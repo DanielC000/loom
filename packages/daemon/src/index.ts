@@ -9,14 +9,15 @@ async function main(): Promise<void> {
   ensureDirs();
   const db = new Db();
 
+  const mcp = new TaskMcpRouter(db);
+
   // PtyHost callbacks persist runtime state into the registry (engine id on receipt; exit).
   const pty = new PtyHost({
     onEngineSessionId: (sessionId, engineId) => db.setEngineSessionId(sessionId, engineId),
-    onExit: (sessionId) => db.setProcessState(sessionId, "exited"),
+    onExit: (sessionId) => { db.setProcessState(sessionId, "exited"); mcp.dispose(sessionId); },
   });
 
   const sessions = new SessionService(db, pty);
-  const mcp = new TaskMcpRouter(db);
 
   const app = await buildServer({ db, pty, sessions, mcp });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
