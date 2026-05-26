@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolveConfig, type Session } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
+import { engineTranscriptExists } from "./transcript.js";
 
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
@@ -48,6 +49,11 @@ export class SessionService {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
     if (!session.engineSessionId) throw new Error("session has no engine id to resume");
+    // Backstop dead-ID detection: if the engine transcript is gone, this id is unresumable.
+    if (!engineTranscriptExists(session.cwd, session.engineSessionId)) {
+      this.db.setResumability(session.id, "dead");
+      throw new Error("session is no longer resumable (engine transcript missing)");
+    }
     const project = this.db.getProject(session.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);

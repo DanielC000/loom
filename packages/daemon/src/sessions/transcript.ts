@@ -12,6 +12,16 @@ function encodeProjectDir(cwd: string): string {
   return path.resolve(cwd).replace(/[:\\/]/g, "-");
 }
 
+/** Absolute path to a session's engine transcript JSONL on disk. */
+export function engineTranscriptPath(cwd: string, engineSessionId: string): string {
+  return path.join(os.homedir(), ".claude", "projects", encodeProjectDir(cwd), `${engineSessionId}.jsonl`);
+}
+
+/** Whether a session is still resumable (its engine transcript file still exists). */
+export function engineTranscriptExists(cwd: string, engineSessionId: string): boolean {
+  return fs.existsSync(engineTranscriptPath(cwd, engineSessionId));
+}
+
 function extractText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -29,7 +39,7 @@ function extractText(content: unknown): string {
  * "read past conversation" surface (terminal scrollback is best-effort live-only).
  */
 export function readTranscript(cwd: string, engineSessionId: string): TranscriptTurn[] {
-  const file = path.join(os.homedir(), ".claude", "projects", encodeProjectDir(cwd), `${engineSessionId}.jsonl`);
+  const file = engineTranscriptPath(cwd, engineSessionId);
   let raw: string;
   try { raw = fs.readFileSync(file, "utf8"); } catch { return []; }
   const turns: TranscriptTurn[] = [];
