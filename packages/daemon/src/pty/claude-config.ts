@@ -15,6 +15,19 @@ function claudeJsonPath(): string {
 }
 
 /**
+ * Atomically write `value` as pretty JSON to `filePath`: a uniquely-named temp file in the
+ * same directory (so two concurrent writers can't collide on it) followed by a rename onto
+ * the target. The rename is atomic on a single filesystem, so a crash mid-write can never
+ * leave the real (possibly large, concurrently-read) config truncated/corrupt.
+ */
+export function writeJsonAtomic(filePath: string, value: unknown): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.${process.pid}.${randomUUID()}.loom.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+  fs.renameSync(tmp, filePath);
+}
+
+/**
  * Pre-accept Claude's workspace-trust dialog for a directory so an unattended spawned
  * session doesn't block on "Is this a project you trust?". This is exactly what clicking
  * "Yes, I trust this folder" persists. Trust lives in .claude.json under
@@ -33,10 +46,5 @@ export function ensureTrusted(dir: string): void {
   const entry = cfg.projects[key] ?? {};
   if (entry.hasTrustDialogAccepted === true && entry.hasCompletedProjectOnboarding === true) return;
   cfg.projects[key] = { ...entry, hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true };
-  fs.mkdirSync(path.dirname(claudeJson), { recursive: true });
-  // Unique per-call temp name so two concurrent ensureTrusted calls can't collide on it,
-  // then atomic rename onto the real file (same dir → same filesystem).
-  const tmp = `${claudeJson}.${process.pid}.${randomUUID()}.loom.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
-  fs.renameSync(tmp, claudeJson);
+  writeJsonAtomic(claudeJson, cfg);
 }

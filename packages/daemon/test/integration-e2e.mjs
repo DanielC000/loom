@@ -14,6 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
 const BASE = "http://127.0.0.1:4317";
 const post = async (u, b) => (await fetch(BASE + u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b ?? {}) })).json();
@@ -111,7 +112,7 @@ try {
       const cfg = JSON.parse(fs.readFileSync(realClaudeJson, "utf8"));
       if (cfg.projects && trustKey in cfg.projects) {
         delete cfg.projects[trustKey];
-        fs.writeFileSync(realClaudeJson, JSON.stringify(cfg, null, 2));
+        writeJsonAtomic(realClaudeJson, cfg); // atomic: a crash mid-write can't corrupt the real config
       }
     } catch { /* nothing to clean */ }
   }
