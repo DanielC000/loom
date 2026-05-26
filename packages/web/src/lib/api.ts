@@ -1,4 +1,6 @@
-import type { Project, Topic, Session, Task, SessionListItem, VaultEntry } from "@loom/shared";
+import type { Project, Topic, Session, Task, SessionListItem, VaultEntry, KanbanColumn } from "@loom/shared";
+
+export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 
 async function get<T>(url: string): Promise<T> {
   const r = await fetch(url);
@@ -38,4 +40,9 @@ export const api = {
     get<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/log`),
   gitBranches: (projectId: string) =>
     get<{ current: string; all: string[] }>(`/api/projects/${projectId}/git/branches`),
+  board: (projectId: string) =>
+    get<{ columns: KanbanColumn[]; tasks: Task[] }>(`/api/projects/${projectId}/board`),
+  updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position">>) =>
+    post<{ ok: boolean }>(`/api/tasks/${id}`, patch),
+  transcript: (sessionId: string) => get<TranscriptTurn[]>(`/api/sessions/${sessionId}/transcript`),
 };
