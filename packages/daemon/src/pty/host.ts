@@ -1,9 +1,12 @@
+import fs from "node:fs";
+import path from "node:path";
 import { spawn, type IPty } from "node-pty";
 import type { PermissionPolicy, PtyGeometry } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
 import { writeSessionSettings } from "./claude-settings.js";
-import { PORT } from "../paths.js";
+import { ensureTrusted } from "./claude-config.js";
+import { PORT, LOGS_DIR } from "../paths.js";
 
 const RING_CAP_BYTES = 256 * 1024;
 
@@ -20,6 +23,7 @@ interface Live {
   ring: { chunks: Buffer[]; bytes: number };
   subscribers: Set<Subscriber>;
   alive: boolean;
+  logStream: fs.WriteStream;
 }
 
 export interface SpawnOpts {
@@ -51,6 +55,7 @@ export class PtyHost {
 
   spawn(opts: SpawnOpts): void {
     const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
+    ensureTrusted(opts.cwd); // pre-accept the workspace-trust dialog so warmup never blocks
     const settingsPath = writeSessionSettings(opts.sessionId, opts.permission);
 
     const args: string[] = [];
@@ -71,6 +76,8 @@ export class PtyHost {
     }
     Object.assign(env, opts.sessionEnv);
 
+    // eslint-disable-next-line no-console
+    console.log(`[pty] spawn ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${opts.resumeId ?? "none"} args=${JSON.stringify(args)}`);
     const pty = spawn(bin, args, {
       name: "xterm-256color",
       cols: opts.geometry.cols,
@@ -85,16 +92,21 @@ export class PtyHost {
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
       alive: true,
+      logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.sessionId}.log`)),
     };
     this.live.set(opts.sessionId, live);
 
     pty.onData((d) => {
       const buf = Buffer.from(d, "utf-8");
       this.appendRing(live, buf);
+      live.logStream.write(buf);
       for (const s of live.subscribers) { try { s.onData(buf); } catch { /* ignore */ } }
     });
     pty.onExit(({ exitCode }) => {
       live.alive = false;
+      // eslint-disable-next-line no-console
+      console.log(`[pty] exit ${opts.sessionId} code=${exitCode}`);
+      try { live.logStream.end(); } catch { /* ignore */ }
       this.broadcastControl(live, { type: "exit", code: exitCode });
       this.events.onExit(opts.sessionId, exitCode);
     });
@@ -104,6 +116,8 @@ export class PtyHost {
   deliverHook(sessionId: string, hook: { hook_event_name?: string; session_id?: string }): void {
     const live = this.live.get(sessionId);
     if (!live) return;
+    // eslint-disable-next-line no-console
+    console.log(`[hook] ${sessionId} ${hook.hook_event_name ?? "?"} session_id=${hook.session_id ?? "-"}`);
     if (hook.hook_event_name === "SessionStart" && typeof hook.session_id === "string") {
       if (!live.engineSessionId) {
         live.engineSessionId = hook.session_id;

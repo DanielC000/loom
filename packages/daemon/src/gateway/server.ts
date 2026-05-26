@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
 import type { WebSocket } from "ws";
-import type { TerminalInput } from "@loom/shared";
+import type { TerminalInput, Project, Topic, Task, ProjectConfigOverride } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
@@ -35,7 +36,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return reply.send({ ok: true });
   });
 
-  // --- REST (representative subset; expanded during the build) ---
+  // --- REST: read ---
   app.get("/api/projects", async () => deps.db.listProjects());
   app.get("/api/projects/:id/topics", async (req) =>
     deps.db.listTopics((req.params as { id: string }).id));
@@ -43,6 +44,46 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deps.db.listTasks((req.params as { id: string }).id));
   app.get("/api/topics/:id/sessions", async (req) =>
     deps.db.listSessions((req.params as { id: string }).id));
+
+  // --- REST: create / bind ---
+  app.post("/api/projects", async (req, reply) => {
+    const b = (req.body ?? {}) as { name?: string; repoPath?: string; vaultPath?: string; config?: ProjectConfigOverride };
+    if (!b.name || !b.repoPath || !b.vaultPath)
+      return reply.code(400).send({ error: "name, repoPath, vaultPath required" });
+    const project: Project = {
+      id: randomUUID(), name: b.name, repoPath: b.repoPath, vaultPath: b.vaultPath,
+      config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
+    };
+    deps.db.insertProject(project);
+    return reply.code(201).send(project);
+  });
+
+  app.post("/api/projects/:id/topics", async (req, reply) => {
+    const projectId = (req.params as { id: string }).id;
+    if (!deps.db.getProject(projectId)) return reply.code(404).send({ error: "project not found" });
+    const b = (req.body ?? {}) as { name?: string; startupPrompt?: string };
+    if (!b.name) return reply.code(400).send({ error: "name required" });
+    const topic: Topic = {
+      id: randomUUID(), projectId, name: b.name,
+      startupPrompt: b.startupPrompt ?? "", position: deps.db.listTopics(projectId).length,
+    };
+    deps.db.insertTopic(topic);
+    return reply.code(201).send(topic);
+  });
+
+  app.post("/api/projects/:id/tasks", async (req, reply) => {
+    const projectId = (req.params as { id: string }).id;
+    if (!deps.db.getProject(projectId)) return reply.code(404).send({ error: "project not found" });
+    const b = (req.body ?? {}) as { title?: string; body?: string; columnKey?: string };
+    if (!b.title) return reply.code(400).send({ error: "title required" });
+    const now = new Date().toISOString();
+    const task: Task = {
+      id: randomUUID(), projectId, title: b.title, body: b.body ?? "",
+      columnKey: b.columnKey ?? "backlog", position: Date.now(), createdAt: now, updatedAt: now,
+    };
+    deps.db.insertTask(task);
+    return reply.code(201).send(task);
+  });
 
   app.post("/api/topics/:id/sessions", async (req) =>
     deps.sessions.startNew((req.params as { id: string }).id));

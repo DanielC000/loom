@@ -48,6 +48,10 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   permission: {
     mode: "acceptEdits",
     allow: [
+      // Loom's own project-scoped task tools — safe by construction (server derives the
+      // project from the session id), so always auto-approved. Without this the agent
+      // would hang on a permission prompt when calling tasks_* unattended.
+      "mcp__loom-tasks",
       "Bash(obsidian:*)",
       "Bash(git status:*)",
       "Bash(git log:*)",
