@@ -1,0 +1,165 @@
+import { spawn, type IPty } from "node-pty";
+import type { PermissionPolicy, PtyGeometry } from "@loom/shared";
+import type { TerminalControl, StopMode } from "@loom/shared";
+import { resolveExecutable } from "./resolve-bin.js";
+import { writeSessionSettings } from "./claude-settings.js";
+import { PORT } from "../paths.js";
+
+const RING_CAP_BYTES = 256 * 1024;
+
+interface Subscriber {
+  onData: (b: Buffer) => void;
+  onControl: (e: TerminalControl) => void;
+}
+
+interface Live {
+  pty: IPty;
+  pid: number;
+  cwd: string;
+  engineSessionId: string | null;
+  ring: { chunks: Buffer[]; bytes: number };
+  subscribers: Set<Subscriber>;
+  alive: boolean;
+}
+
+export interface SpawnOpts {
+  sessionId: string;          // Loom session id
+  cwd: string;                // = project repoPath
+  permission: PermissionPolicy;
+  geometry: PtyGeometry;
+  sessionEnv: Record<string, string>;
+  /** New session: the topic startup prompt (injected once). Resume: omit. */
+  startupPrompt?: string;
+  /** Resume: Claude engine session id. */
+  resumeId?: string;
+}
+
+export interface PtyHostEvents {
+  onEngineSessionId(sessionId: string, engineId: string): void;
+  onExit(sessionId: string, code: number | null): void;
+}
+
+/**
+ * Owns all interactive `claude` ptys. Independent of any browser — sessions live here.
+ * Implements the spike-validated gate-free spawn recipe (acceptEdits + allowlist,
+ * --strict-mcp-config WITH an explicit --mcp-config so the .mcp.json prompt never blocks,
+ * absolute bin path for the Windows node-pty agent, env scrub + main-screen scrollback).
+ */
+export class PtyHost {
+  private live = new Map<string, Live>();
+  constructor(private events: PtyHostEvents) {}
+
+  spawn(opts: SpawnOpts): void {
+    const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
+    const settingsPath = writeSessionSettings(opts.sessionId, opts.permission);
+
+    const args: string[] = [];
+    if (opts.resumeId) args.push("--resume", opts.resumeId);
+    if (opts.startupPrompt) args.push(opts.startupPrompt); // positional MUST precede variadic --mcp-config
+    args.push("--settings", settingsPath);
+    args.push("--permission-mode", opts.permission.mode);
+    // §6 scoping: route by session id in the URL path; daemon derives the project server-side.
+    const mcp = JSON.stringify({
+      mcpServers: { "loom-tasks": { type: "http", url: `http://127.0.0.1:${PORT}/mcp/${opts.sessionId}` } },
+    });
+    args.push("--strict-mcp-config", "--mcp-config", mcp);
+
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
+      if (v !== undefined) env[k] = v;
+    }
+    Object.assign(env, opts.sessionEnv);
+
+    const pty = spawn(bin, args, {
+      name: "xterm-256color",
+      cols: opts.geometry.cols,
+      rows: opts.geometry.rows,
+      cwd: opts.cwd,
+      env,
+    });
+
+    const live: Live = {
+      pty, pid: pty.pid, cwd: opts.cwd,
+      engineSessionId: opts.resumeId ?? null,
+      ring: { chunks: [], bytes: 0 },
+      subscribers: new Set(),
+      alive: true,
+    };
+    this.live.set(opts.sessionId, live);
+
+    pty.onData((d) => {
+      const buf = Buffer.from(d, "utf-8");
+      this.appendRing(live, buf);
+      for (const s of live.subscribers) { try { s.onData(buf); } catch { /* ignore */ } }
+    });
+    pty.onExit(({ exitCode }) => {
+      live.alive = false;
+      this.broadcastControl(live, { type: "exit", code: exitCode });
+      this.events.onExit(opts.sessionId, exitCode);
+    });
+  }
+
+  /** Called by the hook endpoint when a relayed hook arrives. */
+  deliverHook(sessionId: string, hook: { hook_event_name?: string; session_id?: string }): void {
+    const live = this.live.get(sessionId);
+    if (!live) return;
+    if (hook.hook_event_name === "SessionStart" && typeof hook.session_id === "string") {
+      if (!live.engineSessionId) {
+        live.engineSessionId = hook.session_id;
+        this.events.onEngineSessionId(sessionId, hook.session_id);
+        this.broadcastControl(live, { type: "sessionId", id: hook.session_id });
+      }
+    }
+  }
+
+  subscribe(sessionId: string, sub: Subscriber): () => void {
+    const live = this.live.get(sessionId);
+    if (!live) return () => {};
+    // Replay ring so a LATE attach sees a coherent screen, then stream live.
+    const sb = Buffer.concat(live.ring.chunks);
+    if (sb.length) sub.onData(sb);
+    if (live.engineSessionId) sub.onControl({ type: "sessionId", id: live.engineSessionId });
+    if (!live.alive) sub.onControl({ type: "exit", code: null });
+    live.subscribers.add(sub);
+    return () => { live.subscribers.delete(sub); };
+  }
+
+  writeStdin(sessionId: string, data: string): void {
+    const live = this.live.get(sessionId);
+    if (live?.alive) live.pty.write(data);
+  }
+
+  repaint(sessionId: string): void {
+    const live = this.live.get(sessionId);
+    if (live?.alive) live.pty.write("\x0c"); // Ctrl-L
+  }
+
+  stop(sessionId: string, mode: StopMode): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) return;
+    if (mode === "hard") {
+      live.pty.kill(); // TerminateProcess on Windows; node-pty Job Object kills the tree (no orphans)
+      return;
+    }
+    // graceful: double Ctrl-C, leaves the session resumable
+    live.pty.write("\x03");
+    setTimeout(() => { if (live.alive) live.pty.write("\x03"); }, 600);
+  }
+
+  isAlive(sessionId: string): boolean {
+    return this.live.get(sessionId)?.alive ?? false;
+  }
+
+  private appendRing(live: Live, buf: Buffer): void {
+    live.ring.chunks.push(buf);
+    live.ring.bytes += buf.length;
+    while (live.ring.bytes > RING_CAP_BYTES && live.ring.chunks.length > 1) {
+      live.ring.bytes -= live.ring.chunks.shift()!.length;
+    }
+  }
+
+  private broadcastControl(live: Live, e: TerminalControl): void {
+    for (const s of live.subscribers) { try { s.onControl(e); } catch { /* ignore */ } }
+  }
+}

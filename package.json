@@ -1,0 +1,24 @@
+{
+  "name": "loom",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Local-first AI project workspace — weaves Claude Code sessions, Obsidian docs, and tasks into one fabric.",
+  "packageManager": "pnpm@10.6.4",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "turbo build",
+    "dev": "turbo dev",
+    "typecheck": "turbo typecheck",
+    "lint": "turbo lint",
+    "daemon": "pnpm --filter @loom/daemon dev",
+    "web": "pnpm --filter @loom/web dev"
+  },
+  "devDependencies": {
+    "turbo": "^2.4.0",
+    "typescript": "^5.8.0",
+    "@types/node": "^22.10.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["better-sqlite3", "node-pty", "esbuild"]
+  }
+}

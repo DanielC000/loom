@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.turbo/
+*.tsbuildinfo
+.loom/
+*.log
+
+# spike has its own ignores; keep its source but not its artifacts
+spike/node_modules/
+spike/tmp/
+spike/logs/
+spike/sandbox/
+spike/package-lock.json
