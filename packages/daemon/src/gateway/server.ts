@@ -23,8 +23,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- Project-scoped task MCP (session id in the path; project resolved server-side) ---
   app.all("/mcp/:sessionId", async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
-    reply.hijack();
-    await deps.mcp.handle(req.raw, reply.raw, sessionId);
+    reply.hijack(); // hand raw req/res to the MCP transport; pass the Fastify-parsed body
+    await deps.mcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
 
   // --- Hook relay target (loopback only) ---
