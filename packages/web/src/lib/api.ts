@@ -1,4 +1,4 @@
-import type { Project, Topic, Session, Task } from "@loom/shared";
+import type { Project, Topic, Session, Task, SessionListItem, VaultEntry } from "@loom/shared";
 
 async function get<T>(url: string): Promise<T> {
   const r = await fetch(url);
@@ -30,4 +30,12 @@ export const api = {
   resumeSession: (id: string) => post<Session>(`/api/sessions/${id}/resume`),
   stopSession: (id: string, mode: "graceful" | "hard") =>
     post<{ ok: boolean }>(`/api/sessions/${id}/stop`, { mode }),
+  allSessions: () => get<SessionListItem[]>("/api/sessions"),
+  vaultTree: (projectId: string) => get<VaultEntry[]>(`/api/projects/${projectId}/vault`),
+  vaultFile: (projectId: string, path: string) =>
+    get<{ path: string; content: string }>(`/api/projects/${projectId}/vault/file?path=${encodeURIComponent(path)}`),
+  gitLog: (projectId: string) =>
+    get<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/log`),
+  gitBranches: (projectId: string) =>
+    get<{ current: string; all: string[] }>(`/api/projects/${projectId}/git/branches`),
 };
