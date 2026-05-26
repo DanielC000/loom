@@ -3,6 +3,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
 import type { WebSocket } from "ws";
 import type { TerminalInput, Project, Topic, Task, ProjectConfigOverride } from "@loom/shared";
+import { resolveConfig } from "@loom/shared";
+import { readTranscript } from "../sessions/transcript.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
@@ -44,6 +46,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deps.db.listTopics((req.params as { id: string }).id));
   app.get("/api/projects/:id/tasks", async (req) =>
     deps.db.listTasks((req.params as { id: string }).id));
+  // Board = resolved kanban columns (config default→override) + the project's tasks.
+  app.get("/api/projects/:id/board", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    return { columns: resolveConfig(p.config).kanbanColumns, tasks: deps.db.listTasks(p.id) };
+  });
+  // Transcript = Claude's session JSONL rendered to clean turns (canonical history).
+  app.get("/api/sessions/:id/transcript", async (req) => {
+    const s = deps.db.getSession((req.params as { id: string }).id);
+    if (!s?.engineSessionId) return [];
+    return readTranscript(s.cwd, s.engineSessionId);
+  });
   app.get("/api/topics/:id/sessions", async (req) =>
     deps.db.listSessions((req.params as { id: string }).id));
   // All running/known sessions across projects — for the global Live Terminals grid.
@@ -114,6 +128,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     };
     deps.db.insertTask(task);
     return reply.code(201).send(task);
+  });
+
+  // Update / move a task (kanban drag writes columnKey + position here — SAME store the
+  // MCP task tools read/write, so UI and agent never diverge).
+  app.post("/api/tasks/:id", async (req) => {
+    const id = (req.params as { id: string }).id;
+    const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position">>;
+    deps.db.updateTask(id, b);
+    return { ok: true };
   });
 
   app.post("/api/topics/:id/sessions", async (req) =>

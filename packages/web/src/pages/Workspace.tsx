@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { TerminalPane } from "../components/Terminal";
+import { TranscriptPane } from "../components/TranscriptPane";
 import { card, btn, input } from "../ui";
 
 // Per-project working view: create project/topic, spawn or resume sessions, attach a terminal.
@@ -10,6 +11,7 @@ export default function Workspace() {
   const [projectId, setProjectId] = useState<string | null>(null);
   const [topicId, setTopicId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [rightTab, setRightTab] = useState<"terminal" | "transcript">("terminal");
 
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const topics = useQuery({ queryKey: ["topics", projectId], queryFn: () => api.topics(projectId!), enabled: !!projectId });
@@ -75,10 +77,22 @@ export default function Workspace() {
         )}
       </div>
 
-      <div style={{ ...card, height: "72vh", padding: 6 }}>
-        {sessionId
-          ? <TerminalPane sessionId={sessionId} />
-          : <p style={{ color: "#777", padding: 12 }}>Select or spawn a session to attach a live terminal.</p>}
+      <div style={{ ...card, height: "72vh", padding: 6, display: "flex", flexDirection: "column" }}>
+        {sessionId ? (
+          <>
+            <div style={{ marginBottom: 6 }}>
+              {(["terminal", "transcript"] as const).map((t) => (
+                <button key={t} style={{ ...btn, marginRight: 6, background: rightTab === t ? "#3a3a40" : "#26262b" }}
+                  onClick={() => setRightTab(t)}>{t === "terminal" ? "Terminal" : "Transcript"}</button>
+              ))}
+            </div>
+            <div style={{ flex: 1, minHeight: 0 }}>
+              {rightTab === "terminal"
+                ? <TerminalPane sessionId={sessionId} />
+                : <TranscriptPane sessionId={sessionId} />}
+            </div>
+          </>
+        ) : <p style={{ color: "#777", padding: 12 }}>Select or spawn a session to attach a live terminal.</p>}
       </div>
     </div>
   );
