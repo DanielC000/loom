@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { DB_PATH } from "./paths.js";
 import type {
   Project, Topic, Session, Task, ProjectConfigOverride,
-  ProcessState, Resumability,
+  ProcessState, Resumability, SessionListItem,
 } from "@loom/shared";
 
 const SCHEMA = `
@@ -102,6 +102,15 @@ export class Db {
     const r = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as Row | undefined;
     return r ? toSession(r) : undefined;
   }
+  /** All sessions across all projects, enriched with project/topic names (global grid). */
+  listAllSessions(): SessionListItem[] {
+    const rows = this.db.prepare(
+      `SELECT s.*, p.name AS project_name, t.name AS topic_name
+       FROM sessions s JOIN projects p ON s.project_id = p.id JOIN topics t ON s.topic_id = t.id
+       ORDER BY s.last_activity DESC`,
+    ).all() as Row[];
+    return rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, topicName: r.topic_name as string }));
+  }
   insertSession(s: Session): void {
     this.db.prepare(
       `INSERT INTO sessions (id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error)
@@ -118,6 +127,15 @@ export class Db {
   }
   setResumability(id: string, r: Resumability): void {
     this.db.prepare("UPDATE sessions SET resumability = ? WHERE id = ?").run(r, id);
+  }
+  /**
+   * On daemon boot, no pty from a previous run survives — reconcile any session still
+   * marked live/starting to exited (it stays resumable if it captured an engine id).
+   */
+  recoverStaleSessions(): number {
+    return this.db.prepare(
+      "UPDATE sessions SET process_state = 'exited', busy = 0 WHERE process_state IN ('live','starting')",
+    ).run().changes;
   }
 
   // --- tasks ---

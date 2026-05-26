@@ -49,6 +49,18 @@ export interface Session {
   lastError: string | null;
 }
 
+/** A session enriched with its project/topic names — for the global Live Terminals grid. */
+export interface SessionListItem extends Session {
+  projectName: string;
+  topicName: string;
+}
+
+/** A read-only vault file-tree entry. */
+export interface VaultEntry {
+  path: string; // relative to the project's vault folder, forward slashes
+  type: "file" | "dir";
+}
+
 export interface Task {
   id: TaskId;
   projectId: ProjectId;

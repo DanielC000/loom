@@ -7,6 +7,8 @@ import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
+import { GitReader } from "../git/reader.js";
+import { listVaultTree, readVaultFile } from "../vault/browser.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -44,6 +46,35 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deps.db.listTasks((req.params as { id: string }).id));
   app.get("/api/topics/:id/sessions", async (req) =>
     deps.db.listSessions((req.params as { id: string }).id));
+  // All running/known sessions across projects — for the global Live Terminals grid.
+  app.get("/api/sessions", async () => deps.db.listAllSessions());
+
+  // Read-only vault browser (§7: no editing from the UI in phase 1).
+  app.get("/api/projects/:id/vault", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    return listVaultTree(p.vaultPath);
+  });
+  app.get("/api/projects/:id/vault/file", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const rel = (req.query as { path?: string }).path ?? "";
+    const content = readVaultFile(p.vaultPath, rel);
+    if (content === null) return reply.code(404).send({ error: "file not found" });
+    return { path: rel, content };
+  });
+
+  // Read-only git view (§: no commit/checkout/push from the UI in phase 1).
+  app.get("/api/projects/:id/git/log", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    return new GitReader(p.repoPath).log();
+  });
+  app.get("/api/projects/:id/git/branches", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    return new GitReader(p.repoPath).branches();
+  });
 
   // --- REST: create / bind ---
   app.post("/api/projects", async (req, reply) => {

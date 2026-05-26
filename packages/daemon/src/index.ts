@@ -8,6 +8,8 @@ import { buildServer } from "./gateway/server.js";
 async function main(): Promise<void> {
   ensureDirs();
   const db = new Db();
+  const recovered = db.recoverStaleSessions();
+  if (recovered > 0) console.log(`[boot] reconciled ${recovered} stale session(s) -> exited`);
 
   const mcp = new TaskMcpRouter(db);
 
