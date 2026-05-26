@@ -137,6 +137,12 @@ export class Db {
       "UPDATE sessions SET process_state = 'exited', busy = 0 WHERE process_state IN ('live','starting')",
     ).run().changes;
   }
+  /** Sessions that have a captured engine id and aren't already marked dead. */
+  listResumeCandidates(): Session[] {
+    return (this.db.prepare(
+      "SELECT * FROM sessions WHERE engine_session_id IS NOT NULL AND resumability != 'dead'",
+    ).all() as Row[]).map(toSession);
+  }
 
   // --- tasks ---
   listTasks(projectId: string): Task[] {

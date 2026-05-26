@@ -1,5 +1,7 @@
 import { ensureDirs, PORT } from "./paths.js";
 import { Db } from "./db.js";
+import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
+import { seedGlobalSkills } from "./skills/seed.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
 import { TaskMcpRouter } from "./mcp/server.js";
@@ -7,9 +9,15 @@ import { buildServer } from "./gateway/server.js";
 
 async function main(): Promise<void> {
   ensureDirs();
+  const seeded = seedGlobalSkills();
+  if (seeded.length) console.log(`[boot] seeded global skill(s): ${seeded.join(", ")}`);
   const db = new Db();
   const recovered = db.recoverStaleSessions();
   if (recovered > 0) console.log(`[boot] reconciled ${recovered} stale session(s) -> exited`);
+  const dead = sweepDeadSessions(db);
+  if (dead > 0) console.log(`[boot] marked ${dead} session(s) dead (engine transcript gone)`);
+  // Keep dead-ID state fresh as Claude's transcripts come and go.
+  watchClaudeProjects(db, (n) => console.log(`[watch] marked ${n} session(s) dead`));
 
   const mcp = new TaskMcpRouter(db);
 
