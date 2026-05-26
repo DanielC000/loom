@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { card, input } from "../ui";
+import Markdown from "../components/Markdown";
 
 // Read-only vault browser + file viewer (§7: no editing from the UI in phase 1).
 export default function Vault() {
@@ -28,7 +29,15 @@ export default function Vault() {
           </div>
           <div style={{ ...card, height: "74vh", overflow: "auto" }}>
             {file
-              ? <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "ui-monospace, Consolas, monospace", fontSize: 13 }}>{content.data?.content ?? "…"}</pre>
+              ? content.data?.content === undefined
+                ? <p style={{ color: "#777" }}>…</p>
+                : file.toLowerCase().endsWith(".md")
+                  ? <Markdown
+                      source={content.data.content}
+                      files={(tree.data ?? []).filter((e) => e.type === "file").map((e) => e.path)}
+                      onOpen={(p) => setFile(p)}
+                    />
+                  : <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "ui-monospace, Consolas, monospace", fontSize: 13 }}>{content.data.content}</pre>
               : <p style={{ color: "#777" }}>Select a file to view (read-only).</p>}
           </div>
         </div>
