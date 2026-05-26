@@ -27,6 +27,14 @@ export function listVaultTree(vaultPath: string): VaultEntry[] {
 export function readVaultFile(vaultPath: string, relPath: string): string | null {
   const root = path.resolve(vaultPath);
   const target = path.resolve(root, relPath);
-  if (target !== root && !target.startsWith(root + path.sep)) return null; // traversal guard
-  try { return fs.readFileSync(target, "utf8"); } catch { return null; }
+  if (target !== root && !target.startsWith(root + path.sep)) return null; // lexical traversal guard
+  try {
+    // Resolve symlinks too: a link INSIDE the vault that points OUTSIDE must be rejected
+    // (the lexical check above only sees the in-vault link path, not its real target).
+    const real = fs.realpathSync(target);
+    const realRoot = fs.realpathSync(root);
+    if (real !== realRoot && !real.startsWith(realRoot + path.sep)) return null;
+    return fs.readFileSync(real, "utf8");
+  } catch { return null; } // missing file/root or unreadable → not found
+
 }

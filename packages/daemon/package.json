@@ -10,9 +10,10 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "test:mcp": "node test/mcp-scope.mjs",
-    "test:spawn-scope": "node test/spawn-scope.mjs",
+    "test:claude-config": "node test/claude-config.mjs",
     "test:board-consistency": "node test/board-consistency.mjs",
-    "test:dead-id": "node test/dead-id.mjs"
+    "test:dead-id": "node test/dead-id.mjs",
+    "test:vault": "node test/vault-browser.mjs"
   },
   "dependencies": {
     "@loom/shared": "workspace:*",
