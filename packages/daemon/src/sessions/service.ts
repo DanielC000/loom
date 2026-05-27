@@ -237,4 +237,86 @@ export class SessionService {
     }
     return { reported: true, delivered };
   }
+
+  /**
+   * Recycle a worker whose context has grown too large (phase-2 §A4). Close the old worker and
+   * spawn a FRESH one in the SAME retained worktree, seeded with the manager-supplied handoff:
+   * the worktree carries CODE state forward, the handoff carries INTENT — and we spawn fresh
+   * (never --resume), so the bloated context is dropped rather than carried on. Same task/branch;
+   * gen+1; recycledFrom = the old session. The task is NOT moved (work continues, in_progress).
+   */
+  async recycleWorker(
+    managerSessionId: string, workerSessionId: string, handoffSummary: string,
+  ): Promise<Session> {
+    const old = this.db.getSession(workerSessionId);
+    if (!old || old.parentSessionId !== managerSessionId) throw new Error("not your worker");
+    const worktreePath = old.worktreePath ?? old.cwd; // worker cwd === its worktree
+    const branch = old.branch ?? null;
+    const taskId = old.taskId ?? null;
+    const project = this.db.getProject(old.projectId);
+    if (!project) throw new Error("project not found");
+    const config = resolveConfig(project.config);
+    const newGen = (old.gen ?? 0) + 1;
+
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId, workerSessionId, taskId, kind: "recycle_begin",
+    });
+
+    // Close the old worker HARD: reliable, and we spawn fresh (never resume) so a clean graceful
+    // exit isn't needed. Wait until the pty is actually gone before reusing the worktree.
+    this.pty.stop(workerSessionId, "hard");
+    for (let i = 0; i < 50 && this.pty.isAlive(workerSessionId); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (this.pty.isAlive(workerSessionId)) {
+      // eslint-disable-next-line no-console
+      console.warn(`[recycle] old worker ${workerSessionId} still alive after ~5s; proceeding`);
+    }
+
+    const now = new Date().toISOString();
+    const fresh: Session = {
+      id: randomUUID(),
+      projectId: old.projectId,
+      topicId: old.topicId,
+      engineSessionId: null,
+      title: null,
+      cwd: worktreePath, // SAME worktree — code state persists
+      processState: "starting",
+      resumability: "unknown",
+      busy: false,
+      createdAt: now,
+      lastActivity: now,
+      lastError: null,
+      role: "worker",
+      parentSessionId: managerSessionId,
+      taskId,
+      worktreePath,
+      branch,
+      gen: newGen,
+      recycledFrom: old.id,
+    };
+    this.db.insertSession(fresh);
+    // The handoff is the fresh worker's startup prompt (the proven positional-arg path, run on
+    // boot) — NOT --resume, which would carry the old context forward and defeat the recycle.
+    const framed =
+      `[loom:handoff] You are continuing a task in an existing git worktree on branch ${branch ?? "(unknown)"}. ` +
+      `Your predecessor's handoff:\n\n${handoffSummary}\n\nContinue from here.`;
+    this.pty.spawn({
+      sessionId: fresh.id,
+      cwd: worktreePath,
+      permission: config.permission,
+      geometry: config.pty,
+      sessionEnv: config.sessionEnv,
+      startupPrompt: framed,
+      role: "worker",
+    });
+    this.db.setProcessState(fresh.id, "live");
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId, workerSessionId: fresh.id, taskId, kind: "recycle_complete",
+      detail: { recycledFrom: old.id, gen: newGen },
+    });
+    return { ...fresh, processState: "live" };
+  }
 }
