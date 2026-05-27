@@ -25,6 +25,7 @@ async function main(): Promise<void> {
   const pty = new PtyHost({
     onEngineSessionId: (sessionId, engineId) => db.setEngineSessionId(sessionId, engineId),
     onBusy: (sessionId, busy) => db.setBusy(sessionId, busy),
+    onContextStats: (sessionId, s) => db.setContextCounters(sessionId, { ctxInputTokens: s.inputTokens, ctxTurns: s.turns }),
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
     onExit: (sessionId) => { db.setProcessState(sessionId, "exited"); db.setBusy(sessionId, false); mcp.dispose(sessionId); },
   });

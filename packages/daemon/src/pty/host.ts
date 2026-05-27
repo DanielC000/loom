@@ -6,6 +6,7 @@ import type { TerminalControl, StopMode } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
 import { writeSessionSettings } from "./claude-settings.js";
 import { ensureTrusted } from "./claude-config.js";
+import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { PORT, LOGS_DIR } from "../paths.js";
 
 const RING_CAP_BYTES = 256 * 1024;
@@ -42,6 +43,8 @@ export interface PtyHostEvents {
   onEngineSessionId(sessionId: string, engineId: string): void;
   /** Persist the turn-in-flight flag (rising on UserPromptSubmit, falling on Stop/StopFailure). */
   onBusy(sessionId: string, busy: boolean): void;
+  /** Persist measured engine-context occupancy, refreshed at each turn boundary (Stop). */
+  onContextStats(sessionId: string, stats: ContextStats): void;
   onExit(sessionId: string, code: number | null): void;
 }
 
@@ -140,6 +143,12 @@ export class PtyHost {
       case "Stop":
       case "StopFailure":
         this.setBusy(sessionId, false); // falling edge — exactly one Stop per end-of-turn (no per-tool-use)
+        // Refresh context occupancy at the turn boundary. Cheap tail-read; done for EVERY session
+        // (the host doesn't know role — a manager's own occupancy matters too, "who recycles the manager").
+        if (live.engineSessionId) {
+          const stats = readContextStats(live.cwd, live.engineSessionId);
+          if (stats) this.events.onContextStats(sessionId, stats);
+        }
         break;
     }
   }
