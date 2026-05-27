@@ -179,4 +179,22 @@ export class SessionService {
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "stop_worker",
     });
   }
+
+  /**
+   * Send a framed message to one of a manager's workers (parent-scoped). Submitted as a turn
+   * when the worker is idle, or queued FIFO (busy-gated) and drained on the worker's next Stop.
+   */
+  messageWorker(
+    managerSessionId: string, workerSessionId: string, text: string,
+  ): { delivered: boolean; position?: number } {
+    const worker = this.db.getSession(workerSessionId);
+    if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
+    const framed = `[loom:from-manager]\n${text}`;
+    const r = this.pty.enqueueStdin(workerSessionId, framed);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "message_worker",
+    });
+    return r;
+  }
 }
