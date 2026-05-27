@@ -11,6 +11,7 @@
     "start": "node dist/index.js",
     "test:mcp": "node test/mcp-scope.mjs",
     "test:orch-scope": "node test/orch-scope.mjs",
+    "test:orch-spawn": "node test/orch-spawn.mjs",
     "test:busy": "node test/busy-flag.mjs",
     "test:orch": "node test/orch-model.mjs",
     "test:context": "node test/context-stats.mjs",
