@@ -27,6 +27,11 @@ export interface OrchestrationConfig {
    * (#17 will REQUIRE a non-empty gate before autonomy is enabled.)
    */
   gateCommand: string;
+  /**
+   * Safety rail (§17a): hard cap on concurrently-LIVE workers per manager, gating worker_spawn.
+   * At the cap the manager's next spawn is refused; in-flight workers keep running. Default 3.
+   */
+  maxConcurrentWorkers: number;
 }
 
 /** The fully-resolved, effective config for a project. */
@@ -78,7 +83,8 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     // Mitigate the repaint-tearing artifact seen during streaming (spike finding).
     CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT: "1",
   },
-  orchestration: { gateCommand: "" }, // no automated gate by default; the two-step review is the gate
+  // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3
+  orchestration: { gateCommand: "", maxConcurrentWorkers: 3 },
 };
 
 /** The single config-resolution mechanism, reused everywhere. */
@@ -99,6 +105,7 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
     sessionEnv: { ...d.sessionEnv, ...(override.sessionEnv ?? {}) },
     orchestration: {
       gateCommand: override.orchestration?.gateCommand ?? d.orchestration.gateCommand,
+      maxConcurrentWorkers: override.orchestration?.maxConcurrentWorkers ?? d.orchestration.maxConcurrentWorkers,
     },
   };
 }

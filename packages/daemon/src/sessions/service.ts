@@ -5,10 +5,11 @@ import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { createWorktree, removeWorktree, diffBranch, mergeBranch } from "../git/worktrees.js";
 import { engineTranscriptExists } from "./transcript.js";
+import type { OrchestrationControl } from "../orchestration/control.js";
 
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
-  constructor(private db: Db, private pty: PtyHost) {}
+  constructor(private db: Db, private pty: PtyHost, private control: OrchestrationControl) {}
 
   /** Start a NEW session in a topic — injects the topic startup prompt once. */
   startNew(topicId: string): Session {
@@ -130,6 +131,13 @@ export class SessionService {
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
 
+    // Safety rails (§17a) — refuse NEW work before any side effect (worktree/pty). In-flight
+    // workers are untouched. Pause is global-or-this-manager; the cap counts LIVE children only.
+    if (this.control.isPaused(managerSessionId)) throw new Error("orchestration paused");
+    const liveWorkers = this.db.listWorkers(managerSessionId).filter((w) => w.processState === "live").length;
+    const cap = config.orchestration.maxConcurrentWorkers;
+    if (liveWorkers >= cap) throw new Error(`concurrency cap reached (${cap})`);
+
     const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, opts.taskId);
 
     const now = new Date().toISOString();
@@ -180,6 +188,19 @@ export class SessionService {
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "stop_worker",
     });
+  }
+
+  /**
+   * Emergency kill switch (§17a): HARD-stop every live worker pty across ALL managers, then latch
+   * the global pause so nothing new spawns until an explicit resume. "Stop everything now" — the
+   * distinct sibling of pause ("stop taking on more"). onExit reconciles each pty to processState
+   * 'exited'. Returns the number of live workers we issued a hard stop to.
+   */
+  killAllWorkers(): number {
+    const live = this.db.listAllSessions().filter((s) => s.role === "worker" && s.processState === "live");
+    for (const w of live) this.pty.stop(w.id, "hard");
+    this.control.pause("global");
+    return live.length;
   }
 
   /**

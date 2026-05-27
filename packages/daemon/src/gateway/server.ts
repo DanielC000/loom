@@ -10,6 +10,7 @@ import type { PtyHost } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
+import type { OrchestrationControl } from "../orchestration/control.js";
 import { GitReader } from "../git/reader.js";
 import { listVaultTree, readVaultFile } from "../vault/browser.js";
 
@@ -21,6 +22,7 @@ export interface GatewayDeps {
   sessions: SessionService;
   mcp: TaskMcpRouter;
   orchMcp: OrchestrationMcpRouter;
+  control: OrchestrationControl;
 }
 
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
@@ -40,6 +42,22 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     reply.hijack();
     await deps.orchMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
+
+  // --- Orchestration safety rails (§17a): pause/kill switch + status. These gate worker_spawn
+  // (server-side, in spawnWorker); kill also hard-stops in-flight workers. scope = "global"
+  // (default) or a manager session id. ---
+  app.post("/api/orchestration/pause", async (req) => {
+    const { scope } = (req.body as { scope?: string }) ?? {};
+    deps.control.pause(scope ?? "global");
+    return { ok: true, pausedScopes: deps.control.pausedScopes() };
+  });
+  app.post("/api/orchestration/resume", async (req) => {
+    const { scope } = (req.body as { scope?: string }) ?? {};
+    deps.control.resume(scope ?? "global");
+    return { ok: true, pausedScopes: deps.control.pausedScopes() };
+  });
+  app.post("/api/orchestration/kill", async () => ({ stopped: deps.sessions.killAllWorkers() }));
+  app.get("/api/orchestration/status", async () => ({ pausedScopes: deps.control.pausedScopes() }));
 
   // --- Hook relay target (loopback only) ---
   app.post("/internal/hook", async (req, reply) => {

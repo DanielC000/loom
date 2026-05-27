@@ -6,6 +6,7 @@ import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
 import { TaskMcpRouter } from "./mcp/server.js";
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
+import { OrchestrationControl } from "./orchestration/control.js";
 import { buildServer } from "./gateway/server.js";
 
 async function main(): Promise<void> {
@@ -32,11 +33,12 @@ async function main(): Promise<void> {
     onExit: (sessionId) => { db.setProcessState(sessionId, "exited"); db.setBusy(sessionId, false); mcp.dispose(sessionId); orchMcp.dispose(sessionId); },
   });
 
-  const sessions = new SessionService(db, pty);
+  const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design
+  const sessions = new SessionService(db, pty, control);
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after.
   const orchMcp = new OrchestrationMcpRouter(db, sessions);
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp });
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, control });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon listening on http://127.0.0.1:${PORT}`);

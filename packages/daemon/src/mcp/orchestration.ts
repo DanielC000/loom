@@ -116,8 +116,14 @@ export class OrchestrationMcpRouter {
         },
       },
       async ({ taskId, topicId, kickoffPrompt }) => {
-        const worker = await sessions.spawnWorker(managerSessionId, { taskId, topicId, kickoffPrompt });
-        return ok({ workerSessionId: worker.id, branch: worker.branch, worktreePath: worker.worktreePath });
+        try {
+          const worker = await sessions.spawnWorker(managerSessionId, { taskId, topicId, kickoffPrompt });
+          return ok({ workerSessionId: worker.id, branch: worker.branch, worktreePath: worker.worktreePath });
+        } catch (e) {
+          // Surface a refused spawn (paused / over-cap / bad task) to the manager as data, not an
+          // MCP protocol error — same envelope as the sibling lifecycle tools.
+          return ok({ error: (e as Error).message });
+        }
       },
     );
 
