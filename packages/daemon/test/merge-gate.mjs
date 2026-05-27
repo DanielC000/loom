@@ -55,10 +55,7 @@ function makeProject(label, gateCommand) {
   return p;
 }
 
-async function seedWorker(p) {
-  const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
-  fs.writeFileSync(path.join(worktreePath, p.file), `work for ${p.projId}\n`);
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+function seedRows(p, worktreePath, branch) {
   const db = new Database(DB_FILE);
   db.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)")
     .run(p.projId, "MG", p.repo, p.repo, JSON.stringify({ orchestration: { gateCommand: p.gateCommand } }), now);
@@ -70,13 +67,34 @@ async function seedWorker(p) {
   db.prepare(`INSERT INTO sessions (id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role,parent_session_id,task_id,worktree_path,branch)
     VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL,'worker',?,?,?,?)`).run(p.workerId, p.projId, p.topicId, worktreePath, now, now, p.mgrId, p.taskId, worktreePath, branch);
   db.close();
+}
+
+// A/B: the worker added a new file on its branch (a clean, mergeable change).
+async function seedWorker(p) {
+  const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
+  fs.writeFileSync(path.join(worktreePath, p.file), `work for ${p.projId}\n`);
+  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  seedRows(p, worktreePath, branch);
   return { worktreePath, branch };
 }
 
-const A = makeProject("A", 'node -e "process.exit(0)"'); // gate green
-const B = makeProject("B", 'node -e "process.exit(1)"'); // gate red
+// C: branch AND main both change README.md since divergence → a guaranteed merge conflict.
+async function seedConflict(p) {
+  const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
+  fs.writeFileSync(path.join(worktreePath, "README.md"), "branch version\n");
+  execSync(`git add . && git ${GIT_ID} commit -q -m "branch README"`, { cwd: worktreePath });
+  fs.writeFileSync(path.join(p.repo, "README.md"), "main version\n");
+  execSync(`git add . && git ${GIT_ID} commit -q -m "main README"`, { cwd: p.repo });
+  seedRows(p, worktreePath, branch);
+  return { worktreePath, branch };
+}
+
+const A = makeProject("A", 'node -e "process.exit(0)"'); // gate green → clean merge
+const B = makeProject("B", 'node -e "process.exit(1)"'); // gate red → rejected by gate
+const C = makeProject("C", 'node -e "process.exit(0)"'); // gate green but a real merge conflict
 const a = await seedWorker(A);
 const b = await seedWorker(B);
+const c = await seedConflict(C);
 
 try {
   // --- PASS path: gate green → merged, worktree removed, task done ---
@@ -101,11 +119,25 @@ try {
   check("FAIL: merge_rejected event recorded", eventExists(B.mgrId, "merge_rejected"));
   check("FAIL: worktree RETAINED (manager can re-task a fix)", fs.existsSync(b.worktreePath));
   await MB.close();
+
+  // --- CONFLICT path (fail-closed): gate green, but the merge conflicts → --abort, repo clean ---
+  const MC = await connect(C.mgrId);
+  const confirmC = parse(await MC.callTool({ name: "worker_merge_confirm", arguments: { workerSessionId: C.workerId } }));
+  check("CONFLICT: worker_merge_confirm → merged:false, reason ~ conflict", confirmC.merged === false && /conflict/i.test(confirmC.reason ?? ""));
+  const porcelain = execSync("git status --porcelain", { cwd: C.repo }).toString().trim();
+  check("CONFLICT: repo is CLEAN, not mid-merge (git status --porcelain empty)", porcelain === "");
+  check("CONFLICT: no .git/MERGE_HEAD — `git merge --abort` actually ran", !fs.existsSync(path.join(C.repo, ".git", "MERGE_HEAD")));
+  check("CONFLICT: repo README still 'main version' (the branch change did NOT land)", fs.readFileSync(path.join(C.repo, "README.md"), "utf8").includes("main version"));
+  check("CONFLICT: merge_rejected event recorded", eventExists(C.mgrId, "merge_rejected"));
+  check("CONFLICT: worktree RETAINED", fs.existsSync(c.worktreePath));
+  await MC.close();
 } finally {
+  // B and C retained their worktrees (fail-closed); A's was removed by the successful merge.
   try { await removeWorktree(B.repo, b.worktreePath); } catch { /* ignore */ }
+  try { await removeWorktree(C.repo, c.worktreePath); } catch { /* ignore */ }
   try {
     const db = new Database(DB_FILE);
-    for (const p of [A, B]) {
+    for (const p of [A, B, C]) {
       db.prepare("DELETE FROM sessions WHERE id = ? OR parent_session_id = ?").run(p.mgrId, p.mgrId);
       db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ?").run(p.mgrId);
       db.prepare("DELETE FROM tasks WHERE project_id = ?").run(p.projId);
@@ -114,8 +146,7 @@ try {
     }
     db.close();
   } catch { /* ignore */ }
-  fs.rmSync(A.repo, { recursive: true, force: true });
-  fs.rmSync(B.repo, { recursive: true, force: true });
+  for (const p of [A, B, C]) fs.rmSync(p.repo, { recursive: true, force: true });
 }
 
 console.log(failures === 0

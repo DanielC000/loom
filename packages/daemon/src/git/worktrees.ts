@@ -54,16 +54,26 @@ export async function diffBranch(
 
 /**
  * Merge a worker's branch back into the repo's current branch with `--no-ff` (always a merge
- * commit; --no-edit so it never opens an editor and hangs). On ANY merge failure (conflict),
- * `git merge --abort` to leave the canonical repo UNTOUCHED — fail-closed.
+ * commit; --no-edit so it never opens an editor and hangs). FAIL-CLOSED.
+ *
+ * NOTE: simple-git's `raw(["merge", …])` does NOT reliably reject on a merge conflict — it can
+ * resolve while leaving the repo MID-MERGE (verified: `git merge` exits non-zero on conflict but
+ * raw still resolves, leaving `UU` unmerged entries + MERGE_HEAD). So we do NOT trust raw's
+ * resolve/reject; we detect a conflict EXPLICITLY via unmerged index entries and `git merge
+ * --abort` on anything but a clean win, leaving the canonical repo untouched.
  */
 export async function mergeBranch(repoPath: string, branch: string): Promise<{ ok: boolean; conflict?: boolean }> {
   const git = simpleGit(repoPath);
+  let rawError = false;
   try {
     await git.raw(["merge", "--no-ff", "--no-edit", branch]);
-    return { ok: true };
   } catch {
+    rawError = true; // a conflict OR a real failure — either way, the explicit check below decides
+  }
+  const conflicted = (await git.raw(["ls-files", "--unmerged"])).trim() !== "";
+  if (conflicted || rawError) {
     try { await git.raw(["merge", "--abort"]); } catch { /* nothing in progress to abort */ }
     return { ok: false, conflict: true };
   }
+  return { ok: true };
 }
