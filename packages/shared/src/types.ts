@@ -33,6 +33,9 @@ export interface Topic {
 export type ProcessState = "none" | "starting" | "live" | "exited";
 export type Resumability = "unknown" | "resumable" | "dead";
 
+/** A session's orchestration role (phase-2). Plain phase-1 sessions have no role. */
+export type SessionRole = "manager" | "worker";
+
 export interface Session {
   id: SessionId;
   projectId: ProjectId;
@@ -47,6 +50,33 @@ export interface Session {
   createdAt: string;
   lastActivity: string;
   lastError: string | null;
+  // --- phase-2 orchestration lineage + context counters (additive; null/0 on phase-1 sessions) ---
+  role?: SessionRole | null;
+  parentSessionId?: string | null;  // the manager that spawned this worker
+  taskId?: string | null;           // the board task this worker is working (references tasks)
+  worktreePath?: string | null;     // a worker's isolated git worktree cwd
+  branch?: string | null;           // the worker's branch
+  gen?: number;                     // recycle generation (0 = original)
+  recycledFrom?: string | null;     // the prior-generation session id this was recycled from
+  ctxInputTokens?: number | null;   // measured engine context occupancy (last-assistant usage)
+  ctxTurns?: number | null;
+  ctxUpdatedAt?: string | null;
+}
+
+/** Append-only orchestration audit record (the manager↔worker timeline). */
+export type OrchestrationEventKind =
+  | "spawn_worker" | "message_worker" | "worker_report" | "stop_worker"
+  | "recycle_begin" | "recycle_complete" | "merge_request" | "merge_done"
+  | "merge_rejected" | "build_gate" | "kill_switch";
+
+export interface OrchestrationEvent {
+  id: string;
+  ts: string;
+  managerSessionId: string;
+  workerSessionId?: string | null;
+  taskId?: string | null;
+  kind: OrchestrationEventKind;
+  detail?: Record<string, unknown>;
 }
 
 /** A session enriched with its project/topic names — for the global Live Terminals grid. */

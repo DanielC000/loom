@@ -2,7 +2,8 @@ import Database from "better-sqlite3";
 import { DB_PATH } from "./paths.js";
 import type {
   Project, Topic, Session, Task, ProjectConfigOverride,
-  ProcessState, Resumability, SessionListItem,
+  ProcessState, Resumability, SessionListItem, SessionRole,
+  OrchestrationEvent, OrchestrationEventKind,
 } from "@loom/shared";
 
 const SCHEMA = `
@@ -34,7 +35,28 @@ CREATE TABLE IF NOT EXISTS sessions (
   busy INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   last_activity TEXT NOT NULL,
-  last_error TEXT
+  last_error TEXT,
+  -- phase-2 orchestration (also added to existing DBs via the idempotent migration below)
+  role TEXT,
+  parent_session_id TEXT,
+  task_id TEXT,
+  worktree_path TEXT,
+  branch TEXT,
+  gen INTEGER DEFAULT 0,
+  recycled_from TEXT,
+  ctx_input_tokens INTEGER,
+  ctx_turns INTEGER,
+  ctx_updated_at TEXT
+);
+-- Append-only orchestration audit trail (manager↔worker timeline; UI timeline in #18).
+CREATE TABLE IF NOT EXISTS orchestration_events (
+  id TEXT PRIMARY KEY,
+  ts TEXT NOT NULL,
+  manager_session_id TEXT NOT NULL,
+  worker_session_id TEXT,
+  task_id TEXT,
+  kind TEXT NOT NULL,
+  detail_json TEXT
 );
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
@@ -49,7 +71,22 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_topics_project ON topics(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_sessions_topic ON sessions(topic_id, last_activity DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, column_key, position);
+CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_session_id, ts);
 `;
+
+/** Columns added to `sessions` after phase-1; applied to existing DBs by migrateSessions(). */
+const SESSION_ADDED_COLUMNS: Record<string, string> = {
+  role: "TEXT",
+  parent_session_id: "TEXT",
+  task_id: "TEXT",
+  worktree_path: "TEXT",
+  branch: "TEXT",
+  gen: "INTEGER DEFAULT 0",
+  recycled_from: "TEXT",
+  ctx_input_tokens: "INTEGER",
+  ctx_turns: "INTEGER",
+  ctx_updated_at: "TEXT",
+};
 
 type Row = Record<string, unknown>;
 
@@ -59,6 +96,28 @@ export class Db {
     this.db = new Database(file);
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
+    this.migrateSessions();
+  }
+
+  /**
+   * Idempotent additive migration: ADD COLUMN any phase-2 `sessions` column missing from an
+   * existing DB (fresh installs already have them via CREATE TABLE). Converges both paths
+   * without wiping data. The parent-lineage index is created here since it depends on a
+   * migrated column.
+   */
+  private migrateSessions(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(SESSION_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)");
+  }
+
+  /** Release the SQLite handle (used by hermetic tests to free the file before cleanup). */
+  close(): void {
+    this.db.close();
   }
 
   // --- projects ---
@@ -113,9 +172,32 @@ export class Db {
   }
   insertSession(s: Session): void {
     this.db.prepare(
-      `INSERT INTO sessions (id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error)
-       VALUES (@id,@projectId,@topicId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,@createdAt,@lastActivity,@lastError)`,
-    ).run({ ...s, busy: s.busy ? 1 : 0 });
+      `INSERT INTO sessions (
+         id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,
+         created_at,last_activity,last_error,
+         role,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
+         ctx_input_tokens,ctx_turns,ctx_updated_at)
+       VALUES (
+         @id,@projectId,@topicId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
+         @createdAt,@lastActivity,@lastError,
+         @role,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
+         @ctxInputTokens,@ctxTurns,@ctxUpdatedAt)`,
+    ).run({
+      ...s,
+      busy: s.busy ? 1 : 0,
+      // Orchestration fields are optional on Session; coerce absent ones (undefined) to NULL/0
+      // so plain phase-1 session literals insert unchanged.
+      role: s.role ?? null,
+      parentSessionId: s.parentSessionId ?? null,
+      taskId: s.taskId ?? null,
+      worktreePath: s.worktreePath ?? null,
+      branch: s.branch ?? null,
+      gen: s.gen ?? 0,
+      recycledFrom: s.recycledFrom ?? null,
+      ctxInputTokens: s.ctxInputTokens ?? null,
+      ctxTurns: s.ctxTurns ?? null,
+      ctxUpdatedAt: s.ctxUpdatedAt ?? null,
+    });
   }
   setEngineSessionId(id: string, engineId: string): void {
     this.db.prepare("UPDATE sessions SET engine_session_id = ?, resumability = 'resumable', last_activity = ? WHERE id = ?")
@@ -147,6 +229,50 @@ export class Db {
     return (this.db.prepare(
       "SELECT * FROM sessions WHERE engine_session_id IS NOT NULL AND resumability != 'dead'",
     ).all() as Row[]).map(toSession);
+  }
+
+  // --- orchestration (phase-2): lineage, context counters, audit trail ---
+  /** Set only the provided lineage fields on a session (undefined = leave as-is; null clears). */
+  setOrchestration(id: string, patch: {
+    role?: SessionRole | null; parentSessionId?: string | null; taskId?: string | null;
+    worktreePath?: string | null; branch?: string | null; gen?: number; recycledFrom?: string | null;
+  }): void {
+    const cols: Record<string, unknown> = {
+      role: patch.role, parent_session_id: patch.parentSessionId, task_id: patch.taskId,
+      worktree_path: patch.worktreePath, branch: patch.branch, gen: patch.gen,
+      recycled_from: patch.recycledFrom,
+    };
+    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
+    if (names.length === 0) return;
+    const set = names.map((c) => `${c} = ?`).join(", ");
+    const vals = names.map((c) => cols[c]);
+    this.db.prepare(`UPDATE sessions SET ${set} WHERE id = ?`).run(...vals, id);
+  }
+  /** Update measured context occupancy, bumping ctx_updated_at. */
+  setContextCounters(id: string, c: { ctxInputTokens: number; ctxTurns: number }): void {
+    this.db.prepare("UPDATE sessions SET ctx_input_tokens = ?, ctx_turns = ?, ctx_updated_at = ? WHERE id = ?")
+      .run(c.ctxInputTokens, c.ctxTurns, new Date().toISOString(), id);
+  }
+  /** Append an orchestration audit record (detail serialized to JSON). */
+  appendEvent(evt: OrchestrationEvent): void {
+    this.db.prepare(
+      `INSERT INTO orchestration_events (id,ts,manager_session_id,worker_session_id,task_id,kind,detail_json)
+       VALUES (@id,@ts,@managerSessionId,@workerSessionId,@taskId,@kind,@detailJson)`,
+    ).run({
+      id: evt.id, ts: evt.ts, managerSessionId: evt.managerSessionId,
+      workerSessionId: evt.workerSessionId ?? null, taskId: evt.taskId ?? null,
+      kind: evt.kind, detailJson: evt.detail === undefined ? null : JSON.stringify(evt.detail),
+    });
+  }
+  /** The workers a manager spawned (its direct children). */
+  listWorkers(managerSessionId: string): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at")
+      .all(managerSessionId) as Row[]).map(toSession);
+  }
+  /** A manager's audit trail in chronological order (rowid breaks same-timestamp ties). */
+  listEvents(managerSessionId: string): OrchestrationEvent[] {
+    return (this.db.prepare("SELECT * FROM orchestration_events WHERE manager_session_id = ? ORDER BY ts, rowid")
+      .all(managerSessionId) as Row[]).map(toOrchestrationEvent);
   }
 
   // --- tasks ---
@@ -197,6 +323,28 @@ function toSession(r0: unknown): Session {
     busy: (r.busy as number) === 1,
     createdAt: r.created_at as string, lastActivity: r.last_activity as string,
     lastError: (r.last_error as string) ?? null,
+    // phase-2 orchestration (null/0 on plain phase-1 rows)
+    role: (r.role as SessionRole) ?? null,
+    parentSessionId: (r.parent_session_id as string) ?? null,
+    taskId: (r.task_id as string) ?? null,
+    worktreePath: (r.worktree_path as string) ?? null,
+    branch: (r.branch as string) ?? null,
+    gen: (r.gen as number) ?? 0,
+    recycledFrom: (r.recycled_from as string) ?? null,
+    ctxInputTokens: (r.ctx_input_tokens as number) ?? null,
+    ctxTurns: (r.ctx_turns as number) ?? null,
+    ctxUpdatedAt: (r.ctx_updated_at as string) ?? null,
+  };
+}
+function toOrchestrationEvent(r0: unknown): OrchestrationEvent {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, ts: r.ts as string,
+    managerSessionId: r.manager_session_id as string,
+    workerSessionId: (r.worker_session_id as string) ?? null,
+    taskId: (r.task_id as string) ?? null,
+    kind: r.kind as OrchestrationEventKind,
+    detail: r.detail_json ? (JSON.parse(r.detail_json as string) as Record<string, unknown>) : undefined,
   };
 }
 function toTask(r0: unknown): Task {
