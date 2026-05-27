@@ -4,10 +4,11 @@ import type { PermissionPolicy } from "@loom/shared";
 import { SETTINGS_DIR, RELAY_SCRIPT, PORT } from "../paths.js";
 
 /**
- * Write the per-session --settings file: SessionStart/Stop hooks that relay back to the
- * daemon, plus the resolved permission policy. acceptEdits + allowlist avoids the
- * "Bypass Permissions mode" acceptance gate that --dangerously-skip-permissions triggers.
- * (Both behaviors validated in the spike.)
+ * Write the per-session --settings file: the hooks that relay back to the daemon, plus the
+ * resolved permission policy. SessionStart captures the engine id; UserPromptSubmit/Stop/
+ * StopFailure drive the busy state machine (rising/falling edges). acceptEdits + allowlist
+ * avoids the "Bypass Permissions mode" acceptance gate that --dangerously-skip-permissions
+ * triggers. (All behaviors validated in the spike.)
  */
 export function writeSessionSettings(sessionId: string, permission: PermissionPolicy): string {
   const hookCmd = {
@@ -16,6 +17,7 @@ export function writeSessionSettings(sessionId: string, permission: PermissionPo
   const settings = {
     hooks: {
       SessionStart: [hookCmd],
+      UserPromptSubmit: [hookCmd],
       Stop: [hookCmd],
       StopFailure: [hookCmd],
     },

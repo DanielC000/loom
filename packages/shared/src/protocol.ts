@@ -8,6 +8,7 @@
 export type TerminalControl =
   | { type: "sessionId"; id: string }   // engine session id captured/known
   | { type: "reset" }                   // pty respawned (resume) — clear xterm
+  | { type: "busy"; busy: boolean }     // a turn started (true) / ended (false) — hook-driven
   | { type: "exit"; code: number | null }
   | { type: "dead" };                   // stored engine id no longer resumable
 

@@ -40,6 +40,8 @@ export interface SpawnOpts {
 
 export interface PtyHostEvents {
   onEngineSessionId(sessionId: string, engineId: string): void;
+  /** Persist the turn-in-flight flag (rising on UserPromptSubmit, falling on Stop/StopFailure). */
+  onBusy(sessionId: string, busy: boolean): void;
   onExit(sessionId: string, code: number | null): void;
 }
 
@@ -110,21 +112,44 @@ export class PtyHost {
       this.broadcastControl(live, { type: "exit", code: exitCode });
       this.events.onExit(opts.sessionId, exitCode);
     });
+
+    // A new session runs its startup-prompt turn immediately. Set busy optimistically so
+    // GET /api/sessions is correct within the ~250ms before the UserPromptSubmit hook lands;
+    // the hook then re-asserts the same value (idempotent). Resume injects no prompt, so no set.
+    if (opts.startupPrompt) this.setBusy(opts.sessionId, true);
   }
 
-  /** Called by the hook endpoint when a relayed hook arrives. */
+  /** Called by the hook endpoint when a relayed hook arrives. Routes the busy state machine. */
   deliverHook(sessionId: string, hook: { hook_event_name?: string; session_id?: string }): void {
     const live = this.live.get(sessionId);
     if (!live) return;
     // eslint-disable-next-line no-console
     console.log(`[hook] ${sessionId} ${hook.hook_event_name ?? "?"} session_id=${hook.session_id ?? "-"}`);
-    if (hook.hook_event_name === "SessionStart" && typeof hook.session_id === "string") {
-      if (!live.engineSessionId) {
-        live.engineSessionId = hook.session_id;
-        this.events.onEngineSessionId(sessionId, hook.session_id);
-        this.broadcastControl(live, { type: "sessionId", id: hook.session_id });
-      }
+    switch (hook.hook_event_name) {
+      case "SessionStart":
+        // Capture the engine session id once (unchanged from phase 1).
+        if (typeof hook.session_id === "string" && !live.engineSessionId) {
+          live.engineSessionId = hook.session_id;
+          this.events.onEngineSessionId(sessionId, hook.session_id);
+          this.broadcastControl(live, { type: "sessionId", id: hook.session_id });
+        }
+        break;
+      case "UserPromptSubmit":
+        this.setBusy(sessionId, true); // rising edge — fires for the startup-prompt arg and injected prompts alike
+        break;
+      case "Stop":
+      case "StopFailure":
+        this.setBusy(sessionId, false); // falling edge — exactly one Stop per end-of-turn (no per-tool-use)
+        break;
     }
+  }
+
+  /** Persist + broadcast the turn-in-flight flag. Idempotent; safe to call repeatedly. */
+  private setBusy(sessionId: string, busy: boolean): void {
+    const live = this.live.get(sessionId);
+    if (!live) return;
+    this.events.onBusy(sessionId, busy);
+    this.broadcastControl(live, { type: "busy", busy });
   }
 
   subscribe(sessionId: string, sub: Subscriber): () => void {
