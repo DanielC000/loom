@@ -40,3 +40,30 @@ export async function removeWorktree(repoPath: string, worktreePath: string): Pr
   await git.raw(["worktree", "remove", worktreePath, "--force"]);
   await git.raw(["worktree", "prune"]);
 }
+
+/** A branch's changes since it diverged from base — the manager's pre-merge diff review (#16). */
+export async function diffBranch(
+  repoPath: string, branch: string, base = "HEAD",
+): Promise<{ filesChanged: number; insertions: number; deletions: number; patch: string }> {
+  const git = simpleGit(repoPath);
+  const range = `${base}...${branch}`; // 3-dot: changes on `branch` since the merge-base with `base`
+  const summary = await git.diffSummary([range]);
+  const patch = await git.diff([range]);
+  return { filesChanged: summary.files.length, insertions: summary.insertions, deletions: summary.deletions, patch };
+}
+
+/**
+ * Merge a worker's branch back into the repo's current branch with `--no-ff` (always a merge
+ * commit; --no-edit so it never opens an editor and hangs). On ANY merge failure (conflict),
+ * `git merge --abort` to leave the canonical repo UNTOUCHED — fail-closed.
+ */
+export async function mergeBranch(repoPath: string, branch: string): Promise<{ ok: boolean; conflict?: boolean }> {
+  const git = simpleGit(repoPath);
+  try {
+    await git.raw(["merge", "--no-ff", "--no-edit", branch]);
+    return { ok: true };
+  } catch {
+    try { await git.raw(["merge", "--abort"]); } catch { /* nothing in progress to abort */ }
+    return { ok: false, conflict: true };
+  }
+}

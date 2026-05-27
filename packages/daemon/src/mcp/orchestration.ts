@@ -168,6 +168,36 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    server.registerTool(
+      "worker_merge",
+      {
+        description: "STEP 1 of the merge gate: review a worker's branch diff (files changed + patch). No merge happens. You must review before confirming — there is no worker-side merge.",
+        inputSchema: { workerSessionId: z.string() },
+      },
+      async ({ workerSessionId }) => {
+        try {
+          return ok(await sessions.reviewWorkerMerge(managerSessionId, workerSessionId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
+      "worker_merge_confirm",
+      {
+        description: "STEP 2: after reviewing, confirm the merge. Runs the build/DoD gate, and ONLY if green merges the branch --no-ff, removes the worktree, and moves the task to done. Fail-closed: a failed gate or a conflict leaves the repo untouched and the worktree retained.",
+        inputSchema: { workerSessionId: z.string() },
+      },
+      async ({ workerSessionId }) => {
+        try {
+          return ok(await sessions.confirmWorkerMerge(managerSessionId, workerSessionId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     return server;
   }
 

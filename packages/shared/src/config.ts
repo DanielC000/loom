@@ -19,6 +19,16 @@ export interface PtyGeometry {
   rows: number;
 }
 
+/** Phase-2 orchestration settings. */
+export interface OrchestrationConfig {
+  /**
+   * Build/test command run in a worker's worktree before a merge (the build/DoD gate).
+   * Empty string = no automated gate; at this stage the two-step manager review IS the gate.
+   * (#17 will REQUIRE a non-empty gate before autonomy is enabled.)
+   */
+  gateCommand: string;
+}
+
 /** The fully-resolved, effective config for a project. */
 export interface ResolvedConfig {
   kanbanColumns: KanbanColumn[];
@@ -26,6 +36,7 @@ export interface ResolvedConfig {
   pty: PtyGeometry;
   /** Extra env applied to spawned sessions (merged over the spawn baseline). */
   sessionEnv: Record<string, string>;
+  orchestration: OrchestrationConfig;
 }
 
 /** Per-project overrides. Deep-partial of ResolvedConfig; anything omitted inherits the default. */
@@ -34,6 +45,7 @@ export interface ProjectConfigOverride {
   permission?: Partial<PermissionPolicy>;
   pty?: Partial<PtyGeometry>;
   sessionEnv?: Record<string, string>;
+  orchestration?: Partial<OrchestrationConfig>;
 }
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
@@ -66,6 +78,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     // Mitigate the repaint-tearing artifact seen during streaming (spike finding).
     CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT: "1",
   },
+  orchestration: { gateCommand: "" }, // no automated gate by default; the two-step review is the gate
 };
 
 /** The single config-resolution mechanism, reused everywhere. */
@@ -84,5 +97,8 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
       rows: override.pty?.rows ?? d.pty.rows,
     },
     sessionEnv: { ...d.sessionEnv, ...(override.sessionEnv ?? {}) },
+    orchestration: {
+      gateCommand: override.orchestration?.gateCommand ?? d.orchestration.gateCommand,
+    },
   };
 }
