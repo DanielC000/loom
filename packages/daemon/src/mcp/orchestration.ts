@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import type { Db } from "../db.js";
+import type { SessionService } from "../sessions/service.js";
 import { readTranscript } from "../sessions/transcript.js";
 
 // Same envelope as the task MCP server (mcp/server.ts).
@@ -26,7 +27,7 @@ interface Live {
  */
 export class OrchestrationMcpRouter {
   private live = new Map<string, Live>();
-  constructor(private db: Db) {}
+  constructor(private db: Db, private sessions: SessionService) {}
 
   /** The role gate: returns the manager's own id, or null for non-managers / unknown sessions. */
   resolveManager(sessionId: string): string | null {
@@ -35,6 +36,7 @@ export class OrchestrationMcpRouter {
 
   private buildServer(managerSessionId: string): McpServer {
     const db = this.db;
+    const sessions = this.sessions;
     const server = new McpServer({ name: "loom-orchestration", version: "0.1.0" });
 
     server.registerTool(
@@ -75,6 +77,40 @@ export class OrchestrationMcpRouter {
         if (!w || w.parentSessionId !== managerSessionId) return ok({ error: "not your worker" });
         const turns = w.engineSessionId ? readTranscript(w.cwd, w.engineSessionId) : [];
         return ok(typeof lastN === "number" && lastN > 0 ? turns.slice(-lastN) : turns);
+      },
+    );
+
+    // --- lifecycle actions ---
+    server.registerTool(
+      "worker_spawn",
+      {
+        description: "Spawn a worker on a task: creates an isolated git worktree + branch, starts a worker session in it, and moves the task to in_progress.",
+        inputSchema: {
+          taskId: z.string(),
+          topicId: z.string().optional(),
+          kickoffPrompt: z.string(),
+          skipPermissions: z.boolean().optional(), // accepted but IGNORED until autonomy rails (#17)
+        },
+      },
+      async ({ taskId, topicId, kickoffPrompt }) => {
+        const worker = await sessions.spawnWorker(managerSessionId, { taskId, topicId, kickoffPrompt });
+        return ok({ workerSessionId: worker.id, branch: worker.branch, worktreePath: worker.worktreePath });
+      },
+    );
+
+    server.registerTool(
+      "worker_stop",
+      {
+        description: "Stop one of your workers (graceful Ctrl-C by default, or hard kill). The worktree is retained.",
+        inputSchema: { workerSessionId: z.string(), mode: z.enum(["graceful", "hard"]).optional() },
+      },
+      async ({ workerSessionId, mode }) => {
+        try {
+          sessions.stopWorker(managerSessionId, workerSessionId, mode ?? "graceful");
+          return ok({ stopped: true });
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
       },
     );
 

@@ -21,9 +21,9 @@ async function main(): Promise<void> {
   watchClaudeProjects(db, (n) => console.log(`[watch] marked ${n} session(s) dead`));
 
   const mcp = new TaskMcpRouter(db);
-  const orchMcp = new OrchestrationMcpRouter(db);
 
   // PtyHost callbacks persist runtime state into the registry (engine id on receipt; exit).
+  // onExit references orchMcp (declared below) — only invoked at runtime, after init.
   const pty = new PtyHost({
     onEngineSessionId: (sessionId, engineId) => db.setEngineSessionId(sessionId, engineId),
     onBusy: (sessionId, busy) => db.setBusy(sessionId, busy),
@@ -33,6 +33,8 @@ async function main(): Promise<void> {
   });
 
   const sessions = new SessionService(db, pty);
+  // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after.
+  const orchMcp = new OrchestrationMcpRouter(db, sessions);
 
   const app = await buildServer({ db, pty, sessions, mcp, orchMcp });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only

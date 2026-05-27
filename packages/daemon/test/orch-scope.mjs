@@ -43,10 +43,10 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 const M = await connect("M");
 
-// 1) the manager's tool surface.
+// 1) the manager's tool surface (read tools from #13a + the #13b lifecycle actions).
 const tools = (await M.listTools()).tools.map((t) => t.name).sort();
-check(`tools = worker_list,worker_status,worker_transcript  (got ${tools.join(",")})`,
-  tools.join(",") === "worker_list,worker_status,worker_transcript");
+check(`tools = worker_list,worker_spawn,worker_status,worker_stop,worker_transcript  (got ${tools.join(",")})`,
+  tools.join(",") === "worker_list,worker_spawn,worker_status,worker_stop,worker_transcript");
 
 // 2) worker_list is manager-scoped by construction — M sees W1 only, never W2.
 const list = parse(await M.callTool({ name: "worker_list", arguments: {} }));
