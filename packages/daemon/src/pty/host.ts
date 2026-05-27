@@ -10,6 +10,14 @@ import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { PORT, LOGS_DIR } from "../paths.js";
 
 const RING_CAP_BYTES = 256 * 1024;
+/**
+ * Gap between writing a turn's text and writing the Enter (\r) that submits it. A SINGLE
+ * `text + "\r"` write does NOT submit a second turn to a running claude v2.1.150 session — the
+ * trailing \r is swallowed with the text and no UserPromptSubmit fires (observed; this also
+ * explains PR #9's earlier injected-turn finding). Writing Enter as a separate write a beat
+ * later submits reliably. (Revises the roadmap's S2 "single raw write" note.)
+ */
+const SUBMIT_ENTER_DELAY_MS = 150;
 
 interface Subscriber {
   onData: (b: Buffer) => void;
@@ -25,6 +33,8 @@ interface Live {
   subscribers: Set<Subscriber>;
   alive: boolean;
   logStream: fs.WriteStream;
+  busy: boolean;        // a turn is in flight (locally tracked; mirrored to DB via onBusy)
+  pending: string[];    // FIFO of messages held while busy — drained one-per-Stop
 }
 
 export interface SpawnOpts {
@@ -110,6 +120,8 @@ export class PtyHost {
       subscribers: new Set(),
       alive: true,
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.sessionId}.log`)),
+      busy: false,
+      pending: [],
     };
     this.live.set(opts.sessionId, live);
 
@@ -161,14 +173,50 @@ export class PtyHost {
           const stats = readContextStats(live.cwd, live.engineSessionId);
           if (stats) this.events.onContextStats(sessionId, stats);
         }
+        // The turn ended → safe to write. Drain ONE queued message (FIFO), re-arming busy so the
+        // next Stop releases the next: strict per-session serialization. Writing only at the turn
+        // boundary is what keeps a running turn from being corrupted by a mid-turn write.
+        if (live.pending.length > 0) this.submit(sessionId, live.pending.shift()!);
         break;
     }
   }
 
-  /** Persist + broadcast the turn-in-flight flag. Idempotent; safe to call repeatedly. */
+  /**
+   * Queue text for submission as a turn (text + "\r"). Submits immediately when the session is
+   * IDLE (arming busy); when a turn is in flight, HOLDS it FIFO and the next Stop drains one.
+   * Returns whether it went out now, or its 1-based queue position. Never writes while busy —
+   * a mid-turn write corrupts the running turn (the whole reason for the queue).
+   */
+  enqueueStdin(sessionId: string, text: string): { delivered: boolean; position?: number } {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) return { delivered: false };
+    if (!live.busy) {
+      this.submit(sessionId, text);
+      return { delivered: true };
+    }
+    live.pending.push(text);
+    return { delivered: false, position: live.pending.length };
+  }
+
+  /**
+   * Write text as a turn and arm busy (the immediate path and the Stop-drain share this).
+   * Two writes: the text, then Enter (\r) a beat later — see SUBMIT_ENTER_DELAY_MS. busy is
+   * armed synchronously, so a concurrent enqueueStdin for this session queues rather than
+   * racing the pending \r.
+   */
+  private submit(sessionId: string, text: string): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) return;
+    live.pty.write(text);
+    setTimeout(() => { const l = this.live.get(sessionId); if (l?.alive) l.pty.write("\r"); }, SUBMIT_ENTER_DELAY_MS);
+    this.setBusy(sessionId, true);
+  }
+
+  /** Persist + broadcast the turn-in-flight flag, and track it locally. Idempotent. */
   private setBusy(sessionId: string, busy: boolean): void {
     const live = this.live.get(sessionId);
     if (!live) return;
+    live.busy = busy;
     this.events.onBusy(sessionId, busy);
     this.broadcastControl(live, { type: "busy", busy });
   }

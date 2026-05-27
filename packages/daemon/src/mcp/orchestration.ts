@@ -114,6 +114,21 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    server.registerTool(
+      "worker_message",
+      {
+        description: "Send a message to one of your workers. Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn.",
+        inputSchema: { workerSessionId: z.string(), text: z.string() },
+      },
+      async ({ workerSessionId, text }) => {
+        try {
+          return ok(sessions.messageWorker(managerSessionId, workerSessionId, text));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     return server;
   }
 
