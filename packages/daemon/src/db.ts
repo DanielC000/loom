@@ -128,6 +128,11 @@ export class Db {
   setResumability(id: string, r: Resumability): void {
     this.db.prepare("UPDATE sessions SET resumability = ? WHERE id = ?").run(r, id);
   }
+  /** Turn in-flight flag — driven hook-side (UserPromptSubmit rising, Stop/StopFailure falling). */
+  setBusy(id: string, busy: boolean): void {
+    this.db.prepare("UPDATE sessions SET busy = ?, last_activity = ? WHERE id = ?")
+      .run(busy ? 1 : 0, new Date().toISOString(), id);
+  }
   /**
    * On daemon boot, no pty from a previous run survives — reconcile any session still
    * marked live/starting to exited (it stays resumable if it captured an engine id).

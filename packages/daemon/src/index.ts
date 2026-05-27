@@ -24,7 +24,9 @@ async function main(): Promise<void> {
   // PtyHost callbacks persist runtime state into the registry (engine id on receipt; exit).
   const pty = new PtyHost({
     onEngineSessionId: (sessionId, engineId) => db.setEngineSessionId(sessionId, engineId),
-    onExit: (sessionId) => { db.setProcessState(sessionId, "exited"); mcp.dispose(sessionId); },
+    onBusy: (sessionId, busy) => db.setBusy(sessionId, busy),
+    // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
+    onExit: (sessionId) => { db.setProcessState(sessionId, "exited"); db.setBusy(sessionId, false); mcp.dispose(sessionId); },
   });
 
   const sessions = new SessionService(db, pty);
