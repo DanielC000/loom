@@ -7,6 +7,7 @@ import { SessionService } from "./sessions/service.js";
 import { TaskMcpRouter } from "./mcp/server.js";
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
 import { OrchestrationControl } from "./orchestration/control.js";
+import { Scheduler } from "./orchestration/scheduler.js";
 import { buildServer } from "./gateway/server.js";
 
 async function main(): Promise<void> {
@@ -42,6 +43,14 @@ async function main(): Promise<void> {
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon listening on http://127.0.0.1:${PORT}`);
+
+  // Pillar B: the cron trigger layer. Boots a manager (interactive pty, never headless) on each
+  // due schedule's tick. start() reconciles missed fires forward (no catch-up flood).
+  const scheduler = new Scheduler({ db, control, startManager: (topicId) => sessions.startManager(topicId) });
+  scheduler.start();
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.on(sig, () => { scheduler.stop(); process.exit(0); });
+  }
 }
 
 main().catch((err) => {
