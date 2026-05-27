@@ -15,6 +15,7 @@
     "test:manager": "node test/manager-live.mjs",
     "test:messaging": "node test/messaging.mjs",
     "test:worker-report": "node test/worker-report.mjs",
+    "test:recycle": "node test/recycle.mjs",
     "test:busy": "node test/busy-flag.mjs",
     "test:orch": "node test/orch-model.mjs",
     "test:context": "node test/context-stats.mjs",

@@ -152,6 +152,22 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    server.registerTool(
+      "worker_recycle",
+      {
+        description: "Recycle a worker whose context has grown too large: closes it and spawns a FRESH worker in the SAME git worktree (code state kept) seeded with your handoff summary (intent kept). Same task + branch; gen+1. Read worker_transcript first and write the summary.",
+        inputSchema: { workerSessionId: z.string(), handoffSummary: z.string() },
+      },
+      async ({ workerSessionId, handoffSummary }) => {
+        try {
+          const fresh = await sessions.recycleWorker(managerSessionId, workerSessionId, handoffSummary);
+          return ok({ newWorkerSessionId: fresh.id, gen: fresh.gen, recycledFrom: fresh.recycledFrom });
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     return server;
   }
 
