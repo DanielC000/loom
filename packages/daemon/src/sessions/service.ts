@@ -405,7 +405,16 @@ export class SessionService {
       return { merged: false, reason: "merge conflict" };
     }
 
-    // Green: the branch is now on the canonical repo. Retire the worktree and finish the task.
+    // Green: the branch is on the canonical repo. The worker (which reported 'done' but is still
+    // alive) holds the worktree as its pty cwd — on Windows `git worktree remove` fails while the
+    // dir is a live process's cwd. So hard-stop the worker and wait for the pty to die BEFORE
+    // removing the worktree (recycleWorker does the same before reusing one). A no-pty worker row
+    // (e.g. merge-gate's seed) is already !isAlive, so this is a no-op there.
+    this.pty.stop(workerSessionId, "hard");
+    for (let i = 0; i < 50 && this.pty.isAlive(workerSessionId); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // Retire the worktree and finish the task.
     await removeWorktree(project.repoPath, worktreePath);
     if (taskId) this.db.updateTask(taskId, { columnKey: "done" });
     evt("merge_done", { branch });
