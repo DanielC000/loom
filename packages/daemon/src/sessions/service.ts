@@ -159,6 +159,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       startupPrompt: opts.kickoffPrompt,
+      role: "worker", // gives the worker the orchestration surface (worker_report only)
     });
     this.db.setProcessState(worker.id, "live");
     this.db.updateTask(opts.taskId, { columnKey: "in_progress" });
@@ -196,5 +197,44 @@ export class SessionService {
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "message_worker",
     });
     return r;
+  }
+
+  /**
+   * A worker reports to its manager (phase-2 §A3, the worker→manager direction). Moves the
+   * worker's task by status, records the event, and notifies the manager via the busy-gated
+   * queue — exactly Jinn's role:notification semantics: if the manager is mid-turn the report
+   * queues behind its running turn and drains on its next Stop. The caller IS the worker
+   * (workerSessionId is derived server-side from the URL path), so there's no id to spoof.
+   */
+  workerReport(
+    workerSessionId: string,
+    report: { status: "done" | "blocked" | "progress"; summary: string; prUrl?: string; needs?: string },
+  ): { reported: boolean; delivered: boolean } {
+    const worker = this.db.getSession(workerSessionId);
+    if (!worker) throw new Error("unknown worker session");
+    const managerSessionId = worker.parentSessionId ?? null;
+    const taskId = worker.taskId ?? null;
+
+    // Task move by status: done → review (ready for the manager's diff review), blocked →
+    // waiting, progress → no move.
+    if (taskId) {
+      const col = report.status === "done" ? "review" : report.status === "blocked" ? "waiting" : null;
+      if (col) this.db.updateTask(taskId, { columnKey: col });
+    }
+
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report",
+      detail: { status: report.status, summary: report.summary, prUrl: report.prUrl, needs: report.needs },
+    });
+
+    let delivered = false;
+    if (managerSessionId) {
+      let framed = `[loom:worker-report] worker ${workerSessionId} (task ${taskId ?? "none"}) — ${report.status}: ${report.summary}`;
+      if (report.prUrl) framed += ` | PR: ${report.prUrl}`;
+      if (report.needs) framed += ` | needs: ${report.needs}`;
+      delivered = this.pty.enqueueStdin(managerSessionId, framed).delivered;
+    }
+    return { reported: true, delivered };
   }
 }

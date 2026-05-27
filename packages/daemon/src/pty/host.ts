@@ -73,11 +73,12 @@ export class PtyHost {
   spawn(opts: SpawnOpts): void {
     const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
     ensureTrusted(opts.cwd); // pre-accept the workspace-trust dialog so warmup never blocks
-    const isManager = opts.role === "manager";
-    // A manager also gets the orchestration MCP. acceptEdits does NOT auto-approve MCP tools
-    // (the §9 lesson — that's why mcp__loom-tasks is in the default allow), so allowlist
-    // mcp__loom-orchestration too, else the manager hangs on a permission prompt calling worker_*.
-    const permission = isManager
+    // Both managers AND workers get the orchestration MCP — but a role-gated surface: managers
+    // get the full coordination tools, workers get only worker_report (resolved server-side).
+    // acceptEdits does NOT auto-approve MCP tools (the §9 lesson — why mcp__loom-tasks is in the
+    // default allow), so allowlist mcp__loom-orchestration too, else the agent hangs on a prompt.
+    const wantsOrch = opts.role === "manager" || opts.role === "worker";
+    const permission = wantsOrch
       ? { ...opts.permission, allow: [...opts.permission.allow, "mcp__loom-orchestration"] }
       : opts.permission;
     const settingsPath = writeSessionSettings(opts.sessionId, permission);
@@ -91,7 +92,7 @@ export class PtyHost {
     const mcpServers: Record<string, unknown> = {
       "loom-tasks": { type: "http", url: `http://127.0.0.1:${PORT}/mcp/${opts.sessionId}` },
     };
-    if (isManager) {
+    if (wantsOrch) {
       mcpServers["loom-orchestration"] = { type: "http", url: `http://127.0.0.1:${PORT}/mcp-orch/${opts.sessionId}` };
     }
     args.push("--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers }));
