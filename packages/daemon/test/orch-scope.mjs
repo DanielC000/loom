@@ -67,10 +67,16 @@ check("worker_transcript(W1) returns an array", Array.isArray(tx));
 
 await M.close();
 
-// 5) ROLE GATE: a plain session and a worker get NO surface — connect is rejected (404 → throw).
+// 5) ROLE-BASED surface: a WORKER connects but sees ONLY worker_report (no manager tools —
+//    the depth-1 tree holds at the surface, not just a gate). worker_report is NOT a manager tool.
+const W = await connect("W1");
+const wTools = (await W.listTools()).tools.map((t) => t.name).sort();
+check(`worker W1 sees ONLY [worker_report]  (got ${wTools.join(",")})`, wTools.join(",") === "worker_report");
+await W.close();
+
+// A PLAIN session (no role) still gets nothing — connect is rejected (404 → throw).
 const rejected = async (id) => { try { const c = await connect(id); await c.close(); return false; } catch { return true; } };
-check("plain session P rejected (no orchestration surface)", await rejected("P"));
-check("worker W1 rejected (no orchestration surface)", await rejected("W1"));
+check("plain session P still rejected (no orchestration surface)", await rejected("P"));
 
 console.log(failures === 0
   ? "\nALL PASS — orchestration MCP is manager-scoped and role-gated (only managers, only own workers)."
