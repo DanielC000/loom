@@ -45,6 +45,48 @@ export class SessionService {
     return { ...session, processState: "live" };
   }
 
+  /**
+   * Start a NEW MANAGER session in a topic (phase-2 §A2). Mirrors startNew, but marks the
+   * session role 'manager' (so it gets the loom-orchestration MCP + allowlist at spawn) and
+   * runs in the project repo, NOT a worktree (managers coordinate; workers get the worktrees).
+   */
+  startManager(topicId: string): Session {
+    const topic = this.db.getTopic(topicId);
+    if (!topic) throw new Error("topic not found");
+    const project = this.db.getProject(topic.projectId);
+    if (!project) throw new Error("project not found");
+    const config = resolveConfig(project.config);
+
+    const now = new Date().toISOString();
+    const session: Session = {
+      id: randomUUID(),
+      projectId: project.id,
+      topicId,
+      engineSessionId: null,
+      title: null,
+      cwd: project.repoPath, // a manager works in the repo, not a worktree
+      processState: "starting",
+      resumability: "unknown",
+      busy: false,
+      createdAt: now,
+      lastActivity: now,
+      lastError: null,
+      role: "manager",
+    };
+    this.db.insertSession(session);
+    this.pty.spawn({
+      sessionId: session.id,
+      cwd: session.cwd,
+      permission: config.permission,
+      geometry: config.pty,
+      sessionEnv: config.sessionEnv,
+      startupPrompt: topic.startupPrompt || undefined,
+      role: "manager",
+    });
+    this.db.setProcessState(session.id, "live");
+    return { ...session, processState: "live" };
+  }
+
   /** Resume an existing session — NO prompt injection. */
   resume(sessionId: string): Session {
     const session = this.db.getSession(sessionId);
