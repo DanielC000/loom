@@ -4,6 +4,7 @@ import Terminals from "./pages/Terminals";
 import Vault from "./pages/Vault";
 import Git from "./pages/Git";
 import Board from "./pages/Board";
+import Orchestration from "./pages/Orchestration";
 import { page } from "./ui";
 
 const navStyle = ({ isActive }: { isActive: boolean }) =>
@@ -18,6 +19,7 @@ export default function App() {
           <NavLink to="/" style={navStyle} end>Workspace</NavLink>
           <NavLink to="/terminals" style={navStyle}>Terminals</NavLink>
           <NavLink to="/board" style={navStyle}>Board</NavLink>
+          <NavLink to="/orchestration" style={navStyle}>Orchestration</NavLink>
           <NavLink to="/vault" style={navStyle}>Vault</NavLink>
           <NavLink to="/git" style={navStyle}>Git</NavLink>
         </nav>
@@ -27,6 +29,7 @@ export default function App() {
           <Route path="/" element={<Workspace />} />
           <Route path="/terminals" element={<Terminals />} />
           <Route path="/board" element={<Board />} />
+          <Route path="/orchestration" element={<Orchestration />} />
           <Route path="/vault" element={<Vault />} />
           <Route path="/git" element={<Git />} />
         </Routes>
