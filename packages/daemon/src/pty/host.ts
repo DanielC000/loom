@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, type IPty } from "node-pty";
-import type { PermissionPolicy, PtyGeometry } from "@loom/shared";
+import type { PermissionPolicy, PtyGeometry, SessionRole } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
 import { writeSessionSettings } from "./claude-settings.js";
@@ -37,6 +37,8 @@ export interface SpawnOpts {
   startupPrompt?: string;
   /** Resume: Claude engine session id. */
   resumeId?: string;
+  /** A manager also gets the loom-orchestration MCP (+ its allowlist); workers/plain do not. */
+  role?: SessionRole;
 }
 
 export interface PtyHostEvents {
@@ -61,18 +63,28 @@ export class PtyHost {
   spawn(opts: SpawnOpts): void {
     const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
     ensureTrusted(opts.cwd); // pre-accept the workspace-trust dialog so warmup never blocks
-    const settingsPath = writeSessionSettings(opts.sessionId, opts.permission);
+    const isManager = opts.role === "manager";
+    // A manager also gets the orchestration MCP. acceptEdits does NOT auto-approve MCP tools
+    // (the §9 lesson — that's why mcp__loom-tasks is in the default allow), so allowlist
+    // mcp__loom-orchestration too, else the manager hangs on a permission prompt calling worker_*.
+    const permission = isManager
+      ? { ...opts.permission, allow: [...opts.permission.allow, "mcp__loom-orchestration"] }
+      : opts.permission;
+    const settingsPath = writeSessionSettings(opts.sessionId, permission);
 
     const args: string[] = [];
     if (opts.resumeId) args.push("--resume", opts.resumeId);
     if (opts.startupPrompt) args.push(opts.startupPrompt); // positional MUST precede variadic --mcp-config
     args.push("--settings", settingsPath);
-    args.push("--permission-mode", opts.permission.mode);
+    args.push("--permission-mode", permission.mode);
     // §6 scoping: route by session id in the URL path; daemon derives the project server-side.
-    const mcp = JSON.stringify({
-      mcpServers: { "loom-tasks": { type: "http", url: `http://127.0.0.1:${PORT}/mcp/${opts.sessionId}` } },
-    });
-    args.push("--strict-mcp-config", "--mcp-config", mcp);
+    const mcpServers: Record<string, unknown> = {
+      "loom-tasks": { type: "http", url: `http://127.0.0.1:${PORT}/mcp/${opts.sessionId}` },
+    };
+    if (isManager) {
+      mcpServers["loom-orchestration"] = { type: "http", url: `http://127.0.0.1:${PORT}/mcp-orch/${opts.sessionId}` };
+    }
+    args.push("--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers }));
 
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {

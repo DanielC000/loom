@@ -148,8 +148,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true };
   });
 
-  app.post("/api/topics/:id/sessions", async (req) =>
-    deps.sessions.startNew((req.params as { id: string }).id));
+  app.post("/api/topics/:id/sessions", async (req) => {
+    const id = (req.params as { id: string }).id;
+    const { role } = (req.body as { role?: string }) ?? {};
+    return role === "manager" ? deps.sessions.startManager(id) : deps.sessions.startNew(id);
+  });
   app.post("/api/sessions/:id/resume", async (req) =>
     deps.sessions.resume((req.params as { id: string }).id));
   app.post("/api/sessions/:id/stop", async (req, reply) => {
