@@ -5,6 +5,7 @@ import { seedGlobalSkills } from "./skills/seed.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
 import { TaskMcpRouter } from "./mcp/server.js";
+import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
 import { buildServer } from "./gateway/server.js";
 
 async function main(): Promise<void> {
@@ -20,6 +21,7 @@ async function main(): Promise<void> {
   watchClaudeProjects(db, (n) => console.log(`[watch] marked ${n} session(s) dead`));
 
   const mcp = new TaskMcpRouter(db);
+  const orchMcp = new OrchestrationMcpRouter(db);
 
   // PtyHost callbacks persist runtime state into the registry (engine id on receipt; exit).
   const pty = new PtyHost({
@@ -27,12 +29,12 @@ async function main(): Promise<void> {
     onBusy: (sessionId, busy) => db.setBusy(sessionId, busy),
     onContextStats: (sessionId, s) => db.setContextCounters(sessionId, { ctxInputTokens: s.inputTokens, ctxTurns: s.turns }),
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
-    onExit: (sessionId) => { db.setProcessState(sessionId, "exited"); db.setBusy(sessionId, false); mcp.dispose(sessionId); },
+    onExit: (sessionId) => { db.setProcessState(sessionId, "exited"); db.setBusy(sessionId, false); mcp.dispose(sessionId); orchMcp.dispose(sessionId); },
   });
 
   const sessions = new SessionService(db, pty);
 
-  const app = await buildServer({ db, pty, sessions, mcp });
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon listening on http://127.0.0.1:${PORT}`);

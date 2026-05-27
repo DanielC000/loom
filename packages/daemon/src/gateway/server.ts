@@ -9,6 +9,7 @@ import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
+import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import { GitReader } from "../git/reader.js";
 import { listVaultTree, readVaultFile } from "../vault/browser.js";
 
@@ -19,6 +20,7 @@ export interface GatewayDeps {
   pty: PtyHost;
   sessions: SessionService;
   mcp: TaskMcpRouter;
+  orchMcp: OrchestrationMcpRouter;
 }
 
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
@@ -30,6 +32,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { sessionId } = req.params as { sessionId: string };
     reply.hijack(); // hand raw req/res to the MCP transport; pass the Fastify-parsed body
     await deps.mcp.handle(req.raw, reply.raw, sessionId, req.body);
+  });
+
+  // --- Manager-scoped orchestration MCP (role-gated; manager derived server-side) ---
+  app.all("/mcp-orch/:sessionId", async (req, reply) => {
+    const { sessionId } = req.params as { sessionId: string };
+    reply.hijack();
+    await deps.orchMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
 
   // --- Hook relay target (loopback only) ---
