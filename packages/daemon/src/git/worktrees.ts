@@ -34,11 +34,27 @@ export async function createWorktree(repoPath: string, projectId: string, taskId
 /**
  * Remove a worker's worktree and prune the admin record. Branch deletion (after merge) is
  * #16's concern, not here.
+ *
+ * Windows handle-release race: when a worker is hard-stopped just before its worktree is removed
+ * (the merge path — confirmWorkerMerge), node-pty's exit event fires when the process SIGNALS
+ * exit, but the OS releases the worktree's directory handle a beat later. `git worktree remove`
+ * then fails ("failed to delete '…': Permission denied") and is NOT idempotent — it can drop the
+ * worktree's admin record while leaving the dir on disk, so retrying the same command fails with
+ * "is not a working tree". So: attempt the clean git removal once (best-effort), then back it up
+ * with a filesystem delete that retries the EBUSY/EPERM lag (fs.rm maxRetries — built for exactly
+ * this), then prune any stale admin record. When nothing holds the dir (merge-gate's no-pty rows)
+ * the git removal succeeds and the backstop is a no-op.
  */
 export async function removeWorktree(repoPath: string, worktreePath: string): Promise<void> {
   const git = simpleGit(repoPath);
-  await git.raw(["worktree", "remove", worktreePath, "--force"]);
-  await git.raw(["worktree", "prune"]);
+  try {
+    await git.raw(["worktree", "remove", worktreePath, "--force"]);
+  } catch {
+    // fall through to the filesystem backstop (the dir handle hasn't released, or git already
+    // de-registered the worktree but couldn't delete the dir).
+  }
+  await fs.promises.rm(worktreePath, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+  await git.raw(["worktree", "prune"]); // reconcile the admin record with what's on disk
 }
 
 /** A branch's changes since it diverged from base — the manager's pre-merge diff review (#16). */
