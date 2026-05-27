@@ -40,3 +40,40 @@ export async function removeWorktree(repoPath: string, worktreePath: string): Pr
   await git.raw(["worktree", "remove", worktreePath, "--force"]);
   await git.raw(["worktree", "prune"]);
 }
+
+/** A branch's changes since it diverged from base — the manager's pre-merge diff review (#16). */
+export async function diffBranch(
+  repoPath: string, branch: string, base = "HEAD",
+): Promise<{ filesChanged: number; insertions: number; deletions: number; patch: string }> {
+  const git = simpleGit(repoPath);
+  const range = `${base}...${branch}`; // 3-dot: changes on `branch` since the merge-base with `base`
+  const summary = await git.diffSummary([range]);
+  const patch = await git.diff([range]);
+  return { filesChanged: summary.files.length, insertions: summary.insertions, deletions: summary.deletions, patch };
+}
+
+/**
+ * Merge a worker's branch back into the repo's current branch with `--no-ff` (always a merge
+ * commit; --no-edit so it never opens an editor and hangs). FAIL-CLOSED.
+ *
+ * NOTE: simple-git's `raw(["merge", …])` does NOT reliably reject on a merge conflict — it can
+ * resolve while leaving the repo MID-MERGE (verified: `git merge` exits non-zero on conflict but
+ * raw still resolves, leaving `UU` unmerged entries + MERGE_HEAD). So we do NOT trust raw's
+ * resolve/reject; we detect a conflict EXPLICITLY via unmerged index entries and `git merge
+ * --abort` on anything but a clean win, leaving the canonical repo untouched.
+ */
+export async function mergeBranch(repoPath: string, branch: string): Promise<{ ok: boolean; conflict?: boolean }> {
+  const git = simpleGit(repoPath);
+  let rawError = false;
+  try {
+    await git.raw(["merge", "--no-ff", "--no-edit", branch]);
+  } catch {
+    rawError = true; // a conflict OR a real failure — either way, the explicit check below decides
+  }
+  const conflicted = (await git.raw(["ls-files", "--unmerged"])).trim() !== "";
+  if (conflicted || rawError) {
+    try { await git.raw(["merge", "--abort"]); } catch { /* nothing in progress to abort */ }
+    return { ok: false, conflict: true };
+  }
+  return { ok: true };
+}

@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { resolveConfig, type Session, type StopMode } from "@loom/shared";
+import { spawnSync } from "node:child_process";
+import { resolveConfig, type Session, type StopMode, type OrchestrationEvent } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
-import { createWorktree } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, diffBranch, mergeBranch } from "../git/worktrees.js";
 import { engineTranscriptExists } from "./transcript.js";
 
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
@@ -318,5 +319,75 @@ export class SessionService {
       detail: { recycledFrom: old.id, gen: newGen },
     });
     return { ...fresh, processState: "live" };
+  }
+
+  /**
+   * Step 1 of the two-step merge gate (#16): show the manager a worker's branch diff. NO merge
+   * happens — this is the review the manager cannot skip (there is no worker-side merge tool).
+   */
+  async reviewWorkerMerge(
+    managerSessionId: string, workerSessionId: string,
+  ): Promise<{ filesChanged: number; insertions: number; deletions: number; patch: string }> {
+    const worker = this.db.getSession(workerSessionId);
+    if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
+    if (!worker.branch) throw new Error("worker has no branch");
+    const project = this.db.getProject(worker.projectId);
+    if (!project) throw new Error("project not found");
+    const diff = await diffBranch(project.repoPath, worker.branch);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "merge_request",
+      detail: { branch: worker.branch, filesChanged: diff.filesChanged },
+    });
+    return diff;
+  }
+
+  /**
+   * Step 2: run the build/DoD gate, and ONLY if green merge the branch --no-ff, remove the
+   * worktree, and move the task to done. FAIL-CLOSED — a failed gate or a merge conflict leaves
+   * the canonical repo UNTOUCHED and the worktree RETAINED (so the manager can re-task a fix).
+   * Merge is daemon-executed; workers have no merge tool.
+   */
+  async confirmWorkerMerge(
+    managerSessionId: string, workerSessionId: string,
+  ): Promise<{ merged: boolean; reason?: string }> {
+    const worker = this.db.getSession(workerSessionId);
+    if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
+    if (!worker.branch) throw new Error("worker has no branch");
+    const project = this.db.getProject(worker.projectId);
+    if (!project) throw new Error("project not found");
+    const worktreePath = worker.worktreePath ?? worker.cwd;
+    const taskId = worker.taskId ?? null;
+    const branch = worker.branch;
+    const gate = resolveConfig(project.config).orchestration.gateCommand;
+    const evt = (kind: OrchestrationEvent["kind"], detail?: Record<string, unknown>) => this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId, taskId, kind, detail,
+    });
+    const rejectNotify = (msg: string) => { try { this.pty.enqueueStdin(managerSessionId, msg); } catch { /* manager not live */ } };
+
+    // Build/DoD gate (fail-closed): run the configured command in the WORKTREE; non-zero rejects.
+    if (gate) {
+      const res = spawnSync(gate, { cwd: worktreePath, shell: true, timeout: 120_000, stdio: "ignore" });
+      const passed = res.status === 0 && !res.error;
+      evt("build_gate", { passed });
+      if (!passed) {
+        evt("merge_rejected", { reason: "gate" });
+        rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — build gate failed; canonical repo untouched, worktree retained.`);
+        return { merged: false, reason: "build gate failed" };
+      }
+    }
+
+    const merge = await mergeBranch(project.repoPath, branch);
+    if (!merge.ok) {
+      evt("merge_rejected", { reason: "conflict" });
+      rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — merge conflict; canonical repo untouched, worktree retained. Re-task a rebase.`);
+      return { merged: false, reason: "merge conflict" };
+    }
+
+    // Green: the branch is now on the canonical repo. Retire the worktree and finish the task.
+    await removeWorktree(project.repoPath, worktreePath);
+    if (taskId) this.db.updateTask(taskId, { columnKey: "done" });
+    evt("merge_done", { branch });
+    return { merged: true };
   }
 }

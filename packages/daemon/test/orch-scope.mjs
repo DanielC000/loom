@@ -43,9 +43,9 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 const M = await connect("M");
 
-// 1) the manager's tool surface (read tools from #13a + lifecycle/messaging/recycle actions).
+// 1) the manager's tool surface (read tools + lifecycle/messaging/recycle/merge-gate actions).
 const tools = (await M.listTools()).tools.map((t) => t.name).sort();
-const expected = "worker_list,worker_message,worker_recycle,worker_spawn,worker_status,worker_stop,worker_transcript";
+const expected = "worker_list,worker_merge,worker_merge_confirm,worker_message,worker_recycle,worker_spawn,worker_status,worker_stop,worker_transcript";
 check(`tools = ${expected}  (got ${tools.join(",")})`, tools.join(",") === expected);
 
 // 2) worker_list is manager-scoped by construction — M sees W1 only, never W2.
