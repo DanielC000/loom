@@ -1,6 +1,7 @@
-import type { Project, Topic, Session, Task, SessionListItem, VaultEntry, KanbanColumn } from "@loom/shared";
+import type { Project, Topic, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
+export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; }
 
 async function get<T>(url: string): Promise<T> {
   const r = await fetch(url);
@@ -45,4 +46,15 @@ export const api = {
   updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position">>) =>
     post<{ ok: boolean }>(`/api/tasks/${id}`, patch),
   transcript: (sessionId: string) => get<TranscriptTurn[]>(`/api/sessions/${sessionId}/transcript`),
+
+  // --- phase-2 orchestration (#18b view) ---
+  orchestrationEvents: (managerId: string) =>
+    get<OrchestrationEvent[]>(`/api/orchestration/events?managerId=${encodeURIComponent(managerId)}`),
+  workerDiff: (sessionId: string) => get<BranchDiff>(`/api/sessions/${sessionId}/diff`),
+  orchestrationStatus: () => get<{ pausedScopes: string[] }>("/api/orchestration/status"),
+  pauseOrchestration: (scope?: string) =>
+    post<{ ok: boolean; pausedScopes: string[] }>("/api/orchestration/pause", scope ? { scope } : {}),
+  resumeOrchestration: (scope?: string) =>
+    post<{ ok: boolean; pausedScopes: string[] }>("/api/orchestration/resume", scope ? { scope } : {}),
+  killOrchestration: () => post<{ stopped: number }>("/api/orchestration/kill"),
 };

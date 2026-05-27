@@ -12,6 +12,7 @@ import type { TaskMcpRouter } from "../mcp/server.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { GitReader } from "../git/reader.js";
+import { diffBranch } from "../git/worktrees.js";
 import { listVaultTree, readVaultFile } from "../vault/browser.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
@@ -58,6 +59,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.post("/api/orchestration/kill", async () => ({ stopped: deps.sessions.killAllWorkers() }));
   app.get("/api/orchestration/status", async () => ({ pausedScopes: deps.control.pausedScopes() }));
+  // A manager's orchestration_events timeline (chronological). READ-ONLY — emits no event.
+  app.get("/api/orchestration/events", async (req) => {
+    const { managerId } = req.query as { managerId?: string };
+    return managerId ? deps.db.listEvents(managerId) : [];
+  });
 
   // --- Hook relay target (loopback only) ---
   app.post("/internal/hook", async (req, reply) => {
@@ -84,6 +90,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const s = deps.db.getSession((req.params as { id: string }).id);
     if (!s?.engineSessionId) return [];
     return readTranscript(s.cwd, s.engineSessionId);
+  });
+  // A worker's branch diff for the orchestration view (read-only — does NOT call reviewWorkerMerge,
+  // so it appends no merge_request event; the manager's two-step gate is the only thing that does).
+  app.get("/api/sessions/:id/diff", async (req, reply) => {
+    const s = deps.db.getSession((req.params as { id: string }).id);
+    if (!s?.branch) return reply.code(404).send({ error: "session has no branch" });
+    const p = deps.db.getProject(s.projectId);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    return diffBranch(p.repoPath, s.branch);
   });
   app.get("/api/topics/:id/sessions", async (req) =>
     deps.db.listSessions((req.params as { id: string }).id));
