@@ -96,26 +96,27 @@ try {
   const list = parse(await M.callTool({ name: "worker_list", arguments: {} }));
   check("worker_list on the manager includes the worker", list.some((x) => x.workerSessionId === spawned.workerSessionId));
 
-  // Let the worker boot AND finish its kickoff turn before stopping: graceful stop is a
-  // double Ctrl-C, which exits an IDLE claude but only INTERRUPTS the turn if it's mid-turn.
-  // busy=false (the Stop hook) means the turn ended and the worker is idle at the prompt.
+  // Confirm the worker actually came alive and ran its kickoff turn (engine id captured,
+  // then busy=false on the Stop hook) — proof the spawn produced a working session.
   let idle = null;
   for (let i = 0; i < 90 && !idle; i++) {
     await sleep(1000);
     const s = (await get("/api/sessions")).find((x) => x.id === spawned.workerSessionId);
     if (s?.engineSessionId && s.busy === false) idle = s;
   }
-  check("worker booted and went idle (engine id captured, kickoff turn done)", !!idle);
+  check("worker booted and ran its kickoff turn (engine id captured, then idle)", !!idle);
 
-  // worker_stop → the worker exits.
-  const stopRes = parse(await M.callTool({ name: "worker_stop", arguments: { workerSessionId: spawned.workerSessionId } }));
+  // worker_stop with mode 'hard' (pty.kill) → DETERMINISTIC exit (~0.5s). Graceful (Ctrl-C ×2)
+  // does NOT reliably exit an idle v2.1.150 worker; the graceful→bounded-wait→hard escalation
+  // is tracked separately (lands before #15's recycle relies on a clean graceful close).
+  const stopRes = parse(await M.callTool({ name: "worker_stop", arguments: { workerSessionId: spawned.workerSessionId, mode: "hard" } }));
   check("worker_stop returns { stopped: true }", stopRes.stopped === true);
   let exited = false;
   for (let i = 0; i < 30 && !exited; i++) {
     await sleep(1000);
     exited = (await get("/api/sessions")).find((s) => s.id === spawned.workerSessionId)?.processState === "exited";
   }
-  check("worker stopped (processState → exited)", exited);
+  check("worker_stop(hard) stops the worker (processState → exited)", exited);
 
   await M.close();
 } finally {
