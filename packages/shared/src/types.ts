@@ -61,6 +61,13 @@ export interface Session {
   ctxInputTokens?: number | null;   // measured engine context occupancy (last-assistant usage)
   ctxTurns?: number | null;
   ctxUpdatedAt?: string | null;
+  /**
+   * §19c usage-limit park: the ISO instant this session may resume after hitting the Claude
+   * usage cap (reset+buffer when known, else a default backoff). null = not rate-limited. The
+   * pty is NOT killed on a cap; #19c-b re-submits the pending turn at this time. (lastError
+   * carries the human "usage limit — resumes X" string.)
+   */
+  rateLimitedUntil?: string | null;
 }
 
 /** Append-only orchestration audit record (the manager↔worker timeline). */

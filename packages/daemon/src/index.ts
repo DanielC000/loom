@@ -9,6 +9,7 @@ import { TaskMcpRouter } from "./mcp/server.js";
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
 import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
+import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { buildServer } from "./gateway/server.js";
 
 async function main(): Promise<void> {
@@ -31,6 +32,12 @@ async function main(): Promise<void> {
     onEngineSessionId: (sessionId, engineId) => db.setEngineSessionId(sessionId, engineId),
     onBusy: (sessionId, busy) => db.setBusy(sessionId, busy),
     onContextStats: (sessionId, s) => db.setContextCounters(sessionId, { ctxInputTokens: s.inputTokens, ctxTurns: s.turns }),
+    // §19c: persist the per-session park (resume-at + human lastError) AND record GLOBAL awareness
+    // (so the Scheduler / worker_spawn won't fire into a known-limited account).
+    onRateLimited: (sessionId, until, detail) => {
+      db.setRateLimitedUntil(sessionId, until, detail.message);
+      recordClaudeRateLimit(detail.resetsAtSeconds);
+    },
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
     onExit: (sessionId) => { db.setProcessState(sessionId, "exited"); db.setBusy(sessionId, false); mcp.dispose(sessionId); orchMcp.dispose(sessionId); },
   });

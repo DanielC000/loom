@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   recycled_from TEXT,
   ctx_input_tokens INTEGER,
   ctx_turns INTEGER,
-  ctx_updated_at TEXT
+  ctx_updated_at TEXT,
+  rate_limited_until TEXT
 );
 -- Append-only orchestration audit trail (manager↔worker timeline; UI timeline in #18).
 CREATE TABLE IF NOT EXISTS orchestration_events (
@@ -97,6 +98,7 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   ctx_input_tokens: "INTEGER",
   ctx_turns: "INTEGER",
   ctx_updated_at: "TEXT",
+  rate_limited_until: "TEXT",
 };
 
 type Row = Record<string, unknown>;
@@ -187,12 +189,12 @@ export class Db {
          id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
          role,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
-         ctx_input_tokens,ctx_turns,ctx_updated_at)
+         ctx_input_tokens,ctx_turns,ctx_updated_at,rate_limited_until)
        VALUES (
          @id,@projectId,@topicId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
          @role,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
-         @ctxInputTokens,@ctxTurns,@ctxUpdatedAt)`,
+         @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@rateLimitedUntil)`,
     ).run({
       ...s,
       busy: s.busy ? 1 : 0,
@@ -208,6 +210,7 @@ export class Db {
       ctxInputTokens: s.ctxInputTokens ?? null,
       ctxTurns: s.ctxTurns ?? null,
       ctxUpdatedAt: s.ctxUpdatedAt ?? null,
+      rateLimitedUntil: s.rateLimitedUntil ?? null,
     });
   }
   setEngineSessionId(id: string, engineId: string): void {
@@ -263,6 +266,15 @@ export class Db {
   setContextCounters(id: string, c: { ctxInputTokens: number; ctxTurns: number }): void {
     this.db.prepare("UPDATE sessions SET ctx_input_tokens = ?, ctx_turns = ?, ctx_updated_at = ? WHERE id = ?")
       .run(c.ctxInputTokens, c.ctxTurns, new Date().toISOString(), id);
+  }
+  /**
+   * §19c usage-limit park: stamp when the session may resume (null clears the park) and the
+   * human-readable lastError. Bumps last_activity so the UI shows parked-not-dead. Persisted, so
+   * the resume-at survives a daemon restart (#19c-b re-arms the wake from it).
+   */
+  setRateLimitedUntil(id: string, until: string | null, lastError: string | null): void {
+    this.db.prepare("UPDATE sessions SET rate_limited_until = ?, last_error = ?, last_activity = ? WHERE id = ?")
+      .run(until, lastError, new Date().toISOString(), id);
   }
   /** Append an orchestration audit record (detail serialized to JSON). */
   appendEvent(evt: OrchestrationEvent): void {
@@ -385,6 +397,7 @@ function toSession(r0: unknown): Session {
     ctxInputTokens: (r.ctx_input_tokens as number) ?? null,
     ctxTurns: (r.ctx_turns as number) ?? null,
     ctxUpdatedAt: (r.ctx_updated_at as string) ?? null,
+    rateLimitedUntil: (r.rate_limited_until as string) ?? null,
   };
 }
 function toOrchestrationEvent(r0: unknown): OrchestrationEvent {
