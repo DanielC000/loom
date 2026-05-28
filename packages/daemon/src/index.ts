@@ -1,3 +1,4 @@
+import { resolveConfig } from "@loom/shared";
 import { ensureDirs, PORT } from "./paths.js";
 import { Db } from "./db.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
@@ -45,9 +46,19 @@ async function main(): Promise<void> {
   console.log(`Loom daemon listening on http://127.0.0.1:${PORT}`);
 
   // Pillar B: the cron trigger layer. Boots a manager (interactive pty, never headless) on each
-  // due schedule's tick. start() reconciles missed fires forward (no catch-up flood).
-  const scheduler = new Scheduler({ db, control, startManager: (topicId) => sessions.startManager(topicId) });
-  scheduler.start();
+  // due schedule's tick. OPT-IN (autonomy earned gate-by-gate): only start when enabled via the
+  // platform config OR the LOOM_SCHEDULER_ENABLED=1 env override. LOOM_SCHEDULER_INTERVAL_MS tunes
+  // the tick cadence (default 60s) — tests use a short interval to avoid a 60s wait.
+  const schedulerEnabled =
+    process.env.LOOM_SCHEDULER_ENABLED === "1" || resolveConfig(undefined).orchestration.schedulerEnabled;
+  const intervalMs = Number(process.env.LOOM_SCHEDULER_INTERVAL_MS) || 60_000;
+  const scheduler = new Scheduler({ db, control, startManager: (topicId) => sessions.startManager(topicId), intervalMs });
+  if (schedulerEnabled) {
+    scheduler.start();
+    console.log(`[boot] scheduler enabled (tick ${intervalMs}ms)`);
+  } else {
+    console.log("[boot] scheduler disabled (set orchestration.schedulerEnabled or LOOM_SCHEDULER_ENABLED=1)");
+  }
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => { scheduler.stop(); process.exit(0); });
   }
