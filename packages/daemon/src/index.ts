@@ -9,7 +9,9 @@ import { TaskMcpRouter } from "./mcp/server.js";
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
 import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
+import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
+import { rateLimitDeadline } from "./orchestration/usage-limit.js";
 import { buildServer } from "./gateway/server.js";
 
 async function main(): Promise<void> {
@@ -32,10 +34,12 @@ async function main(): Promise<void> {
     onEngineSessionId: (sessionId, engineId) => db.setEngineSessionId(sessionId, engineId),
     onBusy: (sessionId, busy) => db.setBusy(sessionId, busy),
     onContextStats: (sessionId, s) => db.setContextCounters(sessionId, { ctxInputTokens: s.inputTokens, ctxTurns: s.turns }),
-    // §19c: persist the per-session park (resume-at + human lastError) AND record GLOBAL awareness
-    // (so the Scheduler / worker_spawn won't fire into a known-limited account).
+    // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
+    // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
+    // the Scheduler / worker_spawn won't fire into a known-limited account).
     onRateLimited: (sessionId, until, detail) => {
       db.setRateLimitedUntil(sessionId, until, detail.message);
+      db.armRateLimitDeadline(sessionId, rateLimitDeadline(detail.resetsAtSeconds));
       recordClaudeRateLimit(detail.resetsAtSeconds);
     },
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
@@ -66,8 +70,17 @@ async function main(): Promise<void> {
   } else {
     console.log("[boot] scheduler disabled (set orchestration.schedulerEnabled or LOOM_SCHEDULER_ENABLED=1)");
   }
+
+  // §19c-b usage-limit RESUME watcher — ALWAYS ON (recovery ≠ autonomy; a manually-started session
+  // can hit the cap too), so it runs regardless of schedulerEnabled. LOOM_RATE_LIMIT_WATCH_INTERVAL_MS
+  // tunes the tick for tests (default 60s).
+  const watchIntervalMs = Number(process.env.LOOM_RATE_LIMIT_WATCH_INTERVAL_MS) || 60_000;
+  const rateLimitWatcher = new RateLimitWatcher({ db, pty, intervalMs: watchIntervalMs });
+  rateLimitWatcher.start();
+  console.log(`[boot] usage-limit resume watcher on (tick ${watchIntervalMs}ms)`);
+
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => { scheduler.stop(); process.exit(0); });
+    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); process.exit(0); });
   }
 }
 

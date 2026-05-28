@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   ctx_input_tokens INTEGER,
   ctx_turns INTEGER,
   ctx_updated_at TEXT,
-  rate_limited_until TEXT
+  rate_limited_until TEXT,
+  rate_limit_deadline TEXT
 );
 -- Append-only orchestration audit trail (manager↔worker timeline; UI timeline in #18).
 CREATE TABLE IF NOT EXISTS orchestration_events (
@@ -99,6 +100,7 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   ctx_turns: "INTEGER",
   ctx_updated_at: "TEXT",
   rate_limited_until: "TEXT",
+  rate_limit_deadline: "TEXT",
 };
 
 type Row = Record<string, unknown>;
@@ -189,12 +191,12 @@ export class Db {
          id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
          role,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
-         ctx_input_tokens,ctx_turns,ctx_updated_at,rate_limited_until)
+         ctx_input_tokens,ctx_turns,ctx_updated_at,rate_limited_until,rate_limit_deadline)
        VALUES (
          @id,@projectId,@topicId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
          @role,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
-         @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@rateLimitedUntil)`,
+         @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@rateLimitedUntil,@rateLimitDeadline)`,
     ).run({
       ...s,
       busy: s.busy ? 1 : 0,
@@ -211,6 +213,7 @@ export class Db {
       ctxTurns: s.ctxTurns ?? null,
       ctxUpdatedAt: s.ctxUpdatedAt ?? null,
       rateLimitedUntil: s.rateLimitedUntil ?? null,
+      rateLimitDeadline: s.rateLimitDeadline ?? null,
     });
   }
   setEngineSessionId(id: string, engineId: string): void {
@@ -275,6 +278,23 @@ export class Db {
   setRateLimitedUntil(id: string, until: string | null, lastError: string | null): void {
     this.db.prepare("UPDATE sessions SET rate_limited_until = ?, last_error = ?, last_activity = ? WHERE id = ?")
       .run(until, lastError, new Date().toISOString(), id);
+  }
+  /**
+   * §19c-b: arm the give-up deadline for a recovery episode. COALESCE keeps an already-set
+   * deadline, so the FIRST cap sets it and re-caps preserve it (Jinn's episode-bounded deadline) —
+   * the loop is bounded from the first hit, not reset on every retry.
+   */
+  armRateLimitDeadline(id: string, deadline: string): void {
+    this.db.prepare("UPDATE sessions SET rate_limit_deadline = COALESCE(rate_limit_deadline, ?) WHERE id = ?").run(deadline, id);
+  }
+  /** Clear the episode deadline — on recovery (success) or after bailing. */
+  clearRateLimitDeadline(id: string): void {
+    this.db.prepare("UPDATE sessions SET rate_limit_deadline = NULL WHERE id = ?").run(id);
+  }
+  /** Live sessions in an active usage-limit episode (deadline armed) — the resume watcher's work set. */
+  listRateLimitEpisodes(): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE rate_limit_deadline IS NOT NULL AND process_state = 'live'")
+      .all() as Row[]).map(toSession);
   }
   /** Append an orchestration audit record (detail serialized to JSON). */
   appendEvent(evt: OrchestrationEvent): void {
@@ -398,6 +418,7 @@ function toSession(r0: unknown): Session {
     ctxTurns: (r.ctx_turns as number) ?? null,
     ctxUpdatedAt: (r.ctx_updated_at as string) ?? null,
     rateLimitedUntil: (r.rate_limited_until as string) ?? null,
+    rateLimitDeadline: (r.rate_limit_deadline as string) ?? null,
   };
 }
 function toOrchestrationEvent(r0: unknown): OrchestrationEvent {
