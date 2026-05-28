@@ -49,6 +49,11 @@ export interface ResolvedConfig {
   /** Extra env applied to spawned sessions (merged over the spawn baseline). */
   sessionEnv: Record<string, string>;
   orchestration: OrchestrationConfig;
+  /**
+   * Pillar D: wire the mechanical vault-lint PostToolUse hook into this project's sessions
+   * (flags doc-hygiene anti-patterns on .md vault writes). Default true; set false to disable.
+   */
+  docLint: boolean;
 }
 
 /** Per-project overrides. Deep-partial of ResolvedConfig; anything omitted inherits the default. */
@@ -58,6 +63,7 @@ export interface ProjectConfigOverride {
   pty?: Partial<PtyGeometry>;
   sessionEnv?: Record<string, string>;
   orchestration?: Partial<OrchestrationConfig>;
+  docLint?: boolean;
 }
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
@@ -93,6 +99,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
   orchestration: { gateCommand: "", maxConcurrentWorkers: 3, schedulerEnabled: false },
+  docLint: true, // Pillar D vault-lint hook on by default
 };
 
 /** The single config-resolution mechanism, reused everywhere. */
@@ -116,5 +123,6 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
       maxConcurrentWorkers: override.orchestration?.maxConcurrentWorkers ?? d.orchestration.maxConcurrentWorkers,
       schedulerEnabled: override.orchestration?.schedulerEnabled ?? d.orchestration.schedulerEnabled,
     },
+    docLint: override.docLint ?? d.docLint,
   };
 }

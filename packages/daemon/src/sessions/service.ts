@@ -42,6 +42,7 @@ export class SessionService {
       permission: config.permission,
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       startupPrompt: topic.startupPrompt || undefined,
     });
     this.db.setProcessState(session.id, "live");
@@ -83,6 +84,7 @@ export class SessionService {
       permission: config.permission,
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       startupPrompt: topic.startupPrompt || undefined,
       role: "manager",
     });
@@ -125,6 +127,7 @@ export class SessionService {
       permission: config.permission,
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       startupPrompt: topic.startupPrompt || undefined,
       role: "platform",
     });
@@ -152,6 +155,7 @@ export class SessionService {
       permission: config.permission,
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       resumeId: session.engineSessionId,
     });
     this.db.setProcessState(session.id, "live");
@@ -212,6 +216,7 @@ export class SessionService {
       permission: config.permission,
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       startupPrompt: opts.kickoffPrompt,
       role: "worker", // gives the worker the orchestration surface (worker_report only)
     });
@@ -375,6 +380,7 @@ export class SessionService {
       permission: config.permission,
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       startupPrompt: framed,
       role: "worker",
     });

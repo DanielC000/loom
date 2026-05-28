@@ -52,6 +52,8 @@ export interface SpawnOpts {
   /** Role decides the extra MCP surface at spawn: manager/worker → loom-orchestration, platform →
    *  loom-platform (each with its allowlist); plain sessions get only loom-tasks. */
   role?: SessionRole;
+  /** When set (docLint on), wires the vault-lint PostToolUse hook scoped to this vault (Pillar D). */
+  vaultPath?: string;
 }
 
 export interface PtyHostEvents {
@@ -92,7 +94,7 @@ export class PtyHost {
     const permission = extraAllow.length
       ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
       : opts.permission;
-    const settingsPath = writeSessionSettings(opts.sessionId, permission);
+    const settingsPath = writeSessionSettings(opts.sessionId, permission, opts.vaultPath);
 
     const args: string[] = [];
     if (opts.resumeId) args.push("--resume", opts.resumeId);
