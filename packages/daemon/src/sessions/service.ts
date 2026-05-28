@@ -6,6 +6,7 @@ import type { PtyHost } from "../pty/host.js";
 import { createWorktree, removeWorktree, diffBranch, mergeBranch } from "../git/worktrees.js";
 import { engineTranscriptExists } from "./transcript.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
+import { isLikelyNearClaudeUsageLimit } from "../orchestration/usage-awareness.js";
 
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
@@ -134,6 +135,8 @@ export class SessionService {
     // Safety rails (§17a) — refuse NEW work before any side effect (worktree/pty). In-flight
     // workers are untouched. Pause is global-or-this-manager; the cap counts LIVE children only.
     if (this.control.isPaused(managerSessionId)) throw new Error("orchestration paused");
+    // §19c: don't spawn a worker into a known usage-limited account (whole-queue awareness).
+    if (isLikelyNearClaudeUsageLimit()) throw new Error("usage limit active");
     const liveWorkers = this.db.listWorkers(managerSessionId).filter((w) => w.processState === "live").length;
     const cap = config.orchestration.maxConcurrentWorkers;
     if (liveWorkers >= cap) throw new Error(`concurrency cap reached (${cap})`);

@@ -7,6 +7,7 @@ import { resolveExecutable } from "./resolve-bin.js";
 import { writeSessionSettings } from "./claude-settings.js";
 import { ensureTrusted } from "./claude-config.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
+import { detectUsageLimit, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { PORT, LOGS_DIR } from "../paths.js";
 
 const RING_CAP_BYTES = 256 * 1024;
@@ -57,6 +58,11 @@ export interface PtyHostEvents {
   onBusy(sessionId: string, busy: boolean): void;
   /** Persist measured engine-context occupancy, refreshed at each turn boundary (Stop). */
   onContextStats(sessionId: string, stats: ContextStats): void;
+  /**
+   * §19c: the turn ended in a usage-limit StopFailure. `until` is the ISO resume instant; the
+   * pty is left ALIVE (a cap doesn't kill it). Wired to persist the park + record global awareness.
+   */
+  onRateLimited(sessionId: string, until: string, detail: { resetsAtSeconds?: number; message: string }): void;
   onExit(sessionId: string, code: number | null): void;
 }
 
@@ -148,7 +154,12 @@ export class PtyHost {
   }
 
   /** Called by the hook endpoint when a relayed hook arrives. Routes the busy state machine. */
-  deliverHook(sessionId: string, hook: { hook_event_name?: string; session_id?: string }): void {
+  deliverHook(
+    sessionId: string,
+    // StopFailure also carries error/error_details (and a future claude may carry resetsAt) — the
+    // relay + /internal/hook forward the whole hook object; we read them for §19c usage-limit detect.
+    hook: { hook_event_name?: string; session_id?: string; error?: string; error_details?: unknown; resetsAt?: number },
+  ): void {
     const live = this.live.get(sessionId);
     if (!live) return;
     // eslint-disable-next-line no-console
@@ -166,7 +177,7 @@ export class PtyHost {
         this.setBusy(sessionId, true); // rising edge — fires for the startup-prompt arg and injected prompts alike
         break;
       case "Stop":
-      case "StopFailure":
+      case "StopFailure": {
         this.setBusy(sessionId, false); // falling edge — exactly one Stop per end-of-turn (no per-tool-use)
         // Refresh context occupancy at the turn boundary. Cheap tail-read; done for EVERY session
         // (the host doesn't know role — a manager's own occupancy matters too, "who recycles the manager").
@@ -174,11 +185,24 @@ export class PtyHost {
           const stats = readContextStats(live.cwd, live.engineSessionId);
           if (stats) this.events.onContextStats(sessionId, stats);
         }
+        // §19c usage-limit park: a StopFailure with error==="rate_limit" means the turn died on the
+        // cap. The pty stays alive; we record the resume-at and do NOT drain a new turn into a capped
+        // account (the pending queue is held intact for #19c-b's resume). billing_error / a clean Stop
+        // fall through to the normal drain.
+        if (hook.hook_event_name === "StopFailure") {
+          const det = detectUsageLimit(hook);
+          if (det.limited) {
+            const until = rateLimitedUntil(det.resetsAtSeconds);
+            this.events.onRateLimited(sessionId, until, { resetsAtSeconds: det.resetsAtSeconds, message: `usage limit — resumes ${until}` });
+            break;
+          }
+        }
         // The turn ended → safe to write. Drain ONE queued message (FIFO), re-arming busy so the
         // next Stop releases the next: strict per-session serialization. Writing only at the turn
         // boundary is what keeps a running turn from being corrupted by a mid-turn write.
         if (live.pending.length > 0) this.submit(sessionId, live.pending.shift()!);
         break;
+      }
     }
   }
 

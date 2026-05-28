@@ -99,6 +99,8 @@ export default function Orchestration() {
 function WorkerCard({ w, selected, onSelect, onStop, stopping }:
   { w: SessionListItem; selected: boolean; onSelect: () => void; onStop: () => void; stopping: boolean }) {
   const live = w.processState === "live";
+  // §19c: parked on the Claude usage cap until rateLimitedUntil — show it instead of the busy/idle dot.
+  const rateLimited = !!w.rateLimitedUntil && new Date(w.rateLimitedUntil).getTime() > Date.now();
   return (
     <div onClick={onSelect} style={{ ...card, cursor: "pointer", borderColor: selected ? "#9ad" : "#2a2a2e", background: selected ? "#16161c" : undefined }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
@@ -106,8 +108,14 @@ function WorkerCard({ w, selected, onSelect, onStop, stopping }:
           {w.taskId ? `task ${w.taskId.slice(0, 8)}` : "(no task)"}{w.gen ? ` · gen ${w.gen}` : ""}
         </span>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Dot color={live ? (w.busy ? "#ec4" : "#6c6") : "#777"} title={live ? (w.busy ? "busy" : "idle") : w.processState} />
-          <span style={{ fontSize: 11, color: "#aaa" }}>{live ? (w.busy ? "busy" : "idle") : w.processState}</span>
+          {rateLimited
+            ? <span title={`usage limit — resumes ${w.rateLimitedUntil}`} style={{ fontSize: 11, color: "#e9a" }}>
+                ⏳ rate-limited (resumes {new Date(w.rateLimitedUntil!).toLocaleTimeString()})
+              </span>
+            : <>
+                <Dot color={live ? (w.busy ? "#ec4" : "#6c6") : "#777"} title={live ? (w.busy ? "busy" : "idle") : w.processState} />
+                <span style={{ fontSize: 11, color: "#aaa" }}>{live ? (w.busy ? "busy" : "idle") : w.processState}</span>
+              </>}
           <button style={{ ...btn, padding: "2px 8px" }} disabled={!live || stopping}
             onClick={(ev) => { ev.stopPropagation(); onStop(); }}>Stop</button>
         </div>

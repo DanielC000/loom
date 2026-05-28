@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
 import { nextFireAt } from "./cron.js";
+import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
 
 export interface SchedulerDeps {
   db: Db;
@@ -13,6 +14,11 @@ export interface SchedulerDeps {
   startManager: (topicId: string) => { id: string };
   /** Tick cadence; defaults to 60s. Injectable so a test can drive tick() directly instead. */
   intervalMs?: number;
+  /**
+   * §19c: "are we near the Claude usage limit?" — defaults to the global awareness record. Injectable
+   * so a test can drive the limit-skip deterministically without writing the awareness file.
+   */
+  isUsageLimited?: (now: Date) => boolean;
 }
 
 /**
@@ -35,6 +41,9 @@ export class Scheduler {
     if (due.length === 0) return;
     // Pause gate (global kill/pause switch): hold everything; next_fire_at stays, retried next tick.
     if (this.deps.control.pausedScopes().includes("global")) return;
+    // §19c usage-limit gate: don't boot a manager into a known-limited account (whole-queue
+    // awareness). Same shape as the pause gate — next_fire_at stays, retried once the limit clears.
+    if ((this.deps.isUsageLimited ?? isLikelyNearClaudeUsageLimit)(now)) return;
 
     for (const s of due) {
       try {
