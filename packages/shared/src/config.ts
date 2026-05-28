@@ -32,6 +32,13 @@ export interface OrchestrationConfig {
    * At the cap the manager's next spawn is refused; in-flight workers keep running. Default 3.
    */
   maxConcurrentWorkers: number;
+  /**
+   * Pillar-B trigger gate (§19b): when false (default), the daemon does NOT start the cron
+   * Scheduler, so no schedule auto-fires. Opt-in per the autonomy ladder — a daemon shouldn't
+   * auto-spawn managers until explicitly switched on. The daemon reads the platform-default value
+   * (this is a daemon-wide service, not per-project); env override: LOOM_SCHEDULER_ENABLED=1.
+   */
+  schedulerEnabled: boolean;
 }
 
 /** The fully-resolved, effective config for a project. */
@@ -83,8 +90,9 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     // Mitigate the repaint-tearing artifact seen during streaming (spike finding).
     CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT: "1",
   },
-  // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3
-  orchestration: { gateCommand: "", maxConcurrentWorkers: 3 },
+  // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
+  // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
+  orchestration: { gateCommand: "", maxConcurrentWorkers: 3, schedulerEnabled: false },
 };
 
 /** The single config-resolution mechanism, reused everywhere. */
@@ -106,6 +114,7 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
     orchestration: {
       gateCommand: override.orchestration?.gateCommand ?? d.orchestration.gateCommand,
       maxConcurrentWorkers: override.orchestration?.maxConcurrentWorkers ?? d.orchestration.maxConcurrentWorkers,
+      schedulerEnabled: override.orchestration?.schedulerEnabled ?? d.orchestration.schedulerEnabled,
     },
   };
 }

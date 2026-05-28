@@ -20,6 +20,8 @@
     "test:autonomy-rails": "node test/autonomy-rails.mjs",
     "test:orchestration-e2e": "node test/orchestration-e2e.mjs",
     "test:scheduler": "node test/scheduler.mjs",
+    "test:scheduler-drain": "node test/scheduler-drain.mjs",
+    "test:scheduler-disabled": "node test/scheduler-disabled.mjs",
     "test:busy": "node test/busy-flag.mjs",
     "test:orch": "node test/orch-model.mjs",
     "test:context": "node test/context-stats.mjs",
