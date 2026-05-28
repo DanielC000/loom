@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
 import type { WebSocket } from "ws";
-import type { TerminalInput, Project, Topic, Task, ProjectConfigOverride } from "@loom/shared";
+import type { TerminalInput, Project, Topic, Task, ProjectConfigOverride, Schedule } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
+import { nextFireAt } from "../orchestration/cron.js";
 import { readTranscript } from "../sessions/transcript.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
@@ -63,6 +64,40 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/api/orchestration/events", async (req) => {
     const { managerId } = req.query as { managerId?: string };
     return managerId ? deps.db.listEvents(managerId) : [];
+  });
+
+  // --- Schedules (phase-2 Pillar B): cron triggers. next_fire_at is computed here on
+  // create/update (the Scheduler advances it after each fire). ---
+  app.get("/api/schedules", async () => deps.db.listSchedules());
+  app.post("/api/schedules", async (req, reply) => {
+    const b = (req.body ?? {}) as { topicId?: string; cron?: string; enabled?: boolean };
+    if (!b.topicId || !b.cron) return reply.code(400).send({ error: "topicId and cron required" });
+    if (!deps.db.getTopic(b.topicId)) return reply.code(404).send({ error: "topic not found" });
+    let next: string;
+    try { next = nextFireAt(b.cron, new Date()); } catch { return reply.code(400).send({ error: "invalid cron expression" }); }
+    const schedule: Schedule = {
+      id: randomUUID(), topicId: b.topicId, cron: b.cron,
+      enabled: b.enabled ?? true, nextFireAt: next, lastFiredAt: null, createdAt: new Date().toISOString(),
+    };
+    deps.db.insertSchedule(schedule);
+    return reply.code(201).send(schedule);
+  });
+  app.post("/api/schedules/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getSchedule(id)) return reply.code(404).send({ error: "schedule not found" });
+    const b = (req.body ?? {}) as { cron?: string; enabled?: boolean };
+    const patch: { cron?: string; enabled?: boolean; nextFireAt?: string } = {};
+    if (typeof b.enabled === "boolean") patch.enabled = b.enabled;
+    if (typeof b.cron === "string") {
+      try { patch.nextFireAt = nextFireAt(b.cron, new Date()); } catch { return reply.code(400).send({ error: "invalid cron expression" }); }
+      patch.cron = b.cron;
+    }
+    deps.db.updateSchedule(id, patch);
+    return deps.db.getSchedule(id);
+  });
+  app.delete("/api/schedules/:id", async (req) => {
+    deps.db.deleteSchedule((req.params as { id: string }).id);
+    return { ok: true };
   });
 
   // --- Hook relay target (loopback only) ---

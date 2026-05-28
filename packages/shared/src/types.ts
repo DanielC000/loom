@@ -67,7 +67,7 @@ export interface Session {
 export type OrchestrationEventKind =
   | "spawn_worker" | "message_worker" | "worker_report" | "stop_worker"
   | "recycle_begin" | "recycle_complete" | "merge_request" | "merge_done"
-  | "merge_rejected" | "build_gate" | "kill_switch";
+  | "merge_rejected" | "build_gate" | "kill_switch" | "schedule_fired";
 
 export interface OrchestrationEvent {
   id: string;
@@ -100,4 +100,19 @@ export interface Task {
   position: number;  // fractional index for cheap reordering
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * A cron-triggered schedule (phase-2 Pillar B). On its minute boundary the daemon Scheduler
+ * boots a manager session in `topicId` (the topic's startupPrompt is the kickoff), which then
+ * runs the Pillar-A loop. `nextFireAt` is recomputed on create/update and after each fire.
+ */
+export interface Schedule {
+  id: string;
+  topicId: TopicId;
+  cron: string;              // 5-field cron expression
+  enabled: boolean;
+  nextFireAt: string;        // ISO; the next scheduled fire
+  lastFiredAt: string | null;
+  createdAt: string;
 }

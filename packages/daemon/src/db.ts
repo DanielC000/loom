@@ -3,7 +3,7 @@ import { DB_PATH } from "./paths.js";
 import type {
   Project, Topic, Session, Task, ProjectConfigOverride,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind,
+  OrchestrationEvent, OrchestrationEventKind, Schedule,
 } from "@loom/shared";
 
 const SCHEMA = `
@@ -68,7 +68,18 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+-- Cron-triggered schedules (phase-2 Pillar B): the daemon Scheduler boots a manager on the tick.
+CREATE TABLE IF NOT EXISTS schedules (
+  id TEXT PRIMARY KEY,
+  topic_id TEXT NOT NULL REFERENCES topics(id),
+  cron TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  next_fire_at TEXT NOT NULL,
+  last_fired_at TEXT,
+  created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_topics_project ON topics(project_id, position);
+CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_fire_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_topic ON sessions(topic_id, last_activity DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, column_key, position);
 CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_session_id, ts);
@@ -295,6 +306,46 @@ export class Db {
       "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, updated_at=@updatedAt WHERE id=@id",
     ).run(next);
   }
+
+  // --- schedules (phase-2 Pillar B) ---
+  insertSchedule(s: Schedule): void {
+    this.db.prepare(
+      `INSERT INTO schedules (id,topic_id,cron,enabled,next_fire_at,last_fired_at,created_at)
+       VALUES (@id,@topicId,@cron,@enabled,@nextFireAt,@lastFiredAt,@createdAt)`,
+    ).run({ ...s, enabled: s.enabled ? 1 : 0, lastFiredAt: s.lastFiredAt ?? null });
+  }
+  listSchedules(): Schedule[] {
+    return (this.db.prepare("SELECT * FROM schedules ORDER BY created_at").all() as Row[]).map(toSchedule);
+  }
+  getSchedule(id: string): Schedule | undefined {
+    const r = this.db.prepare("SELECT * FROM schedules WHERE id = ?").get(id) as Row | undefined;
+    return r ? toSchedule(r) : undefined;
+  }
+  /** Partial edit (REST): any provided field is written; omitted fields are left as-is. */
+  updateSchedule(id: string, patch: { cron?: string; enabled?: boolean; nextFireAt?: string; lastFiredAt?: string | null }): void {
+    const cols: Record<string, unknown> = {
+      cron: patch.cron,
+      enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
+      next_fire_at: patch.nextFireAt,
+      last_fired_at: patch.lastFiredAt,
+    };
+    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
+    if (names.length === 0) return;
+    const set = names.map((c) => `${c} = ?`).join(", ");
+    this.db.prepare(`UPDATE schedules SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
+  deleteSchedule(id: string): void {
+    this.db.prepare("DELETE FROM schedules WHERE id = ?").run(id);
+  }
+  /** Enabled schedules whose next_fire_at is at/earlier than nowIso (the Scheduler's due set). */
+  listDueSchedules(nowIso: string): Schedule[] {
+    return (this.db.prepare("SELECT * FROM schedules WHERE enabled = 1 AND next_fire_at <= ? ORDER BY next_fire_at")
+      .all(nowIso) as Row[]).map(toSchedule);
+  }
+  /** Record a fire: stamp last_fired_at and advance next_fire_at (computed by the caller). */
+  markFired(id: string, lastIso: string, nextIso: string): void {
+    this.db.prepare("UPDATE schedules SET last_fired_at = ?, next_fire_at = ? WHERE id = ?").run(lastIso, nextIso, id);
+  }
 }
 
 function toProject(r0: unknown): Project {
@@ -353,5 +404,14 @@ function toTask(r0: unknown): Task {
     id: r.id as string, projectId: r.project_id as string, title: r.title as string,
     body: r.body as string, columnKey: r.column_key as string, position: r.position as number,
     createdAt: r.created_at as string, updatedAt: r.updated_at as string,
+  };
+}
+function toSchedule(r0: unknown): Schedule {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, topicId: r.topic_id as string, cron: r.cron as string,
+    enabled: (r.enabled as number) === 1,
+    nextFireAt: r.next_fire_at as string, lastFiredAt: (r.last_fired_at as string) ?? null,
+    createdAt: r.created_at as string,
   };
 }
