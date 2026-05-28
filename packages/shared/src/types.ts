@@ -33,8 +33,14 @@ export interface Topic {
 export type ProcessState = "none" | "starting" | "live" | "exited";
 export type Resumability = "unknown" | "resumable" | "dead";
 
-/** A session's orchestration role (phase-2). Plain phase-1 sessions have no role. */
-export type SessionRole = "manager" | "worker";
+/**
+ * A session's orchestration role (phase-2). Plain phase-1 sessions have no role.
+ * - manager / worker: the orchestration spine (loom-orchestration MCP).
+ * - platform: a platform-lead — creates/configures projects + topics (loom-platform MCP, Pillar C).
+ *   Kept distinct from manager so least-privilege holds: cross-project tools never leak into a
+ *   project-scoped manager, and a platform-lead gets no worker-coordination tools.
+ */
+export type SessionRole = "manager" | "worker" | "platform";
 
 export interface Session {
   id: SessionId;
