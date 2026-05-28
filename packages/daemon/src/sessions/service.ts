@@ -90,6 +90,48 @@ export class SessionService {
     return { ...session, processState: "live" };
   }
 
+  /**
+   * Start a NEW PLATFORM-LEAD session in a topic (phase-2 Pillar C). Mirrors startManager, but
+   * role 'platform' (so it gets the loom-platform MCP + allowlist at spawn, NOT orchestration).
+   * A platform-lead creates/configures projects + topics; it runs in its host project's repo.
+   */
+  startPlatformLead(topicId: string): Session {
+    const topic = this.db.getTopic(topicId);
+    if (!topic) throw new Error("topic not found");
+    const project = this.db.getProject(topic.projectId);
+    if (!project) throw new Error("project not found");
+    const config = resolveConfig(project.config);
+
+    const now = new Date().toISOString();
+    const session: Session = {
+      id: randomUUID(),
+      projectId: project.id,
+      topicId,
+      engineSessionId: null,
+      title: null,
+      cwd: project.repoPath,
+      processState: "starting",
+      resumability: "unknown",
+      busy: false,
+      createdAt: now,
+      lastActivity: now,
+      lastError: null,
+      role: "platform",
+    };
+    this.db.insertSession(session);
+    this.pty.spawn({
+      sessionId: session.id,
+      cwd: session.cwd,
+      permission: config.permission,
+      geometry: config.pty,
+      sessionEnv: config.sessionEnv,
+      startupPrompt: topic.startupPrompt || undefined,
+      role: "platform",
+    });
+    this.db.setProcessState(session.id, "live");
+    return { ...session, processState: "live" };
+  }
+
   /** Resume an existing session — NO prompt injection. */
   resume(sessionId: string): Session {
     const session = this.db.getSession(sessionId);

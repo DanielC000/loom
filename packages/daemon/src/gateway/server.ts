@@ -11,6 +11,8 @@ import type { PtyHost } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
+import type { PlatformMcpRouter } from "../mcp/platform.js";
+import { validateProjectConfigOverride } from "../mcp/platform.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { GitReader } from "../git/reader.js";
 import { diffBranch } from "../git/worktrees.js";
@@ -24,6 +26,7 @@ export interface GatewayDeps {
   sessions: SessionService;
   mcp: TaskMcpRouter;
   orchMcp: OrchestrationMcpRouter;
+  platformMcp: PlatformMcpRouter;
   control: OrchestrationControl;
 }
 
@@ -43,6 +46,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { sessionId } = req.params as { sessionId: string };
     reply.hijack();
     await deps.orchMcp.handle(req.raw, reply.raw, sessionId, req.body);
+  });
+
+  // --- Platform-lead MCP (role-gated to 'platform'; project/topic creation — Pillar C) ---
+  app.all("/mcp-platform/:sessionId", async (req, reply) => {
+    const { sessionId } = req.params as { sessionId: string };
+    reply.hijack();
+    await deps.platformMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
 
   // --- Orchestration safety rails (§17a): pause/kill switch + status. These gate worker_spawn
@@ -180,6 +190,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return reply.code(201).send(project);
   });
 
+  // Set a project's config override (the machine-writable config, schema-validated). Mirrors the
+  // platform MCP's project_configure so UI/REST and the agent share one validator + store.
+  app.patch("/api/projects/:id/config", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    const v = validateProjectConfigOverride((req.body as { config?: unknown })?.config ?? req.body);
+    if (!v.ok) return reply.code(400).send({ error: `invalid config: ${v.error}` });
+    deps.db.setProjectConfig(id, v.value);
+    return deps.db.getProject(id);
+  });
+
   app.post("/api/projects/:id/topics", async (req, reply) => {
     const projectId = (req.params as { id: string }).id;
     if (!deps.db.getProject(projectId)) return reply.code(404).send({ error: "project not found" });
@@ -219,7 +240,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/topics/:id/sessions", async (req) => {
     const id = (req.params as { id: string }).id;
     const { role } = (req.body as { role?: string }) ?? {};
-    return role === "manager" ? deps.sessions.startManager(id) : deps.sessions.startNew(id);
+    if (role === "manager") return deps.sessions.startManager(id);
+    if (role === "platform") return deps.sessions.startPlatformLead(id);
+    return deps.sessions.startNew(id);
   });
   app.post("/api/sessions/:id/resume", async (req) =>
     deps.sessions.resume((req.params as { id: string }).id));

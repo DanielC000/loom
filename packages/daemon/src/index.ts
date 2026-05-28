@@ -7,6 +7,7 @@ import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
 import { TaskMcpRouter } from "./mcp/server.js";
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
+import { PlatformMcpRouter } from "./mcp/platform.js";
 import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
 import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
@@ -43,15 +44,17 @@ async function main(): Promise<void> {
       recordClaudeRateLimit(detail.resetsAtSeconds);
     },
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
-    onExit: (sessionId) => { db.setProcessState(sessionId, "exited"); db.setBusy(sessionId, false); mcp.dispose(sessionId); orchMcp.dispose(sessionId); },
+    onExit: (sessionId) => { db.setProcessState(sessionId, "exited"); db.setBusy(sessionId, false); mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); },
   });
 
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design
   const sessions = new SessionService(db, pty, control);
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after.
   const orchMcp = new OrchestrationMcpRouter(db, sessions);
+  // Platform MCP (Pillar C) only needs the registry (project/topic creation + config).
+  const platformMcp = new PlatformMcpRouter(db);
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, control });
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, control });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon listening on http://127.0.0.1:${PORT}`);

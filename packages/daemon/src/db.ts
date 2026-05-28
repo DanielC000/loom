@@ -150,6 +150,10 @@ export class Db {
        VALUES (@id,@name,@repoPath,@vaultPath,@config,@createdAt,@archivedAt)`,
     ).run({ ...p, config: JSON.stringify(p.config), archivedAt: p.archivedAt });
   }
+  /** Replace a project's config override (Pillar C project_configure / PATCH config). */
+  setProjectConfig(id: string, config: ProjectConfigOverride): void {
+    this.db.prepare("UPDATE projects SET config_json = ? WHERE id = ?").run(JSON.stringify(config), id);
+  }
 
   // --- topics ---
   listTopics(projectId: string): Topic[] {

@@ -49,7 +49,8 @@ export interface SpawnOpts {
   startupPrompt?: string;
   /** Resume: Claude engine session id. */
   resumeId?: string;
-  /** A manager also gets the loom-orchestration MCP (+ its allowlist); workers/plain do not. */
+  /** Role decides the extra MCP surface at spawn: manager/worker → loom-orchestration, platform →
+   *  loom-platform (each with its allowlist); plain sessions get only loom-tasks. */
   role?: SessionRole;
 }
 
@@ -81,12 +82,15 @@ export class PtyHost {
     const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
     ensureTrusted(opts.cwd); // pre-accept the workspace-trust dialog so warmup never blocks
     // Both managers AND workers get the orchestration MCP — but a role-gated surface: managers
-    // get the full coordination tools, workers get only worker_report (resolved server-side).
-    // acceptEdits does NOT auto-approve MCP tools (the §9 lesson — why mcp__loom-tasks is in the
-    // default allow), so allowlist mcp__loom-orchestration too, else the agent hangs on a prompt.
+    // get the full coordination tools, workers get only worker_report (resolved server-side). A
+    // platform-lead instead gets the loom-platform MCP (project/topic creation, Pillar C). acceptEdits
+    // does NOT auto-approve MCP tools (the §9 lesson — why mcp__loom-tasks is in the default allow),
+    // so allowlist the role's MCP server too, else the agent hangs on a prompt.
     const wantsOrch = opts.role === "manager" || opts.role === "worker";
-    const permission = wantsOrch
-      ? { ...opts.permission, allow: [...opts.permission.allow, "mcp__loom-orchestration"] }
+    const wantsPlatform = opts.role === "platform";
+    const extraAllow = wantsOrch ? ["mcp__loom-orchestration"] : wantsPlatform ? ["mcp__loom-platform"] : [];
+    const permission = extraAllow.length
+      ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
       : opts.permission;
     const settingsPath = writeSessionSettings(opts.sessionId, permission);
 
@@ -101,6 +105,9 @@ export class PtyHost {
     };
     if (wantsOrch) {
       mcpServers["loom-orchestration"] = { type: "http", url: `http://127.0.0.1:${PORT}/mcp-orch/${opts.sessionId}` };
+    }
+    if (wantsPlatform) {
+      mcpServers["loom-platform"] = { type: "http", url: `http://127.0.0.1:${PORT}/mcp-platform/${opts.sessionId}` };
     }
     args.push("--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers }));
 
