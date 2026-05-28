@@ -68,6 +68,12 @@ export interface Session {
    * carries the human "usage limit — resumes X" string.)
    */
   rateLimitedUntil?: string | null;
+  /**
+   * §19c-b give-up deadline for the active usage-limit recovery episode — set ONCE at the first
+   * cap (reset+30min, else now+6h) and kept across re-caps; null when not recovering. Past it
+   * without recovery, the watcher abandons auto-resume and marks the session errored (lastError).
+   */
+  rateLimitDeadline?: string | null;
 }
 
 /** Append-only orchestration audit record (the manager↔worker timeline). */

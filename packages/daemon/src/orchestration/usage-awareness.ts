@@ -48,6 +48,16 @@ export function recordClaudeRateLimit(resetsAtSeconds?: number): void {
   }
 }
 
+/**
+ * Clear the global rate-limit record (§19c-b). Called on a successful resume so the queue stops
+ * skipping spawns the moment recovery happens, rather than waiting out the 6h recency heuristic.
+ */
+export function clearClaudeRateLimit(): void {
+  for (const f of [STATE_PATH, `${STATE_PATH}.tmp`]) {
+    try { fs.rmSync(f, { force: true }); } catch { /* best-effort */ }
+  }
+}
+
 /** The expected reset instant if known AND still in the future, else undefined. */
 export function getClaudeExpectedResetAt(now: Date = new Date()): Date | undefined {
   const state = readClaudeUsageState();

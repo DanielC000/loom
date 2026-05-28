@@ -36,6 +36,7 @@ interface Live {
   logStream: fs.WriteStream;
   busy: boolean;        // a turn is in flight (locally tracked; mirrored to DB via onBusy)
   pending: string[];    // FIFO of messages held while busy — drained one-per-Stop
+  lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
 }
 
 export interface SpawnOpts {
@@ -129,6 +130,9 @@ export class PtyHost {
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.sessionId}.log`)),
       busy: false,
       pending: [],
+      // The startup-prompt turn runs from a CLI arg (not submit()), so seed lastPrompt with it —
+      // a cap on the FIRST turn must still be re-submittable on resume (§19c-b).
+      lastPrompt: opts.startupPrompt ?? null,
     };
     this.live.set(opts.sessionId, live);
 
@@ -232,9 +236,22 @@ export class PtyHost {
   private submit(sessionId: string, text: string): void {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
+    live.lastPrompt = text; // remember the in-flight turn so a usage-cap kill is recoverable (§19c-b)
     live.pty.write(text);
     setTimeout(() => { const l = this.live.get(sessionId); if (l?.alive) l.pty.write("\r"); }, SUBMIT_ENTER_DELAY_MS);
     this.setBusy(sessionId, true);
+  }
+
+  /**
+   * §19c-b resume: re-submit the turn the usage cap killed (lastPrompt) once the reset passes. Goes
+   * out via submit() (re-arms busy); the held pending queue then drains normally on the next Stop.
+   * Returns false if the session isn't live (already stopped/killed → caller does not resume).
+   */
+  resumeAfterRateLimit(sessionId: string): boolean {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) return false;
+    if (live.lastPrompt != null) this.submit(sessionId, live.lastPrompt);
+    return true;
   }
 
   /** Persist + broadcast the turn-in-flight flag, and track it locally. Idempotent. */

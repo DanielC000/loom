@@ -25,6 +25,11 @@ export const DEFAULT_RATE_LIMIT_BACKOFF_MS = 5 * 60 * 60_000;
 /** Resume a beat AFTER the reset boundary, not a few ms before it (Jinn's computeNextRetryDelayMs buffer). */
 const RESET_BUFFER_MS = 10_000;
 
+/** Give-up grace past a KNOWN reset (Jinn's computeRateLimitDeadlineMs default for reset-known). */
+const DEADLINE_AFTER_RESET_MS = 30 * 60_000;
+/** Give-up horizon when NO reset is known (Jinn's reset-absent deadline). */
+const DEADLINE_NO_RESET_MS = 6 * 60 * 60_000;
+
 /** The subset of a relayed hook payload this detector reads. */
 export interface UsageLimitHook {
   hook_event_name?: string;
@@ -73,4 +78,16 @@ export function rateLimitedUntil(resetsAtSeconds: number | undefined, now: Date 
     return new Date(resetsAtSeconds * 1000 + RESET_BUFFER_MS).toISOString();
   }
   return new Date(now.getTime() + DEFAULT_RATE_LIMIT_BACKOFF_MS).toISOString();
+}
+
+/**
+ * The ISO give-up deadline for a recovery episode (§19c-b): reset+30min when known, else now+6h —
+ * Jinn's `computeRateLimitDeadlineMs`. Computed ONCE at the first cap and kept across re-caps, so a
+ * never-clearing cap is eventually abandoned rather than retried forever.
+ */
+export function rateLimitDeadline(resetsAtSeconds: number | undefined, now: Date = new Date()): string {
+  if (typeof resetsAtSeconds === "number" && Number.isFinite(resetsAtSeconds)) {
+    return new Date(resetsAtSeconds * 1000 + DEADLINE_AFTER_RESET_MS).toISOString();
+  }
+  return new Date(now.getTime() + DEADLINE_NO_RESET_MS).toISOString();
 }
