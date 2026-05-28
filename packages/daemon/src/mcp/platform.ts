@@ -38,6 +38,7 @@ const projectConfigOverrideSchema = z.object({
   pty: ptyOverride.optional(),
   sessionEnv: z.record(z.string(), z.string()).optional(),
   orchestration: orchestrationOverride.optional(),
+  docLint: z.boolean().optional(),
 }).strict();
 
 export function validateProjectConfigOverride(

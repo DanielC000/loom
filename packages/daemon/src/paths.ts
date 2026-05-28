@@ -15,6 +15,8 @@ export const WORKTREES_DIR = path.join(LOOM_HOME, "worktrees");
 
 /** hook-relay.mjs ships as an asset alongside the built daemon. */
 export const RELAY_SCRIPT = path.join(__dirname, "..", "assets", "hook-relay.mjs");
+/** vault-lint.mjs (Pillar D PostToolUse hook) ships as an asset too. */
+export const VAULT_LINT_SCRIPT = path.join(__dirname, "..", "assets", "vault-lint.mjs");
 
 export const PORT = Number(process.env.LOOM_PORT || 4317);
 
