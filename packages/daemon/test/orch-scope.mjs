@@ -44,9 +44,16 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const M = await connect("M");
 
 // 1) the manager's tool surface (read tools + lifecycle/messaging/recycle/merge-gate actions).
-const tools = (await M.listTools()).tools.map((t) => t.name).sort();
+const toolList = (await M.listTools()).tools;
+const tools = toolList.map((t) => t.name).sort();
 const expected = "worker_list,worker_merge,worker_merge_confirm,worker_message,worker_recycle,worker_spawn,worker_status,worker_stop,worker_transcript";
 check(`tools = ${expected}  (got ${tools.join(",")})`, tools.join(",") === expected);
+
+// 1b) H3: worker_spawn's advertised schema carries taskId + kickoffPrompt but NOT the removed,
+//     accepted-but-ignored skipPermissions field (a footgun that misled a manager).
+const spawnProps = toolList.find((t) => t.name === "worker_spawn")?.inputSchema?.properties ?? {};
+check("worker_spawn schema = {taskId, topicId, kickoffPrompt}, NO skipPermissions (H3)",
+  "taskId" in spawnProps && "kickoffPrompt" in spawnProps && !("skipPermissions" in spawnProps));
 
 // 2) worker_list is manager-scoped by construction — M sees W1 only, never W2.
 const list = parse(await M.callTool({ name: "worker_list", arguments: {} }));

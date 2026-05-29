@@ -71,6 +71,29 @@ export interface PtyHostEvents {
 }
 
 /**
+ * Assemble the `claude` argv (extracted so the ordering is unit-testable). The startup/kickoff
+ * prompt is positional and goes LAST, behind a `--` end-of-options separator (H2): a manager
+ * controls kickoffPrompt, and a prompt beginning with `-`/`--` would otherwise be parsed as a flag.
+ * `--` also terminates the variadic `--mcp-config`, so the prompt isn't swallowed as another config
+ * value (the reason the prompt used to be placed before --mcp-config). All real flags precede `--`.
+ */
+export function buildSpawnArgs(o: {
+  resumeId?: string;
+  settingsPath: string;
+  mode: string;
+  mcpServers: Record<string, unknown>;
+  startupPrompt?: string;
+}): string[] {
+  const args: string[] = [];
+  if (o.resumeId) args.push("--resume", o.resumeId);
+  args.push("--settings", o.settingsPath);
+  args.push("--permission-mode", o.mode);
+  args.push("--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: o.mcpServers }));
+  if (o.startupPrompt) args.push("--", o.startupPrompt);
+  return args;
+}
+
+/**
  * Owns all interactive `claude` ptys. Independent of any browser — sessions live here.
  * Implements the spike-validated gate-free spawn recipe (acceptEdits + allowlist,
  * --strict-mcp-config WITH an explicit --mcp-config so the .mcp.json prompt never blocks,
@@ -96,11 +119,6 @@ export class PtyHost {
       : opts.permission;
     const settingsPath = writeSessionSettings(opts.sessionId, permission, opts.vaultPath);
 
-    const args: string[] = [];
-    if (opts.resumeId) args.push("--resume", opts.resumeId);
-    if (opts.startupPrompt) args.push(opts.startupPrompt); // positional MUST precede variadic --mcp-config
-    args.push("--settings", settingsPath);
-    args.push("--permission-mode", permission.mode);
     // §6 scoping: route by session id in the URL path; daemon derives the project server-side.
     const mcpServers: Record<string, unknown> = {
       "loom-tasks": { type: "http", url: `http://127.0.0.1:${PORT}/mcp/${opts.sessionId}` },
@@ -111,7 +129,7 @@ export class PtyHost {
     if (wantsPlatform) {
       mcpServers["loom-platform"] = { type: "http", url: `http://127.0.0.1:${PORT}/mcp-platform/${opts.sessionId}` };
     }
-    args.push("--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers }));
+    const args = buildSpawnArgs({ resumeId: opts.resumeId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt });
 
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {

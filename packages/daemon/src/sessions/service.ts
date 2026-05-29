@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { resolveConfig, type Session, type StopMode, type OrchestrationEvent } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
-import { createWorktree, removeWorktree, diffBranch, mergeBranch } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch } from "../git/worktrees.js";
 import { engineTranscriptExists } from "./transcript.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit } from "../orchestration/usage-awareness.js";
@@ -465,8 +465,11 @@ export class SessionService {
     for (let i = 0; i < 50 && this.pty.isAlive(workerSessionId); i++) {
       await new Promise((r) => setTimeout(r, 100));
     }
-    // Retire the worktree and finish the task.
+    // Retire the worktree, delete the now-merged branch (so a later worker on this task — or any
+    // id8-colliding task — doesn't hit "branch already exists"), and finish the task. The rejected
+    // paths above return early WITHOUT deleting, so a re-task keeps its retained worktree + branch.
     await removeWorktree(project.repoPath, worktreePath);
+    await deleteBranch(project.repoPath, branch);
     if (taskId) this.db.updateTask(taskId, { columnKey: "done" });
     evt("merge_done", { branch });
     return { merged: true };
