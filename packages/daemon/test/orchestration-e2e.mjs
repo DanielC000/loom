@@ -17,6 +17,7 @@ import Database from "better-sqlite3";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { removeWorktree } from "../dist/git/worktrees.js";
+import { readTranscript } from "../dist/sessions/transcript.js";
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
 const BASE = "http://127.0.0.1:4317";
@@ -142,6 +143,20 @@ try {
   let oldBExited = false;
   for (let i = 0; i < 30 && !oldBExited; i++) { await sleep(500); oldBExited = (await findSession(spawnB.workerSessionId))?.processState === "exited"; }
   check("RECYCLE: old workerB is now 'exited'", oldBExited);
+
+  // RECYCLE handoff CARRIES INTENT: the fresh worker's first user turn IS the framed handoff
+  // (contains the summary). This guards R1 — a transcript-encoding bug once let recycle "succeed"
+  // (worktree reused, gen+1) while the handoff never actually reached the new worker's first turn.
+  let handoffSeeded = false;
+  for (let i = 0; i < 90 && !handoffSeeded; i++) {
+    await sleep(1000);
+    const f = await findSession(recycled.newWorkerSessionId);
+    if (f?.engineSessionId) {
+      const firstUser = readTranscript(fresh.worktreePath, f.engineSessionId).find((t) => t.role === "user");
+      handoffSeeded = !!firstUser && firstUser.text.includes("E2E-HANDOFF");
+    }
+  }
+  check("RECYCLE: the handoff reached the fresh worker's first user turn (intent carried)", handoffSeeded);
 
   // === 6. KILL — global kill stops the live worker(s) and latches the global pause ===
   const killRes = await (await post("/api/orchestration/kill")).json();
