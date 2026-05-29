@@ -112,7 +112,6 @@ export class OrchestrationMcpRouter {
           taskId: z.string(),
           topicId: z.string().optional(),
           kickoffPrompt: z.string(),
-          skipPermissions: z.boolean().optional(), // accepted but IGNORED until autonomy rails (#17)
         },
       },
       async ({ taskId, topicId, kickoffPrompt }) => {

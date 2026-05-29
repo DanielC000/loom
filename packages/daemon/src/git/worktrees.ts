@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { simpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 
@@ -8,27 +9,56 @@ export interface WorktreeInfo {
   branch: string;
 }
 
-/** Short, filesystem- and ref-safe slug for a task (worktrees/branches key off this). */
-function shortId(taskId: string): string {
-  return taskId.slice(0, 8);
+/**
+ * Filesystem- and ref-safe key for a task: 12 hex chars of sha256(taskId). Keyed off the FULL id,
+ * not `taskId.slice(0,8)` — two human-readable task ids sharing the first 8 chars used to collide
+ * onto the same branch/worktree (H1.3). Deterministic, so the SAME task always resolves to the same
+ * worktree (re-spawn after a rejected merge, and recycle which carries the stored path forward).
+ */
+function taskKey(taskId: string): string {
+  return createHash("sha256").update(taskId).digest("hex").slice(0, 12);
 }
 
 /**
- * Create an isolated git worktree for a worker (phase-2 §A5): a fresh checkout under
- * ~/.loom/worktrees on a NEW branch `loom/<taskId8>` off the repo's current HEAD. Worktrees
- * share the repo's object store (cheap) and live outside the repo so parallel workers can't
- * corrupt one working tree. Git errors (branch/worktree already exists) are SURFACED, not
- * swallowed — reuse is the caller's concern (#13/#15); #12 always creates fresh.
+ * Create (or re-attach) an isolated git worktree for a worker (phase-2 §A5): a checkout under
+ * ~/.loom/worktrees on branch `loom/<key>` off the repo's current HEAD. Worktrees share the repo's
+ * object store (cheap) and live outside the repo so parallel workers can't corrupt one tree.
+ *
+ * TOLERANT of a pre-existing branch/worktree (H1.2) — re-spawning a worker on a task whose merge
+ * was rejected (worktree + branch intentionally retained) must NOT fatal with "already exists":
+ *   - worktree dir present  → reuse it as-is (the retained checkout carries the worker's changes);
+ *   - branch present, dir gone → attach a fresh worktree to the existing branch (no -b);
+ *   - neither               → fresh worktree on a new branch (-b).
  */
 export async function createWorktree(repoPath: string, projectId: string, taskId: string): Promise<WorktreeInfo> {
-  const short = shortId(taskId);
-  const branch = `loom/${short}`;
-  const worktreePath = path.join(WORKTREES_DIR, projectId, short);
-  // Ensure only the PARENT exists — `git worktree add` creates the leaf dir itself and errors
-  // if it already exists (which we want to surface).
+  const key = taskKey(taskId);
+  const branch = `loom/${key}`;
+  const worktreePath = path.join(WORKTREES_DIR, projectId, key);
+  if (fs.existsSync(worktreePath)) return { worktreePath, branch }; // retained worktree → reuse
+
+  const git = simpleGit(repoPath);
   fs.mkdirSync(path.join(WORKTREES_DIR, projectId), { recursive: true });
-  await simpleGit(repoPath).raw(["worktree", "add", worktreePath, "-b", branch]);
+  await git.raw(["worktree", "prune"]); // drop any stale admin record for a since-deleted dir
+  const branchExists = (await git.raw(["branch", "--list", branch])).trim() !== "";
+  await git.raw(branchExists
+    ? ["worktree", "add", worktreePath, branch]        // branch survived a worktree removal → re-attach
+    : ["worktree", "add", worktreePath, "-b", branch]); // fresh task → new branch
   return { worktreePath, branch };
+}
+
+/**
+ * Delete a worker's branch after a CLEAN merge (H1.1) — `git branch -d` (safe: refuses an unmerged
+ * branch). Without this, re-spawning on the same task hit "a branch named 'loom/…' already exists".
+ * Best-effort: the merge already succeeded, and createWorktree tolerates a leftover branch anyway, so
+ * a delete hiccup is logged, not fatal. NOT called on a rejected merge or recycle (branch retained).
+ */
+export async function deleteBranch(repoPath: string, branch: string): Promise<void> {
+  try {
+    await simpleGit(repoPath).raw(["branch", "-d", branch]);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`[worktree] could not delete merged branch ${branch}: ${(e as Error).message}`);
+  }
 }
 
 /**
