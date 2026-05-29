@@ -29,7 +29,7 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- PART 1: hermetic (own temp DB + injected stub; no daemon, no claude) ---
-function makeEnv() {
+function makeEnv(opts = {}) {
   const dbFile = path.join(os.tmpdir(), `loom-sched-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const projId = `sp-${Math.random().toString(36).slice(2, 8)}`;
@@ -39,9 +39,21 @@ function makeEnv() {
   db.insertTopic({ id: topicId, projectId: projId, name: "t", startupPrompt: "drain the board", position: 0 });
   const control = new OrchestrationControl();
   const calls = [];
-  const startManager = (tid) => { const id = `mgr-${calls.length}`; calls.push({ topicId: tid, id }); return { id }; };
-  return { dbFile, db, projId, topicId, control, calls, scheduler: new Scheduler({ db, control, startManager }) };
+  // opts.failFirstN: throw on the first N startManager calls (to exercise claim-before-spawn).
+  let failsLeft = opts.failFirstN ?? 0;
+  const startManager = (tid) => {
+    if (failsLeft > 0) { failsLeft--; throw new Error("startManager failed (simulated)"); }
+    const id = `mgr-${calls.length}`; calls.push({ topicId: tid, id }); return { id };
+  };
+  const scheduler = new Scheduler({ db, control, startManager, maxConcurrentManagers: opts.cap });
+  return { dbFile, db, projId, topicId, control, calls, scheduler };
 }
+// Seed a live MANAGER session row directly (for the manager-cap DB-count axis).
+const seedLiveManager = (e, id) => e.db.insertSession({
+  id, projectId: e.projId, topicId: e.topicId, engineSessionId: null, title: null, cwd: e.projId,
+  processState: "live", resumability: "unknown", busy: false,
+  createdAt: new Date().toISOString(), lastActivity: new Date().toISOString(), lastError: null, role: "manager",
+});
 function cleanupEnv(e) {
   try { e.db.close(); } catch { /* ignore */ }
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(e.dbFile + ext, { force: true }); } catch { /* ignore */ } }
@@ -120,6 +132,69 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
   const after = e.db.getSchedule("sch-restart");
   check("Restart-resume: past next_fire_at recomputed forward on start()", new Date(after.nextFireAt).getTime() > now.getTime());
   check("Restart-resume: start() did NOT fire (no catch-up flood)", e.calls.length === 0);
+  cleanupEnv(e);
+}
+
+// === §19a hardening (3 findings) ===
+
+// Finding 1 — deleted topic: a due schedule whose topic no longer exists is DISABLED (so it stops
+// re-firing every tick), not fired. (Note: the `topic_id REFERENCES topics(id)` FK normally PREVENTS
+// orphaning — so this is defense-in-depth. We simulate "topic deleted out from under the schedule"
+// via a raw FK-off delete, the state a future cascade-less topic-delete or FK-off run would produce.)
+{
+  const e = makeEnv();
+  seedSchedule(e, "sch-orphan"); // valid topic (e.topicId)
+  const raw = new Database(e.dbFile);
+  raw.pragma("foreign_keys = OFF");
+  raw.prepare("DELETE FROM topics WHERE id = ?").run(e.topicId);
+  raw.close();
+  await e.scheduler.tick(new Date());
+  check("Deleted-topic: a schedule whose topic was deleted does NOT fire", e.calls.length === 0);
+  check("Deleted-topic: the schedule is auto-DISABLED (self-heal — no re-fire every tick)", e.db.getSchedule("sch-orphan").enabled === false);
+  await e.scheduler.tick(new Date()); // a now-disabled schedule is not even due
+  check("Deleted-topic: a second tick still does nothing", e.calls.length === 0);
+  cleanupEnv(e);
+}
+
+// Finding 2 — claim-before-spawn: when startManager throws, next_fire_at is ALREADY advanced (slot
+// claimed first), so the failed schedule does NOT double-fire on the next tick.
+{
+  const e = makeEnv({ failFirstN: 1 });
+  seedSchedule(e, "sch-claim");
+  const now = new Date();
+  await e.scheduler.tick(now); // the spawn throws — but the slot was claimed first
+  check("Claim-before-spawn: the throwing spawn recorded NO schedule_fired event", e.calls.length === 0);
+  const after = e.db.getSchedule("sch-claim");
+  check("Claim-before-spawn: next_fire_at was advanced despite the failure (slot consumed)", new Date(after.nextFireAt).getTime() > now.getTime());
+  await e.scheduler.tick(now); // immediately again: NOT due (slot already advanced) → no double-spawn
+  check("Claim-before-spawn: no double-fire on the next tick", e.calls.length === 0);
+  cleanupEnv(e);
+}
+
+// Finding 3a — manager cap (in-tick burst): with cap=2, a burst of 5 simultaneously-due schedules
+// fires only 2 this tick; the rest are deferred (still due) and fire on later ticks.
+{
+  const e = makeEnv({ cap: 2 });
+  for (let i = 0; i < 5; i++) seedSchedule(e, `sch-burst-${i}`);
+  await e.scheduler.tick(new Date());
+  check("Manager-cap: a 5-schedule burst with cap 2 fires only 2 this tick", e.calls.length === 2);
+  const deferred = ["sch-burst-0", "sch-burst-1", "sch-burst-2", "sch-burst-3", "sch-burst-4"]
+    .filter((id) => e.db.getSchedule(id).lastFiredAt === null).length;
+  check("Manager-cap: the other 3 are deferred (still unfired, next_fire_at left in the past)", deferred === 3);
+  cleanupEnv(e);
+}
+
+// Finding 3b — manager cap (DB count axis): pre-existing LIVE managers count toward the cap, so a
+// due schedule does NOT fire while the account already has `cap` live managers.
+{
+  const e = makeEnv({ cap: 2 });
+  seedLiveManager(e, "mgr-existing-1");
+  seedLiveManager(e, "mgr-existing-2"); // already at the cap of 2
+  seedSchedule(e, "sch-capped");
+  await e.scheduler.tick(new Date());
+  check("Manager-cap (DB count): at the cap from existing live managers → a due schedule does NOT fire", e.calls.length === 0);
+  check("Manager-cap (DB count): the deferred schedule is left due (not advanced, not disabled)",
+    e.db.getSchedule("sch-capped").lastFiredAt === null && e.db.getSchedule("sch-capped").enabled === true);
   cleanupEnv(e);
 }
 

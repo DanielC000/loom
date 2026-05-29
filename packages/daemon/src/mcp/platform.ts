@@ -30,6 +30,7 @@ const ptyOverride = z.object({ cols: z.number().optional(), rows: z.number().opt
 const orchestrationOverride = z.object({
   gateCommand: z.string().optional(),
   maxConcurrentWorkers: z.number().optional(),
+  maxConcurrentManagers: z.number().optional(),
   schedulerEnabled: z.boolean().optional(),
 }).strict();
 const projectConfigOverrideSchema = z.object({
