@@ -33,6 +33,13 @@ export interface OrchestrationConfig {
    */
   maxConcurrentWorkers: number;
   /**
+   * Safety rail (§19a hardening): hard cap on concurrently-LIVE manager sessions the cron Scheduler
+   * will spawn. maxConcurrentWorkers caps workers PER manager; this caps the managers themselves, so
+   * a burst of simultaneously-due schedules can't launch an unbounded fleet in one tick. At the cap
+   * the Scheduler defers the remaining due schedules to the next tick (next_fire_at untouched). Default 3.
+   */
+  maxConcurrentManagers: number;
+  /**
    * Pillar-B trigger gate (§19b): when false (default), the daemon does NOT start the cron
    * Scheduler, so no schedule auto-fires. Opt-in per the autonomy ladder — a daemon shouldn't
    * auto-spawn managers until explicitly switched on. The daemon reads the platform-default value
@@ -98,7 +105,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", maxConcurrentWorkers: 3, schedulerEnabled: false },
+  orchestration: { gateCommand: "", maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false },
   docLint: true, // Pillar D vault-lint hook on by default
 };
 
@@ -121,6 +128,7 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
     orchestration: {
       gateCommand: override.orchestration?.gateCommand ?? d.orchestration.gateCommand,
       maxConcurrentWorkers: override.orchestration?.maxConcurrentWorkers ?? d.orchestration.maxConcurrentWorkers,
+      maxConcurrentManagers: override.orchestration?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers,
       schedulerEnabled: override.orchestration?.schedulerEnabled ?? d.orchestration.schedulerEnabled,
     },
     docLint: override.docLint ?? d.docLint,

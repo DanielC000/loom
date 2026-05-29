@@ -66,7 +66,8 @@ async function main(): Promise<void> {
   const schedulerEnabled =
     process.env.LOOM_SCHEDULER_ENABLED === "1" || resolveConfig(undefined).orchestration.schedulerEnabled;
   const intervalMs = Number(process.env.LOOM_SCHEDULER_INTERVAL_MS) || 60_000;
-  const scheduler = new Scheduler({ db, control, startManager: (topicId) => sessions.startManager(topicId), intervalMs });
+  const maxConcurrentManagers = resolveConfig(undefined).orchestration.maxConcurrentManagers;
+  const scheduler = new Scheduler({ db, control, startManager: (topicId) => sessions.startManager(topicId), intervalMs, maxConcurrentManagers });
   if (schedulerEnabled) {
     scheduler.start();
     console.log(`[boot] scheduler enabled (tick ${intervalMs}ms)`);

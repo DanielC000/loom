@@ -19,7 +19,15 @@ export interface SchedulerDeps {
    * so a test can drive the limit-skip deterministically without writing the awareness file.
    */
   isUsageLimited?: (now: Date) => boolean;
+  /**
+   * §19a hardening: hard cap on concurrently-LIVE managers the Scheduler will spawn. Wired from
+   * `orchestration.maxConcurrentManagers` in index.ts; defaults to DEFAULT_MAX_CONCURRENT_MANAGERS.
+   */
+  maxConcurrentManagers?: number;
 }
+
+/** Fallback manager cap when none is injected (matches the config default). */
+const DEFAULT_MAX_CONCURRENT_MANAGERS = 3;
 
 /**
  * Cron Scheduler (phase-2 Pillar B): the trigger layer. On each minute tick it boots a manager
@@ -35,6 +43,14 @@ export class Scheduler {
    * (then it leaves next_fire_at untouched so the next tick retries — mirrors #17a's spawn gate).
    * Per-schedule try/catch: a throwing schedule (bad cron, startManager failure) is logged and
    * skipped, never crashing the loop or blocking the other schedules.
+   *
+   * §19a hardening (3 findings):
+   *  - DELETED TOPIC (finding 1): a schedule whose topic no longer exists can never fire — disable
+   *    it (it has no topic-delete cascade to clean it up) so it stops re-trying every tick.
+   *  - CLAIM-BEFORE-SPAWN (finding 2): advance next_fire_at BEFORE the spawn/event side effects, so
+   *    if startManager or appendEvent throws the slot is already consumed → no double-spawn next tick.
+   *  - MANAGER CAP (finding 3): stop once `maxConcurrentManagers` live managers exist; the remaining
+   *    due schedules are deferred to the next tick (next_fire_at untouched) — like the pause gate.
    */
   async tick(now: Date = new Date()): Promise<void> {
     const due = this.deps.db.listDueSchedules(now.toISOString());
@@ -45,15 +61,35 @@ export class Scheduler {
     // awareness). Same shape as the pause gate — next_fire_at stays, retried once the limit clears.
     if ((this.deps.isUsageLimited ?? isLikelyNearClaudeUsageLimit)(now)) return;
 
+    const cap = this.deps.maxConcurrentManagers ?? DEFAULT_MAX_CONCURRENT_MANAGERS;
+    let liveManagers = this.deps.db.countLiveManagers(); // managers persisting from prior ticks
+
     for (const s of due) {
+      // Finding 3 — manager cap: defer the rest of this tick's due schedules (next_fire_at left in
+      // the past → they come back due next tick). DB count + in-tick increments cover both axes.
+      if (liveManagers >= cap) {
+        // eslint-disable-next-line no-console
+        console.error(`[scheduler] manager cap (${cap}) reached — deferring remaining due schedules to the next tick`);
+        break;
+      }
+      // Finding 1 — deleted topic: never fireable → disable so it stops re-firing every tick.
+      if (!this.deps.db.getTopic(s.topicId)) {
+        this.deps.db.updateSchedule(s.id, { enabled: false });
+        // eslint-disable-next-line no-console
+        console.error(`[scheduler] schedule ${s.id} (${s.cron}) disabled — topic ${s.topicId} no longer exists`);
+        continue;
+      }
       try {
+        // Finding 2 — claim the slot FIRST: advance next_fire_at before any side effect, so a
+        // failed spawn/event can't leave the slot un-advanced and re-fire (double-spawn) next tick.
+        this.deps.db.markFired(s.id, now.toISOString(), nextFireAt(s.cron, now));
         const mgr = this.deps.startManager(s.topicId);
         this.deps.db.appendEvent({
           id: randomUUID(), ts: now.toISOString(),
           managerSessionId: mgr.id, kind: "schedule_fired",
           detail: { scheduleId: s.id, cron: s.cron },
         });
-        this.deps.db.markFired(s.id, now.toISOString(), nextFireAt(s.cron, now));
+        liveManagers++;
       } catch (e) {
         // eslint-disable-next-line no-console
         console.error(`[scheduler] schedule ${s.id} (${s.cron}) failed to fire:`, (e as Error).message);

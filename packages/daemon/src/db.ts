@@ -316,6 +316,11 @@ export class Db {
     return (this.db.prepare("SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at")
       .all(managerSessionId) as Row[]).map(toSession);
   }
+  /** Count of currently-LIVE manager sessions — the Scheduler's manager-cap gate (§19a hardening). */
+  countLiveManagers(): number {
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE role = 'manager' AND process_state = 'live'")
+      .get() as { c: number }).c;
+  }
   /** A manager's audit trail in chronological order (rowid breaks same-timestamp ties). */
   listEvents(managerSessionId: string): OrchestrationEvent[] {
     return (this.db.prepare("SELECT * FROM orchestration_events WHERE manager_session_id = ? ORDER BY ts, rowid")
