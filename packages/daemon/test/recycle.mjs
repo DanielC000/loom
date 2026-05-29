@@ -51,10 +51,11 @@ const now = new Date().toISOString();
   db.close();
 }
 
-const worktreePathExpected = path.join(LOOM, "worktrees", projId, taskId.slice(0, 8));
-const trustKey = path.resolve(worktreePathExpected).replace(/\\/g, "/");
+// Post-#30 the worktree key is a hash of the task id (not slice(0,8)), so the path can't be
+// precomputed — the trust-entry cleanup derives its key from the REAL `spawned.worktreePath` in
+// `finally`. The worktree is always freshly created by this test, so we only ever delete what we added.
 const realClaudeJson = path.join(os.homedir(), ".claude.json");
-const realHadKeyBefore = (() => { try { return trustKey in (JSON.parse(fs.readFileSync(realClaudeJson, "utf8")).projects ?? {}); } catch { return false; } })();
+const trustKeyOf = (p) => path.resolve(p).replace(/\\/g, "/");
 
 async function connect(sessionId) {
   const client = new Client({ name: "recycle-test", version: "0" });
@@ -105,9 +106,10 @@ try {
     try { if (id) await post(`/api/sessions/${id}/stop`, { mode: "hard" }); } catch { /* ignore */ }
   }
   await sleep(1500);
-  try { await removeWorktree(repo, spawned?.worktreePath ?? worktreePathExpected); } catch { /* ignore */ }
-  if (!realHadKeyBefore) {
+  if (spawned?.worktreePath) {
+    try { await removeWorktree(repo, spawned.worktreePath); } catch { /* ignore */ }
     try {
+      const trustKey = trustKeyOf(spawned.worktreePath);
       const cfg = JSON.parse(fs.readFileSync(realClaudeJson, "utf8"));
       if (cfg.projects && trustKey in cfg.projects) { delete cfg.projects[trustKey]; writeJsonAtomic(realClaudeJson, cfg); }
     } catch { /* nothing to clean */ }
