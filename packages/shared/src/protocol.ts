@@ -10,7 +10,11 @@ export type TerminalControl =
   | { type: "reset" }                   // pty respawned (resume) — clear xterm
   | { type: "busy"; busy: boolean }     // a turn started (true) / ended (false) — hook-driven
   | { type: "exit"; code: number | null }
-  | { type: "dead" };                   // stored engine id no longer resumable
+  | { type: "dead" }                    // stored engine id no longer resumable
+  // INFO ONLY: the daemon telling a viewer the pinned pty grid so it can size its xterm
+  // (resize the grid to match + scale fontSize to fill the tile). This is NOT resize
+  // negotiation — the viewer never resizes the pty; the pin stays viewer-independent.
+  | { type: "geometry"; cols: number; rows: number };
 
 export type TerminalInput =
   | { type: "stdin"; data: string }
