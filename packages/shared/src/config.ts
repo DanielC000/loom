@@ -96,7 +96,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     ],
     deny: [],
   },
-  pty: { cols: 120, rows: 40 }, // fixed geometry; viewers scale by font size (no resize in phase 1)
+  pty: { cols: 80, rows: 24 }, // fixed geometry; viewers scale by font size (no resize). 80x24 (classic terminal size) keeps scaled text comfortably readable in tiled panes.
   sessionEnv: {
     // Keep output on the main screen so xterm scrollback retains history.
     CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1",

@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import type { TerminalControl } from "@loom/shared";
 import "@xterm/xterm/css/xterm.css";
+import "./Terminal.css";
 
 /**
  * Live terminal pane. Attaches to /ws/term/:sessionId, fully bidirectional (the user types

@@ -1,0 +1,8 @@
+/* Hide the xterm scrollbar — the terminal is a fixed-grid TUI viewport, not a scroll
+   region. Wheel-scroll of the scrollback still works; this only removes the visible bar. */
+.xterm-viewport {
+  scrollbar-width: none; /* Firefox */
+}
+.xterm-viewport::-webkit-scrollbar {
+  display: none; /* WebKit / Chromium */
+}

@@ -38,9 +38,9 @@ export default function Terminals() {
         </select>
       </div>
       {shown.length === 0 && <p style={{ color: "#777" }}>No running sessions.</p>}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(440px, 1fr))", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12 }}>
         {shown.map((s) => (
-          <div key={s.id} style={{ ...card, height: 300, padding: 6, display: "flex", flexDirection: "column" }}>
+          <div key={s.id} style={{ ...card, height: 460, padding: 6, display: "flex", flexDirection: "column" }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#9ad", marginBottom: 4 }}>
               <span>{s.projectName} · {s.topicName} · {s.id.slice(0, 8)}</span>
               <button style={{ ...btn, padding: "0 6px" }} onClick={() => setMaximized(s.id)}>⤢</button>
