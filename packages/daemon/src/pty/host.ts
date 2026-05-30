@@ -29,6 +29,7 @@ interface Live {
   pty: IPty;
   pid: number;
   cwd: string;
+  geometry: PtyGeometry; // the pinned grid — sent to each new subscriber (info only, never resized)
   engineSessionId: string | null;
   ring: { chunks: Buffer[]; bytes: number };
   subscribers: Set<Subscriber>;
@@ -150,6 +151,7 @@ export class PtyHost {
 
     const live: Live = {
       pty, pid: pty.pid, cwd: opts.cwd,
+      geometry: opts.geometry,
       engineSessionId: opts.resumeId ?? null,
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
@@ -297,6 +299,8 @@ export class PtyHost {
     const sb = Buffer.concat(live.ring.chunks);
     if (sb.length) sub.onData(sb);
     if (live.engineSessionId) sub.onControl({ type: "sessionId", id: live.engineSessionId });
+    // Tell the new viewer the pinned grid so it sizes its xterm to match (info only — never resizes the pty).
+    sub.onControl({ type: "geometry", cols: live.geometry.cols, rows: live.geometry.rows });
     if (!live.alive) sub.onControl({ type: "exit", code: null });
     live.subscribers.add(sub);
     return () => { live.subscribers.delete(sub); };
