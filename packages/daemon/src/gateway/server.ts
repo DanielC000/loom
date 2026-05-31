@@ -214,6 +214,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return reply.code(201).send(topic);
   });
 
+  // Edit a topic preset (name / startup prompt). Same store the spawn path reads, so a saved
+  // prompt is injected as the first turn of the NEXT new session in this topic.
+  app.post("/api/topics/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getTopic(id)) return reply.code(404).send({ error: "topic not found" });
+    const b = (req.body ?? {}) as { name?: string; startupPrompt?: string };
+    deps.db.updateTopic(id, b);
+    return deps.db.getTopic(id);
+  });
+
   app.post("/api/projects/:id/tasks", async (req, reply) => {
     const projectId = (req.params as { id: string }).id;
     if (!deps.db.getProject(projectId)) return reply.code(404).send({ error: "project not found" });

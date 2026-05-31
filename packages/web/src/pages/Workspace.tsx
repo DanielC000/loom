@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import type { Topic } from "@loom/shared";
 import { api } from "../lib/api";
 import { TerminalPane } from "../components/Terminal";
 import { TranscriptPane } from "../components/TranscriptPane";
@@ -24,6 +25,11 @@ export default function Workspace() {
     mutationFn: (b: { name: string; startupPrompt: string }) => api.createTopic(projectId!, b),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["topics", projectId] }),
   });
+  const updateTopic = useMutation({
+    mutationFn: (v: { id: string; patch: { name?: string; startupPrompt?: string } }) => api.updateTopic(v.id, v.patch),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["topics", projectId] }),
+  });
+  const selectedTopic = topics.data?.find((t) => t.id === topicId) ?? null;
   const spawn = useMutation({
     mutationFn: () => api.startSession(topicId!),
     onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", topicId] }); },
@@ -92,7 +98,11 @@ export default function Workspace() {
                 : <TranscriptPane sessionId={sessionId} />}
             </div>
           </>
-        ) : <p style={{ color: "#777", padding: 12 }}>Select or spawn a session to attach a live terminal.</p>}
+        ) : selectedTopic ? (
+          <TopicPresetEditor key={selectedTopic.id} topic={selectedTopic}
+            onSave={(startupPrompt) => updateTopic.mutate({ id: selectedTopic.id, patch: { startupPrompt } })}
+            saving={updateTopic.isPending} />
+        ) : <p style={{ color: "#777", padding: 12 }}>Select a topic to view/edit its startup prompt, or spawn a session to attach a live terminal.</p>}
       </div>
     </div>
   );
@@ -116,8 +126,40 @@ function TopicForm({ onCreate }: { onCreate: (b: { name: string; startupPrompt: 
   return (
     <div style={{ marginTop: 8 }}>
       <input style={input} placeholder="topic name" value={name} onChange={(e) => setName(e.target.value)} />
-      <input style={{ ...input, width: 200 }} placeholder="startup prompt (e.g. /pickup)" value={startupPrompt} onChange={(e) => setPrompt(e.target.value)} />
+      <textarea style={{ ...input, width: "100%", height: 64, fontFamily: "monospace", resize: "vertical" }}
+        placeholder="startup prompt (injected as the first turn of each new session)"
+        value={startupPrompt} onChange={(e) => setPrompt(e.target.value)} />
       <button style={btn} disabled={!name} onClick={() => { onCreate({ name, startupPrompt }); setName(""); setPrompt(""); }}>Create</button>
+    </div>
+  );
+}
+
+// View + edit a topic's startup-prompt preset. Remounted per topic (key=topic.id) so the
+// textarea state resets on switch; after Save the query refetches and `dirty` clears.
+function TopicPresetEditor(
+  { topic, onSave, saving }: { topic: Topic; onSave: (startupPrompt: string) => void; saving: boolean },
+) {
+  const [prompt, setPrompt] = useState(topic.startupPrompt);
+  const dirty = prompt !== topic.startupPrompt;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", padding: 8 }}>
+      <div style={{ marginBottom: 6 }}>
+        <strong>Startup prompt — {topic.name}</strong>
+        <span style={{ color: "#777", fontSize: 12 }}>{" "}· injected as the first turn of each new session in this topic</span>
+      </div>
+      <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)}
+        spellCheck={false}
+        style={{
+          flex: 1, minHeight: 0, width: "100%", boxSizing: "border-box", resize: "none",
+          fontFamily: "monospace", fontSize: 13, lineHeight: 1.5,
+          background: "#1b1b1f", color: "#ddd", border: "1px solid #333", borderRadius: 6, padding: 8,
+        }} />
+      <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
+        <button style={btn} disabled={!dirty || saving} onClick={() => onSave(prompt)}>{saving ? "Saving…" : "Save"}</button>
+        {dirty
+          ? <button style={btn} onClick={() => setPrompt(topic.startupPrompt)}>Reset</button>
+          : <span style={{ color: "#6a6", fontSize: 12 }}>saved</span>}
+      </div>
     </div>
   );
 }

@@ -170,6 +170,14 @@ export class Db {
        VALUES (@id,@projectId,@name,@startupPrompt,@position)`,
     ).run(t);
   }
+  /** Partial edit of a topic preset (name / startup prompt). Omitted fields are left as-is. */
+  updateTopic(id: string, patch: { name?: string; startupPrompt?: string }): void {
+    const cols: Record<string, unknown> = { name: patch.name, startup_prompt: patch.startupPrompt };
+    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
+    if (names.length === 0) return;
+    const set = names.map((c) => `${c} = ?`).join(", ");
+    this.db.prepare(`UPDATE topics SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
 
   // --- sessions ---
   listSessions(topicId: string): Session[] {

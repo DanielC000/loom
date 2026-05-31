@@ -25,6 +25,8 @@ export const api = {
   topics: (projectId: string) => get<Topic[]>(`/api/projects/${projectId}/topics`),
   createTopic: (projectId: string, b: { name: string; startupPrompt?: string }) =>
     post<Topic>(`/api/projects/${projectId}/topics`, b),
+  updateTopic: (id: string, patch: { name?: string; startupPrompt?: string }) =>
+    post<Topic>(`/api/topics/${id}`, patch),
   tasks: (projectId: string) => get<Task[]>(`/api/projects/${projectId}/tasks`),
   createTask: (projectId: string, b: { title: string; body?: string; columnKey?: string }) =>
     post<Task>(`/api/projects/${projectId}/tasks`, b),
