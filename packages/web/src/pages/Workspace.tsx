@@ -31,7 +31,7 @@ export default function Workspace() {
   });
   const selectedTopic = topics.data?.find((t) => t.id === topicId) ?? null;
   const spawn = useMutation({
-    mutationFn: () => api.startSession(topicId!),
+    mutationFn: (role?: "manager") => api.startSession(topicId!, role),
     onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", topicId] }); },
   });
 
@@ -69,7 +69,9 @@ export default function Workspace() {
         {topicId && (
           <div style={card}>
             <strong>Sessions</strong>{" "}
-            <button style={btn} onClick={() => spawn.mutate()} disabled={spawn.isPending}>+ New (warm)</button>
+            <button style={btn} onClick={() => spawn.mutate(undefined)} disabled={spawn.isPending}>+ New (warm)</button>{" "}
+            <button style={btn} onClick={() => spawn.mutate("manager")} disabled={spawn.isPending}
+              title="Spawn as orchestrator: role=manager + worker-spawning MCP surface">+ Manager</button>
             <ul style={{ paddingLeft: 16 }}>
               {sessions.data?.map((s) => (
                 <li key={s.id}>

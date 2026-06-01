@@ -31,7 +31,8 @@ export const api = {
   createTask: (projectId: string, b: { title: string; body?: string; columnKey?: string }) =>
     post<Task>(`/api/projects/${projectId}/tasks`, b),
   sessions: (topicId: string) => get<Session[]>(`/api/topics/${topicId}/sessions`),
-  startSession: (topicId: string) => post<Session>(`/api/topics/${topicId}/sessions`),
+  startSession: (topicId: string, role?: "manager") =>
+    post<Session>(`/api/topics/${topicId}/sessions`, role ? { role } : undefined),
   resumeSession: (id: string) => post<Session>(`/api/sessions/${id}/resume`),
   stopSession: (id: string, mode: "graceful" | "hard") =>
     post<{ ok: boolean }>(`/api/sessions/${id}/stop`, { mode }),
