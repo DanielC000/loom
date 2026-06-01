@@ -1,4 +1,5 @@
-import { Route, Routes } from "react-router-dom";
+import { useEffect, useRef } from "react";
+import { Route, Routes, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import MissionControl from "./pages/MissionControl";
 import Workspace from "./pages/Workspace";
@@ -10,6 +11,7 @@ import Orchestration from "./pages/Orchestration";
 import ReviewPanel from "./pages/ReviewPanel";
 import { NavTab, Badge } from "./components/ui";
 import { api } from "./lib/api";
+import { useAttention } from "./lib/attention";
 import { color, font } from "./theme";
 import { page } from "./ui";
 
@@ -19,6 +21,36 @@ function GlobalStatus() {
   if (!status.data) return null;
   const globalPaused = status.data.pausedScopes.includes("global");
   return <Badge tone={globalPaused ? "red" : "phosphor"}>{globalPaused ? "paused" : "running"}</Badge>;
+}
+
+// Shell alert bell: count of attention-queue items + a browser Notification when a NEW one appears
+// (seeded silently on first load so a reload doesn't replay the backlog). Click → Mission Control.
+function Bell() {
+  const { items, count } = useAttention();
+  const navigate = useNavigate();
+  const seen = useRef<Set<string> | null>(null);
+
+  useEffect(() => {
+    if (typeof Notification !== "undefined" && Notification.permission === "default") void Notification.requestPermission();
+  }, []);
+  useEffect(() => {
+    if (seen.current === null) { seen.current = new Set(items.map((i) => i.key)); return; }
+    for (const it of items) {
+      if (!seen.current.has(it.key) && typeof Notification !== "undefined" && Notification.permission === "granted") {
+        new Notification(`Loom · ${it.kind}`, { body: it.text });
+      }
+    }
+    seen.current = new Set(items.map((i) => i.key)); // drop departed keys so a re-occurrence re-notifies
+  }, [items]);
+
+  return (
+    <button onClick={() => navigate("/")} title="attention queue"
+      style={{ fontFamily: font.mono, fontSize: 12, letterSpacing: "0.06em", textTransform: "uppercase",
+        color: count ? color.amber : color.textDim, border: `1px solid ${count ? color.amber : color.borderStrong}`,
+        background: "transparent", borderRadius: 4, padding: "4px 10px", cursor: "pointer" }}>
+      Alerts {count}
+    </button>
+  );
 }
 
 export default function App() {
@@ -36,6 +68,7 @@ export default function App() {
           <NavTab to="/git">Git</NavTab>
         </nav>
         <span style={{ flex: 1 }} />
+        <Bell />
         <GlobalStatus />
       </header>
       <main style={page}>

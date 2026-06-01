@@ -2,23 +2,17 @@ import { useNavigate } from "react-router-dom";
 import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "../lib/api";
+import { useAttention, isRateLimited, type AttentionItem } from "../lib/attention";
 import { Panel, SectionLabel, StatusPill, Badge, Chip, Meter, Button, Dot } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
 
-// Phase 3 — MISSION CONTROL: a god-eye view of every orchestration at once, so you don't
-// have to pick a single manager. Three regions: a global status strip, an ATTENTION QUEUE
-// (the things needing a human), and FLEET (projects → managers → workers) beside a global
-// ACTIVITY feed. All derived from existing endpoints (/api/sessions + per-manager events).
+// Phase 3 — MISSION CONTROL: a god-eye view of every orchestration at once, so you don't have to
+// pick a single manager. Three regions: a global status strip, an ATTENTION QUEUE (shared with the
+// shell bell via useAttention), and FLEET (projects → managers → workers) beside a global ACTIVITY
+// feed. All derived from existing endpoints (/api/sessions + per-manager events).
 
 const CTX_WINDOW = 200_000; // model context window, for the ctx meters
-const STUCK_BUSY_MS = 3 * 60_000; // busy with no activity this long → likely stuck (heuristic)
 
-function isRateLimited(s: SessionListItem): boolean {
-  return !!s.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > Date.now();
-}
-function isStuckBusy(s: SessionListItem): boolean {
-  return s.processState === "live" && s.busy && Date.now() - new Date(s.lastActivity).getTime() > STUCK_BUSY_MS;
-}
 function sessionStatus(s: SessionListItem): { tone: Tone; label: string; glow?: boolean } {
   if (isRateLimited(s)) return { tone: "red", label: "rate-limited" };
   if (s.processState !== "live") return { tone: "muted", label: s.processState };
@@ -32,13 +26,14 @@ export default function MissionControl() {
 
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 2000 });
   const status = useQuery({ queryKey: ["orchStatus"], queryFn: api.orchestrationStatus, refetchInterval: 2000 });
+  const { items: attention } = useAttention();
 
   const all = sessions.data ?? [];
   const managers = all.filter((s) => s.role === "manager");
   const workers = all.filter((s) => s.role === "worker");
   const globalPaused = (status.data?.pausedScopes ?? []).includes("global");
 
-  // Pull each manager's event timeline; union them for the activity feed + merge-request state.
+  // Each manager's event timeline → the activity feed.
   const eventQueries = useQueries({
     queries: managers.map((m) => ({
       queryKey: ["orchEvents", m.id],
@@ -49,18 +44,6 @@ export default function MissionControl() {
   const allEvents = eventQueries
     .flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? [])
     .sort((a, b) => +new Date(b.ts) - +new Date(a.ts));
-
-  // A merge_request is "pending" until a later merge_done/merge_rejected for the same worker/task.
-  const latestMerge = new Map<string, OrchestrationEvent>();
-  for (const e of [...allEvents].reverse()) {
-    if (e.kind === "merge_request" || e.kind === "merge_done" || e.kind === "merge_rejected") {
-      latestMerge.set(e.workerSessionId || e.taskId || e.id, e);
-    }
-  }
-  const pendingMerges = [...latestMerge.values()].filter((e) => e.kind === "merge_request");
-  const rateLimited = all.filter(isRateLimited);
-  const stuckBusy = all.filter(isStuckBusy);
-  const attentionCount = pendingMerges.length + rateLimited.length + stuckBusy.length;
 
   const projectNames = [...new Set([...managers, ...workers].map((s) => s.projectName))];
 
@@ -79,7 +62,7 @@ export default function MissionControl() {
           <Stat label="projects" value={projectNames.length} />
           <Stat label="managers" value={managers.length} />
           <Stat label="workers" value={workers.length} />
-          <Stat label="attention" value={attentionCount} tone={attentionCount ? "amber" : "muted"} />
+          <Stat label="attention" value={attention.length} tone={attention.length ? "amber" : "muted"} />
         </div>
         <span style={{ flex: 1 }} />
         <Button variant="default" disabled={pause.isPending} onClick={() => pause.mutate()}>Pause</Button>
@@ -89,21 +72,11 @@ export default function MissionControl() {
 
       {/* Attention queue */}
       <div>
-        <SectionLabel>Attention queue ({attentionCount})</SectionLabel>
-        {attentionCount === 0 && <Panel><span style={{ color: color.textMuted }}>Nothing needs you right now.</span></Panel>}
-        {pendingMerges.map((e) => (
-          <AttentionRow key={`m-${e.id}`} tone="phosphor" kind="MERGE REQUEST"
-            text={`${e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)} ` : ""}${e.taskId ? `task ${e.taskId.slice(0, 8)} ` : ""}— awaiting review`}
-            onOpen={e.workerSessionId ? () => navigate(`/review/${e.workerSessionId}`) : undefined} />
-        ))}
-        {rateLimited.map((s) => (
-          <AttentionRow key={`r-${s.id}`} tone="red" kind="RATE-LIMITED"
-            text={`${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — resumes ${s.rateLimitedUntil ? new Date(s.rateLimitedUntil).toLocaleTimeString() : "?"}`} />
-        ))}
-        {stuckBusy.map((s) => (
-          <AttentionRow key={`s-${s.id}`} tone="amber" kind="STUCK-BUSY"
-            text={`${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — busy, no activity since ${new Date(s.lastActivity).toLocaleTimeString()} (heuristic)`}
-            onOpen={() => navigate("/orchestration")} />
+        <SectionLabel>Attention queue ({attention.length})</SectionLabel>
+        {attention.length === 0 && <Panel><span style={{ color: color.textMuted }}>Nothing needs you right now.</span></Panel>}
+        {attention.map((item) => (
+          <AttentionRow key={item.key} item={item}
+            onOpen={item.workerSessionId ? () => navigate(`/review/${item.workerSessionId}`) : undefined} />
         ))}
       </div>
 
@@ -156,12 +129,12 @@ function Stat({ label, value, tone: t = "phosphor" }: { label: string; value: nu
   );
 }
 
-function AttentionRow({ tone: t, kind, text, onOpen }: { tone: Tone; kind: string; text: string; onOpen?: () => void }) {
+function AttentionRow({ item, onOpen }: { item: AttentionItem; onOpen?: () => void }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 10px", marginBottom: 6 }}>
-      <Dot tone={t} glow={t === "amber"} />
-      <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[t], textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{kind}</span>
-      <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis" }}>{text}</span>
+      <Dot tone={item.tone} glow={item.tone === "amber"} />
+      <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[item.tone], textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{item.kind}</span>
+      <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis" }}>{item.text}</span>
       <span style={{ flex: 1 }} />
       {onOpen && <Button onClick={onOpen}>Open</Button>}
     </div>

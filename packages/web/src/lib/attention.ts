@@ -1,0 +1,71 @@
+import { useQuery, useQueries } from "@tanstack/react-query";
+import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
+import { api } from "./api";
+import type { Tone } from "../theme";
+
+// Centralized "things needing a human" derivation, shared by Mission Control's attention queue and
+// the shell bell. Built from the already-polled sessions + per-manager events (react-query dedups
+// the network calls by key), so it needs no extra backend.
+
+const STUCK_BUSY_MS = 3 * 60_000; // busy with no activity this long → likely stuck (heuristic)
+
+export function isRateLimited(s: SessionListItem): boolean {
+  return !!s.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > Date.now();
+}
+export function isStuckBusy(s: SessionListItem): boolean {
+  return s.processState === "live" && s.busy && Date.now() - new Date(s.lastActivity).getTime() > STUCK_BUSY_MS;
+}
+
+export interface AttentionItem {
+  key: string;
+  tone: Tone;
+  kind: string;
+  text: string;
+  workerSessionId?: string | null; // when set, the item is openable in the review panel
+}
+
+export function useAttention(): { items: AttentionItem[]; count: number } {
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
+  const all = sessions.data ?? [];
+  const managers = all.filter((s) => s.role === "manager");
+
+  const eventQueries = useQueries({
+    queries: managers.map((m) => ({
+      queryKey: ["orchEvents", m.id],
+      queryFn: () => api.orchestrationEvents(m.id),
+      refetchInterval: 4000,
+    })),
+  });
+  const allEvents = eventQueries.flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? []);
+
+  // A merge_request is "pending" until a later merge_done/merge_rejected for the same worker/task.
+  const latestMerge = new Map<string, OrchestrationEvent>();
+  for (const e of [...allEvents].sort((a, b) => +new Date(a.ts) - +new Date(b.ts))) {
+    if (e.kind === "merge_request" || e.kind === "merge_done" || e.kind === "merge_rejected") {
+      latestMerge.set(e.workerSessionId || e.taskId || e.id, e);
+    }
+  }
+
+  const items: AttentionItem[] = [];
+  for (const e of latestMerge.values()) {
+    if (e.kind === "merge_request") {
+      items.push({
+        key: `m-${e.id}`, tone: "phosphor", kind: "MERGE REQUEST", workerSessionId: e.workerSessionId,
+        text: `${e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)} ` : ""}${e.taskId ? `task ${e.taskId.slice(0, 8)} ` : ""}— awaiting review`,
+      });
+    }
+  }
+  for (const s of all.filter(isRateLimited)) {
+    items.push({
+      key: `r-${s.id}`, tone: "red", kind: "RATE-LIMITED",
+      text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — resumes ${s.rateLimitedUntil ? new Date(s.rateLimitedUntil).toLocaleTimeString() : "?"}`,
+    });
+  }
+  for (const s of all.filter(isStuckBusy)) {
+    items.push({
+      key: `s-${s.id}`, tone: "amber", kind: "STUCK-BUSY", workerSessionId: s.id,
+      text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — busy, no activity since ${new Date(s.lastActivity).toLocaleTimeString()} (heuristic)`,
+    });
+  }
+  return { items, count: items.length };
+}
