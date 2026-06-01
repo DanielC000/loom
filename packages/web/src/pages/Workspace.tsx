@@ -8,6 +8,16 @@ import { Composer } from "../components/Composer";
 import { Panel, Button, Input, SectionLabel, StatusPill } from "../components/ui";
 import { color, font } from "../theme";
 
+// Starter topics seeded on project creation (editable afterward via the preset editor). Generic
+// role scaffolds — the canonical, project-specific prompts get filled in per project.
+const TEMPLATE_TOPICS: { name: string; startupPrompt: string }[] = [
+  { name: "Orchestrator", startupPrompt: "You are the lead orchestrator for this project. Plan work into board tasks, spawn and review workers, and merge their branches via your loom-orchestration tools." },
+  { name: "Planning & Triage", startupPrompt: "Triage incoming work for this project into clear, well-scoped board tasks, each with a sharp definition of done." },
+  { name: "Dev", startupPrompt: "Implement the assigned board task on your worktree branch. Keep the change small and focused; run the build/tests; then report." },
+  { name: "Bugfix", startupPrompt: "Reproduce, fix, and verify the assigned bug on your worktree branch. Add a regression check; then report." },
+  { name: "Content Strategy", startupPrompt: "Work on content and strategy for this project, grounded in the vault notes." },
+];
+
 // Per-project working view: create project/topic, spawn or resume sessions, attach a terminal.
 export default function Workspace() {
   const qc = useQueryClient();
@@ -24,7 +34,16 @@ export default function Workspace() {
   const sessions = useQuery({ queryKey: ["sessions", topicId], queryFn: () => api.sessions(topicId!), enabled: !!topicId });
 
   const createProject = useMutation({
-    mutationFn: api.createProject, onSuccess: () => qc.invalidateQueries({ queryKey: ["projects"] }),
+    mutationFn: async (b: { name: string; repoPath: string; vaultPath: string; seedTopics: boolean }) => {
+      const project = await api.createProject({ name: b.name, repoPath: b.repoPath, vaultPath: b.vaultPath });
+      if (b.seedTopics) for (const t of TEMPLATE_TOPICS) await api.createTopic(project.id, t);
+      return project;
+    },
+    onSuccess: (project) => {
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      qc.invalidateQueries({ queryKey: ["topics", project.id] });
+      setProjectId(project.id); setTopicId(null); setSessionId(null);
+    },
   });
   const createTopic = useMutation({
     mutationFn: (b: { name: string; startupPrompt: string }) => api.createTopic(projectId!, b),
@@ -145,15 +164,20 @@ function SessionRow({ s, selected, onSelect, onResume, resuming }:
   );
 }
 
-function ProjectForm({ onCreate }: { onCreate: (b: { name: string; repoPath: string; vaultPath: string }) => void }) {
+function ProjectForm({ onCreate }: { onCreate: (b: { name: string; repoPath: string; vaultPath: string; seedTopics: boolean }) => void }) {
   const [name, setName] = useState(""), [repoPath, setRepo] = useState(""), [vaultPath, setVault] = useState("");
+  const [seedTopics, setSeed] = useState(true);
   return (
     <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
       <Input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
       <Input placeholder="repo path" value={repoPath} onChange={(e) => setRepo(e.target.value)} />
       <Input placeholder="vault path" value={vaultPath} onChange={(e) => setVault(e.target.value)} />
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
+        <input type="checkbox" checked={seedTopics} onChange={(e) => setSeed(e.target.checked)} />
+        seed starter topics (Orchestrator · Planning · Dev · Bugfix · Content)
+      </label>
       <Button variant="primary" disabled={!name || !repoPath || !vaultPath}
-        onClick={() => { onCreate({ name, repoPath, vaultPath }); setName(""); setRepo(""); setVault(""); }}>Create</Button>
+        onClick={() => { onCreate({ name, repoPath, vaultPath, seedTopics }); setName(""); setRepo(""); setVault(""); }}>Create project</Button>
     </div>
   );
 }
