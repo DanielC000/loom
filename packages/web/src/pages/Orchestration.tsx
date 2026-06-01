@@ -2,12 +2,15 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "../lib/api";
-import { card, btn, input } from "../ui";
-import { SectionLabel, Badge, Dot } from "../components/ui";
+import { Panel, Button, Select, SectionLabel, Badge, StatusPill, Chip, Meter } from "../components/ui";
+import { color, font } from "../theme";
 
-// Orchestration viewport (#18b): SEE the spine that the MCP manager drives. Read-first — a live
-// fleet view of a manager's workers, its orchestration_events timeline, and a per-worker branch
-// diff — plus the already-REST pause/kill/stop controls. Human-driven merge/recycle is #18c.
+// Orchestration viewport (#18b): SEE the spine that the MCP manager drives. A live fleet view of
+// ONE manager's workers, its orchestration_events timeline, and a per-worker branch diff — plus
+// the REST pause/kill/stop controls. (The all-managers god-eye view is Mission Control.)
+
+const CTX_WINDOW = 200_000;
+
 export default function Orchestration() {
   const qc = useQueryClient();
   const [managerId, setManagerId] = useState("");
@@ -24,6 +27,7 @@ export default function Orchestration() {
   const workers = all.filter((s) => s.parentSessionId === managerId);
   const paused = status.data?.pausedScopes ?? [];
   const globalPaused = paused.includes("global");
+  const scoped = paused.filter((s) => s !== "global");
 
   const refreshStatus = () => qc.invalidateQueries({ queryKey: ["orchStatus"] });
   const refreshSessions = () => qc.invalidateQueries({ queryKey: ["allSessions"] });
@@ -35,61 +39,57 @@ export default function Orchestration() {
   return (
     <div>
       {/* Global controls + live pause status */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
-        <span>Manager:{" "}
-          <select style={input} value={managerId} onChange={(e) => { setManagerId(e.target.value); setWorkerId(""); }}>
-            <option value="">— select —</option>
-            {managers.map((m) => (
-              <option key={m.id} value={m.id}>{m.projectName} · {m.topicName} · {m.id.slice(0, 8)} ({m.processState})</option>
-            ))}
-          </select>
-        </span>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>Manager</span>
+        <Select value={managerId} onChange={(e) => { setManagerId(e.target.value); setWorkerId(""); }}>
+          <option value="">— select —</option>
+          {managers.map((m) => (
+            <option key={m.id} value={m.id}>{m.projectName} · {m.topicName} · {m.id.slice(0, 8)} ({m.processState})</option>
+          ))}
+        </Select>
         <span style={{ flex: 1 }} />
-        <Badge tone={globalPaused ? "red" : "phosphor"}>{globalPaused ? "PAUSED (global)" : "running"}</Badge>
-        {paused.filter((s) => s !== "global").length > 0 &&
-          <span style={{ fontSize: 12, color: "#caa" }}>scoped: {paused.filter((s) => s !== "global").map((s) => s.slice(0, 8)).join(", ")}</span>}
-        <button style={btn} disabled={pause.isPending} onClick={() => pause.mutate()}>Pause</button>
-        <button style={btn} disabled={resume.isPending} onClick={() => resume.mutate()}>Resume</button>
-        <button style={{ ...btn, borderColor: "#a44", color: "#f99" }} disabled={kill.isPending} onClick={() => kill.mutate()}>Kill all</button>
+        <Badge tone={globalPaused ? "red" : "phosphor"}>{globalPaused ? "paused (global)" : "running"}</Badge>
+        {scoped.length > 0 && <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber }}>scoped: {scoped.map((s) => s.slice(0, 8)).join(", ")}</span>}
+        <Button disabled={pause.isPending} onClick={() => pause.mutate()}>Pause</Button>
+        <Button disabled={resume.isPending} onClick={() => resume.mutate()}>Resume</Button>
+        <Button variant="danger" disabled={kill.isPending} onClick={() => kill.mutate()}>Kill all</Button>
       </div>
 
-      {!managerId && <p style={{ color: "#777" }}>Select a manager to view its workers, timeline, and diffs.</p>}
+      {!managerId && <p style={{ color: color.textMuted }}>Select a manager to view its workers, timeline, and diffs.</p>}
 
       {managerId && (
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 16 }}>
           {/* LEFT: live workers + timeline */}
           <div>
-            <SectionLabel>{`Workers (${workers.length})`}</SectionLabel>
-            {workers.length === 0 && <p style={{ color: "#777" }}>No workers spawned by this manager.</p>}
+            <SectionLabel>Workers ({workers.length})</SectionLabel>
+            {workers.length === 0 && <p style={{ color: color.textMuted }}>No workers spawned by this manager.</p>}
             {workers.map((w) => (
               <WorkerCard key={w.id} w={w} selected={w.id === workerId}
                 onSelect={() => setWorkerId(w.id)} onStop={() => stop.mutate(w.id)} stopping={stop.isPending} />
             ))}
 
             <SectionLabel>Timeline</SectionLabel>
-            <div style={{ ...card, maxHeight: "40vh", overflow: "auto" }}>
-              {(events.data ?? []).length === 0 && <p style={{ color: "#777", margin: 0 }}>No events yet.</p>}
+            <Panel grid style={{ maxHeight: "40vh", overflow: "auto" }}>
+              {(events.data ?? []).length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No events yet.</span>}
               {(events.data ?? []).map((e) => <EventRow key={e.id} e={e} />)}
-            </div>
+            </Panel>
           </div>
 
           {/* RIGHT: selected worker's branch diff */}
           <div>
             <SectionLabel>{workerId ? `Diff · ${workerId.slice(0, 8)}` : "Diff"}</SectionLabel>
-            <div style={{ ...card, height: "76vh", overflow: "auto" }}>
-              {!workerId && <p style={{ color: "#777" }}>Click a worker to see its branch diff.</p>}
-              {workerId && diff.isError && <p style={{ color: "#c77" }}>No diff (worker has no branch, or it was merged/removed).</p>}
+            <Panel style={{ height: "76vh", overflow: "auto" }}>
+              {!workerId && <span style={{ color: color.textMuted, fontSize: 12 }}>Click a worker to see its branch diff.</span>}
+              {workerId && diff.isError && <span style={{ color: color.red, fontSize: 12 }}>No diff (worker has no branch, or it was merged/removed).</span>}
               {workerId && diff.data && (
                 <>
-                  <div style={{ fontSize: 12, color: "#9ad", marginBottom: 8 }}>
+                  <div style={{ fontFamily: font.mono, fontSize: 12, color: color.cyan, marginBottom: 8 }}>
                     {diff.data.filesChanged} file(s) · +{diff.data.insertions} −{diff.data.deletions}
                   </div>
-                  <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "ui-monospace, Consolas, monospace", fontSize: 12, color: "#ddd" }}>
-                    {diff.data.patch || "(no changes vs HEAD)"}
-                  </pre>
+                  <DiffView patch={diff.data.patch || "(no changes vs HEAD)"} />
                 </>
               )}
-            </div>
+            </Panel>
           </div>
         </div>
       )}
@@ -100,47 +100,63 @@ export default function Orchestration() {
 function WorkerCard({ w, selected, onSelect, onStop, stopping }:
   { w: SessionListItem; selected: boolean; onSelect: () => void; onStop: () => void; stopping: boolean }) {
   const live = w.processState === "live";
-  // §19c: parked on the Claude usage cap until rateLimitedUntil — show it instead of the busy/idle dot.
+  // §19c: parked on the Claude usage cap until rateLimitedUntil — show it instead of the busy/idle pill.
   const rateLimited = !!w.rateLimitedUntil && new Date(w.rateLimitedUntil).getTime() > Date.now();
+  const ctx = w.ctxInputTokens ?? 0;
   return (
-    <div onClick={onSelect} style={{ ...card, cursor: "pointer", borderColor: selected ? "#9ad" : "#2a2a2e", background: selected ? "#16161c" : undefined }}>
+    <Panel selected={selected} onClick={onSelect} style={{ marginBottom: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 12, color: "#9ad" }}>
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.cyan }}>
           {w.taskId ? `task ${w.taskId.slice(0, 8)}` : "(no task)"}{w.gen ? ` · gen ${w.gen}` : ""}
         </span>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {rateLimited
-            ? <span title={`usage limit — resumes ${w.rateLimitedUntil}`} style={{ fontSize: 11, color: "#e9a" }}>
-                ⏳ rate-limited (resumes {new Date(w.rateLimitedUntil!).toLocaleTimeString()})
-              </span>
-            : <>
-                <Dot tone={live ? (w.busy ? "amber" : "phosphor") : "muted"} glow={live && w.busy} title={live ? (w.busy ? "busy" : "idle") : w.processState} />
-                <span style={{ fontSize: 11, color: "#aaa" }}>{live ? (w.busy ? "busy" : "idle") : w.processState}</span>
-              </>}
-          <button style={{ ...btn, padding: "2px 8px" }} disabled={!live || stopping}
-            onClick={(ev) => { ev.stopPropagation(); onStop(); }}>Stop</button>
+            ? <StatusPill tone="red" label={`rate-limited · ${new Date(w.rateLimitedUntil!).toLocaleTimeString()}`} />
+            : <StatusPill tone={live ? (w.busy ? "amber" : "phosphor") : "muted"} glow={live && w.busy}
+                label={live ? (w.busy ? "busy" : "idle") : w.processState} />}
+          <Button disabled={!live || stopping} style={{ padding: "2px 8px" }}
+            onClick={(ev) => { ev.stopPropagation(); onStop(); }}>Stop</Button>
         </div>
       </div>
-      <div style={{ fontSize: 11, color: "#888", marginTop: 6, display: "flex", gap: 14, flexWrap: "wrap" }}>
-        <span>branch: <span style={{ color: "#bbb" }}>{w.branch ?? "—"}</span></span>
-        <span>ctx: <span style={{ color: "#bbb" }}>{w.ctxInputTokens != null ? w.ctxInputTokens.toLocaleString() : "—"}</span></span>
-        <span>active: <span style={{ color: "#bbb" }}>{new Date(w.lastActivity).toLocaleTimeString()}</span></span>
+      <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <Chip label="branch" value={w.branch ?? "—"} tone="cyan" />
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <Chip label="ctx" value={ctx ? ctx.toLocaleString() : "—"} />
+          {ctx > 0 && <Meter value={ctx} max={CTX_WINDOW} tone={ctx > 120_000 ? "amber" : "phosphor"} width={50} />}
+        </span>
+        <Chip label="active" value={new Date(w.lastActivity).toLocaleTimeString()} />
       </div>
-    </div>
+    </Panel>
   );
 }
 
 function EventRow({ e }: { e: OrchestrationEvent }) {
   const detail = e.detail && Object.keys(e.detail).length ? JSON.stringify(e.detail) : "";
   return (
-    <div style={{ fontSize: 12, padding: "3px 0", borderBottom: "1px solid #1e1e22", display: "flex", gap: 8 }}>
-      <span style={{ color: "#778", whiteSpace: "nowrap" }}>{new Date(e.ts).toLocaleTimeString()}</span>
-      <span style={{ color: "#9ad", whiteSpace: "nowrap" }}>{e.kind}</span>
-      <span style={{ color: "#aaa", overflow: "hidden", textOverflow: "ellipsis" }}>
+    <div style={{ fontFamily: font.mono, fontSize: 12, padding: "3px 0", borderBottom: `1px solid ${color.border}`, display: "flex", gap: 8 }}>
+      <span style={{ color: color.textMuted, whiteSpace: "nowrap" }}>{new Date(e.ts).toLocaleTimeString()}</span>
+      <span style={{ color: color.cyan, whiteSpace: "nowrap" }}>{e.kind}</span>
+      <span style={{ color: color.textDim, overflow: "hidden", textOverflow: "ellipsis" }}>
         {e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)} ` : ""}{e.taskId ? `t:${e.taskId.slice(0, 8)} ` : ""}
-        {detail && <span style={{ color: "#777" }}>{detail}</span>}
+        {detail && <span style={{ color: color.textMuted }}>{detail}</span>}
       </span>
     </div>
   );
 }
 
+// Unified diff with green additions / red deletions / cyan hunk headers.
+function DiffView({ patch }: { patch: string }) {
+  const lines = patch.split("\n");
+  return (
+    <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: 12, lineHeight: 1.5 }}>
+      {lines.map((ln, i) => {
+        let c: string = color.textDim;
+        if (ln.startsWith("@@")) c = color.cyan;
+        else if (ln.startsWith("+++") || ln.startsWith("---") || ln.startsWith("diff ") || ln.startsWith("index ")) c = color.textMuted;
+        else if (ln.startsWith("+")) c = color.phosphor;
+        else if (ln.startsWith("-")) c = color.red;
+        return <div key={i} style={{ color: c }}>{ln || " "}</div>;
+      })}
+    </pre>
+  );
+}
