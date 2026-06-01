@@ -1,5 +1,6 @@
 import { Route, Routes } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import MissionControl from "./pages/MissionControl";
 import Workspace from "./pages/Workspace";
 import Terminals from "./pages/Terminals";
 import Vault from "./pages/Vault";
@@ -25,7 +26,8 @@ export default function App() {
       <header style={{ display: "flex", alignItems: "center", gap: 24, padding: "10px 20px", borderBottom: `1px solid ${color.border}` }}>
         <strong style={{ fontFamily: font.head, letterSpacing: "0.18em", color: color.text, fontSize: 15 }}>LOOM</strong>
         <nav style={{ display: "flex", gap: 18 }}>
-          <NavTab to="/" end>Workspace</NavTab>
+          <NavTab to="/" end>Mission</NavTab>
+          <NavTab to="/workspace">Workspace</NavTab>
           <NavTab to="/terminals">Terminals</NavTab>
           <NavTab to="/board">Board</NavTab>
           <NavTab to="/orchestration">Orchestration</NavTab>
@@ -37,7 +39,8 @@ export default function App() {
       </header>
       <main style={page}>
         <Routes>
-          <Route path="/" element={<Workspace />} />
+          <Route path="/" element={<MissionControl />} />
+          <Route path="/workspace" element={<Workspace />} />
           <Route path="/terminals" element={<Terminals />} />
           <Route path="/board" element={<Board />} />
           <Route path="/orchestration" element={<Orchestration />} />
