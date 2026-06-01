@@ -10,11 +10,6 @@ import { isGitRepo } from "../git/reader.js";
 // Same envelope as the task / orchestration MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
-interface Live {
-  server: McpServer;
-  transport: StreamableHTTPServerTransport;
-}
-
 /**
  * The machine-writable config schema the architecture promised: a strict zod mirror of
  * ProjectConfigOverride. `.strict()` everywhere rejects unknown keys (typo guard); types are
@@ -57,11 +52,10 @@ export function validateProjectConfigOverride(
  * Platform MCP server (phase-2 Pillar C) — a platform-lead's surface for creating + configuring
  * projects/topics, so the autonomous queue can stand up NEW work, not just drain an existing board.
  * Mirrors the orchestration MCP exactly: keyed by the URL-path session id, resolved SERVER-SIDE,
- * role-gated to 'platform' (manager/worker/plain → 404, no surface). One McpServer+transport per
- * session (reused so the initialize handshake holds; disposed on session exit).
+ * role-gated to 'platform' (manager/worker/plain → 404, no surface). Stateless: a fresh
+ * McpServer+transport per request, so no cached transport can be wedged by a dropped stream.
  */
 export class PlatformMcpRouter {
-  private live = new Map<string, Live>();
   constructor(private db: Db) {}
 
   /** Role gate: only a platform-lead gets this surface. */
@@ -146,27 +140,14 @@ export class PlatformMcpRouter {
       res.end(JSON.stringify({ error: "no platform surface for this session" }));
       return;
     }
-    let entry = this.live.get(sessionId);
-    if (!entry) {
-      const server = this.buildServer();
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        enableJsonResponse: true,
-      });
-      transport.onclose = () => { this.live.delete(sessionId); };
-      await server.connect(transport);
-      entry = { server, transport };
-      this.live.set(sessionId, entry);
-    }
-    await entry.transport.handleRequest(req, res, body);
+    // Stateless per request (see TaskMcpRouter): no cached transport to be wedged by a dropped stream.
+    const server = this.buildServer();
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    res.on("close", () => { void transport.close(); void server.close(); });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, body);
   }
 
-  /** Tear down a session's platform MCP server when the session ends. */
-  dispose(sessionId: string): void {
-    const entry = this.live.get(sessionId);
-    if (!entry) return;
-    void entry.transport.close();
-    void entry.server.close();
-    this.live.delete(sessionId);
-  }
+  /** No-op: stateless transports hold no per-session state to tear down (kept for the onExit hook). */
+  dispose(_sessionId: string): void {}
 }

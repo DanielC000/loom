@@ -1,5 +1,4 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -11,11 +10,6 @@ import { readTranscript } from "../sessions/transcript.js";
 // Same envelope as the task MCP server (mcp/server.ts).
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
-interface Live {
-  server: McpServer;
-  transport: StreamableHTTPServerTransport;
-}
-
 /**
  * Orchestration MCP server (phase-2 §A2/§A3) — a ROLE-BASED surface, keyed by the URL-path
  * session id and resolved SERVER-SIDE (the agent never names "which session"):
@@ -23,11 +17,10 @@ interface Live {
  *   - worker  → ONLY worker_report (so a worker CANNOT spawn/list/stop — the depth-1 tree holds
  *               at the tool surface, not just the role gate);
  *   - plain/unknown → 404 (no surface).
- * One McpServer+transport per session (created on first request, reused so the initialize
- * handshake holds; disposed on session exit).
+ * Stateless: a fresh McpServer+transport per request (the URL-path session id supplies the role
+ * binding). No cached transport, so a dropped stream can't wedge the surface mid-session.
  */
 export class OrchestrationMcpRouter {
-  private live = new Map<string, Live>();
   constructor(private db: Db, private sessions: SessionService) {}
 
   /** Role gate: returns the session's id + orchestration role, or null (→ 404) for plain/unknown. */
@@ -215,27 +208,15 @@ export class OrchestrationMcpRouter {
       return;
     }
 
-    let entry = this.live.get(sessionId);
-    if (!entry) {
-      const server = this.buildServer(sessionId, resolved.role);
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        enableJsonResponse: true,
-      });
-      transport.onclose = () => { this.live.delete(sessionId); };
-      await server.connect(transport);
-      entry = { server, transport };
-      this.live.set(sessionId, entry);
-    }
-    await entry.transport.handleRequest(req, res, body);
+    // Stateless per request (see TaskMcpRouter): no cached transport to be deleted on a transient
+    // onclose, so the worker_* surface can't vanish mid-session. Rebuilt each call from the role.
+    const server = this.buildServer(sessionId, resolved.role);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    res.on("close", () => { void transport.close(); void server.close(); });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, body);
   }
 
-  /** Tear down a session's orchestration MCP server when the session ends. */
-  dispose(sessionId: string): void {
-    const entry = this.live.get(sessionId);
-    if (!entry) return;
-    void entry.transport.close();
-    void entry.server.close();
-    this.live.delete(sessionId);
-  }
+  /** No-op: stateless transports hold no per-session state to tear down (kept for the onExit hook). */
+  dispose(_sessionId: string): void {}
 }

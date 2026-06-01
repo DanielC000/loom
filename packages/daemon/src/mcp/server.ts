@@ -1,5 +1,4 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -8,22 +7,17 @@ import { listProjectTasks, createProjectTask, updateProjectTask } from "./tasks.
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
-interface Live {
-  server: McpServer;
-  transport: StreamableHTTPServerTransport;
-}
-
 /**
  * Project-scoped task MCP server. The session id arrives in the URL path
  * (/mcp/:sessionId); we resolve session -> project SERVER-SIDE and bind every tool to that
  * project. The agent never supplies a projectId, so cross-project access is impossible by
  * construction (§6).
  *
- * One McpServer+transport per Loom session (the URL path IS the routing key), created on
- * first request and reused so the MCP initialize handshake holds across requests.
+ * Stateless: a fresh McpServer+transport is built per request (the URL path supplies the
+ * session→project binding). No per-session transport is cached, so a dropped stream can never
+ * wedge the surface — every request rebuilds the identical tools from the stable mapping.
  */
 export class TaskMcpRouter {
-  private live = new Map<string, Live>();
   constructor(private db: Db) {}
 
   resolveProject(sessionId: string): string | null {
@@ -73,27 +67,17 @@ export class TaskMcpRouter {
       return;
     }
 
-    let entry = this.live.get(sessionId);
-    if (!entry) {
-      const server = this.buildServer(projectId);
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        enableJsonResponse: true,
-      });
-      transport.onclose = () => { this.live.delete(sessionId); };
-      await server.connect(transport);
-      entry = { server, transport };
-      this.live.set(sessionId, entry);
-    }
-    await entry.transport.handleRequest(req, res, body);
+    // Stateless per request: sessionIdGenerator undefined → no session state, no validation, so a
+    // transient stream close can't strand the session. (The old per-session cache deleted the
+    // transport on onclose, and claude never re-initialized a server it thought died → the
+    // loom-tasks "drop".) The same surface is rebuilt every request from the session→project map.
+    const server = this.buildServer(projectId);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    res.on("close", () => { void transport.close(); void server.close(); });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, body);
   }
 
-  /** Tear down a session's MCP server when the session ends. */
-  dispose(sessionId: string): void {
-    const entry = this.live.get(sessionId);
-    if (!entry) return;
-    void entry.transport.close();
-    void entry.server.close();
-    this.live.delete(sessionId);
-  }
+  /** No-op: stateless transports hold no per-session state to tear down (kept for the onExit hook). */
+  dispose(_sessionId: string): void {}
 }
