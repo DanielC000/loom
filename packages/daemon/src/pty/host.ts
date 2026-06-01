@@ -20,6 +20,13 @@ const RING_CAP_BYTES = 256 * 1024;
  */
 const SUBMIT_ENTER_DELAY_MS = 150;
 
+/** Shift+Tab (CSI Z / back-tab) — Claude's TUI cycles the permission mode on this key. */
+const SHIFT_TAB = "\x1b[Z";
+/** Settle window after SessionStart before sending the first mode-cycle keystroke (let the TUI's input attach). */
+const MODE_CYCLE_SETTLE_MS = 700;
+/** Gap between successive Shift+Tab presses so each cycle registers as a distinct key event. */
+const MODE_CYCLE_INTERVAL_MS = 120;
+
 interface Subscriber {
   onData: (b: Buffer) => void;
   onControl: (e: TerminalControl) => void;
@@ -38,6 +45,8 @@ interface Live {
   busy: boolean;        // a turn is in flight (locally tracked; mirrored to DB via onBusy)
   pending: string[];    // FIFO of messages held while busy — drained one-per-Stop
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
+  startupModeCycles: number; // Shift+Tab presses to inject once, after SessionStart, to reach the target mode
+  startupCyclesDone: boolean; // guard so the cycle-inject fires at most once per session
 }
 
 export interface SpawnOpts {
@@ -162,6 +171,9 @@ export class PtyHost {
       // The startup-prompt turn runs from a CLI arg (not submit()), so seed lastPrompt with it —
       // a cap on the FIRST turn must still be re-submittable on resume (§19c-b).
       lastPrompt: opts.startupPrompt ?? null,
+      // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
+      startupModeCycles: opts.permission.startupModeCycles ?? 0,
+      startupCyclesDone: false,
     };
     this.live.set(opts.sessionId, live);
 
@@ -204,6 +216,12 @@ export class PtyHost {
           live.engineSessionId = hook.session_id;
           this.events.onEngineSessionId(sessionId, hook.session_id);
           this.broadcastControl(live, { type: "sessionId", id: hook.session_id });
+        }
+        // Claude is up → cycle the permission mode off the gate-free boot default into the target
+        // mode (the human Shift+Tab step), once per session. Fire-and-forget; never blocks the turn.
+        if (live.startupModeCycles > 0 && !live.startupCyclesDone) {
+          live.startupCyclesDone = true;
+          this.sendModeCycles(sessionId, live.startupModeCycles);
         }
         break;
       case "UserPromptSubmit":
@@ -290,6 +308,21 @@ export class PtyHost {
     live.busy = busy;
     this.events.onBusy(sessionId, busy);
     this.broadcastControl(live, { type: "busy", busy });
+  }
+
+  /**
+   * Inject `count` Shift+Tab presses to cycle the permission mode (the human step), spaced so each
+   * registers as a distinct key event. Pure key writes — not turns — so they bypass the busy queue:
+   * the mode cycle must land even while the startup-prompt turn is in flight (acceptEdits → target).
+   */
+  private sendModeCycles(sessionId: string, count: number): void {
+    const tick = (i: number): void => {
+      const live = this.live.get(sessionId);
+      if (!live?.alive || i >= count) return;
+      live.pty.write(SHIFT_TAB);
+      setTimeout(() => tick(i + 1), MODE_CYCLE_INTERVAL_MS);
+    };
+    setTimeout(() => tick(0), MODE_CYCLE_SETTLE_MS);
   }
 
   subscribe(sessionId: string, sub: Subscriber): () => void {

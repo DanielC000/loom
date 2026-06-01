@@ -12,6 +12,14 @@ export interface PermissionPolicy {
   /** Allowlist patterns, e.g. "Bash(git status:*)". Auto-approved so warmup never blocks. */
   allow: string[];
   deny: string[];
+  /**
+   * Shift+Tab presses to inject shortly after the session starts, cycling the permission mode off
+   * the gate-free boot default (`mode`) into the desired one. The spawn always boots in `mode`
+   * (acceptEdits) to dodge the bypass-mode acceptance gate; this then steps it the way a human would.
+   * Default 2 (acceptEdits → … → bypassPermissions in the current CLI). 0 = leave the boot mode.
+   * Version-sensitive: tied to the CLI's Shift+Tab cycle order, so it's tunable here.
+   */
+  startupModeCycles?: number;
 }
 
 export interface PtyGeometry {
@@ -95,6 +103,8 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
       "Bash(git diff:*)",
     ],
     deny: [],
+    // Boot gate-free in acceptEdits, then Shift+Tab twice into the target mode (the human step).
+    startupModeCycles: 2,
   },
   pty: { cols: 80, rows: 24 }, // fixed geometry; viewers scale by font size (no resize). 80x24 (classic terminal size) keeps scaled text comfortably readable in tiled panes.
   sessionEnv: {
@@ -119,6 +129,7 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
       mode: override.permission?.mode ?? d.permission.mode,
       allow: override.permission?.allow ?? [...d.permission.allow],
       deny: override.permission?.deny ?? [...d.permission.deny],
+      startupModeCycles: override.permission?.startupModeCycles ?? d.permission.startupModeCycles,
     },
     pty: {
       cols: override.pty?.cols ?? d.pty.cols,
