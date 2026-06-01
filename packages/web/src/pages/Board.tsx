@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
-import type { Task, KanbanColumn } from "@loom/shared";
+import type { Task, KanbanColumn, SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
-import { Button, Input, SectionLabel } from "../components/ui";
+import { Button, Input, SectionLabel, StatusPill, Chip } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
 import { ProjectSelect } from "./Vault";
 
@@ -14,6 +14,11 @@ export default function Board() {
   const [projectId, setProjectId] = useState<string>("");
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const board = useQuery({ queryKey: ["board", projectId], queryFn: () => api.board(projectId), enabled: !!projectId, placeholderData: keepPreviousData });
+  // Link the board to the orchestration spine: a worker carries its task id, so cards can show the
+  // live worker's status + branch for the task they represent.
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
+  const workerByTask = new Map<string, SessionListItem>();
+  for (const s of sessions.data ?? []) if (s.taskId) workerByTask.set(s.taskId, s);
 
   const move = useMutation({
     mutationFn: ({ id, columnKey }: { id: string; columnKey: string }) => api.updateTask(id, { columnKey }),
@@ -37,7 +42,7 @@ export default function Board() {
           <DndContext onDragEnd={onDragEnd}>
             <div style={{ display: "grid", gridTemplateColumns: `repeat(${board.data.columns.length}, 1fr)`, gap: 10, marginTop: 12 }}>
               {board.data.columns.map((col) => (
-                <Column key={col.key} col={col} tasks={board.data!.tasks.filter((t) => t.columnKey === col.key)} />
+                <Column key={col.key} col={col} tasks={board.data!.tasks.filter((t) => t.columnKey === col.key)} workers={workerByTask} />
               ))}
             </div>
           </DndContext>
@@ -56,20 +61,27 @@ function columnTone(key: string): Tone {
   return "muted";
 }
 
-function Column({ col, tasks }: { col: KanbanColumn; tasks: Task[] }) {
+function Column({ col, tasks, workers }: { col: KanbanColumn; tasks: Task[]; workers: Map<string, SessionListItem> }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key });
   const t = columnTone(col.key);
   return (
     <div ref={setNodeRef} className="loom-grid"
       style={{ background: isOver ? color.phosphorDim : color.panel, border: `1px solid ${color.border}`, borderRadius: 4, padding: 12, minHeight: "60vh" }}>
       <SectionLabel style={{ color: tone[t] }}>{col.label} ({tasks.length})</SectionLabel>
-      {tasks.map((task) => <Card key={task.id} task={task} accent={tone[t]} />)}
+      {tasks.map((task) => <Card key={task.id} task={task} accent={tone[t]} worker={workers.get(task.id)} />)}
     </div>
   );
 }
 
-function Card({ task, accent }: { task: Task; accent: string }) {
+// A worker bound to this task → show its live status + branch (links the board to the spine).
+function workerStatus(w: SessionListItem): { tone: Tone; label: string; glow?: boolean } {
+  if (w.processState !== "live") return { tone: "muted", label: w.processState };
+  return w.busy ? { tone: "amber", label: "working", glow: true } : { tone: "phosphor", label: "idle" };
+}
+
+function Card({ task, accent, worker }: { task: Task; accent: string; worker?: SessionListItem }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id });
+  const st = worker ? workerStatus(worker) : null;
   return (
     <div ref={setNodeRef} {...listeners} {...attributes}
       style={{
@@ -80,6 +92,12 @@ function Card({ task, accent }: { task: Task; accent: string }) {
         fontFamily: font.mono, fontSize: 12, color: color.text,
       }}>
       {task.title}
+      {worker && st && (
+        <div style={{ marginTop: 5, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          <StatusPill tone={st.tone} label={st.label} glow={st.glow} />
+          {worker.branch && <Chip label="branch" value={worker.branch} tone="cyan" />}
+        </div>
+      )}
     </div>
   );
 }
