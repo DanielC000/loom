@@ -4,6 +4,7 @@ import type { Topic, Session } from "@loom/shared";
 import { api } from "../lib/api";
 import { TerminalPane } from "../components/Terminal";
 import { TranscriptPane } from "../components/TranscriptPane";
+import { Composer } from "../components/Composer";
 import { Panel, Button, Input, SectionLabel, StatusPill } from "../components/ui";
 import { color, font } from "../theme";
 
@@ -103,6 +104,7 @@ export default function Workspace() {
                 ? <TerminalPane sessionId={sessionId} />
                 : <TranscriptPane sessionId={sessionId} />}
             </div>
+            <Composer sessionId={sessionId} />
           </>
         ) : selectedTopic ? (
           <TopicPresetEditor key={selectedTopic.id} topic={selectedTopic}

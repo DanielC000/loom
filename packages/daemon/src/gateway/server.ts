@@ -262,6 +262,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deps.pty.stop(id, mode === "hard" ? "hard" : "graceful");
     return reply.send({ ok: true });
   });
+  // Send a turn to a session through the busy-gated queue, so a human composer and the
+  // programmatic worker_report enqueue share ONE coordinated submission path (the daemon owns
+  // the Enter). Returns { delivered:true } if it went out now, { delivered:false, position:N }
+  // if held until the in-flight turn ends, or { delivered:false } if the session isn't live.
+  app.post("/api/sessions/:id/input", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { text } = (req.body as { text?: string }) ?? {};
+    if (typeof text !== "string" || !text.trim()) return reply.code(400).send({ error: "text required" });
+    return reply.send(deps.pty.enqueueStdin(id, text));
+  });
 
   // --- Live terminal: attach/detach (binary pty bytes + JSON control) ---
   app.get("/ws/term/:sessionId", { websocket: true }, (socket: WebSocket, req) => {

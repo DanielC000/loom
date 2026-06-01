@@ -34,6 +34,8 @@ export const api = {
   startSession: (topicId: string, role?: "manager") =>
     post<Session>(`/api/topics/${topicId}/sessions`, role ? { role } : undefined),
   resumeSession: (id: string) => post<Session>(`/api/sessions/${id}/resume`),
+  sendInput: (id: string, text: string) =>
+    post<{ delivered: boolean; position?: number }>(`/api/sessions/${id}/input`, { text }),
   stopSession: (id: string, mode: "graceful" | "hard") =>
     post<{ ok: boolean }>(`/api/sessions/${id}/stop`, { mode }),
   allSessions: () => get<SessionListItem[]>("/api/sessions"),
