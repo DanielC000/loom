@@ -34,6 +34,13 @@ export default function Workspace() {
     mutationFn: (role?: "manager") => api.startSession(topicId!, role),
     onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", topicId] }); },
   });
+  const resume = useMutation({
+    mutationFn: (id: string) => api.resumeSession(id),
+    onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", topicId] }); },
+  });
+  // Manager first, then platform, then workers — so the orchestrator isn't lost among its workers.
+  const roleRank = (r?: string | null) => (r === "manager" ? 0 : r === "platform" ? 1 : r === "worker" ? 2 : 3);
+  const orderedSessions = [...(sessions.data ?? [])].sort((a, b) => roleRank(a.role) - roleRank(b.role));
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 16 }}>
@@ -72,14 +79,25 @@ export default function Workspace() {
             <button style={btn} onClick={() => spawn.mutate(undefined)} disabled={spawn.isPending}>+ New (warm)</button>{" "}
             <button style={btn} onClick={() => spawn.mutate("manager")} disabled={spawn.isPending}
               title="Spawn as orchestrator: role=manager + worker-spawning MCP surface">+ Manager</button>
-            <ul style={{ paddingLeft: 16 }}>
-              {sessions.data?.map((s) => (
-                <li key={s.id}>
-                  <button style={{ ...btn, background: s.id === sessionId ? "#3a3a40" : "#26262b" }}
-                    onClick={() => setSessionId(s.id)}>{s.id.slice(0, 8)} · {s.processState}</button>
-                  {s.resumability === "dead" && <span style={{ color: "#e88" }}> dead</span>}
-                </li>
-              ))}
+            <ul style={{ paddingLeft: 0, listStyle: "none" }}>
+              {orderedSessions.map((s) => {
+                const isManager = s.role === "manager";
+                const canResume = s.processState === "exited" && s.resumability !== "dead";
+                return (
+                  <li key={s.id} style={{ marginBottom: 4, display: "flex", alignItems: "center", gap: 4 }}>
+                    <button style={{ ...btn, flex: 1, textAlign: "left",
+                      background: s.id === sessionId ? "#3a3a40" : "#26262b",
+                      borderColor: isManager ? "#9ad" : undefined, fontWeight: isManager ? 700 : 400 }}
+                      onClick={() => setSessionId(s.id)}>
+                      {isManager ? "★ " : ""}{s.id.slice(0, 8)} · {s.role ?? "session"} · {s.processState}
+                    </button>
+                    {canResume && <button style={btn} disabled={resume.isPending}
+                      title="Resume this session and attach its terminal"
+                      onClick={() => resume.mutate(s.id)}>Resume</button>}
+                    {s.resumability === "dead" && <span style={{ color: "#e88" }}>dead</span>}
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}
