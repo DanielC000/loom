@@ -13,7 +13,10 @@ export default function Terminals() {
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 4000 });
   const live = (sessions.data ?? []).filter((s) => s.processState === "live");
   const projectNames = useMemo(() => [...new Set(live.map((s) => s.projectName))].sort(), [live]);
-  const shown = filter ? live.filter((s) => s.projectName === filter) : live;
+  // Stable tile order: sort by spawn time so a tile keeps its place once spawned. (The backend
+  // lists sessions by last_activity DESC, which would otherwise reshuffle tiles on every prompt.)
+  const shown = (filter ? live.filter((s) => s.projectName === filter) : live)
+    .slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
   if (maximized) {
     const s = live.find((x) => x.id === maximized);
@@ -21,7 +24,7 @@ export default function Terminals() {
       <div>
         <button style={btn} onClick={() => setMaximized(null)}>← back to grid</button>
         {s && <div style={{ ...card, height: "78vh", padding: 6, marginTop: 8 }}>
-          <div style={{ color: "#9ad", fontSize: 12, marginBottom: 4 }}>{s.projectName} · {s.topicName} · {s.id.slice(0, 8)}</div>
+          <div style={{ color: "#9ad", fontSize: 12, marginBottom: 4 }}>{s.projectName} · {s.topicName}{s.role ? ` · ${s.role}` : ""} · {s.id.slice(0, 8)}</div>
           <TerminalPane sessionId={s.id} />
         </div>}
       </div>
@@ -42,7 +45,7 @@ export default function Terminals() {
         {shown.map((s) => (
           <div key={s.id} style={{ ...card, height: 460, padding: 6, display: "flex", flexDirection: "column" }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#9ad", marginBottom: 4 }}>
-              <span>{s.projectName} · {s.topicName} · {s.id.slice(0, 8)}</span>
+              <span>{s.projectName} · {s.topicName}{s.role ? ` · ${s.role}` : ""} · {s.id.slice(0, 8)}</span>
               <button style={{ ...btn, padding: "0 6px" }} onClick={() => setMaximized(s.id)}>⤢</button>
             </div>
             <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
