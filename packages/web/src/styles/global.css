@@ -87,3 +87,57 @@ body {
     linear-gradient(90deg, var(--loom-grid-line) 1px, transparent 1px);
   background-size: 32px 32px;
 }
+
+/* ── Component-kit interaction states (see components/ui) ─────────────────────── */
+
+/* Button: primary fills on hover; danger tints; default brightens its border. */
+.loom-btn {
+  transition:
+    background 80ms linear,
+    border-color 80ms linear,
+    color 80ms linear;
+}
+.loom-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.loom-btn-default:not(:disabled):hover {
+  border-color: var(--loom-text-dim);
+}
+.loom-btn-primary:not(:disabled):hover {
+  background: var(--loom-phosphor-dim);
+}
+.loom-btn-danger:not(:disabled):hover {
+  background: rgba(255, 92, 92, 0.12);
+}
+.loom-btn-ghost:not(:disabled):hover {
+  color: var(--loom-text);
+}
+
+/* Field: phosphor focus border, no default outline. */
+.loom-field:focus {
+  border-color: var(--loom-phosphor);
+  outline: none;
+}
+
+/* NavTab: uppercase mono, phosphor underline when active. */
+.loom-navtab {
+  font-family: var(--loom-font-mono);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-decoration: none;
+  color: var(--loom-text-dim);
+  padding: 4px 0;
+  border-bottom: 2px solid transparent;
+  transition:
+    color 80ms linear,
+    border-color 80ms linear;
+}
+.loom-navtab:hover {
+  color: var(--loom-text);
+}
+.loom-navtab.is-active {
+  color: var(--loom-text);
+  border-bottom-color: var(--loom-phosphor);
+}

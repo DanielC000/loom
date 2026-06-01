@@ -35,3 +35,13 @@ export const radius = {
 
 // 4px base grid. space(2) -> "8px".
 export const space = (n: number): string => `${n * 4}px`;
+
+// Signal tones — the semantic status palette used by StatusPill / Dot / Badge / Meter.
+export type Tone = "phosphor" | "amber" | "cyan" | "red" | "muted";
+export const tone: Record<Tone, string> = {
+  phosphor: color.phosphor,
+  amber: color.amber,
+  cyan: color.cyan,
+  red: color.red,
+  muted: color.textMuted,
+};

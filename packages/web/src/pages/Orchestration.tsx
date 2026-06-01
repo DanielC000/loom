@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "../lib/api";
 import { card, btn, input } from "../ui";
+import { SectionLabel, Badge, Dot } from "../components/ui";
 
 // Orchestration viewport (#18b): SEE the spine that the MCP manager drives. Read-first — a live
 // fleet view of a manager's workers, its orchestration_events timeline, and a per-worker branch
@@ -44,7 +45,7 @@ export default function Orchestration() {
           </select>
         </span>
         <span style={{ flex: 1 }} />
-        <Badge ok={!globalPaused} text={globalPaused ? "PAUSED (global)" : "running"} />
+        <Badge tone={globalPaused ? "red" : "phosphor"}>{globalPaused ? "PAUSED (global)" : "running"}</Badge>
         {paused.filter((s) => s !== "global").length > 0 &&
           <span style={{ fontSize: 12, color: "#caa" }}>scoped: {paused.filter((s) => s !== "global").map((s) => s.slice(0, 8)).join(", ")}</span>}
         <button style={btn} disabled={pause.isPending} onClick={() => pause.mutate()}>Pause</button>
@@ -58,14 +59,14 @@ export default function Orchestration() {
         <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 12 }}>
           {/* LEFT: live workers + timeline */}
           <div>
-            <SectionLabel text={`Workers (${workers.length})`} />
+            <SectionLabel>{`Workers (${workers.length})`}</SectionLabel>
             {workers.length === 0 && <p style={{ color: "#777" }}>No workers spawned by this manager.</p>}
             {workers.map((w) => (
               <WorkerCard key={w.id} w={w} selected={w.id === workerId}
                 onSelect={() => setWorkerId(w.id)} onStop={() => stop.mutate(w.id)} stopping={stop.isPending} />
             ))}
 
-            <SectionLabel text="Timeline" />
+            <SectionLabel>Timeline</SectionLabel>
             <div style={{ ...card, maxHeight: "40vh", overflow: "auto" }}>
               {(events.data ?? []).length === 0 && <p style={{ color: "#777", margin: 0 }}>No events yet.</p>}
               {(events.data ?? []).map((e) => <EventRow key={e.id} e={e} />)}
@@ -74,7 +75,7 @@ export default function Orchestration() {
 
           {/* RIGHT: selected worker's branch diff */}
           <div>
-            <SectionLabel text={workerId ? `Diff · ${workerId.slice(0, 8)}` : "Diff"} />
+            <SectionLabel>{workerId ? `Diff · ${workerId.slice(0, 8)}` : "Diff"}</SectionLabel>
             <div style={{ ...card, height: "76vh", overflow: "auto" }}>
               {!workerId && <p style={{ color: "#777" }}>Click a worker to see its branch diff.</p>}
               {workerId && diff.isError && <p style={{ color: "#c77" }}>No diff (worker has no branch, or it was merged/removed).</p>}
@@ -113,7 +114,7 @@ function WorkerCard({ w, selected, onSelect, onStop, stopping }:
                 ⏳ rate-limited (resumes {new Date(w.rateLimitedUntil!).toLocaleTimeString()})
               </span>
             : <>
-                <Dot color={live ? (w.busy ? "#ec4" : "#6c6") : "#777"} title={live ? (w.busy ? "busy" : "idle") : w.processState} />
+                <Dot tone={live ? (w.busy ? "amber" : "phosphor") : "muted"} glow={live && w.busy} title={live ? (w.busy ? "busy" : "idle") : w.processState} />
                 <span style={{ fontSize: 11, color: "#aaa" }}>{live ? (w.busy ? "busy" : "idle") : w.processState}</span>
               </>}
           <button style={{ ...btn, padding: "2px 8px" }} disabled={!live || stopping}
@@ -143,12 +144,3 @@ function EventRow({ e }: { e: OrchestrationEvent }) {
   );
 }
 
-function SectionLabel({ text }: { text: string }) {
-  return <div style={{ fontSize: 12, color: "#9ad", margin: "4px 0 8px" }}>{text}</div>;
-}
-function Badge({ ok, text }: { ok: boolean; text: string }) {
-  return <span style={{ fontSize: 12, padding: "2px 8px", borderRadius: 10, border: `1px solid ${ok ? "#3a5" : "#a44"}`, color: ok ? "#8d8" : "#f99" }}>{text}</span>;
-}
-function Dot({ color, title }: { color: string; title: string }) {
-  return <span title={title} style={{ width: 8, height: 8, borderRadius: 8, background: color, display: "inline-block" }} />;
-}
