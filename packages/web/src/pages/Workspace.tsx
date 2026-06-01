@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Topic } from "@loom/shared";
+import type { Topic, Session } from "@loom/shared";
 import { api } from "../lib/api";
 import { TerminalPane } from "../components/Terminal";
 import { TranscriptPane } from "../components/TranscriptPane";
-import { card, btn, input } from "../ui";
+import { Panel, Button, Input, SectionLabel, StatusPill } from "../components/ui";
+import { color, font } from "../theme";
 
 // Per-project working view: create project/topic, spawn or resume sessions, attach a terminal.
 export default function Workspace() {
@@ -44,72 +45,57 @@ export default function Workspace() {
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 16 }}>
-      <div>
-        <div style={card}>
-          <strong>Projects</strong>
-          <ul style={{ paddingLeft: 16 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <Panel>
+          <SectionLabel>Projects</SectionLabel>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {projects.data?.map((p) => (
-              <li key={p.id}>
-                <button style={{ ...btn, background: p.id === projectId ? "#3a3a40" : "#26262b" }}
-                  onClick={() => { setProjectId(p.id); setTopicId(null); setSessionId(null); }}>{p.name}</button>
-              </li>
+              <Button key={p.id} variant={p.id === projectId ? "primary" : "default"} style={{ textAlign: "left" }}
+                onClick={() => { setProjectId(p.id); setTopicId(null); setSessionId(null); }}>{p.name}</Button>
             ))}
-          </ul>
+          </div>
           <ProjectForm onCreate={(b) => createProject.mutate(b)} />
-        </div>
+        </Panel>
 
         {projectId && (
-          <div style={card}>
-            <strong>Topics</strong>
-            <ul style={{ paddingLeft: 16 }}>
+          <Panel>
+            <SectionLabel>Topics</SectionLabel>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               {topics.data?.map((t) => (
-                <li key={t.id}>
-                  <button style={{ ...btn, background: t.id === topicId ? "#3a3a40" : "#26262b" }}
-                    onClick={() => { setTopicId(t.id); setSessionId(null); }}>{t.name}</button>
-                </li>
+                <Button key={t.id} variant={t.id === topicId ? "primary" : "default"} style={{ textAlign: "left" }}
+                  onClick={() => { setTopicId(t.id); setSessionId(null); }}>{t.name}</Button>
               ))}
-            </ul>
+            </div>
             <TopicForm onCreate={(b) => createTopic.mutate(b)} />
-          </div>
+          </Panel>
         )}
 
         {topicId && (
-          <div style={card}>
-            <strong>Sessions</strong>{" "}
-            <button style={btn} onClick={() => spawn.mutate(undefined)} disabled={spawn.isPending}>+ New (warm)</button>{" "}
-            <button style={btn} onClick={() => spawn.mutate("manager")} disabled={spawn.isPending}
-              title="Spawn as orchestrator: role=manager + worker-spawning MCP surface">+ Manager</button>
-            <ul style={{ paddingLeft: 0, listStyle: "none" }}>
-              {orderedSessions.map((s) => {
-                const isManager = s.role === "manager";
-                const canResume = s.processState === "exited" && s.resumability !== "dead";
-                return (
-                  <li key={s.id} style={{ marginBottom: 4, display: "flex", alignItems: "center", gap: 4 }}>
-                    <button style={{ ...btn, flex: 1, textAlign: "left",
-                      background: s.id === sessionId ? "#3a3a40" : "#26262b",
-                      borderColor: isManager ? "#9ad" : undefined, fontWeight: isManager ? 700 : 400 }}
-                      onClick={() => setSessionId(s.id)}>
-                      {isManager ? "★ " : ""}{s.id.slice(0, 8)} · {s.role ?? "session"} · {s.processState}
-                    </button>
-                    {canResume && <button style={btn} disabled={resume.isPending}
-                      title="Resume this session and attach its terminal"
-                      onClick={() => resume.mutate(s.id)}>Resume</button>}
-                    {s.resumability === "dead" && <span style={{ color: "#e88" }}>dead</span>}
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
+          <Panel>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <SectionLabel style={{ margin: 0, flex: 1 }}>Sessions</SectionLabel>
+              <Button onClick={() => spawn.mutate(undefined)} disabled={spawn.isPending}>+ New</Button>
+              <Button variant="primary" onClick={() => spawn.mutate("manager")} disabled={spawn.isPending}
+                title="Spawn as orchestrator: role=manager + worker-spawning MCP surface">+ Manager</Button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {orderedSessions.map((s) => (
+                <SessionRow key={s.id} s={s} selected={s.id === sessionId}
+                  onSelect={() => setSessionId(s.id)} onResume={() => resume.mutate(s.id)} resuming={resume.isPending} />
+              ))}
+            </div>
+          </Panel>
         )}
       </div>
 
-      <div style={{ ...card, height: "72vh", padding: 6, display: "flex", flexDirection: "column" }}>
+      <Panel style={{ height: "72vh", padding: 6, display: "flex", flexDirection: "column" }}>
         {sessionId ? (
           <>
-            <div style={{ marginBottom: 6 }}>
+            <div style={{ marginBottom: 6, display: "flex", gap: 6 }}>
               {(["terminal", "transcript"] as const).map((t) => (
-                <button key={t} style={{ ...btn, marginRight: 6, background: rightTab === t ? "#3a3a40" : "#26262b" }}
-                  onClick={() => setRightTab(t)}>{t === "terminal" ? "Terminal" : "Transcript"}</button>
+                <Button key={t} variant={rightTab === t ? "primary" : "default"} onClick={() => setRightTab(t)}>
+                  {t === "terminal" ? "Terminal" : "Transcript"}
+                </Button>
               ))}
             </div>
             <div style={{ flex: 1, minHeight: 0 }}>
@@ -122,8 +108,34 @@ export default function Workspace() {
           <TopicPresetEditor key={selectedTopic.id} topic={selectedTopic}
             onSave={(startupPrompt) => updateTopic.mutate({ id: selectedTopic.id, patch: { startupPrompt } })}
             saving={updateTopic.isPending} />
-        ) : <p style={{ color: "#777", padding: 12 }}>Select a topic to view/edit its startup prompt, or spawn a session to attach a live terminal.</p>}
-      </div>
+        ) : <p style={{ color: color.textMuted, padding: 12 }}>Select a topic to view/edit its startup prompt, or spawn a session to attach a live terminal.</p>}
+      </Panel>
+    </div>
+  );
+}
+
+function SessionRow({ s, selected, onSelect, onResume, resuming }:
+  { s: Session; selected: boolean; onSelect: () => void; onResume: () => void; resuming: boolean }) {
+  const isManager = s.role === "manager";
+  const canResume = s.processState === "exited" && s.resumability !== "dead";
+  const live = s.processState === "live";
+  const st = live
+    ? (s.busy ? { tone: "amber" as const, label: "busy", glow: true } : { tone: "phosphor" as const, label: "live" })
+    : { tone: "muted" as const, label: s.processState };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <Panel selected={selected} onClick={onSelect}
+        style={{ flex: 1, padding: "6px 8px", borderColor: isManager && !selected ? color.phosphor : undefined }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontFamily: font.mono, fontSize: 12, color: isManager ? color.phosphor : color.text, fontWeight: isManager ? 700 : 400 }}>
+            {isManager ? "★ " : ""}{s.id.slice(0, 8)} · {s.role ?? "session"}
+          </span>
+          <span style={{ flex: 1 }} />
+          <StatusPill tone={st.tone} label={st.label} glow={"glow" in st ? st.glow : undefined} />
+        </div>
+      </Panel>
+      {canResume && <Button disabled={resuming} title="Resume this session and attach its terminal" onClick={onResume}>Resume</Button>}
+      {s.resumability === "dead" && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>dead</span>}
     </div>
   );
 }
@@ -131,12 +143,12 @@ export default function Workspace() {
 function ProjectForm({ onCreate }: { onCreate: (b: { name: string; repoPath: string; vaultPath: string }) => void }) {
   const [name, setName] = useState(""), [repoPath, setRepo] = useState(""), [vaultPath, setVault] = useState("");
   return (
-    <div style={{ marginTop: 8 }}>
-      <input style={input} placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
-      <input style={input} placeholder="repo path" value={repoPath} onChange={(e) => setRepo(e.target.value)} />
-      <input style={input} placeholder="vault path" value={vaultPath} onChange={(e) => setVault(e.target.value)} />
-      <button style={btn} disabled={!name || !repoPath || !vaultPath}
-        onClick={() => { onCreate({ name, repoPath, vaultPath }); setName(""); setRepo(""); setVault(""); }}>Create</button>
+    <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+      <Input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
+      <Input placeholder="repo path" value={repoPath} onChange={(e) => setRepo(e.target.value)} />
+      <Input placeholder="vault path" value={vaultPath} onChange={(e) => setVault(e.target.value)} />
+      <Button variant="primary" disabled={!name || !repoPath || !vaultPath}
+        onClick={() => { onCreate({ name, repoPath, vaultPath }); setName(""); setRepo(""); setVault(""); }}>Create</Button>
     </div>
   );
 }
@@ -144,12 +156,13 @@ function ProjectForm({ onCreate }: { onCreate: (b: { name: string; repoPath: str
 function TopicForm({ onCreate }: { onCreate: (b: { name: string; startupPrompt: string }) => void }) {
   const [name, setName] = useState(""), [startupPrompt, setPrompt] = useState("");
   return (
-    <div style={{ marginTop: 8 }}>
-      <input style={input} placeholder="topic name" value={name} onChange={(e) => setName(e.target.value)} />
-      <textarea style={{ ...input, width: "100%", height: 64, fontFamily: "monospace", resize: "vertical" }}
+    <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+      <Input placeholder="topic name" value={name} onChange={(e) => setName(e.target.value)} />
+      <textarea
+        style={{ width: "100%", height: 64, boxSizing: "border-box", resize: "vertical", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: 8, fontFamily: font.mono, fontSize: 13 }}
         placeholder="startup prompt (injected as the first turn of each new session)"
         value={startupPrompt} onChange={(e) => setPrompt(e.target.value)} />
-      <button style={btn} disabled={!name} onClick={() => { onCreate({ name, startupPrompt }); setName(""); setPrompt(""); }}>Create</button>
+      <Button variant="primary" disabled={!name} onClick={() => { onCreate({ name, startupPrompt }); setName(""); setPrompt(""); }}>Create</Button>
     </div>
   );
 }
@@ -164,21 +177,20 @@ function TopicPresetEditor(
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", padding: 8 }}>
       <div style={{ marginBottom: 6 }}>
-        <strong>Startup prompt — {topic.name}</strong>
-        <span style={{ color: "#777", fontSize: 12 }}>{" "}· injected as the first turn of each new session in this topic</span>
+        <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>Startup prompt — {topic.name}</strong>
+        <span style={{ color: color.textMuted, fontSize: 12 }}>{" "}· injected as the first turn of each new session in this topic</span>
       </div>
-      <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)}
-        spellCheck={false}
+      <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} spellCheck={false}
         style={{
           flex: 1, minHeight: 0, width: "100%", boxSizing: "border-box", resize: "none",
-          fontFamily: "monospace", fontSize: 13, lineHeight: 1.5,
-          background: "#1b1b1f", color: "#ddd", border: "1px solid #333", borderRadius: 6, padding: 8,
+          fontFamily: font.mono, fontSize: 13, lineHeight: 1.5,
+          background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
         }} />
       <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
-        <button style={btn} disabled={!dirty || saving} onClick={() => onSave(prompt)}>{saving ? "Saving…" : "Save"}</button>
+        <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave(prompt)}>{saving ? "Saving…" : "Save"}</Button>
         {dirty
-          ? <button style={btn} onClick={() => setPrompt(topic.startupPrompt)}>Reset</button>
-          : <span style={{ color: "#6a6", fontSize: 12 }}>saved</span>}
+          ? <Button onClick={() => setPrompt(topic.startupPrompt)}>Reset</Button>
+          : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
       </div>
     </div>
   );
