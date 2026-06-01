@@ -1,28 +1,39 @@
-import { NavLink, Route, Routes } from "react-router-dom";
+import { Route, Routes } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import Workspace from "./pages/Workspace";
 import Terminals from "./pages/Terminals";
 import Vault from "./pages/Vault";
 import Git from "./pages/Git";
 import Board from "./pages/Board";
 import Orchestration from "./pages/Orchestration";
+import { NavTab, Badge } from "./components/ui";
+import { api } from "./lib/api";
+import { color, font } from "./theme";
 import { page } from "./ui";
 
-const navStyle = ({ isActive }: { isActive: boolean }) =>
-  ({ color: isActive ? "#9ad" : "#ccc", textDecoration: "none", marginRight: 16 });
+// Live global orchestration status (RUNNING / PAUSED), polled into the top bar.
+function GlobalStatus() {
+  const status = useQuery({ queryKey: ["orchStatus"], queryFn: api.orchestrationStatus, refetchInterval: 4000 });
+  if (!status.data) return null;
+  const globalPaused = status.data.pausedScopes.includes("global");
+  return <Badge tone={globalPaused ? "red" : "phosphor"}>{globalPaused ? "paused" : "running"}</Badge>;
+}
 
 export default function App() {
   return (
-    <div style={{ background: "#0b0b0c", minHeight: "100vh", fontFamily: "ui-sans-serif, system-ui" }}>
-      <header style={{ display: "flex", alignItems: "baseline", gap: 20, padding: "12px 20px", borderBottom: "1px solid #2a2a2e", color: "#e6e6e6" }}>
-        <strong style={{ color: "#fff" }}>Loom</strong>
-        <nav>
-          <NavLink to="/" style={navStyle} end>Workspace</NavLink>
-          <NavLink to="/terminals" style={navStyle}>Terminals</NavLink>
-          <NavLink to="/board" style={navStyle}>Board</NavLink>
-          <NavLink to="/orchestration" style={navStyle}>Orchestration</NavLink>
-          <NavLink to="/vault" style={navStyle}>Vault</NavLink>
-          <NavLink to="/git" style={navStyle}>Git</NavLink>
+    <div style={{ minHeight: "100vh" }}>
+      <header style={{ display: "flex", alignItems: "center", gap: 24, padding: "10px 20px", borderBottom: `1px solid ${color.border}` }}>
+        <strong style={{ fontFamily: font.head, letterSpacing: "0.18em", color: color.text, fontSize: 15 }}>LOOM</strong>
+        <nav style={{ display: "flex", gap: 18 }}>
+          <NavTab to="/" end>Workspace</NavTab>
+          <NavTab to="/terminals">Terminals</NavTab>
+          <NavTab to="/board">Board</NavTab>
+          <NavTab to="/orchestration">Orchestration</NavTab>
+          <NavTab to="/vault">Vault</NavTab>
+          <NavTab to="/git">Git</NavTab>
         </nav>
+        <span style={{ flex: 1 }} />
+        <GlobalStatus />
       </header>
       <main style={page}>
         <Routes>
