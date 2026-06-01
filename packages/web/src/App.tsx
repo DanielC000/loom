@@ -10,6 +10,7 @@ import Board from "./pages/Board";
 import Orchestration from "./pages/Orchestration";
 import ReviewPanel from "./pages/ReviewPanel";
 import { NavTab, Badge } from "./components/ui";
+import { CommandPalette } from "./components/CommandPalette";
 import { api } from "./lib/api";
 import { useAttention } from "./lib/attention";
 import { color, font } from "./theme";
@@ -56,6 +57,7 @@ function Bell() {
 export default function App() {
   return (
     <div style={{ minHeight: "100vh" }}>
+      <CommandPalette />
       <header style={{ display: "flex", alignItems: "center", gap: 24, padding: "10px 20px", borderBottom: `1px solid ${color.border}` }}>
         <strong style={{ fontFamily: font.head, letterSpacing: "0.18em", color: color.text, fontSize: 15 }}>LOOM</strong>
         <nav style={{ display: "flex", gap: 18 }}>
