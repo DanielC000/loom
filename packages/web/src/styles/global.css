@@ -1,0 +1,89 @@
+/* Loom "Terminal Cockpit" — global stylesheet.
+   Token values (the single source of truth) + base element styling.
+   Spec: packages/web/design/DESIGN.md. TS access: src/theme.ts. */
+
+/* Fonts. CDN for now; switching to self-hosted @fontsource is a local-first follow-up
+   (the app is loopback-only, so offline should not depend on a CDN). Fallbacks keep the
+   layout intact when the faces are unavailable. */
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+:root {
+  /* Surfaces */
+  --loom-bg: #0a0b0c;
+  --loom-panel: #101316;
+  --loom-panel-2: #0d0f11;
+  --loom-border: #1e2329;
+  --loom-border-strong: #2a323a;
+
+  /* Signal */
+  --loom-phosphor: #2ee66e;
+  --loom-phosphor-dim: rgba(46, 230, 110, 0.15);
+  --loom-amber: #ffb23e;
+  --loom-cyan: #5bc8ff;
+  --loom-red: #ff5c5c;
+
+  /* Text */
+  --loom-text: #e6eaed;
+  --loom-text-dim: #8a929b;
+  --loom-text-muted: #5a636c;
+
+  /* Type */
+  --loom-font-head: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --loom-font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  /* Shape */
+  --loom-radius: 4px;
+  --loom-radius-sm: 2px;
+
+  /* Faint grid texture */
+  --loom-grid-line: rgba(255, 255, 255, 0.02);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--loom-bg);
+  color: var(--loom-text);
+  font-family: var(--loom-font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--loom-phosphor-dim);
+}
+
+/* Scrollbars — thin, instrument-grade, square */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--loom-border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--loom-border-strong);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Utility: faint 32px grid backdrop for dense panels (apply class="loom-grid"). */
+.loom-grid {
+  background-image:
+    linear-gradient(var(--loom-grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--loom-grid-line) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
