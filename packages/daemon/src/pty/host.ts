@@ -20,6 +20,14 @@ const RING_CAP_BYTES = 256 * 1024;
  */
 const SUBMIT_ENTER_DELAY_MS = 150;
 
+/**
+ * A single large `pty.write` is truncated by Windows ConPTY's input buffer — observed as long
+ * worker reports and pastes arriving cut off in the receiving session. Split big writes into
+ * paced chunks so the console host drains between them. Keystroke-sized writes take one chunk.
+ */
+const PTY_WRITE_CHUNK_BYTES = 1024;
+const PTY_WRITE_CHUNK_DELAY_MS = 8;
+
 /** Shift+Tab (CSI Z / back-tab) — Claude's TUI cycles the permission mode on this key. */
 const SHIFT_TAB = "\x1b[Z";
 /** Settle window after SessionStart before sending the first mode-cycle keystroke (let the TUI's input attach). */
@@ -284,8 +292,11 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
     live.lastPrompt = text; // remember the in-flight turn so a usage-cap kill is recoverable (§19c-b)
-    live.pty.write(text);
-    setTimeout(() => { const l = this.live.get(sessionId); if (l?.alive) l.pty.write("\r"); }, SUBMIT_ENTER_DELAY_MS);
+    // Chunk the write — a long turn (e.g. a worker report) sent as one pty.write is truncated by
+    // ConPTY. Send the Enter only AFTER the last chunk lands, else it submits a partial turn.
+    this.writeChunked(sessionId, text, () => {
+      setTimeout(() => { const l = this.live.get(sessionId); if (l?.alive) l.pty.write("\r"); }, SUBMIT_ENTER_DELAY_MS);
+    });
     this.setBusy(sessionId, true);
   }
 
@@ -340,8 +351,29 @@ export class PtyHost {
   }
 
   writeStdin(sessionId: string, data: string): void {
+    this.writeChunked(sessionId, data);
+  }
+
+  /**
+   * Write `text` to the pty in paced chunks. One big `pty.write` is truncated by Windows ConPTY's
+   * input buffer (long worker reports / pastes arrived cut off), so split large writes and let the
+   * console host drain between them. Keystroke-sized writes go in a single chunk; `done` fires
+   * after the last chunk (submit() uses it to send Enter only once the whole turn has landed).
+   */
+  private writeChunked(sessionId: string, text: string, done?: () => void): void {
     const live = this.live.get(sessionId);
-    if (live?.alive) live.pty.write(data);
+    if (!live?.alive) return;
+    if (text.length === 0) { done?.(); return; }
+    let i = 0;
+    const step = (): void => {
+      const l = this.live.get(sessionId);
+      if (!l?.alive) return;
+      l.pty.write(text.slice(i, i + PTY_WRITE_CHUNK_BYTES));
+      i += PTY_WRITE_CHUNK_BYTES;
+      if (i >= text.length) { done?.(); return; }
+      setTimeout(step, PTY_WRITE_CHUNK_DELAY_MS);
+    };
+    step();
   }
 
   repaint(sessionId: string): void {
