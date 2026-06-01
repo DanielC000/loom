@@ -163,7 +163,11 @@ export class SessionService {
       role: session.role ?? undefined,
     });
     this.db.setProcessState(session.id, "live");
-    return { ...session, processState: "live" };
+    // A freshly-resumed session has no turn in flight (resume injects no prompt) — clear any stale
+    // busy=true carried in the DB across the restart. Without this the session shows/acts "busy"
+    // forever, so enqueued worker reports queue instead of submitting and the idle guard can't fire.
+    this.db.setBusy(session.id, false);
+    return { ...session, processState: "live", busy: false };
   }
 
   /**
