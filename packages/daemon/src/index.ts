@@ -33,7 +33,10 @@ async function main(): Promise<void> {
   // onExit references orchMcp (declared below) — only invoked at runtime, after init.
   const pty = new PtyHost({
     onEngineSessionId: (sessionId, engineId) => db.setEngineSessionId(sessionId, engineId),
-    onBusy: (sessionId, busy) => db.setBusy(sessionId, busy),
+    // Persist busy, and on the falling edge nudge the manager if a worker went idle without
+    // reporting (stranded-worker guard; no-op for non-workers). `sessions` is assigned below but
+    // this closure only runs at runtime — same forward-reference pattern as onExit→orchMcp.
+    onBusy: (sessionId, busy) => { db.setBusy(sessionId, busy); if (!busy) sessions.notifyManagerOfIdleWorker(sessionId); },
     onContextStats: (sessionId, s) => db.setContextCounters(sessionId, { ctxInputTokens: s.inputTokens, ctxTurns: s.turns }),
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so

@@ -340,6 +340,10 @@ export class Db {
     return this.db.prepare("SELECT * FROM tasks WHERE project_id = ? ORDER BY column_key, position")
       .all(projectId).map(toTask);
   }
+  getTask(id: string): Task | undefined {
+    const r = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
+    return r ? toTask(r) : undefined;
+  }
   insertTask(t: Task): void {
     this.db.prepare(
       `INSERT INTO tasks (id,project_id,title,body,column_key,position,created_at,updated_at)

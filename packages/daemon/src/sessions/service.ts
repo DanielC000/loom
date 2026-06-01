@@ -315,6 +315,23 @@ export class SessionService {
   }
 
   /**
+   * Stranded-worker guard. A worker only reaches its manager via worker_report's push; a worker
+   * that ends its turn WITHOUT reporting goes idle silently and the manager — which has no
+   * idle/exit signal for its children — waits forever. Called on every session's busy->false edge:
+   * if this is a worker still sitting in `in_progress` (worker_report would have moved it to
+   * review/waiting), push a [loom:worker-idle] nudge to its manager via the same enqueue channel.
+   * No-op for non-workers, parentless sessions, or workers that already reported/merged.
+   */
+  notifyManagerOfIdleWorker(workerSessionId: string): void {
+    const w = this.db.getSession(workerSessionId);
+    if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return;
+    const task = this.db.getTask(w.taskId);
+    if (!task || task.columnKey !== "in_progress") return; // reported done/blocked, or already merged
+    const msg = `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review, or worker_message it.`;
+    try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
+  }
+
+  /**
    * Recycle a worker whose context has grown too large (phase-2 §A4). Close the old worker and
    * spawn a FRESH one in the SAME retained worktree, seeded with the manager-supplied handoff:
    * the worktree carries CODE state forward, the handoff carries INTENT — and we spawn fresh
