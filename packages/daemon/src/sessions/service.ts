@@ -157,6 +157,10 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       resumeId: session.engineSessionId,
+      // Carry the role across resume so a manager/worker/platform session is re-spawned WITH its
+      // role-gated MCP surface (loom-orchestration / loom-platform) + allowlist. Without this a
+      // resumed manager loses worker_spawn/merge/etc. and a worker loses worker_report.
+      role: session.role ?? undefined,
     });
     this.db.setProcessState(session.id, "live");
     return { ...session, processState: "live" };
