@@ -7,6 +7,7 @@ import Vault from "./pages/Vault";
 import Git from "./pages/Git";
 import Board from "./pages/Board";
 import Orchestration from "./pages/Orchestration";
+import ReviewPanel from "./pages/ReviewPanel";
 import { NavTab, Badge } from "./components/ui";
 import { api } from "./lib/api";
 import { color, font } from "./theme";
@@ -44,6 +45,7 @@ export default function App() {
           <Route path="/terminals" element={<Terminals />} />
           <Route path="/board" element={<Board />} />
           <Route path="/orchestration" element={<Orchestration />} />
+          <Route path="/review/:workerId" element={<ReviewPanel />} />
           <Route path="/vault" element={<Vault />} />
           <Route path="/git" element={<Git />} />
         </Routes>

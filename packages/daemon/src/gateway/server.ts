@@ -272,6 +272,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (typeof text !== "string" || !text.trim()) return reply.code(400).send({ error: "text required" });
     return reply.send(deps.pty.enqueueStdin(id, text));
   });
+  // Human-initiated merge of a worker's branch (the Review panel / #18c). Runs the daemon's
+  // fail-closed build gate then merges --no-ff; manager is derived from the worker's parent so the
+  // existing ownership check holds. Returns { merged } or { merged:false, reason }.
+  app.post("/api/sessions/:id/merge", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const worker = deps.db.getSession(id);
+    if (!worker) return reply.code(404).send({ error: "session not found" });
+    if (!worker.parentSessionId) return reply.code(400).send({ error: "not a worker (no manager)" });
+    try {
+      return reply.send(await deps.sessions.confirmWorkerMerge(worker.parentSessionId, id));
+    } catch (e) {
+      return reply.code(400).send({ error: (e as Error).message });
+    }
+  });
 
   // --- Live terminal: attach/detach (binary pty bytes + JSON control) ---
   app.get("/ws/term/:sessionId", { websocket: true }, (socket: WebSocket, req) => {

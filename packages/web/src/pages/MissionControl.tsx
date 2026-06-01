@@ -94,7 +94,7 @@ export default function MissionControl() {
         {pendingMerges.map((e) => (
           <AttentionRow key={`m-${e.id}`} tone="phosphor" kind="MERGE REQUEST"
             text={`${e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)} ` : ""}${e.taskId ? `task ${e.taskId.slice(0, 8)} ` : ""}— awaiting review`}
-            onOpen={() => navigate("/orchestration")} />
+            onOpen={e.workerSessionId ? () => navigate(`/review/${e.workerSessionId}`) : undefined} />
         ))}
         {rateLimited.map((s) => (
           <AttentionRow key={`r-${s.id}`} tone="red" kind="RATE-LIMITED"

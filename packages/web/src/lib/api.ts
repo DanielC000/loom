@@ -56,6 +56,9 @@ export const api = {
   orchestrationEvents: (managerId: string) =>
     get<OrchestrationEvent[]>(`/api/orchestration/events?managerId=${encodeURIComponent(managerId)}`),
   workerDiff: (sessionId: string) => get<BranchDiff>(`/api/sessions/${sessionId}/diff`),
+  // Human-initiated merge of a worker's branch — runs the daemon's fail-closed build gate then
+  // merges (manager derived from the worker's parentSessionId server-side).
+  mergeWorker: (sessionId: string) => post<{ merged: boolean; reason?: string }>(`/api/sessions/${sessionId}/merge`),
   orchestrationStatus: () => get<{ pausedScopes: string[] }>("/api/orchestration/status"),
   pauseOrchestration: (scope?: string) =>
     post<{ ok: boolean; pausedScopes: string[] }>("/api/orchestration/pause", scope ? { scope } : {}),

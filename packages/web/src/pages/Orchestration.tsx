@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "../lib/api";
 import { Panel, Button, Select, SectionLabel, Badge, StatusPill, Chip, Meter } from "../components/ui";
+import { DiffView } from "../components/Diff";
 import { color, font } from "../theme";
 
 // Orchestration viewport (#18b): SEE the spine that the MCP manager drives. A live fleet view of
@@ -141,22 +142,5 @@ function EventRow({ e }: { e: OrchestrationEvent }) {
         {detail && <span style={{ color: color.textMuted }}>{detail}</span>}
       </span>
     </div>
-  );
-}
-
-// Unified diff with green additions / red deletions / cyan hunk headers.
-function DiffView({ patch }: { patch: string }) {
-  const lines = patch.split("\n");
-  return (
-    <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: 12, lineHeight: 1.5 }}>
-      {lines.map((ln, i) => {
-        let c: string = color.textDim;
-        if (ln.startsWith("@@")) c = color.cyan;
-        else if (ln.startsWith("+++") || ln.startsWith("---") || ln.startsWith("diff ") || ln.startsWith("index ")) c = color.textMuted;
-        else if (ln.startsWith("+")) c = color.phosphor;
-        else if (ln.startsWith("-")) c = color.red;
-        return <div key={i} style={{ color: c }}>{ln || " "}</div>;
-      })}
-    </pre>
   );
 }
