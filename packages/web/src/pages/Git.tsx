@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { card } from "../ui";
+import { Panel, SectionLabel, Dot } from "../components/ui";
+import { color, font } from "../theme";
 import { ProjectSelect } from "./Vault";
 
 // Read-only git view: branches + commit log (§: no commit/checkout/push from the UI in phase 1).
@@ -16,30 +17,33 @@ export default function Git() {
       <ProjectSelect value={projectId} onChange={setProjectId} projects={projects.data ?? []} />
       {projectId && (
         <>
-          <div style={{ ...card, marginTop: 12 }}>
-            <strong>Branches</strong>
-            <div style={{ marginTop: 6 }}>
-              {branches.data?.all.map((b) => (
-                <span key={b} style={{ marginRight: 10, color: b === branches.data?.current ? "#9ad" : "#ccc" }}>
-                  {b === branches.data?.current ? "● " : ""}{b}
-                </span>
-              ))}
+          <Panel style={{ marginTop: 12 }}>
+            <SectionLabel>Branches</SectionLabel>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+              {branches.data?.all.map((b) => {
+                const current = b === branches.data?.current;
+                return (
+                  <span key={b} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 12, color: current ? color.phosphor : color.textDim }}>
+                    {current && <Dot tone="phosphor" glow />}{b}
+                  </span>
+                );
+              })}
             </div>
-          </div>
-          <div style={{ ...card, maxHeight: "60vh", overflow: "auto" }}>
-            <strong>Commits</strong>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginTop: 6 }}>
+          </Panel>
+          <Panel style={{ maxHeight: "60vh", overflow: "auto" }}>
+            <SectionLabel>Commits</SectionLabel>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font.mono, fontSize: 13 }}>
               <tbody>
                 {log.data?.map((c) => (
-                  <tr key={c.hash} style={{ borderTop: "1px solid #222" }}>
-                    <td style={{ color: "#888", fontFamily: "monospace", padding: "3px 8px 3px 0" }}>{c.hash.slice(0, 7)}</td>
-                    <td style={{ padding: "3px 8px 3px 0" }}>{c.message}</td>
-                    <td style={{ color: "#888", padding: "3px 0" }}>{c.author}</td>
+                  <tr key={c.hash} style={{ borderTop: `1px solid ${color.border}` }}>
+                    <td style={{ color: color.cyan, padding: "3px 8px 3px 0", whiteSpace: "nowrap" }}>{c.hash.slice(0, 7)}</td>
+                    <td style={{ color: color.text, padding: "3px 8px 3px 0" }}>{c.message}</td>
+                    <td style={{ color: color.textMuted, padding: "3px 0", whiteSpace: "nowrap" }}>{c.author}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>
+          </Panel>
         </>
       )}
     </div>
