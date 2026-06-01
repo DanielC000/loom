@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Topic, Session } from "@loom/shared";
 import { api } from "../lib/api";
@@ -11,10 +11,13 @@ import { color, font } from "../theme";
 // Per-project working view: create project/topic, spawn or resume sessions, attach a terminal.
 export default function Workspace() {
   const qc = useQueryClient();
-  const [projectId, setProjectId] = useState<string | null>(null);
-  const [topicId, setTopicId] = useState<string | null>(null);
+  // Restore the last project/topic across reloads (session is ephemeral).
+  const [projectId, setProjectId] = useState<string | null>(() => localStorage.getItem("loom.projectId"));
+  const [topicId, setTopicId] = useState<string | null>(() => localStorage.getItem("loom.topicId"));
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [rightTab, setRightTab] = useState<"terminal" | "transcript">("terminal");
+  useEffect(() => { projectId ? localStorage.setItem("loom.projectId", projectId) : localStorage.removeItem("loom.projectId"); }, [projectId]);
+  useEffect(() => { topicId ? localStorage.setItem("loom.topicId", topicId) : localStorage.removeItem("loom.topicId"); }, [topicId]);
 
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const topics = useQuery({ queryKey: ["topics", projectId], queryFn: () => api.topics(projectId!), enabled: !!projectId });

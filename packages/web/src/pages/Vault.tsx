@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import Markdown from "../components/Markdown";
 import { Panel, Select } from "../components/ui";
@@ -12,7 +12,7 @@ export default function Vault() {
 
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const tree = useQuery({ queryKey: ["vault", projectId], queryFn: () => api.vaultTree(projectId), enabled: !!projectId });
-  const content = useQuery({ queryKey: ["vaultFile", projectId, file], queryFn: () => api.vaultFile(projectId, file), enabled: !!projectId && !!file });
+  const content = useQuery({ queryKey: ["vaultFile", projectId, file], queryFn: () => api.vaultFile(projectId, file), enabled: !!projectId && !!file, placeholderData: keepPreviousData });
 
   return (
     <div>

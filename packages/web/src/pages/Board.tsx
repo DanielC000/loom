@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
 import type { Task, KanbanColumn } from "@loom/shared";
 import { api } from "../lib/api";
@@ -13,7 +13,7 @@ export default function Board() {
   const qc = useQueryClient();
   const [projectId, setProjectId] = useState<string>("");
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
-  const board = useQuery({ queryKey: ["board", projectId], queryFn: () => api.board(projectId), enabled: !!projectId });
+  const board = useQuery({ queryKey: ["board", projectId], queryFn: () => api.board(projectId), enabled: !!projectId, placeholderData: keepPreviousData });
 
   const move = useMutation({
     mutationFn: ({ id, columnKey }: { id: string; columnKey: string }) => api.updateTask(id, { columnKey }),
