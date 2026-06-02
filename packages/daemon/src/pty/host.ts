@@ -6,6 +6,7 @@ import type { TerminalControl, StopMode } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
 import { writeSessionSettings } from "./claude-settings.js";
 import { ensureTrusted } from "./claude-config.js";
+import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { detectUsageLimit, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { PORT, LOGS_DIR } from "../paths.js";
@@ -54,6 +55,10 @@ const HUMAN_TYPING_GRACE_MS = 6_000;
 
 /** Shift+Tab (CSI Z / back-tab) — Claude's TUI cycles the permission mode on this key. */
 const SHIFT_TAB = "\x1b[Z";
+const ESC_KEY = "\x1b";
+/** Strip CSI sequences so the boot-output scan matches the MCP prompt's words across TUI styling. */
+const ANSI_CSI = new RegExp(ESC_KEY + "\\[[0-9;?]*[ -/]*[@-~]", "g");
+const collapseBoot = (s: string): string => s.replace(ANSI_CSI, "").replace(/\s+/g, "");
 /** Settle window after SessionStart before sending the first mode-cycle keystroke (let the TUI's input attach). */
 const MODE_CYCLE_SETTLE_MS = 700;
 /** Gap between successive Shift+Tab presses so each cycle registers as a distinct key event. */
@@ -82,6 +87,8 @@ interface Live {
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
   startupModeCycles: number; // Shift+Tab presses to inject once, after SessionStart, to reach the target mode
   startupCyclesDone: boolean; // guard so the cycle-inject fires at most once per session
+  mcpPromptHandled: boolean;  // guard: dismiss the plugin-MCP enable-prompt with Esc at most once per session
+  bootScan: string;           // bounded rolling buffer of early boot output, scanned for that prompt
 }
 
 export interface SpawnOpts {
@@ -166,6 +173,9 @@ export class PtyHost {
   spawn(opts: SpawnOpts): void {
     const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
     ensureTrusted(opts.cwd); // pre-accept the workspace-trust dialog so warmup never blocks
+    // Mirror Loom's managed skills into <cwd>/.claude/skills (project-local; shadow personal). Never
+    // let a skills hiccup block a spawn — a session must boot even if skill delivery fails.
+    try { injectSkills(opts.cwd); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
     // Both managers AND workers get the orchestration MCP — but a role-gated surface: managers
     // get the full coordination tools, workers get only worker_report (resolved server-side). A
     // platform-lead instead gets the loom-platform MCP (project/topic creation, Pillar C). acceptEdits
@@ -229,12 +239,29 @@ export class PtyHost {
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
+      mcpPromptHandled: false,
+      bootScan: "",
     };
     this.live.set(opts.sessionId, live);
 
     pty.onData((d) => {
       const buf = Buffer.from(d, "utf-8");
       live.lastOutputAt = Date.now(); // engine is producing → not stuck (feeds the BUSY_STALE_MS heal)
+      // The official-marketplace plugins surface a per-project "enable docker/sentry MCP?" prompt that
+      // blocks the unattended boot BEFORE SessionStart, and is NOT config-suppressible (validated). Scan
+      // early boot output and dismiss it once with Esc ("reject all") — Loom sessions get ONLY their
+      // injected --mcp-config servers, never the user's personal plugin MCP. Bounded rolling scan.
+      if (!live.mcpPromptHandled) {
+        live.bootScan = (live.bootScan + d).slice(-8192);
+        const flat = collapseBoot(live.bootScan);
+        if (/MCPserver/i.test(flat) && /rejectall/i.test(flat)) {
+          live.mcpPromptHandled = true;
+          live.bootScan = "";
+          // eslint-disable-next-line no-console
+          console.log(`[pty] ${opts.sessionId} dismissing plugin-MCP enable-prompt (Esc = reject all)`);
+          setTimeout(() => { if (live.alive) live.pty.write(ESC_KEY); }, 300);
+        }
+      }
       this.appendRing(live, buf);
       live.logStream.write(buf);
       for (const s of live.subscribers) { try { s.onData(buf); } catch { /* ignore */ } }
@@ -267,6 +294,8 @@ export class PtyHost {
     console.log(`[hook] ${sessionId} ${hook.hook_event_name ?? "?"} session_id=${hook.session_id ?? "-"}`);
     switch (hook.hook_event_name) {
       case "SessionStart":
+        // SessionStart only fires once boot is past the (now-dismissed) MCP prompt — stop scanning.
+        live.mcpPromptHandled = true; live.bootScan = "";
         // Capture the engine session id once (unchanged from phase 1).
         if (typeof hook.session_id === "string" && !live.engineSessionId) {
           live.engineSessionId = hook.session_id;

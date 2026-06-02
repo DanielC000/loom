@@ -1,4 +1,4 @@
-import type { Project, Topic, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake } from "@loom/shared";
+import type { Project, Topic, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; }
@@ -22,6 +22,11 @@ async function post<T>(url: string, body?: unknown): Promise<T> {
 }
 async function del<T>(url: string): Promise<T> {
   const r = await fetch(url, { method: "DELETE" });
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return r.json() as Promise<T>;
+}
+async function put<T>(url: string, body: unknown): Promise<T> {
+  const r = await fetch(url, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
   return r.json() as Promise<T>;
 }
@@ -80,4 +85,11 @@ export const api = {
   resumeOrchestration: (scope?: string) =>
     post<{ ok: boolean; pausedScopes: string[] }>("/api/orchestration/resume", scope ? { scope } : {}),
   killOrchestration: () => post<{ stopped: number }>("/api/orchestration/kill"),
+
+  // --- Loom-managed skills (UI-editable; injected into every session as project-local) ---
+  skills: () => get<SkillSummary[]>("/api/skills"),
+  skill: (name: string) => get<{ name: string; content: string }>(`/api/skills/${encodeURIComponent(name)}`),
+  saveSkill: (name: string, content: string) => put<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}`, { content }),
+  createSkill: (name: string) => post<{ name: string }>("/api/skills", { name }),
+  deleteSkill: (name: string) => del<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}`),
 };

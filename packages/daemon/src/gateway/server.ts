@@ -17,6 +17,7 @@ import type { OrchestrationControl } from "../orchestration/control.js";
 import { GitReader } from "../git/reader.js";
 import { diffBranch } from "../git/worktrees.js";
 import { listVaultTree, readVaultFile } from "../vault/browser.js";
+import { listSkills, readSkill, writeSkill, deleteSkill, isValidSkillName, skillTemplate } from "../skills/store.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -120,6 +121,35 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
 
   // --- REST: read ---
   app.get("/api/projects", async () => deps.db.listProjects());
+
+  // --- Loom-managed skills (the UI-editable skill store; delivered to sessions project-local) ---
+  app.get("/api/skills", async () => listSkills());
+  app.get("/api/skills/:name", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    const s = readSkill(name);
+    if (!s) return reply.code(404).send({ error: "skill not found" });
+    return s;
+  });
+  app.post("/api/skills", async (req, reply) => {
+    const b = (req.body ?? {}) as { name?: string; content?: string };
+    if (!b.name || !isValidSkillName(b.name)) return reply.code(400).send({ error: "invalid skill name (kebab-case: a-z, 0-9, -)" });
+    if (readSkill(b.name)) return reply.code(409).send({ error: "skill already exists" });
+    writeSkill(b.name, b.content ?? skillTemplate(b.name));
+    return reply.code(201).send({ name: b.name });
+  });
+  app.put("/api/skills/:name", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    const b = (req.body ?? {}) as { content?: string };
+    if (typeof b.content !== "string") return reply.code(400).send({ error: "content required" });
+    if (!writeSkill(name, b.content)) return reply.code(400).send({ error: "invalid skill name" });
+    return { ok: true };
+  });
+  app.delete("/api/skills/:name", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
+    deleteSkill(name);
+    return { ok: true };
+  });
   app.get("/api/projects/:id/topics", async (req) =>
     deps.db.listTopics((req.params as { id: string }).id));
   app.get("/api/projects/:id/tasks", async (req) =>

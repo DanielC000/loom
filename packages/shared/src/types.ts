@@ -153,6 +153,17 @@ export interface Wake {
   createdAt: string;
 }
 
+/**
+ * A Loom-managed skill (a SKILL.md playbook in the Loom skill store, ~/.loom/skills/<name>). These
+ * are delivered to every session as project-local skills (shadowing the user's personal ones) and
+ * are editable in the UI. `bundled` = a same-named skill ships with Loom (so the UI can offer reset).
+ */
+export interface SkillSummary {
+  name: string;
+  description: string;
+  bundled: boolean;
+}
+
 // --- Context-window sizing -------------------------------------------------------------------
 /** Fallback window for an unknown / not-yet-measured model — the classic Claude context size. */
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
