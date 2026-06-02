@@ -171,6 +171,65 @@ export class SessionService {
   }
 
   /**
+   * Fork an IDLE session: spawn a NEW Loom session that resumes the source's engine conversation
+   * with --fork-session (a FRESH engine id), so it inherits the full context but then diverges
+   * independently — the source's transcript is left untouched. Same cwd + role (so a forked manager
+   * keeps its orchestration surface); orchestration lineage (parent/task/worktree) is NOT carried —
+   * a fork is a conversation branch, not a worker. engineSessionId starts null: the fork's NEW id is
+   * captured on its own SessionStart (same as a brand-new session). Idle-only: forking a busy session
+   * could branch a half-written turn.
+   */
+  forkSession(sourceId: string): Session {
+    const src = this.db.getSession(sourceId);
+    if (!src) throw new Error("session not found");
+    if (!src.engineSessionId) throw new Error("session has no engine context to fork (it never started)");
+    if (src.busy) throw new Error("cannot fork a busy session — wait until it's idle");
+    // The fork reads the source's transcript; if it's gone there's nothing to branch from.
+    if (!engineTranscriptExists(src.cwd, src.engineSessionId)) {
+      throw new Error("source conversation transcript is missing — nothing to fork");
+    }
+    const project = this.db.getProject(src.projectId);
+    if (!project) throw new Error("project not found");
+    const config = resolveConfig(project.config);
+
+    // Pre-assign the fork's engine id (--session-id) and persist it up front. --fork-session mints
+    // the new id lazily (on the fork's first turn), so the SessionStart hook would report the SOURCE
+    // id — capturing it would be wrong. Assigning the id ourselves makes the fork's transcript known.
+    const forkEngineId = randomUUID();
+    const now = new Date().toISOString();
+    const session: Session = {
+      id: randomUUID(),
+      projectId: src.projectId,
+      topicId: src.topicId,
+      engineSessionId: forkEngineId, // the fork's own (new) engine transcript id
+      title: null,
+      cwd: src.cwd, // fork in the same workspace as the source
+      processState: "starting",
+      resumability: "unknown",
+      busy: false,
+      createdAt: now,
+      lastActivity: now,
+      lastError: null,
+      role: src.role ?? undefined, // a forked manager stays a manager (keeps its MCP surface)
+    };
+    this.db.insertSession(session);
+    this.pty.spawn({
+      sessionId: session.id,
+      cwd: session.cwd,
+      permission: config.permission,
+      geometry: config.pty,
+      sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      resumeId: src.engineSessionId, // resume the SOURCE conversation...
+      fork: true,                    // ...but fork it (--fork-session)...
+      forkSessionId: forkEngineId,   // ...into this pre-assigned id (--session-id).
+      role: src.role ?? undefined,
+    });
+    this.db.setProcessState(session.id, "live");
+    return { ...session, processState: "live" };
+  }
+
+  /**
    * Spawn a WORKER for a manager (phase-2 §A2/§A5): create an isolated git worktree+branch,
    * start a real worker `claude` in it (the existing spawn path — workers get loom-tasks scoped
    * to their own session→project, NOT the orchestration surface), and move the task to

@@ -11,6 +11,7 @@ import { PlatformMcpRouter } from "./mcp/platform.js";
 import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
 import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
+import { WakeService } from "./orchestration/wake.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "./orchestration/usage-limit.js";
 import { buildServer } from "./gateway/server.js";
@@ -26,8 +27,6 @@ async function main(): Promise<void> {
   if (dead > 0) console.log(`[boot] marked ${dead} session(s) dead (engine transcript gone)`);
   // Keep dead-ID state fresh as Claude's transcripts come and go.
   watchClaudeProjects(db, (n) => console.log(`[watch] marked ${n} session(s) dead`));
-
-  const mcp = new TaskMcpRouter(db);
 
   // PtyHost callbacks persist runtime state into the registry (engine id on receipt; exit).
   // onExit references orchMcp (declared below) — only invoked at runtime, after init.
@@ -52,6 +51,13 @@ async function main(): Promise<void> {
 
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design
   const sessions = new SessionService(db, pty, control);
+  // WakeService (the `wake_me` primitive) needs SessionService.resume (auto-resume on fire), so it
+  // comes after sessions. Always on — recovery/continuation, not autonomy-gated (like the rate-limit
+  // watcher). LOOM_WAKE_INTERVAL_MS tunes the tick for tests (default 60s).
+  const wakeIntervalMs = Number(process.env.LOOM_WAKE_INTERVAL_MS) || 60_000;
+  const wakes = new WakeService({ db, pty, resume: (id) => sessions.resume(id), intervalMs: wakeIntervalMs });
+  // The task MCP hosts the universal wake tools, so it takes the WakeService.
+  const mcp = new TaskMcpRouter(db, wakes);
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after.
   const orchMcp = new OrchestrationMcpRouter(db, sessions);
   // Platform MCP (Pillar C) only needs the registry (project/topic creation + config).
@@ -86,8 +92,12 @@ async function main(): Promise<void> {
   rateLimitWatcher.start();
   console.log(`[boot] usage-limit resume watcher on (tick ${watchIntervalMs}ms)`);
 
+  // The self-scheduled wake-up ticker (always on; reconciles past-due wakes fire-once on start()).
+  wakes.start();
+  console.log(`[boot] wake-up ticker on (tick ${wakeIntervalMs}ms)`);
+
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); process.exit(0); });
+    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); wakes.stop(); process.exit(0); });
   }
 }
 

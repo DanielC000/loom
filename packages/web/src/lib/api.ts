@@ -1,4 +1,4 @@
-import type { Project, Topic, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent } from "@loom/shared";
+import type { Project, Topic, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; }
@@ -9,11 +9,19 @@ async function get<T>(url: string): Promise<T> {
   return r.json() as Promise<T>;
 }
 async function post<T>(url: string, body?: unknown): Promise<T> {
+  // Only declare a JSON content-type when we actually send a body — Fastify's JSON parser rejects an
+  // EMPTY body under content-type: application/json with 400 FST_ERR_CTP_EMPTY_JSON_BODY, which would
+  // silently fail every no-body POST (resumeSession, no-role startSession). No body → no header.
   const r = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
+    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return r.json() as Promise<T>;
+}
+async function del<T>(url: string): Promise<T> {
+  const r = await fetch(url, { method: "DELETE" });
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
   return r.json() as Promise<T>;
 }
@@ -34,6 +42,7 @@ export const api = {
   startSession: (topicId: string, role?: "manager") =>
     post<Session>(`/api/topics/${topicId}/sessions`, role ? { role } : undefined),
   resumeSession: (id: string) => post<Session>(`/api/sessions/${id}/resume`),
+  forkSession: (id: string) => post<Session>(`/api/sessions/${id}/fork`),
   sendInput: (id: string, text: string) =>
     post<{ delivered: boolean; position?: number }>(`/api/sessions/${id}/input`, { text }),
   stopSession: (id: string, mode: "graceful" | "hard") =>
@@ -51,6 +60,10 @@ export const api = {
   updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position">>) =>
     post<{ ok: boolean }>(`/api/tasks/${id}`, patch),
   transcript: (sessionId: string) => get<TranscriptTurn[]>(`/api/sessions/${sessionId}/transcript`),
+  // Pending one-shot wake-ups scheduled for a session (the wake_me primitive).
+  sessionWakes: (sessionId: string) => get<Wake[]>(`/api/sessions/${sessionId}/wakes`),
+  cancelWake: (sessionId: string, wakeId: string) =>
+    del<{ cancelled: boolean }>(`/api/sessions/${sessionId}/wakes/${wakeId}`),
 
   // --- phase-2 orchestration (#18b view) ---
   orchestrationEvents: (managerId: string) =>

@@ -256,6 +256,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.post("/api/sessions/:id/resume", async (req) =>
     deps.sessions.resume((req.params as { id: string }).id));
+  app.post("/api/sessions/:id/fork", async (req) =>
+    deps.sessions.forkSession((req.params as { id: string }).id));
+  // Pending one-shot wake-ups scheduled for a session (the wake_me primitive) — read-only.
+  app.get("/api/sessions/:id/wakes", async (req) =>
+    deps.db.listWakesForSession((req.params as { id: string }).id));
+  // Cancel one of a session's pending wakes (scoped: the wake must belong to that session).
+  app.delete("/api/sessions/:id/wakes/:wakeId", async (req, reply) => {
+    const { id, wakeId } = req.params as { id: string; wakeId: string };
+    const w = deps.db.getWake(wakeId);
+    if (!w || w.sessionId !== id) return reply.code(404).send({ error: "wake not found for this session" });
+    deps.db.deleteWake(wakeId);
+    return reply.send({ cancelled: true });
+  });
   app.post("/api/sessions/:id/stop", async (req, reply) => {
     const { id } = req.params as { id: string };
     const { mode } = (req.body as { mode?: "graceful" | "hard" }) ?? {};

@@ -86,7 +86,8 @@ export interface Session {
 export type OrchestrationEventKind =
   | "spawn_worker" | "message_worker" | "worker_report" | "stop_worker"
   | "recycle_begin" | "recycle_complete" | "merge_request" | "merge_done"
-  | "merge_rejected" | "build_gate" | "kill_switch" | "schedule_fired";
+  | "merge_rejected" | "build_gate" | "kill_switch" | "schedule_fired"
+  | "wake_scheduled" | "wake_fired" | "wake_dropped";
 
 export interface OrchestrationEvent {
   id: string;
@@ -133,5 +134,19 @@ export interface Schedule {
   enabled: boolean;
   nextFireAt: string;        // ISO; the next scheduled fire
   lastFiredAt: string | null;
+  createdAt: string;
+}
+
+/**
+ * A one-shot self-scheduled wake-up (the agent-facing `wake_me` primitive). A session schedules
+ * one, ends its turn, and goes idle; when `wakeAt` passes the daemon WakeService re-submits `note`
+ * as a fresh turn — auto-resuming the session first if it was stopped. Unlike a Schedule it does
+ * NOT recur: a fired wake is deleted. `note` is the agent's message-to-its-future-self.
+ */
+export interface Wake {
+  id: string;
+  sessionId: SessionId;
+  wakeAt: string;            // ISO; when to re-nudge the session
+  note: string;
   createdAt: string;
 }

@@ -67,6 +67,10 @@ export interface SpawnOpts {
   startupPrompt?: string;
   /** Resume: Claude engine session id. */
   resumeId?: string;
+  /** Fork: with resumeId, mint a fresh engine id (--fork-session) so the copy diverges from the source. */
+  fork?: boolean;
+  /** Fork: the pre-assigned engine session id for the fork (--session-id), persisted up front by the caller. */
+  forkSessionId?: string;
   /** Role decides the extra MCP surface at spawn: manager/worker → loom-orchestration, platform →
    *  loom-platform (each with its allowlist); plain sessions get only loom-tasks. */
   role?: SessionRole;
@@ -97,6 +101,8 @@ export interface PtyHostEvents {
  */
 export function buildSpawnArgs(o: {
   resumeId?: string;
+  fork?: boolean;
+  forkSessionId?: string;
   settingsPath: string;
   mode: string;
   mcpServers: Record<string, unknown>;
@@ -104,6 +110,15 @@ export function buildSpawnArgs(o: {
 }): string[] {
   const args: string[] = [];
   if (o.resumeId) args.push("--resume", o.resumeId);
+  // Fork: resume the conversation but mint a FRESH engine session id so the copy diverges and the
+  // source transcript is untouched. We PRE-ASSIGN that id (--session-id) rather than let claude
+  // auto-generate it, because --fork-session mints the new id lazily (on the first turn, not at
+  // SessionStart) — so capturing it from the hook would grab the OLD id. Pre-assigning lets us
+  // persist the fork's id up front. (Only meaningful alongside --resume.)
+  if (o.fork && o.resumeId) {
+    args.push("--fork-session");
+    if (o.forkSessionId) args.push("--session-id", o.forkSessionId);
+  }
   args.push("--settings", o.settingsPath);
   args.push("--permission-mode", o.mode);
   args.push("--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: o.mcpServers }));
@@ -147,7 +162,7 @@ export class PtyHost {
     if (wantsPlatform) {
       mcpServers["loom-platform"] = { type: "http", url: `http://127.0.0.1:${PORT}/mcp-platform/${opts.sessionId}` };
     }
-    const args = buildSpawnArgs({ resumeId: opts.resumeId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt });
+    const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt });
 
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
@@ -169,7 +184,9 @@ export class PtyHost {
     const live: Live = {
       pty, pid: pty.pid, cwd: opts.cwd,
       geometry: opts.geometry,
-      engineSessionId: opts.resumeId ?? null,
+      // A fork carries its PRE-ASSIGNED engine id (forkSessionId); a plain resume reuses resumeId;
+      // a brand-new session has none yet (captured on SessionStart).
+      engineSessionId: opts.forkSessionId ?? opts.resumeId ?? null,
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
       alive: true,

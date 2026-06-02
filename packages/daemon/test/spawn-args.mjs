@@ -41,7 +41,19 @@ const mcpServers = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/m
   check("--mcp-config value precedes the `--` separator", cfg !== -1 && args.indexOf("--") > cfg + 1);
 }
 
+// Fork: with resumeId, --fork-session follows --resume <id>, then --session-id pre-assigns the fork's id.
+{
+  const args = buildSpawnArgs({ resumeId: "engine-123", fork: true, forkSessionId: "new-456", settingsPath: "S", mode: "acceptEdits", mcpServers });
+  check("fork: --resume <src> leads, then --fork-session --session-id <new>",
+    args[0] === "--resume" && args[1] === "engine-123" && args[2] === "--fork-session" && args[3] === "--session-id" && args[4] === "new-456");
+}
+// Fork flag is inert without a resume target (nothing to fork from) → no --fork-session emitted.
+{
+  const args = buildSpawnArgs({ fork: true, settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it" });
+  check("fork without resumeId: no --fork-session (nothing to fork from)", !args.includes("--fork-session"));
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — buildSpawnArgs puts the prompt last behind a `--` separator (dashed prompts stay positional), flags lead, resume omits the separator."
+  ? "\n✅ ALL PASS — buildSpawnArgs puts the prompt last behind a `--` separator (dashed prompts stay positional), flags lead, resume omits the separator, --fork-session follows --resume."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

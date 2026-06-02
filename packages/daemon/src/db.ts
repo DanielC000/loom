@@ -3,7 +3,7 @@ import { DB_PATH } from "./paths.js";
 import type {
   Project, Topic, Session, Task, ProjectConfigOverride,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, Schedule,
+  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake,
 } from "@loom/shared";
 
 const SCHEMA = `
@@ -80,8 +80,18 @@ CREATE TABLE IF NOT EXISTS schedules (
   last_fired_at TEXT,
   created_at TEXT NOT NULL
 );
+-- One-shot self-scheduled wake-ups (the agent wake_me primitive): the daemon WakeService
+-- re-nudges session_id with its note when wake_at passes, then deletes the row (one-shot).
+CREATE TABLE IF NOT EXISTS wakes (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  wake_at TEXT NOT NULL,
+  note TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_topics_project ON topics(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_fire_at);
+CREATE INDEX IF NOT EXISTS idx_wakes_due ON wakes(wake_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_topic ON sessions(topic_id, last_activity DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, column_key, position);
 CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_session_id, ts);
@@ -399,6 +409,32 @@ export class Db {
   markFired(id: string, lastIso: string, nextIso: string): void {
     this.db.prepare("UPDATE schedules SET last_fired_at = ?, next_fire_at = ? WHERE id = ?").run(lastIso, nextIso, id);
   }
+
+  // --- wakes (one-shot self-scheduled wake-ups; the `wake_me` primitive) ---
+  insertWake(w: Wake): void {
+    this.db.prepare(
+      `INSERT INTO wakes (id,session_id,wake_at,note,created_at)
+       VALUES (@id,@sessionId,@wakeAt,@note,@createdAt)`,
+    ).run(w);
+  }
+  getWake(id: string): Wake | undefined {
+    const r = this.db.prepare("SELECT * FROM wakes WHERE id = ?").get(id) as Row | undefined;
+    return r ? toWake(r) : undefined;
+  }
+  deleteWake(id: string): void {
+    this.db.prepare("DELETE FROM wakes WHERE id = ?").run(id);
+  }
+  /** Wakes whose wake_at is at/earlier than nowIso — the WakeService's due set. */
+  listDueWakes(nowIso: string): Wake[] {
+    return (this.db.prepare("SELECT * FROM wakes WHERE wake_at <= ? ORDER BY wake_at").all(nowIso) as Row[]).map(toWake);
+  }
+  /** A session's pending wakes (chronological) — for wake_list and the per-session cap. */
+  listWakesForSession(sessionId: string): Wake[] {
+    return (this.db.prepare("SELECT * FROM wakes WHERE session_id = ? ORDER BY wake_at").all(sessionId) as Row[]).map(toWake);
+  }
+  countPendingWakes(sessionId: string): number {
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM wakes WHERE session_id = ?").get(sessionId) as { c: number }).c;
+  }
 }
 
 function toProject(r0: unknown): Project {
@@ -468,5 +504,12 @@ function toSchedule(r0: unknown): Schedule {
     enabled: (r.enabled as number) === 1,
     nextFireAt: r.next_fire_at as string, lastFiredAt: (r.last_fired_at as string) ?? null,
     createdAt: r.created_at as string,
+  };
+}
+function toWake(r0: unknown): Wake {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, sessionId: r.session_id as string,
+    wakeAt: r.wake_at as string, note: r.note as string, createdAt: r.created_at as string,
   };
 }

@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
 import { TerminalPane } from "../components/Terminal";
+import { SessionWakes } from "../components/SessionWakes";
 import { Panel, Button, Select, StatusPill } from "../components/ui";
 import { color, font } from "../theme";
 
@@ -12,7 +13,20 @@ export default function Terminals() {
   const [filter, setFilter] = useState<string>("");      // projectName filter ("" = all)
   const [maximized, setMaximized] = useState<string | null>(null);
 
+  const qc = useQueryClient();
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 4000 });
+  // Manual graceful stop (Ctrl-C ×2 — clean + resumable). On success the session leaves the live set,
+  // so its tile drops out; refetch confirms. Stopping the maximized one falls back to the grid.
+  const stop = useMutation({
+    mutationFn: (id: string) => api.stopSession(id, "graceful"),
+    onSuccess: (_r, id) => { if (maximized === id) setMaximized(null); qc.invalidateQueries({ queryKey: ["allSessions"] }); },
+  });
+  // Fork an idle session: branch its conversation into a fresh divergent session (appears as a new
+  // tile). Idle-only — the button is disabled while the source is busy.
+  const fork = useMutation({
+    mutationFn: (id: string) => api.forkSession(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
+  });
   const live = (sessions.data ?? []).filter((s) => s.processState === "live");
   const projectNames = useMemo(() => [...new Set(live.map((s) => s.projectName))].sort(), [live]);
   // Stable tile order: sort by spawn time so a tile keeps its place once spawned. (The backend
@@ -27,8 +41,15 @@ export default function Terminals() {
         <Button onClick={() => setMaximized(null)}>← back to grid</Button>
         {s && (
           <Panel style={{ height: "78vh", padding: 6, marginTop: 8, display: "flex", flexDirection: "column" }}>
-            <TileTitle s={s} />
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+              <TileTitle s={s} />
+              <div style={{ display: "flex", gap: 4 }}>
+                <ForkButton onFork={() => fork.mutate(s.id)} busy={s.busy} pending={fork.isPending} />
+                <StopButton onStop={() => stop.mutate(s.id)} stopping={stop.isPending} />
+              </div>
+            </div>
             <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
+            <SessionWakes sessionId={s.id} />
           </Panel>
         )}
       </div>
@@ -50,13 +71,34 @@ export default function Terminals() {
           <Panel key={s.id} style={{ height: 460, padding: 6, display: "flex", flexDirection: "column" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
               <TileTitle s={s} />
-              <Button style={{ padding: "0 6px" }} onClick={() => setMaximized(s.id)}>⤢</Button>
+              <div style={{ display: "flex", gap: 4 }}>
+                <ForkButton onFork={() => fork.mutate(s.id)} busy={s.busy} pending={fork.isPending} />
+                <StopButton onStop={() => stop.mutate(s.id)} stopping={stop.isPending} />
+                <Button style={{ padding: "0 6px" }} onClick={() => setMaximized(s.id)}>⤢</Button>
+              </div>
             </div>
             <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
+            <SessionWakes sessionId={s.id} />
           </Panel>
         ))}
       </div>
     </div>
+  );
+}
+
+function ForkButton({ onFork, busy, pending }: { onFork: () => void; busy: boolean; pending: boolean }) {
+  return (
+    <Button style={{ padding: "0 8px" }} disabled={busy || pending}
+      title={busy ? "Fork is available when the session is idle" : "Fork — branch this conversation into a new divergent session"}
+      onClick={(ev) => { ev.stopPropagation(); onFork(); }}>Fork</Button>
+  );
+}
+
+function StopButton({ onStop, stopping }: { onStop: () => void; stopping: boolean }) {
+  return (
+    <Button style={{ padding: "0 8px" }} disabled={stopping}
+      title="Stop this session — graceful Ctrl-C, clean and resumable"
+      onClick={(ev) => { ev.stopPropagation(); onStop(); }}>Stop</Button>
   );
 }
 

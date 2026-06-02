@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import type { Db } from "../db.js";
+import type { WakeService } from "../orchestration/wake.js";
 import { listProjectTasks, createProjectTask, updateProjectTask } from "./tasks.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -18,14 +19,15 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * wedge the surface — every request rebuilds the identical tools from the stable mapping.
  */
 export class TaskMcpRouter {
-  constructor(private db: Db) {}
+  constructor(private db: Db, private wakes: WakeService) {}
 
   resolveProject(sessionId: string): string | null {
     return this.db.getSession(sessionId)?.projectId ?? null;
   }
 
-  private buildServer(projectId: string): McpServer {
+  private buildServer(projectId: string, sessionId: string): McpServer {
     const db = this.db;
+    const wakes = this.wakes;
     const server = new McpServer({ name: "loom-tasks", version: "0.1.0" });
 
     server.registerTool(
@@ -55,6 +57,37 @@ export class TaskMcpRouter {
       },
       async ({ id, ...patch }) => ok(updateProjectTask(db, projectId, id, patch)),
     );
+
+    // Self-scheduled wake-ups (universal — every session, any role). Keyed to THIS session id.
+    server.registerTool(
+      "wake_me",
+      {
+        description:
+          "Schedule a one-shot wake-up: end your turn and go idle, and you'll be re-prompted with `note` when it fires (it re-submits as a fresh turn; you're auto-resumed if you were stopped). Give exactly one of delaySeconds or wakeAt (ISO). Use this to WAIT for a known external process/condition — a build, a render, a deploy — instead of busy-polling. Min 30s out, max 24h.",
+        inputSchema: {
+          delaySeconds: z.number().optional(),
+          wakeAt: z.string().optional(),
+          note: z.string(),
+        },
+      },
+      async ({ delaySeconds, wakeAt, note }) => {
+        try {
+          return ok(wakes.schedule(sessionId, { delaySeconds, wakeAt, note }));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+    server.registerTool(
+      "wake_cancel",
+      { description: "Cancel one of your pending wake-ups by id.", inputSchema: { wakeId: z.string() } },
+      async ({ wakeId }) => ok(wakes.cancel(sessionId, wakeId)),
+    );
+    server.registerTool(
+      "wake_list",
+      { description: "List your pending wake-ups.", inputSchema: {} },
+      async () => ok(wakes.list(sessionId)),
+    );
     return server;
   }
 
@@ -71,7 +104,7 @@ export class TaskMcpRouter {
     // transient stream close can't strand the session. (The old per-session cache deleted the
     // transport on onclose, and claude never re-initialized a server it thought died → the
     // loom-tasks "drop".) The same surface is rebuilt every request from the session→project map.
-    const server = this.buildServer(projectId);
+    const server = this.buildServer(projectId, sessionId);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => { void transport.close(); void server.close(); });
     await server.connect(transport);

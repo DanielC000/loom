@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 import { TerminalPane } from "../components/Terminal";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { Composer } from "../components/Composer";
+import { SessionWakes } from "../components/SessionWakes";
 import { Panel, Button, Input, SectionLabel, StatusPill } from "../components/ui";
 import { color, font } from "../theme";
 
@@ -62,6 +63,16 @@ export default function Workspace() {
     mutationFn: (id: string) => api.resumeSession(id),
     onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", topicId] }); },
   });
+  // Manual graceful stop (Ctrl-C ×2 — clean + resumable) for a live/idle session.
+  const stop = useMutation({
+    mutationFn: (id: string) => api.stopSession(id, "graceful"),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sessions", topicId] }),
+  });
+  // Fork an idle session: branch its conversation into a fresh divergent session, then attach to it.
+  const fork = useMutation({
+    mutationFn: (id: string) => api.forkSession(id),
+    onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", topicId] }); },
+  });
   // Manager first, then platform, then workers — so the orchestrator isn't lost among its workers.
   const roleRank = (r?: string | null) => (r === "manager" ? 0 : r === "platform" ? 1 : r === "worker" ? 2 : 3);
   const orderedSessions = [...(sessions.data ?? [])].sort((a, b) => roleRank(a.role) - roleRank(b.role));
@@ -104,7 +115,9 @@ export default function Workspace() {
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {orderedSessions.map((s) => (
                 <SessionRow key={s.id} s={s} selected={s.id === sessionId}
-                  onSelect={() => setSessionId(s.id)} onResume={() => resume.mutate(s.id)} resuming={resume.isPending} />
+                  onSelect={() => setSessionId(s.id)} onResume={() => resume.mutate(s.id)} resuming={resume.isPending}
+                  onStop={() => stop.mutate(s.id)} stopping={stop.isPending}
+                  onFork={() => fork.mutate(s.id)} forking={fork.isPending} />
               ))}
             </div>
           </Panel>
@@ -126,6 +139,7 @@ export default function Workspace() {
                 ? <TerminalPane sessionId={sessionId} />
                 : <TranscriptPane sessionId={sessionId} />}
             </div>
+            <SessionWakes sessionId={sessionId} />
             <Composer sessionId={sessionId} />
           </>
         ) : selectedTopic ? (
@@ -138,8 +152,9 @@ export default function Workspace() {
   );
 }
 
-function SessionRow({ s, selected, onSelect, onResume, resuming }:
-  { s: Session; selected: boolean; onSelect: () => void; onResume: () => void; resuming: boolean }) {
+function SessionRow({ s, selected, onSelect, onResume, resuming, onStop, stopping, onFork, forking }:
+  { s: Session; selected: boolean; onSelect: () => void; onResume: () => void; resuming: boolean;
+    onStop: () => void; stopping: boolean; onFork: () => void; forking: boolean }) {
   const isManager = s.role === "manager";
   const canResume = s.processState === "exited" && s.resumability !== "dead";
   const live = s.processState === "live";
@@ -158,6 +173,10 @@ function SessionRow({ s, selected, onSelect, onResume, resuming }:
           <StatusPill tone={st.tone} label={st.label} glow={"glow" in st ? st.glow : undefined} />
         </div>
       </Panel>
+      {live && <Button disabled={forking || s.busy} onClick={(ev) => { ev.stopPropagation(); onFork(); }}
+        title={s.busy ? "Fork is available when the session is idle" : "Fork — branch this conversation into a new divergent session"}>Fork</Button>}
+      {live && <Button disabled={stopping} title="Stop this session — graceful Ctrl-C, clean and resumable"
+        onClick={(ev) => { ev.stopPropagation(); onStop(); }}>Stop</Button>}
       {canResume && <Button disabled={resuming} title="Resume this session and attach its terminal" onClick={onResume}>Resume</Button>}
       {s.resumability === "dead" && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>dead</span>}
     </div>
