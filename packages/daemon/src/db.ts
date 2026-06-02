@@ -166,6 +166,10 @@ export class Db {
   setProjectConfig(id: string, config: ProjectConfigOverride): void {
     this.db.prepare("UPDATE projects SET config_json = ? WHERE id = ?").run(JSON.stringify(config), id);
   }
+  /** Soft-remove a project: stamp archived_at so listProjects() hides it (rows + sessions kept). */
+  archiveProject(id: string): void {
+    this.db.prepare("UPDATE projects SET archived_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+  }
 
   // --- topics ---
   listTopics(projectId: string): Topic[] {

@@ -220,6 +220,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return reply.code(201).send(project);
   });
 
+  // Soft-remove (archive) a project — hides it from the project list; rows/sessions are retained.
+  app.delete("/api/projects/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    deps.db.archiveProject(id);
+    return { ok: true };
+  });
+
   // Set a project's config override (the machine-writable config, schema-validated). Mirrors the
   // platform MCP's project_configure so UI/REST and the agent share one validator + store.
   app.patch("/api/projects/:id/config", async (req, reply) => {

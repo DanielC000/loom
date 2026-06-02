@@ -35,6 +35,7 @@ export const api = {
   projects: () => get<Project[]>("/api/projects"),
   createProject: (b: { name: string; repoPath: string; vaultPath: string }) =>
     post<Project>("/api/projects", b),
+  archiveProject: (id: string) => del<{ ok: boolean }>(`/api/projects/${id}`),
   topics: (projectId: string) => get<Topic[]>(`/api/projects/${projectId}/topics`),
   createTopic: (projectId: string, b: { name: string; startupPrompt?: string }) =>
     post<Topic>(`/api/projects/${projectId}/topics`, b),
