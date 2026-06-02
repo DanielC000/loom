@@ -44,7 +44,14 @@ export default function MissionControl() {
     .flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? [])
     .sort((a, b) => +new Date(b.ts) - +new Date(a.ts));
 
-  const projectNames = [...new Set([...managers, ...workers].map((s) => s.projectName))];
+  // Order projects by recent activity: each project ranks by the most-recent lastActivity across
+  // any of its managers/workers, most-recent first — so the project you're actively driving floats up.
+  const recentByProject = new Map<string, number>();
+  for (const s of [...managers, ...workers]) {
+    const ts = +new Date(s.lastActivity);
+    recentByProject.set(s.projectName, Math.max(recentByProject.get(s.projectName) ?? 0, ts));
+  }
+  const projectNames = [...recentByProject.keys()].sort((a, b) => recentByProject.get(b)! - recentByProject.get(a)!);
 
   const refreshStatus = () => qc.invalidateQueries({ queryKey: ["orchStatus"] });
   const refreshSessions = () => qc.invalidateQueries({ queryKey: ["allSessions"] });
