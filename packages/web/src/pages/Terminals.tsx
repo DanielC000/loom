@@ -1,11 +1,15 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type CSSProperties } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
 import { TerminalPane } from "../components/Terminal";
 import { SessionWakes } from "../components/SessionWakes";
-import { Panel, Button, Select, StatusPill } from "../components/ui";
+import { SessionQueue } from "../components/SessionQueue";
+import { Panel, Button, Select, StatusPill, SectionLabel } from "../components/ui";
 import { color, font } from "../theme";
+
+// Tiles flow horizontally then wrap; reused per-project group and for a single filtered project.
+const gridStyle: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12 };
 
 // Global Live Terminals grid: all running sessions, with a project filter, tiled, maximizable.
 // Also reachable per-project by pre-selecting the filter.
@@ -33,6 +37,30 @@ export default function Terminals() {
   // lists sessions by last_activity DESC, which would otherwise reshuffle tiles on every prompt.)
   const shown = (filter ? live.filter((s) => s.projectName === filter) : live)
     .slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  // When unfiltered ("All"), bucket the tiles by project so each project becomes its own
+  // horizontal group under a header. Insertion order follows the createdAt sort above; group
+  // keys are then alphabetised so the lanes have a stable, predictable order.
+  const groups = useMemo(() => {
+    const m = new Map<string, SessionListItem[]>();
+    for (const s of shown) (m.get(s.projectName) ?? m.set(s.projectName, []).get(s.projectName)!).push(s);
+    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [shown]);
+
+  const renderTile = (s: SessionListItem) => (
+    <Panel key={s.id} style={{ height: 460, padding: 6, display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+        <TileTitle s={s} />
+        <div style={{ display: "flex", gap: 4 }}>
+          <ForkButton onFork={() => fork.mutate(s.id)} busy={s.busy} pending={fork.isPending} />
+          <StopButton onStop={() => stop.mutate(s.id)} stopping={stop.isPending} />
+          <Button style={{ padding: "0 6px" }} onClick={() => setMaximized(s.id)}>⤢</Button>
+        </div>
+      </div>
+      <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
+      <SessionWakes sessionId={s.id} />
+      <SessionQueue sessionId={s.id} />
+    </Panel>
+  );
 
   if (maximized) {
     const s = live.find((x) => x.id === maximized);
@@ -50,6 +78,7 @@ export default function Terminals() {
             </div>
             <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
             <SessionWakes sessionId={s.id} />
+      <SessionQueue sessionId={s.id} />
           </Panel>
         )}
       </div>
@@ -66,22 +95,19 @@ export default function Terminals() {
         </Select>
       </div>
       {shown.length === 0 && <p style={{ color: color.textMuted }}>No running sessions.</p>}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12 }}>
-        {shown.map((s) => (
-          <Panel key={s.id} style={{ height: 460, padding: 6, display: "flex", flexDirection: "column" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-              <TileTitle s={s} />
-              <div style={{ display: "flex", gap: 4 }}>
-                <ForkButton onFork={() => fork.mutate(s.id)} busy={s.busy} pending={fork.isPending} />
-                <StopButton onStop={() => stop.mutate(s.id)} stopping={stop.isPending} />
-                <Button style={{ padding: "0 6px" }} onClick={() => setMaximized(s.id)}>⤢</Button>
-              </div>
-            </div>
-            <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
-            <SessionWakes sessionId={s.id} />
-          </Panel>
-        ))}
-      </div>
+      {filter ? (
+        <div style={gridStyle}>{shown.map(renderTile)}</div>
+      ) : (
+        groups.map(([name, list]) => (
+          <section key={name} style={{ marginBottom: 20 }}>
+            <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {name}
+              <span style={{ color: color.textMuted, fontWeight: 400 }}>({list.length})</span>
+            </SectionLabel>
+            <div style={gridStyle}>{list.map(renderTile)}</div>
+          </section>
+        ))
+      )}
     </div>
   );
 }

@@ -6,6 +6,7 @@ import { TerminalPane } from "../components/Terminal";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { Composer } from "../components/Composer";
 import { SessionWakes } from "../components/SessionWakes";
+import { SessionQueue } from "../components/SessionQueue";
 import { Panel, Button, Input, SectionLabel, StatusPill } from "../components/ui";
 import { color, font } from "../theme";
 
@@ -140,6 +141,7 @@ export default function Workspace() {
                 : <TranscriptPane sessionId={sessionId} />}
             </div>
             <SessionWakes sessionId={sessionId} />
+            <SessionQueue sessionId={sessionId} />
             <Composer sessionId={sessionId} />
           </>
         ) : selectedTopic ? (

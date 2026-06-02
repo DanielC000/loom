@@ -96,8 +96,15 @@ async function main(): Promise<void> {
   wakes.start();
   console.log(`[boot] wake-up ticker on (tick ${wakeIntervalMs}ms)`);
 
+  // Input-queue reconcile: self-heal stuck-busy sessions and drain any message held while the session
+  // was busy / the human was typing — so a worker report never strands behind a phantom 'busy' or an
+  // unfinished compose. The Stop hook is the fast path; this is the safety net (10s).
+  const reconcileMs = Number(process.env.LOOM_RECONCILE_INTERVAL_MS) || 10_000;
+  const reconcileTimer = setInterval(() => pty.reconcile(), reconcileMs);
+  console.log(`[boot] input-queue reconcile on (tick ${reconcileMs}ms)`);
+
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); wakes.stop(); process.exit(0); });
+    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); wakes.stop(); clearInterval(reconcileTimer); process.exit(0); });
   }
 }
 

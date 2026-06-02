@@ -28,6 +28,30 @@ const SUBMIT_ENTER_DELAY_MS = 150;
 const PTY_WRITE_CHUNK_BYTES = 1024;
 const PTY_WRITE_CHUNK_DELAY_MS = 8;
 
+/**
+ * Bracketed-paste delimiters. Programmatic turns (worker reports, queued messages, /input) are
+ * wrapped so claude treats the whole block — even multi-line — as ONE paste unit: embedded newlines
+ * don't submit partial turns, and the trailing Enter (after the close marker) reliably submits. This
+ * is why a worker report no longer "sits in the input box" un-submitted.
+ */
+const BRACKET_PASTE_START = "\x1b[200~";
+const BRACKET_PASTE_END = "\x1b[201~";
+
+/**
+ * A session marked busy with NO engine output for this long is treated as STUCK (a turn that never
+ * really started, or a missed Stop hook) and self-healed to idle so its queued messages can drain
+ * and the UI stops showing a phantom 'busy'. Conservative — a genuinely long, silent tool call is
+ * rare — so a false heal can't clobber a live turn. (The robust follow-up is transcript-based.)
+ */
+const BUSY_STALE_MS = 5 * 60_000;
+
+/**
+ * After a human keystroke in the composer, hold any programmatic turn this long before delivering —
+ * so a worker report can't be concatenated onto the human's half-typed text (the collision that
+ * mangled both messages). The queued report drains once the human submits/clears or this lapses.
+ */
+const HUMAN_TYPING_GRACE_MS = 6_000;
+
 /** Shift+Tab (CSI Z / back-tab) — Claude's TUI cycles the permission mode on this key. */
 const SHIFT_TAB = "\x1b[Z";
 /** Settle window after SessionStart before sending the first mode-cycle keystroke (let the TUI's input attach). */
@@ -51,7 +75,10 @@ interface Live {
   alive: boolean;
   logStream: fs.WriteStream;
   busy: boolean;        // a turn is in flight (locally tracked; mirrored to DB via onBusy)
-  pending: string[];    // FIFO of messages held while busy — drained one-per-Stop
+  busySince: number | null;  // epoch ms when busy rose — for stuck-busy self-heal (BUSY_STALE_MS)
+  lastOutputAt: number; // epoch ms of the last pty output — "is the engine actually producing?"
+  lastHumanKeyAt: number | null; // epoch ms of the last human composer keystroke (collision guard)
+  pending: string[];    // FIFO of messages held while busy / while the human types — drained on Stop + reconcile
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
   startupModeCycles: number; // Shift+Tab presses to inject once, after SessionStart, to reach the target mode
   startupCyclesDone: boolean; // guard so the cycle-inject fires at most once per session
@@ -192,6 +219,9 @@ export class PtyHost {
       alive: true,
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.sessionId}.log`)),
       busy: false,
+      busySince: null,
+      lastOutputAt: Date.now(),
+      lastHumanKeyAt: null,
       pending: [],
       // The startup-prompt turn runs from a CLI arg (not submit()), so seed lastPrompt with it —
       // a cap on the FIRST turn must still be re-submittable on resume (§19c-b).
@@ -204,6 +234,7 @@ export class PtyHost {
 
     pty.onData((d) => {
       const buf = Buffer.from(d, "utf-8");
+      live.lastOutputAt = Date.now(); // engine is producing → not stuck (feeds the BUSY_STALE_MS heal)
       this.appendRing(live, buf);
       live.logStream.write(buf);
       for (const s of live.subscribers) { try { s.onData(buf); } catch { /* ignore */ } }
@@ -276,22 +307,27 @@ export class PtyHost {
         // The turn ended → safe to write. Drain ONE queued message (FIFO), re-arming busy so the
         // next Stop releases the next: strict per-session serialization. Writing only at the turn
         // boundary is what keeps a running turn from being corrupted by a mid-turn write.
-        if (live.pending.length > 0) this.submit(sessionId, live.pending.shift()!);
+        this.drainPending(sessionId);
         break;
       }
     }
   }
 
   /**
-   * Queue text for submission as a turn (text + "\r"). Submits immediately when the session is
-   * IDLE (arming busy); when a turn is in flight, HOLDS it FIFO and the next Stop drains one.
-   * Returns whether it went out now, or its 1-based queue position. Never writes while busy —
-   * a mid-turn write corrupts the running turn (the whole reason for the queue).
+   * Queue text for submission as a turn. Submits IMMEDIATELY only when the session is idle AND the
+   * human isn't mid-compose; otherwise HOLDS it FIFO and `drainPending` (on the next Stop, or the
+   * reconcile tick) delivers it. Two reasons not to write now:
+   *   - busy: a mid-turn write corrupts the running turn (the original reason for the queue);
+   *   - human typing: writing onto half-typed composer text concatenates the two into one garbled
+   *     message (the observed manager/worker collision) — so we wait until the box is free.
+   * Also self-heals a STUCK-busy session first, so a report can't strand behind a phantom 'busy'.
+   * Returns whether it went out now, or its 1-based queue position.
    */
   enqueueStdin(sessionId: string, text: string): { delivered: boolean; position?: number } {
     const live = this.live.get(sessionId);
     if (!live?.alive) return { delivered: false };
-    if (!live.busy) {
+    this.healIfStuck(live, sessionId);
+    if (!live.busy && !this.humanActivelyTyping(live)) {
       this.submit(sessionId, text);
       return { delivered: true };
     }
@@ -299,20 +335,67 @@ export class PtyHost {
     return { delivered: false, position: live.pending.length };
   }
 
+  /** A copy of a session's queued (not-yet-delivered) messages — for the UI queue display. */
+  getPending(sessionId: string): string[] {
+    return [...(this.live.get(sessionId)?.pending ?? [])];
+  }
+
+  /** True while the human has uncommitted composer text (recent keystroke, no submit/clear since). */
+  private humanActivelyTyping(live: Live): boolean {
+    return live.lastHumanKeyAt != null && Date.now() - live.lastHumanKeyAt < HUMAN_TYPING_GRACE_MS;
+  }
+
+  /** Clear a phantom 'busy' (busy with no engine output for BUSY_STALE_MS) so its queue can drain. */
+  private healIfStuck(live: Live, sessionId: string): void {
+    const now = Date.now();
+    if (live.busy && live.busySince != null
+      && now - live.busySince > BUSY_STALE_MS && now - live.lastOutputAt > BUSY_STALE_MS) {
+      this.setBusy(sessionId, false);
+    }
+  }
+
+  /** Deliver the next queued message when it's safe (idle + composer free). Shared by Stop + reconcile. */
+  private drainPending(sessionId: string): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive || live.busy || live.pending.length === 0) return;
+    if (this.humanActivelyTyping(live)) return; // don't land on the human's half-typed text
+    this.submit(sessionId, live.pending.shift()!);
+  }
+
   /**
-   * Write text as a turn and arm busy (the immediate path and the Stop-drain share this).
-   * Two writes: the text, then Enter (\r) a beat later — see SUBMIT_ENTER_DELAY_MS. busy is
-   * armed synchronously, so a concurrent enqueueStdin for this session queues rather than
-   * racing the pending \r.
+   * Periodic safety net (wired to a timer in index.ts): self-heal stuck-busy sessions and drain any
+   * queue that's been waiting (a report queued behind a phantom 'busy', or held while the human typed
+   * and has since stopped). Without this, a queued message only ever drains on a Stop hook — which a
+   * stuck session never fires.
+   */
+  reconcile(): void {
+    for (const [sessionId, live] of this.live) {
+      if (!live.alive) continue;
+      this.healIfStuck(live, sessionId);
+      this.drainPending(sessionId);
+    }
+  }
+
+  /**
+   * Write text as a turn and arm busy (the immediate path and the Stop-drain share this). The text
+   * goes out as a BRACKETED PASTE (start marker, the chunked text, end marker) then Enter a beat
+   * later — so claude treats even multi-line content as one paste unit and the trailing Enter
+   * reliably submits (no more reports stuck un-submitted in the box). The markers are written on
+   * their own so chunking can't split a marker sequence. busy is armed synchronously, so a
+   * concurrent enqueueStdin queues rather than racing the pending Enter.
    */
   private submit(sessionId: string, text: string): void {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
     live.lastPrompt = text; // remember the in-flight turn so a usage-cap kill is recoverable (§19c-b)
-    // Chunk the write — a long turn (e.g. a worker report) sent as one pty.write is truncated by
-    // ConPTY. Send the Enter only AFTER the last chunk lands, else it submits a partial turn.
+    live.pty.write(BRACKET_PASTE_START);
+    // Chunk the text — a long turn (e.g. a worker report) sent as one pty.write is truncated by
+    // ConPTY. Close the paste + send Enter only AFTER the last chunk lands, else it submits a partial.
     this.writeChunked(sessionId, text, () => {
-      setTimeout(() => { const l = this.live.get(sessionId); if (l?.alive) l.pty.write("\r"); }, SUBMIT_ENTER_DELAY_MS);
+      const l = this.live.get(sessionId);
+      if (!l?.alive) return;
+      l.pty.write(BRACKET_PASTE_END);
+      setTimeout(() => { const x = this.live.get(sessionId); if (x?.alive) x.pty.write("\r"); }, SUBMIT_ENTER_DELAY_MS);
     });
     this.setBusy(sessionId, true);
   }
@@ -334,6 +417,7 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live) return;
     live.busy = busy;
+    live.busySince = busy ? Date.now() : null; // track the rising edge for the stuck-busy heal
     this.events.onBusy(sessionId, busy);
     this.broadcastControl(live, { type: "busy", busy });
   }
@@ -368,6 +452,12 @@ export class PtyHost {
   }
 
   writeStdin(sessionId: string, data: string): void {
+    const live = this.live.get(sessionId);
+    if (live) {
+      // Track the human's composer state so a programmatic turn doesn't land on half-typed text.
+      // Enter / Ctrl-C / Esc submit or clear the box (free it); anything else means they're composing.
+      live.lastHumanKeyAt = /[\r\x03\x1b]/.test(data) ? null : Date.now();
+    }
     this.writeChunked(sessionId, data);
   }
 

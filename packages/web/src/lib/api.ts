@@ -64,6 +64,8 @@ export const api = {
   sessionWakes: (sessionId: string) => get<Wake[]>(`/api/sessions/${sessionId}/wakes`),
   cancelWake: (sessionId: string, wakeId: string) =>
     del<{ cancelled: boolean }>(`/api/sessions/${sessionId}/wakes/${wakeId}`),
+  // Queued inbound messages held for a session (worker reports / turns waiting for it to free up).
+  sessionQueue: (sessionId: string) => get<{ pending: string[] }>(`/api/sessions/${sessionId}/queue`),
 
   // --- phase-2 orchestration (#18b view) ---
   orchestrationEvents: (managerId: string) =>

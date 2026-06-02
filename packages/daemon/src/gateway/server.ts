@@ -261,6 +261,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // Pending one-shot wake-ups scheduled for a session (the wake_me primitive) — read-only.
   app.get("/api/sessions/:id/wakes", async (req) =>
     deps.db.listWakesForSession((req.params as { id: string }).id));
+  // A session's queued (not-yet-delivered) inbound messages — worker reports / turns held while the
+  // session is busy or the human is mid-compose. Read-only; they drain automatically. Shown in the UI.
+  app.get("/api/sessions/:id/queue", async (req) =>
+    ({ pending: deps.pty.getPending((req.params as { id: string }).id) }));
   // Cancel one of a session's pending wakes (scoped: the wake must belong to that session).
   app.delete("/api/sessions/:id/wakes/:wakeId", async (req, reply) => {
     const { id, wakeId } = req.params as { id: string; wakeId: string };
