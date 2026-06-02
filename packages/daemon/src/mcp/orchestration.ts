@@ -66,6 +66,7 @@ export class OrchestrationMcpRouter {
         busy: w.busy,
         branch: w.branch ?? null,
         ctxInputTokens: w.ctxInputTokens ?? null,
+        model: w.model ?? null,
         lastActivity: w.lastActivity,
       }))),
     );
@@ -190,6 +191,28 @@ export class OrchestrationMcpRouter {
       async ({ workerSessionId }) => {
         try {
           return ok(await sessions.confirmWorkerMerge(managerSessionId, workerSessionId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
+      "recycle_me",
+      {
+        description:
+          "Recycle YOURSELF before your context fills up — hand off to a fresh successor manager. " +
+          "Loom nudges you when you near your context limit; when you get that nudge: FIRST run /session-end " +
+          "(log progress to the vault) and take stock, THEN call this with a self-contained continuationPrompt " +
+          "for your successor — current goal, what's done, your in-flight workers and their tasks/status, the " +
+          "next steps, and key decisions. Loom boots a fresh manager seeded with this topic's warm-up + your " +
+          "continuationPrompt, re-parents your live workers onto it, and then closes you.",
+        inputSchema: { continuationPrompt: z.string() },
+      },
+      async ({ continuationPrompt }) => {
+        try {
+          const fresh = await sessions.recycleManager(managerSessionId, continuationPrompt);
+          return ok({ newManagerSessionId: fresh.id, gen: fresh.gen });
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

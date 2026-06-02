@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Topic, Session } from "@loom/shared";
 import { api } from "../lib/api";
@@ -76,7 +76,33 @@ export default function Workspace() {
   });
   // Manager first, then platform, then workers — so the orchestrator isn't lost among its workers.
   const roleRank = (r?: string | null) => (r === "manager" ? 0 : r === "platform" ? 1 : r === "worker" ? 2 : 3);
-  const orderedSessions = [...(sessions.data ?? [])].sort((a, b) => roleRank(a.role) - roleRank(b.role));
+  // Fold each manager's workers into a collapsible group under it, so a manager with many workers
+  // doesn't blow out the Sessions box. A worker is grouped only when its spawning manager is also in
+  // this topic's list; orphan workers (no/unknown parent) stay top-level. Workers sort by spawn time.
+  const allSessions = sessions.data ?? [];
+  const sessionIds = new Set(allSessions.map((s) => s.id));
+  const workersByManager = new Map<string, Session[]>();
+  const topLevel: Session[] = [];
+  for (const s of allSessions) {
+    if (s.role === "worker" && s.parentSessionId && sessionIds.has(s.parentSessionId)) {
+      (workersByManager.get(s.parentSessionId) ?? workersByManager.set(s.parentSessionId, []).get(s.parentSessionId)!).push(s);
+    } else {
+      topLevel.push(s);
+    }
+  }
+  for (const ws of workersByManager.values()) ws.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const orderedTop = topLevel.sort((a, b) => roleRank(a.role) - roleRank(b.role));
+  // Collapsed by default (to keep the box small); a group auto-expands while one of its workers is selected.
+  const [expandedManagers, setExpandedManagers] = useState<Set<string>>(new Set());
+  const toggleManager = (id: string) =>
+    setExpandedManagers((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  const renderRow = (s: Session) => (
+    <SessionRow key={s.id} s={s} selected={s.id === sessionId}
+      onSelect={() => setSessionId(s.id)} onResume={() => resume.mutate(s.id)} resuming={resume.isPending}
+      onStop={() => stop.mutate(s.id)} stopping={stop.isPending}
+      onFork={() => fork.mutate(s.id)} forking={fork.isPending} />
+  );
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 16 }}>
@@ -114,12 +140,19 @@ export default function Workspace() {
                 title="Spawn as orchestrator: role=manager + worker-spawning MCP surface">+ Manager</Button>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {orderedSessions.map((s) => (
-                <SessionRow key={s.id} s={s} selected={s.id === sessionId}
-                  onSelect={() => setSessionId(s.id)} onResume={() => resume.mutate(s.id)} resuming={resume.isPending}
-                  onStop={() => stop.mutate(s.id)} stopping={stop.isPending}
-                  onFork={() => fork.mutate(s.id)} forking={fork.isPending} />
-              ))}
+              {orderedTop.map((s) => {
+                const workers = workersByManager.get(s.id);
+                return (
+                  <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {renderRow(s)}
+                    {workers && workers.length > 0 && (
+                      <WorkerGroup workers={workers} renderRow={renderRow}
+                        open={expandedManagers.has(s.id) || workers.some((w) => w.id === sessionId)}
+                        onToggle={() => toggleManager(s.id)} />
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </Panel>
         )}
@@ -181,6 +214,28 @@ function SessionRow({ s, selected, onSelect, onResume, resuming, onStop, stoppin
         onClick={(ev) => { ev.stopPropagation(); onStop(); }}>Stop</Button>}
       {canResume && <Button disabled={resuming} title="Resume this session and attach its terminal" onClick={onResume}>Resume</Button>}
       {s.resumability === "dead" && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>dead</span>}
+    </div>
+  );
+}
+
+// Collapsible block of a manager's workers, indented under its row with a phosphor rail. The toggle
+// summarises the worker count + how many are currently busy, so a collapsed group still signals activity.
+function WorkerGroup({ workers, open, onToggle, renderRow }:
+  { workers: Session[]; open: boolean; onToggle: () => void; renderRow: (s: Session) => ReactNode }) {
+  const busy = workers.filter((w) => w.processState === "live" && w.busy).length;
+  return (
+    <div style={{ marginLeft: 10, paddingLeft: 8, borderLeft: `1px solid ${color.border}`, display: "flex", flexDirection: "column", gap: 6 }}>
+      <button onClick={onToggle}
+        style={{
+          display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
+          background: "transparent", border: "none", padding: "2px 0",
+          fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim,
+        }}>
+        <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>
+        {workers.length} worker{workers.length === 1 ? "" : "s"}
+        {busy > 0 && <span style={{ color: color.amber }}>· {busy} busy</span>}
+      </button>
+      {open && workers.map(renderRow)}
     </div>
   );
 }

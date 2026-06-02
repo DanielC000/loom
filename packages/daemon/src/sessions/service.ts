@@ -478,6 +478,82 @@ export class SessionService {
   }
 
   /**
+   * Recycle a MANAGER near its context limit (the `recycle_me` flow). The manager has already run
+   * /session-end and written `continuationPrompt`; here Loom boots a FRESH successor manager seeded
+   * with the topic warm-up prompt + that continuation (NOT --resume — fresh context, intent carried),
+   * RE-PARENTS the old manager's live workers onto the successor so the fleet survives, then closes
+   * the old manager (deferred, so this call's tool response flushes first). gen+1; recycledFrom = old.
+   */
+  async recycleManager(oldManagerId: string, continuationPrompt: string): Promise<Session> {
+    const old = this.db.getSession(oldManagerId);
+    if (!old || old.role !== "manager") throw new Error("not a manager session");
+    const topic = this.db.getTopic(old.topicId);
+    const project = this.db.getProject(old.projectId);
+    if (!project) throw new Error("project not found");
+    const config = resolveConfig(project.config);
+    const newGen = (old.gen ?? 0) + 1;
+
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: oldManagerId, kind: "recycle_begin", detail: { kind: "manager", gen: newGen },
+    });
+
+    const warmup = topic?.startupPrompt?.trim();
+    const startupPrompt =
+      (warmup ? warmup + "\n\n---\n" : "") +
+      `[loom:continuation] You are the successor to a previous manager session that recycled as it neared its ` +
+      `context limit. Continue its work from this handoff — your predecessor's live workers have been re-parented ` +
+      `to you (run worker_list to see them). Predecessor's handoff:\n\n${continuationPrompt}`;
+
+    const now = new Date().toISOString();
+    const fresh: Session = {
+      id: randomUUID(),
+      projectId: old.projectId,
+      topicId: old.topicId,
+      engineSessionId: null,
+      title: null,
+      cwd: old.cwd, // a manager works in the project repo (same cwd)
+      processState: "starting",
+      resumability: "unknown",
+      busy: false,
+      createdAt: now,
+      lastActivity: now,
+      lastError: null,
+      role: "manager",
+      gen: newGen,
+      recycledFrom: old.id,
+    };
+    this.db.insertSession(fresh);
+    this.pty.spawn({
+      sessionId: fresh.id,
+      cwd: fresh.cwd,
+      permission: config.permission,
+      geometry: config.pty,
+      sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      startupPrompt,
+      role: "manager", // successor keeps the orchestration surface
+    });
+    this.db.setProcessState(fresh.id, "live");
+
+    // Re-parent live workers onto the successor BEFORE closing the old manager, so they're never
+    // orphaned (worker_report routes by parent_session_id; the successor sees them via worker_list).
+    const reparented = this.db.reparentLiveWorkers(oldManagerId, fresh.id);
+
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: fresh.id, kind: "recycle_complete",
+      detail: { recycledFrom: old.id, gen: newGen, reparentedWorkers: reparented },
+    });
+
+    // Close the predecessor AFTER a short delay so the recycle_me tool response (it's the old manager's
+    // own MCP call) flushes before its pty is killed.
+    setTimeout(() => { try { this.pty.stop(oldManagerId, "hard"); } catch { /* already gone */ } }, 3000);
+
+    return { ...fresh, processState: "live" };
+  }
+
+  /**
    * Step 1 of the two-step merge gate (#16): show the manager a worker's branch diff. NO merge
    * happens — this is the review the manager cannot skip (there is no worker-side merge tool).
    */

@@ -54,6 +54,14 @@ export interface OrchestrationConfig {
    * (this is a daemon-wide service, not per-project); env override: LOOM_SCHEDULER_ENABLED=1.
    */
   schedulerEnabled: boolean;
+  /**
+   * Manager context-recycle threshold: the fraction of a manager's MODEL context window
+   * (`contextWindowForModel`, so it scales with the model — 1M for Opus/Sonnet 4.x, 200k otherwise)
+   * at which the daemon's ContextWatcher nudges the manager to hand off to a fresh successor (run
+   * /session-end, write a continuation prompt, call recycle_me). Agent-confirmed — the watcher only
+   * prompts; the manager performs the handoff. Default 0.80; 0 disables. Env: LOOM_RECYCLE_CONTEXT_RATIO.
+   */
+  recycleAtContextRatio: number;
 }
 
 /** The fully-resolved, effective config for a project. */
@@ -115,7 +123,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false },
+  orchestration: { gateCommand: "", maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80 },
   docLint: true, // Pillar D vault-lint hook on by default
 };
 
@@ -141,6 +149,7 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
       maxConcurrentWorkers: override.orchestration?.maxConcurrentWorkers ?? d.orchestration.maxConcurrentWorkers,
       maxConcurrentManagers: override.orchestration?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers,
       schedulerEnabled: override.orchestration?.schedulerEnabled ?? d.orchestration.schedulerEnabled,
+      recycleAtContextRatio: override.orchestration?.recycleAtContextRatio ?? d.orchestration.recycleAtContextRatio,
     },
     docLint: override.docLint ?? d.docLint,
   };

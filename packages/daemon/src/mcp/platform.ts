@@ -27,6 +27,7 @@ const orchestrationOverride = z.object({
   maxConcurrentWorkers: z.number().optional(),
   maxConcurrentManagers: z.number().optional(),
   schedulerEnabled: z.boolean().optional(),
+  recycleAtContextRatio: z.number().optional(),
 }).strict();
 const projectConfigOverrideSchema = z.object({
   kanbanColumns: z.array(kanbanColumn).optional(),

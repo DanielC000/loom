@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
+import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
 import { Panel, Button, Select, SectionLabel, Badge, StatusPill, Chip, Meter } from "../components/ui";
 import { DiffView } from "../components/Diff";
@@ -9,8 +10,6 @@ import { color, font } from "../theme";
 // Orchestration viewport (#18b): SEE the spine that the MCP manager drives. A live fleet view of
 // ONE manager's workers, its orchestration_events timeline, and a per-worker branch diff — plus
 // the REST pause/kill/stop controls. (The all-managers god-eye view is Mission Control.)
-
-const CTX_WINDOW = 200_000;
 
 export default function Orchestration() {
   const qc = useQueryClient();
@@ -104,6 +103,7 @@ function WorkerCard({ w, selected, onSelect, onStop, stopping }:
   // §19c: parked on the Claude usage cap until rateLimitedUntil — show it instead of the busy/idle pill.
   const rateLimited = !!w.rateLimitedUntil && new Date(w.rateLimitedUntil).getTime() > Date.now();
   const ctx = w.ctxInputTokens ?? 0;
+  const window = contextWindowForModel(w.model);
   return (
     <Panel selected={selected} onClick={onSelect} style={{ marginBottom: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
@@ -123,7 +123,7 @@ function WorkerCard({ w, selected, onSelect, onStop, stopping }:
         <Chip label="branch" value={w.branch ?? "—"} tone="cyan" />
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           <Chip label="ctx" value={ctx ? ctx.toLocaleString() : "—"} />
-          {ctx > 0 && <Meter value={ctx} max={CTX_WINDOW} tone={ctx > 120_000 ? "amber" : "phosphor"} width={50} />}
+          {ctx > 0 && <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "amber" : "phosphor"} width={50} />}
         </span>
         <Chip label="active" value={new Date(w.lastActivity).toLocaleTimeString()} />
       </div>

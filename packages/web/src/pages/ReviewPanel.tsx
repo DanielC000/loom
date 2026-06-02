@@ -1,12 +1,11 @@
 import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
 import { Panel, Button, SectionLabel, Chip, Meter } from "../components/ui";
 import { DiffView } from "../components/Diff";
 import { color, font } from "../theme";
-
-const CTX_WINDOW = 200_000;
 
 // The human-in-the-loop REVIEW & MERGE surface (promotes deferred #18c): a worker's branch diff +
 // the build gate (run on Approve) + Approve&Merge / Request-changes. Reached from Mission Control's
@@ -33,6 +32,7 @@ export default function ReviewPanel() {
   });
 
   const ctx = worker?.ctxInputTokens ?? 0;
+  const window = contextWindowForModel(worker?.model);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -48,7 +48,7 @@ export default function ReviewPanel() {
         {diff.data && <Chip value={`${diff.data.filesChanged} files · +${diff.data.insertions} −${diff.data.deletions}`} tone="cyan" />}
         {ctx > 0 && (
           <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <Meter value={ctx} max={CTX_WINDOW} tone={ctx > 120_000 ? "amber" : "phosphor"} width={60} />
+            <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "amber" : "phosphor"} width={60} />
             <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{(ctx / 1000).toFixed(1)}k ctx</span>
           </span>
         )}

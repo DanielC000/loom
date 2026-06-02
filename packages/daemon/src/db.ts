@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   ctx_input_tokens INTEGER,
   ctx_turns INTEGER,
   ctx_updated_at TEXT,
+  model TEXT,
   rate_limited_until TEXT,
   rate_limit_deadline TEXT
 );
@@ -109,6 +110,7 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   ctx_input_tokens: "INTEGER",
   ctx_turns: "INTEGER",
   ctx_updated_at: "TEXT",
+  model: "TEXT",
   rate_limited_until: "TEXT",
   rate_limit_deadline: "TEXT",
 };
@@ -213,12 +215,12 @@ export class Db {
          id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
          role,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
-         ctx_input_tokens,ctx_turns,ctx_updated_at,rate_limited_until,rate_limit_deadline)
+         ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline)
        VALUES (
          @id,@projectId,@topicId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
          @role,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
-         @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@rateLimitedUntil,@rateLimitDeadline)`,
+         @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline)`,
     ).run({
       ...s,
       busy: s.busy ? 1 : 0,
@@ -234,6 +236,7 @@ export class Db {
       ctxInputTokens: s.ctxInputTokens ?? null,
       ctxTurns: s.ctxTurns ?? null,
       ctxUpdatedAt: s.ctxUpdatedAt ?? null,
+      model: s.model ?? null,
       rateLimitedUntil: s.rateLimitedUntil ?? null,
       rateLimitDeadline: s.rateLimitDeadline ?? null,
     });
@@ -287,10 +290,14 @@ export class Db {
     const vals = names.map((c) => cols[c]);
     this.db.prepare(`UPDATE sessions SET ${set} WHERE id = ?`).run(...vals, id);
   }
-  /** Update measured context occupancy, bumping ctx_updated_at. */
-  setContextCounters(id: string, c: { ctxInputTokens: number; ctxTurns: number }): void {
-    this.db.prepare("UPDATE sessions SET ctx_input_tokens = ?, ctx_turns = ?, ctx_updated_at = ? WHERE id = ?")
-      .run(c.ctxInputTokens, c.ctxTurns, new Date().toISOString(), id);
+  /**
+   * Update measured context occupancy, bumping ctx_updated_at. Also records the model id read
+   * from the same transcript line (COALESCE keeps the prior model when this reading lacks one,
+   * so a model-less line never clears it).
+   */
+  setContextCounters(id: string, c: { ctxInputTokens: number; ctxTurns: number; model?: string | null }): void {
+    this.db.prepare("UPDATE sessions SET ctx_input_tokens = ?, ctx_turns = ?, model = COALESCE(?, model), ctx_updated_at = ? WHERE id = ?")
+      .run(c.ctxInputTokens, c.ctxTurns, c.model ?? null, new Date().toISOString(), id);
   }
   /**
    * §19c usage-limit park: stamp when the session may resume (null clears the park) and the
@@ -333,6 +340,16 @@ export class Db {
   listWorkers(managerSessionId: string): Session[] {
     return (this.db.prepare("SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at")
       .all(managerSessionId) as Row[]).map(toSession);
+  }
+  /** Currently-LIVE manager sessions — the ContextWatcher's work set (recycle-by-context). */
+  listLiveManagers(): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE role = 'manager' AND process_state = 'live'")
+      .all() as Row[]).map(toSession);
+  }
+  /** Re-parent a recycled manager's LIVE workers onto its successor so the fleet survives the handoff. */
+  reparentLiveWorkers(oldManagerId: string, newManagerId: string): number {
+    return this.db.prepare("UPDATE sessions SET parent_session_id = ? WHERE parent_session_id = ? AND process_state = 'live'")
+      .run(newManagerId, oldManagerId).changes;
   }
   /** Count of currently-LIVE manager sessions — the Scheduler's manager-cap gate (§19a hardening). */
   countLiveManagers(): number {
@@ -474,6 +491,7 @@ function toSession(r0: unknown): Session {
     ctxInputTokens: (r.ctx_input_tokens as number) ?? null,
     ctxTurns: (r.ctx_turns as number) ?? null,
     ctxUpdatedAt: (r.ctx_updated_at as string) ?? null,
+    model: (r.model as string) ?? null,
     rateLimitedUntil: (r.rate_limited_until as string) ?? null,
     rateLimitDeadline: (r.rate_limit_deadline as string) ?? null,
   };

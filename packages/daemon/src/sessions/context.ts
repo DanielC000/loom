@@ -6,6 +6,8 @@ export interface ContextStats {
   inputTokens: number;
   /** Assistant turns so far (coarse secondary signal). */
   turns: number;
+  /** Model id from the most recent assistant line (e.g. "claude-opus-4-8"); null if absent. */
+  model: string | null;
 }
 
 function num(x: unknown): number {
@@ -26,14 +28,16 @@ export function readContextStats(cwd: string, engineSessionId: string): ContextS
 
   let turns = 0;
   let lastUsage: Record<string, unknown> | null = null;
+  let lastModel: string | null = null;
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let o: Record<string, unknown>;
     try { o = JSON.parse(line); } catch { continue; }
     if (o.type !== "assistant" || !o.message) continue;
     turns++;
-    const usage = (o.message as { usage?: Record<string, unknown> }).usage;
-    if (usage) lastUsage = usage; // keep the most recent turn's usage
+    const msg = o.message as { usage?: Record<string, unknown>; model?: string };
+    if (msg.usage) lastUsage = msg.usage; // keep the most recent turn's usage
+    if (typeof msg.model === "string") lastModel = msg.model; // …and its model id
   }
 
   if (!lastUsage) return null; // assistant lines but none with usage (or no assistant lines)
@@ -41,5 +45,5 @@ export function readContextStats(cwd: string, engineSessionId: string): ContextS
     num(lastUsage.input_tokens) +
     num(lastUsage.cache_read_input_tokens) +
     num(lastUsage.cache_creation_input_tokens);
-  return { inputTokens, turns };
+  return { inputTokens, turns, model: lastModel };
 }

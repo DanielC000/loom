@@ -67,6 +67,8 @@ export interface Session {
   ctxInputTokens?: number | null;   // measured engine context occupancy (last-assistant usage)
   ctxTurns?: number | null;
   ctxUpdatedAt?: string | null;
+  /** Engine model id from the transcript (e.g. "claude-opus-4-8"); sizes the ctx meters. */
+  model?: string | null;
   /**
    * §19c usage-limit park: the ISO instant this session may resume after hitting the Claude
    * usage cap (reset+buffer when known, else a default backoff). null = not rate-limited. The
@@ -149,4 +151,25 @@ export interface Wake {
   wakeAt: string;            // ISO; when to re-nudge the session
   note: string;
   createdAt: string;
+}
+
+// --- Context-window sizing -------------------------------------------------------------------
+/** Fallback window for an unknown / not-yet-measured model — the classic Claude context size. */
+export const DEFAULT_CONTEXT_WINDOW = 200_000;
+/** Fraction of the window at which a ctx meter flips to the amber "getting full" tone. */
+export const CONTEXT_WARN_RATIO = 0.6;
+// Map a model id to its context window. The transcript reports a BARE model id (e.g.
+// "claude-opus-4-8") with no signal of the 1M-context beta, so we size by the model's MAX
+// attainable window: Claude 4.x Opus/Sonnet run with the 1M beta in this deployment. An explicit
+// "1m" in the id always wins. Unknown models fall back to DEFAULT_CONTEXT_WINDOW. Adjust here if
+// you run a 4.x model pinned to the smaller 200k window.
+const CONTEXT_WINDOW_BY_MODEL: { match: RegExp; window: number }[] = [
+  { match: /1m/i, window: 1_000_000 },               // an explicit 1M-context model id
+  { match: /opus-4|sonnet-4/i, window: 1_000_000 },  // Claude 4.x Opus/Sonnet — 1M-context beta
+];
+/** Resolve a session's context window from its (possibly null) model id. */
+export function contextWindowForModel(model?: string | null): number {
+  if (!model) return DEFAULT_CONTEXT_WINDOW;
+  for (const { match, window } of CONTEXT_WINDOW_BY_MODEL) if (match.test(model)) return window;
+  return DEFAULT_CONTEXT_WINDOW;
 }

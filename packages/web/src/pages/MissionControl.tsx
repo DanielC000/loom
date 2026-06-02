@@ -1,6 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
+import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
 import { useAttention, isRateLimited, type AttentionItem } from "../lib/attention";
 import { Panel, SectionLabel, StatusPill, Badge, Chip, Meter, Button, Dot } from "../components/ui";
@@ -10,8 +11,6 @@ import { color, font, tone, type Tone } from "../theme";
 // pick a single manager. Three regions: a global status strip, an ATTENTION QUEUE (shared with the
 // shell bell via useAttention), and FLEET (projects → managers → workers) beside a global ACTIVITY
 // feed. All derived from existing endpoints (/api/sessions + per-manager events).
-
-const CTX_WINDOW = 200_000; // model context window, for the ctx meters
 
 function sessionStatus(s: SessionListItem): { tone: Tone; label: string; glow?: boolean } {
   if (isRateLimited(s)) return { tone: "red", label: "rate-limited" };
@@ -144,6 +143,7 @@ function AttentionRow({ item, onOpen }: { item: AttentionItem; onOpen?: () => vo
 function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
   const st = sessionStatus(s);
   const ctx = s.ctxInputTokens ?? 0;
+  const window = contextWindowForModel(s.model);
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "3px 0", flexWrap: "wrap" }}>
       <span style={{ fontFamily: font.mono, fontSize: 12, color: star ? color.phosphor : color.text, fontWeight: star ? 700 : 400 }}>
@@ -154,7 +154,7 @@ function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
       {s.branch && <Chip label="branch" value={s.branch} tone="cyan" />}
       {ctx > 0 && (
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <Meter value={ctx} max={CTX_WINDOW} tone={ctx > 120_000 ? "amber" : "phosphor"} width={60} />
+          <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "amber" : "phosphor"} width={60} />
           <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{(ctx / 1000).toFixed(1)}k</span>
         </span>
       )}

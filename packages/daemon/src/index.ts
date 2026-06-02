@@ -12,6 +12,7 @@ import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
 import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
 import { WakeService } from "./orchestration/wake.js";
+import { ContextWatcher } from "./orchestration/context-watcher.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "./orchestration/usage-limit.js";
 import { buildServer } from "./gateway/server.js";
@@ -36,7 +37,7 @@ async function main(): Promise<void> {
     // reporting (stranded-worker guard; no-op for non-workers). `sessions` is assigned below but
     // this closure only runs at runtime — same forward-reference pattern as onExit→orchMcp.
     onBusy: (sessionId, busy) => { db.setBusy(sessionId, busy); if (!busy) sessions.notifyManagerOfIdleWorker(sessionId); },
-    onContextStats: (sessionId, s) => db.setContextCounters(sessionId, { ctxInputTokens: s.inputTokens, ctxTurns: s.turns }),
+    onContextStats: (sessionId, s) => db.setContextCounters(sessionId, { ctxInputTokens: s.inputTokens, ctxTurns: s.turns, model: s.model }),
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
     // the Scheduler / worker_spawn won't fire into a known-limited account).
@@ -103,8 +104,16 @@ async function main(): Promise<void> {
   const reconcileTimer = setInterval(() => pty.reconcile(), reconcileMs);
   console.log(`[boot] input-queue reconcile on (tick ${reconcileMs}ms)`);
 
+  // Manager context-recycle watcher — nudges a manager nearing its model's context window to hand off
+  // to a fresh successor (run /session-end → recycle_me). Ratio scales with the model. 0 disables.
+  const recycleRatio = Number(process.env.LOOM_RECYCLE_CONTEXT_RATIO) || resolveConfig(undefined).orchestration.recycleAtContextRatio;
+  const ctxWatchMs = Number(process.env.LOOM_CONTEXT_WATCH_INTERVAL_MS) || 60_000;
+  const contextWatcher = new ContextWatcher({ db, pty, ratio: recycleRatio, intervalMs: ctxWatchMs });
+  contextWatcher.start();
+  console.log(`[boot] context-recycle watcher on (ratio ${recycleRatio}, tick ${ctxWatchMs}ms)`);
+
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); wakes.stop(); clearInterval(reconcileTimer); process.exit(0); });
+    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); wakes.stop(); clearInterval(reconcileTimer); contextWatcher.stop(); process.exit(0); });
   }
 }
 
