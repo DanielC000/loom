@@ -95,6 +95,17 @@ export const api = {
     get<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/log`),
   gitBranches: (projectId: string) =>
     get<{ current: string; all: string[] }>(`/api/projects/${projectId}/git/branches`),
+  // Git WRITE (HUMAN-only; mirrors the vault writer — no agent MCP surface). Each returns a structured
+  // { ok, error? } so the UI shows an expected git failure (dirty tree, no upstream, conflict) instead
+  // of a generic throw. commit takes ONLY a message (repo-configured identity, no overrides/trailer).
+  gitCheckout: (projectId: string, branch: string) =>
+    post<{ ok: boolean; branch?: string; error?: string }>(`/api/projects/${projectId}/git/checkout`, { branch }),
+  gitCreateBranch: (projectId: string, name: string) =>
+    post<{ ok: boolean; branch?: string; error?: string }>(`/api/projects/${projectId}/git/branch`, { name }),
+  gitCommit: (projectId: string, message: string) =>
+    post<{ ok: boolean; hash?: string; error?: string }>(`/api/projects/${projectId}/git/commit`, { message }),
+  gitPush: (projectId: string) =>
+    post<{ ok: boolean; branch?: string; error?: string }>(`/api/projects/${projectId}/git/push`),
   board: (projectId: string) =>
     get<{ columns: KanbanColumn[]; tasks: Task[] }>(`/api/projects/${projectId}/board`),
   updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position">>) =>

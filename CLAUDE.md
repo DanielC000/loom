@@ -60,4 +60,8 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
 ## Conventions
 - Node 22 + TypeScript, ESM (`NodeNext`) in daemon/shared; `bundler` resolution in web.
 - One config-resolution mechanism (`resolveConfig`) — never read defaults ad hoc.
-- Read-only in phase 1: vault browser and git view do not write/commit/push from the UI.
+- Vault + git writes are enabled via a HUMAN-only REST surface (vault: `vault/writer.ts`; git:
+  `git/writer.ts` — checkout/commit/push/create-branch). These are trust-boundary surfaces like
+  gateCommand: NO agent MCP tool exposes them; an agent can never write/commit/push from a session.
+  Every git write is bounded + non-interactive (`GIT_TERMINAL_PROMPT=0` + timeout) so a hung push
+  can't wedge the daemon. The read-only log/branches view is unchanged.
