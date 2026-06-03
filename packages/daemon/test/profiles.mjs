@@ -63,20 +63,30 @@ const profile = {
   allowDelta: ["Bash(pnpm test:*)"], skills: ["worker"], model: "claude-opus-4-8", icon: "🛠️",
 };
 
-// Topic with its OWN prompt → topic prompt overrides the profile's; everything else from the profile.
+// Topic with its OWN (non-empty) prompt → topic prompt overrides the profile's; everything else from
+// the profile.
 const withProfile = resolveProfile({ startupPrompt: "topic override prompt" }, profile);
 check("(b) profile supplies role/allow/skills/model/icon",
   withProfile.role === "worker" &&
   JSON.stringify(withProfile.allow) === JSON.stringify(["Bash(pnpm test:*)"]) &&
   JSON.stringify(withProfile.skills) === JSON.stringify(["worker"]) &&
   withProfile.model === "claude-opus-4-8" && withProfile.icon === "🛠️");
-check("(b) topic.startupPrompt overrides the profile prompt",
+check("(b) non-empty topic.startupPrompt overrides the profile prompt",
   withProfile.startupPrompt === "topic override prompt");
 
 // A prompt-less topic (null) falls back to the profile's prompt (per-topic override is opt-in).
 const fallback = resolveProfile({ startupPrompt: null }, profile);
-check("(b) prompt-less topic falls back to the profile prompt",
+check("(b) prompt-less topic (null) falls back to the profile prompt",
   fallback.startupPrompt === "profile default prompt");
+
+// Empty-as-absent (profile PRESENT): an empty/whitespace per-topic prompt also falls back to the
+// profile's default. This is the real-DB case — topics.startup_prompt is NOT NULL DEFAULT '', so a
+// profile-topic with no per-topic prompt presents '' (never null); without this the profile's prompt
+// would be dead code.
+check("(b) empty ('') topic prompt + profile falls back to the profile prompt",
+  resolveProfile({ startupPrompt: "" }, profile).startupPrompt === "profile default prompt");
+check("(b) whitespace-only topic prompt + profile falls back to the profile prompt",
+  resolveProfile({ startupPrompt: "   \n " }, profile).startupPrompt === "profile default prompt");
 
 // NULL / absent profile ⇒ EXACTLY today's backstop behavior.
 const backstop = resolveProfile({ startupPrompt: "just the topic prompt" }, null);
@@ -84,6 +94,10 @@ check("(b) null profile ⇒ today's backstop EXACTLY",
   backstop.role === null && backstop.startupPrompt === "just the topic prompt" &&
   JSON.stringify(backstop.allow) === "[]" && backstop.skills === null &&
   backstop.model === null && backstop.icon === null);
+// Backstop keeps the topic prompt VERBATIM — empty-as-absent does NOT apply without a profile, so a
+// plain (profile-less) topic with an empty prompt stays a plain session with no prompt (today's behavior).
+check("(b) null profile + empty prompt stays empty (empty-as-absent is profile-present ONLY)",
+  resolveProfile({ startupPrompt: "" }, null).startupPrompt === "");
 const backstopUndef = resolveProfile({ startupPrompt: "p" });
 check("(b) absent profile (undefined) ⇒ same backstop",
   backstopUndef.role === null && backstopUndef.startupPrompt === "p" &&

@@ -1,7 +1,11 @@
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { resolveConfig, type Session, type StopMode, type OrchestrationEvent } from "@loom/shared";
+import {
+  resolveConfig, resolveProfile,
+  type Session, type StopMode, type OrchestrationEvent,
+  type Topic, type SessionRole, type ResolvedConfig, type PermissionPolicy,
+} from "@loom/shared";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, isBranchMerged } from "../git/worktrees.js";
@@ -14,6 +18,41 @@ import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon } from
 export class SessionService {
   constructor(private db: Db, private pty: PtyHost, private control: OrchestrationControl) {}
 
+  /**
+   * Phase-2 profile-driven spawn (Topics→Profiles P2): resolve a topic's OPTIONAL Agent Profile into
+   * the effective spawn shape the "start a session in a topic" paths read — the role it confers, the
+   * startup prompt to inject, and the permission policy (config allow + the profile's allowDelta).
+   *
+   * Fully ADDITIVE — a topic with `profileId === null` (every topic today) resolves to EXACTLY
+   * today's behavior: role straight from the caller, the topic's OWN prompt, and the config's
+   * permission object UNCHANGED (same reference — no allow delta layered), so every existing spawn is
+   * byte-identical when no profile is involved.
+   *
+   * Role composition (the load-bearing rule): an EXPLICIT caller role — worker_spawn → worker,
+   * REST/scheduler → manager/platform — ALWAYS wins; the profile supplies role ONLY when the caller
+   * didn't specify one (the plain "+New" path) AND the topic has a profile.
+   *
+   * DEFERRED to a later phase (NOT wired here): the profile's `model` (no `--model` emitted) and its
+   * `skills` subset (all skills still delivered). This wires ONLY role + startupPrompt + allow.
+   */
+  private resolveTopicSpawn(
+    topic: Topic, config: ResolvedConfig, explicitRole?: SessionRole,
+  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy } {
+    const profile = topic.profileId ? this.db.getProfile(topic.profileId) : undefined;
+    const resolved = resolveProfile(topic, profile);
+    // Layer the profile's allowDelta onto the config allow; an empty delta keeps the SAME config
+    // permission reference, so a profile-less spawn is byte-identical to today.
+    const permission = resolved.allow.length
+      ? { ...config.permission, allow: [...config.permission.allow, ...resolved.allow] }
+      : config.permission;
+    return {
+      role: explicitRole ?? resolved.role ?? undefined,
+      // Same `|| undefined` empties-to-undefined coercion today's start paths use on the topic prompt.
+      startupPrompt: resolved.startupPrompt || undefined,
+      permission,
+    };
+  }
+
   /** Start a NEW session in a topic — injects the topic startup prompt once. */
   startNew(topicId: string): Session {
     const topic = this.db.getTopic(topicId);
@@ -21,6 +60,10 @@ export class SessionService {
     const project = this.db.getProject(topic.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
+    // Phase-2: a topic with an Agent Profile spawns with the profile's role + prompt + allowDelta.
+    // No caller role here (plain "+New"), so the profile's role applies when present. No profile ⇒
+    // role undefined, the topic's own prompt, the config permission unchanged — i.e. today's session.
+    const { role, startupPrompt, permission } = this.resolveTopicSpawn(topic, config);
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -36,18 +79,22 @@ export class SessionService {
       createdAt: now,
       lastActivity: now,
       lastError: null,
+      role, // phase-2: profile-conferred role (undefined ⇒ today's plain, role-null session)
     };
     this.db.insertSession(session);
+    // M5: flip to live BEFORE wiring the pty, so onExit ('exited') from a fast-failing spawn always
+    // wins — there is no post-spawn 'live' write left to clobber it back to live.
+    this.db.setProcessState(session.id, "live");
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd,
-      permission: config.permission,
+      permission,
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      startupPrompt: topic.startupPrompt || undefined,
+      startupPrompt,
+      role,
     });
-    this.db.setProcessState(session.id, "live");
     return { ...session, processState: "live" };
   }
 
@@ -62,6 +109,9 @@ export class SessionService {
     const project = this.db.getProject(topic.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
+    // Explicit 'manager' role from the caller (scheduler/REST) ALWAYS wins; the profile (if any) only
+    // layers its prompt + allowDelta. No profile ⇒ byte-identical to today's manager spawn.
+    const { role, startupPrompt, permission } = this.resolveTopicSpawn(topic, config, "manager");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -77,20 +127,21 @@ export class SessionService {
       createdAt: now,
       lastActivity: now,
       lastError: null,
-      role: "manager",
+      role,
     };
     this.db.insertSession(session);
+    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
+    this.db.setProcessState(session.id, "live");
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd,
-      permission: config.permission,
+      permission,
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      startupPrompt: topic.startupPrompt || undefined,
-      role: "manager",
+      startupPrompt,
+      role,
     });
-    this.db.setProcessState(session.id, "live");
     return { ...session, processState: "live" };
   }
 
@@ -105,6 +156,9 @@ export class SessionService {
     const project = this.db.getProject(topic.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
+    // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
+    // prompt + allowDelta. No profile ⇒ byte-identical to today's platform-lead spawn.
+    const { role, startupPrompt, permission } = this.resolveTopicSpawn(topic, config, "platform");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -120,20 +174,21 @@ export class SessionService {
       createdAt: now,
       lastActivity: now,
       lastError: null,
-      role: "platform",
+      role,
     };
     this.db.insertSession(session);
+    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
+    this.db.setProcessState(session.id, "live");
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd,
-      permission: config.permission,
+      permission,
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      startupPrompt: topic.startupPrompt || undefined,
-      role: "platform",
+      startupPrompt,
+      role,
     });
-    this.db.setProcessState(session.id, "live");
     return { ...session, processState: "live" };
   }
 
@@ -151,6 +206,8 @@ export class SessionService {
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
 
+    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
+    this.db.setProcessState(session.id, "live");
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd, // SAME cwd — Claude keys sessions to the project dir
@@ -164,7 +221,6 @@ export class SessionService {
       // resumed manager loses worker_spawn/merge/etc. and a worker loses worker_report.
       role: session.role ?? undefined,
     });
-    this.db.setProcessState(session.id, "live");
     // A freshly-resumed session has no turn in flight (resume injects no prompt) — clear any stale
     // busy=true carried in the DB across the restart. Without this the session shows/acts "busy"
     // forever, so enqueued worker reports queue instead of submitting and the idle guard can't fire.
@@ -247,6 +303,8 @@ export class SessionService {
       role: src.role ?? undefined, // a forked manager stays a manager (keeps its MCP surface)
     };
     this.db.insertSession(session);
+    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
+    this.db.setProcessState(session.id, "live");
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd,
@@ -259,7 +317,6 @@ export class SessionService {
       forkSessionId: forkEngineId,   // ...into this pre-assigned id (--session-id).
       role: src.role ?? undefined,
     });
-    this.db.setProcessState(session.id, "live");
     return { ...session, processState: "live" };
   }
 
@@ -311,6 +368,8 @@ export class SessionService {
       branch,
     };
     this.db.insertSession(worker);
+    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
+    this.db.setProcessState(worker.id, "live");
     this.pty.spawn({
       sessionId: worker.id,
       cwd: worktreePath,
@@ -321,7 +380,6 @@ export class SessionService {
       startupPrompt: opts.kickoffPrompt,
       role: "worker", // gives the worker the orchestration surface (worker_report only)
     });
-    this.db.setProcessState(worker.id, "live");
     this.db.updateTask(opts.taskId, { columnKey: "in_progress" });
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
@@ -492,6 +550,8 @@ export class SessionService {
     const framed =
       `[loom:handoff] You are continuing a task in an existing git worktree on branch ${branch ?? "(unknown)"}. ` +
       `Your predecessor's handoff:\n\n${handoffSummary}\n\nContinue from here.`;
+    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
+    this.db.setProcessState(fresh.id, "live");
     this.pty.spawn({
       sessionId: fresh.id,
       cwd: worktreePath,
@@ -502,7 +562,6 @@ export class SessionService {
       startupPrompt: framed,
       role: "worker",
     });
-    this.db.setProcessState(fresh.id, "live");
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId: fresh.id, taskId, kind: "recycle_complete",
@@ -558,6 +617,8 @@ export class SessionService {
       recycledFrom: old.id,
     };
     this.db.insertSession(fresh);
+    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
+    this.db.setProcessState(fresh.id, "live");
     this.pty.spawn({
       sessionId: fresh.id,
       cwd: fresh.cwd,
@@ -568,7 +629,6 @@ export class SessionService {
       startupPrompt,
       role: "manager", // successor keeps the orchestration surface
     });
-    this.db.setProcessState(fresh.id, "live");
 
     // Re-parent live workers onto the successor BEFORE closing the old manager, so they're never
     // orphaned (worker_report routes by parent_session_id; the successor sees them via worker_list).

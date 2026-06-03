@@ -32,7 +32,8 @@ export interface Topic {
    * Optional Agent Profile this topic adopts — the reusable, platform-level "who" (role + prompt +
    * tool/permission/model/icon). Nullable + additive: null = a legacy / plain topic, which
    * `resolveProfile` maps to EXACTLY today's behavior. When set, the profile supplies
-   * role/allow/skills/model/icon and the topic's own startupPrompt overrides the profile's.
+   * role/allow/skills/model/icon and the topic's own startupPrompt overrides the profile's when
+   * non-empty (a blank per-topic prompt falls back to the profile's default prompt).
    * Phase-1 is the READ PATH only — the spawn path still ignores this (P2 wires it in).
    */
   profileId: ProfileId | null;
@@ -51,7 +52,8 @@ export interface Profile {
   name: string;
   /** Orchestration role conferred; null = a plain (non-orchestration) session — today's default. */
   role: SessionRole | null;
-  /** Default startup prompt. A topic's own startupPrompt overrides this (per-topic override). */
+  /** Default startup prompt. A topic's own (non-empty) startupPrompt overrides this; a blank one
+   *  falls back to this default (per-topic override is opt-in). */
   startupPrompt: string;
   /** Permission allowlist delta layered onto the resolved config's allow (e.g. extra Bash globs). */
   allowDelta: string[];
