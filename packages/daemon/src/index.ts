@@ -157,12 +157,20 @@ async function main(): Promise<void> {
     const tryResume = (id: string): boolean => {
       try { sessions.resume(id); return true; } catch { return false; }
     };
+    // Replay a session's pre-restart pending inbound FIFO (snapshotted into the intent) onto the freshly
+    // resumed pty, IN ORDER and BEFORE its continuation nudge below. These messages predate the restart,
+    // so FIFO-correctness puts them ahead of the boot note. enqueueStdin is ready-gated (same as the
+    // nudge), so they queue until the resumed TUI boots, then drain cleanly.
+    const replayPending = (id: string): void => {
+      for (const m of restartIntent.pending?.[id] ?? []) pty.enqueueStdin(id, m);
+    };
     // Resume the workers, then give EACH a continuation nudge. A resumed worker gets no startup prompt,
     // so a mid-task one would otherwise sit idle (the stranded-worker guard can't catch it — that fires
     // on a busy->false hook edge, which a resume's direct setBusy(false) doesn't produce). The nudge is
     // ready-gated in enqueueStdin, so it queues until the worker's TUI boots, then submits cleanly.
     const resumedWorkers = restartIntent.workerSessionIds.filter(tryResume);
     for (const wid of resumedWorkers) {
+      replayPending(wid);
       pty.enqueueStdin(
         wid,
         `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — your worktree ` +
@@ -172,6 +180,7 @@ async function main(): Promise<void> {
     }
     const workersResumed = resumedWorkers.length;
     if (tryResume(restartIntent.managerSessionId)) {
+      replayPending(restartIntent.managerSessionId);
       pty.enqueueStdin(
         restartIntent.managerSessionId,
         `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +

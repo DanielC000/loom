@@ -1,7 +1,11 @@
 // Self-host daemon-restart support test (the `daemon_restart` manager tool). NO claude, NO live
 // daemon, NO process.exit — drives the restart module + SessionService directly against an isolated
 // LOOM_HOME. Proves:
-//   (1) restart-intent roundtrips: write → read → clear (and reads null when absent).
+//   (1) restart-intent roundtrips: write → read → clear (and reads null when absent), INCLUDING a
+//       `pending` FIFO snapshot (sessionId → queued inbound msgs) persisted byte-for-byte, order intact.
+//   (4) boot replay seam: replaying an intent's `pending` snapshot onto a resumed (not-yet-ready) pty
+//       re-enqueues each session's messages in FIFO order (getPending after replay == the snapshot) —
+//       the persisted analogue of recycle's in-process carriedPending, mirrored from index.ts boot.
 //   (2) reconcileOrchestrationOnBoot PROTECTS a restart-intent worker's worktree from pass-B GC —
 //       without protection the exited worker's worktree is pruned (and would be unresumable); WITH
 //       the worker in the protected set the worktree is RETAINED so boot can resume into it.
@@ -49,6 +53,17 @@ try {
   check("(1) intent cleared → reads null again", restart.readRestartIntent() === null);
   check("(1) RESTART_EXIT_CODE is the agreed sentinel (75)", restart.RESTART_EXIT_CODE === 75);
 
+  // --- (1b) an intent carrying a `pending` FIFO snapshot round-trips intact (order preserved) ---
+  const pendingSnap = {
+    [ids.mgrId]: ["queued for busy manager (worker_report frame)", "second manager msg"],
+    [ids.workerId]: ["queued for busy worker"],
+  };
+  restart.writeRestartIntent({ reason: "deploy", managerSessionId: ids.mgrId, workerSessionIds: [ids.workerId], requestedAt: now, pending: pendingSnap });
+  const readP = restart.readRestartIntent();
+  check("(1b) intent's pending snapshot round-trips byte-for-byte (FIFO order preserved)",
+    readP && JSON.stringify(readP.pending) === JSON.stringify(pendingSnap));
+  restart.clearRestartIntent();
+
   // --- setup: a real exited worker with a committed-but-unmerged worktree on disk ---
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# ri\n");
@@ -86,6 +101,34 @@ try {
   let threw = false;
   try { await sessions.requestDaemonRestart(ids.workerId, "nope"); } catch { threw = true; }
   check("(3) a worker calling requestDaemonRestart throws (manager-only)", threw);
+
+  // --- (4) boot replay seam: replaying the intent's pending snapshot onto a resumed pty preserves FIFO order ---
+  // A minimal stand-in for the PTY host's FIFO seam: a freshly resumed pty is not-ready, so every
+  // enqueueStdin QUEUES (the ready-gated path in host.ts) and getPending returns a copy — exactly what
+  // boot's replay relies on. Claude-free: proves the replay re-enqueues in order without a live engine.
+  class PtyStub {
+    constructor() { this.q = new Map(); }
+    enqueueStdin(id, text) { const a = this.q.get(id) ?? []; a.push(text); this.q.set(id, a); return { delivered: false, position: a.length }; }
+    getPending(id) { return [...(this.q.get(id) ?? [])]; }
+  }
+  const replaySnap = {
+    [ids.mgrId]: ["mgr msg 1 (worker_report frame)", "mgr msg 2", "mgr msg 3"],
+    [ids.workerId]: ["wkr msg A", "wkr msg B"],
+  };
+  restart.writeRestartIntent({ reason: "deploy", managerSessionId: ids.mgrId, workerSessionIds: [ids.workerId], requestedAt: now, pending: replaySnap });
+  const replayIntent = restart.readRestartIntent();
+  const pty = new PtyStub();
+  // Mirror index.ts boot exactly: replay each resumed session's pending IN ORDER (BEFORE any nudge).
+  const replayPending = (id) => { for (const m of replayIntent.pending?.[id] ?? []) pty.enqueueStdin(id, m); };
+  for (const wid of replayIntent.workerSessionIds) replayPending(wid);
+  replayPending(replayIntent.managerSessionId);
+  check("(4) manager FIFO replayed onto resumed pty in order",
+    JSON.stringify(pty.getPending(ids.mgrId)) === JSON.stringify(replaySnap[ids.mgrId]));
+  check("(4) worker FIFO replayed onto resumed pty in order",
+    JSON.stringify(pty.getPending(ids.workerId)) === JSON.stringify(replaySnap[ids.workerId]));
+  check("(4) a session with no pending snapshot replays nothing",
+    pty.getPending("no-such-session").length === 0);
+  restart.clearRestartIntent();
 } finally {
   db.close();
   try { if (worktreePath) fs.rmSync(worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -94,6 +137,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — restart intent roundtrips, the reconcile protects intent worktrees from GC, and an unsupervised/non-manager daemon_restart is refused without side effects."
+  ? "\n✅ ALL PASS — restart intent roundtrips (incl. the pending FIFO snapshot, replayed in order onto a resumed pty), the reconcile protects intent worktrees from GC, and an unsupervised/non-manager daemon_restart is refused without side effects."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
