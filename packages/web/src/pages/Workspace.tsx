@@ -1,6 +1,6 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Topic, Session, SessionRole } from "@loom/shared";
+import type { Agent, Session, SessionRole } from "@loom/shared";
 import { api } from "../lib/api";
 import { TerminalPane } from "../components/Terminal";
 import { TranscriptPane } from "../components/TranscriptPane";
@@ -12,9 +12,9 @@ import { color, font, tone, type Tone } from "../theme";
 
 const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber" };
 
-// Starter topics seeded on project creation (editable afterward via the preset editor). Generic
+// Starter agents seeded on project creation (editable afterward via the preset editor). Generic
 // role scaffolds — the canonical, project-specific prompts get filled in per project.
-const TEMPLATE_TOPICS: { name: string; startupPrompt: string }[] = [
+const TEMPLATE_AGENTS: { name: string; startupPrompt: string }[] = [
   { name: "Orchestrator", startupPrompt: "You are the lead orchestrator for this project. Plan work into board tasks, spawn and review workers, and merge their branches via your loom-orchestration tools." },
   { name: "Planning & Triage", startupPrompt: "Triage incoming work for this project into clear, well-scoped board tasks, each with a sharp definition of done." },
   { name: "Dev", startupPrompt: "Implement the assigned board task on your worktree branch. Keep the change small and focused; run the build/tests; then report." },
@@ -22,69 +22,78 @@ const TEMPLATE_TOPICS: { name: string; startupPrompt: string }[] = [
   { name: "Content Strategy", startupPrompt: "Work on content and strategy for this project, grounded in the vault notes." },
 ];
 
-// Per-project working view: create project/topic, spawn or resume sessions, attach a terminal.
+// Per-project working view: create project/agent, spawn or resume sessions, attach a terminal.
 export default function Workspace() {
   const qc = useQueryClient();
-  // Restore the last project/topic across reloads (session is ephemeral).
+  // Restore the last project/agent across reloads (session is ephemeral).
   const [projectId, setProjectId] = useState<string | null>(() => localStorage.getItem("loom.projectId"));
-  const [topicId, setTopicId] = useState<string | null>(() => localStorage.getItem("loom.topicId"));
+  const [agentId, setAgentId] = useState<string | null>(() => {
+    // One-time read-migration: the persisted key was renamed loom.topicId → loom.agentId in the
+    // Topics→Agents rename. If only the legacy key is present, adopt + rewrite it so the last
+    // selection survives the rename, then drop the old key.
+    const v = localStorage.getItem("loom.agentId");
+    if (v !== null) return v;
+    const legacy = localStorage.getItem("loom.topicId");
+    if (legacy !== null) { localStorage.setItem("loom.agentId", legacy); localStorage.removeItem("loom.topicId"); }
+    return legacy;
+  });
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [rightTab, setRightTab] = useState<"terminal" | "transcript">("terminal");
   useEffect(() => { projectId ? localStorage.setItem("loom.projectId", projectId) : localStorage.removeItem("loom.projectId"); }, [projectId]);
-  useEffect(() => { topicId ? localStorage.setItem("loom.topicId", topicId) : localStorage.removeItem("loom.topicId"); }, [topicId]);
+  useEffect(() => { agentId ? localStorage.setItem("loom.agentId", agentId) : localStorage.removeItem("loom.agentId"); }, [agentId]);
 
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
-  const topics = useQuery({ queryKey: ["topics", projectId], queryFn: () => api.topics(projectId!), enabled: !!projectId });
-  // Agent Profiles are platform-level (cross-project), so this is a single global query, not project-scoped.
+  const agents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId!), enabled: !!projectId });
+  // Profiles are platform-level (cross-project), so this is a single global query, not project-scoped.
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
-  const sessions = useQuery({ queryKey: ["sessions", topicId], queryFn: () => api.sessions(topicId!), enabled: !!topicId });
+  const sessions = useQuery({ queryKey: ["sessions", agentId], queryFn: () => api.sessions(agentId!), enabled: !!agentId });
 
   const createProject = useMutation({
-    mutationFn: async (b: { name: string; repoPath: string; vaultPath: string; seedTopics: boolean }) => {
+    mutationFn: async (b: { name: string; repoPath: string; vaultPath: string; seedAgents: boolean }) => {
       const project = await api.createProject({ name: b.name, repoPath: b.repoPath, vaultPath: b.vaultPath });
-      if (b.seedTopics) for (const t of TEMPLATE_TOPICS) await api.createTopic(project.id, t);
+      if (b.seedAgents) for (const t of TEMPLATE_AGENTS) await api.createAgent(project.id, t);
       return project;
     },
     onSuccess: (project) => {
       qc.invalidateQueries({ queryKey: ["projects"] });
-      qc.invalidateQueries({ queryKey: ["topics", project.id] });
-      setProjectId(project.id); setTopicId(null); setSessionId(null);
+      qc.invalidateQueries({ queryKey: ["agents", project.id] });
+      setProjectId(project.id); setAgentId(null); setSessionId(null);
     },
   });
-  const createTopic = useMutation({
-    mutationFn: (b: { name: string; startupPrompt: string }) => api.createTopic(projectId!, b),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["topics", projectId] }),
+  const createAgent = useMutation({
+    mutationFn: (b: { name: string; startupPrompt: string }) => api.createAgent(projectId!, b),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["agents", projectId] }),
   });
-  const updateTopic = useMutation({
-    mutationFn: (v: { id: string; patch: { name?: string; startupPrompt?: string; profileId?: string | null } }) => api.updateTopic(v.id, v.patch),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["topics", projectId] }),
+  const updateAgent = useMutation({
+    mutationFn: (v: { id: string; patch: { name?: string; startupPrompt?: string; profileId?: string | null } }) => api.updateAgent(v.id, v.patch),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["agents", projectId] }),
   });
-  const selectedTopic = topics.data?.find((t) => t.id === topicId) ?? null;
-  const selectedProfile = selectedTopic?.profileId ? profiles.data?.find((p) => p.id === selectedTopic.profileId) ?? null : null;
-  // role omitted = auto (the topic's profile role applies, server-side); "manager"/"plain" = per-spawn override.
+  const selectedAgent = agents.data?.find((t) => t.id === agentId) ?? null;
+  const selectedProfile = selectedAgent?.profileId ? profiles.data?.find((p) => p.id === selectedAgent.profileId) ?? null : null;
+  // role omitted = auto (the agent's profile role applies, server-side); "manager"/"plain" = per-spawn override.
   const spawn = useMutation({
-    mutationFn: (role?: "manager" | "plain") => api.startSession(topicId!, role),
-    onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", topicId] }); },
+    mutationFn: (role?: "manager" | "plain") => api.startSession(agentId!, role),
+    onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", agentId] }); },
   });
   const resume = useMutation({
     mutationFn: (id: string) => api.resumeSession(id),
-    onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", topicId] }); },
+    onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", agentId] }); },
   });
   // Manual graceful stop (Ctrl-C ×2 — clean + resumable) for a live/idle session.
   const stop = useMutation({
     mutationFn: (id: string) => api.stopSession(id, "graceful"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["sessions", topicId] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sessions", agentId] }),
   });
   // Fork an idle session: branch its conversation into a fresh divergent session, then attach to it.
   const fork = useMutation({
     mutationFn: (id: string) => api.forkSession(id),
-    onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", topicId] }); },
+    onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", agentId] }); },
   });
   // Manager first, then platform, then workers — so the orchestrator isn't lost among its workers.
   const roleRank = (r?: string | null) => (r === "manager" ? 0 : r === "platform" ? 1 : r === "worker" ? 2 : 3);
   // Fold each manager's workers into a collapsible group under it, so a manager with many workers
   // doesn't blow out the Sessions box. A worker is grouped only when its spawning manager is also in
-  // this topic's list; orphan workers (no/unknown parent) stay top-level. Workers sort by spawn time.
+  // this agent's list; orphan workers (no/unknown parent) stay top-level. Workers sort by spawn time.
   const allSessions = sessions.data ?? [];
   const sessionIds = new Set(allSessions.map((s) => s.id));
   const workersByManager = new Map<string, Session[]>();
@@ -118,7 +127,7 @@ export default function Workspace() {
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {projects.data?.map((p) => (
               <Button key={p.id} variant={p.id === projectId ? "primary" : "default"} style={{ textAlign: "left" }}
-                onClick={() => { setProjectId(p.id); setTopicId(null); setSessionId(null); }}>{p.name}</Button>
+                onClick={() => { setProjectId(p.id); setAgentId(null); setSessionId(null); }}>{p.name}</Button>
             ))}
           </div>
           <ProjectForm onCreate={(b) => createProject.mutate(b)} />
@@ -126,13 +135,13 @@ export default function Workspace() {
 
         {projectId && (
           <Panel>
-            <SectionLabel>Topics</SectionLabel>
+            <SectionLabel>Agents</SectionLabel>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {topics.data?.map((t) => {
+              {agents.data?.map((t) => {
                 const prof = t.profileId ? profiles.data?.find((p) => p.id === t.profileId) ?? null : null;
                 return (
-                  <Button key={t.id} variant={t.id === topicId ? "primary" : "default"} style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8 }}
-                    onClick={() => { setTopicId(t.id); setSessionId(null); }}
+                  <Button key={t.id} variant={t.id === agentId ? "primary" : "default"} style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8 }}
+                    onClick={() => { setAgentId(t.id); setSessionId(null); }}
                     title={prof ? `profile: ${prof.name}${prof.role ? ` · ${prof.role}` : ""}` : "no profile"}>
                     <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</span>
                     {prof?.icon && <span>{prof.icon}</span>}
@@ -141,12 +150,12 @@ export default function Workspace() {
                 );
               })}
             </div>
-            {/* Assign / clear the selected topic's Agent Profile — the profile supplies the spawn role + prompt. */}
-            {selectedTopic && (
+            {/* Assign / clear the selected agent's Profile — the profile supplies the spawn role/rig; the prompt comes from the agent. */}
+            {selectedAgent && (
               <div style={{ marginTop: 10 }}>
-                <SectionLabel style={{ margin: "4px 0" }}>Profile · {selectedTopic.name}</SectionLabel>
-                <Select style={{ width: "100%" }} value={selectedTopic.profileId ?? ""}
-                  onChange={(e) => updateTopic.mutate({ id: selectedTopic.id, patch: { profileId: e.target.value || null } })}>
+                <SectionLabel style={{ margin: "4px 0" }}>Profile · {selectedAgent.name}</SectionLabel>
+                <Select style={{ width: "100%" }} value={selectedAgent.profileId ?? ""}
+                  onChange={(e) => updateAgent.mutate({ id: selectedAgent.id, patch: { profileId: e.target.value || null } })}>
                   <option value="">— none —</option>
                   {profiles.data?.map((p) => (
                     <option key={p.id} value={p.id}>{p.icon ? `${p.icon} ` : ""}{p.name}{p.role ? ` (${p.role})` : ""}</option>
@@ -154,11 +163,11 @@ export default function Workspace() {
                 </Select>
               </div>
             )}
-            <TopicForm onCreate={(b) => createTopic.mutate(b)} />
+            <AgentForm onCreate={(b) => createAgent.mutate(b)} />
           </Panel>
         )}
 
-        {topicId && (
+        {agentId && (
           <Panel>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
               <SectionLabel style={{ margin: 0, flex: 1 }}>Sessions</SectionLabel>
@@ -202,11 +211,11 @@ export default function Workspace() {
             <SessionQueue sessionId={sessionId} />
             <Composer sessionId={sessionId} />
           </>
-        ) : selectedTopic ? (
-          <TopicPresetEditor key={selectedTopic.id} topic={selectedTopic}
-            onSave={(startupPrompt) => updateTopic.mutate({ id: selectedTopic.id, patch: { startupPrompt } })}
-            saving={updateTopic.isPending} />
-        ) : <p style={{ color: color.textMuted, padding: 12 }}>Select a topic to view/edit its startup prompt, or spawn a session to attach a live terminal.</p>}
+        ) : selectedAgent ? (
+          <AgentPresetEditor key={selectedAgent.id} agent={selectedAgent}
+            onSave={(startupPrompt) => updateAgent.mutate({ id: selectedAgent.id, patch: { startupPrompt } })}
+            saving={updateAgent.isPending} />
+        ) : <p style={{ color: color.textMuted, padding: 12 }}>Select an agent to view/edit its startup prompt, or spawn a session to attach a live terminal.</p>}
       </Panel>
     </div>
   );
@@ -265,7 +274,7 @@ function WorkerGroup({ workers, open, onToggle, renderRow }:
   );
 }
 
-// Spawn split-button: the primary action spawns from the topic's profile (no role → the profile's role
+// Spawn split-button: the primary action spawns from the agent's profile (no role → the profile's role
 // applies server-side); the ▾ menu overrides the role per-spawn. "From profile" = auto, "Manager" =
 // explicit manager, "Plain" = force-plain (ignore the profile's role → a role-null session).
 function SpawnControls({ profileRole, onSpawn, pending }:
@@ -303,29 +312,29 @@ function SpawnControls({ profileRole, onSpawn, pending }:
   );
 }
 
-function ProjectForm({ onCreate }: { onCreate: (b: { name: string; repoPath: string; vaultPath: string; seedTopics: boolean }) => void }) {
+function ProjectForm({ onCreate }: { onCreate: (b: { name: string; repoPath: string; vaultPath: string; seedAgents: boolean }) => void }) {
   const [name, setName] = useState(""), [repoPath, setRepo] = useState(""), [vaultPath, setVault] = useState("");
-  const [seedTopics, setSeed] = useState(true);
+  const [seedAgents, setSeed] = useState(true);
   return (
     <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
       <Input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
       <Input placeholder="repo path" value={repoPath} onChange={(e) => setRepo(e.target.value)} />
       <Input placeholder="vault path" value={vaultPath} onChange={(e) => setVault(e.target.value)} />
       <label style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
-        <input type="checkbox" checked={seedTopics} onChange={(e) => setSeed(e.target.checked)} />
-        seed starter topics (Orchestrator · Planning · Dev · Bugfix · Content)
+        <input type="checkbox" checked={seedAgents} onChange={(e) => setSeed(e.target.checked)} />
+        seed starter agents (Orchestrator · Planning · Dev · Bugfix · Content)
       </label>
       <Button variant="primary" disabled={!name || !repoPath || !vaultPath}
-        onClick={() => { onCreate({ name, repoPath, vaultPath, seedTopics }); setName(""); setRepo(""); setVault(""); }}>Create project</Button>
+        onClick={() => { onCreate({ name, repoPath, vaultPath, seedAgents }); setName(""); setRepo(""); setVault(""); }}>Create project</Button>
     </div>
   );
 }
 
-function TopicForm({ onCreate }: { onCreate: (b: { name: string; startupPrompt: string }) => void }) {
+function AgentForm({ onCreate }: { onCreate: (b: { name: string; startupPrompt: string }) => void }) {
   const [name, setName] = useState(""), [startupPrompt, setPrompt] = useState("");
   return (
     <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
-      <Input placeholder="topic name" value={name} onChange={(e) => setName(e.target.value)} />
+      <Input placeholder="agent name" value={name} onChange={(e) => setName(e.target.value)} />
       <textarea
         style={{ width: "100%", height: 64, boxSizing: "border-box", resize: "vertical", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: 8, fontFamily: font.mono, fontSize: 13 }}
         placeholder="startup prompt (injected as the first turn of each new session)"
@@ -335,18 +344,18 @@ function TopicForm({ onCreate }: { onCreate: (b: { name: string; startupPrompt: 
   );
 }
 
-// View + edit a topic's startup-prompt preset. Remounted per topic (key=topic.id) so the
+// View + edit an agent's startup-prompt preset. Remounted per agent (key=agent.id) so the
 // textarea state resets on switch; after Save the query refetches and `dirty` clears.
-function TopicPresetEditor(
-  { topic, onSave, saving }: { topic: Topic; onSave: (startupPrompt: string) => void; saving: boolean },
+function AgentPresetEditor(
+  { agent, onSave, saving }: { agent: Agent; onSave: (startupPrompt: string) => void; saving: boolean },
 ) {
-  const [prompt, setPrompt] = useState(topic.startupPrompt);
-  const dirty = prompt !== topic.startupPrompt;
+  const [prompt, setPrompt] = useState(agent.startupPrompt);
+  const dirty = prompt !== agent.startupPrompt;
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", padding: 8 }}>
       <div style={{ marginBottom: 6 }}>
-        <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>Startup prompt — {topic.name}</strong>
-        <span style={{ color: color.textMuted, fontSize: 12 }}>{" "}· injected as the first turn of each new session in this topic</span>
+        <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>Startup prompt — {agent.name}</strong>
+        <span style={{ color: color.textMuted, fontSize: 12 }}>{" "}· injected as the first turn of each new session in this agent</span>
       </div>
       <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} spellCheck={false}
         style={{
@@ -357,7 +366,7 @@ function TopicPresetEditor(
       <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave(prompt)}>{saving ? "Saving…" : "Save"}</Button>
         {dirty
-          ? <Button onClick={() => setPrompt(topic.startupPrompt)}>Reset</Button>
+          ? <Button onClick={() => setPrompt(agent.startupPrompt)}>Reset</Button>
           : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
       </div>
     </div>

@@ -1,6 +1,6 @@
 // Integrated phase-1 end-to-end pass: drives the WHOLE assembled product through one
 // running daemon, exercising every surface the UI sits on top of, in one flow:
-//   project -> topic -> board task + move -> spawn real session (live terminal) ->
+//   project -> agent -> board task + move -> spawn real session (live terminal) ->
 //   agent sees the board via MCP -> vault browse -> git view -> transcript ->
 //   dead-session detection (grey-out).
 // Run: 1) start the daemon, 2) node test/integration-e2e.mjs
@@ -43,12 +43,12 @@ const realHadKeyBefore = (() => {
 
 let session = null;
 try {
-  // 1. project + topic
+  // 1. project + agent
   const P = await post("/api/projects", { name: `E2E-${Date.now()}`, repoPath: dir, vaultPath: dir });
   check("1. project created", !!P.id);
   const PROMPT = "Call the tasks_list tool. Then call tasks_create with title set to exactly 'SAW=' followed by the titles of the tasks you saw joined with '+'. Then stop. Do not use other tools or ask questions.";
-  const topic = await post(`/api/projects/${P.id}/topics`, { name: "build", startupPrompt: PROMPT });
-  check("1. topic created", !!topic.id);
+  const agent = await post(`/api/projects/${P.id}/agents`, { name: "build", startupPrompt: PROMPT });
+  check("1. agent created", !!agent.id);
 
   // 2. board: create a task and MOVE it (the kanban drag path)
   const t1 = await post(`/api/projects/${P.id}/tasks`, { title: "T1" });
@@ -58,7 +58,7 @@ try {
   check("2. card T1 moved to in_progress", board.tasks.find((t) => t.id === t1.id)?.columnKey === "in_progress");
 
   // 3. spawn -> live session + engine id (the live terminal)
-  session = await post(`/api/topics/${topic.id}/sessions`, {});
+  session = await post(`/api/agents/${agent.id}/sessions`, {});
   check("3. session spawned live", session.processState === "live");
   let engineId = null;
   for (let i = 0; i < 40 && !engineId; i++) {

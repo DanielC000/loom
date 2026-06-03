@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { Profile } from "@loom/shared";
 
 /**
- * Strict zod validator for an Agent Profile's WRITABLE shape (everything but the server-assigned id),
+ * Strict zod validator for a Profile's WRITABLE shape (everything but the server-assigned id),
  * mirroring validateProjectConfigOverride (mcp/platform.ts): `.strict()` rejects unknown keys (typo
  * guard) and types are checked. ONE validator the future write paths (P3 REST + platform-MCP) share.
  * Optional fields are normalized to their stored defaults, so the result is directly insertable once
@@ -12,7 +12,7 @@ const profileSchema = z
   .object({
     name: z.string().min(1),
     role: z.enum(["manager", "worker", "platform"]).nullable().optional(),
-    startupPrompt: z.string().optional(),
+    description: z.string().optional(),
     allowDelta: z.array(z.string()).optional(),
     skills: z.array(z.string()).nullable().optional(),
     model: z.string().nullable().optional(),
@@ -34,7 +34,7 @@ export function validateProfile(
     value: {
       name: d.name,
       role: d.role ?? null,
-      startupPrompt: d.startupPrompt ?? "",
+      description: d.description ?? "",
       allowDelta: d.allowDelta ?? [],
       skills: d.skills ?? null,
       model: d.model ?? null,

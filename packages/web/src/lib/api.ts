@@ -1,4 +1,4 @@
-import type { Project, Topic, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile } from "@loom/shared";
+import type { Project, Agent, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; }
@@ -36,19 +36,19 @@ export const api = {
   createProject: (b: { name: string; repoPath: string; vaultPath: string }) =>
     post<Project>("/api/projects", b),
   archiveProject: (id: string) => del<{ ok: boolean }>(`/api/projects/${id}`),
-  topics: (projectId: string) => get<Topic[]>(`/api/projects/${projectId}/topics`),
-  createTopic: (projectId: string, b: { name: string; startupPrompt?: string }) =>
-    post<Topic>(`/api/projects/${projectId}/topics`, b),
-  updateTopic: (id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null }) =>
-    post<Topic>(`/api/topics/${id}`, patch),
+  agents: (projectId: string) => get<Agent[]>(`/api/projects/${projectId}/agents`),
+  createAgent: (projectId: string, b: { name: string; startupPrompt?: string }) =>
+    post<Agent>(`/api/projects/${projectId}/agents`, b),
+  updateAgent: (id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null }) =>
+    post<Agent>(`/api/agents/${id}`, patch),
   tasks: (projectId: string) => get<Task[]>(`/api/projects/${projectId}/tasks`),
   createTask: (projectId: string, b: { title: string; body?: string; columnKey?: string }) =>
     post<Task>(`/api/projects/${projectId}/tasks`, b),
-  sessions: (topicId: string) => get<Session[]>(`/api/topics/${topicId}/sessions`),
-  // role omitted/undefined = auto (the topic's profile role applies, server-side); "manager"/"platform"
+  sessions: (agentId: string) => get<Session[]>(`/api/agents/${agentId}/sessions`),
+  // role omitted/undefined = auto (the agent's profile role applies, server-side); "manager"/"platform"
   // = explicit role; "plain" = force-plain (ignore the profile's role → a role-null session).
-  startSession: (topicId: string, role?: "manager" | "platform" | "plain") =>
-    post<Session>(`/api/topics/${topicId}/sessions`, role ? { role } : undefined),
+  startSession: (agentId: string, role?: "manager" | "platform" | "plain") =>
+    post<Session>(`/api/agents/${agentId}/sessions`, role ? { role } : undefined),
   resumeSession: (id: string) => post<Session>(`/api/sessions/${id}/resume`),
   forkSession: (id: string) => post<Session>(`/api/sessions/${id}/fork`),
   sendInput: (id: string, text: string) =>
@@ -97,8 +97,9 @@ export const api = {
   deleteSkill: (name: string) => del<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}`),
   resetSkill: (name: string) => post<{ name: string; content: string }>(`/api/skills/${encodeURIComponent(name)}/reset`),
 
-  // --- Agent Profiles (platform-level "who": role + prompt + allow/skills/model/icon). HUMAN-managed
-  // only — there is no agent-writable MCP surface, just this web client + REST. createProfile validates
+  // --- Profiles (platform-level rig: role + allow/skills/model/icon + a UI-only description; the
+  // injected prompt comes from the agent). HUMAN-managed only — there is no agent-writable MCP
+  // surface, just this web client + REST. createProfile validates
   // → 201; updateProfile is a partial-merge (omitted fields are preserved server-side); resetProfile
   // restores a bundled profile to its shipped fields. ---
   profiles: () => get<Profile[]>("/api/profiles"),

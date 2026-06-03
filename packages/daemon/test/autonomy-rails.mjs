@@ -41,9 +41,9 @@ async function connect(sessionId) {
 
 // --- unique ids per scenario ---
 const sfx = Date.now();
-const P = { proj: `ar-pause-proj-${sfx}`, topic: `ar-pause-topic-${sfx}`, task: `ar-pause-task-${sfx}`, mgr: `ar-pause-mgr-${sfx}`, repo: path.join(os.tmpdir(), `loom-ar-pause-${sfx}`) };
-const C = { proj: `ar-cap-proj-${sfx}`, topic: `ar-cap-topic-${sfx}`, task: `ar-cap-task-${sfx}`, mgr: `ar-cap-mgr-${sfx}`, w1: `ar-cap-w1-${sfx}`, w2: `ar-cap-w2-${sfx}`, repo: path.join(os.tmpdir(), `loom-ar-cap-${sfx}`) };
-const K = { proj: `ar-kill-proj-${sfx}`, topic: `ar-kill-topic-${sfx}`, task: `ar-kill-task-${sfx}`, mgr: `ar-kill-mgr-${sfx}`, repo: path.join(os.tmpdir(), `loom-ar-kill-${sfx}`) };
+const P = { proj: `ar-pause-proj-${sfx}`, agent: `ar-pause-agent-${sfx}`, task: `ar-pause-task-${sfx}`, mgr: `ar-pause-mgr-${sfx}`, repo: path.join(os.tmpdir(), `loom-ar-pause-${sfx}`) };
+const C = { proj: `ar-cap-proj-${sfx}`, agent: `ar-cap-agent-${sfx}`, task: `ar-cap-task-${sfx}`, mgr: `ar-cap-mgr-${sfx}`, w1: `ar-cap-w1-${sfx}`, w2: `ar-cap-w2-${sfx}`, repo: path.join(os.tmpdir(), `loom-ar-cap-${sfx}`) };
+const K = { proj: `ar-kill-proj-${sfx}`, agent: `ar-kill-agent-${sfx}`, task: `ar-kill-task-${sfx}`, mgr: `ar-kill-mgr-${sfx}`, repo: path.join(os.tmpdir(), `loom-ar-kill-${sfx}`) };
 
 // KILL needs a real git repo (it reaches createWorktree); PAUSE/CAP only need the project row.
 fs.mkdirSync(K.repo, { recursive: true });
@@ -55,27 +55,27 @@ execSync(`git init -q && git add . && git -c user.email=ar@loom -c user.name=ar 
   const d = new Database(DB_FILE);
   const seedProject = (id, repo, config) =>
     d.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)").run(id, "AR", repo, repo, config, now);
-  const seedTopic = (id, proj) =>
-    d.prepare("INSERT INTO topics (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)").run(id, proj, "t", "");
+  const seedAgent = (id, proj) =>
+    d.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)").run(id, proj, "t", "");
   const seedTask = (id, proj) =>
     d.prepare("INSERT INTO tasks (id,project_id,title,body,column_key,position,created_at,updated_at) VALUES (?,?,?,'','todo',?,?,?)").run(id, proj, "T", 1, now, now);
-  const seedManager = (id, proj, topic, repo) =>
-    d.prepare(`INSERT INTO sessions (id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role)
-      VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL,'manager')`).run(id, proj, topic, repo, now, now);
-  const seedLiveWorker = (id, proj, topic, mgr, repo) =>
-    d.prepare(`INSERT INTO sessions (id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role,parent_session_id,task_id,worktree_path,branch)
-      VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL,'worker',?,NULL,?,?)`).run(id, proj, topic, repo, now, now, mgr, repo, "loom/seeded");
+  const seedManager = (id, proj, agent, repo) =>
+    d.prepare(`INSERT INTO sessions (id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role)
+      VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL,'manager')`).run(id, proj, agent, repo, now, now);
+  const seedLiveWorker = (id, proj, agent, mgr, repo) =>
+    d.prepare(`INSERT INTO sessions (id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role,parent_session_id,task_id,worktree_path,branch)
+      VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL,'worker',?,NULL,?,?)`).run(id, proj, agent, repo, now, now, mgr, repo, "loom/seeded");
 
   // PAUSE: default project config (cap=3); one manager.
   seedProject(P.proj, P.repo, "{}");
-  seedTopic(P.topic, P.proj); seedTask(P.task, P.proj); seedManager(P.mgr, P.proj, P.topic, P.repo);
+  seedAgent(P.agent, P.proj); seedTask(P.task, P.proj); seedManager(P.mgr, P.proj, P.agent, P.repo);
   // CAP: project config caps at 2; manager + exactly 2 LIVE workers under it → at the cap.
   seedProject(C.proj, C.repo, JSON.stringify({ orchestration: { maxConcurrentWorkers: 2 } }));
-  seedTopic(C.topic, C.proj); seedTask(C.task, C.proj); seedManager(C.mgr, C.proj, C.topic, C.repo);
-  seedLiveWorker(C.w1, C.proj, C.topic, C.mgr, C.repo); seedLiveWorker(C.w2, C.proj, C.topic, C.mgr, C.repo);
+  seedAgent(C.agent, C.proj); seedTask(C.task, C.proj); seedManager(C.mgr, C.proj, C.agent, C.repo);
+  seedLiveWorker(C.w1, C.proj, C.agent, C.mgr, C.repo); seedLiveWorker(C.w2, C.proj, C.agent, C.mgr, C.repo);
   // KILL: default config; one manager; spawns a real worker live.
   seedProject(K.proj, K.repo, "{}");
-  seedTopic(K.topic, K.proj); seedTask(K.task, K.proj); seedManager(K.mgr, K.proj, K.topic, K.repo);
+  seedAgent(K.agent, K.proj); seedTask(K.task, K.proj); seedManager(K.mgr, K.proj, K.agent, K.repo);
   d.close();
 }
 
@@ -154,7 +154,7 @@ try {
     }
     for (const proj of [P.proj, C.proj, K.proj]) {
       d.prepare("DELETE FROM tasks WHERE project_id = ?").run(proj);
-      d.prepare("DELETE FROM topics WHERE project_id = ?").run(proj);
+      d.prepare("DELETE FROM agents WHERE project_id = ?").run(proj);
       d.prepare("DELETE FROM projects WHERE id = ?").run(proj);
     }
     d.close();

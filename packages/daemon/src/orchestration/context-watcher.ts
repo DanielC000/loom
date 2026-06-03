@@ -50,7 +50,7 @@ export class ContextWatcher {
         `[loom:context] Your context is ~${pct}% of your ${kw}k window — hand off before it fills. ` +
         `Wind down NOW: run /session-end to log progress to the vault, then call recycle_me with a ` +
         `self-contained continuation prompt for your successor (current goal, what's done, your in-flight ` +
-        `workers + their tasks/status, next steps, key decisions). Your successor boots with this topic's ` +
+        `workers + their tasks/status, next steps, key decisions). Your successor boots with this agent's ` +
         `warm-up + your continuation and inherits your workers — finish merges/reviews you can close quickly first.`;
       try { this.deps.pty.enqueueStdin(m.id, msg); } catch { /* manager not live */ }
       this.nudged.add(m.id);

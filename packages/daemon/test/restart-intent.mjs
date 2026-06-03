@@ -34,7 +34,7 @@ const sessions = new SessionService(db, {}, new OrchestrationControl());
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const repo = path.join(os.tmpdir(), `loom-ri-repo-${sfx}`);
-const ids = { projId: `ri-proj-${sfx}`, topicId: `ri-top-${sfx}`, taskId: `ri-task-${sfx}`, mgrId: `ri-mgr-${sfx}`, workerId: `ri-wkr-${sfx}` };
+const ids = { projId: `ri-proj-${sfx}`, agentId: `ri-top-${sfx}`, taskId: `ri-task-${sfx}`, mgrId: `ri-mgr-${sfx}`, workerId: `ri-wkr-${sfx}` };
 let worktreePath; // hoisted so the finally cleanup can reach it
 
 try {
@@ -60,11 +60,11 @@ try {
   execSync(`git add . && git ${GIT_ID} commit -q -m work`, { cwd: worktreePath });
 
   db.insertProject({ id: ids.projId, name: "RI", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
-  db.insertTopic({ id: ids.topicId, projectId: ids.projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertAgent({ id: ids.agentId, projectId: ids.projId, name: "t", startupPrompt: "", position: 0 });
   db.insertTask({ id: ids.taskId, projectId: ids.projId, title: "RI", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
-  db.insertSession({ id: ids.mgrId, projectId: ids.projId, topicId: ids.topicId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  db.insertSession({ id: ids.mgrId, projectId: ids.projId, agentId: ids.agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
   // The worker was LIVE at restart, marked 'exited' by recoverStaleSessions — exactly pass-B's GC target.
-  db.insertSession({ id: ids.workerId, projectId: ids.projId, topicId: ids.topicId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: ids.mgrId, taskId: ids.taskId, worktreePath, branch });
+  db.insertSession({ id: ids.workerId, projectId: ids.projId, agentId: ids.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: ids.mgrId, taskId: ids.taskId, worktreePath, branch });
 
   // --- (2) protection: WITH the worker protected, its worktree survives the reconcile ---
   check("(2-pre) worktree present before reconcile", fs.existsSync(worktreePath));

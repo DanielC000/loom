@@ -57,15 +57,15 @@ const realHadKeyBefore = (() => {
 
 let session = null;
 try {
-  // Project + topic. The startup prompt runs one tool-free turn and stops — one full
+  // Project + agent. The startup prompt runs one tool-free turn and stops — one full
   // UserPromptSubmit -> Stop busy cycle.
   const P = await post("/api/projects", { name: `Busy-${Date.now()}`, repoPath: dir, vaultPath: dir });
   check("project created", !!P.id);
   const STARTUP = "Respond with exactly the word READY and nothing else, then stop. Do not use any tools and do not ask any questions.";
-  const topic = await post(`/api/projects/${P.id}/topics`, { name: "busy", startupPrompt: STARTUP });
-  check("topic created", !!topic.id);
+  const agent = await post(`/api/projects/${P.id}/agents`, { name: "busy", startupPrompt: STARTUP });
+  check("agent created", !!agent.id);
 
-  session = await post(`/api/topics/${topic.id}/sessions`, {});
+  session = await post(`/api/agents/${agent.id}/sessions`, {});
   check("session spawned live", session.processState === "live");
 
   // Rising edge: the optimistic spawn set makes busy=true visible immediately; the

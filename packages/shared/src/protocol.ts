@@ -23,8 +23,8 @@ export type TerminalInput =
 // REST DTOs (subset; expanded during the build).
 export interface SpawnSessionRequest {
   projectId: string;
-  topicId: string;
-  /** Omit to resume; present to start a NEW session (the topic's startup prompt). */
+  agentId: string;
+  /** Omit to resume; present to start a NEW session (the agent's startup prompt). */
   startNew: boolean;
 }
 

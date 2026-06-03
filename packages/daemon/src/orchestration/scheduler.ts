@@ -8,10 +8,10 @@ export interface SchedulerDeps {
   db: Db;
   control: OrchestrationControl;
   /**
-   * Boots a manager session in the topic and returns its id. Prod-wired to
+   * Boots a manager session in the agent and returns its id. Prod-wired to
    * SessionService.startManager; the test injects a recording stub (keeps this PR claude-free).
    */
-  startManager: (topicId: string) => { id: string };
+  startManager: (agentId: string) => { id: string };
   /** Tick cadence; defaults to 60s. Injectable so a test can drive tick() directly instead. */
   intervalMs?: number;
   /**
@@ -45,8 +45,8 @@ export class Scheduler {
    * skipped, never crashing the loop or blocking the other schedules.
    *
    * §19a hardening (3 findings):
-   *  - DELETED TOPIC (finding 1): a schedule whose topic no longer exists can never fire — disable
-   *    it (it has no topic-delete cascade to clean it up) so it stops re-trying every tick.
+   *  - DELETED AGENT (finding 1): a schedule whose agent no longer exists can never fire — disable
+   *    it (it has no agent-delete cascade to clean it up) so it stops re-trying every tick.
    *  - CLAIM-BEFORE-SPAWN (finding 2): advance next_fire_at BEFORE the spawn/event side effects, so
    *    if startManager or appendEvent throws the slot is already consumed → no double-spawn next tick.
    *  - MANAGER CAP (finding 3): stop once `maxConcurrentManagers` live managers exist; the remaining
@@ -72,18 +72,18 @@ export class Scheduler {
         console.error(`[scheduler] manager cap (${cap}) reached — deferring remaining due schedules to the next tick`);
         break;
       }
-      // Finding 1 — deleted topic: never fireable → disable so it stops re-firing every tick.
-      if (!this.deps.db.getTopic(s.topicId)) {
+      // Finding 1 — deleted agent: never fireable → disable so it stops re-firing every tick.
+      if (!this.deps.db.getAgent(s.agentId)) {
         this.deps.db.updateSchedule(s.id, { enabled: false });
         // eslint-disable-next-line no-console
-        console.error(`[scheduler] schedule ${s.id} (${s.cron}) disabled — topic ${s.topicId} no longer exists`);
+        console.error(`[scheduler] schedule ${s.id} (${s.cron}) disabled — agent ${s.agentId} no longer exists`);
         continue;
       }
       try {
         // Finding 2 — claim the slot FIRST: advance next_fire_at before any side effect, so a
         // failed spawn/event can't leave the slot un-advanced and re-fire (double-spawn) next tick.
         this.deps.db.markFired(s.id, now.toISOString(), nextFireAt(s.cron, now));
-        const mgr = this.deps.startManager(s.topicId);
+        const mgr = this.deps.startManager(s.agentId);
         this.deps.db.appendEvent({
           id: randomUUID(), ts: now.toISOString(),
           managerSessionId: mgr.id, kind: "schedule_fired",

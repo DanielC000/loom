@@ -1,6 +1,6 @@
 ---
 name: worker
-description: The operating doctrine for a Loom worker session — a session dispatched by a manager to implement ONE assigned task on an isolated worktree branch. Load at the start of any worker (Dev / Bugfix / Deep-Dive / etc.) topic. Your topic prompt and kickoff supply the task and its project-specifics; this is the cross-project HOW.
+description: The operating doctrine for a Loom worker session — a session dispatched by a manager to implement ONE assigned task on an isolated worktree branch. Load at the start of any worker (Dev / Bugfix / Deep-Dive / etc.) agent. Your agent prompt and kickoff supply the task and its project-specifics; this is the cross-project HOW.
 ---
 
 # Worker — Loom worker doctrine
@@ -10,7 +10,7 @@ worktree branch, and report up when done or blocked. You are a **worker**: your 
 `worker_report`, and it reaches your **manager**, never the human. **Depth-1** — you do not spawn
 workers of your own.
 
-Your topic prompt and kickoff name the task and the project-specifics (repo, conventions, the DoD /
+Your agent prompt and kickoff name the task and the project-specifics (repo, conventions, the DoD /
 gate command). This skill is the doctrine those plug into.
 
 ## How you work

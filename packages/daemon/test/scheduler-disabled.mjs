@@ -21,7 +21,7 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 const sfx = Date.now();
-const projId = `sx-proj-${sfx}`, topicId = `sx-topic-${sfx}`, taskId = `sx-task-${sfx}`, scheduleId = `sx-sched-${sfx}`;
+const projId = `sx-proj-${sfx}`, agentId = `sx-agent-${sfx}`, taskId = `sx-task-${sfx}`, scheduleId = `sx-sched-${sfx}`;
 const repo = path.join(os.tmpdir(), `loom-sx-${sfx}`); // never used (nothing spawns), but kept for tidy teardown
 const past = new Date(Date.now() - 60_000).toISOString();
 
@@ -29,11 +29,11 @@ const past = new Date(Date.now() - 60_000).toISOString();
   const db = new Database(DB_FILE);
   db.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)")
     .run(projId, "SchedOff", repo, repo, "{}", now);
-  db.prepare("INSERT INTO topics (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)").run(topicId, projId, "t", "noop");
+  db.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)").run(agentId, projId, "t", "noop");
   db.prepare("INSERT INTO tasks (id,project_id,title,body,column_key,position,created_at,updated_at) VALUES (?,?,?,'','todo',?,?,?)")
     .run(taskId, projId, "T", 1, now, now);
-  db.prepare("INSERT INTO schedules (id,topic_id,cron,enabled,next_fire_at,last_fired_at,created_at) VALUES (?,?,?,1,?,NULL,?)")
-    .run(scheduleId, topicId, "*/5 * * * *", past, now);
+  db.prepare("INSERT INTO schedules (id,agent_id,cron,enabled,next_fire_at,last_fired_at,created_at) VALUES (?,?,?,1,?,NULL,?)")
+    .run(scheduleId, agentId, "*/5 * * * *", past, now);
   db.close();
 }
 
@@ -42,7 +42,7 @@ try {
   await sleep(6000);
 
   const ss = await get("/api/sessions");
-  check("disabled: NO manager session booted in the topic", !ss.some((s) => s.role === "manager" && s.topicId === topicId));
+  check("disabled: NO manager session booted in the agent", !ss.some((s) => s.role === "manager" && s.agentId === agentId));
 
   const db = new Database(DB_FILE, { readonly: true });
   const firedCount = db.prepare("SELECT COUNT(*) c FROM orchestration_events WHERE kind = 'schedule_fired'").get().c;
@@ -58,7 +58,7 @@ try {
     const db = new Database(DB_FILE);
     db.prepare("DELETE FROM schedules WHERE id = ?").run(scheduleId);
     db.prepare("DELETE FROM tasks WHERE project_id = ?").run(projId);
-    db.prepare("DELETE FROM topics WHERE id = ?").run(topicId);
+    db.prepare("DELETE FROM agents WHERE id = ?").run(agentId);
     db.prepare("DELETE FROM projects WHERE id = ?").run(projId);
     db.close();
   } catch { /* ignore */ }

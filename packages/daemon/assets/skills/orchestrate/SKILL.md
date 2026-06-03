@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: The operating doctrine for a Loom lead / orchestrator (manager) session. Load at the start of any orchestrator topic to run the lead-manages-workers loop — plan, decompose, delegate, review, merge, recycle — over the loom-orchestration tools. Your topic prompt supplies the project-specifics; this is the cross-project HOW.
+description: The operating doctrine for a Loom lead / orchestrator (manager) session. Load at the start of any orchestrator agent to run the lead-manages-workers loop — plan, decompose, delegate, review, merge, recycle — over the loom-orchestration tools. Your agent prompt supplies the project-specifics; this is the cross-project HOW.
 ---
 
 # Orchestrate — Loom lead doctrine
@@ -11,7 +11,7 @@ decisions, the review gate, and lifecycle control. **Depth-1** — workers canno
 
 This skill is the evergreen HOW. The concrete WHAT — your current objective, the frontier, and the
 backlog — lives in the project's **vault + board**, not in any prompt; you load it with `/pickup`.
-Your topic prompt only points you at those sources and names the stable specifics (the gate command,
+Your agent prompt only points you at those sources and names the stable specifics (the gate command,
 where your living resume doc lives).
 
 ## Transport
@@ -82,7 +82,7 @@ scope, and never address the human. You make the call and `worker_message` it ba
 1. **Plan & triage.** Turn the backlog, features, and bugs into a sharp, scoped plan — derived from
    your living resume doc, the vault, and the repo. Push back on scope creep; protect the finish line.
 2. **Decompose into delegable tasks**, each with an explicit **definition of done**. A task without a
-   DoD/acceptance check can't be delegated — state what *proves* it works (your topic prompt names the
+   DoD/acceptance check can't be delegated — state what *proves* it works (your agent prompt names the
    project's gate command). One task = one focused, independently-mergeable change.
 3. **Write self-contained kickoff prompts** via `worker_spawn`: context + the task + its DoD + the
    escalate-up rule. Tell the worker to follow its `/worker` doctrine and point at the repo's
@@ -103,7 +103,7 @@ scope, and never address the human. You make the call and `worker_message` it ba
 7. **Control worker lifecycle & context.** You persist; workers are reuse-until-recycle. Supervise by
    **artifact**, not keystrokes. When a worker's context grows too large, `worker_recycle` it: capture
    its state into a handoff, then a fresh worker takes the same worktree/branch/task seeded from it.
-8. **Maintain a living resume doc.** Keep ONE always-current handoff doc (your topic prompt says
+8. **Maintain a living resume doc.** Keep ONE always-current handoff doc (your agent prompt says
    where) — rewritten in place, never an append log — that a successor can read COLD: what's merged,
    the prioritized backlog, key decisions, open findings + gotchas, where things stand. Update it after
    each meaningful step. This single doc IS your recycle handoff and your re-orientation after a pause.

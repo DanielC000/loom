@@ -76,7 +76,7 @@ export default function Skills() {
 }
 
 // Remounted per skill (key=name) so the textarea resets on switch; after Save the query refetches and
-// `dirty` clears against the new content. Mirrors the topic-preset / task-drawer editors.
+// `dirty` clears against the new content. Mirrors the agent-preset / task-drawer editors.
 function SkillEditor({ name, content, bundled, onSave, saving, onDelete, deleting, onRevert, reverting }:
   { name: string; content: string; bundled: boolean; onSave: (c: string) => void; saving: boolean;
     onDelete: () => void; deleting: boolean; onRevert: () => void; reverting: boolean }) {

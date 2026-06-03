@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
 import type { WebSocket } from "ws";
-import type { TerminalInput, Project, Topic, Task, ProjectConfigOverride, Schedule } from "@loom/shared";
+import type { TerminalInput, Project, Agent, Task, ProjectConfigOverride, Schedule } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import { nextFireAt } from "../orchestration/cron.js";
 import { readTranscript } from "../sessions/transcript.js";
@@ -51,7 +51,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     await deps.orchMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
 
-  // --- Platform-lead MCP (role-gated to 'platform'; project/topic creation — Pillar C) ---
+  // --- Platform-lead MCP (role-gated to 'platform'; project/agent creation — Pillar C) ---
   app.all("/mcp-platform/:sessionId", async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
     reply.hijack();
@@ -83,13 +83,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // create/update (the Scheduler advances it after each fire). ---
   app.get("/api/schedules", async () => deps.db.listSchedules());
   app.post("/api/schedules", async (req, reply) => {
-    const b = (req.body ?? {}) as { topicId?: string; cron?: string; enabled?: boolean };
-    if (!b.topicId || !b.cron) return reply.code(400).send({ error: "topicId and cron required" });
-    if (!deps.db.getTopic(b.topicId)) return reply.code(404).send({ error: "topic not found" });
+    const b = (req.body ?? {}) as { agentId?: string; cron?: string; enabled?: boolean };
+    if (!b.agentId || !b.cron) return reply.code(400).send({ error: "agentId and cron required" });
+    if (!deps.db.getAgent(b.agentId)) return reply.code(404).send({ error: "agent not found" });
     let next: string;
     try { next = nextFireAt(b.cron, new Date()); } catch { return reply.code(400).send({ error: "invalid cron expression" }); }
     const schedule: Schedule = {
-      id: randomUUID(), topicId: b.topicId, cron: b.cron,
+      id: randomUUID(), agentId: b.agentId, cron: b.cron,
       enabled: b.enabled ?? true, nextFireAt: next, lastFiredAt: null, createdAt: new Date().toISOString(),
     };
     deps.db.insertSchedule(schedule);
@@ -161,7 +161,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return readSkill(name);
   });
 
-  // --- Agent Profiles (platform-level "who": role + prompt + allow/skills/model/icon). HUMAN-managed
+  // --- Profiles (platform-level rig: role + allow/skills/model/icon + a UI-only description; the
+  // injected prompt always comes from the agent). HUMAN-managed
   // ONLY (REST + later web UI) — profiles confer role + permission allowlists (= privilege), so they
   // are deliberately kept OFF the agent-writable MCP surface. Writes are schema-validated (strict,
   // typo-guarded) by validateProfile, mirroring the project-config validator. ---
@@ -192,7 +193,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deps.db.updateProfile(id, v.value);
     return deps.db.getProfile(id);
   });
-  // Delete is SAFE for assigned topics: a dangling profile_id resolves to the plain backstop (a
+  // Delete is SAFE for assigned agents: a dangling profile_id resolves to the plain backstop (a
   // bundled profile re-seeds on next boot). Idempotent — mirrors the skills DELETE (no 404).
   app.delete("/api/profiles/:id", async (req) => {
     deps.db.deleteProfile((req.params as { id: string }).id);
@@ -206,8 +207,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return deps.db.getProfile(id);
   });
 
-  app.get("/api/projects/:id/topics", async (req) =>
-    deps.db.listTopics((req.params as { id: string }).id));
+  app.get("/api/projects/:id/agents", async (req) =>
+    deps.db.listAgents((req.params as { id: string }).id));
   app.get("/api/projects/:id/tasks", async (req) =>
     deps.db.listTasks((req.params as { id: string }).id));
   // Board = resolved kanban columns (config default→override) + the project's tasks.
@@ -231,7 +232,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!p) return reply.code(404).send({ error: "project not found" });
     return diffBranch(p.repoPath, s.branch);
   });
-  app.get("/api/topics/:id/sessions", async (req) =>
+  app.get("/api/agents/:id/sessions", async (req) =>
     deps.db.listSessions((req.params as { id: string }).id));
   // All running/known sessions across projects — for the global Live Terminals grid.
   app.get("/api/sessions", async () => deps.db.listAllSessions());
@@ -295,32 +296,32 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return deps.db.getProject(id);
   });
 
-  app.post("/api/projects/:id/topics", async (req, reply) => {
+  app.post("/api/projects/:id/agents", async (req, reply) => {
     const projectId = (req.params as { id: string }).id;
     if (!deps.db.getProject(projectId)) return reply.code(404).send({ error: "project not found" });
     const b = (req.body ?? {}) as { name?: string; startupPrompt?: string };
     if (!b.name) return reply.code(400).send({ error: "name required" });
-    const topic: Topic = {
+    const agent: Agent = {
       id: randomUUID(), projectId, name: b.name,
-      startupPrompt: b.startupPrompt ?? "", position: deps.db.listTopics(projectId).length,
-      profileId: null, // additive: topics start profile-less (P3 wires up profile assignment)
+      startupPrompt: b.startupPrompt ?? "", position: deps.db.listAgents(projectId).length,
+      profileId: null, // additive: agents start profile-less (P3 wires up profile assignment)
     };
-    deps.db.insertTopic(topic);
-    return reply.code(201).send(topic);
+    deps.db.insertAgent(agent);
+    return reply.code(201).send(agent);
   });
 
-  // Edit a topic preset (name / startup prompt). Same store the spawn path reads, so a saved
-  // prompt is injected as the first turn of the NEXT new session in this topic.
-  app.post("/api/topics/:id", async (req, reply) => {
+  // Edit an agent preset (name / startup prompt). Same store the spawn path reads, so a saved
+  // prompt is injected as the first turn of the NEXT new session in this agent.
+  app.post("/api/agents/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    if (!deps.db.getTopic(id)) return reply.code(404).send({ error: "topic not found" });
+    if (!deps.db.getAgent(id)) return reply.code(404).send({ error: "agent not found" });
     const b = (req.body ?? {}) as { name?: string; startupPrompt?: string; profileId?: string | null };
-    // Assigning a profile: a non-null profileId must reference a real profile (null CLEARS — the topic
-    // falls back to the plain backstop). Pass the whole patch through; updateTopic writes only the
+    // Assigning a profile: a non-null profileId must reference a real profile (null CLEARS — the agent
+    // falls back to the plain backstop). Pass the whole patch through; updateAgent writes only the
     // provided keys (`profileId: null` clears, an absent key leaves the assignment as-is).
     if (b.profileId != null && !deps.db.getProfile(b.profileId)) return reply.code(404).send({ error: "profile not found" });
-    deps.db.updateTopic(id, b);
-    return deps.db.getTopic(id);
+    deps.db.updateAgent(id, b);
+    return deps.db.getAgent(id);
   });
 
   app.post("/api/projects/:id/tasks", async (req, reply) => {
@@ -346,13 +347,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true };
   });
 
-  app.post("/api/topics/:id/sessions", async (req) => {
+  app.post("/api/agents/:id/sessions", async (req) => {
     const id = (req.params as { id: string }).id;
     const { role } = (req.body as { role?: string }) ?? {};
     if (role === "manager") return deps.sessions.startManager(id);
     if (role === "platform") return deps.sessions.startPlatformLead(id);
-    // P3 force-plain override (web "Spawn → force plain"): a VANILLA session even in a topic with a
-    // manager/platform profile — bypasses the profile entirely (role null, topic's own prompt, no allow
+    // P3 force-plain override (web "Spawn → force plain"): a VANILLA session even in an agent with a
+    // manager/platform profile — bypasses the profile entirely (role null, agent's own prompt, no allow
     // delta). Absent/undefined role = auto (the profile's role applies — P2 default).
     if (role === "plain") return deps.sessions.startNew(id, { forcePlain: true });
     return deps.sessions.startNew(id);

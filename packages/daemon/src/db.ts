@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { DB_PATH } from "./paths.js";
 import type {
-  Project, Topic, Session, Task, ProjectConfigOverride, Profile,
+  Project, Agent, Session, Task, ProjectConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake,
 } from "@loom/shared";
@@ -16,32 +16,33 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at TEXT NOT NULL,
   archived_at TEXT
 );
--- Agent Profiles (platform-level "who": role + prompt + tool/permission/model/icon). NO project FK —
--- a profile is cross-project, reused by topics across projects. allow_delta/skills are JSON text.
+-- Profiles (platform-level rig: role + model + permission-delta + skill-subset + icon). NO project
+-- FK — a profile is cross-project, reused by agents across projects. allow_delta/skills are JSON text.
+-- the description column is a UI-only blurb (NEVER injected); the startup prompt comes from the agent.
 CREATE TABLE IF NOT EXISTS profiles (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   role TEXT,                              -- NULL = plain | 'manager' | 'worker' | 'platform'
-  startup_prompt TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',   -- human-facing blurb (UI only; never injected)
   allow_delta TEXT NOT NULL DEFAULT '[]', -- JSON string[] (permission allowlist delta)
   skills TEXT,                            -- JSON string[] | NULL (NULL = deliver all skills)
   model TEXT,                             -- model id | NULL (NULL = engine default)
   icon TEXT                               -- UI icon | NULL
 );
-CREATE TABLE IF NOT EXISTS topics (
+CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id),
   name TEXT NOT NULL,
   startup_prompt TEXT NOT NULL DEFAULT '',
   position INTEGER NOT NULL DEFAULT 0,
-  -- nullable Agent Profile ref (also added to existing DBs via the idempotent migration below).
+  -- nullable Profile ref (also added to existing DBs via the idempotent migration below).
   -- plain TEXT (no FK), matching the migration's ADD COLUMN so fresh + migrated DBs converge.
   profile_id TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id),
-  topic_id TEXT NOT NULL REFERENCES topics(id),
+  agent_id TEXT NOT NULL REFERENCES agents(id),
   engine_session_id TEXT,
   title TEXT,
   cwd TEXT NOT NULL,
@@ -95,7 +96,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 -- Cron-triggered schedules (phase-2 Pillar B): the daemon Scheduler boots a manager on the tick.
 CREATE TABLE IF NOT EXISTS schedules (
   id TEXT PRIMARY KEY,
-  topic_id TEXT NOT NULL REFERENCES topics(id),
+  agent_id TEXT NOT NULL REFERENCES agents(id),
   cron TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1,
   next_fire_at TEXT NOT NULL,
@@ -111,10 +112,10 @@ CREATE TABLE IF NOT EXISTS wakes (
   note TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_topics_project ON topics(project_id, position);
+CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_fire_at);
 CREATE INDEX IF NOT EXISTS idx_wakes_due ON wakes(wake_at);
-CREATE INDEX IF NOT EXISTS idx_sessions_topic ON sessions(topic_id, last_activity DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id, last_activity DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, column_key, position);
 CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_session_id, ts);
 `;
@@ -142,8 +143,8 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   idle_nudge_unanswered: "INTEGER NOT NULL DEFAULT 0",
 };
 
-/** Columns added to `topics` after phase-1; applied to existing DBs by migrateTopics(). */
-const TOPIC_ADDED_COLUMNS: Record<string, string> = {
+/** Columns added to `agents` after phase-1; applied to existing DBs by migrateAgents(). */
+const AGENT_ADDED_COLUMNS: Record<string, string> = {
   profile_id: "TEXT",
 };
 
@@ -164,9 +165,50 @@ export class Db {
   constructor(file = DB_PATH) {
     this.db = new Database(file);
     this.db.pragma("journal_mode = WAL");
+    // One-shot structural rename (topics→agents) MUST run before exec(SCHEMA) — see the method doc.
+    this.migrateTopicsToAgents();
     this.db.exec(SCHEMA);
     this.migrateSessions();
-    this.migrateTopics();
+    this.migrateAgents();
+  }
+
+  /**
+   * One-shot structural migration: rename the legacy `topics` table → `agents` (and the FK columns
+   * `sessions.topic_id` / `schedules.topic_id` → `agent_id`, plus `profiles.startup_prompt` →
+   * `description`). Unlike the additive migrations below this is a true rename of existing data.
+   *
+   * GUARD: runs EXACTLY once, only on a legacy DB — fires only when `topics` exists AND `agents` does
+   * not. CRITICAL ORDERING: it MUST run BEFORE exec(SCHEMA). SCHEMA's `CREATE TABLE IF NOT EXISTS
+   * agents` would otherwise create an empty `agents` table first, defeating the guard and orphaning
+   * the real rows still sitting in `topics`. better-sqlite3 bundles SQLite ≥3.25, so RENAME COLUMN is
+   * supported and (with legacy_alter_table OFF, the default) RENAME TO auto-rewrites the FK references
+   * in `sessions`/`schedules`. Wrapped in a transaction → a failure rolls back to the legacy schema.
+   */
+  private migrateTopicsToAgents(): void {
+    const tables = new Set(
+      (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((t) => t.name),
+    );
+    if (!tables.has("topics") || tables.has("agents")) return;
+    this.db.transaction(() => {
+      this.db.exec("ALTER TABLE topics RENAME TO agents");
+      // Guard each FK-column rename by table existence: in prod these always coexist with `topics`,
+      // but this runs BEFORE exec(SCHEMA), so a minimal/legacy DB may not have them all yet.
+      if (tables.has("sessions")) this.db.exec("ALTER TABLE sessions RENAME COLUMN topic_id TO agent_id");
+      if (tables.has("schedules")) this.db.exec("ALTER TABLE schedules RENAME COLUMN topic_id TO agent_id");
+      // `profiles` postdates `topics` but predates this rename; rename its prompt column → UI blurb
+      // only when present (a pre-profiles legacy DB has no profiles table yet — SCHEMA creates it
+      // after this runs; PRAGMA on an absent table returns an empty set, so this safely no-ops).
+      const profileCols = new Set(
+        (this.db.prepare("PRAGMA table_info(profiles)").all() as { name: string }[]).map((c) => c.name),
+      );
+      if (profileCols.has("startup_prompt") && !profileCols.has("description")) {
+        this.db.exec("ALTER TABLE profiles RENAME COLUMN startup_prompt TO description");
+      }
+      // Drop the legacy-named indexes; SCHEMA recreates them as idx_agents_project / idx_sessions_agent.
+      // (RENAME keeps the old index names pointing at the renamed table/column → otherwise duplicates.)
+      this.db.exec("DROP INDEX IF EXISTS idx_topics_project");
+      this.db.exec("DROP INDEX IF EXISTS idx_sessions_topic");
+    })();
   }
 
   /**
@@ -186,17 +228,17 @@ export class Db {
   }
 
   /**
-   * Idempotent additive migration for `topics` — ADD COLUMN any post-phase-1 column missing from an
+   * Idempotent additive migration for `agents` — ADD COLUMN any post-phase-1 column missing from an
    * existing DB (fresh installs already have them via CREATE TABLE). Mirrors migrateSessions; the
    * nullable `profile_id` defaults to NULL on legacy rows ⇒ resolveProfile maps them to today's
-   * behavior. (The `profiles` table itself is created by the CREATE TABLE IF NOT EXISTS in SCHEMA.)
+   * behavior. Runs after migrateTopicsToAgents + exec(SCHEMA), so the `agents` table always exists.
    */
-  private migrateTopics(): void {
+  private migrateAgents(): void {
     const have = new Set(
-      (this.db.prepare("PRAGMA table_info(topics)").all() as { name: string }[]).map((c) => c.name),
+      (this.db.prepare("PRAGMA table_info(agents)").all() as { name: string }[]).map((c) => c.name),
     );
-    for (const [name, type] of Object.entries(TOPIC_ADDED_COLUMNS)) {
-      if (!have.has(name)) this.db.exec(`ALTER TABLE topics ADD COLUMN ${name} ${type}`);
+    for (const [name, type] of Object.entries(AGENT_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE agents ADD COLUMN ${name} ${type}`);
     }
   }
 
@@ -229,28 +271,28 @@ export class Db {
     this.db.prepare("UPDATE projects SET archived_at = ? WHERE id = ?").run(new Date().toISOString(), id);
   }
 
-  // --- topics ---
-  listTopics(projectId: string): Topic[] {
-    return this.db.prepare("SELECT * FROM topics WHERE project_id = ? ORDER BY position")
-      .all(projectId).map(toTopic);
+  // --- agents ---
+  listAgents(projectId: string): Agent[] {
+    return this.db.prepare("SELECT * FROM agents WHERE project_id = ? ORDER BY position")
+      .all(projectId).map(toAgent);
   }
-  getTopic(id: string): Topic | undefined {
-    const r = this.db.prepare("SELECT * FROM topics WHERE id = ?").get(id) as Row | undefined;
-    return r ? toTopic(r) : undefined;
+  getAgent(id: string): Agent | undefined {
+    const r = this.db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Row | undefined;
+    return r ? toAgent(r) : undefined;
   }
-  insertTopic(t: Topic): void {
+  insertAgent(a: Agent): void {
     this.db.prepare(
-      `INSERT INTO topics (id,project_id,name,startup_prompt,position,profile_id)
+      `INSERT INTO agents (id,project_id,name,startup_prompt,position,profile_id)
        VALUES (@id,@projectId,@name,@startupPrompt,@position,@profileId)`,
-    ).run({ ...t, profileId: t.profileId ?? null });
+    ).run({ ...a, profileId: a.profileId ?? null });
   }
   /**
-   * Partial edit of a topic preset (name / startup prompt / assigned Agent Profile). Omitted fields
-   * are left as-is; `profileId: null` CLEARS the assignment (topic falls back to resolveProfile's
-   * plain backstop). `?? null` coerces a provided-but-undefined value so an explicit clear reaches
-   * the column (a truly absent key is filtered out and left as-is).
+   * Partial edit of an agent (name / startup prompt / assigned Profile). Omitted fields are left
+   * as-is; `profileId: null` CLEARS the assignment (agent falls back to resolveProfile's plain
+   * backstop). `?? null` coerces a provided-but-undefined value so an explicit clear reaches the
+   * column (a truly absent key is filtered out and left as-is).
    */
-  updateTopic(id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null }): void {
+  updateAgent(id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null }): void {
     const cols: Record<string, unknown> = {
       name: patch.name,
       startup_prompt: patch.startupPrompt,
@@ -260,10 +302,10 @@ export class Db {
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
     const set = names.map((c) => `${c} = ?`).join(", ");
-    this.db.prepare(`UPDATE topics SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+    this.db.prepare(`UPDATE agents SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
   }
 
-  // --- profiles (platform-level Agent Profiles; phase-1 read path + seed) ---
+  // --- profiles (platform-level rigs; read path + seed) ---
   listProfiles(): Profile[] {
     return (this.db.prepare("SELECT * FROM profiles ORDER BY name").all() as Row[]).map(toProfile);
   }
@@ -273,10 +315,10 @@ export class Db {
   }
   insertProfile(p: Profile): void {
     this.db.prepare(
-      `INSERT INTO profiles (id,name,role,startup_prompt,allow_delta,skills,model,icon)
-       VALUES (@id,@name,@role,@startupPrompt,@allowDelta,@skills,@model,@icon)`,
+      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon)
+       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon)`,
     ).run({
-      id: p.id, name: p.name, role: p.role ?? null, startupPrompt: p.startupPrompt,
+      id: p.id, name: p.name, role: p.role ?? null, description: p.description,
       // string[] columns persist as JSON text; skills NULL means "deliver all".
       allowDelta: JSON.stringify(p.allowDelta ?? []),
       skills: p.skills == null ? null : JSON.stringify(p.skills),
@@ -288,7 +330,7 @@ export class Db {
     const cols: Record<string, unknown> = {
       name: patch.name,
       role: patch.role,
-      startup_prompt: patch.startupPrompt,
+      description: patch.description,
       allow_delta: patch.allowDelta === undefined ? undefined : JSON.stringify(patch.allowDelta),
       skills: patch.skills === undefined ? undefined : patch.skills === null ? null : JSON.stringify(patch.skills),
       model: patch.model,
@@ -300,7 +342,7 @@ export class Db {
     this.db.prepare(`UPDATE profiles SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
   }
   /**
-   * Delete a profile. SAFE for assigned topics: a topic whose profile_id now dangles resolves to the
+   * Delete a profile. SAFE for assigned agents: an agent whose profile_id now dangles resolves to the
    * plain backstop via resolveProfile (getProfile → undefined). A bundled profile re-seeds on next
    * boot (seed-if-absent), so deleting one is non-destructive.
    */
@@ -309,32 +351,32 @@ export class Db {
   }
 
   // --- sessions ---
-  listSessions(topicId: string): Session[] {
-    return this.db.prepare("SELECT * FROM sessions WHERE topic_id = ? ORDER BY last_activity DESC")
-      .all(topicId).map(toSession);
+  listSessions(agentId: string): Session[] {
+    return this.db.prepare("SELECT * FROM sessions WHERE agent_id = ? ORDER BY last_activity DESC")
+      .all(agentId).map(toSession);
   }
   getSession(id: string): Session | undefined {
     const r = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as Row | undefined;
     return r ? toSession(r) : undefined;
   }
-  /** All sessions across all projects, enriched with project/topic names (global grid). */
+  /** All sessions across all projects, enriched with project/agent names (global grid). */
   listAllSessions(): SessionListItem[] {
     const rows = this.db.prepare(
-      `SELECT s.*, p.name AS project_name, t.name AS topic_name
-       FROM sessions s JOIN projects p ON s.project_id = p.id JOIN topics t ON s.topic_id = t.id
+      `SELECT s.*, p.name AS project_name, a.name AS agent_name
+       FROM sessions s JOIN projects p ON s.project_id = p.id JOIN agents a ON s.agent_id = a.id
        ORDER BY s.last_activity DESC`,
     ).all() as Row[];
-    return rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, topicName: r.topic_name as string }));
+    return rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string }));
   }
   insertSession(s: Session): void {
     this.db.prepare(
       `INSERT INTO sessions (
-         id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,
+         id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
          role,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
          ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline)
        VALUES (
-         @id,@projectId,@topicId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
+         @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
          @role,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
          @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline)`,
@@ -557,8 +599,8 @@ export class Db {
   // --- schedules (phase-2 Pillar B) ---
   insertSchedule(s: Schedule): void {
     this.db.prepare(
-      `INSERT INTO schedules (id,topic_id,cron,enabled,next_fire_at,last_fired_at,created_at)
-       VALUES (@id,@topicId,@cron,@enabled,@nextFireAt,@lastFiredAt,@createdAt)`,
+      `INSERT INTO schedules (id,agent_id,cron,enabled,next_fire_at,last_fired_at,created_at)
+       VALUES (@id,@agentId,@cron,@enabled,@nextFireAt,@lastFiredAt,@createdAt)`,
     ).run({ ...s, enabled: s.enabled ? 1 : 0, lastFiredAt: s.lastFiredAt ?? null });
   }
   listSchedules(): Schedule[] {
@@ -630,7 +672,7 @@ function toProject(r0: unknown): Project {
     createdAt: r.created_at as string, archivedAt: (r.archived_at as string) ?? null,
   };
 }
-function toTopic(r0: unknown): Topic {
+function toAgent(r0: unknown): Agent {
   const r = r0 as Row;
   return {
     id: r.id as string, projectId: r.project_id as string, name: r.name as string,
@@ -644,7 +686,7 @@ function toProfile(r0: unknown): Profile {
   return {
     id: r.id as string, name: r.name as string,
     role: (r.role as SessionRole) ?? null,
-    startupPrompt: r.startup_prompt as string,
+    description: r.description as string,
     allowDelta: JSON.parse((r.allow_delta as string) || "[]") as string[],
     skills: r.skills == null ? null : (JSON.parse(r.skills as string) as string[]),
     model: (r.model as string) ?? null,
@@ -654,7 +696,7 @@ function toProfile(r0: unknown): Profile {
 function toSession(r0: unknown): Session {
   const r = r0 as Row;
   return {
-    id: r.id as string, projectId: r.project_id as string, topicId: r.topic_id as string,
+    id: r.id as string, projectId: r.project_id as string, agentId: r.agent_id as string,
     engineSessionId: (r.engine_session_id as string) ?? null, title: (r.title as string) ?? null,
     cwd: r.cwd as string,
     processState: r.process_state as ProcessState, resumability: r.resumability as Resumability,
@@ -699,7 +741,7 @@ function toTask(r0: unknown): Task {
 function toSchedule(r0: unknown): Schedule {
   const r = r0 as Row;
   return {
-    id: r.id as string, topicId: r.topic_id as string, cron: r.cron as string,
+    id: r.id as string, agentId: r.agent_id as string, cron: r.cron as string,
     enabled: (r.enabled as number) === 1,
     nextFireAt: r.next_fire_at as string, lastFiredAt: (r.last_fired_at as string) ?? null,
     createdAt: r.created_at as string,

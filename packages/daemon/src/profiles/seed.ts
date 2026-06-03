@@ -3,18 +3,21 @@ import type { Profile } from "@loom/shared";
 import type { Db } from "../db.js";
 
 /**
- * Loom's bundled Agent Profiles — the reusable, platform-level "who", encoding the role scaffolds the
- * web's TEMPLATE_TOPICS (web/src/pages/Workspace.tsx) describes in prose. Orchestrator=manager,
- * Dev/Bugfix=worker, Planning & Triage / Content Strategy = plain (role null), plus a Platform-lead
- * (role=platform; today REST/internal-only). Cross-project, so NO project FK. Keyed by NAME for the
- * seed-if-absent idempotent seed (UUID id assigned on first seed). No "reset to bundled" yet (P3).
+ * Loom's bundled Profiles — the reusable, platform-level "rig" (role + model + allow-delta +
+ * skill-subset + icon) an agent runs under. Orchestrator=manager, Dev/Bugfix=worker, Planning &
+ * Triage / Content Strategy = plain (role null), plus a Platform-lead (role=platform; today
+ * REST/internal-only). Cross-project, so NO project FK. Keyed by NAME for the seed-if-absent
+ * idempotent seed (UUID id assigned on first seed); "reset to bundled" restores a row to these.
+ *
+ * NOTE: a Profile carries NO injected prompt — `description` is a UI-only blurb describing what the
+ * rig is for. The startup prompt always comes from the Agent (resolveProfile sources it there).
  */
 export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
   {
     name: "Orchestrator",
     role: "manager",
-    startupPrompt:
-      "You are the lead orchestrator for this project. Plan work into board tasks, spawn and review workers, and merge their branches via your loom-orchestration tools.",
+    description:
+      "Lead-orchestrator rig: runs as a manager with the loom-orchestration tools — plans board work, spawns and reviews workers, merges their branches. The agent supplies the project specifics.",
     allowDelta: [],
     skills: null,
     model: null,
@@ -23,8 +26,8 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
   {
     name: "Planning & Triage",
     role: null,
-    startupPrompt:
-      "Triage incoming work for this project into clear, well-scoped board tasks, each with a sharp definition of done.",
+    description:
+      "Plain rig (no orchestration role) for triaging incoming work into clear, well-scoped board tasks, each with a sharp definition of done.",
     allowDelta: [],
     skills: null,
     model: null,
@@ -33,8 +36,8 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
   {
     name: "Dev",
     role: "worker",
-    startupPrompt:
-      "Implement the assigned board task on your worktree branch. Keep the change small and focused; run the build/tests; then report.",
+    description:
+      "Worker rig: implements one assigned board task on an isolated worktree branch — small, focused change, build/tests, then report.",
     allowDelta: [],
     skills: null,
     model: null,
@@ -43,8 +46,8 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
   {
     name: "Bugfix",
     role: "worker",
-    startupPrompt:
-      "Reproduce, fix, and verify the assigned bug on your worktree branch. Add a regression check; then report.",
+    description:
+      "Worker rig for bug work: reproduce, fix, and verify on a worktree branch, with a regression check, then report.",
     allowDelta: [],
     skills: null,
     model: null,
@@ -53,7 +56,7 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
   {
     name: "Content Strategy",
     role: null,
-    startupPrompt: "Work on content and strategy for this project, grounded in the vault notes.",
+    description: "Plain rig for content and strategy work, grounded in the project's vault notes.",
     allowDelta: [],
     skills: null,
     model: null,
@@ -62,8 +65,8 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
   {
     name: "Platform-lead",
     role: "platform",
-    startupPrompt:
-      "You are a platform-lead. Stand up and configure projects and topics via your loom-platform tools so the orchestration queue has well-formed work to drain.",
+    description:
+      "Platform-lead rig: runs with the loom-platform tools to stand up and configure projects + agents so the orchestration queue has well-formed work to drain.",
     allowDelta: [],
     skills: null,
     model: null,
@@ -91,7 +94,7 @@ export function seedDefaultProfiles(db: Db): string[] {
  * Restore a profile to its shipped BUNDLED_PROFILES version, discarding any UI edits — the profile
  * analogue of skills/store.ts resetSkillToBundled, closing the same seed-if-absent gap (seeding never
  * overwrites, so improvements to a bundled profile don't reach an existing row on reboot). The bundled
- * entry is matched by NAME (the seed key), preserving the row's id + any topic assignments. Returns
+ * entry is matched by NAME (the seed key), preserving the row's id + any agent assignments. Returns
  * false (caller → 404) if the id is unknown OR its name isn't a bundled one (a user-created profile
  * can't be "reset"). The user may have renamed a bundled profile, in which case it's no longer matchable
  * — that's the documented limitation, identical to the skill reset's bundled-by-name contract.

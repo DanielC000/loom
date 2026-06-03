@@ -8,7 +8,7 @@
 //
 // HERMETIC: boots its OWN isolated daemon on a temp LOOM_HOME + a non-4317 LOOM_PORT (mirroring
 // profiles-rest.mjs / skills-e2e.mjs) so it NEVER touches the real ~/.loom or the prod loom.db —
-// the Board-<ts> project/topic/session it creates live only in the throwaway db, which is deleted
+// the Board-<ts> project/agent/session it creates live only in the throwaway db, which is deleted
 // on teardown. Spawns one real claude. Run after build (needs dist/):  node test/board-consistency.mjs
 // (honors LOOM_HOME/LOOM_PORT if you pre-set them to target an externally-started daemon instead.)
 import fs from "node:fs";
@@ -71,8 +71,8 @@ try {
   const P = await post("/api/projects", { name: `Board-${Date.now()}`, repoPath: dir, vaultPath: dir });
   const t1 = await post(`/api/projects/${P.id}/tasks`, { title: "BOARD-ONE" });           // backlog
   await post(`/api/tasks/${t1.id}`, { columnKey: "review" });                              // MOVE via REST
-  const topic = await post(`/api/projects/${P.id}/topics`, { name: "probe", startupPrompt: PROMPT });
-  session = await post(`/api/topics/${topic.id}/sessions`, {});
+  const agent = await post(`/api/projects/${P.id}/agents`, { name: "probe", startupPrompt: PROMPT });
+  session = await post(`/api/agents/${agent.id}/sessions`, {});
   console.log(`spawned ${session.id}; REST created BOARD-ONE and moved it to 'review'. Waiting for the agent...`);
 
   let marker = null;

@@ -26,9 +26,9 @@ const now = new Date().toISOString();
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-// --- a real git repo + seeds. The topic's startupPrompt is the manager kickoff (drain the board). ---
+// --- a real git repo + seeds. The agent's startupPrompt is the manager kickoff (drain the board). ---
 const sfx = Date.now();
-const projId = `sd-proj-${sfx}`, topicId = `sd-topic-${sfx}`, taskId = `sd-task-${sfx}`, scheduleId = `sd-sched-${sfx}`;
+const projId = `sd-proj-${sfx}`, agentId = `sd-agent-${sfx}`, taskId = `sd-task-${sfx}`, scheduleId = `sd-sched-${sfx}`;
 const repo = path.join(os.tmpdir(), `loom-sd-repo-${sfx}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# scheduler-drain test\n");
@@ -46,12 +46,12 @@ const managerKickoff =
   const db = new Database(DB_FILE);
   db.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)")
     .run(projId, "SchedDrain", repo, repo, "{}", now);
-  db.prepare("INSERT INTO topics (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)")
-    .run(topicId, projId, "drain", managerKickoff);
+  db.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)")
+    .run(agentId, projId, "drain", managerKickoff);
   db.prepare("INSERT INTO tasks (id,project_id,title,body,column_key,position,created_at,updated_at) VALUES (?,?,?,'','todo',?,?,?)")
     .run(taskId, projId, "make-done-file", 1, now, now);
-  db.prepare("INSERT INTO schedules (id,topic_id,cron,enabled,next_fire_at,last_fired_at,created_at) VALUES (?,?,?,1,?,NULL,?)")
-    .run(scheduleId, topicId, "0 0 1 1 *", new Date(Date.now() - 60_000).toISOString(), now);
+  db.prepare("INSERT INTO schedules (id,agent_id,cron,enabled,next_fire_at,last_fired_at,created_at) VALUES (?,?,?,1,?,NULL,?)")
+    .run(scheduleId, agentId, "0 0 1 1 *", new Date(Date.now() - 60_000).toISOString(), now);
   db.close();
 }
 
@@ -75,14 +75,14 @@ try {
   for (let i = 0; i < 180 && !worker; i++) {
     await sleep(1000);
     const ss = await get("/api/sessions");
-    mgr = ss.find((s) => s.role === "manager" && s.topicId === topicId) ?? mgr;
+    mgr = ss.find((s) => s.role === "manager" && s.agentId === agentId) ?? mgr;
     worker = ss.find((s) => s.role === "worker" && s.taskId === taskId);
     taskCol = (await get(`/api/projects/${projId}/board`)).tasks.find((t) => t.id === taskId)?.columnKey;
   }
 
   const fired = scheduleFiredEvent();
   check("scheduler fired the schedule unattended (schedule_fired event)", !!fired && JSON.parse(fired.detail_json ?? "{}").scheduleId === scheduleId);
-  check("a manager session booted (role=manager in the scheduled topic)", !!mgr);
+  check("a manager session booted (role=manager in the scheduled agent)", !!mgr);
   check("the booted manager IS the schedule_fired event's manager", !!fired && !!mgr && fired.manager_session_id === mgr.id);
   check("the manager spawned a worker for the seeded task (parent=manager, taskId)", !!worker && !!mgr && worker.parentSessionId === mgr.id && worker.taskId === taskId);
   check("the task left 'todo' (the manager drained the board)", !!taskCol && taskCol !== "todo");
@@ -102,11 +102,11 @@ try {
   try {
     const db = new Database(DB_FILE);
     if (mgr?.id) db.prepare("DELETE FROM sessions WHERE id = ? OR parent_session_id = ?").run(mgr.id, mgr.id);
-    db.prepare("DELETE FROM sessions WHERE topic_id = ?").run(topicId);
+    db.prepare("DELETE FROM sessions WHERE agent_id = ?").run(agentId);
     db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ?").run(mgr?.id ?? "");
     db.prepare("DELETE FROM schedules WHERE id = ?").run(scheduleId);
     db.prepare("DELETE FROM tasks WHERE project_id = ?").run(projId);
-    db.prepare("DELETE FROM topics WHERE id = ?").run(topicId);
+    db.prepare("DELETE FROM agents WHERE id = ?").run(agentId);
     db.prepare("DELETE FROM projects WHERE id = ?").run(projId);
     db.close();
   } catch { /* ignore */ }

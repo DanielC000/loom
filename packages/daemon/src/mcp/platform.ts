@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import type { Project, ProjectConfigOverride, Topic } from "@loom/shared";
+import type { Project, ProjectConfigOverride, Agent } from "@loom/shared";
 import type { Db } from "../db.js";
 import { isGitRepo } from "../git/reader.js";
 
@@ -83,7 +83,7 @@ export function validateAgentProjectConfigOverride(
 
 /**
  * Platform MCP server (phase-2 Pillar C) — a platform-lead's surface for creating + configuring
- * projects/topics, so the autonomous queue can stand up NEW work, not just drain an existing board.
+ * projects/agents, so the autonomous queue can stand up NEW work, not just drain an existing board.
  * Mirrors the orchestration MCP exactly: keyed by the URL-path session id, resolved SERVER-SIDE,
  * role-gated to 'platform' (manager/worker/plain → 404, no surface). Stateless: a fresh
  * McpServer+transport per request, so no cached transport can be wedged by a dropped stream.
@@ -125,9 +125,9 @@ export class PlatformMcpRouter {
     );
 
     server.registerTool(
-      "topic_create",
+      "agent_create",
       {
-        description: "Create a topic in a project. The startupPrompt is injected as the first turn when a session starts in this topic.",
+        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent.",
         inputSchema: {
           projectId: z.string(),
           name: z.string(),
@@ -136,13 +136,13 @@ export class PlatformMcpRouter {
       },
       async ({ projectId, name, startupPrompt }) => {
         if (!db.getProject(projectId)) return ok({ error: "project not found" });
-        const topic: Topic = {
+        const agent: Agent = {
           id: randomUUID(), projectId, name,
-          startupPrompt: startupPrompt ?? "", position: db.listTopics(projectId).length,
-          profileId: null, // additive: topics start profile-less (P3 wires up profile assignment)
+          startupPrompt: startupPrompt ?? "", position: db.listAgents(projectId).length,
+          profileId: null, // additive: agents start profile-less (P3 wires up profile assignment)
         };
-        db.insertTopic(topic);
-        return ok(topic);
+        db.insertAgent(agent);
+        return ok(agent);
       },
     );
 

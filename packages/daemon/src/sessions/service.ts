@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import {
   resolveConfig, resolveProfile,
   type Session, type StopMode, type OrchestrationEvent,
-  type Topic, type SessionRole, type ResolvedConfig, type PermissionPolicy,
+  type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
@@ -19,35 +19,35 @@ export class SessionService {
   constructor(private db: Db, private pty: PtyHost, private control: OrchestrationControl) {}
 
   /**
-   * Phase-2 profile-driven spawn (Topics→Profiles P2): resolve a topic's OPTIONAL Agent Profile into
-   * the effective spawn shape the "start a session in a topic" paths read — the role it confers, the
+   * Phase-2 profile-driven spawn (Agents→Profiles P2): resolve an agent's OPTIONAL Profile into
+   * the effective spawn shape the "start a session in an agent" paths read — the role it confers, the
    * startup prompt to inject, and the permission policy (config allow + the profile's allowDelta).
    *
-   * Fully ADDITIVE — a topic with `profileId === null` (every topic today) resolves to EXACTLY
-   * today's behavior: role straight from the caller, the topic's OWN prompt, and the config's
+   * Fully ADDITIVE — an agent with `profileId === null` (every agent today) resolves to EXACTLY
+   * today's behavior: role straight from the caller, the agent's OWN prompt, and the config's
    * permission object UNCHANGED (same reference — no allow delta layered), so every existing spawn is
    * byte-identical when no profile is involved.
    *
    * Role composition (the load-bearing rule): an EXPLICIT caller role — worker_spawn → worker,
    * REST/scheduler → manager/platform — ALWAYS wins; the profile supplies role ONLY when the caller
-   * didn't specify one (the plain "+New" path) AND the topic has a profile.
+   * didn't specify one (the plain "+New" path) AND the agent has a profile.
    *
    * DEFERRED to a later phase (NOT wired here): the profile's `model` (no `--model` emitted) and its
    * `skills` subset (all skills still delivered). This wires ONLY role + startupPrompt + allow.
    *
-   * `forcePlain` (P3 spawn override): BYPASS the profile entirely so role + prompt + allow ALL resolve
-   * via resolveProfile's backstop — i.e. spawn as if the topic had no profile (a vanilla "+New": role
-   * null, the topic's OWN prompt, no allow delta). The web "Spawn → force plain" menu uses this so a
-   * manager/platform-profile topic can still start a COHERENT plain session, not one carrying the
-   * profile's "you are the lead orchestrator" prompt + a manager allowlist it shouldn't have / can't use.
+   * `forcePlain` (P3 spawn override): BYPASS the profile entirely so role + allow resolve via
+   * resolveProfile's backstop — i.e. spawn as if the agent had no profile (a vanilla "+New": role null,
+   * no allow delta; the injected prompt is the agent's own either way). The web "Spawn → force plain"
+   * menu uses this so a manager/platform-profile agent can still start a COHERENT plain session, not one
+   * carrying a manager role + allowlist it shouldn't have / can't use.
    */
-  private resolveTopicSpawn(
-    topic: Topic, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false,
+  private resolveAgentSpawn(
+    agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false,
   ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy } {
-    // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the topic's
-    // own prompt, and NO allow delta (exactly a profile-less topic's "+New").
-    const profile = (forcePlain || !topic.profileId) ? undefined : this.db.getProfile(topic.profileId);
-    const resolved = resolveProfile(topic, profile);
+    // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
+    // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
+    const profile = (forcePlain || !agent.profileId) ? undefined : this.db.getProfile(agent.profileId);
+    const resolved = resolveProfile(agent, profile);
     // Layer the profile's allowDelta onto the config allow; an empty delta keeps the SAME config
     // permission reference, so a profile-less spawn is byte-identical to today.
     const permission = resolved.allow.length
@@ -57,33 +57,33 @@ export class SessionService {
       // An explicit caller role still wins; then the profile's role (null under forcePlain), then
       // undefined (today's plain). The force-plain path passes no explicitRole, so it resolves null.
       role: explicitRole ?? resolved.role ?? undefined,
-      // Same `|| undefined` empties-to-undefined coercion today's start paths use on the topic prompt.
+      // Same `|| undefined` empties-to-undefined coercion today's start paths use on the agent prompt.
       startupPrompt: resolved.startupPrompt || undefined,
       permission,
     };
   }
 
   /**
-   * Start a NEW session in a topic — injects the topic startup prompt once. `opts.forcePlain` (P3
+   * Start a NEW session in an agent — injects the agent startup prompt once. `opts.forcePlain` (P3
    * web "Spawn → force plain") overrides any profile-conferred role to spawn a role-null session.
    */
-  startNew(topicId: string, opts: { forcePlain?: boolean } = {}): Session {
-    const topic = this.db.getTopic(topicId);
-    if (!topic) throw new Error("topic not found");
-    const project = this.db.getProject(topic.projectId);
+  startNew(agentId: string, opts: { forcePlain?: boolean } = {}): Session {
+    const agent = this.db.getAgent(agentId);
+    if (!agent) throw new Error("agent not found");
+    const project = this.db.getProject(agent.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
-    // Phase-2: a topic with an Agent Profile spawns with the profile's role + prompt + allowDelta.
-    // No caller role here (plain "+New"), so the profile's role applies when present. No profile ⇒
-    // role undefined, the topic's own prompt, the config permission unchanged — i.e. today's session.
-    // forcePlain (P3) pins role to undefined even on a profile topic (see resolveTopicSpawn).
-    const { role, startupPrompt, permission } = this.resolveTopicSpawn(topic, config, undefined, opts.forcePlain ?? false);
+    // Phase-2: an agent with a Profile spawns with the profile's role + allowDelta (the injected
+    // prompt is always the agent's own). No caller role here (plain "+New"), so the profile's role
+    // applies when present. No profile ⇒ role undefined, the config permission unchanged — today's session.
+    // forcePlain (P3) pins role to undefined even on a profile agent (see resolveAgentSpawn).
+    const { role, startupPrompt, permission } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false);
 
     const now = new Date().toISOString();
     const session: Session = {
       id: randomUUID(),
       projectId: project.id,
-      topicId,
+      agentId,
       engineSessionId: null,
       title: null,
       cwd: project.repoPath,
@@ -113,25 +113,25 @@ export class SessionService {
   }
 
   /**
-   * Start a NEW MANAGER session in a topic (phase-2 §A2). Mirrors startNew, but marks the
+   * Start a NEW MANAGER session in an agent (phase-2 §A2). Mirrors startNew, but marks the
    * session role 'manager' (so it gets the loom-orchestration MCP + allowlist at spawn) and
    * runs in the project repo, NOT a worktree (managers coordinate; workers get the worktrees).
    */
-  startManager(topicId: string): Session {
-    const topic = this.db.getTopic(topicId);
-    if (!topic) throw new Error("topic not found");
-    const project = this.db.getProject(topic.projectId);
+  startManager(agentId: string): Session {
+    const agent = this.db.getAgent(agentId);
+    if (!agent) throw new Error("agent not found");
+    const project = this.db.getProject(agent.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
     // Explicit 'manager' role from the caller (scheduler/REST) ALWAYS wins; the profile (if any) only
     // layers its prompt + allowDelta. No profile ⇒ byte-identical to today's manager spawn.
-    const { role, startupPrompt, permission } = this.resolveTopicSpawn(topic, config, "manager");
+    const { role, startupPrompt, permission } = this.resolveAgentSpawn(agent, config, "manager");
 
     const now = new Date().toISOString();
     const session: Session = {
       id: randomUUID(),
       projectId: project.id,
-      topicId,
+      agentId,
       engineSessionId: null,
       title: null,
       cwd: project.repoPath, // a manager works in the repo, not a worktree
@@ -160,25 +160,25 @@ export class SessionService {
   }
 
   /**
-   * Start a NEW PLATFORM-LEAD session in a topic (phase-2 Pillar C). Mirrors startManager, but
+   * Start a NEW PLATFORM-LEAD session in an agent (phase-2 Pillar C). Mirrors startManager, but
    * role 'platform' (so it gets the loom-platform MCP + allowlist at spawn, NOT orchestration).
-   * A platform-lead creates/configures projects + topics; it runs in its host project's repo.
+   * A platform-lead creates/configures projects + agents; it runs in its host project's repo.
    */
-  startPlatformLead(topicId: string): Session {
-    const topic = this.db.getTopic(topicId);
-    if (!topic) throw new Error("topic not found");
-    const project = this.db.getProject(topic.projectId);
+  startPlatformLead(agentId: string): Session {
+    const agent = this.db.getAgent(agentId);
+    if (!agent) throw new Error("agent not found");
+    const project = this.db.getProject(agent.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
     // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. No profile ⇒ byte-identical to today's platform-lead spawn.
-    const { role, startupPrompt, permission } = this.resolveTopicSpawn(topic, config, "platform");
+    const { role, startupPrompt, permission } = this.resolveAgentSpawn(agent, config, "platform");
 
     const now = new Date().toISOString();
     const session: Session = {
       id: randomUUID(),
       projectId: project.id,
-      topicId,
+      agentId,
       engineSessionId: null,
       title: null,
       cwd: project.repoPath,
@@ -218,7 +218,7 @@ export class SessionService {
     }
     // A RECYCLED session has a successor that took over its work + fleet (and inherited its wakes +
     // queued messages). Block AUTOMATIC resurrection — a due wake, a rate-limit resume, or boot-resume
-    // would otherwise zombie it ALONGSIDE its successor (two managers on one topic). A HUMAN can still
+    // would otherwise zombie it ALONGSIDE its successor (two managers on one agent). A HUMAN can still
     // force it: the manual /resume endpoint passes allowSuperseded — a deliberate escape hatch to
     // inspect or recover a retired session. (recycle_me reparents the wakes/queue, so the automatic
     // paths never NEED a recycled session anyway.)
@@ -313,7 +313,7 @@ export class SessionService {
     const session: Session = {
       id: randomUUID(),
       projectId: src.projectId,
-      topicId: src.topicId,
+      agentId: src.agentId,
       engineSessionId: forkEngineId, // the fork's own (new) engine transcript id
       title: null,
       cwd: src.cwd, // fork in the same workspace as the source
@@ -351,7 +351,7 @@ export class SessionService {
    */
   async spawnWorker(
     managerSessionId: string,
-    opts: { taskId: string; topicId?: string; kickoffPrompt: string },
+    opts: { taskId: string; agentId?: string; kickoffPrompt: string },
   ): Promise<Session> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
@@ -374,7 +374,7 @@ export class SessionService {
     const worker: Session = {
       id: randomUUID(),
       projectId: manager.projectId,
-      topicId: opts.topicId ?? manager.topicId,
+      agentId: opts.agentId ?? manager.agentId,
       engineSessionId: null,
       title: null,
       cwd: worktreePath, // worker runs IN its worktree (parallel-worker isolation)
@@ -553,7 +553,7 @@ export class SessionService {
     const fresh: Session = {
       id: randomUUID(),
       projectId: old.projectId,
-      topicId: old.topicId,
+      agentId: old.agentId,
       engineSessionId: null,
       title: null,
       cwd: worktreePath, // SAME worktree — code state persists
@@ -605,14 +605,14 @@ export class SessionService {
   /**
    * Recycle a MANAGER near its context limit (the `recycle_me` flow). The manager has already run
    * /session-end and written `continuationPrompt`; here Loom boots a FRESH successor manager seeded
-   * with the topic warm-up prompt + that continuation (NOT --resume — fresh context, intent carried),
+   * with the agent warm-up prompt + that continuation (NOT --resume — fresh context, intent carried),
    * RE-PARENTS the old manager's live workers onto the successor so the fleet survives, then closes
    * the old manager (deferred, so this call's tool response flushes first). gen+1; recycledFrom = old.
    */
   async recycleManager(oldManagerId: string, continuationPrompt: string): Promise<Session> {
     const old = this.db.getSession(oldManagerId);
     if (!old || old.role !== "manager") throw new Error("not a manager session");
-    const topic = this.db.getTopic(old.topicId);
+    const agent = this.db.getAgent(old.agentId);
     const project = this.db.getProject(old.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
@@ -623,7 +623,7 @@ export class SessionService {
       managerSessionId: oldManagerId, kind: "recycle_begin", detail: { kind: "manager", gen: newGen },
     });
 
-    const warmup = topic?.startupPrompt?.trim();
+    const warmup = agent?.startupPrompt?.trim();
     const startupPrompt =
       (warmup ? warmup + "\n\n---\n" : "") +
       `[loom:continuation] You are the successor to a previous manager session that recycled as it neared its ` +
@@ -634,7 +634,7 @@ export class SessionService {
     const fresh: Session = {
       id: randomUUID(),
       projectId: old.projectId,
-      topicId: old.topicId,
+      agentId: old.agentId,
       engineSessionId: null,
       title: null,
       cwd: old.cwd, // a manager works in the project repo (same cwd)

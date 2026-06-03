@@ -34,10 +34,10 @@ const mergeDoneCount = (mgrId) => db.listEvents(mgrId).filter((e) => e.kind === 
 
 function seed(p) {
   db.insertProject({ id: p.projId, name: "BR", repoPath: p.repo, vaultPath: p.repo, config: {}, createdAt: now, archivedAt: null });
-  db.insertTopic({ id: p.topicId, projectId: p.projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertAgent({ id: p.agentId, projectId: p.projId, name: "t", startupPrompt: "", position: 0 });
   db.insertTask({ id: p.taskId, projectId: p.projId, title: "BR-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
-  db.insertSession({ id: p.mgrId, projectId: p.projId, topicId: p.topicId, engineSessionId: null, title: null, cwd: p.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
-  db.insertSession({ id: p.workerId, projectId: p.projId, topicId: p.topicId, engineSessionId: null, title: null, cwd: p.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: p.mgrId, taskId: p.taskId, worktreePath: p.worktreePath, branch: p.branch });
+  db.insertSession({ id: p.mgrId, projectId: p.projId, agentId: p.agentId, engineSessionId: null, title: null, cwd: p.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  db.insertSession({ id: p.workerId, projectId: p.projId, agentId: p.agentId, engineSessionId: null, title: null, cwd: p.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: p.mgrId, taskId: p.taskId, worktreePath: p.worktreePath, branch: p.branch });
 }
 
 // --- Scenario 1: a merge whose bookkeeping was interrupted ---
@@ -68,8 +68,8 @@ async function setupOrphan(p) {
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-const M = { projId: `br-m-proj-${sfx}`, topicId: `br-m-top-${sfx}`, taskId: `br-m-task-${sfx}`, mgrId: `br-m-mgr-${sfx}`, workerId: `br-m-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-br-merged-${sfx}`), file: "merged.txt" };
-const O = { projId: `br-o-proj-${sfx}`, topicId: `br-o-top-${sfx}`, taskId: `br-o-task-${sfx}`, mgrId: `br-o-mgr-${sfx}`, workerId: `br-o-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-br-orphan-${sfx}`), file: "orphan.txt" };
+const M = { projId: `br-m-proj-${sfx}`, agentId: `br-m-top-${sfx}`, taskId: `br-m-task-${sfx}`, mgrId: `br-m-mgr-${sfx}`, workerId: `br-m-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-br-merged-${sfx}`), file: "merged.txt" };
+const O = { projId: `br-o-proj-${sfx}`, agentId: `br-o-top-${sfx}`, taskId: `br-o-task-${sfx}`, mgrId: `br-o-mgr-${sfx}`, workerId: `br-o-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-br-orphan-${sfx}`), file: "orphan.txt" };
 
 try {
   await setupMerged(M);

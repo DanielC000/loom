@@ -37,7 +37,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // --- unique ids + a real temp git repo (init + commit on main; a persisted git identity so a
 // worker's commit in a linked worktree has an author — worktrees share the repo's .git/config) ---
 const sfx = Date.now();
-const projId = `e2e-proj-${sfx}`, topicId = `e2e-topic-${sfx}`, mgrId = `e2e-mgr-${sfx}`;
+const projId = `e2e-proj-${sfx}`, agentId = `e2e-agent-${sfx}`, mgrId = `e2e-mgr-${sfx}`;
 // NB: worktree/branch derive from taskId.slice(0,8) (git/worktrees.ts shortId) — so the two ids
 // MUST differ within their first 8 chars or both workers collide on the same branch/worktree.
 const taskA = `e2eA-${sfx}`, taskB = `e2eB-${sfx}`;
@@ -66,13 +66,13 @@ const projectConfig = JSON.stringify({
   const db = new Database(DB_FILE);
   db.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)")
     .run(projId, "E2E", repo, repo, projectConfig, now);
-  db.prepare("INSERT INTO topics (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)").run(topicId, projId, "work", "");
+  db.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)").run(agentId, projId, "work", "");
   for (const [id, title] of [[taskA, "E2E-TASK-A"], [taskB, "E2E-TASK-B"]]) {
     db.prepare("INSERT INTO tasks (id,project_id,title,body,column_key,position,created_at,updated_at) VALUES (?,?,?,'','todo',?,?,?)")
       .run(id, projId, title, 1, now, now);
   }
-  db.prepare(`INSERT INTO sessions (id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role)
-    VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL,'manager')`).run(mgrId, projId, topicId, repo, now, now);
+  db.prepare(`INSERT INTO sessions (id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role)
+    VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL,'manager')`).run(mgrId, projId, agentId, repo, now, now);
   db.close();
 }
 
@@ -193,7 +193,7 @@ try {
     db.prepare("DELETE FROM sessions WHERE id = ? OR parent_session_id = ?").run(mgrId, mgrId);
     db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ?").run(mgrId);
     db.prepare("DELETE FROM tasks WHERE project_id = ?").run(projId);
-    db.prepare("DELETE FROM topics WHERE project_id = ?").run(projId);
+    db.prepare("DELETE FROM agents WHERE project_id = ?").run(projId);
     db.prepare("DELETE FROM projects WHERE id = ?").run(projId);
     db.close();
   } catch { /* ignore */ }

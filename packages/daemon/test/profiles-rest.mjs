@@ -1,10 +1,10 @@
-// Agent Profiles REST test (Topics→Profiles P3). Boots an ISOLATED daemon (temp LOOM_HOME + a
+// Profiles REST test (Agents→Profiles P3). Boots an ISOLATED daemon (temp LOOM_HOME + a
 // non-4317 LOOM_PORT) so it never touches a live :4317 daemon, exercises the new HTTP surface, then
 // tears the daemon down. NO claude is spawned (we never POST /sessions — the role→spawn seam is
 // covered claude-free by profiles-crud.mjs / profile-spawn.mjs). Covers:
 //   • Profile CRUD round-trip: POST create (201) → GET list/get → PUT partial update → POST reset →
 //     DELETE; plus GET/PUT/POST-reset 404s and 400 validation (bad role / unknown key).
-//   • Topic assignment: POST /api/topics/:id SETS and CLEARS profileId; 404 on a bogus profileId.
+//   • Agent assignment: POST /api/agents/:id SETS and CLEARS profileId; 404 on a bogus profileId.
 // Run (self-contained): node test/profiles-rest.mjs   (honors LOOM_HOME/LOOM_PORT if you pre-set them
 // to target an externally-started daemon instead).
 import fs from "node:fs";
@@ -60,7 +60,7 @@ try {
 
   // ===================== CRUD round-trip =====================
   // CREATE (201) — a valid writable shape, defaults filled by the validator.
-  const created = await json("POST", "/api/profiles", { name: "Reviewer", role: "worker", startupPrompt: "review carefully" });
+  const created = await json("POST", "/api/profiles", { name: "Reviewer", role: "worker", description: "review carefully" });
   check("POST /api/profiles → 201 with a server-assigned id", created.status === 201 && !!created.body.id && created.body.name === "Reviewer");
   check("POST: validator filled defaults (allowDelta [], skills null)", JSON.stringify(created.body.allowDelta) === "[]" && created.body.skills === null);
   const id = created.body.id;
@@ -72,10 +72,10 @@ try {
   check("GET /api/profiles/:id returns it", got.status === 200 && got.body.id === id && got.body.role === "worker");
   check("GET /api/profiles/:id → 404 for an unknown id", (await json("GET", "/api/profiles/no-such")).status === 404);
 
-  // PUT partial update — only `role` provided; name/startupPrompt preserved via the merge.
+  // PUT partial update — only `role` provided; name/description preserved via the merge.
   const put = await json("PUT", `/api/profiles/${id}`, { role: "manager" });
   check("PUT /api/profiles/:id partial update applies (role→manager)", put.status === 200 && put.body.role === "manager");
-  check("PUT partial: untouched fields preserved (name + prompt)", put.body.name === "Reviewer" && put.body.startupPrompt === "review carefully");
+  check("PUT partial: untouched fields preserved (name + description)", put.body.name === "Reviewer" && put.body.description === "review carefully");
   check("PUT /api/profiles/:id → 404 for an unknown id", (await json("PUT", "/api/profiles/no-such", { role: "worker" })).status === 404);
   // Validation on the MERGED result: a bad role enum and an unknown key are both rejected (.strict()).
   check("PUT rejects a bad role enum → 400", (await json("PUT", `/api/profiles/${id}`, { role: "boss" })).status === 400);
@@ -85,9 +85,9 @@ try {
   check("POST rejects a missing name → 400", (await json("POST", "/api/profiles", { role: "worker" })).status === 400);
 
   // RESET-to-bundled: edit a bundled profile, then reset restores the shipped fields.
-  await json("PUT", `/api/profiles/${bundledDev.id}`, { startupPrompt: "EDITED", role: "manager" });
+  await json("PUT", `/api/profiles/${bundledDev.id}`, { description: "EDITED", role: "manager" });
   const resetRes = await json("POST", `/api/profiles/${bundledDev.id}/reset`);
-  check("POST /api/profiles/:id/reset restores bundled fields", resetRes.status === 200 && resetRes.body.role === "worker" && resetRes.body.startupPrompt !== "EDITED");
+  check("POST /api/profiles/:id/reset restores bundled fields", resetRes.status === 200 && resetRes.body.role === "worker" && resetRes.body.description !== "EDITED");
   check("reset → 404 for a non-bundled profile (the user-created 'Reviewer')", (await json("POST", `/api/profiles/${id}/reset`)).status === 404);
 
   // DELETE — idempotent; removed from the list afterwards.
@@ -97,35 +97,35 @@ try {
   check("DELETE: GET the deleted id → 404", (await json("GET", `/api/profiles/${id}`)).status === 404);
   check("DELETE on an already-gone id is idempotent (ok)", (await json("DELETE", `/api/profiles/${id}`)).status === 200);
 
-  // ===================== Topic profile assignment via POST /api/topics/:id =====================
-  // Need a project + topic. Create them via REST (project requires a real-ish path; vault browser/git
+  // ===================== Agent profile assignment via POST /api/agents/:id =====================
+  // Need a project + agent. Create them via REST (project requires a real-ish path; vault browser/git
   // aren't touched here, so any existing dir works — use LOOM_HOME).
   const proj = await json("POST", "/api/projects", { name: "RestProj", repoPath: LOOM_HOME, vaultPath: LOOM_HOME });
   check("setup: project created", proj.status === 201 && !!proj.body.id);
-  const topic = await json("POST", `/api/projects/${proj.body.id}/topics`, { name: "AssignTopic" });
-  check("setup: topic created, profile-less", topic.status === 201 && topic.body.profileId === null);
-  const tid = topic.body.id;
+  const agent = await json("POST", `/api/projects/${proj.body.id}/agents`, { name: "AssignAgent" });
+  check("setup: agent created, profile-less", agent.status === 201 && agent.body.profileId === null);
+  const tid = agent.body.id;
 
   // SET profileId → the bundled Dev profile.
-  const setRes = await json("POST", `/api/topics/${tid}`, { profileId: bundledDev.id });
-  check("POST /api/topics/:id SETS profileId", setRes.status === 200 && setRes.body.profileId === bundledDev.id);
+  const setRes = await json("POST", `/api/agents/${tid}`, { profileId: bundledDev.id });
+  check("POST /api/agents/:id SETS profileId", setRes.status === 200 && setRes.body.profileId === bundledDev.id);
   // A patch omitting profileId leaves the assignment intact.
-  const nameOnly = await json("POST", `/api/topics/${tid}`, { name: "Renamed" });
-  check("POST /api/topics/:id without profileId leaves the assignment as-is", nameOnly.body.profileId === bundledDev.id && nameOnly.body.name === "Renamed");
+  const nameOnly = await json("POST", `/api/agents/${tid}`, { name: "Renamed" });
+  check("POST /api/agents/:id without profileId leaves the assignment as-is", nameOnly.body.profileId === bundledDev.id && nameOnly.body.name === "Renamed");
   // CLEAR profileId (null) → falls back to the plain backstop.
-  const clearRes = await json("POST", `/api/topics/${tid}`, { profileId: null });
-  check("POST /api/topics/:id CLEARS profileId (null)", clearRes.status === 200 && clearRes.body.profileId === null);
-  // 404 on a bogus (non-null) profileId — and it must NOT mutate the topic.
-  const bogus = await json("POST", `/api/topics/${tid}`, { profileId: "no-such-profile" });
-  check("POST /api/topics/:id → 404 for a bogus profileId", bogus.status === 404);
-  check("POST /api/topics/:id: a rejected bogus assignment did NOT change the topic", (await json("GET", `/api/projects/${proj.body.id}/topics`)).body.find((t) => t.id === tid).profileId === null);
-  check("POST /api/topics/:id → 404 for an unknown topic id", (await json("POST", "/api/topics/no-such-topic", { name: "x" })).status === 404);
+  const clearRes = await json("POST", `/api/agents/${tid}`, { profileId: null });
+  check("POST /api/agents/:id CLEARS profileId (null)", clearRes.status === 200 && clearRes.body.profileId === null);
+  // 404 on a bogus (non-null) profileId — and it must NOT mutate the agent.
+  const bogus = await json("POST", `/api/agents/${tid}`, { profileId: "no-such-profile" });
+  check("POST /api/agents/:id → 404 for a bogus profileId", bogus.status === 404);
+  check("POST /api/agents/:id: a rejected bogus assignment did NOT change the agent", (await json("GET", `/api/projects/${proj.body.id}/agents`)).body.find((t) => t.id === tid).profileId === null);
+  check("POST /api/agents/:id → 404 for an unknown agent id", (await json("POST", "/api/agents/no-such-agent", { name: "x" })).status === 404);
 } finally {
   if (daemon) { try { daemon.kill(); } catch { /* ignore */ } }
   if (ownDaemon) { try { fs.rmSync(LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort (WAL handle) */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — profile CRUD round-trips over REST (201/404/400 validation), reset-to-bundled works, and POST /api/topics/:id sets+clears profileId (404 on a bogus one) — isolated daemon, claude-free."
+  ? "\n✅ ALL PASS — profile CRUD round-trips over REST (201/404/400 validation), reset-to-bundled works, and POST /api/agents/:id sets+clears profileId (404 on a bogus one) — isolated daemon, claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

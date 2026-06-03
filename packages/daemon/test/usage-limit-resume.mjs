@@ -37,9 +37,9 @@ function makeEnv() {
   const dbFile = path.join(os.tmpdir(), `loom-resume-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const now = new Date().toISOString();
-  // FKs are enforced (better-sqlite3 default), so the parent project + topic must exist.
+  // FKs are enforced (better-sqlite3 default), so the parent project + agent must exist.
   db.insertProject({ id: "p", name: "P", repoPath: "p", vaultPath: "p", config: {}, createdAt: now, archivedAt: null });
-  db.insertTopic({ id: "t", projectId: "p", name: "t", startupPrompt: "x", position: 0 });
+  db.insertAgent({ id: "t", projectId: "p", name: "t", startupPrompt: "x", position: 0 });
   const resumed = [];
   const alive = new Set();
   const pty = { isAlive: (id) => alive.has(id), resumeAfterRateLimit: (id) => { resumed.push(id); return true; } };
@@ -54,7 +54,7 @@ function seed(e, id, o = {}) {
   const { state = "live", until = null, deadline = null, busy = false, error = null } = o;
   const now = new Date().toISOString();
   e.db.insertSession({
-    id, projectId: "p", topicId: "t", engineSessionId: null, title: null, cwd: "/x",
+    id, projectId: "p", agentId: "t", engineSessionId: null, title: null, cwd: "/x",
     processState: state, resumability: "unknown", busy, createdAt: now, lastActivity: now, lastError: error,
   });
   if (until !== null) e.db.setRateLimitedUntil(id, until, error);
@@ -198,8 +198,8 @@ let session = null;
 try {
   const P = await post("/api/projects", { name: `RLresume-${Date.now()}`, repoPath: dir, vaultPath: dir });
   const STARTUP = "Respond with exactly the word READY and nothing else, then stop. Do not use any tools and do not ask any questions.";
-  const topic = await post(`/api/projects/${P.id}/topics`, { name: "rl", startupPrompt: STARTUP });
-  session = await post(`/api/topics/${topic.id}/sessions`, {});
+  const agent = await post(`/api/projects/${P.id}/agents`, { name: "rl", startupPrompt: STARTUP });
+  session = await post(`/api/agents/${agent.id}/sessions`, {});
   check("live: session spawned", session.processState === "live");
 
   const warmed = await waitForSession(session.id, (s) => !!s.engineSessionId, 60_000, 250);

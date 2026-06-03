@@ -45,10 +45,10 @@ const mergeDoneCount = (mgrId) => db.listEvents(mgrId).filter((e) => e.kind === 
 // goes straight to the merge + finalizeMerge bookkeeping we're exercising.
 function seed(p) {
   db.insertProject({ id: p.projId, name: "MFR", repoPath: p.repo, vaultPath: p.repo, config: {}, createdAt: now, archivedAt: null });
-  db.insertTopic({ id: p.topicId, projectId: p.projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertAgent({ id: p.agentId, projectId: p.projId, name: "t", startupPrompt: "", position: 0 });
   db.insertTask({ id: p.taskId, projectId: p.projId, title: "MFR-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
-  db.insertSession({ id: p.mgrId, projectId: p.projId, topicId: p.topicId, engineSessionId: null, title: null, cwd: p.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
-  db.insertSession({ id: p.workerId, projectId: p.projId, topicId: p.topicId, engineSessionId: null, title: null, cwd: p.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: p.mgrId, taskId: p.taskId, worktreePath: p.worktreePath, branch: p.branch });
+  db.insertSession({ id: p.mgrId, projectId: p.projId, agentId: p.agentId, engineSessionId: null, title: null, cwd: p.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  db.insertSession({ id: p.workerId, projectId: p.projId, agentId: p.agentId, engineSessionId: null, title: null, cwd: p.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: p.mgrId, taskId: p.taskId, worktreePath: p.worktreePath, branch: p.branch });
 }
 
 // HAPPY worker: a real worktree with a committed file on its branch (a clean, mergeable change),
@@ -87,8 +87,8 @@ async function setupBusyWorker(p) {
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-const H = { projId: `mfr-h-proj-${sfx}`, topicId: `mfr-h-top-${sfx}`, taskId: `mfr-h-task-${sfx}`, mgrId: `mfr-h-mgr-${sfx}`, workerId: `mfr-h-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mfr-happy-${sfx}`), file: "happy.txt" };
-const X = { projId: `mfr-x-proj-${sfx}`, topicId: `mfr-x-top-${sfx}`, taskId: `mfr-x-task-${sfx}`, mgrId: `mfr-x-mgr-${sfx}`, workerId: `mfr-x-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mfr-busy-${sfx}`), file: "busy.txt" };
+const H = { projId: `mfr-h-proj-${sfx}`, agentId: `mfr-h-top-${sfx}`, taskId: `mfr-h-task-${sfx}`, mgrId: `mfr-h-mgr-${sfx}`, workerId: `mfr-h-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mfr-happy-${sfx}`), file: "happy.txt" };
+const X = { projId: `mfr-x-proj-${sfx}`, agentId: `mfr-x-top-${sfx}`, taskId: `mfr-x-task-${sfx}`, mgrId: `mfr-x-mgr-${sfx}`, workerId: `mfr-x-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mfr-busy-${sfx}`), file: "busy.txt" };
 
 const realRm = fs.promises.rm;
 try {

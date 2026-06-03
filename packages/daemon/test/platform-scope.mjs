@@ -1,7 +1,7 @@
 // Platform MCP scope + guardrails test (PR #20, Pillar C). orch-scope style: seeds the daemon's DB
 // directly, drives a REAL MCP client over StreamableHTTP, no claude. Proves the loom-platform
 // surface is role-gated to 'platform' (manager/worker/plain → 404), that its three tools
-// create/configure projects + topics end-to-end (visible via the REST API), and that the guardrails
+// create/configure projects + agents end-to-end (visible via the REST API), and that the guardrails
 // reject a bad repoPath (missing / non-git) and an invalid config (both project_create + configure).
 //
 // RUN against a fresh isolated LOOM_HOME daemon (real git is used for the repo guardrail):
@@ -26,14 +26,14 @@ const patchJson = async (u, body) => {
 };
 const now = new Date().toISOString();
 
-// --- seed the daemon's DB directly: a host project/topic + one session per role ---
+// --- seed the daemon's DB directly: a host project/agent + one session per role ---
 const db = new Database(path.join(LOOM, "loom.db"));
-db.exec("DELETE FROM orchestration_events; DELETE FROM tasks; DELETE FROM sessions; DELETE FROM topics; DELETE FROM projects;");
+db.exec("DELETE FROM orchestration_events; DELETE FROM tasks; DELETE FROM sessions; DELETE FROM agents; DELETE FROM projects;");
 db.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)")
   .run("projPL", "Platform", "C:/tmp/pl", "C:/tmp/pl", "{}", now);
-db.prepare("INSERT INTO topics (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)").run("tPL", "projPL", "lead", "");
+db.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)").run("tPL", "projPL", "lead", "");
 const sess = db.prepare(`INSERT INTO sessions
-  (id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role,parent_session_id)
+  (id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role,parent_session_id)
   VALUES (@id,'projPL','tPL',NULL,NULL,'C:/tmp/pl','live','unknown',0,@now,@now,NULL,@role,@parent)`);
 sess.run({ id: "PL", now, role: "platform", parent: null }); // platform-lead under test
 sess.run({ id: "M", now, role: "manager", parent: null });
@@ -65,8 +65,8 @@ try {
   // 1) Role gate: a platform-lead sees exactly the three platform tools.
   const PL = await connect("PL");
   const tools = (await PL.listTools()).tools.map((t) => t.name).sort();
-  check(`tools = project_configure,project_create,topic_create  (got ${tools.join(",")})`,
-    tools.join(",") === "project_configure,project_create,topic_create");
+  check(`tools = project_configure,project_create,agent_create  (got ${tools.join(",")})`,
+    tools.join(",") === "project_configure,project_create,agent_create");
 
   // 2) project_create with a REAL git repo → created + visible via the API. vaultPath omitted → defaults to repoPath.
   const before = (await get("/api/projects")).length;
@@ -76,11 +76,11 @@ try {
   const list = await get("/api/projects");
   check("project_create: the project appears via GET /api/projects", list.some((p) => p.id === created.id) && list.length === before + 1);
 
-  // 3) topic_create under the new project → created + visible.
-  const topic = await call(PL, "topic_create", { projectId: created.id, name: "work", startupPrompt: "go" });
-  check("topic_create: returns a topic with an id", !!topic.id && !topic.error);
-  const topics = await get(`/api/projects/${created.id}/topics`);
-  check("topic_create: the topic appears under the project", topics.some((t) => t.id === topic.id && t.startupPrompt === "go"));
+  // 3) agent_create under the new project → created + visible.
+  const agent = await call(PL, "agent_create", { projectId: created.id, name: "work", startupPrompt: "go" });
+  check("agent_create: returns an agent with an id", !!agent.id && !agent.error);
+  const agents = await get(`/api/projects/${created.id}/agents`);
+  check("agent_create: the agent appears under the project", agents.some((t) => t.id === agent.id && t.startupPrompt === "go"));
 
   // 4) project_configure with a valid override → applied; resolveConfig reflects it (via /board).
   const cfg = { kanbanColumns: [{ key: "a", label: "A" }, { key: "b", label: "B" }] };
@@ -147,6 +147,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — loom-platform is role-gated to platform-leads; project_create/topic_create/project_configure work end-to-end (schema-validated); guardrails reject a missing/non-git repo and an invalid config without creating anything."
+  ? "\n✅ ALL PASS — loom-platform is role-gated to platform-leads; project_create/agent_create/project_configure work end-to-end (schema-validated); guardrails reject a missing/non-git repo and an invalid config without creating anything."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

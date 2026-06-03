@@ -25,7 +25,7 @@ async function main(): Promise<void> {
   const seeded = seedGlobalSkills();
   if (seeded.length) console.log(`[boot] seeded global skill(s): ${seeded.join(", ")}`);
   const db = new Db();
-  // Seed Loom's bundled Agent Profiles (platform-level "who") into the profiles table, seed-if-absent
+  // Seed Loom's bundled Profiles (platform-level rig) into the profiles table, seed-if-absent
   // like the skills seed — additive, idempotent, preserves user edits. Phase-1 read path only.
   const seededProfiles = seedDefaultProfiles(db);
   if (seededProfiles.length) console.log(`[boot] seeded default profile(s): ${seededProfiles.join(", ")}`);
@@ -89,7 +89,7 @@ async function main(): Promise<void> {
   const mcp = new TaskMcpRouter(db, wakes);
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after.
   const orchMcp = new OrchestrationMcpRouter(db, sessions);
-  // Platform MCP (Pillar C) only needs the registry (project/topic creation + config).
+  // Platform MCP (Pillar C) only needs the registry (project/agent creation + config).
   const platformMcp = new PlatformMcpRouter(db);
 
   const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, control });
@@ -105,7 +105,7 @@ async function main(): Promise<void> {
     process.env.LOOM_SCHEDULER_ENABLED === "1" || resolveConfig(undefined).orchestration.schedulerEnabled;
   const intervalMs = Number(process.env.LOOM_SCHEDULER_INTERVAL_MS) || 60_000;
   const maxConcurrentManagers = resolveConfig(undefined).orchestration.maxConcurrentManagers;
-  const scheduler = new Scheduler({ db, control, startManager: (topicId) => sessions.startManager(topicId), intervalMs, maxConcurrentManagers });
+  const scheduler = new Scheduler({ db, control, startManager: (agentId) => sessions.startManager(agentId), intervalMs, maxConcurrentManagers });
   if (schedulerEnabled) {
     scheduler.start();
     console.log(`[boot] scheduler enabled (tick ${intervalMs}ms)`);

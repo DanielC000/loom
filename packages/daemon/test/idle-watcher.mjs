@@ -25,10 +25,10 @@ function makeEnv({ recycleRatio = 0.8, projectConfig = {} } = {}) {
   const dbFile = path.join(os.tmpdir(), `loom-idle-w-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const projId = `ip-${Math.random().toString(36).slice(2, 8)}`;
-  const topicId = `it-${Math.random().toString(36).slice(2, 8)}`;
+  const agentId = `it-${Math.random().toString(36).slice(2, 8)}`;
   const now = NOW.toISOString();
   db.insertProject({ id: projId, name: "Idle", repoPath: projId, vaultPath: projId, config: projectConfig, createdAt: now, archivedAt: null });
-  db.insertTopic({ id: topicId, projectId: projId, name: "t", startupPrompt: "orchestrate", position: 0 });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "orchestrate", position: 0 });
   const alive = new Set();
   const enqueued = [];
   const pty = {
@@ -37,13 +37,13 @@ function makeEnv({ recycleRatio = 0.8, projectConfig = {} } = {}) {
   };
   const control = new OrchestrationControl();
   const watcher = new IdleWatcher({ db, pty, control, recycleRatio });
-  return { dbFile, db, projId, topicId, alive, enqueued, control, watcher };
+  return { dbFile, db, projId, agentId, alive, enqueued, control, watcher };
 }
 
 // Seed a manager. Defaults make it eligible to nudge (idle 60m, not busy, no ctx pressure, live).
 function seedManager(e, id, { idleMin = 60, busy = false, model = null, ctx = null, live = true } = {}) {
   e.db.insertSession({
-    id, projectId: e.projId, topicId: e.topicId, engineSessionId: "eng-" + id, title: null, cwd: e.projId,
+    id, projectId: e.projId, agentId: e.agentId, engineSessionId: "eng-" + id, title: null, cwd: e.projId,
     processState: live ? "live" : "exited", resumability: "resumable", busy,
     createdAt: minutesAgo(idleMin), lastActivity: minutesAgo(idleMin), lastError: null, role: "manager",
     ctxInputTokens: ctx, ctxTurns: ctx == null ? null : 1, model,
@@ -53,7 +53,7 @@ function seedManager(e, id, { idleMin = 60, busy = false, model = null, ctx = nu
 function seedWorker(e, id, parentId, { live = true } = {}) {
   const now = NOW.toISOString();
   e.db.insertSession({
-    id, projectId: e.projId, topicId: e.topicId, engineSessionId: "eng-" + id, title: null, cwd: e.projId,
+    id, projectId: e.projId, agentId: e.agentId, engineSessionId: "eng-" + id, title: null, cwd: e.projId,
     processState: live ? "live" : "exited", resumability: "resumable", busy: false,
     createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: parentId, taskId: "tk-" + id,
   });
@@ -268,7 +268,7 @@ function cleanup(e) {
   // A manager that WAS nudged (unanswered 1, nudged 30m ago) but has since produced REAL work
   // (spawn_worker 5m ago) and is currently active → reset, and not re-nudged this tick.
   e.db.insertSession({
-    id: "mgr-resumed", projectId: e.projId, topicId: e.topicId, engineSessionId: "eng-r", title: null, cwd: e.projId,
+    id: "mgr-resumed", projectId: e.projId, agentId: e.agentId, engineSessionId: "eng-r", title: null, cwd: e.projId,
     processState: "live", resumability: "resumable", busy: false,
     createdAt: minutesAgo(120), lastActivity: minutesAgo(5), lastError: null, role: "manager",
     ctxInputTokens: null, ctxTurns: null, model: null,
@@ -301,7 +301,7 @@ function cleanup(e) {
   const e = makeEnv();
   // a plain (roleless) idle live session must be ignored (listLiveManagers is manager-only).
   e.db.insertSession({
-    id: "plain-idle", projectId: e.projId, topicId: e.topicId, engineSessionId: "ep", title: null, cwd: e.projId,
+    id: "plain-idle", projectId: e.projId, agentId: e.agentId, engineSessionId: "ep", title: null, cwd: e.projId,
     processState: "live", resumability: "resumable", busy: false, createdAt: minutesAgo(99), lastActivity: minutesAgo(99),
     lastError: null, role: null, ctxInputTokens: null, ctxTurns: null, model: null,
   });

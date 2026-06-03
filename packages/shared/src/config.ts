@@ -1,6 +1,6 @@
 // Config model: platform default -> per-project override, resolved through ONE merge fn.
 // This is also the machine-writable schema phase-2 AI-driven project creation will target.
-import type { Profile, SessionRole, Topic } from "./types.js";
+import type { Profile, SessionRole } from "./types.js";
 
 export interface KanbanColumn {
   key: string;
@@ -149,16 +149,16 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   docLint: true, // Pillar D vault-lint hook on by default
 };
 
-// --- Agent Profiles: the resolved "who" ------------------------------------------------------
+// --- Profiles: the resolved "who" ------------------------------------------------------
 
 /**
- * The effective "who" for a session — a topic resolved against its (optional) Agent Profile.
- * Sibling of ResolvedConfig: one shape the spawn path will read (P2), produced by ONE resolver.
+ * The effective "who" for a session — an agent resolved against its (optional) Profile.
+ * Sibling of ResolvedConfig: one shape the spawn path reads, produced by ONE resolver.
  */
 export interface ResolvedProfile {
   /** Orchestration role; null = a plain session (today's default). */
   role: SessionRole | null;
-  /** The startup prompt to inject on a NEW session. */
+  /** The startup prompt to inject on a NEW session — ALWAYS the agent's own prompt. */
   startupPrompt: string;
   /** Permission allowlist delta the profile contributes (layered onto the config allow at spawn). */
   allow: string[];
@@ -171,33 +171,27 @@ export interface ResolvedProfile {
 }
 
 /**
- * Resolve a topic + its (optional) Agent Profile into the effective spawn shape — the sibling of
- * resolveConfig for the "who". Precedence: the profile supplies role/allow/skills/model/icon; the
- * topic's own startupPrompt overrides the profile's ONLY when it's non-empty (after trim) — an
- * empty/whitespace per-topic prompt falls back to the profile's. This matters because the persisted
- * `topics.startup_prompt` column is NOT NULL DEFAULT '', so a topic that adopts a profile but sets no
- * per-topic prompt presents '' (never null); empty-as-absent is what makes the profile's default
- * prompt reachable (otherwise it would be dead code).
+ * Resolve an agent + its (optional) Profile into the effective spawn shape — the sibling of
+ * resolveConfig for the "who". Clean separation of jobs: the **injected startup prompt ALWAYS comes
+ * from the agent** (`agent.startupPrompt ?? ""`; an empty prompt = a session that boots but is inert,
+ * acceptable by design); the **profile supplies role/allow/skills/model/icon** — the rig. A profile
+ * carries NO prompt (its `description` is a UI-only blurb), so there is no prompt-merge.
  *
- * A null/absent profile is the BACKSTOP — it yields EXACTLY today's behavior: a plain (role-null)
- * session, the topic's own prompt VERBATIM (empty stays empty → a plain session with no prompt), and
- * no allow delta / skill filter / model / icon. The empty-as-absent fallback applies ONLY when a
- * profile is present.
+ * A null/absent profile is the BACKSTOP — it yields EXACTLY today's plain behavior: a role-null
+ * session, no allow delta / skill filter / model / icon, the agent's own prompt verbatim.
  */
 export function resolveProfile(
-  // A full Topic is assignable; the prompt is widened to nullable so a prompt-less topic can fall
-  // back to the profile's prompt (the per-topic override is opt-in, not forced).
-  topic: { startupPrompt: string | null },
+  agent: { startupPrompt: string | null },
   profile?: Profile | null,
 ): ResolvedProfile {
+  // The injected prompt is sourced from the agent regardless of whether a profile is present.
+  const startupPrompt = agent.startupPrompt ?? "";
   if (!profile) {
-    return { role: null, startupPrompt: topic.startupPrompt ?? "", allow: [], skills: null, model: null, icon: null };
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null };
   }
   return {
     role: profile.role ?? null,
-    // Per-topic override: the topic's own prompt wins when set AND non-empty (after trim); an empty/
-    // whitespace prompt (the NOT NULL DEFAULT '' case) falls back to the profile's default prompt.
-    startupPrompt: topic.startupPrompt && topic.startupPrompt.trim().length ? topic.startupPrompt : profile.startupPrompt,
+    startupPrompt,
     allow: profile.allowDelta ?? [],
     skills: profile.skills ?? null,
     model: profile.model ?? null,

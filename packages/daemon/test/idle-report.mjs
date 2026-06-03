@@ -43,7 +43,7 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
     id: "p", name: "P", repoPath: "/x", vaultPath: "/x",
     config: { orchestration: { idleDefaultSnoozeMinutes: 90 } }, createdAt: now, archivedAt: null,
   });
-  db.insertTopic({ id: "t", projectId: "p", name: "t", startupPrompt: "x", position: 0 });
+  db.insertAgent({ id: "t", projectId: "p", name: "t", startupPrompt: "x", position: 0 });
 
   // Helper: a fresh MANAGER session pre-seeded with 2 recorded nudges (unanswered=2) so we can prove
   // every state path clears the counter back to 0 (not merely leaves an already-0 count).
@@ -51,7 +51,7 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   const freshManager = () => {
     const id = `mgr${++n}`;
     db.insertSession({
-      id, projectId: "p", topicId: "t", engineSessionId: null, title: null, cwd: "/x",
+      id, projectId: "p", agentId: "t", engineSessionId: null, title: null, cwd: "/x",
       processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
       lastError: null, role: "manager",
     });
@@ -133,7 +133,7 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   // Defense: not-a-manager / unknown session are rejected (the service mirrors the manager-only gate).
   {
     db.insertSession({
-      id: "wkr", projectId: "p", topicId: "t", engineSessionId: null, title: null, cwd: "/x",
+      id: "wkr", projectId: "p", agentId: "t", engineSessionId: null, title: null, cwd: "/x",
       processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
       lastError: null, role: "worker",
     });

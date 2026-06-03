@@ -6,7 +6,7 @@
 //       and override > env precedence.
 //   (B) DB — the four idle_nudge_* columns round-trip on a FRESH DB (defaults + getter/setter accessors)
 //       AND on an additive migration of a LEGACY DB created WITHOUT them (mirrors profiles.mjs's
-//       legacy-topics migration test).
+//       legacy-agents migration test).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -83,9 +83,9 @@ function rmDb(file) { for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(
   const db = new Db(file);
   const now = new Date().toISOString();
   db.insertProject({ id: "p", name: "P", repoPath: "p", vaultPath: "p", config: {}, createdAt: now, archivedAt: null });
-  db.insertTopic({ id: "t", projectId: "p", name: "t", startupPrompt: "x", position: 0 });
+  db.insertAgent({ id: "t", projectId: "p", name: "t", startupPrompt: "x", position: 0 });
   db.insertSession({
-    id: "s", projectId: "p", topicId: "t", engineSessionId: null, title: null, cwd: "/x",
+    id: "s", projectId: "p", agentId: "t", engineSessionId: null, title: null, cwd: "/x",
     processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
   });
 
@@ -136,7 +136,7 @@ function rmDb(file) { for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(
   old.exec(`CREATE TABLE sessions (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
-    topic_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
     cwd TEXT NOT NULL,
     process_state TEXT NOT NULL DEFAULT 'none',
     resumability TEXT NOT NULL DEFAULT 'unknown',
@@ -144,7 +144,7 @@ function rmDb(file) { for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(
     created_at TEXT NOT NULL,
     last_activity TEXT NOT NULL
   );`);
-  old.prepare("INSERT INTO sessions (id,project_id,topic_id,cwd,process_state,resumability,busy,created_at,last_activity) VALUES (?,?,?,?,?,?,?,?,?)")
+  old.prepare("INSERT INTO sessions (id,project_id,agent_id,cwd,process_state,resumability,busy,created_at,last_activity) VALUES (?,?,?,?,?,?,?,?,?)")
     .run("legacyS", "pL", "tL", "/legacy/cwd", "exited", "resumable", 0, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
   const colsBefore = new Set(old.prepare("PRAGMA table_info(sessions)").all().map((c) => c.name));
   const IDLE_COLS = ["idle_nudge_policy", "idle_nudge_snooze_until", "last_idle_nudge_at", "idle_nudge_unanswered"];

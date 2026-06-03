@@ -14,13 +14,13 @@ const now = new Date().toISOString();
 
 // --- seed the daemon's DB directly ---
 const db = new Database(path.join(process.env.LOOM_HOME || path.join(os.homedir(), ".loom"), "loom.db"));
-db.exec("DELETE FROM orchestration_events; DELETE FROM tasks; DELETE FROM sessions; DELETE FROM topics; DELETE FROM projects;");
+db.exec("DELETE FROM orchestration_events; DELETE FROM tasks; DELETE FROM sessions; DELETE FROM agents; DELETE FROM projects;");
 db.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)")
   .run("projO", "Orch", "C:/tmp/o", "C:/tmp/o", "{}", now);
-db.prepare("INSERT INTO topics (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)")
+db.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)")
   .run("tO", "projO", "work", "");
 const sess = db.prepare(`INSERT INTO sessions
-  (id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role,parent_session_id,task_id,branch)
+  (id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role,parent_session_id,task_id,branch)
   VALUES (@id,'projO','tO',NULL,NULL,'C:/tmp/o','live','unknown',@busy,@now,@now,NULL,@role,@parent,@taskId,@branch)`);
 const mk = (id, role, parent, extra = {}) =>
   sess.run({ id, busy: extra.busy ?? 0, now, role, parent, taskId: extra.taskId ?? null, branch: extra.branch ?? null });
@@ -52,7 +52,7 @@ check(`tools = ${expected}  (got ${tools.join(",")})`, tools.join(",") === expec
 // 1b) H3: worker_spawn's advertised schema carries taskId + kickoffPrompt but NOT the removed,
 //     accepted-but-ignored skipPermissions field (a footgun that misled a manager).
 const spawnProps = toolList.find((t) => t.name === "worker_spawn")?.inputSchema?.properties ?? {};
-check("worker_spawn schema = {taskId, topicId, kickoffPrompt}, NO skipPermissions (H3)",
+check("worker_spawn schema = {taskId, agentId, kickoffPrompt}, NO skipPermissions (H3)",
   "taskId" in spawnProps && "kickoffPrompt" in spawnProps && !("skipPermissions" in spawnProps));
 
 // 2) worker_list is manager-scoped by construction — M sees W1 only, never W2.

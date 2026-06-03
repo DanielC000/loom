@@ -17,7 +17,7 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const dbFile = path.join(os.tmpdir(), `loom-rh-${sfx}.db`);
 const db = new Db(dbFile);
 const now = new Date().toISOString();
-const projId = `rh-proj-${sfx}`, topicId = `rh-top-${sfx}`;
+const projId = `rh-proj-${sfx}`, agentId = `rh-top-${sfx}`;
 const OLD = `rh-old-${sfx}`, NEW = `rh-new-${sfx}`, OTHER = `rh-other-${sfx}`;
 const engOld = `eng-old-${sfx}`, engOther = `eng-other-${sfx}`;
 
@@ -27,14 +27,14 @@ fs.mkdirSync(fakeProjDir, { recursive: true });
 for (const eng of [engOld, engOther]) fs.writeFileSync(path.join(fakeProjDir, `${eng}.jsonl`), '{"type":"x"}\n');
 
 const mkSession = (id, eng, extra = {}) => ({
-  id, projectId: projId, topicId, engineSessionId: eng, title: null, cwd: projId,
+  id, projectId: projId, agentId, engineSessionId: eng, title: null, cwd: projId,
   processState: "exited", resumability: "resumable", busy: false,
   createdAt: now, lastActivity: now, lastError: null, role: "manager", ...extra,
 });
 
 try {
   db.insertProject({ id: projId, name: "RH", repoPath: projId, vaultPath: projId, config: {}, createdAt: now, archivedAt: null });
-  db.insertTopic({ id: topicId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
   db.insertSession(mkSession(OLD, engOld));
   db.insertSession(mkSession(NEW, "eng-new", { recycledFrom: OLD, gen: 1 })); // the successor
   db.insertSession(mkSession(OTHER, engOther)); // an unrelated, never-recycled session

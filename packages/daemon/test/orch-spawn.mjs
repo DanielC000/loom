@@ -31,24 +31,24 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 // --- unique ids + a real temp git repo bound to the seeded project ---
 const sfx = Date.now();
-const projId = `osp-proj-${sfx}`, topicId = `osp-topic-${sfx}`, taskId = `osp-task-${sfx}`, mgrId = `osp-mgr-${sfx}`;
+const projId = `osp-proj-${sfx}`, agentId = `osp-agent-${sfx}`, taskId = `osp-task-${sfx}`, mgrId = `osp-mgr-${sfx}`;
 const repo = path.join(os.tmpdir(), `loom-osp-repo-${sfx}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# orch-spawn test\n");
 execSync(`git init -q && git add . && git -c user.email=osp@loom -c user.name=osp commit -q -m "init"`, { cwd: repo });
 const now = new Date().toISOString();
 
-// --- seed the daemon's (isolated) DB directly: project, topic, task(todo), manager session ---
+// --- seed the daemon's (isolated) DB directly: project, agent, task(todo), manager session ---
 {
   const db = new Database(DB_FILE);
   db.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)")
     .run(projId, "OrchSpawn", repo, repo, "{}", now);
-  db.prepare("INSERT INTO topics (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)")
-    .run(topicId, projId, "work", "");
+  db.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)")
+    .run(agentId, projId, "work", "");
   db.prepare("INSERT INTO tasks (id,project_id,title,body,column_key,position,created_at,updated_at) VALUES (?,?,?,'','todo',?,?,?)")
     .run(taskId, projId, "WORKER-TASK", 1, now, now);
-  db.prepare(`INSERT INTO sessions (id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role)
-    VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL,'manager')`).run(mgrId, projId, topicId, repo, now, now);
+  db.prepare(`INSERT INTO sessions (id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role)
+    VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL,'manager')`).run(mgrId, projId, agentId, repo, now, now);
   db.close();
 }
 
@@ -135,7 +135,7 @@ try {
     db.prepare("DELETE FROM sessions WHERE id = ? OR parent_session_id = ?").run(mgrId, mgrId);
     db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ?").run(mgrId);
     db.prepare("DELETE FROM tasks WHERE id = ?").run(taskId);
-    db.prepare("DELETE FROM topics WHERE id = ?").run(topicId);
+    db.prepare("DELETE FROM agents WHERE id = ?").run(agentId);
     db.prepare("DELETE FROM projects WHERE id = ?").run(projId);
     db.close();
   } catch { /* ignore */ }

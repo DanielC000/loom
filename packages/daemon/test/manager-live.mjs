@@ -30,7 +30,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-// --- a real temp git repo + a Loom project/task/topic via REST ---
+// --- a real temp git repo + a Loom project/task/agent via REST ---
 const sfx = Date.now();
 const repo = path.join(os.tmpdir(), `loom-mgr-repo-${sfx}`);
 fs.mkdirSync(repo, { recursive: true });
@@ -43,7 +43,7 @@ const startupPrompt =
   `You are a Loom orchestration manager. Call the worker_spawn tool with taskId='${task.id}' and ` +
   `kickoffPrompt='Respond with exactly the word READY and nothing else, then stop. Use no tools.' ` +
   `After worker_spawn returns, stop and do nothing else. Do not ask questions.`;
-const topic = await post(`/api/projects/${P.id}/topics`, { name: "manage", startupPrompt });
+const agent = await post(`/api/projects/${P.id}/agents`, { name: "manage", startupPrompt });
 
 // Trust bookkeeping for BOTH paths the spawns will trust (manager repo + worker worktree).
 const worktreePathExpected = path.join(LOOM, "worktrees", P.id, task.id.slice(0, 8));
@@ -54,7 +54,7 @@ const hadBefore = trustKeys.map((k) => k in projectsNow());
 
 let manager = null, worker = null;
 try {
-  manager = await post(`/api/topics/${topic.id}/sessions`, { role: "manager" });
+  manager = await post(`/api/agents/${agent.id}/sessions`, { role: "manager" });
   check("manager session live with role=manager", manager.processState === "live" && manager.role === "manager");
 
   // The live manager should call worker_spawn from its startup turn → a worker appears. UNATTENDED.
@@ -85,7 +85,7 @@ try {
       db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ?").run(manager.id);
     }
     db.prepare("DELETE FROM tasks WHERE id = ?").run(task.id);
-    db.prepare("DELETE FROM topics WHERE id = ?").run(topic.id);
+    db.prepare("DELETE FROM agents WHERE id = ?").run(agent.id);
     db.prepare("DELETE FROM projects WHERE id = ?").run(P.id);
     db.close();
   } catch { /* ignore */ }

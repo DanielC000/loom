@@ -44,7 +44,7 @@ export default function Orchestration() {
         <Select value={managerId} onChange={(e) => { setManagerId(e.target.value); setWorkerId(""); }}>
           <option value="">— select —</option>
           {managers.map((m) => (
-            <option key={m.id} value={m.id}>{m.projectName} · {m.topicName} · {m.id.slice(0, 8)} ({m.processState})</option>
+            <option key={m.id} value={m.id}>{m.projectName} · {m.agentName} · {m.id.slice(0, 8)} ({m.processState})</option>
           ))}
         </Select>
         <span style={{ flex: 1 }} />

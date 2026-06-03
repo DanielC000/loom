@@ -42,8 +42,8 @@ try {
   if (!up) throw new Error("daemon never listened");
 
   const P = await post("/api/projects", { name: `E2E-${Date.now()}`, repoPath: repo, vaultPath: repo });
-  const topic = await post(`/api/projects/${P.id}/topics`, { name: "t", startupPrompt: "Reply with exactly READY and stop. Do not use tools." });
-  const session = await post(`/api/topics/${topic.id}/sessions`, {});
+  const agent = await post(`/api/projects/${P.id}/agents`, { name: "t", startupPrompt: "Reply with exactly READY and stop. Do not use tools." });
+  const session = await post(`/api/agents/${agent.id}/sessions`, {});
   check("session spawned live", session.processState === "live");
 
   // Engine id captured ⇒ boot got PAST the plugin-MCP prompt (host.ts Esc dismiss worked).

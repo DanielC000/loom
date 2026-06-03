@@ -65,7 +65,7 @@ Scale (suggested): label `11px/600/upper`, body `13px`, data `12–13px mono`, h
 
 - **Orchestration** — the flagship cockpit. Worker fleet cards (status pill + branch/ctx chips), event timeline
   (KIND in cyan), branch diff (green/red). Live 2s polling must feel *steady*, not flickery.
-- **Workspace** — master-detail: Projects → Topics → Sessions sidebar + terminal/transcript pane. Manager sessions
+- **Workspace** — master-detail: Projects → Agents → Sessions sidebar + terminal/transcript pane. Manager sessions
   starred + phosphor-bordered and pinned to top.
 - **Terminals** — xterm tile grid; chrome stays out of the way, status in tile title bars.
 - **Board** — dense kanban; status as column + card accent (todo neutral, in-progress amber bar, review cyan, done phosphor check).

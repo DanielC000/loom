@@ -15,10 +15,10 @@ function makeEnv(ratio = 0.8) {
   const dbFile = path.join(os.tmpdir(), `loom-ctx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const projId = `cp-${Math.random().toString(36).slice(2, 8)}`;
-  const topicId = `ct-${Math.random().toString(36).slice(2, 8)}`;
+  const agentId = `ct-${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
   db.insertProject({ id: projId, name: "Ctx", repoPath: projId, vaultPath: projId, config: {}, createdAt: now, archivedAt: null });
-  db.insertTopic({ id: topicId, projectId: projId, name: "t", startupPrompt: "orchestrate", position: 0 });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "orchestrate", position: 0 });
   const alive = new Set();
   const enqueued = [];
   const pty = {
@@ -26,12 +26,12 @@ function makeEnv(ratio = 0.8) {
     enqueueStdin: (id, text) => { enqueued.push({ id, text }); return { delivered: true }; },
   };
   const watcher = new ContextWatcher({ db, pty, ratio });
-  return { dbFile, db, projId, topicId, alive, enqueued, watcher };
+  return { dbFile, db, projId, agentId, alive, enqueued, watcher };
 }
 function seedManager(e, id, { ctx, model = null, live = true }) {
   const now = new Date().toISOString();
   e.db.insertSession({
-    id, projectId: e.projId, topicId: e.topicId, engineSessionId: "eng-" + id, title: null, cwd: e.projId,
+    id, projectId: e.projId, agentId: e.agentId, engineSessionId: "eng-" + id, title: null, cwd: e.projId,
     processState: live ? "live" : "exited", resumability: "resumable", busy: false,
     createdAt: now, lastActivity: now, lastError: null, role: "manager",
     ctxInputTokens: ctx, ctxTurns: 1, model,
@@ -98,7 +98,7 @@ function cleanup(e) {
   const e = makeEnv(0.8);
   const now = new Date().toISOString();
   e.db.insertSession({
-    id: "plain-1", projectId: e.projId, topicId: e.topicId, engineSessionId: "e1", title: null, cwd: e.projId,
+    id: "plain-1", projectId: e.projId, agentId: e.agentId, engineSessionId: "e1", title: null, cwd: e.projId,
     processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null,
     role: null, ctxInputTokens: 999_000, ctxTurns: 1, model: "claude-opus-4-8",
   });

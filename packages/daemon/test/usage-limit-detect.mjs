@@ -72,11 +72,11 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   const dbFile = path.join(os.tmpdir(), `loom-rl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const now = new Date().toISOString();
-  const projId = `rp-${Math.random().toString(36).slice(2, 8)}`, topicId = `rt-${Math.random().toString(36).slice(2, 8)}`, sid = `rs-${Math.random().toString(36).slice(2, 8)}`;
+  const projId = `rp-${Math.random().toString(36).slice(2, 8)}`, agentId = `rt-${Math.random().toString(36).slice(2, 8)}`, sid = `rs-${Math.random().toString(36).slice(2, 8)}`;
   db.insertProject({ id: projId, name: "RL", repoPath: projId, vaultPath: projId, config: {}, createdAt: now, archivedAt: null });
-  db.insertTopic({ id: topicId, projectId: projId, name: "t", startupPrompt: "x", position: 0 });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "x", position: 0 });
   db.insertSession({
-    id: sid, projectId: projId, topicId, engineSessionId: null, title: null, cwd: projId,
+    id: sid, projectId: projId, agentId, engineSessionId: null, title: null, cwd: projId,
     processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
   });
   check("db: a fresh session has rateLimitedUntil = null", db.getSession(sid).rateLimitedUntil === null);
@@ -121,13 +121,13 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   const dbFile = path.join(os.tmpdir(), `loom-rlsched-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const now0 = new Date().toISOString();
-  const projId = `sp-${Math.random().toString(36).slice(2, 8)}`, topicId = `st-${Math.random().toString(36).slice(2, 8)}`;
+  const projId = `sp-${Math.random().toString(36).slice(2, 8)}`, agentId = `st-${Math.random().toString(36).slice(2, 8)}`;
   db.insertProject({ id: projId, name: "S", repoPath: projId, vaultPath: projId, config: {}, createdAt: now0, archivedAt: null });
-  db.insertTopic({ id: topicId, projectId: projId, name: "t", startupPrompt: "drain", position: 0 });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "drain", position: 0 });
   const control = new OrchestrationControl();
   const calls = [];
-  const scheduler = new Scheduler({ db, control, startManager: (tid) => { const id = `mgr-${calls.length}`; calls.push({ topicId: tid, id }); return { id }; } });
-  db.insertSchedule({ id: "sch-rl", topicId, cron: "*/5 * * * *", enabled: true, nextFireAt: new Date(Date.now() - 60_000).toISOString(), lastFiredAt: null, createdAt: now0 });
+  const scheduler = new Scheduler({ db, control, startManager: (tid) => { const id = `mgr-${calls.length}`; calls.push({ agentId: tid, id }); return { id }; } });
+  db.insertSchedule({ id: "sch-rl", agentId, cron: "*/5 * * * *", enabled: true, nextFireAt: new Date(Date.now() - 60_000).toISOString(), lastFiredAt: null, createdAt: now0 });
 
   const base = new Date();
   const resetSec = Math.floor((base.getTime() + 60_000) / 1000); // limited until ~60s out
@@ -135,7 +135,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   await scheduler.tick(base);
   check("scheduler: due schedule while usage-limited → does NOT fire", calls.length === 0 && db.getSchedule("sch-rl").lastFiredAt === null);
   await scheduler.tick(new Date(resetSec * 1000 + 120_000)); // well past the reset
-  check("scheduler: after the recorded reset passes → fires", calls.length === 1 && calls[0].topicId === topicId);
+  check("scheduler: after the recorded reset passes → fires", calls.length === 1 && calls[0].agentId === agentId);
 
   clearUsage();
   db.close();
@@ -171,8 +171,8 @@ let session = null;
 try {
   const P = await post("/api/projects", { name: `RL-${Date.now()}`, repoPath: dir, vaultPath: dir });
   const STARTUP = "Respond with exactly the word READY and nothing else, then stop. Do not use any tools and do not ask any questions.";
-  const topic = await post(`/api/projects/${P.id}/topics`, { name: "rl", startupPrompt: STARTUP });
-  session = await post(`/api/topics/${topic.id}/sessions`, {});
+  const agent = await post(`/api/projects/${P.id}/agents`, { name: "rl", startupPrompt: STARTUP });
+  session = await post(`/api/agents/${agent.id}/sessions`, {});
   check("live: session spawned", session.processState === "live");
 
   // Warm to idle: engine id captured AND the startup turn's Stop has cleared busy.

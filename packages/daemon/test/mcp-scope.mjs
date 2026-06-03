@@ -12,14 +12,14 @@ const now = new Date().toISOString();
 
 // --- seed the daemon's DB directly ---
 const db = new Database(path.join(process.env.LOOM_HOME || path.join(os.homedir(), ".loom"), "loom.db"));
-db.exec("DELETE FROM tasks; DELETE FROM sessions; DELETE FROM topics; DELETE FROM projects;");
+db.exec("DELETE FROM tasks; DELETE FROM sessions; DELETE FROM agents; DELETE FROM projects;");
 const proj = db.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)");
 proj.run("projA", "Alpha", "C:/tmp/a", "C:/tmp/a", "{}", now);
 proj.run("projB", "Beta", "C:/tmp/b", "C:/tmp/b", "{}", now);
-const topic = db.prepare("INSERT INTO topics (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)");
-topic.run("tA", "projA", "work", "");
-topic.run("tB", "projB", "work", "");
-const sess = db.prepare("INSERT INTO sessions (id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error) VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL)");
+const agent = db.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)");
+agent.run("tA", "projA", "work", "");
+agent.run("tB", "projB", "work", "");
+const sess = db.prepare("INSERT INTO sessions (id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error) VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL)");
 sess.run("SA", "projA", "tA", "C:/tmp/a", now, now);
 sess.run("SB", "projB", "tB", "C:/tmp/b", now, now);
 const task = db.prepare("INSERT INTO tasks (id,project_id,title,body,column_key,position,created_at,updated_at) VALUES (?,?,?,'','backlog',?,?,?)");

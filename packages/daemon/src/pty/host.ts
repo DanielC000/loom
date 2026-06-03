@@ -107,7 +107,7 @@ export interface SpawnOpts {
   permission: PermissionPolicy;
   geometry: PtyGeometry;
   sessionEnv: Record<string, string>;
-  /** New session: the topic startup prompt (injected once). Resume: omit. */
+  /** New session: the agent startup prompt (injected once). Resume: omit. */
   startupPrompt?: string;
   /** Resume: Claude engine session id. */
   resumeId?: string;
@@ -279,7 +279,7 @@ export class PtyHost {
     try { injectSkills(opts.cwd); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
     // Both managers AND workers get the orchestration MCP — but a role-gated surface: managers
     // get the full coordination tools, workers get only worker_report (resolved server-side). A
-    // platform-lead instead gets the loom-platform MCP (project/topic creation, Pillar C). acceptEdits
+    // platform-lead instead gets the loom-platform MCP (project/agent creation, Pillar C). acceptEdits
     // does NOT auto-approve MCP tools (the §9 lesson — why mcp__loom-tasks is in the default allow),
     // so allowlist the role's MCP server too, else the agent hangs on a prompt.
     const wantsOrch = opts.role === "manager" || opts.role === "worker";

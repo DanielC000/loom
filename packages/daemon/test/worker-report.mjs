@@ -28,7 +28,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-// --- temp git repo + project/task/topic via REST ---
+// --- temp git repo + project/task/agent via REST ---
 const sfx = Date.now();
 const repo = path.join(os.tmpdir(), `loom-wr-repo-${sfx}`);
 fs.mkdirSync(repo, { recursive: true });
@@ -42,7 +42,7 @@ const startupPrompt =
   `kickoffPrompt='Call the worker_report tool with status set to done and summary set to WORKER-DONE, then stop. Use no other tools.' ` +
   `After worker_spawn returns, stop. Then, whenever you later receive a message that begins with [loom:worker-report], ` +
   `call the tasks_create tool to create a task titled MANAGER-GOT-REPORT, then stop. Do not ask questions.`;
-const topic = await post(`/api/projects/${P.id}/topics`, { name: "manage", startupPrompt });
+const agent = await post(`/api/projects/${P.id}/agents`, { name: "manage", startupPrompt });
 
 const worktreePathExpected = path.join(LOOM, "worktrees", P.id, task.id.slice(0, 8));
 const realClaudeJson = path.join(os.homedir(), ".claude.json");
@@ -52,7 +52,7 @@ const hadBefore = trustKeys.map((k) => k in projectsNow());
 
 let manager = null, worker = null;
 try {
-  manager = await post(`/api/topics/${topic.id}/sessions`, { role: "manager" });
+  manager = await post(`/api/agents/${agent.id}/sessions`, { role: "manager" });
   check("manager session live with role=manager", manager.processState === "live" && manager.role === "manager");
 
   // The live manager spawns a real worker; the worker calls worker_report(done); that moves the
@@ -92,7 +92,7 @@ try {
     db.prepare("DELETE FROM sessions WHERE id = ? OR parent_session_id = ?").run(manager.id, manager.id);
     db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ?").run(manager.id);
     db.prepare("DELETE FROM tasks WHERE project_id = ?").run(P.id);
-    db.prepare("DELETE FROM topics WHERE id = ?").run(topic.id);
+    db.prepare("DELETE FROM agents WHERE id = ?").run(agent.id);
     db.prepare("DELETE FROM projects WHERE id = ?").run(P.id);
     db.close();
   } catch { /* ignore */ }

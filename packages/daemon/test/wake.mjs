@@ -16,13 +16,13 @@ function makeEnv(opts = {}) {
   const dbFile = path.join(os.tmpdir(), `loom-wake-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const projId = `wp-${Math.random().toString(36).slice(2, 8)}`;
-  const topicId = `wt-${Math.random().toString(36).slice(2, 8)}`;
+  const agentId = `wt-${Math.random().toString(36).slice(2, 8)}`;
   const sessId = `ws-${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
   db.insertProject({ id: projId, name: "Wake", repoPath: projId, vaultPath: projId, config: {}, createdAt: now, archivedAt: null });
-  db.insertTopic({ id: topicId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
   db.insertSession({
-    id: sessId, projectId: projId, topicId, engineSessionId: "eng-1", title: null, cwd: projId,
+    id: sessId, projectId: projId, agentId, engineSessionId: "eng-1", title: null, cwd: projId,
     processState: "live", resumability: "resumable", busy: false,
     createdAt: now, lastActivity: now, lastError: null, role: "manager",
   });
@@ -43,7 +43,7 @@ function makeEnv(opts = {}) {
     db, pty, resume,
     isUsageLimited: () => !!opts.usageLimited,
   });
-  return { dbFile, db, projId, topicId, sessId, alive, enqueued, resumed, wakes };
+  return { dbFile, db, projId, agentId, sessId, alive, enqueued, resumed, wakes };
 }
 function cleanupEnv(e) {
   try { e.db.close(); } catch { /* ignore */ }

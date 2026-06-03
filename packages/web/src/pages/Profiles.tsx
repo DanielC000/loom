@@ -19,9 +19,10 @@ function RoleBadge({ role }: { role: SessionRole | null }) {
   return <Badge tone={role ? roleTone[role] : "muted"}>{role ?? "plain"}</Badge>;
 }
 
-// Loom's Agent Profiles — the reusable, platform-level "who" (role + prompt + permissions + icon) a
-// topic adopts via its profileId. HUMAN-managed only (profiles confer role + privilege), so there is
-// no agent MCP surface — just this page + REST. Edits apply on the next spawn.
+// Loom's Profiles — the reusable, platform-level rig (role + model + permission deltas + icon) an
+// agent runs under via its profileId. The injected prompt comes from the AGENT; a profile's
+// `description` is a UI-only blurb. HUMAN-managed only (profiles confer role + privilege), so there
+// is no agent MCP surface — just this page + REST. Edits apply on the next spawn.
 export default function Profiles() {
   const qc = useQueryClient();
   const [selected, setSelected] = useState<string | null>(null);
@@ -33,7 +34,7 @@ export default function Profiles() {
 
   const create = useMutation({
     mutationFn: (name: string) =>
-      api.createProfile({ name, role: null, startupPrompt: "", allowDelta: [], skills: null, model: null, icon: null }),
+      api.createProfile({ name, role: null, description: "", allowDelta: [], skills: null, model: null, icon: null }),
     onSuccess: (p) => { qc.invalidateQueries({ queryKey: ["profiles"] }); setSelected(p.id); setNewName(""); },
   });
   const save = useMutation({
@@ -65,13 +66,14 @@ export default function Profiles() {
       <Panel style={{ alignSelf: "start" }}>
         <SectionLabel>Profiles</SectionLabel>
         <p style={{ color: color.textMuted, fontSize: 11, margin: "0 0 10px", fontFamily: font.mono, lineHeight: 1.5 }}>
-          Reusable, cross-project "who" — role, startup prompt, permission deltas, icon. A topic adopts
-          one to drive how its sessions spawn. Human-managed only; edits apply on the next spawn.
+          Reusable, cross-project rig — role, permission deltas, icon (model + skills soon), plus a
+          description blurb. An agent runs under one to drive how its sessions spawn; the injected
+          prompt comes from the agent. Human-managed only; edits apply on the next spawn.
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {profiles.data?.map((p) => (
             <Button key={p.id} variant={p.id === selected ? "primary" : "default"} style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8 }}
-              onClick={() => setSelected(p.id)} title={p.startupPrompt || p.name}>
+              onClick={() => setSelected(p.id)} title={p.description || p.name}>
               {p.icon && <span>{p.icon}</span>}
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</span>
               <span style={{ fontSize: 10, color: p.role ? tone[roleTone[p.role]] : color.textMuted, fontFamily: font.mono }}>{p.role ?? "plain"}</span>
@@ -98,13 +100,13 @@ export default function Profiles() {
 }
 
 // Remounted per profile (key=id) so the fields reset on switch; after Save the query updates and
-// `dirty` clears against the new values. Mirrors the Skills / topic-preset editors.
+// `dirty` clears against the new values. Mirrors the Skills / agent-preset editors.
 function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, onRevert, reverting }:
   { profile: Profile; bundled: boolean; onSave: (patch: Partial<Omit<Profile, "id">>) => void; saving: boolean;
     onDelete: () => void; deleting: boolean; onRevert: () => void; reverting: boolean }) {
   const [name, setName] = useState(profile.name);
   const [role, setRole] = useState<SessionRole | "">(profile.role ?? "");
-  const [startupPrompt, setStartupPrompt] = useState(profile.startupPrompt);
+  const [description, setDescription] = useState(profile.description);
   const [allowText, setAllowText] = useState(profile.allowDelta.join("\n"));
   const [icon, setIcon] = useState(profile.icon ?? "");
   const [confirmDel, setConfirmDel] = useState(false);
@@ -114,7 +116,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
   const dirty =
     name !== profile.name ||
     (role || null) !== profile.role ||
-    startupPrompt !== profile.startupPrompt ||
+    description !== profile.description ||
     JSON.stringify(allowDelta) !== JSON.stringify(profile.allowDelta) ||
     (icon || null) !== profile.icon;
 
@@ -124,7 +126,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
     background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
   };
 
-  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setStartupPrompt(profile.startupPrompt); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); };
+  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
@@ -163,9 +165,9 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
       </div>
 
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={fieldLabel}>Startup prompt</span>
-        <textarea value={startupPrompt} onChange={(e) => setStartupPrompt(e.target.value)} spellCheck={false}
-          style={{ ...ta, minHeight: 140 }} placeholder="Default first turn for a new session in a topic that adopts this profile (a topic's own non-empty prompt overrides it)." />
+        <span style={fieldLabel}>Description</span>
+        <textarea value={description} onChange={(e) => setDescription(e.target.value)} spellCheck={false}
+          style={{ ...ta, minHeight: 140 }} placeholder="A human-facing blurb shown here in the Profiles UI — what this rig is for. NEVER injected into a session (the startup prompt comes from the agent)." />
       </label>
 
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -190,7 +192,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
       <span style={{ flex: 1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || !name.trim() || saving}
-          onClick={() => onSave({ name: name.trim(), role: role || null, startupPrompt, allowDelta, icon: icon.trim() || null })}>
+          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null })}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {dirty

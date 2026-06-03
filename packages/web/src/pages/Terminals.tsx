@@ -132,7 +132,7 @@ function TileTitle({ s }: { s: SessionListItem }) {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
       <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} />
-      <span>{s.projectName} · {s.topicName}{s.role ? ` · ${s.role}` : ""} · {s.id.slice(0, 8)}</span>
+      <span>{s.projectName} · {s.agentName}{s.role ? ` · ${s.role}` : ""} · {s.id.slice(0, 8)}</span>
     </span>
   );
 }

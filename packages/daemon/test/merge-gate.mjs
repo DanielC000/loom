@@ -47,7 +47,7 @@ function eventExists(mgrId, kind) {
 function makeProject(label, gateCommand) {
   const sfx = `${Date.now()}-${label}-${Math.random().toString(36).slice(2, 7)}`;
   const p = {
-    projId: `mg-proj-${sfx}`, topicId: `mg-topic-${sfx}`, taskId: `mg-task-${sfx}`,
+    projId: `mg-proj-${sfx}`, agentId: `mg-agent-${sfx}`, taskId: `mg-task-${sfx}`,
     mgrId: `mg-mgr-${sfx}`, workerId: `mg-wkr-${sfx}`,
     repo: path.join(os.tmpdir(), `loom-mg-repo-${sfx}`), gateCommand, file: `widget-${label}.txt`,
   };
@@ -61,13 +61,13 @@ function seedRows(p, worktreePath, branch) {
   const db = new Database(DB_FILE);
   db.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)")
     .run(p.projId, "MG", p.repo, p.repo, JSON.stringify({ orchestration: { gateCommand: p.gateCommand } }), now);
-  db.prepare("INSERT INTO topics (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)").run(p.topicId, p.projId, "t", "");
+  db.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)").run(p.agentId, p.projId, "t", "");
   db.prepare("INSERT INTO tasks (id,project_id,title,body,column_key,position,created_at,updated_at) VALUES (?,?,?,'','in_progress',?,?,?)")
     .run(p.taskId, p.projId, "MG-TASK", 1, now, now);
-  db.prepare(`INSERT INTO sessions (id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role)
-    VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL,'manager')`).run(p.mgrId, p.projId, p.topicId, p.repo, now, now);
-  db.prepare(`INSERT INTO sessions (id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role,parent_session_id,task_id,worktree_path,branch)
-    VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL,'worker',?,?,?,?)`).run(p.workerId, p.projId, p.topicId, worktreePath, now, now, p.mgrId, p.taskId, worktreePath, branch);
+  db.prepare(`INSERT INTO sessions (id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role)
+    VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL,'manager')`).run(p.mgrId, p.projId, p.agentId, p.repo, now, now);
+  db.prepare(`INSERT INTO sessions (id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role,parent_session_id,task_id,worktree_path,branch)
+    VALUES (?,?,?,NULL,NULL,?,'live','unknown',0,?,?,NULL,'worker',?,?,?,?)`).run(p.workerId, p.projId, p.agentId, worktreePath, now, now, p.mgrId, p.taskId, worktreePath, branch);
   db.close();
 }
 
@@ -143,7 +143,7 @@ try {
       db.prepare("DELETE FROM sessions WHERE id = ? OR parent_session_id = ?").run(p.mgrId, p.mgrId);
       db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ?").run(p.mgrId);
       db.prepare("DELETE FROM tasks WHERE project_id = ?").run(p.projId);
-      db.prepare("DELETE FROM topics WHERE id = ?").run(p.topicId);
+      db.prepare("DELETE FROM agents WHERE id = ?").run(p.agentId);
       db.prepare("DELETE FROM projects WHERE id = ?").run(p.projId);
     }
     db.close();

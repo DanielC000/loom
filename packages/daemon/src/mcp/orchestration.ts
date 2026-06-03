@@ -104,13 +104,13 @@ export class OrchestrationMcpRouter {
         description: "Spawn a worker on a task: creates an isolated git worktree + branch, starts a worker session in it, and moves the task to in_progress.",
         inputSchema: {
           taskId: z.string(),
-          topicId: z.string().optional(),
+          agentId: z.string().optional(),
           kickoffPrompt: z.string(),
         },
       },
-      async ({ taskId, topicId, kickoffPrompt }) => {
+      async ({ taskId, agentId, kickoffPrompt }) => {
         try {
-          const worker = await sessions.spawnWorker(managerSessionId, { taskId, topicId, kickoffPrompt });
+          const worker = await sessions.spawnWorker(managerSessionId, { taskId, agentId, kickoffPrompt });
           return ok({ workerSessionId: worker.id, branch: worker.branch, worktreePath: worker.worktreePath });
         } catch (e) {
           // Surface a refused spawn (paused / over-cap / bad task) to the manager as data, not an
@@ -227,7 +227,7 @@ export class OrchestrationMcpRouter {
           "Loom nudges you when you near your context limit; when you get that nudge: FIRST run /session-end " +
           "(log progress to the vault) and take stock, THEN call this with a self-contained continuationPrompt " +
           "for your successor — current goal, what's done, your in-flight workers and their tasks/status, the " +
-          "next steps, and key decisions. Loom boots a fresh manager seeded with this topic's warm-up + your " +
+          "next steps, and key decisions. Loom boots a fresh manager seeded with this agent's warm-up + your " +
           "continuationPrompt, re-parents your live workers onto it, and then closes you.",
         inputSchema: { continuationPrompt: z.string() },
       },
@@ -249,7 +249,7 @@ export class OrchestrationMcpRouter {
           "the human) — call it when you end a turn with no active work. `state`: 'working' = back at it " +
           "(resumes normal watching); 'waiting' = nothing to do until something lands — optionally snooze " +
           "for `minutes` (defaults to the per-project idle snooze); 'blocked_human' = you need the human; " +
-          "'done' = this topic's work is complete. Always clears your unanswered-nudge counter. Pass a short " +
+          "'done' = this agent's work is complete. Always clears your unanswered-nudge counter. Pass a short " +
           "`detail` to say why (recorded for the human).",
         inputSchema: {
           state: z.enum(["working", "waiting", "blocked_human", "done"]),

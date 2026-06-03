@@ -23,12 +23,12 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 {
   const old = new Database(DB_FILE);
   old.exec(`CREATE TABLE sessions (
-    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, topic_id TEXT NOT NULL,
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, agent_id TEXT NOT NULL,
     engine_session_id TEXT, title TEXT, cwd TEXT NOT NULL,
     process_state TEXT NOT NULL DEFAULT 'none', resumability TEXT NOT NULL DEFAULT 'unknown',
     busy INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_activity TEXT NOT NULL, last_error TEXT
   );`);
-  old.prepare(`INSERT INTO sessions (id,project_id,topic_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error)
+  old.prepare(`INSERT INTO sessions (id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run("legacy1", "pX", "tX", "eng-legacy", null, "C:/tmp/x", "exited", "resumable", 0, now, now, null);
   old.close();
@@ -47,9 +47,9 @@ check("migration: pre-#10 row's new orchestration fields default null/0",
 
 // (a) a plain phase-1 session literal (no orchestration fields) inserts + round-trips unchanged.
 db.insertProject({ id: "pX", name: "X", repoPath: "C:/tmp/x", vaultPath: "C:/tmp/x", config: {}, createdAt: now, archivedAt: null });
-db.insertTopic({ id: "tX", projectId: "pX", name: "t", startupPrompt: "", position: 0 });
+db.insertAgent({ id: "tX", projectId: "pX", name: "t", startupPrompt: "", position: 0 });
 db.insertSession({
-  id: "plain1", projectId: "pX", topicId: "tX", engineSessionId: null, title: null,
+  id: "plain1", projectId: "pX", agentId: "tX", engineSessionId: null, title: null,
   cwd: "C:/tmp/x", processState: "live", resumability: "unknown", busy: true,
   createdAt: now, lastActivity: now, lastError: null,
 });
@@ -62,12 +62,12 @@ check("(a) plain session's orchestration fields are null, gen 0",
 
 // (b) a manager (role set at insert) + a worker (lineage set via setOrchestration).
 db.insertSession({
-  id: "mgr1", projectId: "pX", topicId: "tX", engineSessionId: null, title: null,
+  id: "mgr1", projectId: "pX", agentId: "tX", engineSessionId: null, title: null,
   cwd: "C:/tmp/x", processState: "live", resumability: "unknown", busy: false,
   createdAt: now, lastActivity: now, lastError: null, role: "manager",
 });
 db.insertSession({
-  id: "wkr1", projectId: "pX", topicId: "tX", engineSessionId: null, title: null,
+  id: "wkr1", projectId: "pX", agentId: "tX", engineSessionId: null, title: null,
   cwd: "C:/tmp/x", processState: "live", resumability: "unknown", busy: false,
   createdAt: now, lastActivity: now, lastError: null,
 });

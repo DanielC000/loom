@@ -33,24 +33,24 @@ function makeEnv(opts = {}) {
   const dbFile = path.join(os.tmpdir(), `loom-sched-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const projId = `sp-${Math.random().toString(36).slice(2, 8)}`;
-  const topicId = `st-${Math.random().toString(36).slice(2, 8)}`;
+  const agentId = `st-${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
   db.insertProject({ id: projId, name: "Sched", repoPath: projId, vaultPath: projId, config: {}, createdAt: now, archivedAt: null });
-  db.insertTopic({ id: topicId, projectId: projId, name: "t", startupPrompt: "drain the board", position: 0 });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "drain the board", position: 0 });
   const control = new OrchestrationControl();
   const calls = [];
   // opts.failFirstN: throw on the first N startManager calls (to exercise claim-before-spawn).
   let failsLeft = opts.failFirstN ?? 0;
   const startManager = (tid) => {
     if (failsLeft > 0) { failsLeft--; throw new Error("startManager failed (simulated)"); }
-    const id = `mgr-${calls.length}`; calls.push({ topicId: tid, id }); return { id };
+    const id = `mgr-${calls.length}`; calls.push({ agentId: tid, id }); return { id };
   };
   const scheduler = new Scheduler({ db, control, startManager, maxConcurrentManagers: opts.cap });
-  return { dbFile, db, projId, topicId, control, calls, scheduler };
+  return { dbFile, db, projId, agentId, control, calls, scheduler };
 }
 // Seed a live MANAGER session row directly (for the manager-cap DB-count axis).
 const seedLiveManager = (e, id) => e.db.insertSession({
-  id, projectId: e.projId, topicId: e.topicId, engineSessionId: null, title: null, cwd: e.projId,
+  id, projectId: e.projId, agentId: e.agentId, engineSessionId: null, title: null, cwd: e.projId,
   processState: "live", resumability: "unknown", busy: false,
   createdAt: new Date().toISOString(), lastActivity: new Date().toISOString(), lastError: null, role: "manager",
 });
@@ -59,17 +59,17 @@ function cleanupEnv(e) {
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(e.dbFile + ext, { force: true }); } catch { /* ignore */ } }
 }
 const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
-  id, topicId: e.topicId, cron: "*/5 * * * *", enabled: true,
+  id, agentId: e.agentId, cron: "*/5 * * * *", enabled: true,
   nextFireAt: new Date(Date.now() - 60_000).toISOString(), lastFiredAt: null, createdAt: new Date().toISOString(), ...over,
 });
 
-// Fires: a due, enabled schedule → start-fn called with the topic; event recorded; next_fire_at future.
+// Fires: a due, enabled schedule → start-fn called with the agent; event recorded; next_fire_at future.
 {
   const e = makeEnv();
   seedSchedule(e, "sch-fire");
   const now = new Date();
   await e.scheduler.tick(now);
-  check("Fires: stub start-fn called once with the schedule's topic", e.calls.length === 1 && e.calls[0].topicId === e.topicId);
+  check("Fires: stub start-fn called once with the schedule's agent", e.calls.length === 1 && e.calls[0].agentId === e.agentId);
   const evs = e.db.listEvents(e.calls[0].id);
   check("Fires: schedule_fired event recorded (managerSessionId = started manager)",
     evs.length === 1 && evs[0].kind === "schedule_fired" && evs[0].detail?.scheduleId === "sch-fire" && evs[0].detail?.cron === "*/5 * * * *");
@@ -98,7 +98,7 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
   check("Pause-gated: globally paused → does NOT fire", e.calls.length === 0 && e.db.getSchedule("sch-pause").lastFiredAt === null);
   e.control.resume("global");
   await e.scheduler.tick(new Date());
-  check("Pause-gated: after resume → fires on the next tick", e.calls.length === 1 && e.calls[0].topicId === e.topicId);
+  check("Pause-gated: after resume → fires on the next tick", e.calls.length === 1 && e.calls[0].agentId === e.agentId);
   cleanupEnv(e);
 }
 
@@ -137,22 +137,22 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
 
 // === §19a hardening (3 findings) ===
 
-// Finding 1 — deleted topic: a due schedule whose topic no longer exists is DISABLED (so it stops
-// re-firing every tick), not fired. (Note: the `topic_id REFERENCES topics(id)` FK normally PREVENTS
-// orphaning — so this is defense-in-depth. We simulate "topic deleted out from under the schedule"
-// via a raw FK-off delete, the state a future cascade-less topic-delete or FK-off run would produce.)
+// Finding 1 — deleted agent: a due schedule whose agent no longer exists is DISABLED (so it stops
+// re-firing every tick), not fired. (Note: the `agent_id REFERENCES agents(id)` FK normally PREVENTS
+// orphaning — so this is defense-in-depth. We simulate "agent deleted out from under the schedule"
+// via a raw FK-off delete, the state a future cascade-less agent-delete or FK-off run would produce.)
 {
   const e = makeEnv();
-  seedSchedule(e, "sch-orphan"); // valid topic (e.topicId)
+  seedSchedule(e, "sch-orphan"); // valid agent (e.agentId)
   const raw = new Database(e.dbFile);
   raw.pragma("foreign_keys = OFF");
-  raw.prepare("DELETE FROM topics WHERE id = ?").run(e.topicId);
+  raw.prepare("DELETE FROM agents WHERE id = ?").run(e.agentId);
   raw.close();
   await e.scheduler.tick(new Date());
-  check("Deleted-topic: a schedule whose topic was deleted does NOT fire", e.calls.length === 0);
-  check("Deleted-topic: the schedule is auto-DISABLED (self-heal — no re-fire every tick)", e.db.getSchedule("sch-orphan").enabled === false);
+  check("Deleted-agent: a schedule whose agent was deleted does NOT fire", e.calls.length === 0);
+  check("Deleted-agent: the schedule is auto-DISABLED (self-heal — no re-fire every tick)", e.db.getSchedule("sch-orphan").enabled === false);
   await e.scheduler.tick(new Date()); // a now-disabled schedule is not even due
-  check("Deleted-topic: a second tick still does nothing", e.calls.length === 0);
+  check("Deleted-agent: a second tick still does nothing", e.calls.length === 0);
   cleanupEnv(e);
 }
 
@@ -200,18 +200,18 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
 
 // --- PART 2: REST round-trip via the daemon's endpoints ---
 const rid = `rest-${Date.now()}`;
-const rproj = `rp-${rid}`, rtopic = `rt-${rid}`;
+const rproj = `rp-${rid}`, ragent = `rt-${rid}`;
 {
   const seed = new Database(DB_FILE);
   const now = new Date().toISOString();
   seed.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)")
     .run(rproj, "RESTsched", rproj, rproj, "{}", now);
-  seed.prepare("INSERT INTO topics (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)").run(rtopic, rproj, "t", "x");
+  seed.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)").run(ragent, rproj, "t", "x");
   seed.close();
 }
 try {
   // Far-future cron ("0 0 1 1 *" = next Jan 1) so the daemon's own scheduler never fires it here.
-  const created = await (await post("/api/schedules", { topicId: rtopic, cron: "0 0 1 1 *" })).json();
+  const created = await (await post("/api/schedules", { agentId: ragent, cron: "0 0 1 1 *" })).json();
   check("REST create: 201 with id + a future next_fire_at + enabled", !!created.id && new Date(created.nextFireAt).getTime() > Date.now() && created.enabled === true);
   let list = await get("/api/schedules");
   check("REST list: includes the created schedule", list.some((s) => s.id === created.id));
@@ -221,12 +221,12 @@ try {
   list = await get("/api/schedules");
   check("REST delete: no longer listed", !list.some((s) => s.id === created.id));
   // Validation: a bad cron is rejected 400 (not inserted).
-  const bad = await post("/api/schedules", { topicId: rtopic, cron: "not a cron" });
+  const bad = await post("/api/schedules", { agentId: ragent, cron: "not a cron" });
   check("REST create: invalid cron → 400", bad.status === 400);
 } finally {
   const t = new Database(DB_FILE);
-  t.prepare("DELETE FROM schedules WHERE topic_id = ?").run(rtopic);
-  t.prepare("DELETE FROM topics WHERE id = ?").run(rtopic);
+  t.prepare("DELETE FROM schedules WHERE agent_id = ?").run(ragent);
+  t.prepare("DELETE FROM agents WHERE id = ?").run(ragent);
   t.prepare("DELETE FROM projects WHERE id = ?").run(rproj);
   t.close();
 }

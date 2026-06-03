@@ -1,9 +1,9 @@
-// Core Loom entities. Loom owns four primitives: Project, Topic, Session, Task.
+// Core Loom entities. Loom owns four primitives: Project, Agent, Session, Task.
 // (Skill loading is delegated to the Claude CLI — Loom builds no skill machinery.)
 import type { ProjectConfigOverride } from "./config.js";
 
 export type ProjectId = string;
-export type TopicId = string;
+export type AgentId = string;
 export type SessionId = string; // Loom's own id
 export type TaskId = string;
 export type ProfileId = string;
@@ -20,41 +20,46 @@ export interface Project {
   archivedAt: string | null;
 }
 
-/** A user-defined category of sessions inside a project. */
-export interface Topic {
-  id: TopicId;
+/**
+ * An **Agent** — the seat + brief inside a project: identity, project-specifics, and the startup
+ * prompt injected as the first input of a NEW session. Per-project, many, edited often. An Agent
+ * RUNS UNDER a Profile (the reusable rig); the Profile supplies role/model/allow/skills/icon while
+ * the injected prompt always comes from the Agent.
+ */
+export interface Agent {
+  id: AgentId;
   projectId: ProjectId;
   name: string;
   /** Injected as the first input ONLY when starting a new session (never on resume). */
   startupPrompt: string;
   position: number;
   /**
-   * Optional Agent Profile this topic adopts — the reusable, platform-level "who" (role + prompt +
-   * tool/permission/model/icon). Nullable + additive: null = a legacy / plain topic, which
+   * Optional Profile this agent runs under — the reusable, platform-level "rig" (role + model +
+   * allow-delta + skill-subset + icon). Nullable + additive: null = a plain agent, which
    * `resolveProfile` maps to EXACTLY today's behavior. When set, the profile supplies
-   * role/allow/skills/model/icon and the topic's own startupPrompt overrides the profile's when
-   * non-empty (a blank per-topic prompt falls back to the profile's default prompt).
-   * Phase-1 is the READ PATH only — the spawn path still ignores this (P2 wires it in).
+   * role/allow/skills/model/icon; the injected prompt ALWAYS comes from the agent (a profile no
+   * longer carries a prompt — its `description` is a UI-only blurb).
    */
   profileId: ProfileId | null;
 }
 
 /**
- * An **Agent Profile** — a reusable, platform-level (cross-project) "who": the role, prompt, and
- * tool/permission/model/icon a session adopts. Topics reference one via `profileId`, and
- * `resolveProfile` (sibling of `resolveConfig`) merges profile + topic into the effective spawn
- * shape. A topic with NO profile resolves to today's plain behavior, so this is fully additive.
- * Platform-level on purpose (like skills + config defaults): one definition reused across projects,
- * not re-typed per project the way `TEMPLATE_TOPICS` is today.
+ * A **Profile** — a reusable, platform-level (cross-project) "rig": the role, model, permission
+ * delta, skill-subset, and icon a session adopts. Agents reference one via `profileId`, and
+ * `resolveProfile` (sibling of `resolveConfig`) resolves agent + profile into the effective spawn
+ * shape. An agent with NO profile resolves to today's plain behavior, so this is fully additive.
+ * Platform-level on purpose (like skills + config defaults): a small reusable set, rarely changing,
+ * reused across projects rather than re-typed per project. A Profile carries NO injected prompt —
+ * `description` is a human-facing blurb shown in the Profiles UI, never injected into a session.
  */
 export interface Profile {
   id: ProfileId;
   name: string;
   /** Orchestration role conferred; null = a plain (non-orchestration) session — today's default. */
   role: SessionRole | null;
-  /** Default startup prompt. A topic's own (non-empty) startupPrompt overrides this; a blank one
-   *  falls back to this default (per-topic override is opt-in). */
-  startupPrompt: string;
+  /** Human-facing blurb shown in the Profiles UI (what this rig is for). NEVER injected into a
+   *  session — the injected startup prompt always comes from the Agent. */
+  description: string;
   /** Permission allowlist delta layered onto the resolved config's allow (e.g. extra Bash globs). */
   allowDelta: string[];
   /** Skill-name subset to deliver; null = deliver all (today's behavior). */
@@ -72,7 +77,7 @@ export type Resumability = "unknown" | "resumable" | "dead";
 /**
  * A session's orchestration role (phase-2). Plain phase-1 sessions have no role.
  * - manager / worker: the orchestration spine (loom-orchestration MCP).
- * - platform: a platform-lead — creates/configures projects + topics (loom-platform MCP, Pillar C).
+ * - platform: a platform-lead — creates/configures projects + agents (loom-platform MCP, Pillar C).
  *   Kept distinct from manager so least-privilege holds: cross-project tools never leak into a
  *   project-scoped manager, and a platform-lead gets no worker-coordination tools.
  */
@@ -81,7 +86,7 @@ export type SessionRole = "manager" | "worker" | "platform";
 export interface Session {
   id: SessionId;
   projectId: ProjectId;
-  topicId: TopicId;
+  agentId: AgentId;
   /** Claude Code's engine session id, captured via the SessionStart hook. */
   engineSessionId: string | null;
   title: string | null; // auto-derived from the first turn, user-overridable
@@ -137,10 +142,10 @@ export interface OrchestrationEvent {
   detail?: Record<string, unknown>;
 }
 
-/** A session enriched with its project/topic names — for the global Live Terminals grid. */
+/** A session enriched with its project/agent names — for the global Live Terminals grid. */
 export interface SessionListItem extends Session {
   projectName: string;
-  topicName: string;
+  agentName: string;
 }
 
 /** A read-only vault file-tree entry. */
@@ -162,12 +167,12 @@ export interface Task {
 
 /**
  * A cron-triggered schedule (phase-2 Pillar B). On its minute boundary the daemon Scheduler
- * boots a manager session in `topicId` (the topic's startupPrompt is the kickoff), which then
+ * boots a manager session in `agentId` (the agent's startupPrompt is the kickoff), which then
  * runs the Pillar-A loop. `nextFireAt` is recomputed on create/update and after each fire.
  */
 export interface Schedule {
   id: string;
-  topicId: TopicId;
+  agentId: AgentId;
   cron: string;              // 5-field cron expression
   enabled: boolean;
   nextFireAt: string;        // ISO; the next scheduled fire

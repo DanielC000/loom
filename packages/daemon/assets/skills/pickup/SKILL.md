@@ -16,7 +16,7 @@ project id anywhere; it's derived server-side.
 2. **Code** — `git log --oneline -20` and `git status` for recent and in-flight work.
 3. **Conventions** — read `CLAUDE.md` at the repo root if present.
 4. **Your role's anchor** (whichever applies):
-   - *Lead / orchestrator:* read your **living resume doc** (your topic prompt names it) — it's the
+   - *Lead / orchestrator:* read your **living resume doc** (your agent prompt names it) — it's the
      "you are here + what's next" source of truth. Cross-check it against the board.
    - *Worker:* your scope is your assigned board task / kickoff — orient narrowly to it, not the whole
      project.

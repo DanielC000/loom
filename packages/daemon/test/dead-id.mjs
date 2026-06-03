@@ -15,9 +15,9 @@ const { sweepDeadSessions } = await import("../dist/sessions/liveness.js");
 const db = new Db();
 const now = new Date().toISOString();
 db.insertProject({ id: "pX", name: "X", repoPath: "C:/tmp/loom-x", vaultPath: "C:/tmp/loom-x", config: {}, createdAt: now, archivedAt: null });
-db.insertTopic({ id: "tX", projectId: "pX", name: "t", startupPrompt: "", position: 0 });
+db.insertAgent({ id: "tX", projectId: "pX", name: "t", startupPrompt: "", position: 0 });
 db.insertSession({
-  id: "sDead", projectId: "pX", topicId: "tX",
+  id: "sDead", projectId: "pX", agentId: "tX",
   engineSessionId: "bogus-id-no-transcript-12345", title: null, cwd: "C:/tmp/loom-x",
   processState: "exited", resumability: "resumable", busy: false,
   createdAt: now, lastActivity: now, lastError: null,
