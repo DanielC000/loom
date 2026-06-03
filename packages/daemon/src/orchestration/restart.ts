@@ -40,6 +40,13 @@ export interface RestartIntent {
   managerSessionId: string;
   /** The manager's workers that were live at restart time — resumed best-effort on boot. */
   workerSessionIds: string[];
+  /**
+   * Per-session snapshot (sessionId → its in-memory pending inbound FIFO) taken at restart time, so the
+   * undelivered queue survives the process death and is replayed on boot (index.ts) — the persisted
+   * analogue of recycle's in-process carriedPending. Only non-empty FIFOs of the manager + its resumed
+   * workers are included; absent when nothing was queued.
+   */
+  pending?: Record<string, string[]>;
   requestedAt: string;
 }
 

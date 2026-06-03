@@ -276,7 +276,29 @@ export class SessionService {
       .listWorkers(managerSessionId)
       .filter((w) => w.processState === "live")
       .map((w) => w.id);
-    writeRestartIntent({ reason, managerSessionId, workerSessionIds, requestedAt: new Date().toISOString() });
+    // Snapshot each resumed session's in-memory pending inbound FIFO so the undelivered queue survives
+    // the process death and is replayed on boot (index.ts) — the persisted analogue of recycle's
+    // in-process carriedPending. Grab it NOW, while the pty is still alive (the queue dies with the
+    // process on exit). Only non-empty FIFOs are included. Defensive caps keep the intent JSON small:
+    // a real FIFO holds a handful of short messages, so clip a pathologically long queue and skip a
+    // single absurdly large message rather than bloat the persisted intent.
+    const PENDING_MAX_MSGS = 50;
+    const PENDING_MAX_MSG_LEN = 100_000;
+    const pending: Record<string, string[]> = {};
+    for (const id of [managerSessionId, ...workerSessionIds]) {
+      const snap = this.pty
+        .getPending(id)
+        .filter((m) => m.length <= PENDING_MAX_MSG_LEN)
+        .slice(0, PENDING_MAX_MSGS);
+      if (snap.length > 0) pending[id] = snap;
+    }
+    writeRestartIntent({
+      reason,
+      managerSessionId,
+      workerSessionIds,
+      requestedAt: new Date().toISOString(),
+      ...(Object.keys(pending).length > 0 ? { pending } : {}),
+    });
     // Exit AFTER this MCP response flushes; the pty (incl. this manager) dies with the process, the
     // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent.
     setTimeout(() => process.exit(RESTART_EXIT_CODE), 300);
