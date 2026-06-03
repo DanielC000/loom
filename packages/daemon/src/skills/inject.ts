@@ -14,7 +14,10 @@ const MANIFEST = ".loom-skills.json"; // records which skill names Loom injected
  *  - Manages ONLY the skill names Loom ships; NEVER clobbers a repo's own pre-existing project-local
  *    skill of the same name (a collision is skipped + left to the repo).
  *  - Removes stale entries it previously injected (skill deleted from the store), via a manifest.
- *  - Symlink (junction on Windows — unprivileged for dirs) with a recursive-copy fallback (Jinn's trick).
+ *  - Each session gets an INDEPENDENT recursive COPY of the skill (NOT a junction/symlink). A junction
+ *    is fatal on Windows: worktree removal (git/worktrees.ts removeWorktree's recursive-rm backstop)
+ *    follows the junction and deletes the STORE's SKILL.md contents, nuking ~/.loom/skills for every
+ *    later session. A copy is deleted with the worktree without ever reaching the store.
  *  - Hides the injected skills from git via .git/info/exclude (local only; never edits a tracked .gitignore).
  */
 export function injectSkills(cwd: string): void {
@@ -41,12 +44,9 @@ export function injectSkills(cwd: string): void {
     if (exists && !prev.includes(name)) continue; // a repo's OWN skill of this name — never clobber it
     if (exists) { try { fs.rmSync(dest, { recursive: true, force: true }); } catch { /* ignore */ } }
     const src = path.join(SKILLS_DIR, name);
-    try {
-      fs.symlinkSync(src, dest, "junction"); // dir junction: no admin needed on Windows
-      placed.push(name);
-    } catch {
-      try { fs.cpSync(src, dest, { recursive: true }); placed.push(name); } catch { /* skill won't be discoverable */ }
-    }
+    // COPY, never junction: a junction here lets worktree removal's recursive rm follow it into the
+    // store and delete the store's SKILL.md (see header). An independent copy is self-contained.
+    try { fs.cpSync(src, dest, { recursive: true }); placed.push(name); } catch { /* skill won't be discoverable */ }
   }
 
   try { fs.writeFileSync(manifestPath, JSON.stringify(placed)); } catch { /* ignore */ }
