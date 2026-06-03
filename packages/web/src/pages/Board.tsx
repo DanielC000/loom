@@ -3,17 +3,17 @@ import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tansta
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
 import type { Task, KanbanColumn, SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
+import { useActiveProject } from "../lib/activeProject";
 import { Button, Input, SectionLabel, StatusPill, Chip } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
-import { ProjectSelect } from "./Vault";
 
 // Per-project kanban. Reads/writes the SAME task store the MCP tools use — moving a card
 // POSTs columnKey, which a spawned agent's tasks_list immediately sees, and vice versa.
+// Scoped to the header's active project (see lib/activeProject).
 export default function Board() {
   const qc = useQueryClient();
-  const [projectId, setProjectId] = useState<string>("");
+  const { projectId } = useActiveProject();
   const [openTaskId, setOpenTaskId] = useState<string | null>(null); // task whose detail drawer is open
-  const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const board = useQuery({ queryKey: ["board", projectId], queryFn: () => api.board(projectId), enabled: !!projectId, placeholderData: keepPreviousData });
   // Link the board to the orchestration spine: a worker carries its task id, so cards can show the
   // live worker's status + branch for the task they represent.
@@ -43,7 +43,7 @@ export default function Board() {
 
   return (
     <div>
-      <ProjectSelect value={projectId} onChange={setProjectId} projects={projects.data ?? []} />
+      {!projectId && <p style={{ color: color.textMuted }}>No project selected.</p>}
       {projectId && board.data && (
         <>
           <NewTask onCreate={(t) => create.mutate(t)} />

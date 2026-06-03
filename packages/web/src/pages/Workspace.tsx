@@ -2,6 +2,7 @@ import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Agent, Session, SessionRole } from "@loom/shared";
 import { api } from "../lib/api";
+import { useActiveProject } from "../lib/activeProject";
 import { bySessionActivity } from "../lib/sessions";
 import { TerminalPane } from "../components/Terminal";
 import { TranscriptPane } from "../components/TranscriptPane";
@@ -26,8 +27,9 @@ const TEMPLATE_AGENTS: { name: string; startupPrompt: string }[] = [
 // Per-project working view: create project/agent, spawn or resume sessions, attach a terminal.
 export default function Workspace() {
   const qc = useQueryClient();
-  // Restore the last project/agent across reloads (session is ephemeral).
-  const [projectId, setProjectId] = useState<string | null>(() => localStorage.getItem("loom.projectId"));
+  // The active project is the shared, header-persisted selection (see lib/activeProject) — the
+  // left-rail project buttons WRITE to it. The agent selection stays local to Workspace.
+  const { projectId, setProjectId } = useActiveProject();
   const [agentId, setAgentId] = useState<string | null>(() => {
     // One-time read-migration: the persisted key was renamed loom.topicId → loom.agentId in the
     // Topics→Agents rename. If only the legacy key is present, adopt + rewrite it so the last
@@ -40,11 +42,10 @@ export default function Workspace() {
   });
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [rightTab, setRightTab] = useState<"terminal" | "transcript">("terminal");
-  useEffect(() => { projectId ? localStorage.setItem("loom.projectId", projectId) : localStorage.removeItem("loom.projectId"); }, [projectId]);
   useEffect(() => { agentId ? localStorage.setItem("loom.agentId", agentId) : localStorage.removeItem("loom.agentId"); }, [agentId]);
 
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
-  const agents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId!), enabled: !!projectId });
+  const agents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
   // Profiles are platform-level (cross-project), so this is a single global query, not project-scoped.
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const sessions = useQuery({ queryKey: ["sessions", agentId], queryFn: () => api.sessions(agentId!), enabled: !!agentId });
