@@ -2,8 +2,9 @@
 // an injected pty-slice, so the tick tests use a RECORDING STUB and drive tick() directly. Hermetic
 // like context-watcher.mjs: each env gets its OWN temp .db, imports dist/* + @loom/shared, no daemon.
 // Covers the FULL trigger predicate (fires iff every clause holds), every SILENT skip path
-// (snoozed / suppressed / live-worker / human-paused / unanswered≥cap / idleNudgeMinutes=0 /
-// competing recycle nudge), recordIdleNudge increment, reset-on-activity → 'watching', AND the carried-
+// (snoozed / suppressed / live-worker / human-paused / idleNudgeMinutes=0 / competing recycle nudge),
+// the Task-4 escalate-once-at-cap path (emits ONE idle_escalated + flips policy suppressed; a second
+// tick does not re-emit), recordIdleNudge increment, reset-on-activity → 'watching', AND the carried-
 // over zod fix (orchestrationOverride now accepts the three idle keys; strictness otherwise intact).
 import fs from "node:fs";
 import os from "node:os";
@@ -173,7 +174,7 @@ function cleanup(e) {
   cleanup(e); cleanup(e2);
 }
 
-// ============================ (7) SILENT — unanswered ≥ cap ============================
+// ============================ (7) ESCALATE ONCE — unanswered ≥ cap (Task 4) ============================
 {
   const e = makeEnv();
   seedManager(e, "mgr-capped");
@@ -181,8 +182,42 @@ function cleanup(e) {
   e.db.recordIdleNudge("mgr-capped", minutesAgo(120));
   e.db.recordIdleNudge("mgr-capped", minutesAgo(60));
   check("(7) precondition: unanswered === maxUnansweredNudges (2)", e.db.getIdleNudgeState("mgr-capped")?.unanswered === 2);
+  const escalations = () => e.db.listEvents("mgr-capped").filter((ev) => ev.kind === "idle_escalated");
   e.watcher.tick(NOW);
-  check("(7) at/over the unanswered cap → NOT nudged (Task-4 escalation, not here)", e.enqueued.length === 0);
+  check("(7) at/over the cap → does NOT enqueue another nudge (the event is the signal, not a nudge)", e.enqueued.length === 0);
+  const esc = escalations();
+  check("(7) at/over the cap → emits exactly ONE idle_escalated event", esc.length === 1);
+  check("(7) idle_escalated detail carries reason=unanswered_cap + the unanswered count", esc[0]?.detail?.reason === "unanswered_cap" && esc[0]?.detail?.unanswered === 2);
+  check("(7) escalation flips policy to 'suppressed' (stops nudging + gates re-emit)", e.db.getIdleNudgeState("mgr-capped")?.policy === "suppressed");
+  // A SECOND tick must NOT re-emit (suppressed → policy gate skips it; escalate exactly once).
+  e.watcher.tick(NOW);
+  check("(7) a second tick does NOT re-emit idle_escalated (escalate exactly once)", escalations().length === 1);
+  check("(7) a second tick still enqueues no nudge", e.enqueued.length === 0);
+  cleanup(e);
+}
+// Escalation passes the SAME predicate a nudge does: a capped manager that is human-paused is NOT
+// escalated (the human already owns it) — no idle_escalated event, policy stays 'watching'.
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-capped-paused");
+  e.db.recordIdleNudge("mgr-capped-paused", minutesAgo(120));
+  e.db.recordIdleNudge("mgr-capped-paused", minutesAgo(60)); // at cap (2)
+  e.control.pause("mgr-capped-paused");
+  e.watcher.tick(NOW);
+  check("(7b) capped + human-paused → NOT escalated (no idle_escalated event)", e.db.listEvents("mgr-capped-paused").filter((ev) => ev.kind === "idle_escalated").length === 0);
+  check("(7b) capped + human-paused → policy unchanged ('watching')", e.db.getIdleNudgeState("mgr-capped-paused")?.policy === "watching");
+  cleanup(e);
+}
+// ...and a capped manager with a LIVE worker is NOT escalated (legitimately waiting on the worker).
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-capped-worker");
+  seedWorker(e, "wkr-live-2", "mgr-capped-worker", { live: true });
+  e.db.recordIdleNudge("mgr-capped-worker", minutesAgo(120));
+  e.db.recordIdleNudge("mgr-capped-worker", minutesAgo(60)); // at cap (2)
+  e.watcher.tick(NOW);
+  check("(7c) capped + live worker → NOT escalated (no idle_escalated event)", e.db.listEvents("mgr-capped-worker").filter((ev) => ev.kind === "idle_escalated").length === 0);
+  check("(7c) capped + live worker → policy unchanged ('watching')", e.db.getIdleNudgeState("mgr-capped-worker")?.policy === "watching");
   cleanup(e);
 }
 
@@ -292,6 +327,6 @@ function cleanup(e) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, worker-free, watching, unpaused, under-cap, context-roomy MANAGER exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-worker / human-paused / at-cap / recently-nudged / disabled(0) / recycle-pending; honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); and the zod orchestrationOverride now accepts the three idle config keys (strictness intact)."
+  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, worker-free, watching, unpaused, under-cap, context-roomy MANAGER exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); and the zod orchestrationOverride now accepts the three idle config keys (strictness intact)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
