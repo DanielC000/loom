@@ -7,6 +7,14 @@
 // a write outside the vault, a clean note) is a fast no-op. The LLM-judgment rules of doc-hygiene
 // (contradictions, consolidation) are NOT checked here — that's the scheduled worker (#21b).
 //
+// False-positive guards (driven by real production noise):
+//   - `doc-lint: false` in the note's leading YAML frontmatter → skip ALL checks, stay silent.
+//   - Scar/correction patterns (UPDATE:/EDIT:, Note (YYYY):, ~~strike~~) inside a ```fenced code
+//     block``` are legitimate quoting (meta-docs about doc-hygiene) and are NOT flagged.
+//   - The broken-wikilink check is OPT-IN (default OFF): this vault uses intentional red-links and
+//     cross-project links a single-subfolder index can't resolve. Enable per-note with
+//     `doc-lint-links: true` in frontmatter. Append-scar + oversized checks stay default-on.
+//
 // Always exits 0. On a hit it writes a JSON object to stdout carrying the warning via both
 // `systemMessage` and PostToolUse `hookSpecificOutput.additionalContext` (whichever the running
 // Claude honors) — the non-blocking "flag" channel, NOT exit-2 (which is the blocking channel).
@@ -14,6 +22,18 @@ import fs from "node:fs";
 import path from "node:path";
 
 const MAX_LINES = 400; // doc-hygiene rule 4 (keep docs bounded) — advisory threshold
+
+/** Parse the leading `---`…`---` YAML frontmatter (top of file only) into a flat lowercased key→value map. */
+function parseFrontmatter(content) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content);
+  if (!m) return {};
+  const fm = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const kv = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
+    if (kv) fm[kv[1].toLowerCase()] = kv[2].trim().toLowerCase();
+  }
+  return fm;
+}
 
 /** All note keys in the vault for wikilink resolution: basenames + relative paths (lowercased, no .md). */
 function listVaultNoteKeys(vaultPath) {
@@ -36,15 +56,21 @@ function listVaultNoteKeys(vaultPath) {
 }
 
 // rule 2 — rewrite in place, never append "UPDATE:" / "EDIT:" / "Note (YYYY):" / ~~struck-through~~.
+// Patterns inside a ```fenced code block``` are exempt (legitimate quoting, e.g. a doc ABOUT scars).
 function checkAppendScars(content) {
   const hits = [];
+  let inFence = false, sawNote = false, sawStrike = false;
   content.split(/\r?\n/).forEach((line, i) => {
+    if (/^\s{0,3}(`{3,}|~{3,})/.test(line)) { inFence = !inFence; return; } // fence open/close
+    if (inFence) return; // scars quoted inside a code block are legitimate, not a hit
     if (/^\s{0,3}>?\s*\*{0,2}(UPDATE|EDIT)\b\s*\*{0,2}\s*:/i.test(line)) {
       hits.push(`line ${i + 1}: append marker "${line.trim().slice(0, 48)}"`);
     }
+    if (/\bNote\s*\(\d{4}\)\s*:/.test(line)) sawNote = true;
+    if (/~~[^~\n]+~~/.test(line)) sawStrike = true;
   });
-  if (/\bNote\s*\(\d{4}\)\s*:/.test(content)) hits.push(`a "Note (YYYY):" correction marker`);
-  if (/~~[^~\n]+~~/.test(content)) hits.push(`a ~~struck-through~~ correction`);
+  if (sawNote) hits.push(`a "Note (YYYY):" correction marker`);
+  if (sawStrike) hits.push(`a ~~struck-through~~ correction`);
   return hits;
 }
 
@@ -86,12 +112,16 @@ async function main() {
   let content;
   try { content = fs.readFileSync(filePath, "utf8"); } catch { return; } // tool already ran → file is on disk
 
+  const fm = parseFrontmatter(content);
+  if (fm["doc-lint"] === "false") return; // explicit per-note opt-out → stay silent regardless of content
+
   const warnings = [
     ...checkAppendScars(content),
     ...((content.split(/\r?\n/).length > MAX_LINES)
       ? [`oversized note: ${content.split(/\r?\n/).length} lines (doc-hygiene keeps notes bounded; aim < ${MAX_LINES})`]
       : []),
-    ...checkBrokenWikilinks(content, vaultPath),
+    // broken-wikilink check is opt-in (default OFF) — too noisy on intentional red-links + cross-project links.
+    ...(fm["doc-lint-links"] === "true" ? checkBrokenWikilinks(content, vaultPath) : []),
   ];
   if (warnings.length === 0) return;
 
