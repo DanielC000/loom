@@ -64,6 +64,10 @@ function ConfigEditor({ project }: { project: Project }) {
   const qc = useQueryClient();
   const ov = project.config; // the stored override
   const resolved = resolveConfig(ov); // effective values, shown as hints
+  // The true PLATFORM default (resolveConfig with NO override) — what blanking/inheriting a field
+  // reverts to. Inherit/default hints must show THIS, not the current override-effective value, or
+  // they'd misrepresent the revert target. (CLAUDE.md: defaults come only from resolveConfig.)
+  const defaults = resolveConfig(undefined);
 
   // Override-backed form state. "" / "inherit" means NOT overridden (omitted on save → inherits default).
   const [columnsText, setColumnsText] = useState(
@@ -115,16 +119,24 @@ function ConfigEditor({ project }: { project: Project }) {
     return o;
   }
 
-  // Snapshot the NORMALIZED initial override (buildOverride() on mount round-trips the stored config
+  // Snapshot the NORMALIZED baseline override (buildOverride() on mount round-trips the stored config
   // into this UI's canonical key order, so `dirty` is false until a field actually changes — not merely
-  // because the stored key order differs). Keyed by project id → a project switch remounts + re-snapshots.
+  // because the stored key order differs). The baseline is a MUTABLE ref: a successful save re-points it
+  // at the just-saved value so the form drops "unsaved changes" without waiting for a remount. Keyed by
+  // project id → a project switch remounts + re-snapshots.
   const built = buildOverride();
-  const initial = useRef(JSON.stringify(built)).current;
-  const dirty = JSON.stringify(built) !== initial;
+  const builtJson = JSON.stringify(built);
+  const baseline = useRef(builtJson);
+  const dirty = builtJson !== baseline.current;
 
   const save = useMutation({
     mutationFn: () => api.updateProjectConfig(project.id, built),
+    // Surface this mutation's failures INLINE (see the Save row below); tell the global mutation-error
+    // handler to skip its blocking window.alert for this one.
+    meta: { inlineError: true },
     onSuccess: (updated) => {
+      // The just-saved override is now the clean baseline — clearing the dirty flag immediately.
+      baseline.current = builtJson;
       // Patch the cached projects list so the header + this editor re-read the persisted override
       // immediately (a re-read shows it). Remount via the key happens on the next project switch.
       qc.setQueryData<Project[]>(["projects"], (prev) =>
@@ -160,24 +172,24 @@ function ConfigEditor({ project }: { project: Project }) {
           <textarea value={allowText} onChange={(e) => setAllowText(e.target.value)} spellCheck={false}
             style={{ ...ta, minHeight: 110 }} placeholder={"mcp__loom-tasks\nBash(git status:*)\nBash(pnpm *)"} />
           <Hint>one permission glob per line · overriding REPLACES the default allowlist · blank inherits it</Hint>
-          <Hint>inherited default: <span style={{ color: color.textDim }}>{resolved.permission.allow.join(", ") || "—"}</span></Hint>
+          <Hint>inherited default: <span style={{ color: color.textDim }}>{defaults.permission.allow.join(", ") || "—"}</span></Hint>
         </Field>
       </Panel>
 
       <Panel>
         <SectionLabel>Orchestration Caps</SectionLabel>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-          <NumField label="Max workers / manager" value={maxWorkers} set={setMaxWorkers} effective={resolved.orchestration.maxConcurrentWorkers} />
-          <NumField label="Max managers" value={maxManagers} set={setMaxManagers} effective={resolved.orchestration.maxConcurrentManagers} />
-          <NumField label="Recycle @ ctx ratio" value={recycle} set={setRecycle} effective={resolved.orchestration.recycleAtContextRatio} />
-          <NumField label="Idle nudge (min)" value={idleNudge} set={setIdleNudge} effective={resolved.orchestration.idleNudgeMinutes} />
-          <NumField label="Max unanswered nudges" value={maxUnanswered} set={setMaxUnanswered} effective={resolved.orchestration.maxUnansweredNudges} />
-          <NumField label="Idle snooze (min)" value={idleSnooze} set={setIdleSnooze} effective={resolved.orchestration.idleDefaultSnoozeMinutes} />
+          <NumField label="Max workers / manager" value={maxWorkers} set={setMaxWorkers} effective={resolved.orchestration.maxConcurrentWorkers} def={defaults.orchestration.maxConcurrentWorkers} />
+          <NumField label="Max managers" value={maxManagers} set={setMaxManagers} effective={resolved.orchestration.maxConcurrentManagers} def={defaults.orchestration.maxConcurrentManagers} />
+          <NumField label="Recycle @ ctx ratio" value={recycle} set={setRecycle} effective={resolved.orchestration.recycleAtContextRatio} def={defaults.orchestration.recycleAtContextRatio} />
+          <NumField label="Idle nudge (min)" value={idleNudge} set={setIdleNudge} effective={resolved.orchestration.idleNudgeMinutes} def={defaults.orchestration.idleNudgeMinutes} />
+          <NumField label="Max unanswered nudges" value={maxUnanswered} set={setMaxUnanswered} effective={resolved.orchestration.maxUnansweredNudges} def={defaults.orchestration.maxUnansweredNudges} />
+          <NumField label="Idle snooze (min)" value={idleSnooze} set={setIdleSnooze} effective={resolved.orchestration.idleDefaultSnoozeMinutes} def={defaults.orchestration.idleDefaultSnoozeMinutes} />
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Scheduler enabled</span>
-            <TriSelect value={scheduler} set={setScheduler} effective={resolved.orchestration.schedulerEnabled} />
+            <TriSelect value={scheduler} set={setScheduler} def={defaults.orchestration.schedulerEnabled} />
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Gate command</span>
@@ -191,7 +203,7 @@ function ConfigEditor({ project }: { project: Project }) {
         <SectionLabel>Doc Lint</SectionLabel>
         <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 280 }}>
           <span style={fieldLabel}>Vault-lint hook on .md writes</span>
-          <TriSelect value={docLint} set={setDocLint} effective={resolved.docLint} />
+          <TriSelect value={docLint} set={setDocLint} def={defaults.docLint} />
         </label>
       </Panel>
 
@@ -230,22 +242,26 @@ function effHint(v: unknown): string {
   return `effective: ${String(v)}`;
 }
 
-function NumField({ label, value, set, effective }:
-  { label: string; value: string; set: (v: string) => void; effective: number }) {
+// `effective` = the current resolved value (shown as the "effective:" hint); `def` = the platform
+// default (shown in the "inherit (…)" placeholder, i.e. what blanking the field reverts to).
+function NumField({ label, value, set, effective, def }:
+  { label: string; value: string; set: (v: string) => void; effective: number; def: number }) {
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={fieldLabel}>{label}</span>
-      <Input value={value} onChange={(e) => set(e.target.value)} inputMode="decimal" placeholder={`inherit (${effective})`} />
+      <Input value={value} onChange={(e) => set(e.target.value)} inputMode="decimal" placeholder={`inherit (${def})`} />
       <Hint>{effHint(effective)}</Hint>
     </label>
   );
 }
 
-function TriSelect({ value, set, effective }:
-  { value: TriState; set: (v: TriState) => void; effective: boolean }) {
+// `def` = the platform default shown in the "— inherit (…)" option (the revert target), NOT the
+// current override-effective value.
+function TriSelect({ value, set, def }:
+  { value: TriState; set: (v: TriState) => void; def: boolean }) {
   return (
     <Select value={value} onChange={(e) => set(e.target.value as TriState)}>
-      <option value="inherit">— inherit ({String(effective)})</option>
+      <option value="inherit">— inherit ({String(def)})</option>
       <option value="true">true</option>
       <option value="false">false</option>
     </Select>
