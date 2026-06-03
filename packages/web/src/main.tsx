@@ -7,11 +7,14 @@ import App from "./App";
 
 // Surface mutation failures instead of swallowing them — resume/stop/fork/input used to fail
 // silently (a dead-looking button). One global handler covers every mutation; no per-call onError.
+// A mutation that renders its own inline error opts out of the blocking alert via `meta.inlineError`
+// (avoids a redundant + automation-wedging modal — e.g. Settings save).
 const queryClient = new QueryClient({
   mutationCache: new MutationCache({
-    onError: (err) => {
+    onError: (err, _vars, _ctx, mutation) => {
       // eslint-disable-next-line no-console
       console.error("[action failed]", err);
+      if (mutation.meta?.inlineError) return;
       window.alert(`Action failed: ${err instanceof Error ? err.message : String(err)}`);
     },
   }),
