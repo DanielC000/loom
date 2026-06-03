@@ -3,6 +3,7 @@ import { ensureDirs, PORT } from "./paths.js";
 import { Db } from "./db.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { seedGlobalSkills } from "./skills/seed.js";
+import { seedDefaultProfiles } from "./profiles/seed.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
 import { TaskMcpRouter } from "./mcp/server.js";
@@ -22,6 +23,10 @@ async function main(): Promise<void> {
   const seeded = seedGlobalSkills();
   if (seeded.length) console.log(`[boot] seeded global skill(s): ${seeded.join(", ")}`);
   const db = new Db();
+  // Seed Loom's bundled Agent Profiles (platform-level "who") into the profiles table, seed-if-absent
+  // like the skills seed — additive, idempotent, preserves user edits. Phase-1 read path only.
+  const seededProfiles = seedDefaultProfiles(db);
+  if (seededProfiles.length) console.log(`[boot] seeded default profile(s): ${seededProfiles.join(", ")}`);
   const recovered = db.recoverStaleSessions();
   if (recovered > 0) console.log(`[boot] reconciled ${recovered} stale session(s) -> exited`);
   const dead = sweepDeadSessions(db);

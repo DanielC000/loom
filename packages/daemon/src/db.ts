@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { DB_PATH } from "./paths.js";
 import type {
-  Project, Topic, Session, Task, ProjectConfigOverride,
+  Project, Topic, Session, Task, ProjectConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake,
 } from "@loom/shared";
@@ -16,12 +16,27 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at TEXT NOT NULL,
   archived_at TEXT
 );
+-- Agent Profiles (platform-level "who": role + prompt + tool/permission/model/icon). NO project FK —
+-- a profile is cross-project, reused by topics across projects. allow_delta/skills are JSON text.
+CREATE TABLE IF NOT EXISTS profiles (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  role TEXT,                              -- NULL = plain | 'manager' | 'worker' | 'platform'
+  startup_prompt TEXT NOT NULL DEFAULT '',
+  allow_delta TEXT NOT NULL DEFAULT '[]', -- JSON string[] (permission allowlist delta)
+  skills TEXT,                            -- JSON string[] | NULL (NULL = deliver all skills)
+  model TEXT,                             -- model id | NULL (NULL = engine default)
+  icon TEXT                               -- UI icon | NULL
+);
 CREATE TABLE IF NOT EXISTS topics (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id),
   name TEXT NOT NULL,
   startup_prompt TEXT NOT NULL DEFAULT '',
-  position INTEGER NOT NULL DEFAULT 0
+  position INTEGER NOT NULL DEFAULT 0,
+  -- nullable Agent Profile ref (also added to existing DBs via the idempotent migration below).
+  -- plain TEXT (no FK), matching the migration's ADD COLUMN so fresh + migrated DBs converge.
+  profile_id TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
@@ -115,6 +130,11 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   rate_limit_deadline: "TEXT",
 };
 
+/** Columns added to `topics` after phase-1; applied to existing DBs by migrateTopics(). */
+const TOPIC_ADDED_COLUMNS: Record<string, string> = {
+  profile_id: "TEXT",
+};
+
 type Row = Record<string, unknown>;
 
 export class Db {
@@ -124,6 +144,7 @@ export class Db {
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
     this.migrateSessions();
+    this.migrateTopics();
   }
 
   /**
@@ -140,6 +161,21 @@ export class Db {
       if (!have.has(name)) this.db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
     }
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)");
+  }
+
+  /**
+   * Idempotent additive migration for `topics` — ADD COLUMN any post-phase-1 column missing from an
+   * existing DB (fresh installs already have them via CREATE TABLE). Mirrors migrateSessions; the
+   * nullable `profile_id` defaults to NULL on legacy rows ⇒ resolveProfile maps them to today's
+   * behavior. (The `profiles` table itself is created by the CREATE TABLE IF NOT EXISTS in SCHEMA.)
+   */
+  private migrateTopics(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(topics)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(TOPIC_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE topics ADD COLUMN ${name} ${type}`);
+    }
   }
 
   /** Release the SQLite handle (used by hermetic tests to free the file before cleanup). */
@@ -182,9 +218,9 @@ export class Db {
   }
   insertTopic(t: Topic): void {
     this.db.prepare(
-      `INSERT INTO topics (id,project_id,name,startup_prompt,position)
-       VALUES (@id,@projectId,@name,@startupPrompt,@position)`,
-    ).run(t);
+      `INSERT INTO topics (id,project_id,name,startup_prompt,position,profile_id)
+       VALUES (@id,@projectId,@name,@startupPrompt,@position,@profileId)`,
+    ).run({ ...t, profileId: t.profileId ?? null });
   }
   /** Partial edit of a topic preset (name / startup prompt). Omitted fields are left as-is. */
   updateTopic(id: string, patch: { name?: string; startupPrompt?: string }): void {
@@ -193,6 +229,43 @@ export class Db {
     if (names.length === 0) return;
     const set = names.map((c) => `${c} = ?`).join(", ");
     this.db.prepare(`UPDATE topics SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
+
+  // --- profiles (platform-level Agent Profiles; phase-1 read path + seed) ---
+  listProfiles(): Profile[] {
+    return (this.db.prepare("SELECT * FROM profiles ORDER BY name").all() as Row[]).map(toProfile);
+  }
+  getProfile(id: string): Profile | undefined {
+    const r = this.db.prepare("SELECT * FROM profiles WHERE id = ?").get(id) as Row | undefined;
+    return r ? toProfile(r) : undefined;
+  }
+  insertProfile(p: Profile): void {
+    this.db.prepare(
+      `INSERT INTO profiles (id,name,role,startup_prompt,allow_delta,skills,model,icon)
+       VALUES (@id,@name,@role,@startupPrompt,@allowDelta,@skills,@model,@icon)`,
+    ).run({
+      id: p.id, name: p.name, role: p.role ?? null, startupPrompt: p.startupPrompt,
+      // string[] columns persist as JSON text; skills NULL means "deliver all".
+      allowDelta: JSON.stringify(p.allowDelta ?? []),
+      skills: p.skills == null ? null : JSON.stringify(p.skills),
+      model: p.model ?? null, icon: p.icon ?? null,
+    });
+  }
+  /** Partial edit of a profile. Provided fields are written (null clears); omitted are left as-is. */
+  updateProfile(id: string, patch: Partial<Omit<Profile, "id">>): void {
+    const cols: Record<string, unknown> = {
+      name: patch.name,
+      role: patch.role,
+      startup_prompt: patch.startupPrompt,
+      allow_delta: patch.allowDelta === undefined ? undefined : JSON.stringify(patch.allowDelta),
+      skills: patch.skills === undefined ? undefined : patch.skills === null ? null : JSON.stringify(patch.skills),
+      model: patch.model,
+      icon: patch.icon,
+    };
+    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
+    if (names.length === 0) return;
+    const set = names.map((c) => `${c} = ?`).join(", ");
+    this.db.prepare(`UPDATE profiles SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
   }
 
   // --- sessions ---
@@ -472,6 +545,20 @@ function toTopic(r0: unknown): Topic {
   return {
     id: r.id as string, projectId: r.project_id as string, name: r.name as string,
     startupPrompt: r.startup_prompt as string, position: r.position as number,
+    // null on legacy/plain rows ⇒ resolveProfile maps to today's behavior
+    profileId: (r.profile_id as string) ?? null,
+  };
+}
+function toProfile(r0: unknown): Profile {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, name: r.name as string,
+    role: (r.role as SessionRole) ?? null,
+    startupPrompt: r.startup_prompt as string,
+    allowDelta: JSON.parse((r.allow_delta as string) || "[]") as string[],
+    skills: r.skills == null ? null : (JSON.parse(r.skills as string) as string[]),
+    model: (r.model as string) ?? null,
+    icon: (r.icon as string) ?? null,
   };
 }
 function toSession(r0: unknown): Session {

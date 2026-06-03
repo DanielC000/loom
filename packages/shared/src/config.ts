@@ -1,5 +1,6 @@
 // Config model: platform default -> per-project override, resolved through ONE merge fn.
 // This is also the machine-writable schema phase-2 AI-driven project creation will target.
+import type { Profile, SessionRole, Topic } from "./types.js";
 
 export interface KanbanColumn {
   key: string;
@@ -126,6 +127,54 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   orchestration: { gateCommand: "", maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80 },
   docLint: true, // Pillar D vault-lint hook on by default
 };
+
+// --- Agent Profiles: the resolved "who" ------------------------------------------------------
+
+/**
+ * The effective "who" for a session — a topic resolved against its (optional) Agent Profile.
+ * Sibling of ResolvedConfig: one shape the spawn path will read (P2), produced by ONE resolver.
+ */
+export interface ResolvedProfile {
+  /** Orchestration role; null = a plain session (today's default). */
+  role: SessionRole | null;
+  /** The startup prompt to inject on a NEW session. */
+  startupPrompt: string;
+  /** Permission allowlist delta the profile contributes (layered onto the config allow at spawn). */
+  allow: string[];
+  /** Skill-name subset to deliver; null = deliver all (today's behavior). */
+  skills: string[] | null;
+  /** Model id to spawn with; null = engine default. */
+  model: string | null;
+  /** UI icon; null = none. */
+  icon: string | null;
+}
+
+/**
+ * Resolve a topic + its (optional) Agent Profile into the effective spawn shape — the sibling of
+ * resolveConfig for the "who". Precedence: the profile supplies role/allow/skills/model/icon; the
+ * topic's own startupPrompt overrides the profile's (`topic.startupPrompt ?? profile.startupPrompt`).
+ * A null/absent profile is the BACKSTOP — it yields EXACTLY today's behavior: a plain (role-null)
+ * session, the topic's own prompt, and no allow delta / skill filter / model / icon.
+ */
+export function resolveProfile(
+  // A full Topic is assignable; the prompt is widened to nullable so a prompt-less topic can fall
+  // back to the profile's prompt (the per-topic override is opt-in, not forced).
+  topic: { startupPrompt: string | null },
+  profile?: Profile | null,
+): ResolvedProfile {
+  if (!profile) {
+    return { role: null, startupPrompt: topic.startupPrompt ?? "", allow: [], skills: null, model: null, icon: null };
+  }
+  return {
+    role: profile.role ?? null,
+    // Per-topic override: the topic's own prompt wins when set; else fall back to the profile's.
+    startupPrompt: topic.startupPrompt ?? profile.startupPrompt,
+    allow: profile.allowDelta ?? [],
+    skills: profile.skills ?? null,
+    model: profile.model ?? null,
+    icon: profile.icon ?? null,
+  };
+}
 
 /** The single config-resolution mechanism, reused everywhere. */
 export function resolveConfig(override: ProjectConfigOverride | undefined): ResolvedConfig {
