@@ -2,6 +2,7 @@ import { useMemo, useState, type CSSProperties } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
+import { bySessionActivity, mostRecentActivity } from "../lib/sessions";
 import { TerminalPane } from "../components/Terminal";
 import { SessionWakes } from "../components/SessionWakes";
 import { SessionQueue } from "../components/SessionQueue";
@@ -33,17 +34,17 @@ export default function Terminals() {
   });
   const live = (sessions.data ?? []).filter((s) => s.processState === "live");
   const projectNames = useMemo(() => [...new Set(live.map((s) => s.projectName))].sort(), [live]);
-  // Stable tile order: sort by spawn time so a tile keeps its place once spawned. (The backend
-  // lists sessions by last_activity DESC, which would otherwise reshuffle tiles on every prompt.)
+  // Tile order: the shared activity comparator (live-first → most-recent-active → spawn-order), so
+  // the session you're driving floats up, consistent with every other session list.
   const shown = (filter ? live.filter((s) => s.projectName === filter) : live)
-    .slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  // When unfiltered ("All"), bucket the tiles by project so each project becomes its own
-  // horizontal group under a header. Insertion order follows the createdAt sort above; group
-  // keys are then alphabetised so the lanes have a stable, predictable order.
+    .slice().sort(bySessionActivity);
+  // When unfiltered ("All"), bucket the tiles by project so each project becomes its own horizontal
+  // group under a header. Within-group order follows the activity sort above; the lanes themselves
+  // rank by their most-recent-active member, so the busiest project sits up top.
   const groups = useMemo(() => {
     const m = new Map<string, SessionListItem[]>();
     for (const s of shown) (m.get(s.projectName) ?? m.set(s.projectName, []).get(s.projectName)!).push(s);
-    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    return [...m.entries()].sort((a, b) => mostRecentActivity(b[1]) - mostRecentActivity(a[1]));
   }, [shown]);
 
   const renderTile = (s: SessionListItem) => (

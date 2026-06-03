@@ -3,6 +3,7 @@ import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/rea
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
+import { bySessionActivity, mostRecentActivity } from "../lib/sessions";
 import { useAttention, isRateLimited, type AttentionItem } from "../lib/attention";
 import { Panel, SectionLabel, StatusPill, Badge, Chip, Meter, Button, Dot } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
@@ -44,14 +45,14 @@ export default function MissionControl() {
     .flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? [])
     .sort((a, b) => +new Date(b.ts) - +new Date(a.ts));
 
-  // Order projects by recent activity: each project ranks by the most-recent lastActivity across
-  // any of its managers/workers, most-recent first — so the project you're actively driving floats up.
-  const recentByProject = new Map<string, number>();
-  for (const s of [...managers, ...workers]) {
-    const ts = +new Date(s.lastActivity);
-    recentByProject.set(s.projectName, Math.max(recentByProject.get(s.projectName) ?? 0, ts));
-  }
-  const projectNames = [...recentByProject.keys()].sort((a, b) => recentByProject.get(b)! - recentByProject.get(a)!);
+  // Order projects by recent activity: each project ranks by its most-recent-active member across
+  // any of its managers/workers, most-recent first — so the project you're actively driving floats
+  // up. (Same project-tier behaviour as before, now via the shared mostRecentActivity util.)
+  const sessionsByProject = new Map<string, SessionListItem[]>();
+  for (const s of [...managers, ...workers])
+    (sessionsByProject.get(s.projectName) ?? sessionsByProject.set(s.projectName, []).get(s.projectName)!).push(s);
+  const projectNames = [...sessionsByProject.keys()]
+    .sort((a, b) => mostRecentActivity(sessionsByProject.get(b)!) - mostRecentActivity(sessionsByProject.get(a)!));
 
   const refreshStatus = () => qc.invalidateQueries({ queryKey: ["orchStatus"] });
   const refreshSessions = () => qc.invalidateQueries({ queryKey: ["allSessions"] });
@@ -92,15 +93,19 @@ export default function MissionControl() {
           <SectionLabel>Fleet</SectionLabel>
           {projectNames.length === 0 && <Panel><span style={{ color: color.textMuted }}>No active sessions.</span></Panel>}
           {projectNames.map((pn) => {
-            const projManagers = managers.filter((m) => m.projectName === pn);
-            const looseWorkers = workers.filter((w) => w.projectName === pn && !projManagers.some((m) => m.id === w.parentSessionId));
+            // Within a project: managers ordered by activity; each manager's workers ordered by
+            // activity under it (hierarchy intact); orphan workers ordered among themselves.
+            const projManagers = managers.filter((m) => m.projectName === pn).sort(bySessionActivity);
+            const looseWorkers = workers
+              .filter((w) => w.projectName === pn && !projManagers.some((m) => m.id === w.parentSessionId))
+              .sort(bySessionActivity);
             return (
               <Panel key={pn} style={{ marginBottom: 12 }}>
                 <div style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text, marginBottom: 8 }}>{pn}</div>
                 {projManagers.map((m) => (
                   <div key={m.id} style={{ marginBottom: 8 }}>
                     <FleetRow s={m} star />
-                    {workers.filter((w) => w.parentSessionId === m.id).map((w) => (
+                    {workers.filter((w) => w.parentSessionId === m.id).sort(bySessionActivity).map((w) => (
                       <div key={w.id} style={{ paddingLeft: 16 }}><FleetRow s={w} /></div>
                     ))}
                   </div>
