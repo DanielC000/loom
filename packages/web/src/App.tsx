@@ -10,6 +10,7 @@ import Board from "./pages/Board";
 import Orchestration from "./pages/Orchestration";
 import ReviewPanel from "./pages/ReviewPanel";
 import Skills from "./pages/Skills";
+import Profiles from "./pages/Profiles";
 import { NavTab, Badge } from "./components/ui";
 import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
@@ -71,6 +72,7 @@ export default function App() {
           <NavTab to="/vault">Vault</NavTab>
           <NavTab to="/git">Git</NavTab>
           <NavTab to="/skills">Skills</NavTab>
+          <NavTab to="/profiles">Profiles</NavTab>
         </nav>
         <span style={{ flex: 1 }} />
         <Bell />
@@ -87,6 +89,7 @@ export default function App() {
           <Route path="/vault" element={<Vault />} />
           <Route path="/git" element={<Git />} />
           <Route path="/skills" element={<Skills />} />
+          <Route path="/profiles" element={<Profiles />} />
         </Routes>
       </main>
     </div>
