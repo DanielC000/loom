@@ -7,7 +7,7 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const BASE = "http://127.0.0.1:4317";
+const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const now = new Date().toISOString();
 
 // --- seed the daemon's DB directly ---

@@ -21,7 +21,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
-const BASE = "http://127.0.0.1:4317";
+const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const post = async (u, b) => (await fetch(BASE + u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b ?? {}) })).json();
 const postRaw = (u, b) => fetch(BASE + u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b ?? {}) });
 const get = async (u) => (await fetch(BASE + u)).json();

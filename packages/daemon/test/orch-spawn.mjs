@@ -17,7 +17,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { removeWorktree } from "../dist/git/worktrees.js";
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
-const BASE = "http://127.0.0.1:4317";
+const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
 if (!LOOM) { console.error("LOOM_HOME must be set (and match the daemon's)."); process.exit(2); }
 const DB_FILE = path.join(LOOM, "loom.db");

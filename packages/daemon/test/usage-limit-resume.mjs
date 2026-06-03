@@ -18,7 +18,7 @@ import { detectUsageLimit, rateLimitedUntil, rateLimitDeadline } from "../dist/o
 import { recordClaudeRateLimit, isLikelyNearClaudeUsageLimit } from "../dist/orchestration/usage-awareness.js";
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
-const BASE = "http://127.0.0.1:4317";
+const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
 if (!LOOM) { console.error("LOOM_HOME must be set (and match the daemon's)."); process.exit(2); }
 const USAGE_FILE = path.join(LOOM, "tmp", "claude-usage.json");

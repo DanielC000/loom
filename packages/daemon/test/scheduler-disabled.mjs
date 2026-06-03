@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-const BASE = "http://127.0.0.1:4317";
+const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
 if (!LOOM) { console.error("LOOM_HOME must be set (and match the daemon's)."); process.exit(2); }
 const DB_FILE = path.join(LOOM, "loom.db");

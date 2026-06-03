@@ -6,7 +6,7 @@ import { buildSpawnArgs } from "../dist/pty/host.js";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const mcpServers = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } };
+const mcpServers = { "loom-tasks": { type: "http", url: `http://127.0.0.1:${process.env.LOOM_PORT || 4317}/mcp/s1` } };
 
 // A kickoff prompt that STARTS WITH A DASH (the H2 footgun) must survive as positional text.
 {
