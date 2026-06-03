@@ -63,6 +63,27 @@ export interface OrchestrationConfig {
    * prompts; the manager performs the handoff. Default 0.80; 0 disables. Env: LOOM_RECYCLE_CONTEXT_RATIO.
    */
   recycleAtContextRatio: number;
+  /**
+   * Asleep-at-the-Wheel idle-manager watchdog (FOUNDATION ONLY — nothing reads this yet; the
+   * IdleWatcher ticker is a later task). Minutes a LIVE manager may sit idle (busy=false, no live
+   * workers, not snoozed/suppressed) before the watcher nudges it once. Default 45; 0 disables the
+   * watcher entirely. Env LOOM_IDLE_NUDGE_MINUTES sets the platform default here (a per-project
+   * override still wins). Sibling of recycleAtContextRatio.
+   */
+  idleNudgeMinutes: number;
+  /**
+   * Idle watchdog escalation cap: after this many CONSECUTIVE unanswered idle nudges (no idle_report
+   * and no new orchestration activity) the watcher backs off and escalates to the human (policy →
+   * suppressed) instead of nudging into the void. Default 2. (Foundation only — unread for now.)
+   */
+  maxUnansweredNudges: number;
+  /**
+   * Idle watchdog snooze fallback: minutes to snooze when a manager reports `waiting` WITHOUT an
+   * explicit `minutes`. Default 30. (Foundation only — unread for now.) NOTE: the design note
+   * specifies this key but gives no number; 30 chosen as a conservative re-check interval — the
+   * manager can always pass explicit `minutes` for a longer wait. Confirm/adjust when wiring.
+   */
+  idleDefaultSnoozeMinutes: number;
 }
 
 /** The fully-resolved, effective config for a project. */
@@ -124,7 +145,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80 },
+  orchestration: { gateCommand: "", maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30 },
   docLint: true, // Pillar D vault-lint hook on by default
 };
 
@@ -184,10 +205,33 @@ export function resolveProfile(
   };
 }
 
+/**
+ * Read the LOOM_IDLE_NUDGE_MINUTES env override for the idle-watchdog leash (the only one of the new
+ * orchestration keys with an env var). Returned at the platform-default layer of resolveConfig, so a
+ * per-project override still wins. Returns undefined when unset / blank / non-numeric so the hardcoded
+ * default applies; an explicit "0" is honored as a real value (0 disables the watcher) — which is why
+ * we parse explicitly instead of the `Number(...) || default` idiom (that would swallow 0). Guarded
+ * for `process`-less environments (shared is also bundled into the browser web app, which never sets
+ * this var).
+ */
+function envIdleNudgeMinutes(): number | undefined {
+  const raw = typeof process !== "undefined" ? process.env?.LOOM_IDLE_NUDGE_MINUTES : undefined;
+  if (raw == null || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /** The single config-resolution mechanism, reused everywhere. */
 export function resolveConfig(override: ProjectConfigOverride | undefined): ResolvedConfig {
   const d = PLATFORM_DEFAULTS;
-  if (!override) return structuredClone(d);
+  // The LOOM_IDLE_NUDGE_MINUTES env override applies at the platform-default layer, so it must be
+  // honored even on the no-override fast path (otherwise `resolveConfig(undefined)` would ignore it).
+  const envIdle = envIdleNudgeMinutes();
+  if (!override) {
+    const base = structuredClone(d);
+    if (envIdle !== undefined) base.orchestration.idleNudgeMinutes = envIdle;
+    return base;
+  }
   return {
     kanbanColumns: override.kanbanColumns ?? structuredClone(d.kanbanColumns),
     permission: {
@@ -207,6 +251,11 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
       maxConcurrentManagers: override.orchestration?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers,
       schedulerEnabled: override.orchestration?.schedulerEnabled ?? d.orchestration.schedulerEnabled,
       recycleAtContextRatio: override.orchestration?.recycleAtContextRatio ?? d.orchestration.recycleAtContextRatio,
+      // Precedence: per-project override > LOOM_IDLE_NUDGE_MINUTES env > hardcoded default. `??` (not
+      // `||`) so an explicit 0 at any layer is preserved (0 disables the watcher).
+      idleNudgeMinutes: override.orchestration?.idleNudgeMinutes ?? envIdle ?? d.orchestration.idleNudgeMinutes,
+      maxUnansweredNudges: override.orchestration?.maxUnansweredNudges ?? d.orchestration.maxUnansweredNudges,
+      idleDefaultSnoozeMinutes: override.orchestration?.idleDefaultSnoozeMinutes ?? d.orchestration.idleDefaultSnoozeMinutes,
     },
     docLint: override.docLint ?? d.docLint,
   };

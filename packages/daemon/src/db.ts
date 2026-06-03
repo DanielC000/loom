@@ -64,7 +64,13 @@ CREATE TABLE IF NOT EXISTS sessions (
   ctx_updated_at TEXT,
   model TEXT,
   rate_limited_until TEXT,
-  rate_limit_deadline TEXT
+  rate_limit_deadline TEXT,
+  -- Asleep-at-the-Wheel idle watchdog per-manager state (foundation; nothing reads it yet). Added to
+  -- existing DBs via the idempotent migration below; mirrors the rate-limit columns above.
+  idle_nudge_policy TEXT NOT NULL DEFAULT 'watching', -- 'watching' | 'snoozed' | 'suppressed'
+  idle_nudge_snooze_until TEXT,                        -- ISO ts | NULL (silent until this passes)
+  last_idle_nudge_at TEXT,                             -- ISO ts | NULL (last nudge fired)
+  idle_nudge_unanswered INTEGER NOT NULL DEFAULT 0     -- consecutive unanswered nudges
 );
 -- Append-only orchestration audit trail (manager↔worker timeline; UI timeline in #18).
 CREATE TABLE IF NOT EXISTS orchestration_events (
@@ -128,6 +134,12 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   model: "TEXT",
   rate_limited_until: "TEXT",
   rate_limit_deadline: "TEXT",
+  // Asleep-at-the-Wheel idle watchdog state (foundation). NOT NULL + constant DEFAULT is legal on
+  // ALTER TABLE ADD COLUMN, so legacy rows backfill to 'watching' / 0.
+  idle_nudge_policy: "TEXT NOT NULL DEFAULT 'watching'",
+  idle_nudge_snooze_until: "TEXT",
+  last_idle_nudge_at: "TEXT",
+  idle_nudge_unanswered: "INTEGER NOT NULL DEFAULT 0",
 };
 
 /** Columns added to `topics` after phase-1; applied to existing DBs by migrateTopics(). */
@@ -136,6 +148,16 @@ const TOPIC_ADDED_COLUMNS: Record<string, string> = {
 };
 
 type Row = Record<string, unknown>;
+
+/** Asleep-at-the-Wheel idle-watchdog nudge policy (foundation). */
+export type IdleNudgePolicy = "watching" | "snoozed" | "suppressed";
+/** Per-manager idle-watchdog state read back from the sessions row (db-layer, parity w/ rate-limit). */
+export interface IdleNudgeState {
+  policy: IdleNudgePolicy;
+  snoozeUntil: string | null;
+  lastIdleNudgeAt: string | null;
+  unanswered: number;
+}
 
 export class Db {
   private db: Database.Database;
@@ -419,6 +441,45 @@ export class Db {
   listRateLimitEpisodes(): Session[] {
     return (this.db.prepare("SELECT * FROM sessions WHERE rate_limit_deadline IS NOT NULL AND process_state = 'live'")
       .all() as Row[]).map(toSession);
+  }
+
+  // --- Asleep-at-the-Wheel idle watchdog state (FOUNDATION; persisted per-manager, parity with the
+  // rate-limit accessors above). Nothing reads/writes these yet — the IdleWatcher ticker and the
+  // idle_report tool that drive them are later tasks. Kept as dedicated accessors rather than fields
+  // on the shared Session type, so these db-only columns don't spill into the shared shape. ---
+  /** Read the per-session idle-watchdog state; undefined when the session row is missing. */
+  getIdleNudgeState(id: string): IdleNudgeState | undefined {
+    const r = this.db.prepare(
+      "SELECT idle_nudge_policy, idle_nudge_snooze_until, last_idle_nudge_at, idle_nudge_unanswered FROM sessions WHERE id = ?",
+    ).get(id) as Row | undefined;
+    if (!r) return undefined;
+    return {
+      policy: (r.idle_nudge_policy as IdleNudgePolicy) ?? "watching",
+      snoozeUntil: (r.idle_nudge_snooze_until as string) ?? null,
+      lastIdleNudgeAt: (r.last_idle_nudge_at as string) ?? null,
+      unanswered: (r.idle_nudge_unanswered as number) ?? 0,
+    };
+  }
+  /**
+   * Set the nudge policy and (for 'snoozed') its snooze-until. Pass snoozeUntil for 'snoozed' (silent
+   * until then); 'watching'/'suppressed' clear it. Mirrors setRateLimitedUntil's two-field shape.
+   */
+  setIdleNudgePolicy(id: string, policy: IdleNudgePolicy, snoozeUntil: string | null = null): void {
+    this.db.prepare("UPDATE sessions SET idle_nudge_policy = ?, idle_nudge_snooze_until = ? WHERE id = ?")
+      .run(policy, snoozeUntil, id);
+  }
+  /** Record that an idle nudge fired: stamp last_idle_nudge_at and increment the unanswered counter. */
+  recordIdleNudge(id: string, atIso: string): void {
+    this.db.prepare("UPDATE sessions SET last_idle_nudge_at = ?, idle_nudge_unanswered = idle_nudge_unanswered + 1 WHERE id = ?")
+      .run(atIso, id);
+  }
+  /**
+   * Reset the watchdog when a manager produces genuine new orchestration activity (back at work):
+   * policy → 'watching', unanswered → 0, snooze cleared. Mirrors clearRateLimitDeadline's role.
+   */
+  resetIdleNudgeState(id: string): void {
+    this.db.prepare("UPDATE sessions SET idle_nudge_policy = 'watching', idle_nudge_snooze_until = NULL, idle_nudge_unanswered = 0 WHERE id = ?")
+      .run(id);
   }
   /** Append an orchestration audit record (detail serialized to JSON). */
   appendEvent(evt: OrchestrationEvent): void {
