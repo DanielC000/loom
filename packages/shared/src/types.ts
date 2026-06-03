@@ -68,6 +68,14 @@ export interface Profile {
   model: string | null;
   /** UI icon (emoji or name); null = none. */
   icon: string | null;
+  /**
+   * Opt-in browser-automation capability: when true, a session under this rig is spawned with its
+   * OWN per-session stdio Playwright MCP (`@playwright/mcp`) so the agent can drive a headless
+   * browser. Default OFF (absent/false) and fully additive — a rig without it spawns byte-identically
+   * to today. HUMAN-set only (Profiles UI / REST), like role/allow: NEVER exposed via an agent MCP
+   * tool (a browser is a navigate-anywhere capability — same capability-gating posture as gateCommand).
+   */
+  browserTesting?: boolean;
 }
 
 // --- Session FSM (explicit; replaces Jinn's loose status enum) ---
@@ -123,6 +131,14 @@ export interface Session {
    * without recovery, the watcher abandons auto-resume and marks the session errored (lastError).
    */
   rateLimitDeadline?: string | null;
+  /**
+   * Opt-in browser-automation capability, resolved from the session's Profile at spawn and PINNED
+   * here (mirrors `role`): a per-session stdio Playwright MCP is injected iff this is true. Persisted
+   * so EVERY respawn path (resume / fork / recycle) carries the capability forward unchanged — a
+   * resumed browser-worker keeps its browser, exactly as role is re-passed. Absent/false on every
+   * existing session ⇒ no Playwright MCP, byte-identical spawn.
+   */
+  browserTesting?: boolean;
 }
 
 /** Append-only orchestration audit record (the manager↔worker timeline). */

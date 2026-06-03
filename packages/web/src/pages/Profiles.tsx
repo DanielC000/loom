@@ -10,7 +10,7 @@ import { color, font, tone, type Tone } from "../theme";
 // the reset endpoint also matches by name server-side (a renamed bundled profile is no longer
 // matchable, the documented limitation shared with the skill reset).
 const BUNDLED_PROFILE_NAMES = new Set([
-  "Orchestrator", "Planning & Triage", "Dev", "Bugfix", "Content Strategy", "Platform-lead",
+  "Orchestrator", "Planning & Triage", "Dev", "Bugfix", "QA Tester", "Content Strategy", "Platform-lead",
 ]);
 
 // A profile's role, as a coloured pill. null = a plain (non-orchestration) session — today's default.
@@ -109,6 +109,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
   const [description, setDescription] = useState(profile.description);
   const [allowText, setAllowText] = useState(profile.allowDelta.join("\n"));
   const [icon, setIcon] = useState(profile.icon ?? "");
+  const [browserTesting, setBrowserTesting] = useState(profile.browserTesting ?? false);
   const [confirmDel, setConfirmDel] = useState(false);
   const [confirmRevert, setConfirmRevert] = useState(false);
 
@@ -118,7 +119,8 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
     (role || null) !== profile.role ||
     description !== profile.description ||
     JSON.stringify(allowDelta) !== JSON.stringify(profile.allowDelta) ||
-    (icon || null) !== profile.icon;
+    (icon || null) !== profile.icon ||
+    browserTesting !== (profile.browserTesting ?? false);
 
   const fieldLabel = { fontFamily: font.head as string, fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: color.textDim };
   const ta = {
@@ -126,7 +128,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
     background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
   };
 
-  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); };
+  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setBrowserTesting(profile.browserTesting ?? false); };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
@@ -176,6 +178,20 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
           style={{ ...ta, minHeight: 80 }} placeholder={"Bash(pnpm *)\nRead(*)"} />
       </label>
 
+      {/* Opt-in browser-automation: a session under this rig spawns with its own per-session headless
+          Playwright MCP. A navigate-anywhere capability — human-set here only, never via an agent tool. */}
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+        <input type="checkbox" checked={browserTesting} onChange={(e) => setBrowserTesting(e.target.checked)} style={{ marginTop: 2 }} />
+        <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <span style={fieldLabel}>Browser testing</span>
+          <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+            Inject a per-session Playwright MCP so this rig can drive its own isolated headless browser
+            (navigate / click / fill / assert). Gated — adds ~20-30 tools per turn and a navigate-anywhere
+            capability, so leave off unless this rig does end-to-end UI testing.
+          </span>
+        </span>
+      </label>
+
       {/* model + skills are part of the Profile model but their spawn-wiring lands in a later phase. */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, opacity: 0.55 }}>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -192,7 +208,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
       <span style={{ flex: 1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || !name.trim() || saving}
-          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null })}>
+          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, browserTesting })}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {dirty

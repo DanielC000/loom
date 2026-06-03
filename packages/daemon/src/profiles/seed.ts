@@ -54,6 +54,17 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
     icon: null,
   },
   {
+    name: "QA Tester",
+    role: "worker",
+    description:
+      "Browser-testing worker rig: drives its OWN isolated headless browser (a per-session Playwright MCP) to exercise the running app end-to-end — navigate, click, fill, assert — on a worktree branch, then report. The one bundled rig with browser automation enabled.",
+    allowDelta: [],
+    skills: null,
+    model: null,
+    icon: "🧪",
+    browserTesting: true, // THE browser-capable profile — injects the per-session Playwright MCP at spawn
+  },
+  {
     name: "Content Strategy",
     role: null,
     description: "Plain rig for content and strategy work, grounded in the project's vault notes.",

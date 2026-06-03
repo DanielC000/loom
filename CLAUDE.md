@@ -56,6 +56,13 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
 - **Sessions outlive viewers:** closing a ws never kills the pty. Fixed pty geometry (120×40),
   no resize. Stop: graceful (Ctrl-C ×2, clean) default, hard (`pty.kill`) escalation — both
   resumable and orphan-free (node-pty Job Object).
+- **Opt-in worker browser (`browserTesting`):** a session whose resolved Profile sets `browserTesting`
+  spawns with its OWN per-session stdio Playwright MCP (`@playwright/mcp`, absolute node + absolute
+  `cli.js`, `--headless --isolated`) and that tool surface allowlisted. Default OFF + fully additive
+  (every existing spawn byte-identical when off); pinned on the session row so resume/fork/recycle
+  keep the browser. HUMAN-set only (Profiles UI/REST) — never an agent MCP tool (same capability-gating
+  posture as gateCommand/shell). The MCP launches Chromium lazily on first use; needs a one-time
+  `npx playwright install chromium`. The bundled "QA Tester" profile is the browser-capable rig.
 
 ## Conventions
 - Node 22 + TypeScript, ESM (`NodeNext`) in daemon/shared; `bundler` resolution in web.

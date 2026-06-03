@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS profiles (
   allow_delta TEXT NOT NULL DEFAULT '[]', -- JSON string[] (permission allowlist delta)
   skills TEXT,                            -- JSON string[] | NULL (NULL = deliver all skills)
   model TEXT,                             -- model id | NULL (NULL = engine default)
-  icon TEXT                               -- UI icon | NULL
+  icon TEXT,                              -- UI icon | NULL
+  browser_testing INTEGER NOT NULL DEFAULT 0 -- opt-in: inject a per-session Playwright MCP at spawn
 );
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
@@ -54,6 +55,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_error TEXT,
   -- phase-2 orchestration (also added to existing DBs via the idempotent migration below)
   role TEXT,
+  -- opt-in browser-automation, pinned at spawn from the session's Profile (mirrors role): a
+  -- per-session Playwright MCP is injected iff 1. Carried across every respawn (resume/fork/recycle).
+  browser_testing INTEGER NOT NULL DEFAULT 0,
   parent_session_id TEXT,
   task_id TEXT,
   worktree_path TEXT,
@@ -123,6 +127,9 @@ CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_s
 /** Columns added to `sessions` after phase-1; applied to existing DBs by migrateSessions(). */
 const SESSION_ADDED_COLUMNS: Record<string, string> = {
   role: "TEXT",
+  // opt-in browser-automation (pinned at spawn from the Profile; carried across respawns). NOT NULL +
+  // constant DEFAULT is legal on ALTER TABLE ADD COLUMN, so legacy rows backfill to 0 (off).
+  browser_testing: "INTEGER NOT NULL DEFAULT 0",
   parent_session_id: "TEXT",
   task_id: "TEXT",
   worktree_path: "TEXT",
@@ -148,6 +155,12 @@ const AGENT_ADDED_COLUMNS: Record<string, string> = {
   profile_id: "TEXT",
 };
 
+/** Columns added to `profiles` after the initial rig schema; applied to existing DBs by migrateProfiles(). */
+const PROFILE_ADDED_COLUMNS: Record<string, string> = {
+  // opt-in browser-automation flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
+  browser_testing: "INTEGER NOT NULL DEFAULT 0",
+};
+
 type Row = Record<string, unknown>;
 
 /** Asleep-at-the-Wheel idle-watchdog nudge policy (foundation). */
@@ -170,6 +183,7 @@ export class Db {
     this.db.exec(SCHEMA);
     this.migrateSessions();
     this.migrateAgents();
+    this.migrateProfiles();
   }
 
   /**
@@ -239,6 +253,20 @@ export class Db {
     );
     for (const [name, type] of Object.entries(AGENT_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE agents ADD COLUMN ${name} ${type}`);
+    }
+  }
+
+  /**
+   * Idempotent additive migration for `profiles` — ADD COLUMN any post-rig column missing from an
+   * existing DB (fresh installs already have them via CREATE TABLE). Mirrors migrateAgents; legacy
+   * rows backfill to the column DEFAULT (browser_testing → 0 = off, today's behavior).
+   */
+  private migrateProfiles(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(profiles)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(PROFILE_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE profiles ADD COLUMN ${name} ${type}`);
     }
   }
 
@@ -315,14 +343,15 @@ export class Db {
   }
   insertProfile(p: Profile): void {
     this.db.prepare(
-      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon)
-       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon)`,
+      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing)
+       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting)`,
     ).run({
       id: p.id, name: p.name, role: p.role ?? null, description: p.description,
       // string[] columns persist as JSON text; skills NULL means "deliver all".
       allowDelta: JSON.stringify(p.allowDelta ?? []),
       skills: p.skills == null ? null : JSON.stringify(p.skills),
       model: p.model ?? null, icon: p.icon ?? null,
+      browserTesting: p.browserTesting ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
     });
   }
   /** Partial edit of a profile. Provided fields are written (null clears); omitted are left as-is. */
@@ -335,6 +364,7 @@ export class Db {
       skills: patch.skills === undefined ? undefined : patch.skills === null ? null : JSON.stringify(patch.skills),
       model: patch.model,
       icon: patch.icon,
+      browser_testing: patch.browserTesting === undefined ? undefined : patch.browserTesting ? 1 : 0,
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
@@ -373,12 +403,12 @@ export class Db {
       `INSERT INTO sessions (
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
-         role,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
+         role,browser_testing,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
          ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
-         @role,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
+         @role,@browserTesting,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
          @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline)`,
     ).run({
       ...s,
@@ -386,6 +416,8 @@ export class Db {
       // Orchestration fields are optional on Session; coerce absent ones (undefined) to NULL/0
       // so plain phase-1 session literals insert unchanged.
       role: s.role ?? null,
+      browserTesting: s.browserTesting ? 1 : 0, // off (0) on every plain session literal
+
       parentSessionId: s.parentSessionId ?? null,
       taskId: s.taskId ?? null,
       worktreePath: s.worktreePath ?? null,
@@ -700,6 +732,7 @@ function toProfile(r0: unknown): Profile {
     skills: r.skills == null ? null : (JSON.parse(r.skills as string) as string[]),
     model: (r.model as string) ?? null,
     icon: (r.icon as string) ?? null,
+    browserTesting: (r.browser_testing as number) === 1,
   };
 }
 function toSession(r0: unknown): Session {
@@ -714,6 +747,7 @@ function toSession(r0: unknown): Session {
     lastError: (r.last_error as string) ?? null,
     // phase-2 orchestration (null/0 on plain phase-1 rows)
     role: (r.role as SessionRole) ?? null,
+    browserTesting: (r.browser_testing as number) === 1,
     parentSessionId: (r.parent_session_id as string) ?? null,
     taskId: (r.task_id as string) ?? null,
     worktreePath: (r.worktree_path as string) ?? null,

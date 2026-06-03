@@ -43,7 +43,7 @@ export class SessionService {
    */
   private resolveAgentSpawn(
     agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false,
-  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy } {
+  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean } {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
     const profile = (forcePlain || !agent.profileId) ? undefined : this.db.getProfile(agent.profileId);
@@ -60,6 +60,8 @@ export class SessionService {
       // Same `|| undefined` empties-to-undefined coercion today's start paths use on the agent prompt.
       startupPrompt: resolved.startupPrompt || undefined,
       permission,
+      // Opt-in browser capability from the resolved profile (backstop false under forcePlain / no profile).
+      browserTesting: resolved.browserTesting,
     };
   }
 
@@ -77,7 +79,7 @@ export class SessionService {
     // prompt is always the agent's own). No caller role here (plain "+New"), so the profile's role
     // applies when present. No profile ⇒ role undefined, the config permission unchanged — today's session.
     // forcePlain (P3) pins role to undefined even on a profile agent (see resolveAgentSpawn).
-    const { role, startupPrompt, permission } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false);
+    const { role, startupPrompt, permission, browserTesting } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false);
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -94,6 +96,7 @@ export class SessionService {
       lastActivity: now,
       lastError: null,
       role, // phase-2: profile-conferred role (undefined ⇒ today's plain, role-null session)
+      browserTesting, // profile-conferred browser opt-in (false ⇒ today's plain spawn)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty, so onExit ('exited') from a fast-failing spawn always
@@ -108,6 +111,7 @@ export class SessionService {
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       startupPrompt,
       role,
+      browserTesting,
     });
     return { ...session, processState: "live" };
   }
@@ -125,7 +129,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'manager' role from the caller (scheduler/REST) ALWAYS wins; the profile (if any) only
     // layers its prompt + allowDelta. No profile ⇒ byte-identical to today's manager spawn.
-    const { role, startupPrompt, permission } = this.resolveAgentSpawn(agent, config, "manager");
+    const { role, startupPrompt, permission, browserTesting } = this.resolveAgentSpawn(agent, config, "manager");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -142,6 +146,7 @@ export class SessionService {
       lastActivity: now,
       lastError: null,
       role,
+      browserTesting,
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -155,6 +160,7 @@ export class SessionService {
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       startupPrompt,
       role,
+      browserTesting,
     });
     return { ...session, processState: "live" };
   }
@@ -172,7 +178,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. No profile ⇒ byte-identical to today's platform-lead spawn.
-    const { role, startupPrompt, permission } = this.resolveAgentSpawn(agent, config, "platform");
+    const { role, startupPrompt, permission, browserTesting } = this.resolveAgentSpawn(agent, config, "platform");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -189,6 +195,7 @@ export class SessionService {
       lastActivity: now,
       lastError: null,
       role,
+      browserTesting,
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -202,6 +209,7 @@ export class SessionService {
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       startupPrompt,
       role,
+      browserTesting,
     });
     return { ...session, processState: "live" };
   }
@@ -243,6 +251,9 @@ export class SessionService {
       // role-gated MCP surface (loom-orchestration / loom-platform) + allowlist. Without this a
       // resumed manager loses worker_spawn/merge/etc. and a worker loses worker_report.
       role: session.role ?? undefined,
+      // Carry the browser capability across resume too (pinned on the row at spawn): a resumed
+      // browser-worker must keep its per-session Playwright MCP, exactly as role is re-passed.
+      browserTesting: session.browserTesting ?? false,
     });
     // A freshly-resumed session has no turn in flight (resume injects no prompt) — clear any stale
     // busy=true carried in the DB across the restart. Without this the session shows/acts "busy"
@@ -346,6 +357,7 @@ export class SessionService {
       lastActivity: now,
       lastError: null,
       role: src.role ?? undefined, // a forked manager stays a manager (keeps its MCP surface)
+      browserTesting: src.browserTesting ?? false, // a fork inherits the source's browser capability
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
@@ -361,6 +373,7 @@ export class SessionService {
       fork: true,                    // ...but fork it (--fork-session)...
       forkSessionId: forkEngineId,   // ...into this pre-assigned id (--session-id).
       role: src.role ?? undefined,
+      browserTesting: src.browserTesting ?? false,
     });
     return { ...session, processState: "live" };
   }
@@ -380,6 +393,13 @@ export class SessionService {
     const project = this.db.getProject(manager.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
+
+    // The worker runs in the agent the manager nominated (or its own). Resolve THAT agent's profile to
+    // see whether it opts into browser-automation — a manager spawns a QA worker by pointing it at a
+    // browserTesting profile (e.g. the bundled "QA Tester"). Explicit role is "worker"; we read ONLY
+    // browserTesting (permission stays config.permission, byte-identical to today for non-browser workers).
+    const workerAgent = this.db.getAgent(opts.agentId ?? manager.agentId);
+    const browserTesting = workerAgent ? this.resolveAgentSpawn(workerAgent, config, "worker").browserTesting : false;
 
     // Safety rails (§17a) — refuse NEW work before any side effect (worktree/pty). In-flight
     // workers are untouched. Pause is global-or-this-manager; the cap counts LIVE children only.
@@ -407,6 +427,7 @@ export class SessionService {
       lastActivity: now,
       lastError: null,
       role: "worker",
+      browserTesting, // QA worker (profile opt-in) ⇒ per-session Playwright MCP; else false (plain)
       parentSessionId: managerSessionId,
       taskId: opts.taskId,
       worktreePath,
@@ -424,6 +445,7 @@ export class SessionService {
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       startupPrompt: opts.kickoffPrompt,
       role: "worker", // gives the worker the orchestration surface (worker_report only)
+      browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
     });
     this.db.updateTask(opts.taskId, { columnKey: "in_progress" });
     this.db.appendEvent({
@@ -586,6 +608,7 @@ export class SessionService {
       lastActivity: now,
       lastError: null,
       role: "worker",
+      browserTesting: old.browserTesting ?? false, // a recycled QA worker keeps its browser capability
       parentSessionId: managerSessionId,
       taskId,
       worktreePath,
@@ -610,6 +633,7 @@ export class SessionService {
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       startupPrompt: framed,
       role: "worker",
+      browserTesting: old.browserTesting ?? false,
     });
     // Hand the carried queue + scheduled wakes to the successor: re-point the old worker's wakes (so a
     // due wake can't resurrect the retired worker) and re-enqueue the held messages (busy-gated; they
@@ -667,6 +691,7 @@ export class SessionService {
       lastActivity: now,
       lastError: null,
       role: "manager",
+      browserTesting: old.browserTesting ?? false, // carry the capability forward (managers rarely set it)
       gen: newGen,
       recycledFrom: old.id,
     };
@@ -682,6 +707,7 @@ export class SessionService {
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       startupPrompt,
       role: "manager", // successor keeps the orchestration surface
+      browserTesting: old.browserTesting ?? false,
     });
 
     // Re-parent live workers onto the successor BEFORE closing the old manager, so they're never

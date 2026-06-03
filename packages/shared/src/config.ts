@@ -168,6 +168,8 @@ export interface ResolvedProfile {
   model: string | null;
   /** UI icon; null = none. */
   icon: string | null;
+  /** Opt-in browser-automation: inject a per-session Playwright MCP at spawn. Backstops to false. */
+  browserTesting: boolean;
 }
 
 /**
@@ -187,7 +189,8 @@ export function resolveProfile(
   // The injected prompt is sourced from the agent regardless of whether a profile is present.
   const startupPrompt = agent.startupPrompt ?? "";
   if (!profile) {
-    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null };
+    // The backstop: a null/absent profile confers NO browser capability (false) — today's behavior.
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false };
   }
   return {
     role: profile.role ?? null,
@@ -196,6 +199,8 @@ export function resolveProfile(
     skills: profile.skills ?? null,
     model: profile.model ?? null,
     icon: profile.icon ?? null,
+    // Pass the flag through when the profile sets it; backstop false for an unset/absent flag.
+    browserTesting: profile.browserTesting ?? false,
   };
 }
 
