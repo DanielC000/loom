@@ -55,9 +55,16 @@ async function main(): Promise<void> {
   // Boot-time orchestration reconcile (#22 run-2 + audit M4): finish any merge whose bookkeeping was
   // interrupted (branch merged but task/worktree not reconciled) and GC orphaned worktrees from
   // crashed workers. Runs AFTER recoverStaleSessions (no live pty holds a worktree) — pure git + db.
-  const reconciled = await sessions.reconcileOrchestrationOnBoot();
-  if (reconciled.mergesFinished || reconciled.worktreesPruned) {
-    console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s)`);
+  // Best-effort cleanup: it must NEVER gate startup, so any unexpected failure is warned and swallowed
+  // (a deterministic throw here would otherwise crash-loop the boot, since merging self-restarts the
+  // dev daemon — and that would also block usage-limit auto-resume).
+  try {
+    const reconciled = await sessions.reconcileOrchestrationOnBoot();
+    if (reconciled.mergesFinished || reconciled.mergesFailed || reconciled.worktreesPruned) {
+      console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${reconciled.mergesFailed} failed (retry next boot), pruned ${reconciled.worktreesPruned} orphaned worktree(s)`);
+    }
+  } catch (err) {
+    console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);
   }
   // WakeService (the `wake_me` primitive) needs SessionService.resume (auto-resume on fire), so it
   // comes after sessions. Always on — recovery/continuation, not autonomy-gated (like the rate-limit

@@ -676,28 +676,39 @@ export class SessionService {
    *     the branch here — any committed work stays on it and createWorktree re-attaches a fresh
    *     worktree to it on a re-task.
    */
-  async reconcileOrchestrationOnBoot(): Promise<{ mergesFinished: number; worktreesPruned: number }> {
+  async reconcileOrchestrationOnBoot(): Promise<{ mergesFinished: number; mergesFailed: number; worktreesPruned: number }> {
     const all = this.db.listAllSessions();
     const handledWorktrees = new Set<string>();
     let mergesFinished = 0;
+    let mergesFailed = 0;
     let worktreesPruned = 0;
 
-    // A. Finish orphaned merges.
+    // A. Finish orphaned merges. Best-effort PER SESSION: finalizeMerge → removeWorktree can throw
+    // (its fs.rm rejects when a dir handle stays busy past ~4s), and this runs over EVERY session
+    // from every past run at boot — one throw must not abort the whole reconcile (or, since merging
+    // this branch self-restarts the dev daemon, crash-loop the boot). So a failed session is warned,
+    // counted, and skipped; the next boot retries it.
     for (const s of all) {
       if (s.role !== "worker" || !s.branch || !s.taskId) continue;
       const project = this.db.getProject(s.projectId);
       if (!project) continue;
-      if (!(await isBranchMerged(project.repoPath, s.branch))) continue;
-      const worktreePath = s.worktreePath ?? s.cwd;
-      const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
-      const taskDone = this.db.getTask(s.taskId)?.columnKey === "done";
-      if (taskDone && !worktreeOnDisk) continue; // already fully reconciled — nothing to finish
-      await this.finalizeMerge({
-        managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId,
-        worktreePath, branch: s.branch, repoPath: project.repoPath,
-      });
-      handledWorktrees.add(worktreePath);
-      mergesFinished++;
+      try {
+        if (!(await isBranchMerged(project.repoPath, s.branch))) continue;
+        const worktreePath = s.worktreePath ?? s.cwd;
+        const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
+        const taskDone = this.db.getTask(s.taskId)?.columnKey === "done";
+        if (taskDone && !worktreeOnDisk) continue; // already fully reconciled — nothing to finish
+        await this.finalizeMerge({
+          managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId,
+          worktreePath, branch: s.branch, repoPath: project.repoPath,
+        });
+        handledWorktrees.add(worktreePath);
+        mergesFinished++;
+      } catch (e) {
+        mergesFailed++;
+        // eslint-disable-next-line no-console
+        console.warn(`[reconcile] could not finish merge for worker ${s.id} (branch ${s.branch}): ${(e as Error).message}`);
+      }
     }
 
     // B. GC orphaned worktrees (exited/dead, dir on disk, not handled in A).
@@ -713,6 +724,6 @@ export class SessionService {
       worktreesPruned++;
     }
 
-    return { mergesFinished, worktreesPruned };
+    return { mergesFinished, mergesFailed, worktreesPruned };
   }
 }
