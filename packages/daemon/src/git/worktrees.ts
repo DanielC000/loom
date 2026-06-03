@@ -10,33 +10,41 @@ export interface WorktreeInfo {
 }
 
 /**
- * Per-git-op ceiling for the worktree-removal path. Generous for a real `git worktree remove`/`prune`
- * (sub-second normally), but BOUNDED so a wedged child can't hang the caller. This is the fix for the
- * boot-outage: `git worktree remove` on a busy/locked dir (a directory handle stuck by an unrelated
- * process) HANGS INDEFINITELY — it doesn't throw — and removeWorktree's try/catch only catches throws.
- * boot-reconcile's Pass B calls removeWorktree during daemon BOOT, so one hung removal blocked the
- * whole daemon from booting, for hours, on 2026-06-03. See {@link removeWorktree}.
+ * Per-git-op ceiling for the BOOT-RECONCILE git ops (removeWorktree / isBranchMerged / deleteBranch).
+ * Generous for a real op (sub-second normally), but BOUNDED so a wedged child can't hang the caller.
+ * This is the fix for the boot-outage: a git op on a busy/locked dir (e.g. a directory handle stuck by
+ * an unrelated process) HANGS INDEFINITELY — it doesn't throw — and a try/catch only catches throws.
+ * boot-reconcile runs these ops during daemon BOOT (Pass A: isBranchMerged → finalizeMerge's
+ * removeWorktree + deleteBranch; Pass B: removeWorktree), so one hung op blocked the whole daemon from
+ * booting, for hours, on 2026-06-03. Every op in the reconcile path is now bounded by this.
  */
-const REMOVE_OP_TIMEOUT_MS = 15_000;
+const GIT_OP_TIMEOUT_MS = 15_000;
 
 /**
- * Test seam for {@link removeWorktree}. Lets a test simulate a hanging `git worktree remove` with a
- * tiny budget and assert the call returns within the window (not never). `gitFactory` defaults to a
- * simpleGit whose `block` timeout KILLS a no-output (hung) child; `timeoutMs` bounds BOTH the simpleGit
- * block timeout and removeWorktree's own race guard (below), so a never-settling git promise — real
- * child wedged, or an injected fake that never resolves — still unblocks the function.
+ * Injectable seam for the bounded git ops. Lets a test simulate a hanging git child with a tiny budget
+ * and assert the call returns/throws within the window (not never). `gitFactory` defaults to a simpleGit
+ * whose `block` timeout KILLS a no-output (hung) child; `timeoutMs` bounds BOTH the simpleGit block
+ * timeout and the {@link withTimeout} race below, so a never-settling git promise — a real child wedged,
+ * or an injected fake that never resolves — still unblocks the function.
  */
-export interface RemoveWorktreeDeps {
+export interface BoundedGitDeps {
   gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw">;
   timeoutMs?: number;
 }
 
+/** Build the bounded git instance + resolve the timeout for one op, applying the seam's defaults. */
+function boundedGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
+  const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
+  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  return { git: makeGit(repoPath, timeoutMs), timeoutMs };
+}
+
 /**
- * Reject `p` after `ms` if it hasn't settled, so removeWorktree's git steps are bounded even if the
- * underlying promise NEVER settles. In production the simpleGit `block` timeout (set on the instance)
- * also kills the hung child so it doesn't leak — this race is the belt-and-suspenders guarantee that
- * the FUNCTION returns within the window regardless. The timer is cleared on the winning path; if it
- * fires first the timer is already done, so nothing lingers on the event loop.
+ * Reject `p` after `ms` if it hasn't settled, so a git step is bounded even if the underlying promise
+ * NEVER settles. In production the simpleGit `block` timeout (set on the instance) also kills the hung
+ * child so it doesn't leak — this race is the belt-and-suspenders guarantee that the FUNCTION returns
+ * within the window regardless. The timer is cleared on the winning path; if it fires first the timer
+ * is already done, so nothing lingers on the event loop.
  */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -90,10 +98,15 @@ export async function createWorktree(repoPath: string, projectId: string, taskId
  * branch). Without this, re-spawning on the same task hit "a branch named 'loom/…' already exists".
  * Best-effort: the merge already succeeded, and createWorktree tolerates a leftover branch anyway, so
  * a delete hiccup is logged, not fatal. NOT called on a rejected merge or recycle (branch retained).
+ *
+ * BOUNDED: called by finalizeMerge during boot-reconcile Pass A, so a hung `git branch -d` (busy ref
+ * lock) must not wedge boot. The op runs through the same block-timeout + {@link withTimeout} guard;
+ * a timeout-throw is swallowed + warned exactly like any other delete failure.
  */
-export async function deleteBranch(repoPath: string, branch: string): Promise<void> {
+export async function deleteBranch(repoPath: string, branch: string, deps: BoundedGitDeps = {}): Promise<void> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
-    await simpleGit(repoPath).raw(["branch", "-d", branch]);
+    await withTimeout(git.raw(["branch", "-d", branch]), timeoutMs, "git branch -d");
   } catch (e) {
     // eslint-disable-next-line no-console
     console.warn(`[worktree] could not delete merged branch ${branch}: ${(e as Error).message}`);
@@ -118,18 +131,16 @@ export async function deleteBranch(repoPath: string, branch: string): Promise<vo
  * INDEFINITELY rather than throw, and boot-reconcile's Pass B calls this DURING daemon boot — so one
  * stuck removal blocked the whole daemon from booting for hours (2026-06-03). Both git ops now run on
  * a simpleGit configured with a `block` timeout (kills a no-output hung child) AND through a
- * {@link withTimeout} race, so the worst case is a BOUNDED failure within ~{@link REMOVE_OP_TIMEOUT_MS}
+ * {@link withTimeout} race, so the worst case is a BOUNDED failure within ~{@link GIT_OP_TIMEOUT_MS}
  * — the dir is left on disk for a later GC (boot-reconcile Pass B), NEVER an infinite hang. The
- * git instance/timeout is injectable via {@link RemoveWorktreeDeps} so a test can prove the bound.
+ * git instance/timeout is injectable via {@link BoundedGitDeps} so a test can prove the bound.
  */
 export async function removeWorktree(
   repoPath: string,
   worktreePath: string,
-  deps: RemoveWorktreeDeps = {},
+  deps: BoundedGitDeps = {},
 ): Promise<void> {
-  const timeoutMs = deps.timeoutMs ?? REMOVE_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
-  const git = makeGit(repoPath, timeoutMs);
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
     await withTimeout(git.raw(["worktree", "remove", worktreePath, "--force"]), timeoutMs, "git worktree remove");
   } catch {
@@ -154,10 +165,16 @@ export async function removeWorktree(
  * do NOT use `merge-base --is-ancestor`: simple-git's raw doesn't reject on its exit-1 "not-ancestor"
  * signal, so a try/catch around it reads every branch as merged.) Returns false when the branch ref
  * is gone (a completed merge deletes it), which keeps the reconcile idempotent.
+ *
+ * BOUNDED: this is the FIRST op boot-reconcile Pass A runs per session, so a hang here wedges boot
+ * before any removal even starts. The op now runs through the block-timeout + {@link withTimeout}
+ * guard; a timeout-throw is caught and read as "not merged" (false) — the SAFE default, since Pass A
+ * then skips the session rather than acting on a bad signal. The next boot retries it.
  */
-export async function isBranchMerged(repoPath: string, branch: string, base = "HEAD"): Promise<boolean> {
+export async function isBranchMerged(repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {}): Promise<boolean> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
-    return (await simpleGit(repoPath).raw(["branch", "--merged", base, "--list", branch])).trim() !== "";
+    return (await withTimeout(git.raw(["branch", "--merged", base, "--list", branch]), timeoutMs, "git branch --merged")).trim() !== "";
   } catch {
     return false;
   }

@@ -9,7 +9,7 @@ import { execSync } from "node:child_process";
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wt-home-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
-const { createWorktree, removeWorktree, deleteBranch, mergeBranch } = await import("../dist/git/worktrees.js");
+const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged } = await import("../dist/git/worktrees.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 
 let failures = 0;
@@ -125,12 +125,49 @@ try {
     check("(j2) dir still removed via the fs backstop when git is stubbed", !fs.existsSync(wtJ));
     // (the stub git leaves the admin record registered; the repo teardown below drops it — no deleteBranch.)
   }
+
+  // (k) The OTHER boot-reconcile ops are bounded too — isBranchMerged + deleteBranch run during
+  //     boot-reconcile Pass A (Pass A: isBranchMerged → finalizeMerge's deleteBranch), so a hung git
+  //     there wedges boot just like removeWorktree. Same fake-never-resolves proof: inject a git whose
+  //     `raw` never settles and assert each RETURNS within the bounded window, default cap 15000ms.
+  {
+    const neverGit = { raw: () => new Promise(() => {}) }; // a hung child: this promise never settles
+    const tinyMs = 250;
+
+    // (k1) isBranchMerged: a hung `git branch --merged` returns the SAFE default false (→ Pass A SKIPS
+    //      the session), bounded — never a hang.
+    let mergedMs = -1;
+    const t1 = Date.now();
+    const merged = await isBranchMerged(repo, "any-branch", "HEAD",
+      { gitFactory: (_p, ms) => { mergedMs = ms; return neverGit; }, timeoutMs: tinyMs });
+    const e1 = Date.now() - t1;
+    check("(k1) isBranchMerged RETURNS despite a never-resolving git op (not an infinite hang)", merged === false);
+    check(`(k1) bounded — returned false in ${e1}ms (cap ${tinyMs}ms)`, e1 >= tinyMs && e1 < tinyMs * 5 + 1500);
+    check(`(k1) block timeout passed through to the git factory (got ${mergedMs}ms)`, mergedMs === tinyMs);
+    let mergedDefMs = -1;
+    await isBranchMerged(repo, "any-branch", "HEAD", { gitFactory: (_p, ms) => { mergedDefMs = ms; return { raw: async () => "" }; } });
+    check("(k1) default per-op block timeout is 15000ms", mergedDefMs === 15000);
+
+    // (k2) deleteBranch: a hung `git branch -d` is swallowed + bounded (best-effort), never a hang.
+    let delMs = -1;
+    const t2 = Date.now();
+    let delResolved = false;
+    await deleteBranch(repo, "loom/nonexistent",
+      { gitFactory: (_p, ms) => { delMs = ms; return neverGit; }, timeoutMs: tinyMs }).then(() => { delResolved = true; });
+    const e2 = Date.now() - t2;
+    check("(k2) deleteBranch RETURNS despite a never-resolving git op (swallowed, not a hang)", delResolved);
+    check(`(k2) bounded — returned in ${e2}ms (cap ${tinyMs}ms)`, e2 >= tinyMs && e2 < tinyMs * 5 + 1500);
+    check(`(k2) block timeout passed through to the git factory (got ${delMs}ms)`, delMs === tinyMs);
+    let delDefMs = -1;
+    await deleteBranch(repo, "loom/nonexistent", { gitFactory: (_p, ms) => { delDefMs = ms; return { raw: async () => "" }; } });
+    check("(k2) default per-op block timeout is 15000ms", delDefMs === 15000);
+  }
 } finally {
   fs.rmSync(repo, { recursive: true, force: true });
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worktree-per-worker isolates, merges + deletes the branch on a clean merge, tolerates re-spawn on a retained (rejected) task, never collides on the first 8 chars of a task id, and removeWorktree is BOUNDED (a hung git op can't wedge daemon boot)."
+  ? "\n✅ ALL PASS — worktree-per-worker isolates, merges + deletes the branch on a clean merge, tolerates re-spawn on a retained (rejected) task, never collides on the first 8 chars of a task id, and every boot-reconcile git op (removeWorktree, isBranchMerged, deleteBranch) is BOUNDED — a hung git can't wedge daemon boot anywhere in the reconcile path."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
