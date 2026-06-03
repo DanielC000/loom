@@ -26,11 +26,16 @@ db.insertSession({
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-check("seeded session starts 'resumable'", db.getSession("sDead").resumability === "resumable");
-const marked = sweepDeadSessions(db);
-check("sweep marked exactly 1 session dead", marked === 1);
-check("session whose engine transcript is missing is now 'dead'", db.getSession("sDead").resumability === "dead");
-check("idempotent: a second sweep marks 0", sweepDeadSessions(db) === 0);
+try {
+  check("seeded session starts 'resumable'", db.getSession("sDead").resumability === "resumable");
+  const marked = sweepDeadSessions(db);
+  check("sweep marked exactly 1 session dead", marked === 1);
+  check("session whose engine transcript is missing is now 'dead'", db.getSession("sDead").resumability === "dead");
+  check("idempotent: a second sweep marks 0", sweepDeadSessions(db) === 0);
+} finally {
+  try { db.close(); } catch { /* ignore */ }
+  try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); } catch { /* ignore */ }
+}
 
 console.log(failures === 0 ? "\nALL PASS — dead-ID detection flips unresumable sessions to dead (§12-Q5)." : `\n${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

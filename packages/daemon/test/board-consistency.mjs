@@ -28,26 +28,37 @@ const get = async (u) => (await fetch(BASE + u)).json();
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const P = await post("/api/projects", { name: `Board-${Date.now()}`, repoPath: dir, vaultPath: dir });
-const t1 = await post(`/api/projects/${P.id}/tasks`, { title: "BOARD-ONE" });           // backlog
-await post(`/api/tasks/${t1.id}`, { columnKey: "review" });                              // MOVE via REST
-const topic = await post(`/api/projects/${P.id}/topics`, { name: "probe", startupPrompt: PROMPT });
-const session = await post(`/api/topics/${topic.id}/sessions`, {});
-console.log(`spawned ${session.id}; REST created BOARD-ONE and moved it to 'review'. Waiting for the agent...`);
+try {
+  const P = await post("/api/projects", { name: `Board-${Date.now()}`, repoPath: dir, vaultPath: dir });
+  const t1 = await post(`/api/projects/${P.id}/tasks`, { title: "BOARD-ONE" });           // backlog
+  await post(`/api/tasks/${t1.id}`, { columnKey: "review" });                              // MOVE via REST
+  const topic = await post(`/api/projects/${P.id}/topics`, { name: "probe", startupPrompt: PROMPT });
+  const session = await post(`/api/topics/${topic.id}/sessions`, {});
+  console.log(`spawned ${session.id}; REST created BOARD-ONE and moved it to 'review'. Waiting for the agent...`);
 
-let marker = null;
-for (let i = 0; i < 75; i++) {
-  await new Promise((r) => setTimeout(r, 2000));
-  const { tasks } = await get(`/api/projects/${P.id}/board`);
-  marker = tasks.find((t) => t.title.startsWith("SAW="));
-  if (marker) { console.log(`[${i * 2}s] marker: "${marker.title}"`); break; }
+  let marker = null;
+  for (let i = 0; i < 75; i++) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const { tasks } = await get(`/api/projects/${P.id}/board`);
+    marker = tasks.find((t) => t.title.startsWith("SAW="));
+    if (marker) { console.log(`[${i * 2}s] marker: "${marker.title}"`); break; }
+  }
+
+  check("agent produced a SAW= marker (MCP write -> visible via REST board)", !!marker);
+  check("agent's tasks_list saw the REST-created+moved task as BOARD-ONE@review",
+    !!marker && marker.title.includes("BOARD-ONE@review"));
+
+  await post(`/api/sessions/${session.id}/stop`, { mode: "hard" });
+} finally {
+  // The spawned agent's cwd is `dir`, so on Windows the OS can briefly hold its .claude/
+  // handles after the hard-stop kills the pty. Retry the removal a few times until the
+  // handles release so the temp dir never leaks.
+  for (let i = 0; i < 10; i++) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); break; }
+    catch { await new Promise((r) => setTimeout(r, 300)); }
+  }
 }
 
-check("agent produced a SAW= marker (MCP write -> visible via REST board)", !!marker);
-check("agent's tasks_list saw the REST-created+moved task as BOARD-ONE@review",
-  !!marker && marker.title.includes("BOARD-ONE@review"));
-
-await post(`/api/sessions/${session.id}/stop`, { mode: "hard" });
 console.log(failures === 0
   ? "\nALL PASS — kanban (REST) and MCP tools share one task store; moves propagate both ways."
   : `\n${failures} FAILURE(S).`);
