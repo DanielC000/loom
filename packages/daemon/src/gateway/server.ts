@@ -230,7 +230,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!s?.branch) return reply.code(404).send({ error: "session has no branch" });
     const p = deps.db.getProject(s.projectId);
     if (!p) return reply.code(404).send({ error: "project not found" });
-    return diffBranch(p.repoPath, s.branch);
+    // Lifecycle-robust: live worktree (uncommitted) → committed branch → reconstructed merge diff.
+    const d = await workerDiff(p.repoPath, { branch: s.branch, worktreePath: s.worktreePath });
+    if (!d) return reply.code(404).send({ error: "no diff available (no worktree, and branch gone/unmergeable)" });
+    return d;
   });
   app.get("/api/agents/:id/sessions", async (req) =>
     deps.db.listSessions((req.params as { id: string }).id));

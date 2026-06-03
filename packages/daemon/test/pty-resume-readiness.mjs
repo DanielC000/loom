@@ -30,12 +30,34 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 process.env.LOOM_READY_FALLBACK_MS = "2500";
 
-const { PtyHost } = await import("../dist/pty/host.js");
+const { PtyHost, isResumeSummaryGate } = await import("../dist/pty/host.js");
+
+// --- resume-from-summary gate DETECTION (pure fn). collapseBoot is internal; replicate it
+// (strip ANSI CSI + all whitespace) to feed realistic boot output. The exact gate text Loom hit:
+const GATE = "This session is 1h 16m old and 435.1k tokens. Resuming the full session will consume a "
+  + "substantial portion of your usage limits. We recommend resuming from a summary.\n"
+  + "❯ 1. Resume from summary (recommended)\n  2. Resume full session as-is\n  3. Don't ask me again";
+const collapse = (s) => s.replace(/\x1B\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/\s+/g, "");
+{
+  let f = 0; const ck = (l, c) => { console.log(`${c ? "PASS" : "FAIL"}  ${l}`); if (!c) f++; };
+  ck("gate: real summary/as-is gate text is DETECTED", isResumeSummaryGate(collapse(GATE)) === true);
+  ck("gate: normal manager prose mentioning 'resume' is NOT a false positive",
+    isResumeSummaryGate(collapse("Let me update my living resume doc and continue the loop.")) === false);
+  ck("gate: 'resume from summary' alone (no as-is option) is NOT matched",
+    isResumeSummaryGate(collapse("we recommend resuming from a summary")) === false);
+  if (f) { console.log(`\n❌ ${f} gate-detection FAILURE(S).`); process.exit(1); }
+}
 
 const fakes = [];
 function makeFakePty() {
   const writes = [];
-  const fake = { pid: 4242, write: (d) => writes.push(d), onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {}, writes };
+  let dataCb = null;
+  const fake = {
+    pid: 4242, write: (d) => writes.push(d),
+    onData: (cb) => { dataCb = cb; return { dispose() {} }; }, // capture so a test can feed boot bytes
+    onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {}, writes,
+    feed: (s) => { if (dataCb) dataCb(s); }, // simulate engine output reaching host.onData
+  };
   fakes.push(fake);
   return fake;
 }
@@ -90,8 +112,25 @@ try {
   check("3: queued, and held (no SessionStart delivered)", host.getPending(C).length === 1 && countIn(fc, PASTE_START) === 0);
   await sleep(2900); // > LOOM_READY_FALLBACK_MS(2500)
   check("3: readiness fallback drained the nudge despite no SessionStart", countIn(fc, PASTE_START) === 1 && writtenOf(fc).includes("NUDGE_C"));
+
+  // ============ 4) Gate dismissal WIRING: gate boot output → Down then Enter (select "as-is") ============
+  const D = "sess-resume-gate";
+  host.spawn({ sessionId: D, cwd: tmpHome, resumeId: "engine-D",
+    permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 }, sessionEnv: {} });
+  const fd = fakes[fakes.length - 1];
+  fd.feed(GATE);                 // engine prints the resume-from-summary gate (pre-SessionStart)
+  await sleep(700);              // > 300ms settle + 150ms gap + slack
+  const wd = fd.writes.join("");
+  const di = wd.indexOf("\x1b[B"); const ei = wd.indexOf("\r");
+  check("4: gate → Down arrow written (moves ❯ off the 'from summary' default)", di >= 0);
+  check("4: gate → Enter written AFTER the Down (selects option 2 'as-is')", ei > di && di >= 0);
+  check("4: ONLY Down+Enter written (no stray keys before the gate is dismissed)", wd === "\x1b[B\r");
+  const wlen = fd.writes.length;
+  fd.feed(GATE);                 // a repeat of the gate output must NOT re-fire (handled-once guard)
+  await sleep(500);
+  check("4: gate handled exactly once per session (no double-select)", fd.writes.length === wlen);
 } finally {
-  for (const s of ["sess-resume-A", "sess-resume-B", "sess-resume-C"]) { try { host.stop(s, "hard"); } catch { /* ignore */ } }
+  for (const s of ["sess-resume-A", "sess-resume-B", "sess-resume-C", "sess-resume-gate"]) { try { host.stop(s, "hard"); } catch { /* ignore */ } }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 

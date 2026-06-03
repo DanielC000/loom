@@ -191,6 +191,96 @@ export async function diffBranch(
   return { filesChanged: summary.files.length, insertions: summary.insertions, deletions: summary.deletions, patch };
 }
 
+export interface WorkerDiff {
+  filesChanged: number;
+  insertions: number;
+  deletions: number;
+  patch: string;
+  /** the diff includes UNCOMMITTED working-tree edits read from the live worktree (case 1). */
+  uncommitted?: boolean;
+  /** the branch was already merged + deleted; this is the landed diff reconstructed from the
+   *  merge commit (case 3). */
+  merged?: boolean;
+}
+
+/** Does `branch` still exist as a ref in `repoPath`? (A completed merge deletes it.) */
+async function branchExists(repoPath: string, branch: string): Promise<boolean> {
+  try {
+    return (await simpleGit(repoPath).raw(["branch", "--list", branch])).trim() !== "";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The orchestration-view diff for a worker — "what has this worker changed?" — robust across the
+ * worker's WHOLE lifecycle. {@link diffBranch} alone only sees COMMITTED branch refs in the canonical
+ * repo, so it reads EMPTY for a live worker mid-task (its work is uncommitted, in the worktree) and
+ * ERRORS for a merged+deleted branch (`HEAD...<gone>` → "ambiguous argument") — that was the
+ * "/orchestration diffs are all empty" bug. This resolves it in three lifecycle stages:
+ *
+ *  1. WORKTREE present (live or retained) → diff IN the worktree from the branch's spawn point
+ *     (merge-base with the canonical HEAD) to the WORKING TREE, so committed AND uncommitted
+ *     in-progress edits both show — the live-supervision case the view exists for. (`uncommitted`.)
+ *  2. branch ref present, worktree gone   → the committed 3-dot branch diff ({@link diffBranch}).
+ *  3. branch merged + deleted             → reconstruct the landed diff from the `--no-ff` merge
+ *     commit, whose 2nd parent IS the old branch tip: `<merge>^1...<merge>^2`. So a merged worker
+ *     shows what it contributed instead of a 500. (`merged`.)
+ *
+ * Returns null only when there is genuinely nothing to show (no branch + no worktree, or a merged
+ * branch whose merge commit can't be located) — the caller renders that as an honest "no diff".
+ *
+ * NOT bounded like the boot-reconcile ops: this runs on-demand per HTTP request, so a wedged git
+ * child hangs only that one request, never daemon boot. Each stage is guarded so a failure falls
+ * through to the next rather than throwing the whole call.
+ */
+export async function workerDiff(
+  repoPath: string,
+  opts: { branch: string | null; worktreePath: string | null },
+): Promise<WorkerDiff | null> {
+  const { branch, worktreePath } = opts;
+
+  // 1. Live/retained worktree → include uncommitted work (diff from spawn point to the working tree).
+  if (branch && worktreePath && fs.existsSync(worktreePath)) {
+    try {
+      const base = (await simpleGit(repoPath).raw(["merge-base", "HEAD", branch])).trim();
+      const wt = simpleGit(worktreePath);
+      const summary = await wt.diffSummary([base]); // <base> with one arg = base..WORKING-TREE
+      const patch = await wt.diff([base]);
+      return {
+        filesChanged: summary.files.length, insertions: summary.insertions,
+        deletions: summary.deletions, patch, uncommitted: true,
+      };
+    } catch { /* worktree gone/wedged mid-read → fall through to the committed-branch paths */ }
+  }
+
+  // 2. Branch still on the canonical repo (committed, not yet merged) → committed 3-dot diff.
+  if (branch && await branchExists(repoPath, branch)) {
+    try { return await diffBranch(repoPath, branch); } catch { /* fall through */ }
+  }
+
+  // 3. Branch merged + deleted → reconstruct the landed diff from the --no-ff merge commit.
+  if (branch) {
+    try {
+      const git = simpleGit(repoPath);
+      const merge = (await git.raw([
+        "log", "--all", "--merges", "--max-count=1", "--format=%H", `--grep=Merge branch '${branch}'`,
+      ])).trim();
+      if (merge) {
+        const range = `${merge}^1...${merge}^2`; // ^2 is the old branch tip; 3-dot = its changes
+        const summary = await git.diffSummary([range]);
+        const patch = await git.diff([range]);
+        return {
+          filesChanged: summary.files.length, insertions: summary.insertions,
+          deletions: summary.deletions, patch, merged: true,
+        };
+      }
+    } catch { /* merge commit unfindable → null below */ }
+  }
+
+  return null;
+}
+
 /**
  * Merge a worker's branch back into the repo's current branch with `--no-ff` (always a merge
  * commit; --no-edit so it never opens an editor and hangs). FAIL-CLOSED.

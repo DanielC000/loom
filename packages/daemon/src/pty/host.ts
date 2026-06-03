@@ -55,10 +55,26 @@ const HUMAN_TYPING_GRACE_MS = 6_000;
 
 /** Shift+Tab (CSI Z / back-tab) — Claude's TUI cycles the permission mode on this key. */
 const SHIFT_TAB = "\x1b[Z";
+/** Down arrow (CSI B) — moves the selection in Claude's TUI menus. */
+const DOWN_ARROW = "\x1b[B";
+const ENTER = "\r";
 const ESC_KEY = "\x1b";
 /** Strip CSI sequences so the boot-output scan matches the MCP prompt's words across TUI styling. */
 const ANSI_CSI = new RegExp(ESC_KEY + "\\[[0-9;?]*[ -/]*[@-~]", "g");
 const collapseBoot = (s: string): string => s.replace(ANSI_CSI, "").replace(/\s+/g, "");
+
+/**
+ * Detect Claude Code's "resume from summary / as-is" gate, which appears BEFORE SessionStart when
+ * resuming a large/old session (e.g. "This session is 1h 16m old and 435k tokens. Resuming the full
+ * session will consume a substantial portion of your usage limits. We recommend resuming from a
+ * summary." → ❯ 1. Resume from summary (recommended) / 2. Resume full session as-is / 3. Don't ask
+ * me again). It blocks unattended resume: the DEFAULT is option 1 "from summary", which triggers a
+ * SUMMARIZATION (compaction) and silently drops the manager's full context. Loom always wants option 2
+ * (full as-is). Input is collapseBoot()'d output (ANSI + whitespace stripped). Exported for testing.
+ */
+export function isResumeSummaryGate(flatCollapsed: string): boolean {
+  return /resumefromsummary/i.test(flatCollapsed) && /resumefullsession/i.test(flatCollapsed);
+}
 /** Settle window after SessionStart before sending the first mode-cycle keystroke (let the TUI's input attach). */
 const MODE_CYCLE_SETTLE_MS = 700;
 /** Gap between successive Shift+Tab presses so each cycle registers as a distinct key event. */
@@ -99,6 +115,8 @@ interface Live {
   startupCyclesDone: boolean; // guard so the cycle-inject fires at most once per session
   mcpPromptHandled: boolean;  // guard: dismiss the plugin-MCP enable-prompt with Esc at most once per session
   bootScan: string;           // bounded rolling buffer of early boot output, scanned for that prompt
+  resumeGateHandled: boolean; // guard: select "as-is" on the resume-from-summary gate at most once per session
+  resumeGateScan: string;     // bounded rolling buffer scanned for that gate (separate from bootScan)
 }
 
 export interface SpawnOpts {
@@ -212,6 +230,8 @@ export class PtyHost {
       startupCyclesDone: false,
       mcpPromptHandled: false,
       bootScan: "",
+      resumeGateHandled: false,
+      resumeGateScan: "",
     };
     this.live.set(opts.sessionId, live);
 
@@ -231,6 +251,25 @@ export class PtyHost {
           // eslint-disable-next-line no-console
           console.log(`[pty] ${opts.sessionId} dismissing plugin-MCP enable-prompt (Esc = reject all)`);
           setTimeout(() => { if (live.alive) live.pty.write(ESC_KEY); }, 300);
+        }
+      }
+      // Resuming a large/old session shows a "resume from summary / as-is" gate BEFORE SessionStart
+      // whose DEFAULT (option 1) summarizes — silently compacting away the manager's full context — and
+      // which blocks the whole resume (mode-cycles + the queued boot nudge never run; the readiness
+      // fallback then drains the nudge INTO the gate, selecting that default → the 2026-06-03 incident).
+      // Always pick option 2 "Resume full session as-is": one Down then Enter (moves ❯ off option 1).
+      if (!live.resumeGateHandled) {
+        live.resumeGateScan = (live.resumeGateScan + d).slice(-8192);
+        if (isResumeSummaryGate(collapseBoot(live.resumeGateScan))) {
+          live.resumeGateHandled = true;
+          live.resumeGateScan = "";
+          // eslint-disable-next-line no-console
+          console.log(`[pty] ${opts.sessionId} resume-summary gate → selecting "Resume full session as-is" (Down, Enter)`);
+          setTimeout(() => {
+            if (!live.alive) return;
+            live.pty.write(DOWN_ARROW);
+            setTimeout(() => { if (live.alive) live.pty.write(ENTER); }, 150);
+          }, 300);
         }
       }
       this.appendRing(live, buf);
