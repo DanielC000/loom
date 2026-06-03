@@ -357,8 +357,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (role === "plain") return deps.sessions.startNew(id, { forcePlain: true });
     return deps.sessions.startNew(id);
   });
+  // Manual (human) resume from the UI — the ONE resume path allowed to force-resurrect a RECYCLED
+  // session (allowSuperseded). The automatic paths (wake / rate-limit / boot) cannot; only the user
+  // may deliberately bring a retired session back, to inspect or recover it.
   app.post("/api/sessions/:id/resume", async (req) =>
-    deps.sessions.resume((req.params as { id: string }).id));
+    deps.sessions.resume((req.params as { id: string }).id, { allowSuperseded: true }));
   app.post("/api/sessions/:id/fork", async (req) =>
     deps.sessions.forkSession((req.params as { id: string }).id));
   // Pending one-shot wake-ups scheduled for a session (the wake_me primitive) — read-only.

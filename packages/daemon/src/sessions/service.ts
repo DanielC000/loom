@@ -207,7 +207,7 @@ export class SessionService {
   }
 
   /** Resume an existing session — NO prompt injection. */
-  resume(sessionId: string): Session {
+  resume(sessionId: string, opts: { allowSuperseded?: boolean } = {}): Session {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
     if (!session.engineSessionId) throw new Error("session has no engine id to resume");
@@ -217,11 +217,13 @@ export class SessionService {
       throw new Error("session is no longer resumable (engine transcript missing)");
     }
     // A RECYCLED session has a successor that took over its work + fleet (and inherited its wakes +
-    // queued messages). Never resurrect it — a due wake, a rate-limit resume, or boot-resume would
-    // otherwise zombie it ALONGSIDE its successor (two managers on one topic). Refuse from every
-    // resume path. (recycle_me already reparents the triggers, so this is defense-in-depth.)
-    if (this.db.hasSuccessor(sessionId)) {
-      throw new Error("session was recycled — a successor exists, so it is not resumable");
+    // queued messages). Block AUTOMATIC resurrection — a due wake, a rate-limit resume, or boot-resume
+    // would otherwise zombie it ALONGSIDE its successor (two managers on one topic). A HUMAN can still
+    // force it: the manual /resume endpoint passes allowSuperseded — a deliberate escape hatch to
+    // inspect or recover a retired session. (recycle_me reparents the wakes/queue, so the automatic
+    // paths never NEED a recycled session anyway.)
+    if (!opts.allowSuperseded && this.db.hasSuccessor(sessionId)) {
+      throw new Error("session was recycled — a successor exists; only a manual (human) resume may force it");
     }
     const project = this.db.getProject(session.projectId);
     if (!project) throw new Error("project not found");

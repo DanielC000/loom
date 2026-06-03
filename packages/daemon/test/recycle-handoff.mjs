@@ -60,13 +60,18 @@ try {
 
   let threw = false, msg = "";
   try { sessions.resume(OLD); } catch (e) { threw = true; msg = e.message; }
-  check("(3) resume(recycled) THROWS", threw);
+  check("(3) AUTOMATIC resume(recycled) THROWS (wake/rate-limit/boot can't resurrect it)", threw);
   check("(3) the refusal cites the successor (not a generic error)", /successor/i.test(msg));
-  check("(3) resume(recycled) did NOT spawn a pty (no zombie)", !spawned.includes(OLD));
+  check("(3) auto resume(recycled) did NOT spawn a pty (no zombie)", !spawned.includes(OLD));
 
   // a non-recycled session with a live transcript sails past the guard (reaches the stub spawn).
   const okSession = sessions.resume(OTHER);
   check("(3) resume(non-recycled) succeeds past the guard", okSession.processState === "live" && spawned.includes(OTHER));
+
+  // (4) the HUMAN escape hatch: a manual resume (allowSuperseded — the /resume REST path) MAY force a
+  // recycled session back, deliberately. Only the user can do this; the automatic paths above cannot.
+  const forced = sessions.resume(OLD, { allowSuperseded: true });
+  check("(4) MANUAL resume(recycled, allowSuperseded) IS allowed (human escape hatch)", forced.processState === "live" && spawned.includes(OLD));
 } finally {
   db.close();
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }
@@ -74,6 +79,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — recycle moves scheduled wakes to the successor (none left to fire at the retired session), and a recycled session is refused by resume() from every path (no zombie resurrection)."
+  ? "\n✅ ALL PASS — recycle moves scheduled wakes to the successor (none left to fire at the retired session); a recycled session is refused by every AUTOMATIC resume path (no zombie resurrection) but a manual human resume may still force it."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
