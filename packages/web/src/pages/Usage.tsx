@@ -151,7 +151,11 @@ function Stat({ label, value, tone: t = "phosphor" }: { label: string; value: st
 function UsageRow({ s, showProject }: { s: SessionListItem; showProject?: boolean }) {
   const ctx = s.ctxInputTokens ?? 0;
   const win = contextWindowForModel(s.model);
-  const pct = Math.round(occupancy(s) * 100);
+  // Unknown models fall back to the 200k default window, so a session on a larger real window can
+  // measure >100% (seen up to 456%). Clamp the readout to 100% to match the already-clamped Meter bar,
+  // and flag the overflow with a trailing "+" rather than printing a bug-looking 456%.
+  const rawPct = Math.round(occupancy(s) * 100);
+  const pct = Math.min(100, rawPct);
   const t = occupancyTone(s);
   const cost = estContextCost(ctx, s.model);
   const limited = isRateLimited(s);
@@ -171,7 +175,7 @@ function UsageRow({ s, showProject }: { s: SessionListItem; showProject?: boolea
           {fmtTokens(ctx)} / {fmtTokens(win)}
         </span>
         <Meter value={ctx} max={win} tone={t} width={90} />
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[t], minWidth: 36, textAlign: "right" }}>{pct}%</span>
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[t], minWidth: 36, textAlign: "right" }}>{pct}%{rawPct > 100 ? "+" : ""}</span>
         {cost != null && <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 52, textAlign: "right" }}>{fmtUsd(cost)} est.</span>}
       </span>
     </div>

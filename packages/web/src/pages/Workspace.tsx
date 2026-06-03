@@ -238,7 +238,7 @@ function SessionRow({ s, selected, onSelect, onResume, resuming, onStop, stoppin
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
       <Panel selected={selected} onClick={onSelect}
-        style={{ flex: 1, padding: "6px 8px", borderColor: isManager && !selected ? color.phosphor : undefined }}>
+        style={{ flex: 1, padding: "6px 8px", ...(isManager && !selected ? { border: `1px solid ${color.phosphor}` } : null) }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontFamily: font.mono, fontSize: 12, color: isManager ? color.phosphor : color.text, fontWeight: isManager ? 700 : 400 }}>
             {isManager ? "★ " : ""}{s.id.slice(0, 8)} · {s.role ?? "session"}

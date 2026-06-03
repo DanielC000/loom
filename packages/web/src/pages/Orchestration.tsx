@@ -32,6 +32,7 @@ export default function Orchestration() {
   // (live-first → most-recent → spawn-order), consistent with every other session list.
   const managers = all.filter((s) => s.role === "manager" && s.projectId === projectId).sort(bySessionActivity);
   const workers = all.filter((s) => s.parentSessionId === managerId).sort(bySessionActivity);
+  const selectedWorker = workers.find((w) => w.id === workerId);
   const paused = status.data?.pausedScopes ?? [];
   const globalPaused = paused.includes("global");
   const scoped = paused.filter((s) => s !== "global");
@@ -84,7 +85,11 @@ export default function Orchestration() {
 
           {/* RIGHT: selected worker's branch diff */}
           <div>
-            <SectionLabel>{workerId ? `Diff · ${workerId.slice(0, 8)}` : "Diff"}</SectionLabel>
+            {/* Header keys off the TASK short-id (matching the worker card) so it never reads like a
+                different worker's diff; the worker session short-id trails it for disambiguation. */}
+            <SectionLabel>{workerId
+              ? `Diff · ${selectedWorker?.taskId ? `task ${selectedWorker.taskId.slice(0, 8)}` : "(no task)"} · w:${workerId.slice(0, 8)}`
+              : "Diff"}</SectionLabel>
             <Panel style={{ height: "76vh", overflow: "auto" }}>
               {!workerId && <span style={{ color: color.textMuted, fontSize: 12 }}>Click a worker to see its branch diff.</span>}
               {workerId && diff.isError && <span style={{ color: color.red, fontSize: 12 }}>No diff (worker has no branch, or it was merged/removed).</span>}

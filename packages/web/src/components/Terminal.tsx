@@ -139,7 +139,20 @@ export function TerminalPane({ sessionId, resizable = false }: { sessionId: stri
     const ro = new ResizeObserver(() => { if (resizable) fitAndReport(); else applyFontSize(); });
     ro.observe(el);
 
-    return () => { onData.dispose(); ws.close(); ro.disconnect(); term.dispose(); };
+    return () => {
+      onData.dispose();
+      ro.disconnect();
+      // Don't act on a socket the pane abandoned mid-handshake. Closing one that's still CONNECTING
+      // logs "WebSocket is closed before the connection is established" — it fires on Terminals/Workspace
+      // re-render churn (effect cleanup before the open completes). Detach handlers so no late frame
+      // writes to the disposed terminal, then close once the socket actually opens (or immediately if
+      // it already has).
+      ws.onmessage = null;
+      ws.onopen = null;
+      if (ws.readyState === ws.CONNECTING) ws.onopen = () => ws.close();
+      else ws.close();
+      term.dispose();
+    };
   }, [sessionId, resizable]);
 
   return <div ref={ref} style={{ height: "100%", width: "100%" }} />;
