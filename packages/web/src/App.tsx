@@ -1,19 +1,8 @@
 import { useEffect, useState } from "react";
 import { Route, Routes, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import MissionControl from "./pages/MissionControl";
-import Workspace from "./pages/Workspace";
-import Terminals from "./pages/Terminals";
-import Vault from "./pages/Vault";
-import Git from "./pages/Git";
-import Board from "./pages/Board";
-import Orchestration from "./pages/Orchestration";
 import ReviewPanel from "./pages/ReviewPanel";
-import Skills from "./pages/Skills";
-import Profiles from "./pages/Profiles";
-import Schedules from "./pages/Schedules";
-import Usage from "./pages/Usage";
-import Settings from "./pages/Settings";
+import { NAV_PAGES } from "./nav";
 import { NavTab, Badge, Select } from "./components/ui";
 import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
@@ -145,18 +134,9 @@ export default function App() {
         <header style={{ display: "flex", alignItems: "center", gap: 24, padding: "10px 20px", borderBottom: `1px solid ${color.border}` }}>
           <Logo />
           <nav style={{ display: "flex", gap: 18 }}>
-            <NavTab to="/" end>Mission</NavTab>
-            <NavTab to="/workspace">Workspace</NavTab>
-            <NavTab to="/terminals">Terminals</NavTab>
-            <NavTab to="/board">Board</NavTab>
-            <NavTab to="/orchestration">Orchestration</NavTab>
-            <NavTab to="/vault">Vault</NavTab>
-            <NavTab to="/git">Git</NavTab>
-            <NavTab to="/skills">Skills</NavTab>
-            <NavTab to="/profiles">Profiles</NavTab>
-            <NavTab to="/schedules">Schedules</NavTab>
-            <NavTab to="/usage">Usage</NavTab>
-            <NavTab to="/settings">Settings</NavTab>
+            {NAV_PAGES.map((p) => (
+              <NavTab key={p.to} to={p.to} end={p.end}>{p.nav ?? p.label}</NavTab>
+            ))}
           </nav>
           <span style={{ flex: 1 }} />
           <ActiveProjectControl />
@@ -165,19 +145,10 @@ export default function App() {
         </header>
         <main style={page}>
           <Routes>
-            <Route path="/" element={<MissionControl />} />
-            <Route path="/workspace" element={<Workspace />} />
-            <Route path="/terminals" element={<Terminals />} />
-            <Route path="/board" element={<Board />} />
-            <Route path="/orchestration" element={<Orchestration />} />
+            {NAV_PAGES.map((p) => (
+              <Route key={p.to} path={p.to} element={p.element} />
+            ))}
             <Route path="/review/:workerId" element={<ReviewPanel />} />
-            <Route path="/vault" element={<Vault />} />
-            <Route path="/git" element={<Git />} />
-            <Route path="/skills" element={<Skills />} />
-            <Route path="/profiles" element={<Profiles />} />
-            <Route path="/schedules" element={<Schedules />} />
-            <Route path="/usage" element={<Usage />} />
-            <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>
       </div>
