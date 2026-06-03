@@ -1,4 +1,4 @@
-import type { Project, Agent, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule } from "@loom/shared";
+import type { Project, Agent, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
@@ -88,6 +88,13 @@ export const api = {
   resumeOrchestration: (scope?: string) =>
     post<{ ok: boolean; pausedScopes: string[] }>("/api/orchestration/resume", scope ? { scope } : {}),
   killOrchestration: () => post<{ stopped: number }>("/api/orchestration/kill"),
+
+  // --- Plain shell terminals (HUMAN-only; spawned via REST, never an MCP tool) ---
+  terminals: () => get<ShellTerminal[]>("/api/terminals"),
+  defaultShell: () => get<{ command: string }>("/api/terminals/default-shell"),
+  createTerminal: (b: { projectId: string; command?: string; args?: string[]; label?: string }) =>
+    post<ShellTerminal>("/api/terminals", b),
+  killTerminal: (id: string) => del<{ ok: boolean }>(`/api/terminals/${id}`),
 
   // --- Loom-managed skills (UI-editable; injected into every session as project-local) ---
   skills: () => get<SkillSummary[]>("/api/skills"),
