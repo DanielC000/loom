@@ -27,7 +27,10 @@ export interface AttentionItem {
 export function useAttention(): { items: AttentionItem[]; count: number } {
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
   const all = sessions.data ?? [];
-  const managers = all.filter((s) => s.role === "manager");
+  // LIVE managers only: an EXITED manager has no actionable merge/idle state (it's gone), so its
+  // events (e.g. an orphaned merge_request whose merge_done was never recorded) must not surface as
+  // permanent attention items. Only a live manager's pending reviews / idle states are actionable.
+  const managers = all.filter((s) => s.role === "manager" && s.processState === "live");
 
   const eventQueries = useQueries({
     queries: managers.map((m) => ({
