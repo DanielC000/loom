@@ -570,6 +570,15 @@ export class Db {
     return (this.db.prepare("SELECT * FROM orchestration_events WHERE manager_session_id = ? ORDER BY ts, rowid")
       .all(managerSessionId) as Row[]).map(toOrchestrationEvent);
   }
+  /**
+   * One worker's audit trail in chronological order — used by boot-reconcile's dangling-merge
+   * detector to pair a `merge_request` with its later terminal `merge_done`/`merge_rejected`
+   * regardless of which manager id the events were filed under (rowid breaks same-ts ties).
+   */
+  listEventsForWorker(workerSessionId: string): OrchestrationEvent[] {
+    return (this.db.prepare("SELECT * FROM orchestration_events WHERE worker_session_id = ? ORDER BY ts, rowid")
+      .all(workerSessionId) as Row[]).map(toOrchestrationEvent);
+  }
 
   // --- tasks ---
   listTasks(projectId: string): Task[] {
