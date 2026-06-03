@@ -351,8 +351,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { role } = (req.body as { role?: string }) ?? {};
     if (role === "manager") return deps.sessions.startManager(id);
     if (role === "platform") return deps.sessions.startPlatformLead(id);
-    // P3 force-plain override: a role-null session even in a topic with a manager/platform profile
-    // (web "Spawn → force plain"). Absent/undefined role = auto (profile role applies — P2 default).
+    // P3 force-plain override (web "Spawn → force plain"): a VANILLA session even in a topic with a
+    // manager/platform profile — bypasses the profile entirely (role null, topic's own prompt, no allow
+    // delta). Absent/undefined role = auto (the profile's role applies — P2 default).
     if (role === "plain") return deps.sessions.startNew(id, { forcePlain: true });
     return deps.sessions.startNew(id);
   });

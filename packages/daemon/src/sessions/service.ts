@@ -35,15 +35,18 @@ export class SessionService {
    * DEFERRED to a later phase (NOT wired here): the profile's `model` (no `--model` emitted) and its
    * `skills` subset (all skills still delivered). This wires ONLY role + startupPrompt + allow.
    *
-   * `forcePlain` (P3 spawn override): pin the resolved role to undefined REGARDLESS of the profile,
-   * so the web "Spawn → force plain" path can start a role-null (no orchestration/platform surface)
-   * session in a topic that carries a manager/platform profile. Scoped to the ROLE only — the
-   * profile's prompt + allowDelta still apply (matching "ignore the profile's role").
+   * `forcePlain` (P3 spawn override): BYPASS the profile entirely so role + prompt + allow ALL resolve
+   * via resolveProfile's backstop — i.e. spawn as if the topic had no profile (a vanilla "+New": role
+   * null, the topic's OWN prompt, no allow delta). The web "Spawn → force plain" menu uses this so a
+   * manager/platform-profile topic can still start a COHERENT plain session, not one carrying the
+   * profile's "you are the lead orchestrator" prompt + a manager allowlist it shouldn't have / can't use.
    */
   private resolveTopicSpawn(
     topic: Topic, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false,
   ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy } {
-    const profile = topic.profileId ? this.db.getProfile(topic.profileId) : undefined;
+    // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the topic's
+    // own prompt, and NO allow delta (exactly a profile-less topic's "+New").
+    const profile = (forcePlain || !topic.profileId) ? undefined : this.db.getProfile(topic.profileId);
     const resolved = resolveProfile(topic, profile);
     // Layer the profile's allowDelta onto the config allow; an empty delta keeps the SAME config
     // permission reference, so a profile-less spawn is byte-identical to today.
@@ -51,9 +54,9 @@ export class SessionService {
       ? { ...config.permission, allow: [...config.permission.allow, ...resolved.allow] }
       : config.permission;
     return {
-      // forcePlain wins over everything → role-null session; otherwise an explicit caller role wins,
-      // then the profile's role, then undefined (today's plain).
-      role: forcePlain ? undefined : explicitRole ?? resolved.role ?? undefined,
+      // An explicit caller role still wins; then the profile's role (null under forcePlain), then
+      // undefined (today's plain). The force-plain path passes no explicitRole, so it resolves null.
+      role: explicitRole ?? resolved.role ?? undefined,
       // Same `|| undefined` empties-to-undefined coercion today's start paths use on the topic prompt.
       startupPrompt: resolved.startupPrompt || undefined,
       permission,

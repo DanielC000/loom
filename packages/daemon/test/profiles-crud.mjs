@@ -7,8 +7,9 @@
 //   (2) resetProfileToBundled — restores a UI-edited bundled profile to its shipped fields by NAME
 //       (id + topic assignment preserved); returns false for an unknown id AND a non-bundled name;
 //   (3) updateTopic — SETS and CLEARS profile_id (the UI's assign / unassign);
-//   (4) spawn force-plain — a manager-profile topic spawns role=manager by DEFAULT but role-null with
-//       { forcePlain: true } (asserted at the resolveTopicSpawn/DB seam: the spawn opts.role + DB row).
+//   (4) spawn force-plain — a manager-profile topic spawns role=manager + profile prompt/allow by
+//       DEFAULT, but { forcePlain: true } BYPASSES the profile ENTIRELY (full backstop: role null, the
+//       TOPIC's own prompt, NO allow delta) — asserted at the resolveTopicSpawn/DB seam (opts + DB row).
 // Run: 1) build (turbo builds shared first), 2) node test/profiles-crud.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -30,7 +31,8 @@ const { PtyHost } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { seedDefaultProfiles, resetProfileToBundled, BUNDLED_PROFILES } = await import("../dist/profiles/seed.js");
-const { resolveProfile } = await import("@loom/shared");
+const { resolveProfile, resolveConfig } = await import("@loom/shared");
+const baseAllow = resolveConfig({}).permission.allow; // the config allow a full-backstop spawn must equal
 
 const now = new Date().toISOString();
 const db = new Db();
@@ -84,10 +86,17 @@ try {
   db.updateTopic("tAssign", { profileId: null }); // CLEAR
   check("(3) updateTopic CLEARS profile_id (profileId: null)", db.getTopic("tAssign").profileId === null);
 
-  // ===================== (4) spawn force-plain — manager-profile topic, role-null with forcePlain =====================
+  // ===================== (4) spawn force-plain — FULL backstop (bypass the profile ENTIRELY) =====================
+  // Ruling: force-plain = "spawn as if this topic had no profile" — role null, the TOPIC's own prompt,
+  // NO allow delta. NOT role-only (a plain session must not carry the profile's manager prompt/allowlist).
+  // Two manager-profile topics off the SAME profile prove every dimension is bypassed:
+  //   • tMgrOwn  (own prompt "TOPIC_OWN")  → force-plain delivers the TOPIC's own concrete prompt;
+  //   • tMgrBlank (blank own prompt)       → default falls back to the PROFILE prompt, force-plain does
+  //     NOT (it drops to the empty topic prompt) — the contrast that proves the profile prompt is gone.
   const PROFILE_ALLOW = "Bash(echo PROFILE_OK:*)";
   db.insertProfile({ id: "profMgr", name: "Orchestrator-ForcePlain", role: "manager", startupPrompt: "PROFILE_PROMPT", allowDelta: [PROFILE_ALLOW], skills: null, model: null, icon: null });
-  db.insertTopic({ id: "tMgr", projectId: "pP", name: "ManagedFP", startupPrompt: "", position: 2, profileId: "profMgr" });
+  db.insertTopic({ id: "tMgrOwn", projectId: "pP", name: "ManagedOwn", startupPrompt: "TOPIC_OWN", position: 2, profileId: "profMgr" });
+  db.insertTopic({ id: "tMgrBlank", projectId: "pP", name: "ManagedBlank", startupPrompt: "", position: 3, profileId: "profMgr" });
 
   class SeamHost extends PtyHost {
     constructor(events) { super(events); this.capture = []; }
@@ -106,27 +115,39 @@ try {
   const svc = new SessionService(db, host, new OrchestrationControl());
   const optsFor = (sid) => host.capture.find((o) => o.sessionId === sid);
 
-  // Default (no override) → the profile's manager role applies (unchanged P2 behavior).
-  const sAuto = svc.startNew("tMgr");
+  // --- DEFAULT (no override) → the profile applies (unchanged P2 behavior): role=manager + allowDelta;
+  //     the prompt follows resolveProfile precedence (own non-empty wins; blank falls back to profile).
+  const sAuto = svc.startNew("tMgrOwn");
   const oAuto = optsFor(sAuto.id);
-  check("(4) default startNew on a manager-profile topic → role=manager (returned + DB + spawn opts)",
+  check("(4) default on a manager-profile topic → role=manager (returned + DB + spawn opts)",
     sAuto.role === "manager" && db.getSession(sAuto.id).role === "manager" && oAuto?.role === "manager");
+  check("(4) default layers the profile's allowDelta", oAuto?.permission.allow.includes(PROFILE_ALLOW));
+  const sAutoBlank = svc.startNew("tMgrBlank");
+  const oAutoBlank = optsFor(sAutoBlank.id);
+  check("(4) default on a BLANK manager-profile topic → role=manager + falls back to the PROFILE prompt",
+    oAutoBlank?.role === "manager" && oAutoBlank?.startupPrompt === "PROFILE_PROMPT" && oAutoBlank?.permission.allow.includes(PROFILE_ALLOW));
 
-  // forcePlain → role pinned to null/undefined REGARDLESS of the profile (the web "force plain" path).
-  const sPlain = svc.startNew("tMgr", { forcePlain: true });
+  // --- FORCE-PLAIN → full backstop: role null, the TOPIC's own prompt, NO allow delta (vanilla "+New").
+  const sPlain = svc.startNew("tMgrOwn", { forcePlain: true });
   const oPlain = optsFor(sPlain.id);
-  check("(4) forcePlain startNew → returned session.role undefined (no orchestration surface)", sPlain.role === undefined);
+  check("(4) forcePlain → returned session.role undefined (no orchestration surface)", sPlain.role === undefined);
   check("(4) forcePlain → DB persists role null (server-side role-gate sees a plain session)", db.getSession(sPlain.id).role === null);
   check("(4) forcePlain → spawn opts.role undefined (host.ts maps to the plain MCP surface)", oPlain?.role === undefined);
-  // Scoped to ROLE only: the profile's prompt + allowDelta still apply (matches "ignore the profile's role").
-  check("(4) forcePlain still injects the profile's prompt (role-only override)", oPlain?.startupPrompt === "PROFILE_PROMPT");
-  check("(4) forcePlain still layers the profile's allowDelta (role-only override)", oPlain?.permission.allow.includes(PROFILE_ALLOW));
+  check("(4) forcePlain → the TOPIC's OWN prompt, NOT the profile's", oPlain?.startupPrompt === "TOPIC_OWN");
+  check("(4) forcePlain → NO profile allowDelta; permission.allow equals the base config allow exactly",
+    !oPlain?.permission.allow.includes(PROFILE_ALLOW) && JSON.stringify(oPlain?.permission.allow) === JSON.stringify(baseAllow));
+  // The contrast that proves the PROFILE PROMPT is bypassed: on the blank topic, default → "PROFILE_PROMPT"
+  // (above) but force-plain drops to the topic's own (empty) prompt → undefined.
+  const sPlainBlank = svc.startNew("tMgrBlank", { forcePlain: true });
+  const oPlainBlank = optsFor(sPlainBlank.id);
+  check("(4) forcePlain on the BLANK topic → role null AND no profile prompt (drops to the empty topic prompt → undefined)",
+    db.getSession(sPlainBlank.id).role === null && oPlainBlank?.startupPrompt === undefined && !oPlainBlank?.permission.allow.includes(PROFILE_ALLOW));
 } finally {
   db.close(); // free the WAL handle before removing the temp dir (Windows)
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — profile delete is SAFE (dangling→backstop), reset-to-bundled restores by name (false on unknown/non-bundled), updateTopic sets+clears profileId, and forcePlain pins role-null on a manager-profile topic — claude-free."
+  ? "\n✅ ALL PASS — profile delete is SAFE (dangling→backstop), reset-to-bundled restores by name (false on unknown/non-bundled), updateTopic sets+clears profileId, and forcePlain bypasses the profile ENTIRELY (full backstop: role null, topic's own prompt, no allow delta) — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
