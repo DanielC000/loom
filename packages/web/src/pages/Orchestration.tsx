@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tansta
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
+import { bySessionActivity } from "../lib/sessions";
 import { Panel, Button, Select, SectionLabel, Badge, StatusPill, Chip, Meter } from "../components/ui";
 import { DiffView } from "../components/Diff";
 import { color, font } from "../theme";
@@ -23,8 +24,10 @@ export default function Orchestration() {
   const diff = useQuery({ queryKey: ["workerDiff", workerId], queryFn: () => api.workerDiff(workerId), enabled: !!workerId, placeholderData: keepPreviousData });
 
   const all = sessions.data ?? [];
-  const managers = all.filter((s) => s.role === "manager");
-  const workers = all.filter((s) => s.parentSessionId === managerId);
+  // Shared activity ordering (live-first → most-recent → spawn-order) for the manager picker and the
+  // selected manager's worker list, consistent with every other session list.
+  const managers = all.filter((s) => s.role === "manager").sort(bySessionActivity);
+  const workers = all.filter((s) => s.parentSessionId === managerId).sort(bySessionActivity);
   const paused = status.data?.pausedScopes ?? [];
   const globalPaused = paused.includes("global");
   const scoped = paused.filter((s) => s !== "global");

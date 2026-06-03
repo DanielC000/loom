@@ -2,6 +2,7 @@ import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Agent, Session, SessionRole } from "@loom/shared";
 import { api } from "../lib/api";
+import { bySessionActivity } from "../lib/sessions";
 import { TerminalPane } from "../components/Terminal";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { Composer } from "../components/Composer";
@@ -105,8 +106,11 @@ export default function Workspace() {
       topLevel.push(s);
     }
   }
-  for (const ws of workersByManager.values()) ws.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  const orderedTop = topLevel.sort((a, b) => roleRank(a.role) - roleRank(b.role));
+  // Within each tier, the shared activity comparator (live-first → most-recent → spawn-order). Role
+  // rank stays the PRIMARY top-level key so the orchestrator isn't lost among plain/orphan sessions;
+  // activity orders within a role. Workers sort by activity under their manager (hierarchy intact).
+  for (const ws of workersByManager.values()) ws.sort(bySessionActivity);
+  const orderedTop = topLevel.sort((a, b) => roleRank(a.role) - roleRank(b.role) || bySessionActivity(a, b));
   // Collapsed by default (to keep the box small); a group auto-expands while one of its workers is selected.
   const [expandedManagers, setExpandedManagers] = useState<Set<string>>(new Set());
   const toggleManager = (id: string) =>
