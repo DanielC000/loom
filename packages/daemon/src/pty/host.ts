@@ -63,6 +63,12 @@ const collapseBoot = (s: string): string => s.replace(ANSI_CSI, "").replace(/\s+
 const MODE_CYCLE_SETTLE_MS = 700;
 /** Gap between successive Shift+Tab presses so each cycle registers as a distinct key event. */
 const MODE_CYCLE_INTERVAL_MS = 120;
+/**
+ * Readiness fallback. SessionStart normally flips a (re)spawned session to `ready` (after the
+ * mode-cycles land). If that hook never arrives, don't strand a queued boot injection forever —
+ * mark ready after this grace so the message still drains. Env-overridable so tests don't wait 20s.
+ */
+const READY_FALLBACK_MS = Number(process.env.LOOM_READY_FALLBACK_MS) || 20_000;
 
 interface Subscriber {
   onData: (b: Buffer) => void;
@@ -80,6 +86,10 @@ interface Live {
   alive: boolean;
   logStream: fs.WriteStream;
   busy: boolean;        // a turn is in flight (locally tracked; mirrored to DB via onBusy)
+  ready: boolean;       // the TUI has booted (first SessionStart, after mode-cycles) — gate for injection.
+                        // DISTINCT from busy: busy="turn in flight", ready="engine up + safe to submit".
+                        // A fresh/resumed pty is NOT ready until SessionStart, so a boot-recovery nudge
+                        // queues instead of racing the still-booting composer (the 2026-06-03 restart bug).
   busySince: number | null;  // epoch ms when busy rose — for stuck-busy self-heal (BUSY_STALE_MS)
   lastOutputAt: number; // epoch ms of the last pty output — "is the engine actually producing?"
   lastHumanKeyAt: number | null; // epoch ms of the last human composer keystroke (collision guard)
@@ -189,6 +199,7 @@ export class PtyHost {
       alive: true,
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.sessionId}.log`)),
       busy: false,
+      ready: false, // flipped on the first SessionStart (after mode-cycles) — see Live.ready / markReady
       busySince: null,
       lastOutputAt: Date.now(),
       lastHumanKeyAt: null,
@@ -239,6 +250,16 @@ export class PtyHost {
     // GET /api/sessions is correct within the ~250ms before the UserPromptSubmit hook lands;
     // the hook then re-asserts the same value (idempotent). Resume injects no prompt, so no set.
     if (opts.startupPrompt) this.setBusy(opts.sessionId, true);
+
+    // Readiness fallback: if SessionStart never arrives (a missed hook), don't strand a queued boot
+    // injection forever — mark ready after a grace so it still drains. Bounded; a no-op if already ready.
+    setTimeout(() => {
+      const l = this.live.get(opts.sessionId);
+      if (l?.alive && !l.ready) {
+        console.log(`[pty] ${opts.sessionId} readiness fallback (no SessionStart in ${READY_FALLBACK_MS}ms) — marking ready`);
+        this.markReady(opts.sessionId);
+      }
+    }, READY_FALLBACK_MS);
   }
 
   /**
@@ -321,11 +342,21 @@ export class PtyHost {
           this.events.onEngineSessionId(sessionId, hook.session_id);
           this.broadcastControl(live, { type: "sessionId", id: hook.session_id });
         }
-        // Claude is up → cycle the permission mode off the gate-free boot default into the target
-        // mode (the human Shift+Tab step), once per session. Fire-and-forget; never blocks the turn.
-        if (live.startupModeCycles > 0 && !live.startupCyclesDone) {
+        // Claude is up → cycle the permission mode off the gate-free boot default into the target mode
+        // (the human Shift+Tab step), once per (re)spawn. NEEDED ON RESUME TOO: --permission-mode boots
+        // back at acceptEdits, so the cycles are what restore the target (e.g. auto) mode. The session
+        // is marked READY (which releases any queued injection) only AFTER the cycles land — so a
+        // boot-recovery nudge can't interleave with the Shift+Tabs. That interleave was the 2026-06-03
+        // restart bug: the nudge stranded un-submitted in the composer and the mode stuck mid-cycle on plan.
+        if (!live.startupCyclesDone) {
           live.startupCyclesDone = true;
-          this.sendModeCycles(sessionId, live.startupModeCycles);
+          if (live.startupModeCycles > 0) {
+            this.sendModeCycles(sessionId, live.startupModeCycles, () => this.markReady(sessionId));
+          } else {
+            this.markReady(sessionId);
+          }
+        } else {
+          this.markReady(sessionId); // idempotent: a repeat SessionStart still ensures readiness
         }
         break;
       case "UserPromptSubmit":
@@ -391,7 +422,10 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live?.alive) return { delivered: false };
     this.healIfStuck(live, sessionId);
-    if (!live.busy && !this.humanActivelyTyping(live)) {
+    // `ready` gate: a freshly (re)spawned pty is not ready until SessionStart. Submitting before then
+    // writes into a still-booting TUI — the Enter is swallowed and the text strands in the composer
+    // (the 2026-06-03 restart bug). Hold it FIFO; markReady drains it once the engine is up.
+    if (live.ready && !live.busy && !this.humanActivelyTyping(live)) {
       // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
       // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
       // synchronous code this is unreachable — enqueueStdin runs as its own event-loop task, never
@@ -434,7 +468,7 @@ export class PtyHost {
   /** Deliver the next queued message when it's safe (idle + composer free). Shared by Stop + reconcile. */
   private drainPending(sessionId: string): void {
     const live = this.live.get(sessionId);
-    if (!live?.alive || live.busy || live.pending.length === 0) return;
+    if (!live?.alive || !live.ready || live.busy || live.pending.length === 0) return;
     if (this.humanActivelyTyping(live)) return; // don't land on the human's half-typed text
     this.submit(sessionId, live.pending.shift()!);
   }
@@ -511,14 +545,28 @@ export class PtyHost {
    * registers as a distinct key event. Pure key writes — not turns — so they bypass the busy queue:
    * the mode cycle must land even while the startup-prompt turn is in flight (acceptEdits → target).
    */
-  private sendModeCycles(sessionId: string, count: number): void {
+  private sendModeCycles(sessionId: string, count: number, onDone?: () => void): void {
     const tick = (i: number): void => {
       const live = this.live.get(sessionId);
-      if (!live?.alive || i >= count) return;
+      if (!live?.alive) return;            // pty gone → drop the sequence (and onDone); nothing to ready
+      if (i >= count) { onDone?.(); return; } // all cycles landed → let the caller proceed (markReady)
       live.pty.write(SHIFT_TAB);
       setTimeout(() => tick(i + 1), MODE_CYCLE_INTERVAL_MS);
     };
     setTimeout(() => tick(0), MODE_CYCLE_SETTLE_MS);
+  }
+
+  /**
+   * Mark a (re)spawned session READY: its TUI has booted and (on resume) the permission-mode cycles
+   * have landed, so injected turns are safe to submit. Releases anything queued during boot — e.g. the
+   * daemon-restart continuation nudge that boot-recovery enqueues right after resume(), before the
+   * engine is up. Idempotent. See Live.ready: `busy` is "turn in flight", `ready` is "engine booted".
+   */
+  private markReady(sessionId: string): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive || live.ready) return;
+    live.ready = true;
+    this.drainPending(sessionId); // deliver the first queued injection now that the composer is live
   }
 
   subscribe(sessionId: string, sub: Subscriber): () => void {

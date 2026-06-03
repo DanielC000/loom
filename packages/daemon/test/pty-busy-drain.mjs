@@ -84,6 +84,12 @@ const written = () => fake.writes.join("");
 const countOf = (marker) => written().split(marker).length - 1;
 const lastBusy = () => busyLog[busyLog.length - 1];
 
+// A (re)spawned session is NOT ready until SessionStart (the boot-readiness gate that fixes the
+// resume-injection race; the ready-gate itself is covered in pty-resume-readiness.mjs). With
+// startupModeCycles:0, SessionStart marks ready synchronously — drive it so the M1/M2 immediate-submit
+// assertions below hold.
+host.deliverHook(SID, { hook_event_name: "SessionStart" });
+
 try {
   // ===================== M1 — optimistic, synchronous busy =====================
   // First enqueue on an idle session submits IMMEDIATELY. Crucially, submit() must arm busy

@@ -157,7 +157,20 @@ async function main(): Promise<void> {
     const tryResume = (id: string): boolean => {
       try { sessions.resume(id); return true; } catch { return false; }
     };
-    const workersResumed = restartIntent.workerSessionIds.filter(tryResume).length;
+    // Resume the workers, then give EACH a continuation nudge. A resumed worker gets no startup prompt,
+    // so a mid-task one would otherwise sit idle (the stranded-worker guard can't catch it — that fires
+    // on a busy->false hook edge, which a resume's direct setBusy(false) doesn't produce). The nudge is
+    // ready-gated in enqueueStdin, so it queues until the worker's TUI boots, then submits cleanly.
+    const resumedWorkers = restartIntent.workerSessionIds.filter(tryResume);
+    for (const wid of resumedWorkers) {
+      pty.enqueueStdin(
+        wid,
+        `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — your worktree ` +
+        `WIP is intact. Continue your assigned task from where you left off. If you had already finished, ` +
+        `call worker_report (done/blocked) so your manager isn't left waiting.`,
+      );
+    }
+    const workersResumed = resumedWorkers.length;
     if (tryResume(restartIntent.managerSessionId)) {
       pty.enqueueStdin(
         restartIntent.managerSessionId,
