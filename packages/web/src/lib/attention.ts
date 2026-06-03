@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "./api";
@@ -105,4 +106,26 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     });
   }
   return { items, count: items.length };
+}
+
+// Shared "newly-appeared attention item" detector. Seeds the seen-set silently on first load (so a
+// reload doesn't replay the backlog), then invokes `onNew` exactly once per item whose key wasn't
+// seen before; departed keys drop out so a re-occurrence re-fires. Defined ONCE here so the shell
+// bell (browser Notification) and the in-app toast stack run off the same new-item signal instead of
+// each re-deriving it — no surface fires for an item it already announced.
+export function useNewAttention(onNew: (item: AttentionItem) => void): void {
+  const { items } = useAttention();
+  const seen = useRef<Set<string> | null>(null);
+  const cb = useRef(onNew);
+  cb.current = onNew;
+  useEffect(() => {
+    if (seen.current === null) {
+      seen.current = new Set(items.map((i) => i.key));
+      return;
+    }
+    for (const it of items) {
+      if (!seen.current.has(it.key)) cb.current(it);
+    }
+    seen.current = new Set(items.map((i) => i.key));
+  }, [items]);
 }
