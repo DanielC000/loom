@@ -11,6 +11,7 @@ import Orchestration from "./pages/Orchestration";
 import ReviewPanel from "./pages/ReviewPanel";
 import Skills from "./pages/Skills";
 import { NavTab, Badge } from "./components/ui";
+import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
 import { api } from "./lib/api";
 import { useAttention } from "./lib/attention";
@@ -60,7 +61,7 @@ export default function App() {
     <div style={{ minHeight: "100vh" }}>
       <CommandPalette />
       <header style={{ display: "flex", alignItems: "center", gap: 24, padding: "10px 20px", borderBottom: `1px solid ${color.border}` }}>
-        <strong style={{ fontFamily: font.head, letterSpacing: "0.18em", color: color.text, fontSize: 15 }}>LOOM</strong>
+        <Logo />
         <nav style={{ display: "flex", gap: 18 }}>
           <NavTab to="/" end>Mission</NavTab>
           <NavTab to="/workspace">Workspace</NavTab>

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Loom — plain-weave glyph. Cockpit colors baked in (no CSS context in a favicon):
+       phosphor threads on the near-black panel, rounded square so it reads as an app icon. -->
+  <rect width="32" height="32" rx="6" fill="#0a0b0c"/>
+  <g fill="none" stroke="#2ee66e" stroke-width="3" stroke-linecap="round">
+    <!-- Warp (vertical) -->
+    <path d="M11 6 V17.6 M11 24.4 V26"/>
+    <path d="M21 6 V7.6 M21 14.4 V26"/>
+    <!-- Weft (horizontal) -->
+    <path d="M6 11 H7.6 M14.4 11 H26"/>
+    <path d="M6 21 H17.6 M24.4 21 H26"/>
+  </g>
+</svg>
