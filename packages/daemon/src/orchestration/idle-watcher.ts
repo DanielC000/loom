@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { resolveConfig, contextWindowForModel } from "@loom/shared";
 import type { OrchestrationEventKind } from "@loom/shared";
 import type { Db } from "../db.js";
@@ -43,13 +44,16 @@ const ORCH_ACTIVITY_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<Orchest
  *
  * Unlike ContextWatcher's in-memory `nudged` Set, the "once per episode" mark is PERSISTED
  * (`last_idle_nudge_at`): a re-nudge only fires after another full `idleNudgeMinutes` of continued
- * idleness, and at most `maxUnansweredNudges` times before backing off (the Task-4 escalation path —
- * here we simply stop). This survives a daemon restart, so a snooze/cap is honored across boots.
+ * idleness, and at most `maxUnansweredNudges` times. A manager that has slept through every nudge
+ * (unanswered ≥ cap, still `watching`) ESCALATES ONCE (Task 4): we append an `idle_escalated` event —
+ * the human-facing signal the web attention surface derives an alert from — and flip policy to
+ * `suppressed` (so nudging stops AND the policy gate fires the event exactly once). This is all PERSISTED,
+ * so a snooze/cap/escalation is honored across a daemon restart.
  *
  * Skips silently when: snoozed/suppressed (policy ≠ watching, or an active snooze window); the manager
- * has a live worker (legitimately waiting on a building worker); human-paused; at/over the unanswered
- * cap; a context-recycle nudge is pending (recycle takes precedence); or the project disabled it
- * (`idleNudgeMinutes === 0`). Reset-on-activity re-arms a manager that returned to real work.
+ * has a live worker (legitimately waiting on a building worker); human-paused; a context-recycle nudge
+ * is pending (recycle takes precedence); or the project disabled it (`idleNudgeMinutes === 0`).
+ * Reset-on-activity re-arms a manager that returned to real work.
  */
 export class IdleWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -93,7 +97,9 @@ export class IdleWatcher {
       if (m.busy) continue;                                              // mid-turn → not idle
       if (state.policy !== "watching") continue;                         // snoozed (within window) / suppressed
       if (state.snoozeUntil && nowIso < state.snoozeUntil) continue;     // defensive: active snooze on a watching row
-      if (state.unanswered >= cfg.maxUnansweredNudges) continue;         // at/over cap → Task-4 escalation, not here
+      // NOTE: the unanswered≥cap case is NOT a skip here — it ESCALATES at the nudge-decision point below
+      // (it must pass the SAME predicate a nudge does: unpaused, no live worker, not recycle-pending,
+      // idle≥window-since-last-nudge, alive — so a human/recycle-owned manager is never escalated).
       if (control.isPaused(m.id)) continue;                              // human-paused
 
       // No live workers — a manager waiting on a building worker is legitimately idle (don't nudge).
@@ -115,6 +121,25 @@ export class IdleWatcher {
       if (idleForMin < idleMinutes) continue;
 
       if (!pty.isAlive(m.id)) continue;
+
+      // ESCALATE-INSTEAD-OF-NUDGE (Task 4): we're at the nudge-decision point, so the manager has
+      // already cleared the FULL nudge predicate (unpaused, no live worker, not recycle-pending,
+      // idle≥window-since-last-nudge, alive). If it's also at/over the unanswered cap it slept through
+      // every nudge → escalate ONCE instead of nudging again: append an `idle_escalated` event (the
+      // human-facing signal — attention.ts derives the alert from it; we deliberately do NOT enqueue a
+      // nudge or raise a notification) and flip policy to 'suppressed'. That stops nudging AND makes the
+      // `policy !== 'watching'` gate above skip this manager next tick, so we emit EXACTLY ONCE.
+      // Genuine new activity (reset-on-activity above) clears it back to 'watching' and re-arms the cycle.
+      if (state.unanswered >= cfg.maxUnansweredNudges) {
+        this.deps.db.appendEvent({
+          id: randomUUID(), ts: nowIso, managerSessionId: m.id, kind: "idle_escalated",
+          detail: { reason: "unanswered_cap", unanswered: state.unanswered },
+        });
+        db.setIdleNudgePolicy(m.id, "suppressed");
+        // eslint-disable-next-line no-console
+        console.log(`[idle-watcher] ESCALATED idle manager ${m.id} (${state.unanswered} unanswered nudges → suppressed)`);
+        continue;
+      }
 
       const openTodos = db.listTasks(m.projectId).filter((t) => t.columnKey === "todo").length;
       const n = Math.round((nowMs - lastActivityMs) / 60_000);

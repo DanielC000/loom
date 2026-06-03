@@ -38,11 +38,25 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   });
   const allEvents = eventQueries.flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? []);
 
+  const sortedEvents = [...allEvents].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
+
   // A merge_request is "pending" until a later merge_done/merge_rejected for the same worker/task.
   const latestMerge = new Map<string, OrchestrationEvent>();
-  for (const e of [...allEvents].sort((a, b) => +new Date(a.ts) - +new Date(b.ts))) {
+  for (const e of sortedEvents) {
     if (e.kind === "merge_request" || e.kind === "merge_done" || e.kind === "merge_rejected") {
       latestMerge.set(e.workerSessionId || e.taskId || e.id, e);
+    }
+  }
+
+  // Asleep-at-the-Wheel watchdog (Task 4): surface the manager's LATEST idle disposition. An
+  // `idle_escalated` (slept through every nudge) or an `idle_report` with state blocked_human/done is
+  // a human-facing alert; a later `working`/`waiting` report — or any newer idle event — clears it (we
+  // only keep the single latest idle event per manager, mirroring latestMerge). detail is typed
+  // Record<string,unknown>, so read .state/.detail through a cast as elsewhere in this codebase.
+  const latestIdle = new Map<string, OrchestrationEvent>();
+  for (const e of sortedEvents) {
+    if (e.kind === "idle_report" || e.kind === "idle_escalated") {
+      latestIdle.set(e.managerSessionId, e);
     }
   }
 
@@ -54,6 +68,26 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
         text: `${e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)} ` : ""}${e.taskId ? `task ${e.taskId.slice(0, 8)} ` : ""}— awaiting review`,
       });
     }
+  }
+  for (const e of latestIdle.values()) {
+    const detail = (e.detail ?? {}) as { state?: string; detail?: string; unanswered?: number };
+    if (e.kind === "idle_escalated") {
+      items.push({
+        key: `ie-${e.id}`, tone: "red", kind: "MANAGER ASLEEP", workerSessionId: e.managerSessionId,
+        text: `manager ${e.managerSessionId.slice(0, 8)} — ${detail.unanswered ?? "?"} unanswered idle nudges, escalated`,
+      });
+    } else if (detail.state === "blocked_human") {
+      items.push({
+        key: `ib-${e.id}`, tone: "red", kind: "NEEDS A HUMAN", workerSessionId: e.managerSessionId,
+        text: `manager ${e.managerSessionId.slice(0, 8)} — needs a human decision${detail.detail ? `: ${detail.detail}` : ""}`,
+      });
+    } else if (detail.state === "done") {
+      items.push({
+        key: `id-${e.id}`, tone: "amber", kind: "QUEUE DRAINED", workerSessionId: e.managerSessionId,
+        text: `manager ${e.managerSessionId.slice(0, 8)} — queue drained; reclaim/close the session${detail.detail ? ` (${detail.detail})` : ""}`,
+      });
+    }
+    // a latest idle_report of working/waiting falls through → no item (the alert is cleared).
   }
   for (const s of all.filter(isRateLimited)) {
     items.push({

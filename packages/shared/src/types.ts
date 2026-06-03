@@ -125,7 +125,7 @@ export type OrchestrationEventKind =
   | "spawn_worker" | "message_worker" | "worker_report" | "stop_worker"
   | "recycle_begin" | "recycle_complete" | "merge_request" | "merge_done"
   | "merge_rejected" | "build_gate" | "kill_switch" | "schedule_fired"
-  | "wake_scheduled" | "wake_fired" | "wake_dropped" | "idle_report";
+  | "wake_scheduled" | "wake_fired" | "wake_dropped" | "idle_report" | "idle_escalated";
 
 export interface OrchestrationEvent {
   id: string;
