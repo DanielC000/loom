@@ -25,6 +25,8 @@
     "test:busy": "node test/busy-flag.mjs",
     "test:orch": "node test/orch-model.mjs",
     "test:profile-spawn": "node test/profile-spawn.mjs",
+    "test:profiles-crud": "node test/profiles-crud.mjs",
+    "test:profiles-rest": "node test/profiles-rest.mjs",
     "test:context": "node test/context-stats.mjs",
     "test:worktrees": "node test/worktrees.mjs",
     "test:transcript-encode": "node test/transcript-encode.mjs",

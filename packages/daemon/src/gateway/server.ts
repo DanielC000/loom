@@ -18,6 +18,8 @@ import { GitReader } from "../git/reader.js";
 import { diffBranch } from "../git/worktrees.js";
 import { listVaultTree, readVaultFile } from "../vault/browser.js";
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, isValidSkillName, skillTemplate } from "../skills/store.js";
+import { validateProfile } from "../profiles/validate.js";
+import { resetProfileToBundled } from "../profiles/seed.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -158,6 +160,52 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!resetSkillToBundled(name)) return reply.code(404).send({ error: "no bundled version for this skill" });
     return readSkill(name);
   });
+
+  // --- Agent Profiles (platform-level "who": role + prompt + allow/skills/model/icon). HUMAN-managed
+  // ONLY (REST + later web UI) — profiles confer role + permission allowlists (= privilege), so they
+  // are deliberately kept OFF the agent-writable MCP surface. Writes are schema-validated (strict,
+  // typo-guarded) by validateProfile, mirroring the project-config validator. ---
+  app.get("/api/profiles", async () => deps.db.listProfiles());
+  app.get("/api/profiles/:id", async (req, reply) => {
+    const p = deps.db.getProfile((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "profile not found" });
+    return p;
+  });
+  app.post("/api/profiles", async (req, reply) => {
+    const v = validateProfile(req.body);
+    if (!v.ok) return reply.code(400).send({ error: `invalid profile: ${v.error}` });
+    const profile = { id: randomUUID(), ...v.value };
+    deps.db.insertProfile(profile);
+    return reply.code(201).send(profile);
+  });
+  app.put("/api/profiles/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const existing = deps.db.getProfile(id);
+    if (!existing) return reply.code(404).send({ error: "profile not found" });
+    // Merge the patch over the existing profile, then validate the RESULT (so a partial patch that
+    // omits required fields still passes). `id` is path-scoped — drop it from both sides so a verbatim
+    // round-trip PUT (GET → PUT the same body) doesn't trip .strict()'s unknown-key guard.
+    const { id: _drop, ...patch } = (req.body ?? {}) as Record<string, unknown>;
+    const { id: _eid, ...base } = existing;
+    const v = validateProfile({ ...base, ...patch });
+    if (!v.ok) return reply.code(400).send({ error: `invalid profile: ${v.error}` });
+    deps.db.updateProfile(id, v.value);
+    return deps.db.getProfile(id);
+  });
+  // Delete is SAFE for assigned topics: a dangling profile_id resolves to the plain backstop (a
+  // bundled profile re-seeds on next boot). Idempotent — mirrors the skills DELETE (no 404).
+  app.delete("/api/profiles/:id", async (req) => {
+    deps.db.deleteProfile((req.params as { id: string }).id);
+    return { ok: true };
+  });
+  // Restore a bundled profile to its shipped fields (discards UI edits) — the profile analogue of the
+  // skill reset. 404 if the id is unknown or its name isn't a bundled one (a user-created profile).
+  app.post("/api/profiles/:id/reset", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!resetProfileToBundled(deps.db, id)) return reply.code(404).send({ error: "no bundled version for this profile" });
+    return deps.db.getProfile(id);
+  });
+
   app.get("/api/projects/:id/topics", async (req) =>
     deps.db.listTopics((req.params as { id: string }).id));
   app.get("/api/projects/:id/tasks", async (req) =>
@@ -266,7 +314,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/topics/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getTopic(id)) return reply.code(404).send({ error: "topic not found" });
-    const b = (req.body ?? {}) as { name?: string; startupPrompt?: string };
+    const b = (req.body ?? {}) as { name?: string; startupPrompt?: string; profileId?: string | null };
+    // Assigning a profile: a non-null profileId must reference a real profile (null CLEARS — the topic
+    // falls back to the plain backstop). Pass the whole patch through; updateTopic writes only the
+    // provided keys (`profileId: null` clears, an absent key leaves the assignment as-is).
+    if (b.profileId != null && !deps.db.getProfile(b.profileId)) return reply.code(404).send({ error: "profile not found" });
     deps.db.updateTopic(id, b);
     return deps.db.getTopic(id);
   });
@@ -299,6 +351,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { role } = (req.body as { role?: string }) ?? {};
     if (role === "manager") return deps.sessions.startManager(id);
     if (role === "platform") return deps.sessions.startPlatformLead(id);
+    // P3 force-plain override (web "Spawn → force plain"): a VANILLA session even in a topic with a
+    // manager/platform profile — bypasses the profile entirely (role null, topic's own prompt, no allow
+    // delta). Absent/undefined role = auto (the profile's role applies — P2 default).
+    if (role === "plain") return deps.sessions.startNew(id, { forcePlain: true });
     return deps.sessions.startNew(id);
   });
   app.post("/api/sessions/:id/resume", async (req) =>
