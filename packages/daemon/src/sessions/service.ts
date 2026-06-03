@@ -216,6 +216,13 @@ export class SessionService {
       this.db.setResumability(session.id, "dead");
       throw new Error("session is no longer resumable (engine transcript missing)");
     }
+    // A RECYCLED session has a successor that took over its work + fleet (and inherited its wakes +
+    // queued messages). Never resurrect it — a due wake, a rate-limit resume, or boot-resume would
+    // otherwise zombie it ALONGSIDE its successor (two managers on one topic). Refuse from every
+    // resume path. (recycle_me already reparents the triggers, so this is defense-in-depth.)
+    if (this.db.hasSuccessor(sessionId)) {
+      throw new Error("session was recycled — a successor exists, so it is not resumable");
+    }
     const project = this.db.getProject(session.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
@@ -525,6 +532,10 @@ export class SessionService {
       managerSessionId, workerSessionId, taskId, kind: "recycle_begin",
     });
 
+    // Carry the old worker's in-flight inbound queue (manager messages held while it was busy) onto
+    // the fresh worker — same task + worktree, so they're still valid. Grab it NOW, while the old pty
+    // is still alive (its live entry, and the queue with it, is dropped on exit). Wakes are moved below.
+    const carriedPending = this.pty.getPending(workerSessionId);
     // Close the old worker HARD: reliable, and we spawn fresh (never resume) so a clean graceful
     // exit isn't needed. Wait until the pty is actually gone before reusing the worktree.
     this.pty.stop(workerSessionId, "hard");
@@ -576,6 +587,11 @@ export class SessionService {
       startupPrompt: framed,
       role: "worker",
     });
+    // Hand the carried queue + scheduled wakes to the successor: re-point the old worker's wakes (so a
+    // due wake can't resurrect the retired worker) and re-enqueue the held messages (busy-gated; they
+    // drain on the fresh worker's first turn boundary, after its handoff turn).
+    this.db.reparentWakes(workerSessionId, fresh.id);
+    for (const m of carriedPending) this.pty.enqueueStdin(fresh.id, m);
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId: fresh.id, taskId, kind: "recycle_complete",
@@ -647,6 +663,12 @@ export class SessionService {
     // Re-parent live workers onto the successor BEFORE closing the old manager, so they're never
     // orphaned (worker_report routes by parent_session_id; the successor sees them via worker_list).
     const reparented = this.db.reparentLiveWorkers(oldManagerId, fresh.id);
+    // Carry the old manager's scheduled wakes + its in-flight inbound queue (worker reports / human
+    // turns held while it was busy) onto the successor — it owns the fleet now, so these are its to
+    // handle. Re-pointing the wakes also guarantees nothing fires at the retired manager (which would
+    // zombie-resurrect it). Grab pending while the old pty is still alive (its 3s deferred stop is below).
+    this.db.reparentWakes(oldManagerId, fresh.id);
+    for (const m of this.pty.getPending(oldManagerId)) this.pty.enqueueStdin(fresh.id, m);
 
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),

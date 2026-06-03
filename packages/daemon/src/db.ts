@@ -507,6 +507,17 @@ export class Db {
     return this.db.prepare("UPDATE sessions SET parent_session_id = ? WHERE parent_session_id = ? AND process_state = 'live'")
       .run(newManagerId, oldManagerId).changes;
   }
+  /** Move a session's pending wakes to a successor on recycle: the successor inherits the scheduled
+   *  nudges, and the retired session is left with nothing to fire (so a due wake can't zombie it). */
+  reparentWakes(oldSessionId: string, newSessionId: string): number {
+    return this.db.prepare("UPDATE wakes SET session_id = ? WHERE session_id = ?")
+      .run(newSessionId, oldSessionId).changes;
+  }
+  /** True once a session has been recycled — a successor row points back at it via recycled_from.
+   *  resume() uses this to refuse resurrecting a superseded session from ANY path (wake/rate-limit/boot). */
+  hasSuccessor(sessionId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM sessions WHERE recycled_from = ? LIMIT 1").get(sessionId);
+  }
   /** Count of currently-LIVE manager sessions — the Scheduler's manager-cap gate (§19a hardening). */
   countLiveManagers(): number {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE role = 'manager' AND process_state = 'live'")

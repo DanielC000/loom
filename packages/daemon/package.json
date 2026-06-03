@@ -34,7 +34,8 @@
     "test:board-consistency": "node test/board-consistency.mjs",
     "test:dead-id": "node test/dead-id.mjs",
     "test:restart-intent": "node test/restart-intent.mjs",
-    "test:vault": "node test/vault-browser.mjs"
+    "test:vault": "node test/vault-browser.mjs",
+    "test:recycle-handoff": "node test/recycle-handoff.mjs"
   },
   "dependencies": {
     "@fastify/static": "^8.0.0",
