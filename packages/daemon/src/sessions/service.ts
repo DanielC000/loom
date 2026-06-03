@@ -34,9 +34,14 @@ export class SessionService {
    *
    * DEFERRED to a later phase (NOT wired here): the profile's `model` (no `--model` emitted) and its
    * `skills` subset (all skills still delivered). This wires ONLY role + startupPrompt + allow.
+   *
+   * `forcePlain` (P3 spawn override): pin the resolved role to undefined REGARDLESS of the profile,
+   * so the web "Spawn → force plain" path can start a role-null (no orchestration/platform surface)
+   * session in a topic that carries a manager/platform profile. Scoped to the ROLE only — the
+   * profile's prompt + allowDelta still apply (matching "ignore the profile's role").
    */
   private resolveTopicSpawn(
-    topic: Topic, config: ResolvedConfig, explicitRole?: SessionRole,
+    topic: Topic, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false,
   ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy } {
     const profile = topic.profileId ? this.db.getProfile(topic.profileId) : undefined;
     const resolved = resolveProfile(topic, profile);
@@ -46,15 +51,20 @@ export class SessionService {
       ? { ...config.permission, allow: [...config.permission.allow, ...resolved.allow] }
       : config.permission;
     return {
-      role: explicitRole ?? resolved.role ?? undefined,
+      // forcePlain wins over everything → role-null session; otherwise an explicit caller role wins,
+      // then the profile's role, then undefined (today's plain).
+      role: forcePlain ? undefined : explicitRole ?? resolved.role ?? undefined,
       // Same `|| undefined` empties-to-undefined coercion today's start paths use on the topic prompt.
       startupPrompt: resolved.startupPrompt || undefined,
       permission,
     };
   }
 
-  /** Start a NEW session in a topic — injects the topic startup prompt once. */
-  startNew(topicId: string): Session {
+  /**
+   * Start a NEW session in a topic — injects the topic startup prompt once. `opts.forcePlain` (P3
+   * web "Spawn → force plain") overrides any profile-conferred role to spawn a role-null session.
+   */
+  startNew(topicId: string, opts: { forcePlain?: boolean } = {}): Session {
     const topic = this.db.getTopic(topicId);
     if (!topic) throw new Error("topic not found");
     const project = this.db.getProject(topic.projectId);
@@ -63,7 +73,8 @@ export class SessionService {
     // Phase-2: a topic with an Agent Profile spawns with the profile's role + prompt + allowDelta.
     // No caller role here (plain "+New"), so the profile's role applies when present. No profile ⇒
     // role undefined, the topic's own prompt, the config permission unchanged — i.e. today's session.
-    const { role, startupPrompt, permission } = this.resolveTopicSpawn(topic, config);
+    // forcePlain (P3) pins role to undefined even on a profile topic (see resolveTopicSpawn).
+    const { role, startupPrompt, permission } = this.resolveTopicSpawn(topic, config, undefined, opts.forcePlain ?? false);
 
     const now = new Date().toISOString();
     const session: Session = {

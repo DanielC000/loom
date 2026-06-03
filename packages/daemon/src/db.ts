@@ -222,9 +222,19 @@ export class Db {
        VALUES (@id,@projectId,@name,@startupPrompt,@position,@profileId)`,
     ).run({ ...t, profileId: t.profileId ?? null });
   }
-  /** Partial edit of a topic preset (name / startup prompt). Omitted fields are left as-is. */
-  updateTopic(id: string, patch: { name?: string; startupPrompt?: string }): void {
-    const cols: Record<string, unknown> = { name: patch.name, startup_prompt: patch.startupPrompt };
+  /**
+   * Partial edit of a topic preset (name / startup prompt / assigned Agent Profile). Omitted fields
+   * are left as-is; `profileId: null` CLEARS the assignment (topic falls back to resolveProfile's
+   * plain backstop). `?? null` coerces a provided-but-undefined value so an explicit clear reaches
+   * the column (a truly absent key is filtered out and left as-is).
+   */
+  updateTopic(id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null }): void {
+    const cols: Record<string, unknown> = {
+      name: patch.name,
+      startup_prompt: patch.startupPrompt,
+      // present (incl. null → clear) writes; absent (undefined) is filtered out below and left as-is.
+      profile_id: "profileId" in patch ? patch.profileId ?? null : undefined,
+    };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
     const set = names.map((c) => `${c} = ?`).join(", ");
@@ -266,6 +276,14 @@ export class Db {
     if (names.length === 0) return;
     const set = names.map((c) => `${c} = ?`).join(", ");
     this.db.prepare(`UPDATE profiles SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
+  /**
+   * Delete a profile. SAFE for assigned topics: a topic whose profile_id now dangles resolves to the
+   * plain backstop via resolveProfile (getProfile → undefined). A bundled profile re-seeds on next
+   * boot (seed-if-absent), so deleting one is non-destructive.
+   */
+  deleteProfile(id: string): void {
+    this.db.prepare("DELETE FROM profiles WHERE id = ?").run(id);
   }
 
   // --- sessions ---
