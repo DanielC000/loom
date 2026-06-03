@@ -11,6 +11,7 @@
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",
     "daemon": "pnpm --filter @loom/daemon dev",
+    "daemon:stable": "turbo build --filter=@loom/daemon && pnpm --filter @loom/daemon start",
     "web": "pnpm --filter @loom/web dev"
   },
   "devDependencies": {

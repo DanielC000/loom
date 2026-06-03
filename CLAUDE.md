@@ -20,9 +20,20 @@ tasks into one fabric. Clean-slate successor to Jinn.
 ```sh
 pnpm install
 pnpm build          # builds shared first (turbo ^build)
-pnpm daemon         # daemon on http://127.0.0.1:4317 (loopback only)
+pnpm daemon         # dev daemon (tsx watch) on http://127.0.0.1:4317 (loopback only)
 pnpm web            # viewport on http://127.0.0.1:5317 (proxies /api + /ws to the daemon)
 ```
+
+**Self-hosting (orchestrating Loom WITH Loom):** use `pnpm daemon:stable`, not `pnpm daemon`.
+The dev daemon runs under `tsx watch`, so any worker merge that lands a change under
+`packages/daemon/src/**` (or `shared/dist`) restarts it mid-orchestration and kills the live
+manager/worker PTYs (the watch-restart-kills-PTYs gotcha — it caused an overnight cascade on
+2026-06-03). `daemon:stable` builds once and runs `node dist/index.js` with no watcher, so source
+merges don't restart the running daemon; you pick up merged changes deliberately by re-running it.
+Caveat: `assets/**` (hook-relay, vault-lint, bundled skills) is still read live from the package
+dir, so asset merges take effect on the next spawn without a restart. For full isolation, run the
+stable daemon from a separate checkout (shares `~/.loom` state; override `LOOM_HOME`/`LOOM_PORT` if
+you need two daemons side by side).
 
 ## Load-bearing invariants (validated in the spike — do not regress)
 - **Drive the REAL interactive `claude` via node-pty.** Never `claude -p`/headless.
