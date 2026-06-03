@@ -1,7 +1,7 @@
 import type { Project, Agent, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
-export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; }
+export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
 
 async function get<T>(url: string): Promise<T> {
   const r = await fetch(url);

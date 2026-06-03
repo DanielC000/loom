@@ -83,8 +83,10 @@ export default function Orchestration() {
               {workerId && diff.isError && <span style={{ color: color.red, fontSize: 12 }}>No diff (worker has no branch, or it was merged/removed).</span>}
               {workerId && diff.data && (
                 <>
-                  <div style={{ fontFamily: font.mono, fontSize: 12, color: color.cyan, marginBottom: 8 }}>
-                    {diff.data.filesChanged} file(s) · +{diff.data.insertions} −{diff.data.deletions}
+                  <div style={{ fontFamily: font.mono, fontSize: 12, color: color.cyan, marginBottom: 8, display: "flex", gap: 8, alignItems: "center" }}>
+                    <span>{diff.data.filesChanged} file(s) · +{diff.data.insertions} −{diff.data.deletions}</span>
+                    {diff.data.uncommitted && <Badge tone="amber">live · incl. uncommitted</Badge>}
+                    {diff.data.merged && <Badge tone="phosphor">merged → landed diff</Badge>}
                   </div>
                   <DiffView patch={diff.data.patch || "(no changes vs HEAD)"} />
                 </>

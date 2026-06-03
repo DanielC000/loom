@@ -15,7 +15,7 @@ import type { PlatformMcpRouter } from "../mcp/platform.js";
 import { validateProjectConfigOverride } from "../mcp/platform.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { GitReader } from "../git/reader.js";
-import { diffBranch } from "../git/worktrees.js";
+import { workerDiff } from "../git/worktrees.js";
 import { listVaultTree, readVaultFile } from "../vault/browser.js";
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, isValidSkillName, skillTemplate } from "../skills/store.js";
 import { validateProfile } from "../profiles/validate.js";
@@ -231,7 +231,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const p = deps.db.getProject(s.projectId);
     if (!p) return reply.code(404).send({ error: "project not found" });
     // Lifecycle-robust: live worktree (uncommitted) → committed branch → reconstructed merge diff.
-    const d = await workerDiff(p.repoPath, { branch: s.branch, worktreePath: s.worktreePath });
+    const d = await workerDiff(p.repoPath, { branch: s.branch, worktreePath: s.worktreePath ?? null });
     if (!d) return reply.code(404).send({ error: "no diff available (no worktree, and branch gone/unmergeable)" });
     return d;
   });
