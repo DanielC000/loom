@@ -1,20 +1,25 @@
 import { useEffect, useRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
 import type { TerminalControl } from "@loom/shared";
 import "@xterm/xterm/css/xterm.css";
 import "./Terminal.css";
 
 /**
- * Live terminal pane. Attaches to /ws/term/:sessionId, fully bidirectional (the user types
- * into the real session). Binary frames = pty bytes; text frames = JSON control.
+ * Live terminal pane. Attaches to /ws/term/:sessionId, fully bidirectional (the user types into the
+ * real session/shell). Binary frames = pty bytes; text frames = JSON control.
  *
- * Geometry is NOT negotiated — the daemon pins the pty grid (workers often run with no viewer
- * attached) and sends it once as a `geometry` control frame. We honor the pin: resize the xterm
- * GRID to exactly the pinned cols×rows, then SCALE BY FONT SIZE so that grid fills the tile
- * (§12-Q6). We never fit the grid to the tile — doing so would desync from the pty's redraws and
- * garble Claude's Ink TUI. No FitAddon.
+ * TWO geometry modes:
+ *  • Claude sessions (default, resizable=false): geometry is NOT negotiated — the daemon pins the pty
+ *    grid (workers often run with no viewer) and sends it once as a `geometry` frame. We honor the pin:
+ *    resize the xterm GRID to exactly the pinned cols×rows, then SCALE BY FONT SIZE so it fills the
+ *    tile (§12-Q6). We never fit the grid to the tile — that would desync from the pty's redraws and
+ *    garble Claude's Ink TUI. No FitAddon.
+ *  • Shell terminals (resizable=true): the OPPOSITE — a plain shell has no alt-screen repaint
+ *    constraint, so we FIT the grid to the pane (FitAddon) and tell the daemon to resize the pty to
+ *    match (a `resize` ws msg). The shell then wraps to the pane like any terminal emulator.
  */
-export function TerminalPane({ sessionId }: { sessionId: string }) {
+export function TerminalPane({ sessionId, resizable = false }: { sessionId: string; resizable?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -27,6 +32,8 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
       scrollback: 5000,
       theme: { background: "#0b0b0c" },
     });
+    const fit = resizable ? new FitAddon() : null;
+    if (fit) term.loadAddon(fit);
     term.open(el);
 
     // Clipboard: xterm sends raw control bytes for Ctrl+V/Ctrl+C by default (so Ctrl+V emits 0x16
@@ -53,16 +60,16 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
       return true;
     });
 
-    // The pinned grid, learned from the daemon's `geometry` frame. Held in closure so both the
-    // frame handler and the ResizeObserver can recompute the fontSize against it.
+    // The pinned grid, learned from the daemon's `geometry` frame (Claude mode only). Held in closure
+    // so both the frame handler and the ResizeObserver can recompute the fontSize against it.
     let cols = 0;
     let rows = 0;
 
     /**
-     * Scale fontSize so the pinned cols×rows grid just fills the container without overflow.
-     * Cell size is linear in fontSize for a monospace font, so we read the renderer's current
-     * cell dimensions, derive the per-pixel cell ratio, and solve for the largest fontSize that
-     * fits both axes. Single pass is exact; the floor + clamp keep it from overflowing.
+     * Claude mode: scale fontSize so the pinned cols×rows grid just fills the container without
+     * overflow. Cell size is linear in fontSize for a monospace font, so we read the renderer's current
+     * cell dimensions, derive the per-pixel cell ratio, and solve for the largest fontSize that fits
+     * both axes. Single pass is exact; the floor + clamp keep it from overflowing.
      */
     const applyFontSize = () => {
       if (!cols || !rows) return;
@@ -91,17 +98,33 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
     const ws = new WebSocket(`${proto}//${location.host}/ws/term/${sessionId}`);
     ws.binaryType = "arraybuffer";
 
+    /**
+     * Shell mode: fit the grid to the pane, then tell the daemon to resize the pty to match so the
+     * shell wraps to the visible width. No-op until the ws is open and the element has a size.
+     */
+    const fitAndReport = () => {
+      if (!fit || el.clientWidth <= 0 || el.clientHeight <= 0) return;
+      try { fit.fit(); } catch { return; }
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+    };
+    ws.onopen = () => { if (resizable) fitAndReport(); };
+
     ws.onmessage = (e) => {
       if (typeof e.data === "string") {
         let msg: TerminalControl;
         try { msg = JSON.parse(e.data); } catch { term.write(e.data); return; }
         if (msg.type === "reset") term.reset();
         else if (msg.type === "geometry") {
-          // Honor the pinned grid, then scale the font to fill the tile.
-          cols = msg.cols;
-          rows = msg.rows;
-          term.resize(cols, rows);
-          applyFontSize();
+          if (resizable) {
+            // Shell: the daemon's initial grid is just a seed — we drive the size, so fit instead.
+            fitAndReport();
+          } else {
+            // Claude: honor the pinned grid, then scale the font to fill the tile.
+            cols = msg.cols;
+            rows = msg.rows;
+            term.resize(cols, rows);
+            applyFontSize();
+          }
         }
         // (sessionId/exit/dead control frames handled by parent state in the full UI)
       } else {
@@ -112,12 +135,12 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "stdin", data: d }));
     });
 
-    // Re-scale the font (never the grid) whenever the tile changes size.
-    const ro = new ResizeObserver(() => applyFontSize());
+    // On a tile resize: shells re-fit (and tell the pty); Claude re-scales the font (never the grid).
+    const ro = new ResizeObserver(() => { if (resizable) fitAndReport(); else applyFontSize(); });
     ro.observe(el);
 
     return () => { onData.dispose(); ws.close(); ro.disconnect(); term.dispose(); };
-  }, [sessionId]);
+  }, [sessionId, resizable]);
 
   return <div ref={ref} style={{ height: "100%", width: "100%" }} />;
 }

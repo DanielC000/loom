@@ -3,7 +3,9 @@
 // Terminal WebSocket  (/ws/term/:sessionId):
 //   server -> client: BINARY frames = raw pty bytes; TEXT frames = JSON TerminalControl
 //   client -> server: TEXT frames = JSON TerminalInput
-// No `resize` in phase 1 — the pty is pinned to a fixed geometry; viewers scale by font size.
+// Claude ptys are pinned to a fixed geometry (viewers scale by font size); only SHELL terminals
+// negotiate size — a `resize` from the viewer is honored for shells and ignored for Claude ptys
+// (the alt-screen repaint invariant). See ShellTerminal below.
 
 export type TerminalControl =
   | { type: "sessionId"; id: string }   // engine session id captured/known
@@ -18,7 +20,23 @@ export type TerminalControl =
 
 export type TerminalInput =
   | { type: "stdin"; data: string }
-  | { type: "repaint" };                // force Ctrl-L repaint (tearing mitigation)
+  | { type: "repaint" }                 // force Ctrl-L repaint (tearing mitigation)
+  | { type: "resize"; cols: number; rows: number }; // SHELL terminals only — fit the pty to the pane
+
+/**
+ * A plain interactive SHELL terminal (pwsh/cmd/bash) the HUMAN spawned in a project's repo cwd from
+ * the Terminals page — NOT a Claude session (no agent, engine id, role, busy, or resumability). Lives
+ * in-memory in PtyHost; this is the listing shape for the web to re-attach after a detach/reload. See
+ * the trust-boundary note on POST /api/terminals: spawning a shell is host-RCE-by-design, so it is a
+ * HUMAN-ONLY REST endpoint and deliberately NOT exposed as an MCP tool.
+ */
+export interface ShellTerminal {
+  id: string;
+  cwd: string;
+  command: string;
+  label: string;
+  alive: boolean;
+}
 
 // REST DTOs (subset; expanded during the build).
 export interface SpawnSessionRequest {

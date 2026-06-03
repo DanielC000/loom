@@ -95,7 +95,15 @@ interface Live {
   pty: IPty;
   pid: number;
   cwd: string;
-  geometry: PtyGeometry; // the pinned grid — sent to each new subscriber (info only, never resized)
+  // Discriminates the two pty species sharing this map. "claude" = an interactive Claude session
+  // (the full machinery below: readiness gate, hook-driven busy, injection queue, mode-cycles…).
+  // "shell" = a plain human-spawned interactive shell (pwsh/cmd/bash) — RAW passthrough only; ALL the
+  // Claude-only logic (deliverHook/readiness/drain/reconcile/boot-reconcile) SKIPS it. A shell is NOT a
+  // DB Session, so the orchestration watchers (which iterate DB sessions) never see it either.
+  kind: "claude" | "shell";
+  command?: string;   // shell only: the executable spawned (for GET /api/terminals)
+  label?: string;     // shell only: human label for the tile
+  geometry: PtyGeometry; // claude: the pinned grid (info only, never resized). shell: current size, resizable.
   engineSessionId: string | null;
   ring: { chunks: Buffer[]; bytes: number };
   subscribers: Set<Subscriber>;
@@ -189,6 +197,23 @@ export function buildSpawnArgs(o: {
 }
 
 /**
+ * The host's default interactive shell, used to PREFILL the "+ Shell" modal (the human can override).
+ * Windows: prefer PowerShell 7 (pwsh), else Windows PowerShell, else cmd — returned as an ABSOLUTE path
+ * (node-pty's Windows agent doesn't search %PATH%). Unix: $SHELL, else /bin/bash. This is a convenience
+ * default only — it confers no privilege; the spawn is still gated to the human REST path.
+ */
+export function detectDefaultShell(): string {
+  if (process.platform === "win32") {
+    for (const c of ["pwsh.exe", "powershell.exe", "cmd.exe"]) {
+      const abs = resolveExecutable(c);
+      if (abs !== c) return abs; // resolveExecutable returns the name unchanged when not found on PATH
+    }
+    return resolveExecutable("cmd.exe"); // System32 is always on PATH, so this resolves
+  }
+  return process.env.SHELL || "/bin/bash";
+}
+
+/**
  * Owns all interactive `claude` ptys. Independent of any browser — sessions live here.
  * Implements the spike-validated gate-free spawn recipe (acceptEdits + allowlist,
  * --strict-mcp-config WITH an explicit --mcp-config so the .mcp.json prompt never blocks,
@@ -208,6 +233,7 @@ export class PtyHost {
     const pty = this.createPty(opts);
     const live: Live = {
       pty, pid: pty.pid, cwd: opts.cwd,
+      kind: "claude",
       geometry: opts.geometry,
       // A fork carries its PRE-ASSIGNED engine id (forkSessionId); a plain resume reuses resumeId;
       // a brand-new session has none yet (captured on SessionStart).
@@ -302,6 +328,110 @@ export class PtyHost {
   }
 
   /**
+   * Spawn a PLAIN interactive shell (pwsh/cmd/bash/…) in a project's repo cwd — the human's "open a
+   * terminal in this repo" path, a sibling to spawn() that bypasses ALL the Claude-only machinery.
+   * Bare node-pty spawn with inherited env (no CLAUDE_* scrub, no settings/MCP/skills/trust wiring),
+   * registered in the `live` map with kind:"shell" so deliverHook/readiness/drain/reconcile skip it and
+   * the orchestration watchers (which iterate DB Sessions, not this map) never see it.
+   *
+   * ╔═ TRUST BOUNDARY — HUMAN-ONLY ════════════════════════════════════════════════════════════════╗
+   * ║ `command` is an arbitrary host executable path = HOST RCE BY DESIGN — the same hazard class as ║
+   * ║ orchestration.gateCommand (which is rejected by the agent-facing config validator for exactly  ║
+   * ║ this reason). spawnShell is therefore reachable ONLY from the HUMAN REST endpoint              ║
+   * ║ POST /api/terminals (loopback-only) and is DELIBERATELY NOT exposed as any MCP tool. If a       ║
+   * ║ manager/worker agent could spawn an arbitrary shell it would escape the acceptEdits sandbox →   ║
+   * ║ full host compromise. Do NOT add a loom-orchestration / loom-platform / loom-tasks tool for it. ║
+   * ╚═════════════════════════════════════════════════════════════════════════════════════════════════╝
+   */
+  spawnShell(opts: { id: string; cwd: string; command: string; args: string[]; geometry: PtyGeometry; label: string }): void {
+    const pty = this.createShellPty(opts);
+    const live: Live = {
+      pty, pid: pty.pid, cwd: opts.cwd,
+      kind: "shell", command: opts.command, label: opts.label,
+      geometry: opts.geometry,
+      engineSessionId: null,
+      ring: { chunks: [], bytes: 0 },
+      subscribers: new Set(),
+      alive: true,
+      logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.id}.log`)),
+      // The Claude-only state below is inert for a shell (nothing reads it once kind:"shell" gates the
+      // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
+      busy: false, ready: true, busySince: null,
+      lastOutputAt: Date.now(), lastHumanKeyAt: null,
+      pending: [], lastPrompt: null,
+      startupModeCycles: 0, startupCyclesDone: true,
+      mcpPromptHandled: true, bootScan: "",
+      resumeGateHandled: true, resumeGateScan: "",
+    };
+    this.live.set(opts.id, live);
+    // Shell onData is minimal: NO boot-prompt / resume-gate scanning (those are Claude-TUI artifacts).
+    pty.onData((d) => {
+      const buf = Buffer.from(d, "utf-8");
+      live.lastOutputAt = Date.now();
+      this.appendRing(live, buf);
+      live.logStream.write(buf);
+      for (const s of live.subscribers) { try { s.onData(buf); } catch { /* ignore */ } }
+    });
+    pty.onExit(({ exitCode }) => {
+      live.alive = false;
+      // eslint-disable-next-line no-console
+      console.log(`[pty] shell exit ${opts.id} code=${exitCode}`);
+      try { live.logStream.end(); } catch { /* ignore */ }
+      this.broadcastControl(live, { type: "exit", code: exitCode });
+      // A shell is NOT a DB Session — do NOT call events.onExit (which persists Session/MCP state). It is
+      // ephemeral with no resumable state, so just drop it from the live map; the web's list refetch
+      // then removes its tile. (Explicitly excluded from boot-reconcile / restart-intent for the same reason.)
+      this.live.delete(opts.id);
+    });
+  }
+
+  /**
+   * Resize a SHELL terminal's pty to fit the viewer's pane. Enabled for shells only — Claude ptys are
+   * pinned (the fixed 120×40 / no-resize invariant exists for alt-screen repaint; a resize would garble
+   * the Ink TUI), so this is a no-op for kind:"claude". Idempotent and best-effort.
+   */
+  resize(sessionId: string, cols: number, rows: number): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive || live.kind !== "shell") return;
+    if (cols <= 0 || rows <= 0) return;
+    try { live.pty.resize(cols, rows); } catch { /* ignore */ }
+    live.geometry = { cols, rows };
+  }
+
+  /** List live shell terminals (for GET /api/terminals — the web re-attaches after a detach/reload). */
+  listShells(): { id: string; cwd: string; command: string; label: string; alive: boolean }[] {
+    const out: { id: string; cwd: string; command: string; label: string; alive: boolean }[] = [];
+    for (const [id, live] of this.live) {
+      if (live.kind !== "shell") continue;
+      out.push({ id, cwd: live.cwd, command: live.command ?? "", label: live.label ?? "", alive: live.alive });
+    }
+    return out;
+  }
+
+  /**
+   * Bare node-pty spawn for a shell — the ONE testable seam for spawnShell (mirrors createPty for the
+   * Claude path): the claude-free shell test (test/shell-terminal.mjs) subclasses PtyHost and overrides
+   * this to return a FAKE pty, so it exercises the kind:"shell" registration + Claude-only-skip logic
+   * with no real process. Production NEVER overrides it. Resolves the command to an ABSOLUTE path
+   * (node-pty's Windows agent doesn't search %PATH%) and inherits the daemon's env wholesale — a plain
+   * shell behaves like the host's (no CLAUDE_* scrub: that exists only to boot a nested `claude`).
+   */
+  protected createShellPty(opts: { id: string; cwd: string; command: string; args: string[]; geometry: PtyGeometry }): IPty {
+    const bin = resolveExecutable(opts.command);
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+    // eslint-disable-next-line no-console
+    console.log(`[pty] spawnShell ${opts.id} bin=${bin} cwd=${opts.cwd}`);
+    return spawn(bin, opts.args, {
+      name: "xterm-256color",
+      cols: opts.geometry.cols,
+      rows: opts.geometry.rows,
+      cwd: opts.cwd,
+      env,
+    });
+  }
+
+  /**
    * Build the interactive `claude` pty for a session — the spike-validated, gate-free spawn recipe
    * (absolute bin path for the Windows node-pty agent, env scrub of CLAUDECODE/CLAUDE_CODE_*,
    * --strict-mcp-config WITH an explicit --mcp-config so the .mcp.json prompt never blocks,
@@ -369,6 +499,7 @@ export class PtyHost {
   ): void {
     const live = this.live.get(sessionId);
     if (!live) return;
+    if (live.kind === "shell") return; // shells have no hook relay; the busy/readiness machine is Claude-only
     // eslint-disable-next-line no-console
     console.log(`[hook] ${sessionId} ${hook.hook_event_name ?? "?"} session_id=${hook.session_id ?? "-"}`);
     switch (hook.hook_event_name) {
@@ -520,7 +651,7 @@ export class PtyHost {
    */
   reconcile(): void {
     for (const [sessionId, live] of this.live) {
-      if (!live.alive) continue;
+      if (!live.alive || live.kind === "shell") continue; // shells have no busy/queue to heal or drain
       this.healIfStuck(live, sessionId);
       this.drainPending(sessionId);
     }

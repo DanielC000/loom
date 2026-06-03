@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
 import type { WebSocket } from "ws";
-import type { TerminalInput, Project, Agent, Task, ProjectConfigOverride, Schedule } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import { nextFireAt } from "../orchestration/cron.js";
 import { readTranscript } from "../sessions/transcript.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
+import { detectDefaultShell } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
@@ -414,7 +415,44 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
   });
 
+  // --- Plain SHELL terminals (human-only): spawn pwsh/cmd/bash in a project's repo cwd ---
+  //
+  // ╔═ TRUST BOUNDARY — HUMAN-ONLY, NEVER AN MCP TOOL ═════════════════════════════════════════════╗
+  // ║ POST /api/terminals takes an arbitrary executable path = HOST RCE BY DESIGN, the same hazard   ║
+  // ║ class as orchestration.gateCommand (which the agent-facing config validator REJECTS for this   ║
+  // ║ exact reason). It is therefore exposed ONLY here, on the loopback-only REST surface, and is     ║
+  // ║ DELIBERATELY absent from every MCP server (loom-tasks / loom-orchestration / loom-platform).   ║
+  // ║ A manager/worker agent that could spawn an arbitrary shell would escape the acceptEdits sandbox ║
+  // ║ → full host compromise. Do NOT add an MCP tool for this. (See PtyHost.spawnShell.)             ║
+  // ╚═════════════════════════════════════════════════════════════════════════════════════════════════╝
+  app.get("/api/terminals", async () => deps.pty.listShells());
+  // The host's detected default shell — prefills the "+ Shell" modal (the human can override it).
+  app.get("/api/terminals/default-shell", async () => ({ command: detectDefaultShell() }));
+  app.post("/api/terminals", async (req, reply) => {
+    const b = (req.body ?? {}) as { projectId?: string; command?: string; args?: string[]; label?: string };
+    if (!b.projectId) return reply.code(400).send({ error: "projectId required" });
+    const p = deps.db.getProject(b.projectId);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const command = (b.command ?? "").trim() || detectDefaultShell();
+    const args = Array.isArray(b.args) ? b.args.filter((a) => typeof a === "string") : [];
+    const id = randomUUID();
+    // Initial size = the project's resolved pty grid; the viewer resizes to fit its pane on attach.
+    const geometry = resolveConfig(p.config).pty;
+    const label = (b.label ?? "").trim() || `${p.name} · shell`;
+    deps.pty.spawnShell({ id, cwd: p.repoPath, command, args, geometry, label });
+    const term: ShellTerminal = { id, cwd: p.repoPath, command, label, alive: true };
+    return reply.code(201).send(term);
+  });
+  // Kill a shell terminal (the tile's close/kill button). Hard kill — a shell has no graceful resumable
+  // stop like a Claude session; pty.kill tears down the tree (node-pty Job Object, no orphans). The
+  // onExit handler then drops it from the live map. Idempotent (a no-op if already gone).
+  app.delete("/api/terminals/:id", async (req) => {
+    deps.pty.stop((req.params as { id: string }).id, "hard");
+    return { ok: true };
+  });
+
   // --- Live terminal: attach/detach (binary pty bytes + JSON control) ---
+  // Shared by Claude sessions AND shell terminals (same `live` map): the transport is pty-generic.
   app.get("/ws/term/:sessionId", { websocket: true }, (socket: WebSocket, req) => {
     const { sessionId } = req.params as { sessionId: string };
     const unsub = deps.pty.subscribe(sessionId, {
@@ -424,10 +462,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     socket.on("message", (raw: Buffer) => {
       let msg: TerminalInput;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
+      // RAW passthrough — NOT the busy-gated enqueueStdin (which is for programmatic agent turns).
       if (msg.type === "stdin") deps.pty.writeStdin(sessionId, msg.data);
       else if (msg.type === "repaint") deps.pty.repaint(sessionId);
+      // resize is honored for SHELL terminals only; a no-op for pinned Claude ptys (see PtyHost.resize).
+      else if (msg.type === "resize") deps.pty.resize(sessionId, msg.cols, msg.rows);
     });
-    socket.on("close", unsub); // detach does NOT kill the pty — sessions outlive viewers
+    socket.on("close", unsub); // detach does NOT kill the pty — sessions/shells outlive viewers
   });
 
   return app;
