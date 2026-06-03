@@ -683,12 +683,25 @@ export class SessionService {
    * hard-stops the worker first; at boot no pty from a prior run survives). Best-effort + idempotent:
    * removeWorktree has its fs.rm backstop, deleteBranch swallows a missing branch, and updateTask is
    * a no-op when the task is already `done`.
+   *
+   * removeWorktree is BEST-EFFORT and runs FIRST, but its throw must NOT abort the rest: on Windows a
+   * just-hard-stopped worker's dir can keep a busy handle (node_modules/native modules, a lingering
+   * build) past fs.rm's retry budget, so removeWorktree throws even though the `git merge` already
+   * committed. Unguarded, that would skip deleteBranch/updateTask/merge_done and make the interactive
+   * merge report an ERROR for an already-landed merge. So we swallow it (warn) and finish the
+   * bookkeeping; the leaked dir is GC'd by boot-reconcile's Pass B on the next restart.
    */
   private async finalizeMerge(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
     worktreePath: string; branch: string; repoPath: string;
   }): Promise<void> {
-    await removeWorktree(args.repoPath, args.worktreePath);
+    try {
+      await removeWorktree(args.repoPath, args.worktreePath);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[finalizeMerge] could not remove worktree ${args.worktreePath} (dir busy?); ` +
+        `merge already landed — finishing bookkeeping, boot-reconcile Pass B will GC the dir: ${(e as Error).message}`);
+    }
     await deleteBranch(args.repoPath, args.branch);
     if (args.taskId) this.db.updateTask(args.taskId, { columnKey: "done" });
     this.db.appendEvent({
@@ -725,11 +738,12 @@ export class SessionService {
     let mergesFailed = 0;
     let worktreesPruned = 0;
 
-    // A. Finish orphaned merges. Best-effort PER SESSION: finalizeMerge → removeWorktree can throw
-    // (its fs.rm rejects when a dir handle stays busy past ~4s), and this runs over EVERY session
-    // from every past run at boot — one throw must not abort the whole reconcile (or, since merging
-    // this branch self-restarts the dev daemon, crash-loop the boot). So a failed session is warned,
-    // counted, and skipped; the next boot retries it.
+    // A. Finish orphaned merges. Best-effort PER SESSION: finalizeMerge now swallows a removeWorktree
+    // throw internally (so a busy dir won't even abort the per-session finalize), but the try/catch
+    // here still guards the rest of finalizeMerge (deleteBranch/updateTask/db). This runs over EVERY
+    // session from every past run at boot — one throw must not abort the whole reconcile (or, since
+    // merging this branch self-restarts the dev daemon, crash-loop the boot). So a failed session is
+    // warned, counted, and skipped; the next boot retries it.
     for (const s of all) {
       if (s.role !== "worker" || !s.branch || !s.taskId) continue;
       if (protectedSessionIds.has(s.id)) continue; // about to be resumed (restart-intent) — leave it intact
