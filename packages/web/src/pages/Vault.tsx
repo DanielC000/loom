@@ -86,6 +86,7 @@ export default function Vault() {
                         ? <Markdown
                             source={content.data.content}
                             files={(tree.data ?? []).filter((e) => e.type === "file").map((e) => e.path)}
+                            currentPath={file}
                             onOpen={(p) => setFile(p)}
                           />
                         : <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: 13, color: color.text }}>{content.data.content}</pre>}

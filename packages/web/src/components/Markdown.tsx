@@ -82,7 +82,37 @@ function resolveWiki(rawTarget: string, files: string[]): string | null {
   return files.find((f) => base(f) === wanted) ?? null;
 }
 
-export default function Markdown({ source, files, onOpen }: { source: string; files: string[]; onOpen: (path: string) => void }) {
+/** True for links the browser should open normally (URL scheme like http:/mailto:, or protocol-relative). */
+function isExternalHref(h: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:/i.test(h) || h.startsWith("//");
+}
+
+/**
+ * Resolve a relative in-vault link (e.g. `README.md`, `../notes/x.md`) against the directory of the
+ * currently-open doc, then match it to a known vault file. Falls back to a basename match like
+ * resolveWiki so links written without the full path still land.
+ */
+function resolveRelative(href: string, currentPath: string, files: string[]): string | null {
+  const raw = decodeURIComponent((href.split("#")[0] ?? "").split("?")[0] ?? "").trim();
+  if (!raw) return null;
+  const norm = (s: string) => s.replace(/\\/g, "/");
+  const lower = (s: string) => norm(s).toLowerCase();
+  const stack = raw.startsWith("/") ? [] : norm(currentPath).split("/").slice(0, -1);
+  for (const seg of norm(raw).split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") stack.pop();
+    else stack.push(seg);
+  }
+  const resolved = lower(stack.join("/"));
+  if (!resolved) return null;
+  const exact = files.find((f) => lower(f) === resolved || lower(f) === `${resolved}.md`);
+  if (exact) return exact;
+  const wanted = (stack[stack.length - 1] ?? "").toLowerCase().replace(/\.md$/, "");
+  const base = (f: string) => (lower(f).split("/").pop() ?? "").replace(/\.md$/, "");
+  return files.find((f) => base(f) === wanted) ?? null;
+}
+
+export default function Markdown({ source, files, currentPath = "", onOpen }: { source: string; files: string[]; currentPath?: string; onOpen: (path: string) => void }) {
   const { props, body } = splitFrontmatter(source);
   const transformed = transformWikilinks(body);
 
@@ -97,7 +127,15 @@ export default function Markdown({ source, files, onOpen }: { source: string; fi
         if (path) return <a className={cls} href="#" onClick={(e) => { e.preventDefault(); onOpen(path); }}>{label}</a>;
         return <span className={cls} title="unresolved link">{label}</span>;
       }
-      return <a href={h} target="_blank" rel="noreferrer">{children}</a>;
+      // True external links (http/https/mailto/…) open normally in a new tab.
+      if (isExternalHref(h)) return <a href={h} target="_blank" rel="noreferrer">{children}</a>;
+      // In-page anchors (`#heading`) stay default — same doc, browser scrolls.
+      if (h.startsWith("#")) return <a href={h}>{children}</a>;
+      // Otherwise it's a relative in-vault link: resolve it to a vault file and open it in the pane,
+      // instead of letting the browser navigate the SPA to a dead `/<href>` route.
+      const path = resolveRelative(h, currentPath, files);
+      if (path) return <a className="md-wikilink" href="#" onClick={(e) => { e.preventDefault(); onOpen(path); }}>{children}</a>;
+      return <span className="md-broken" title="unresolved link">{children}</span>;
     },
     div({ className, children, ...rest }) {
       const cls = typeof className === "string" ? className : "";
