@@ -107,6 +107,7 @@ export class PlatformMcpRouter {
         const topic: Topic = {
           id: randomUUID(), projectId, name,
           startupPrompt: startupPrompt ?? "", position: db.listTopics(projectId).length,
+          profileId: null, // additive: topics start profile-less (P3 wires up profile assignment)
         };
         db.insertTopic(topic);
         return ok(topic);

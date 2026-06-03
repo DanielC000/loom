@@ -255,6 +255,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const topic: Topic = {
       id: randomUUID(), projectId, name: b.name,
       startupPrompt: b.startupPrompt ?? "", position: deps.db.listTopics(projectId).length,
+      profileId: null, // additive: topics start profile-less (P3 wires up profile assignment)
     };
     deps.db.insertTopic(topic);
     return reply.code(201).send(topic);

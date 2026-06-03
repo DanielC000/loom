@@ -6,6 +6,7 @@ export type ProjectId = string;
 export type TopicId = string;
 export type SessionId = string; // Loom's own id
 export type TaskId = string;
+export type ProfileId = string;
 
 /** A project's two bindings + its config override blob. */
 export interface Project {
@@ -27,6 +28,39 @@ export interface Topic {
   /** Injected as the first input ONLY when starting a new session (never on resume). */
   startupPrompt: string;
   position: number;
+  /**
+   * Optional Agent Profile this topic adopts — the reusable, platform-level "who" (role + prompt +
+   * tool/permission/model/icon). Nullable + additive: null = a legacy / plain topic, which
+   * `resolveProfile` maps to EXACTLY today's behavior. When set, the profile supplies
+   * role/allow/skills/model/icon and the topic's own startupPrompt overrides the profile's.
+   * Phase-1 is the READ PATH only — the spawn path still ignores this (P2 wires it in).
+   */
+  profileId: ProfileId | null;
+}
+
+/**
+ * An **Agent Profile** — a reusable, platform-level (cross-project) "who": the role, prompt, and
+ * tool/permission/model/icon a session adopts. Topics reference one via `profileId`, and
+ * `resolveProfile` (sibling of `resolveConfig`) merges profile + topic into the effective spawn
+ * shape. A topic with NO profile resolves to today's plain behavior, so this is fully additive.
+ * Platform-level on purpose (like skills + config defaults): one definition reused across projects,
+ * not re-typed per project the way `TEMPLATE_TOPICS` is today.
+ */
+export interface Profile {
+  id: ProfileId;
+  name: string;
+  /** Orchestration role conferred; null = a plain (non-orchestration) session — today's default. */
+  role: SessionRole | null;
+  /** Default startup prompt. A topic's own startupPrompt overrides this (per-topic override). */
+  startupPrompt: string;
+  /** Permission allowlist delta layered onto the resolved config's allow (e.g. extra Bash globs). */
+  allowDelta: string[];
+  /** Skill-name subset to deliver; null = deliver all (today's behavior). */
+  skills: string[] | null;
+  /** Model id to spawn with (e.g. "claude-opus-4-8"); null = engine default (no --model emitted). */
+  model: string | null;
+  /** UI icon (emoji or name); null = none. */
+  icon: string | null;
 }
 
 // --- Session FSM (explicit; replaces Jinn's loose status enum) ---
