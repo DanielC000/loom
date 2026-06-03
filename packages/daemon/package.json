@@ -24,6 +24,7 @@
     "test:scheduler-disabled": "node test/scheduler-disabled.mjs",
     "test:busy": "node test/busy-flag.mjs",
     "test:orch": "node test/orch-model.mjs",
+    "test:profile-spawn": "node test/profile-spawn.mjs",
     "test:context": "node test/context-stats.mjs",
     "test:worktrees": "node test/worktrees.mjs",
     "test:transcript-encode": "node test/transcript-encode.mjs",
