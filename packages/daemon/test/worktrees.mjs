@@ -93,12 +93,44 @@ try {
   // cleanup: these were never merged, so deleteBranch (-d) would safely refuse — just drop the worktrees.
   await removeWorktree(repo, A.worktreePath);
   await removeWorktree(repo, B.worktreePath);
+
+  // (j) BOUNDED removal — the priority reliability fix. A busy/locked worktree dir makes
+  //     `git worktree remove` HANG INDEFINITELY (it does NOT throw), and boot-reconcile's Pass B calls
+  //     removeWorktree DURING daemon boot — so one stuck removal wedged the entire daemon boot for
+  //     hours (2026-06-03). Inject a fake git whose `raw` NEVER resolves (a wedged child) with a tiny
+  //     timeout and prove removeWorktree still RETURNS within the window — bounded, never an infinite
+  //     hang. (Deterministic + cross-platform: no real busy handle needed.)
+  {
+    let seenTimeout = -1;
+    const neverGit = { raw: () => new Promise(() => {}) }; // a hung child: this promise never settles
+    const fakeFactory = (_repo, blockMs) => { seenTimeout = blockMs; return neverGit; };
+    const ghostPath = path.join(process.env.LOOM_HOME, `ghost-${Date.now()}`); // not on disk → fs.rm no-ops
+    const tinyMs = 250;
+    const t0 = Date.now();
+    let resolved = false;
+    await removeWorktree(repo, ghostPath, { gitFactory: fakeFactory, timeoutMs: tinyMs }).then(() => { resolved = true; });
+    const elapsed = Date.now() - t0;
+    check("(j) removeWorktree RETURNS despite a never-resolving git op (not an infinite hang)", resolved);
+    check(`(j) bounded by the timeout — returned in ${elapsed}ms (both ops capped at ${tinyMs}ms)`,
+      elapsed >= tinyMs && elapsed < tinyMs * 8 + 1500);
+    check(`(j) block timeout is passed through to the git factory (got ${seenTimeout}ms)`, seenTimeout === tinyMs);
+
+    // (j2) the DEFAULT (no timeoutMs) path uses a 15s per-op block timeout — generous for a real
+    //      removal, bounded for a hang. Record the ms the factory receives; a fast stub git lets the
+    //      fs backstop do the actual dir removal so the assertion stays hermetic.
+    const { worktreePath: wtJ } = await createWorktree(repo, "projWT", "bounded-cccc-3333");
+    let defaultMs = -1;
+    await removeWorktree(repo, wtJ, { gitFactory: (_p, ms) => { defaultMs = ms; return { raw: async () => "" }; } });
+    check("(j2) default per-op block timeout is 15000ms (generous-but-bounded)", defaultMs === 15000);
+    check("(j2) dir still removed via the fs backstop when git is stubbed", !fs.existsSync(wtJ));
+    // (the stub git leaves the admin record registered; the repo teardown below drops it — no deleteBranch.)
+  }
 } finally {
   fs.rmSync(repo, { recursive: true, force: true });
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worktree-per-worker isolates, merges + deletes the branch on a clean merge, tolerates re-spawn on a retained (rejected) task, and never collides on the first 8 chars of a task id."
+  ? "\n✅ ALL PASS — worktree-per-worker isolates, merges + deletes the branch on a clean merge, tolerates re-spawn on a retained (rejected) task, never collides on the first 8 chars of a task id, and removeWorktree is BOUNDED (a hung git op can't wedge daemon boot)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

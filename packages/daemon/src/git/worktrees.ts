@@ -1,12 +1,51 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { simpleGit } from "simple-git";
+import { simpleGit, type SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 
 export interface WorktreeInfo {
   worktreePath: string;
   branch: string;
+}
+
+/**
+ * Per-git-op ceiling for the worktree-removal path. Generous for a real `git worktree remove`/`prune`
+ * (sub-second normally), but BOUNDED so a wedged child can't hang the caller. This is the fix for the
+ * boot-outage: `git worktree remove` on a busy/locked dir (a directory handle stuck by an unrelated
+ * process) HANGS INDEFINITELY — it doesn't throw — and removeWorktree's try/catch only catches throws.
+ * boot-reconcile's Pass B calls removeWorktree during daemon BOOT, so one hung removal blocked the
+ * whole daemon from booting, for hours, on 2026-06-03. See {@link removeWorktree}.
+ */
+const REMOVE_OP_TIMEOUT_MS = 15_000;
+
+/**
+ * Test seam for {@link removeWorktree}. Lets a test simulate a hanging `git worktree remove` with a
+ * tiny budget and assert the call returns within the window (not never). `gitFactory` defaults to a
+ * simpleGit whose `block` timeout KILLS a no-output (hung) child; `timeoutMs` bounds BOTH the simpleGit
+ * block timeout and removeWorktree's own race guard (below), so a never-settling git promise — real
+ * child wedged, or an injected fake that never resolves — still unblocks the function.
+ */
+export interface RemoveWorktreeDeps {
+  gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw">;
+  timeoutMs?: number;
+}
+
+/**
+ * Reject `p` after `ms` if it hasn't settled, so removeWorktree's git steps are bounded even if the
+ * underlying promise NEVER settles. In production the simpleGit `block` timeout (set on the instance)
+ * also kills the hung child so it doesn't leak — this race is the belt-and-suspenders guarantee that
+ * the FUNCTION returns within the window regardless. The timer is cleared on the winning path; if it
+ * fires first the timer is already done, so nothing lingers on the event loop.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms (hung child?)`)), ms);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
 }
 
 /**
@@ -74,17 +113,36 @@ export async function deleteBranch(repoPath: string, branch: string): Promise<vo
  * with a filesystem delete that retries the EBUSY/EPERM lag (fs.rm maxRetries — built for exactly
  * this), then prune any stale admin record. When nothing holds the dir (merge-gate's no-pty rows)
  * the git removal succeeds and the backstop is a no-op.
+ *
+ * BOUNDED (priority reliability fix): a busy/locked worktree dir makes `git worktree remove` HANG
+ * INDEFINITELY rather than throw, and boot-reconcile's Pass B calls this DURING daemon boot — so one
+ * stuck removal blocked the whole daemon from booting for hours (2026-06-03). Both git ops now run on
+ * a simpleGit configured with a `block` timeout (kills a no-output hung child) AND through a
+ * {@link withTimeout} race, so the worst case is a BOUNDED failure within ~{@link REMOVE_OP_TIMEOUT_MS}
+ * — the dir is left on disk for a later GC (boot-reconcile Pass B), NEVER an infinite hang. The
+ * git instance/timeout is injectable via {@link RemoveWorktreeDeps} so a test can prove the bound.
  */
-export async function removeWorktree(repoPath: string, worktreePath: string): Promise<void> {
-  const git = simpleGit(repoPath);
+export async function removeWorktree(
+  repoPath: string,
+  worktreePath: string,
+  deps: RemoveWorktreeDeps = {},
+): Promise<void> {
+  const timeoutMs = deps.timeoutMs ?? REMOVE_OP_TIMEOUT_MS;
+  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  const git = makeGit(repoPath, timeoutMs);
   try {
-    await git.raw(["worktree", "remove", worktreePath, "--force"]);
+    await withTimeout(git.raw(["worktree", "remove", worktreePath, "--force"]), timeoutMs, "git worktree remove");
   } catch {
-    // fall through to the filesystem backstop (the dir handle hasn't released, or git already
-    // de-registered the worktree but couldn't delete the dir).
+    // A hang (timeout-kill), a busy handle, or git already de-registering the worktree without
+    // deleting the dir — all fall through to the filesystem backstop.
   }
   await fs.promises.rm(worktreePath, { recursive: true, force: true, maxRetries: 40, retryDelay: 200 });
-  await git.raw(["worktree", "prune"]); // reconcile the admin record with what's on disk
+  try {
+    await withTimeout(git.raw(["worktree", "prune"]), timeoutMs, "git worktree prune");
+  } catch {
+    // A hung/failed prune must NOT throw past removeWorktree (which would re-introduce the boot hang
+    // via finalizeMerge / Pass B). A stale admin record is harmless — createWorktree prunes on reuse.
+  }
 }
 
 /**
