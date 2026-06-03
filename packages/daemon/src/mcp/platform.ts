@@ -24,13 +24,20 @@ const permissionOverride = z.object({
 const ptyOverride = z.object({ cols: z.number().optional(), rows: z.number().optional() }).strict();
 const orchestrationOverride = z.object({
   gateCommand: z.string().optional(),
-  maxConcurrentWorkers: z.number().optional(),
-  maxConcurrentManagers: z.number().optional(),
+  // Concurrency caps gate worker_spawn / Scheduler manager launches: whole-number, ≥1 (a cap of 0
+  // would deadlock all spawning), with a generous safety ceiling so a fat-fingered value can't
+  // authorize a fleet-bomb.
+  maxConcurrentWorkers: z.number().int().min(1).max(100).optional(),
+  maxConcurrentManagers: z.number().int().min(1).max(100).optional(),
   schedulerEnabled: z.boolean().optional(),
-  recycleAtContextRatio: z.number().optional(),
-  idleNudgeMinutes: z.number().optional(),
-  maxUnansweredNudges: z.number().optional(),
-  idleDefaultSnoozeMinutes: z.number().optional(),
+  // Fraction of the model context window (0 disables); a ratio >1 or <0 is meaningless and would
+  // corrupt the ContextWatcher's recycle trigger.
+  recycleAtContextRatio: z.number().min(0).max(1).optional(),
+  // Whole-minute leashes/counters; 0 is honored as a real value (disables the watcher / escalates
+  // without nudging), so the floor is 0, not 1. Negative values are nonsensical.
+  idleNudgeMinutes: z.number().int().min(0).optional(),
+  maxUnansweredNudges: z.number().int().min(0).optional(),
+  idleDefaultSnoozeMinutes: z.number().int().min(0).optional(),
 }).strict();
 const projectConfigOverrideSchema = z.object({
   kanbanColumns: z.array(kanbanColumn).optional(),
