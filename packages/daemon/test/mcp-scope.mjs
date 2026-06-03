@@ -43,8 +43,11 @@ const B = await connect("SB");
 // 1) Tool schema has NO projectId parameter (scoping is implicit).
 const tools = await A.listTools();
 const names = tools.tools.map((t) => t.name).sort();
-check(`tools = tasks_create,tasks_list,tasks_update  (got ${names.join(",")})`,
-  names.join(",") === "tasks_create,tasks_list,tasks_update");
+// tasks_* (the project-scoped board) + wake_* (the self-scheduled wake_me primitive) — both ride the
+// per-session loom-tasks surface. Keep this list in sync as the tasks-MCP tool surface grows.
+const expectedTaskTools = "tasks_create,tasks_list,tasks_update,wake_cancel,wake_list,wake_me";
+check(`tools = ${expectedTaskTools}  (got ${names.join(",")})`,
+  names.join(",") === expectedTaskTools);
 const listSchema = JSON.stringify(tools.tools.find((t) => t.name === "tasks_list").inputSchema);
 check("tasks_list takes no projectId param", !listSchema.includes("projectId") && !listSchema.includes("project"));
 const createSchema = JSON.stringify(tools.tools.find((t) => t.name === "tasks_create").inputSchema);
