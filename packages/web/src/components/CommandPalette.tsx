@@ -1,17 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAttention } from "../lib/attention";
+import { NAV_PAGES } from "../nav";
 import { color, font } from "../theme";
-
-const PAGES: { label: string; to: string }[] = [
-  { label: "Mission Control", to: "/" },
-  { label: "Workspace", to: "/workspace" },
-  { label: "Terminals", to: "/terminals" },
-  { label: "Board", to: "/board" },
-  { label: "Orchestration", to: "/orchestration" },
-  { label: "Vault", to: "/vault" },
-  { label: "Git", to: "/git" },
-];
 
 // Ctrl/Cmd-K fuzzy launcher: jump to any page or open the review panel for a pending attention item.
 export function CommandPalette() {
@@ -32,7 +23,7 @@ export function CommandPalette() {
   if (!open) return null;
 
   const commands = [
-    ...PAGES.map((p) => ({ label: p.label, hint: "page", run: () => navigate(p.to) })),
+    ...NAV_PAGES.map((p) => ({ label: p.label, hint: "page", run: () => navigate(p.to) })),
     ...attention.filter((a) => a.workerSessionId).map((a) => ({
       label: `Review · ${a.kind} ${a.text}`, hint: "review", run: () => navigate(`/review/${a.workerSessionId}`),
     })),
