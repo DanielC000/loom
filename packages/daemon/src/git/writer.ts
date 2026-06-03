@@ -69,6 +69,18 @@ function gitError(e: unknown): string {
 }
 
 /**
+ * Does this push failure mean "this branch has no tracking ref to push to" (vs. a remote/auth/reject
+ * failure)? A branch freshly created via the UI "+ Branch" button has no upstream, so a plain `git push`
+ * fails with `The current branch <x> has no upstream branch.` (or, on a repo with no remote at all,
+ * `No configured push destination.`). Those are the ONLY conditions we retry with set-upstream — any
+ * other failure (unreachable remote, auth required, rejected non-fast-forward) is surfaced unchanged.
+ */
+function isNoUpstreamError(e: unknown): boolean {
+  const msg = ((e as Error)?.message ?? String(e)).toLowerCase();
+  return msg.includes("no upstream") || msg.includes("no configured push destination");
+}
+
+/**
  * Bounded, non-interactive git WRITE operations for the project repo. Each method returns a structured
  * {@link GitWriteResult} (never throws for an expected git failure) and is wrapped in {@link withTimeout}
  * so a wedged child can't hang the daemon.
@@ -135,17 +147,29 @@ export class GitWriter {
   }
 
   /**
-   * Push the current branch to its tracking remote. CONSERVATIVE: a plain `git push` — it does NOT
-   * auto-set-upstream, so a brand-new branch with no tracking ref fails fast with git's own
-   * "no upstream / no configured push destination" message (the UI shows it; a human can set tracking
-   * elsewhere). Non-interactive + bounded: a push to an unreachable/auth-required remote FAILS FAST
-   * (GIT_TERMINAL_PROMPT=0 + the timeout) rather than hanging the daemon.
+   * Push the current branch to its remote. A plain `git push` is tried first (respecting whatever
+   * tracking remote the branch already has). If that fails ONLY because the branch has no upstream —
+   * the case for a branch just made with the UI "+ Branch" button — we publish it with
+   * `git push -u origin <branch>`, setting tracking to origin/<branch>. Any OTHER push failure
+   * (unreachable remote, auth required, rejected) is surfaced unchanged — we never retry past a real
+   * remote error. Non-interactive + bounded throughout: a push to an unreachable/auth-required remote
+   * FAILS FAST (GIT_TERMINAL_PROMPT=0 + the timeout) rather than hanging the daemon — the set-upstream
+   * retry runs under the same guards.
    */
   async push(): Promise<GitWriteResult<{ branch: string }>> {
     try {
       const git = this.git(GIT_PUSH_TIMEOUT_MS);
       const branch = (await git.branchLocal()).current;
-      await withTimeout(git.raw(["push"]), GIT_PUSH_TIMEOUT_MS, "git push");
+      try {
+        await withTimeout(git.raw(["push"]), GIT_PUSH_TIMEOUT_MS, "git push");
+      } catch (e) {
+        if (!isNoUpstreamError(e)) throw e;
+        await withTimeout(
+          git.raw(["push", "-u", "origin", branch]),
+          GIT_PUSH_TIMEOUT_MS,
+          "git push -u origin",
+        );
+      }
       return { ok: true, branch };
     } catch (e) {
       return { ok: false, error: gitError(e) };

@@ -91,6 +91,21 @@ try {
   check("plain push to tracking remote succeeds", okPush.ok === true && okPush.branch === baseBranch);
   const remoteLog = execFileSync("git", ["--git-dir", bare, "log", "--pretty=%s"], { stdio: ["ignore", "pipe", "pipe"] }).toString();
   check("pushed commit reached the remote", remoteLog.includes("second"));
+
+  // 7. push of a FRESH branch with NO upstream — the exact "+ Branch" repro: created locally, never
+  //    pushed, so a plain push errors "The current branch <x> has no upstream branch." The writer must
+  //    PUBLISH it: succeed AND set tracking to origin/<branch> (push -u). The remote `origin` is the
+  //    bare repo from step 6.
+  const fresh = await w.createBranch("feature/fresh");
+  check("createBranch fresh ok", fresh.ok === true && fresh.branch === "feature/fresh");
+  fs.writeFileSync(path.join(repo, "fresh.txt"), "added on fresh branch\n");
+  git("add", "-A"); git("commit", "-m", "fresh commit");
+  const freshPush = await w.push();
+  check("push of fresh no-upstream branch succeeds", freshPush.ok === true && freshPush.branch === "feature/fresh");
+  const freshUpstream = git("rev-parse", "--abbrev-ref", "feature/fresh@{upstream}").trim();
+  check("fresh branch upstream now set to origin/feature/fresh", freshUpstream === "origin/feature/fresh");
+  const remoteLogFresh = execFileSync("git", ["--git-dir", bare, "log", "feature/fresh", "--pretty=%s"], { stdio: ["ignore", "pipe", "pipe"] }).toString();
+  check("fresh-branch commit reached the remote", remoteLogFresh.includes("fresh commit"));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
