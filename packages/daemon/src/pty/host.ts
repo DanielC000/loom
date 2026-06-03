@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { spawn, type IPty } from "node-pty";
 import type { PermissionPolicy, PtyGeometry, SessionRole } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
@@ -86,6 +87,86 @@ const MODE_CYCLE_INTERVAL_MS = 120;
  */
 const READY_FALLBACK_MS = Number(process.env.LOOM_READY_FALLBACK_MS) || 20_000;
 
+/**
+ * Resolve the per-session Playwright MCP (`@playwright/mcp`) stdio server entry, injected at spawn
+ * ONLY for a browserTesting session (opt-in, gated). Built with ABSOLUTE paths — the same lesson as
+ * the absolute-claude-path invariant: node-pty's Windows agent does NOT search %PATH%, and a bare
+ * `command: "npx"`/`"playwright-mcp"` would not launch. So:
+ *   - command = `process.execPath` (the daemon's own absolute node binary), and
+ *   - args[0] = the absolute path to the package's `cli.js`.
+ * `cli.js` isn't in the package's `exports` map (only `.` and `./package.json` are), so we resolve
+ * `@playwright/mcp/package.json` and join `cli.js` (its `bin` target) beside it — robust under both
+ * the source (tsx) and the built `dist/` daemon. Memoized: the resolution is constant per process.
+ *
+ * `--headless` (unattended; no visible window) + `--isolated` (profile kept in memory — no on-disk
+ * profile lock, so PARALLEL browser-workers never collide and nothing persists between runs, matching
+ * the "own isolated browser, no shared state/auth" design). Chromium is launched LAZILY by the MCP on
+ * the first browser tool call, so an idle browser-capable worker boots no Chromium. If the Chromium
+ * binaries are absent the FIRST tool call fails inside the MCP with Playwright's own actionable
+ * "run `npx playwright install chromium`" message (the one-time host provisioning step).
+ *
+ * Returns null if the package can't be resolved (it's a pinned daemon dependency, so this is a
+ * should-never-happen guard) — the caller then simply omits the server, leaving the spawn otherwise
+ * intact rather than crashing it.
+ */
+let playwrightCliPathCache: string | null | undefined;
+function resolvePlaywrightCli(): string | null {
+  if (playwrightCliPathCache !== undefined) return playwrightCliPathCache;
+  try {
+    const require = createRequire(import.meta.url);
+    const pkgJson = require.resolve("@playwright/mcp/package.json");
+    playwrightCliPathCache = path.join(path.dirname(pkgJson), "cli.js");
+  } catch {
+    playwrightCliPathCache = null;
+  }
+  return playwrightCliPathCache;
+}
+
+/** The stdio MCP-config entry for a browserTesting session, or null if the package is unresolvable. */
+export function playwrightMcpServer(): { type: "stdio"; command: string; args: string[] } | null {
+  const cli = resolvePlaywrightCli();
+  if (!cli) return null;
+  return { type: "stdio", command: process.execPath, args: [cli, "--headless", "--isolated"] };
+}
+
+/**
+ * Assemble the `--mcp-config` mcpServers map for a Claude spawn (extracted from createPty as the ONE
+ * testable seam for the MCP surface). ALWAYS the project-scoped `loom-tasks` HTTP server; PLUS the
+ * role-gated surface (manager/worker → loom-orchestration, platform → loom-platform); PLUS — only when
+ * `browserTesting` is set — the per-session stdio Playwright MCP. The browser server is fully ADDITIVE:
+ * with the flag off the map is byte-identical to today's. Pure + deterministic (no pty, no network),
+ * so the spawn-config test can assert the iff-browserTesting inclusion directly.
+ */
+export function buildMcpServers(o: {
+  sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean;
+}): Record<string, unknown> {
+  const wantsOrch = o.role === "manager" || o.role === "worker";
+  const wantsPlatform = o.role === "platform";
+  const mcpServers: Record<string, unknown> = {
+    "loom-tasks": { type: "http", url: `http://127.0.0.1:${o.port}/mcp/${o.sessionId}` },
+  };
+  if (wantsOrch) {
+    mcpServers["loom-orchestration"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-orch/${o.sessionId}` };
+  }
+  if (wantsPlatform) {
+    mcpServers["loom-platform"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-platform/${o.sessionId}` };
+  }
+  // Opt-in: a per-session stdio Playwright MCP for a browser-testing worker (each gets its OWN
+  // isolated headless browser — parallelizable, no shared extension/auth/state). Omitted for every
+  // non-browser spawn, so the map is byte-identical to today when the flag is off. A null (unresolvable
+  // package) is logged + skipped rather than crashing the spawn.
+  if (o.browserTesting) {
+    const pw = playwrightMcpServer();
+    if (pw) {
+      mcpServers["playwright"] = pw;
+    } else {
+      // eslint-disable-next-line no-console
+      console.warn(`[pty] ${o.sessionId} browserTesting set but @playwright/mcp could not be resolved — spawning WITHOUT a browser MCP. Is the daemon dependency installed?`);
+    }
+  }
+  return mcpServers;
+}
+
 interface Subscriber {
   onData: (b: Buffer) => void;
   onControl: (e: TerminalControl) => void;
@@ -146,6 +227,12 @@ export interface SpawnOpts {
   role?: SessionRole;
   /** When set (docLint on), wires the vault-lint PostToolUse hook scoped to this vault (Pillar D). */
   vaultPath?: string;
+  /**
+   * Opt-in browser-automation (resolved from the session's Profile, gated). When true, inject a
+   * per-session stdio Playwright MCP (@playwright/mcp) so the agent can drive a headless browser, and
+   * allowlist its tool surface. Default OFF — every existing spawn is byte-identical when unset/false.
+   */
+  browserTesting?: boolean;
 }
 
 export interface PtyHostEvents {
@@ -453,22 +540,22 @@ export class PtyHost {
     // so allowlist the role's MCP server too, else the agent hangs on a prompt.
     const wantsOrch = opts.role === "manager" || opts.role === "worker";
     const wantsPlatform = opts.role === "platform";
-    const extraAllow = wantsOrch ? ["mcp__loom-orchestration"] : wantsPlatform ? ["mcp__loom-platform"] : [];
+    // A browser-testing session ALSO needs its Playwright MCP tools allowlisted — acceptEdits doesn't
+    // auto-approve MCP tools (the §9 lesson), so without this the worker would hang on a permission
+    // prompt the first time it calls a browser tool. Orthogonal to role (a browser session is a worker),
+    // so it layers ON TOP of the role surface rather than replacing it.
+    const extraAllow = [
+      ...(wantsOrch ? ["mcp__loom-orchestration"] : wantsPlatform ? ["mcp__loom-platform"] : []),
+      ...(opts.browserTesting ? ["mcp__playwright"] : []),
+    ];
     const permission = extraAllow.length
       ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
       : opts.permission;
     const settingsPath = writeSessionSettings(opts.sessionId, permission, opts.vaultPath);
 
-    // §6 scoping: route by session id in the URL path; daemon derives the project server-side.
-    const mcpServers: Record<string, unknown> = {
-      "loom-tasks": { type: "http", url: `http://127.0.0.1:${PORT}/mcp/${opts.sessionId}` },
-    };
-    if (wantsOrch) {
-      mcpServers["loom-orchestration"] = { type: "http", url: `http://127.0.0.1:${PORT}/mcp-orch/${opts.sessionId}` };
-    }
-    if (wantsPlatform) {
-      mcpServers["loom-platform"] = { type: "http", url: `http://127.0.0.1:${PORT}/mcp-platform/${opts.sessionId}` };
-    }
+    // §6 scoping: route by session id in the URL path; daemon derives the project server-side. The
+    // mcpServers map (loom-tasks + role surface + opt-in Playwright) is assembled by the testable seam.
+    const mcpServers = buildMcpServers({ sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting });
     const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt });
 
     const env: Record<string, string> = {};

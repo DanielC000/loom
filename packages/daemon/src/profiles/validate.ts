@@ -17,6 +17,9 @@ const profileSchema = z
     skills: z.array(z.string()).nullable().optional(),
     model: z.string().nullable().optional(),
     icon: z.string().nullable().optional(),
+    // Opt-in browser-automation capability (default off). Human-set via this REST path only — there is
+    // NO agent MCP write surface for profiles, so the capability stays human-gated (like role/allow).
+    browserTesting: z.boolean().optional(),
   })
   .strict();
 
@@ -39,6 +42,7 @@ export function validateProfile(
       skills: d.skills ?? null,
       model: d.model ?? null,
       icon: d.icon ?? null,
+      browserTesting: d.browserTesting ?? false, // normalize to the stored default (off)
     },
   };
 }

@@ -32,6 +32,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.12.0
         version: 1.29.0(zod@4.4.3)
+      '@playwright/mcp':
+        specifier: 0.0.75
+        version: 0.0.75
       better-sqlite3:
         specifier: ^11.8.0
         version: 11.10.0
@@ -623,6 +626,11 @@ packages:
   '@pinojs/redact@0.4.0':
     resolution: {integrity: sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg==}
 
+  '@playwright/mcp@0.0.75':
+    resolution: {integrity: sha512-oBjzVXfEGZ9Ev45tKKQULNDVdF83B82lg0uPejEK3xsp/zWmdNdNVnPi032fmd/o20ZZXs+LX7cr77qRNbV4VA==}
+    engines: {node: '>=18'}
+    hasBin: true
+
   '@rolldown/pluginutils@1.0.0-beta.27':
     resolution: {integrity: sha512-+d0F4MKMCbeVUJwG96uQ4SgAznZNSq93I3V+9NHA4OpvqG8mRCpGdKmK8l/dl02h2CCDHwW2FqilnTyDcAnqjA==}
 
@@ -1195,6 +1203,11 @@ packages:
   fs-constants@1.0.0:
     resolution: {integrity: sha512-y6OAwoSIf7FyjMIv94u+b5rdheZEjzR63GTyZJm5qh4Bi+2YgwLCcI/fPFZkL5PSixOt6ZNKm+w+Hfp/Bciwow==}
 
+  fsevents@2.3.2:
+    resolution: {integrity: sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA==}
+    engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
+    os: [darwin]
+
   fsevents@2.3.3:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
@@ -1613,6 +1626,16 @@ packages:
   pkce-challenge@5.0.1:
     resolution: {integrity: sha512-wQ0b/W4Fr01qtpHlqSqspcj3EhBvimsdh0KlHhH8HRZnMsEa0ea2fTULOXOS9ccQr3om+GcGRk4e+isrZWV8qQ==}
     engines: {node: '>=16.20.0'}
+
+  playwright-core@1.61.0-alpha-1778188671000:
+    resolution: {integrity: sha512-nsw2Crz0uZS3IRHiEcOXUt+RaKB/Hna+GAD4oD6cPqCHfJfW77cJdgktC0jzp3Ndyv23EJI3bcWSqFIiqSNE5A==}
+    engines: {node: '>=18'}
+    hasBin: true
+
+  playwright@1.61.0-alpha-1778188671000:
+    resolution: {integrity: sha512-A6fFc7ExLRmvm0ZHqCyY2uHXSvEdpb8W+/HyIPK4ecRqNil8Mc1Vig1WFYoqk82x3+U9Qb571fQE95wgKqIQ1g==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   postcss@8.5.15:
     resolution: {integrity: sha512-FfR8sjd4em2T6fb3I2MwAJU7HWVMr9zba+enmQeeWFfCbm+UOC/0X4DS8XtpUTMwWMGbjKYP7xjfNekzyGmB3A==}
@@ -2432,6 +2455,11 @@ snapshots:
 
   '@pinojs/redact@0.4.0': {}
 
+  '@playwright/mcp@0.0.75':
+    dependencies:
+      playwright: 1.61.0-alpha-1778188671000
+      playwright-core: 1.61.0-alpha-1778188671000
+
   '@rolldown/pluginutils@1.0.0-beta.27': {}
 
   '@rollup/rollup-android-arm-eabi@4.60.4':
@@ -3018,6 +3046,9 @@ snapshots:
   fresh@2.0.0: {}
 
   fs-constants@1.0.0: {}
+
+  fsevents@2.3.2:
+    optional: true
 
   fsevents@2.3.3:
     optional: true
@@ -3624,6 +3655,14 @@ snapshots:
       thread-stream: 4.2.0
 
   pkce-challenge@5.0.1: {}
+
+  playwright-core@1.61.0-alpha-1778188671000: {}
+
+  playwright@1.61.0-alpha-1778188671000:
+    dependencies:
+      playwright-core: 1.61.0-alpha-1778188671000
+    optionalDependencies:
+      fsevents: 2.3.2
 
   postcss@8.5.15:
     dependencies:
