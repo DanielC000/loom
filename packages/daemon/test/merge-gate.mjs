@@ -16,7 +16,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createWorktree, removeWorktree } from "../dist/git/worktrees.js";
 
-const BASE = "http://127.0.0.1:4317";
+// Honors LOOM_PORT (same env the daemon's paths.ts reads) so a regression run can target an ISOLATED
+// daemon on a non-4317 port and leave a live :4317 daemon untouched. Defaults to 4317 as before.
+const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
 if (!LOOM) { console.error("LOOM_HOME must be set (and match the daemon's)."); process.exit(2); }
 const DB_FILE = path.join(LOOM, "loom.db");

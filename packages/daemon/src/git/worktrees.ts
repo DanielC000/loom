@@ -83,7 +83,7 @@ export async function removeWorktree(repoPath: string, worktreePath: string): Pr
     // fall through to the filesystem backstop (the dir handle hasn't released, or git already
     // de-registered the worktree but couldn't delete the dir).
   }
-  await fs.promises.rm(worktreePath, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+  await fs.promises.rm(worktreePath, { recursive: true, force: true, maxRetries: 40, retryDelay: 200 });
   await git.raw(["worktree", "prune"]); // reconcile the admin record with what's on disk
 }
 
