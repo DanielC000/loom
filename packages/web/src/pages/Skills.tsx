@@ -11,6 +11,7 @@ export default function Skills() {
   const qc = useQueryClient();
   const [selected, setSelected] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
+  const [reloadNonce, setReloadNonce] = useState(0); // bumped on revert to force the editor to remount on the bundled content
 
   const skills = useQuery({ queryKey: ["skills"], queryFn: api.skills });
   const current = useQuery({ queryKey: ["skill", selected], queryFn: () => api.skill(selected!), enabled: !!selected });
@@ -26,6 +27,14 @@ export default function Skills() {
   const remove = useMutation({
     mutationFn: (name: string) => api.deleteSkill(name),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["skills"] }); setSelected(null); },
+  });
+  const revert = useMutation({
+    mutationFn: (name: string) => api.resetSkill(name),
+    onSuccess: (r) => {
+      qc.setQueryData(["skill", r.name], { name: r.name, content: r.content }); // sync editor to bundled content (no refetch race)
+      qc.invalidateQueries({ queryKey: ["skills"] });
+      setReloadNonce((n) => n + 1); // remount the editor onto the restored content
+    },
   });
 
   const validNew = /^[a-z0-9][a-z0-9-]{0,63}$/.test(newName);
@@ -56,9 +65,10 @@ export default function Skills() {
 
       <Panel style={{ minHeight: "72vh", padding: 12 }}>
         {selected && current.data ? (
-          <SkillEditor key={selected} name={selected} content={current.data.content} bundled={bundled}
+          <SkillEditor key={`${selected}:${reloadNonce}`} name={selected} content={current.data.content} bundled={bundled}
             onSave={(content) => save.mutate({ name: selected, content })} saving={save.isPending}
-            onDelete={() => remove.mutate(selected)} deleting={remove.isPending} />
+            onDelete={() => remove.mutate(selected)} deleting={remove.isPending}
+            onRevert={() => revert.mutate(selected)} reverting={revert.isPending} />
         ) : <p style={{ color: color.textMuted, padding: 12 }}>Select a skill to edit its SKILL.md, or create a new one.</p>}
       </Panel>
     </div>
@@ -67,10 +77,12 @@ export default function Skills() {
 
 // Remounted per skill (key=name) so the textarea resets on switch; after Save the query refetches and
 // `dirty` clears against the new content. Mirrors the topic-preset / task-drawer editors.
-function SkillEditor({ name, content, bundled, onSave, saving, onDelete, deleting }:
-  { name: string; content: string; bundled: boolean; onSave: (c: string) => void; saving: boolean; onDelete: () => void; deleting: boolean }) {
+function SkillEditor({ name, content, bundled, onSave, saving, onDelete, deleting, onRevert, reverting }:
+  { name: string; content: string; bundled: boolean; onSave: (c: string) => void; saving: boolean;
+    onDelete: () => void; deleting: boolean; onRevert: () => void; reverting: boolean }) {
   const [text, setText] = useState(content);
   const [confirmDel, setConfirmDel] = useState(false);
+  const [confirmRevert, setConfirmRevert] = useState(false);
   const dirty = text !== content;
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -98,6 +110,14 @@ function SkillEditor({ name, content, bundled, onSave, saving, onDelete, deletin
         {dirty
           ? <Button onClick={() => setText(content)}>Reset</Button>
           : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
+        <span style={{ flex: 1 }} />
+        {bundled && (confirmRevert ? (
+          <>
+            <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>discard edits & restore shipped?</span>
+            <Button variant="danger" disabled={reverting} onClick={onRevert}>Revert</Button>
+            <Button onClick={() => setConfirmRevert(false)}>Cancel</Button>
+          </>
+        ) : <Button onClick={() => setConfirmRevert(true)} title="Discard edits and restore this skill to its shipped (bundled) version">Revert to bundled</Button>)}
       </div>
     </div>
   );

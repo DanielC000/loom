@@ -69,6 +69,22 @@ export function deleteSkill(name: string): boolean {
   return true;
 }
 
+/**
+ * Restore a bundled skill in the store to its shipped asset version, discarding any UI edits.
+ * Closes the seed-if-absent gap: seedGlobalSkills() never overwrites, so improvements to a bundled
+ * skill don't reach an existing store on reboot — this is the explicit, per-skill opt-in refresh.
+ * Returns false if the skill has no bundled asset (a user-created skill can't be "reset").
+ */
+export function resetSkillToBundled(name: string): boolean {
+  if (!isValidSkillName(name)) return false;
+  const src = path.join(ASSET_SKILLS, name);
+  try { if (!fs.statSync(src).isDirectory()) return false; } catch { return false; } // not a bundled skill
+  const dest = path.join(SKILLS_DIR, name);
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.cpSync(src, dest, { recursive: true });
+  return true;
+}
+
 /** Starter SKILL.md for a freshly-created skill. */
 export function skillTemplate(name: string): string {
   return `---\nname: ${name}\ndescription: \n---\n\n# ${name}\n\nDescribe when this skill triggers and the steps to follow.\n`;

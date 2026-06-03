@@ -17,7 +17,7 @@ import type { OrchestrationControl } from "../orchestration/control.js";
 import { GitReader } from "../git/reader.js";
 import { diffBranch } from "../git/worktrees.js";
 import { listVaultTree, readVaultFile } from "../vault/browser.js";
-import { listSkills, readSkill, writeSkill, deleteSkill, isValidSkillName, skillTemplate } from "../skills/store.js";
+import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, isValidSkillName, skillTemplate } from "../skills/store.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -149,6 +149,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
     deleteSkill(name);
     return { ok: true };
+  });
+  // Restore a bundled skill to its shipped version (discards UI edits) — the explicit fix for the
+  // seed-if-absent gap. 404 if the skill isn't bundled (nothing to reset to).
+  app.post("/api/skills/:name/reset", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
+    if (!resetSkillToBundled(name)) return reply.code(404).send({ error: "no bundled version for this skill" });
+    return readSkill(name);
   });
   app.get("/api/projects/:id/topics", async (req) =>
     deps.db.listTopics((req.params as { id: string }).id));
