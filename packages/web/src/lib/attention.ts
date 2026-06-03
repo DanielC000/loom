@@ -44,11 +44,12 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
 
   const sortedEvents = [...allEvents].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
 
-  // A merge_request is "pending" until a later merge_done/merge_rejected for the same worker/task.
+  // A merge_request is "pending" until a later merge_done/merge_rejected for the same task/worker.
+  // Key task-first so a worker recycled between review and confirm still pairs its terminal event.
   const latestMerge = new Map<string, OrchestrationEvent>();
   for (const e of sortedEvents) {
     if (e.kind === "merge_request" || e.kind === "merge_done" || e.kind === "merge_rejected") {
-      latestMerge.set(e.workerSessionId || e.taskId || e.id, e);
+      latestMerge.set(e.taskId || e.workerSessionId || e.id, e);
     }
   }
 
@@ -65,8 +66,18 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   }
 
   const items: AttentionItem[] = [];
+  // A genuinely-pending review keeps its WORKER session alive on the worktree (the worker is only
+  // hard-stopped at merge-confirm time). So a merge_request whose worker is gone (exited/dead/not in
+  // `all`) is NOT a live review — its merge resolved or was abandoned (e.g. a merge_done lost to a
+  // daemon restart). Retire it. This is what makes the lost-event case correct even under a live
+  // manager; the live-managers-only filter above composes with it (belt and suspenders).
+  const liveWorker = (id?: string | null): boolean => {
+    if (!id) return false;
+    const w = all.find((s) => s.id === id);
+    return !!w && (w.processState === "live" || w.processState === "starting");
+  };
   for (const e of latestMerge.values()) {
-    if (e.kind === "merge_request") {
+    if (e.kind === "merge_request" && liveWorker(e.workerSessionId)) {
       items.push({
         key: `m-${e.id}`, tone: "phosphor", kind: "MERGE REQUEST", workerSessionId: e.workerSessionId,
         text: `${e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)} ` : ""}${e.taskId ? `task ${e.taskId.slice(0, 8)} ` : ""}— awaiting review`,
