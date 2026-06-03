@@ -8,6 +8,7 @@ import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, 
 import { engineTranscriptExists } from "./transcript.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit } from "../orchestration/usage-awareness.js";
+import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon } from "../orchestration/restart.js";
 
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
@@ -169,6 +170,38 @@ export class SessionService {
     // forever, so enqueued worker reports queue instead of submitting and the idle guard can't fire.
     this.db.setBusy(session.id, false);
     return { ...session, processState: "live", busy: false };
+  }
+
+  /**
+   * Manager-triggered daemon restart (the `daemon_restart` tool) — for SELF-HOSTING (orchestrating
+   * Loom WITH Loom). After a manager merges daemon-`src` worker branches, the new code isn't running
+   * until the daemon is rebuilt + restarted; this does that and brings the manager (+ its live
+   * workers) back on the other side via the restart-intent file (consumed in index.ts boot).
+   *
+   * Safety: (1) refuses unless under the supervisor (LOOM_SUPERVISED) — otherwise nothing relaunches
+   * the daemon; (2) REBUILDS FIRST while still alive, so a broken build aborts the restart and leaves
+   * the manager running to fix it, instead of exiting into a daemon that won't boot. On a green build
+   * it records intent and exits with RESTART_EXIT_CODE; the supervisor relaunches.
+   */
+  async requestDaemonRestart(managerSessionId: string, reason: string): Promise<{ restarting: boolean; error?: string }> {
+    const mgr = this.db.getSession(managerSessionId);
+    if (!mgr || mgr.role !== "manager") throw new Error("only a manager can restart the daemon");
+    if (!isSupervised()) {
+      return { restarting: false, error: "daemon is not running under the restart supervisor (pnpm daemon:stable) — cannot self-restart. Flag that the human must restart for your merged code to go live." };
+    }
+    const build = await buildDaemon();
+    if (build.code !== 0) {
+      return { restarting: false, error: `daemon build failed — NOT restarting (your code stays un-deployed but the daemon stays up). Fix and retry:\n${build.tail}` };
+    }
+    const workerSessionIds = this.db
+      .listWorkers(managerSessionId)
+      .filter((w) => w.processState === "live")
+      .map((w) => w.id);
+    writeRestartIntent({ reason, managerSessionId, workerSessionIds, requestedAt: new Date().toISOString() });
+    // Exit AFTER this MCP response flushes; the pty (incl. this manager) dies with the process, the
+    // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent.
+    setTimeout(() => process.exit(RESTART_EXIT_CODE), 300);
+    return { restarting: true };
   }
 
   /**
@@ -676,7 +709,7 @@ export class SessionService {
    *     the branch here — any committed work stays on it and createWorktree re-attaches a fresh
    *     worktree to it on a re-task.
    */
-  async reconcileOrchestrationOnBoot(): Promise<{ mergesFinished: number; mergesFailed: number; worktreesPruned: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; worktreesPruned: number }> {
     const all = this.db.listAllSessions();
     const handledWorktrees = new Set<string>();
     let mergesFinished = 0;
@@ -690,6 +723,7 @@ export class SessionService {
     // counted, and skipped; the next boot retries it.
     for (const s of all) {
       if (s.role !== "worker" || !s.branch || !s.taskId) continue;
+      if (protectedSessionIds.has(s.id)) continue; // about to be resumed (restart-intent) — leave it intact
       const project = this.db.getProject(s.projectId);
       if (!project) continue;
       try {
@@ -715,6 +749,7 @@ export class SessionService {
     for (const s of all) {
       const worktreePath = s.worktreePath;
       if (!worktreePath || handledWorktrees.has(worktreePath)) continue;
+      if (protectedSessionIds.has(s.id)) continue; // restart-intent worker — keep its worktree to resume into
       if (s.processState !== "exited" && s.resumability !== "dead") continue;
       if (!fs.existsSync(worktreePath)) continue;
       const project = this.db.getProject(s.projectId);

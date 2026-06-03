@@ -28,12 +28,19 @@ pnpm web            # viewport on http://127.0.0.1:5317 (proxies /api + /ws to t
 The dev daemon runs under `tsx watch`, so any worker merge that lands a change under
 `packages/daemon/src/**` (or `shared/dist`) restarts it mid-orchestration and kills the live
 manager/worker PTYs (the watch-restart-kills-PTYs gotcha — it caused an overnight cascade on
-2026-06-03). `daemon:stable` builds once and runs `node dist/index.js` with no watcher, so source
-merges don't restart the running daemon; you pick up merged changes deliberately by re-running it.
-Caveat: `assets/**` (hook-relay, vault-lint, bundled skills) is still read live from the package
-dir, so asset merges take effect on the next spawn without a restart. For full isolation, run the
-stable daemon from a separate checkout (shares `~/.loom` state; override `LOOM_HOME`/`LOOM_PORT` if
-you need two daemons side by side).
+2026-06-03). `daemon:stable` runs the **supervisor** (`scripts/daemon-supervisor.mjs`): it builds
+once and runs the daemon from `dist/` with **no watcher**, so source merges don't restart the running
+daemon. The supervisor relaunches **only** on the explicit restart sentinel (exit `75`); any other
+exit (incl. a crash) stops the loop, so a broken daemon stays visibly down instead of crash-looping.
+- **Manager self-restart:** under the supervisor, a manager that has merged daemon-`src` can make that
+  code go live itself via the `daemon_restart` orchestration tool — it rebuilds first (a failed build
+  aborts the restart and leaves the daemon up), then exits `75`; the supervisor relaunches and boot
+  re-resumes the manager + its live workers (via `~/.loom/restart-intent.json`) with a "code is live"
+  note. Outside the supervisor the tool refuses (nothing would relaunch the daemon).
+- **Caveat:** `assets/**` (hook-relay, vault-lint, bundled skills) is read live from the package dir,
+  so asset merges take effect on the next spawn without a restart. For full isolation, run the stable
+  daemon from a separate checkout (shares `~/.loom` state; override `LOOM_HOME`/`LOOM_PORT` for two
+  daemons side by side).
 
 ## Load-bearing invariants (validated in the spike — do not regress)
 - **Drive the REAL interactive `claude` via node-pty.** Never `claude -p`/headless.

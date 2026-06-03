@@ -89,6 +89,20 @@ scope, and never address the human. You make the call and `worker_message` it ba
 9. **Verify the whole, not just the parts.** Before declaring a phase done, require an integrated
    end-to-end pass; eyeball what can't be verified automatically.
 
+## Self-hosting — when your project IS Loom itself
+
+If you orchestrate **Loom with Loom**, merged daemon-`src` code is **not running** until the daemon is
+rebuilt + restarted — so you cannot end-to-end-verify daemon behavior in the live daemon by merging
+alone. Under the stable supervisor (`pnpm daemon:stable`) you restart it **yourself**: after merging
+the worker branch(es), call **`daemon_restart`** with a short `reason`. It rebuilds FIRST — a failed
+build does **not** restart and returns the error (fix it, then retry), so you never take the daemon
+down on broken code. On a green build the daemon restarts (your pty + your live workers' ptys drop)
+and you are **automatically resumed** with a note once it's back (your live workers too) — then verify
+the now-live behavior. Caveats: changes under `packages/daemon/assets/**` (skills, hooks) are read
+**live** and need no restart; and if `daemon_restart` returns `restarting:false` because the daemon
+isn't supervised, flag that the human must restart for your code to go live. Use this only when a
+change actually needs to be *running* to verify — not after every daemon merge.
+
 ## How you operate
 
 - Be decisive and concise: lead with the decision, then the reasoning.

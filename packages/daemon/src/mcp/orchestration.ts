@@ -198,6 +198,28 @@ export class OrchestrationMcpRouter {
     );
 
     server.registerTool(
+      "daemon_restart",
+      {
+        description:
+          "SELF-HOSTING ONLY (orchestrating Loom with Loom): rebuild + restart the Loom daemon so merged " +
+          "daemon-`src` code goes LIVE in the running process. Use after you've merged worker branch(es) that " +
+          "change the daemon and you need the new behavior actually running (e.g. to end-to-end verify it). " +
+          "Loom REBUILDS FIRST: if the build fails it does NOT restart and returns the error (stays up — fix it " +
+          "and retry). On a green build the daemon restarts: your pty and your live workers' ptys are dropped, " +
+          "then you are AUTOMATICALLY resumed (your live workers too) with a note once it's back. Returns " +
+          "{restarting:true} on success, or {restarting:false, error} if unsupervised / build failed.",
+        inputSchema: { reason: z.string() },
+      },
+      async ({ reason }) => {
+        try {
+          return ok(await sessions.requestDaemonRestart(managerSessionId, reason));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
       "recycle_me",
       {
         description:

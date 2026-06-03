@@ -15,6 +15,7 @@ import { WakeService } from "./orchestration/wake.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "./orchestration/usage-limit.js";
+import { readRestartIntent, clearRestartIntent } from "./orchestration/restart.js";
 import { buildServer } from "./gateway/server.js";
 
 async function main(): Promise<void> {
@@ -52,6 +53,13 @@ async function main(): Promise<void> {
 
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design
   const sessions = new SessionService(db, pty, control);
+  // Self-host restart recovery: a manager's `daemon_restart` left an intent naming the sessions to
+  // bring back. Read it BEFORE the reconcile so those workers' worktrees are PROTECTED from pass-B GC
+  // (recoverStaleSessions just marked them 'exited', which would otherwise prune the worktree we need
+  // to resume into). The actual resume happens after the server is listening (its ptys need the MCP
+  // endpoints up). null on a normal boot.
+  const restartIntent = readRestartIntent();
+  const protectedSessionIds = new Set(restartIntent?.workerSessionIds ?? []);
   // Boot-time orchestration reconcile (#22 run-2 + audit M4): finish any merge whose bookkeeping was
   // interrupted (branch merged but task/worktree not reconciled) and GC orphaned worktrees from
   // crashed workers. Runs AFTER recoverStaleSessions (no live pty holds a worktree) — pure git + db.
@@ -59,7 +67,7 @@ async function main(): Promise<void> {
   // (a deterministic throw here would otherwise crash-loop the boot, since merging self-restarts the
   // dev daemon — and that would also block usage-limit auto-resume).
   try {
-    const reconciled = await sessions.reconcileOrchestrationOnBoot();
+    const reconciled = await sessions.reconcileOrchestrationOnBoot(protectedSessionIds);
     if (reconciled.mergesFinished || reconciled.mergesFailed || reconciled.worktreesPruned) {
       console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${reconciled.mergesFailed} failed (retry next boot), pruned ${reconciled.worktreesPruned} orphaned worktree(s)`);
     }
@@ -125,6 +133,29 @@ async function main(): Promise<void> {
   const contextWatcher = new ContextWatcher({ db, pty, ratio: recycleRatio, intervalMs: ctxWatchMs });
   contextWatcher.start();
   console.log(`[boot] context-recycle watcher on (ratio ${recycleRatio}, tick ${ctxWatchMs}ms)`);
+
+  // Self-host restart recovery (consume the intent read above): a manager deliberately restarted the
+  // daemon (daemon_restart) to make merged code live. Re-resume its live workers, then the manager,
+  // and tell the manager the rebuild+restart is done so it can carry on (e.g. verify the live daemon).
+  // Best-effort: an unresumable session is skipped (dead transcript / gone worktree). Runs once.
+  if (restartIntent) {
+    clearRestartIntent();
+    const tryResume = (id: string): boolean => {
+      try { sessions.resume(id); return true; } catch { return false; }
+    };
+    const workersResumed = restartIntent.workerSessionIds.filter(tryResume).length;
+    if (tryResume(restartIntent.managerSessionId)) {
+      pty.enqueueStdin(
+        restartIntent.managerSessionId,
+        `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
+        `running daemon (reason: ${restartIntent.reason}). ${workersResumed}/${restartIntent.workerSessionIds.length} ` +
+        `of your live workers were resumed. You can now end-to-end verify the live behavior. Continue.`,
+      );
+      console.log(`[boot] self-host restart: resumed manager ${restartIntent.managerSessionId.slice(0, 8)} (+${workersResumed} worker(s))`);
+    } else {
+      console.warn(`[boot] self-host restart: manager ${restartIntent.managerSessionId.slice(0, 8)} could not be resumed`);
+    }
+  }
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); wakes.stop(); clearInterval(reconcileTimer); contextWatcher.stop(); process.exit(0); });
