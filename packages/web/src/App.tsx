@@ -12,11 +12,12 @@ import ReviewPanel from "./pages/ReviewPanel";
 import Skills from "./pages/Skills";
 import Profiles from "./pages/Profiles";
 import Schedules from "./pages/Schedules";
-import { NavTab, Badge } from "./components/ui";
+import { NavTab, Badge, Select } from "./components/ui";
 import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
 import { api } from "./lib/api";
 import { useAttention } from "./lib/attention";
+import { ActiveProjectProvider, useActiveProject } from "./lib/activeProject";
 import { color, font } from "./theme";
 import { page } from "./ui";
 
@@ -58,43 +59,63 @@ function Bell() {
   );
 }
 
+// Header active-project selector. Persists the one project that scopes the detail pages
+// (Board / Git / Vault / Orchestration). Mission Control + Terminals stay god-eye and ignore it —
+// hence the quiet hint rather than hiding the control per route.
+function ActiveProjectControl() {
+  const { projectId, setProjectId, projects } = useActiveProject();
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+      <span style={{ fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>Project</span>
+      <Select value={projects.length ? projectId : ""} onChange={(e) => setProjectId(e.target.value)}>
+        {projects.length === 0 && <option value="">— none —</option>}
+        {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+      </Select>
+      <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>(scopes detail pages)</span>
+    </span>
+  );
+}
+
 export default function App() {
   return (
-    <div style={{ minHeight: "100vh" }}>
-      <CommandPalette />
-      <header style={{ display: "flex", alignItems: "center", gap: 24, padding: "10px 20px", borderBottom: `1px solid ${color.border}` }}>
-        <Logo />
-        <nav style={{ display: "flex", gap: 18 }}>
-          <NavTab to="/" end>Mission</NavTab>
-          <NavTab to="/workspace">Workspace</NavTab>
-          <NavTab to="/terminals">Terminals</NavTab>
-          <NavTab to="/board">Board</NavTab>
-          <NavTab to="/orchestration">Orchestration</NavTab>
-          <NavTab to="/vault">Vault</NavTab>
-          <NavTab to="/git">Git</NavTab>
-          <NavTab to="/skills">Skills</NavTab>
-          <NavTab to="/profiles">Profiles</NavTab>
-          <NavTab to="/schedules">Schedules</NavTab>
-        </nav>
-        <span style={{ flex: 1 }} />
-        <Bell />
-        <GlobalStatus />
-      </header>
-      <main style={page}>
-        <Routes>
-          <Route path="/" element={<MissionControl />} />
-          <Route path="/workspace" element={<Workspace />} />
-          <Route path="/terminals" element={<Terminals />} />
-          <Route path="/board" element={<Board />} />
-          <Route path="/orchestration" element={<Orchestration />} />
-          <Route path="/review/:workerId" element={<ReviewPanel />} />
-          <Route path="/vault" element={<Vault />} />
-          <Route path="/git" element={<Git />} />
-          <Route path="/skills" element={<Skills />} />
-          <Route path="/profiles" element={<Profiles />} />
-          <Route path="/schedules" element={<Schedules />} />
-        </Routes>
-      </main>
-    </div>
+    <ActiveProjectProvider>
+      <div style={{ minHeight: "100vh" }}>
+        <CommandPalette />
+        <header style={{ display: "flex", alignItems: "center", gap: 24, padding: "10px 20px", borderBottom: `1px solid ${color.border}` }}>
+          <Logo />
+          <nav style={{ display: "flex", gap: 18 }}>
+            <NavTab to="/" end>Mission</NavTab>
+            <NavTab to="/workspace">Workspace</NavTab>
+            <NavTab to="/terminals">Terminals</NavTab>
+            <NavTab to="/board">Board</NavTab>
+            <NavTab to="/orchestration">Orchestration</NavTab>
+            <NavTab to="/vault">Vault</NavTab>
+            <NavTab to="/git">Git</NavTab>
+            <NavTab to="/skills">Skills</NavTab>
+            <NavTab to="/profiles">Profiles</NavTab>
+            <NavTab to="/schedules">Schedules</NavTab>
+          </nav>
+          <span style={{ flex: 1 }} />
+          <ActiveProjectControl />
+          <Bell />
+          <GlobalStatus />
+        </header>
+        <main style={page}>
+          <Routes>
+            <Route path="/" element={<MissionControl />} />
+            <Route path="/workspace" element={<Workspace />} />
+            <Route path="/terminals" element={<Terminals />} />
+            <Route path="/board" element={<Board />} />
+            <Route path="/orchestration" element={<Orchestration />} />
+            <Route path="/review/:workerId" element={<ReviewPanel />} />
+            <Route path="/vault" element={<Vault />} />
+            <Route path="/git" element={<Git />} />
+            <Route path="/skills" element={<Skills />} />
+            <Route path="/profiles" element={<Profiles />} />
+            <Route path="/schedules" element={<Schedules />} />
+          </Routes>
+        </main>
+      </div>
+    </ActiveProjectProvider>
   );
 }

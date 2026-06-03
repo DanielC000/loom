@@ -1,20 +1,19 @@
-import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { useActiveProject } from "../lib/activeProject";
 import { Panel, SectionLabel, Dot } from "../components/ui";
 import { color, font } from "../theme";
-import { ProjectSelect } from "./Vault";
 
 // Read-only git view: branches + commit log (§: no commit/checkout/push from the UI in phase 1).
+// Scoped to the header's active project (see lib/activeProject).
 export default function Git() {
-  const [projectId, setProjectId] = useState<string>("");
-  const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
+  const { projectId } = useActiveProject();
   const branches = useQuery({ queryKey: ["git-branches", projectId], queryFn: () => api.gitBranches(projectId), enabled: !!projectId });
   const log = useQuery({ queryKey: ["git-log", projectId], queryFn: () => api.gitLog(projectId), enabled: !!projectId });
 
   return (
     <div>
-      <ProjectSelect value={projectId} onChange={setProjectId} projects={projects.data ?? []} />
+      {!projectId && <p style={{ color: color.textMuted }}>No project selected.</p>}
       {projectId && (
         <>
           <Panel style={{ marginTop: 12 }}>
