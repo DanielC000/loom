@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const BASE = "http://127.0.0.1:4317";
+const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const dir = path.join(os.tmpdir(), `loom-board-${Date.now()}`);
 fs.mkdirSync(dir, { recursive: true });
 
