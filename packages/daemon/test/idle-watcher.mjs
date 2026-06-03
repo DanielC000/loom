@@ -113,6 +113,28 @@ function cleanup(e) {
   check("(4) suppressed manager is NOT nudged", !e.enqueued.some((x) => x.id === "mgr-suppressed"));
   cleanup(e);
 }
+// Timed snooze EXPIRY: a 'snoozed' manager whose snooze_until is in the PAST is re-armed and nudged.
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-snooze-elapsed");
+  e.db.setIdleNudgePolicy("mgr-snooze-elapsed", "snoozed", minutesAgo(5)); // snooze elapsed 5m ago
+  e.watcher.tick(NOW);
+  const s = e.db.getIdleNudgeState("mgr-snooze-elapsed");
+  check("(4b) elapsed snooze → re-armed to 'watching' (snooze cleared)", s?.policy === "watching" && s?.snoozeUntil === null);
+  check("(4b) elapsed-snooze manager IS nudged this tick", e.enqueued.some((x) => x.id === "mgr-snooze-elapsed"));
+  cleanup(e);
+}
+// 'suppressed' does NOT timed-expire: a past snooze_until must NOT re-arm or nudge it (sticky till Task 4).
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-suppressed-past");
+  e.db.setIdleNudgePolicy("mgr-suppressed-past", "suppressed", minutesAgo(5)); // past ts, but suppressed
+  e.watcher.tick(NOW);
+  const s = e.db.getIdleNudgeState("mgr-suppressed-past");
+  check("(4c) suppressed manager with a PAST snooze_until stays 'suppressed' (never timed-expires)", s?.policy === "suppressed");
+  check("(4c) suppressed manager is NOT nudged", !e.enqueued.some((x) => x.id === "mgr-suppressed-past"));
+  cleanup(e);
+}
 
 // ============================ (5) SILENT — has a live worker ============================
 {

@@ -77,10 +77,22 @@ export class IdleWatcher {
         if (!state) continue;
       }
 
+      // Timed snooze expiry: a manager that reported `waiting` is silent only UNTIL snooze_until
+      // ("silent until then" — reuses wake_me semantics; persisted, so honored across a restart).
+      // Once it elapses, re-arm to 'watching' (clears the snooze) so the normal predicate evaluates
+      // it again this/next tick. ONLY for 'snoozed' — 'suppressed' (blocked_human/done) stays sticky
+      // until genuine activity or a human reclaims it (Task 4). unanswered is already 0 for a manager
+      // that answered `waiting`, so the reset is safe.
+      if (state.policy === "snoozed" && state.snoozeUntil && nowIso >= state.snoozeUntil) {
+        db.resetIdleNudgeState(m.id);
+        state = db.getIdleNudgeState(m.id);
+        if (!state) continue;
+      }
+
       // --- the full trigger predicate (skip silently if ANY fails) ---
       if (m.busy) continue;                                              // mid-turn → not idle
-      if (state.policy !== "watching") continue;                         // snoozed / suppressed
-      if (state.snoozeUntil && nowIso < state.snoozeUntil) continue;     // active snooze window
+      if (state.policy !== "watching") continue;                         // snoozed (within window) / suppressed
+      if (state.snoozeUntil && nowIso < state.snoozeUntil) continue;     // defensive: active snooze on a watching row
       if (state.unanswered >= cfg.maxUnansweredNudges) continue;         // at/over cap → Task-4 escalation, not here
       if (control.isPaused(m.id)) continue;                              // human-paused
 
