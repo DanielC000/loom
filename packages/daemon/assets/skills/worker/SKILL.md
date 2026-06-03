@@ -34,8 +34,11 @@ gate command). This skill is the doctrine those plug into.
 ## Report protocol
 
 `worker_report` is your only orchestration tool. Use it to report:
-- **`done`** — a one-line summary of what you did + your key decisions / anything the reviewer should
-  check. Don't merge — your manager reviews the branch and merges through the gate.
+- **`done`** — stage + **commit** your verified work to your branch *first*, then report `done` with
+  the **commit SHA** plus a one-line summary of what you did + your key decisions / anything the
+  reviewer should check. Uncommitted work is invisible to your manager's merge gate — it sees
+  `filesChanged:0` and bounces the task back, wasting a round-trip. Don't merge — your manager reviews
+  the branch and merges through the gate.
 - **`blocked`** — with `needs`: the specific decision, access, or information you're waiting on.
 - **`progress`** — an optional checkpoint on a long task.
 

@@ -124,6 +124,12 @@ the now-live behavior. Caveats: changes under `packages/daemon/assets/**` (skill
 isn't supervised, flag that the human must restart for your code to go live. Use this only when a
 change actually needs to be *running* to verify — not after every daemon merge.
 
+After **any** daemon restart — *especially one you did not initiate* (e.g. the owner deploying) —
+don't trust the auto-resume to have actually put your workers back to work: run `worker_list` and read
+each live worker's transcript. A worker resumed but left **idle mid-task** (a generic "Continue" just
+draws "No response requested") needs a **specific** `worker_message` re-nudge naming where it left off
+to revive it — a generic nudge won't.
+
 ## How you operate
 
 - Be decisive and concise: lead with the decision, then the reasoning.
