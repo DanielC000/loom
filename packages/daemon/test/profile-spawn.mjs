@@ -57,6 +57,9 @@ db.insertProfile({
 });
 db.insertTopic({ id: "topicMgr", projectId: "pP", name: "Managed", startupPrompt: "TOPIC_MGR_PROMPT", position: 0, profileId: "profMgr" });
 db.insertTopic({ id: "topicPlain", projectId: "pP", name: "Plain", startupPrompt: "TOPIC_PLAIN_PROMPT", position: 1, profileId: null });
+// A profile-topic with NO per-topic prompt (the NOT NULL DEFAULT '' real-DB case) → falls back to
+// the profile's default prompt at spawn.
+db.insertTopic({ id: "topicMgrBlank", projectId: "pP", name: "ManagedBlank", startupPrompt: "", position: 2, profileId: "profMgr" });
 db.insertSession({
   id: "mgr1", projectId: "pP", topicId: "topicPlain", engineSessionId: null, title: null,
   cwd: repo, processState: "live", resumability: "unknown", busy: false,
@@ -103,10 +106,19 @@ try {
   check("(a) returned session.role === 'manager' (profile-conferred)", sA.role === "manager");
   check("(a) DB persists role=manager (drives the server-side role-gate)", db.getSession(sA.id).role === "manager");
   check("(a) spawn opts.role === 'manager' (the value host.ts maps to the loom-orchestration surface)", oA?.role === "manager");
-  check("(a) spawn injects the resolved prompt (topic's own overrides the profile's, per `??`)", oA?.startupPrompt === "TOPIC_MGR_PROMPT");
+  check("(a) spawn injects the resolved prompt (topic's own NON-EMPTY prompt overrides the profile's)", oA?.startupPrompt === "TOPIC_MGR_PROMPT");
   check("(a) profile allowDelta is layered onto the config allow", oA?.permission.allow.includes(PROFILE_ALLOW));
   check("(a) the base config allow is preserved alongside the delta", oA?.permission.allow.includes("mcp__loom-tasks"));
   check("(a) session is live", db.getSession(sA.id).processState === "live");
+
+  // (a') a profile-topic with a BLANK per-topic prompt falls back to the PROFILE's default prompt
+  // (empty-as-absent, profile-present) — proves the profile's prompt is reachable from the real DB,
+  // where topics.startup_prompt is NOT NULL DEFAULT ''.
+  const sAb = svc.startNew("topicMgrBlank");
+  const oAb = optsFor(sAb.id);
+  check("(a') blank profile-topic spawns role=manager", oAb?.role === "manager" && db.getSession(sAb.id).role === "manager");
+  check("(a') blank profile-topic injects the PROFILE's default prompt", oAb?.startupPrompt === "PROFILE_DEFAULT_PROMPT");
+  check("(a') blank profile-topic still layers the profile allowDelta", oAb?.permission.allow.includes(PROFILE_ALLOW));
 
   // ===================== (b) NO-profile topic → today's plain session, byte-identical =====================
   const sB = svc.startNew("topicPlain");

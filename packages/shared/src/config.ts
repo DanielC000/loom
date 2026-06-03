@@ -152,9 +152,16 @@ export interface ResolvedProfile {
 /**
  * Resolve a topic + its (optional) Agent Profile into the effective spawn shape — the sibling of
  * resolveConfig for the "who". Precedence: the profile supplies role/allow/skills/model/icon; the
- * topic's own startupPrompt overrides the profile's (`topic.startupPrompt ?? profile.startupPrompt`).
+ * topic's own startupPrompt overrides the profile's ONLY when it's non-empty (after trim) — an
+ * empty/whitespace per-topic prompt falls back to the profile's. This matters because the persisted
+ * `topics.startup_prompt` column is NOT NULL DEFAULT '', so a topic that adopts a profile but sets no
+ * per-topic prompt presents '' (never null); empty-as-absent is what makes the profile's default
+ * prompt reachable (otherwise it would be dead code).
+ *
  * A null/absent profile is the BACKSTOP — it yields EXACTLY today's behavior: a plain (role-null)
- * session, the topic's own prompt, and no allow delta / skill filter / model / icon.
+ * session, the topic's own prompt VERBATIM (empty stays empty → a plain session with no prompt), and
+ * no allow delta / skill filter / model / icon. The empty-as-absent fallback applies ONLY when a
+ * profile is present.
  */
 export function resolveProfile(
   // A full Topic is assignable; the prompt is widened to nullable so a prompt-less topic can fall
@@ -167,8 +174,9 @@ export function resolveProfile(
   }
   return {
     role: profile.role ?? null,
-    // Per-topic override: the topic's own prompt wins when set; else fall back to the profile's.
-    startupPrompt: topic.startupPrompt ?? profile.startupPrompt,
+    // Per-topic override: the topic's own prompt wins when set AND non-empty (after trim); an empty/
+    // whitespace prompt (the NOT NULL DEFAULT '' case) falls back to the profile's default prompt.
+    startupPrompt: topic.startupPrompt && topic.startupPrompt.trim().length ? topic.startupPrompt : profile.startupPrompt,
     allow: profile.allowDelta ?? [],
     skills: profile.skills ?? null,
     model: profile.model ?? null,
