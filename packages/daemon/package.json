@@ -31,6 +31,7 @@
     "test:worktrees": "node test/worktrees.mjs",
     "test:transcript-encode": "node test/transcript-encode.mjs",
     "test:claude-config": "node test/claude-config.mjs",
+    "test:trust-lock": "node test/trust-lock.mjs",
     "test:board-consistency": "node test/board-consistency.mjs",
     "test:dead-id": "node test/dead-id.mjs",
     "test:restart-intent": "node test/restart-intent.mjs",
