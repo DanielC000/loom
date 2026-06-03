@@ -851,19 +851,28 @@ export class SessionService {
 
   /**
    * The post-merge bookkeeping shared by confirmWorkerMerge (the interactive merge path) and
-   * reconcileOrchestrationOnBoot (orphaned-merge recovery): retire the worktree, delete the
-   * now-merged branch, finish the task, and record `merge_done`. Factored out so the two callers
-   * can't drift. The CALLER guarantees no live pty holds the worktree cwd (confirmWorkerMerge
-   * hard-stops the worker first; at boot no pty from a prior run survives). Best-effort + idempotent:
-   * removeWorktree has its fs.rm backstop, deleteBranch swallows a missing branch, and updateTask is
-   * a no-op when the task is already `done`.
+   * reconcileOrchestrationOnBoot (orphaned-merge recovery): retire the worktree, finish the task,
+   * record `merge_done`, then delete the now-merged branch. Factored out so the two callers can't
+   * drift. The CALLER guarantees no live pty holds the worktree cwd (confirmWorkerMerge hard-stops
+   * the worker first; at boot no pty from a prior run survives). Best-effort + idempotent:
+   * removeWorktree has its fs.rm backstop, deleteBranch swallows a missing branch, updateTask is a
+   * no-op when the task is already `done`, and a duplicate merge_done is harmless (attention.ts keeps
+   * only the latest per worker/task).
    *
    * removeWorktree is BEST-EFFORT and runs FIRST, but its throw must NOT abort the rest: on Windows a
    * just-hard-stopped worker's dir can keep a busy handle (node_modules/native modules, a lingering
    * build) past fs.rm's retry budget, so removeWorktree throws even though the `git merge` already
-   * committed. Unguarded, that would skip deleteBranch/updateTask/merge_done and make the interactive
+   * committed. Unguarded, that would skip updateTask/merge_done/deleteBranch and make the interactive
    * merge report an ERROR for an already-landed merge. So we swallow it (warn) and finish the
    * bookkeeping; the leaked dir is GC'd by boot-reconcile's Pass B on the next restart.
+   *
+   * ORDER IS CRASH-CRITICAL. deleteBranch is the DESTRUCTIVE, RE-DETECTION-BLOCKING op — once the
+   * branch is gone, Pass A's isBranchMerged can never re-detect the merge — so it MUST run LAST,
+   * AFTER the durable terminal bookkeeping (updateTask done + merge_done). A crash anywhere before
+   * deleteBranch leaves the branch present-and-merged, which Pass A idempotently re-finalizes; a
+   * crash after it can only happen once merge_done is already durable. This closes the window where a
+   * crash between deleteBranch and merge_done lost the terminal event AND pruned the branch, leaving a
+   * merge_request dangling forever (the lingering-MERGE-REQUEST-alert root cause).
    */
   private async finalizeMerge(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
@@ -876,22 +885,23 @@ export class SessionService {
       console.warn(`[finalizeMerge] could not remove worktree ${args.worktreePath} (dir busy?); ` +
         `merge already landed — finishing bookkeeping, boot-reconcile Pass B will GC the dir: ${(e as Error).message}`);
     }
-    await deleteBranch(args.repoPath, args.branch);
+    // Terminal bookkeeping BEFORE the destructive deleteBranch (see the ORDER IS CRASH-CRITICAL note).
     if (args.taskId) this.db.updateTask(args.taskId, { columnKey: "done" });
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
       taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch },
     });
+    await deleteBranch(args.repoPath, args.branch);
   }
 
   /**
    * Boot-time orchestration reconcile (#22 run-2 + audit M4). Run once at daemon boot, AFTER
    * recoverStaleSessions has marked prior-run ptys exited (so nothing live holds a worktree).
-   * Two surgical, idempotent passes:
+   * Three surgical, idempotent passes:
    *
    *  A. Finish orphaned merges. confirmWorkerMerge commits the `git merge` BEFORE its bookkeeping
-   *     (removeWorktree → deleteBranch → updateTask done → merge_done). If the process dies in
+   *     (removeWorktree → updateTask done → merge_done → deleteBranch). If the process dies in
    *     between (e.g. the dev daemon runs from the repo it merged into, so the merge triggers a
    *     `tsx watch` restart), the merge is correct but the task stays in_progress and the
    *     worktree/branch leak. For each worker whose branch is ALREADY merged into the canonical
@@ -899,17 +909,28 @@ export class SessionService {
    *     finalizeMerge. Idempotent: deleteBranch makes the branch vanish, so a re-run no longer
    *     detects it as merged.
    *
+   *  A2. Resolve branch-gone dangling merges (lingering-MERGE-REQUEST-alert root cause). Pass A is
+   *     keyed on isBranchMerged, so it CANNOT see a merge whose branch was already pruned but whose
+   *     `merge_done` was never recorded — exactly the residual shape (merge landed, branch gone, no
+   *     terminal event) that finalizeMerge's crash-safe ordering now prevents going forward but that
+   *     pre-existing orphans still carry. Detect it from the EVENT trail instead of git: a worker
+   *     with a `merge_request` and NO later `merge_done`/`merge_rejected`, whose task is `done` (so
+   *     the merge demonstrably landed), gets a reconciling `merge_done`. NON-DESTRUCTIVE — it emits
+   *     the terminal event ONLY, never touching a worktree dir or branch (safe for already-cleared
+   *     orphans) — and idempotent: the emitted merge_done makes a re-run find a terminal event and skip.
+   *
    *  B. GC orphaned worktrees (M4). For an exited/dead worker whose worktree dir still lingers and
    *     isn't a finished merge handled in (A), prune the DIR ONLY (best-effort) so crashed-worker
    *     worktrees don't accumulate (they otherwise feed the H1 re-task deadlock). We never delete
    *     the branch here — any committed work stays on it and createWorktree re-attaches a fresh
    *     worktree to it on a re-task.
    */
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; worktreesPruned: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number }> {
     const all = this.db.listAllSessions();
     const handledWorktrees = new Set<string>();
     let mergesFinished = 0;
     let mergesFailed = 0;
+    let staleMergesResolved = 0;
     let worktreesPruned = 0;
 
     // A. Finish orphaned merges. Best-effort PER SESSION: finalizeMerge now swallows a removeWorktree
@@ -942,6 +963,28 @@ export class SessionService {
       }
     }
 
+    // A2. Resolve branch-gone dangling merges from the EVENT trail (Pass A is blind to them — the
+    // branch is gone, so isBranchMerged is false). A worker with a `merge_request` and no later
+    // terminal event, whose task is `done`, had its merge land but lost (or never recorded) merge_done
+    // → a permanent stale MERGE REQUEST alert. Emit the missing terminal event. Purely additive: no
+    // git/fs op, so it never touches a worktree dir or branch (honors the inert-orphan constraint) and
+    // is trivially idempotent — once merge_done exists, the next boot sees a terminal event and skips.
+    for (const s of all) {
+      if (s.role !== "worker" || !s.taskId) continue;
+      if (protectedSessionIds.has(s.id)) continue; // about to be resumed — leave its lifecycle intact
+      if (this.db.getTask(s.taskId)?.columnKey !== "done") continue; // not a demonstrably-landed merge
+      const evts = this.db.listEventsForWorker(s.id);
+      const hasMergeRequest = evts.some((e) => e.kind === "merge_request");
+      const hasTerminal = evts.some((e) => e.kind === "merge_done" || e.kind === "merge_rejected");
+      if (!hasMergeRequest || hasTerminal) continue;
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id,
+        taskId: s.taskId, kind: "merge_done", detail: { branch: s.branch ?? null, reconciled: true },
+      });
+      staleMergesResolved++;
+    }
+
     // B. GC orphaned worktrees (exited/dead, dir on disk, not handled in A).
     for (const s of all) {
       const worktreePath = s.worktreePath;
@@ -956,6 +999,6 @@ export class SessionService {
       worktreesPruned++;
     }
 
-    return { mergesFinished, mergesFailed, worktreesPruned };
+    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned };
   }
 }
