@@ -1,14 +1,16 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Topic, Session } from "@loom/shared";
+import type { Topic, Session, SessionRole } from "@loom/shared";
 import { api } from "../lib/api";
 import { TerminalPane } from "../components/Terminal";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { Composer } from "../components/Composer";
 import { SessionWakes } from "../components/SessionWakes";
 import { SessionQueue } from "../components/SessionQueue";
-import { Panel, Button, Input, SectionLabel, StatusPill } from "../components/ui";
-import { color, font } from "../theme";
+import { Panel, Button, Input, Select, SectionLabel, StatusPill } from "../components/ui";
+import { color, font, tone, type Tone } from "../theme";
+
+const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber" };
 
 // Starter topics seeded on project creation (editable afterward via the preset editor). Generic
 // role scaffolds — the canonical, project-specific prompts get filled in per project.
@@ -33,6 +35,8 @@ export default function Workspace() {
 
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const topics = useQuery({ queryKey: ["topics", projectId], queryFn: () => api.topics(projectId!), enabled: !!projectId });
+  // Agent Profiles are platform-level (cross-project), so this is a single global query, not project-scoped.
+  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const sessions = useQuery({ queryKey: ["sessions", topicId], queryFn: () => api.sessions(topicId!), enabled: !!topicId });
 
   const createProject = useMutation({
@@ -52,12 +56,14 @@ export default function Workspace() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["topics", projectId] }),
   });
   const updateTopic = useMutation({
-    mutationFn: (v: { id: string; patch: { name?: string; startupPrompt?: string } }) => api.updateTopic(v.id, v.patch),
+    mutationFn: (v: { id: string; patch: { name?: string; startupPrompt?: string; profileId?: string | null } }) => api.updateTopic(v.id, v.patch),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["topics", projectId] }),
   });
   const selectedTopic = topics.data?.find((t) => t.id === topicId) ?? null;
+  const selectedProfile = selectedTopic?.profileId ? profiles.data?.find((p) => p.id === selectedTopic.profileId) ?? null : null;
+  // role omitted = auto (the topic's profile role applies, server-side); "manager"/"plain" = per-spawn override.
   const spawn = useMutation({
-    mutationFn: (role?: "manager") => api.startSession(topicId!, role),
+    mutationFn: (role?: "manager" | "plain") => api.startSession(topicId!, role),
     onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", topicId] }); },
   });
   const resume = useMutation({
@@ -122,11 +128,32 @@ export default function Workspace() {
           <Panel>
             <SectionLabel>Topics</SectionLabel>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {topics.data?.map((t) => (
-                <Button key={t.id} variant={t.id === topicId ? "primary" : "default"} style={{ textAlign: "left" }}
-                  onClick={() => { setTopicId(t.id); setSessionId(null); }}>{t.name}</Button>
-              ))}
+              {topics.data?.map((t) => {
+                const prof = t.profileId ? profiles.data?.find((p) => p.id === t.profileId) ?? null : null;
+                return (
+                  <Button key={t.id} variant={t.id === topicId ? "primary" : "default"} style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8 }}
+                    onClick={() => { setTopicId(t.id); setSessionId(null); }}
+                    title={prof ? `profile: ${prof.name}${prof.role ? ` · ${prof.role}` : ""}` : "no profile"}>
+                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</span>
+                    {prof?.icon && <span>{prof.icon}</span>}
+                    {prof?.role && <span style={{ fontSize: 10, color: tone[roleTone[prof.role]], fontFamily: font.mono }}>{prof.role}</span>}
+                  </Button>
+                );
+              })}
             </div>
+            {/* Assign / clear the selected topic's Agent Profile — the profile supplies the spawn role + prompt. */}
+            {selectedTopic && (
+              <div style={{ marginTop: 10 }}>
+                <SectionLabel style={{ margin: "4px 0" }}>Profile · {selectedTopic.name}</SectionLabel>
+                <Select style={{ width: "100%" }} value={selectedTopic.profileId ?? ""}
+                  onChange={(e) => updateTopic.mutate({ id: selectedTopic.id, patch: { profileId: e.target.value || null } })}>
+                  <option value="">— none —</option>
+                  {profiles.data?.map((p) => (
+                    <option key={p.id} value={p.id}>{p.icon ? `${p.icon} ` : ""}{p.name}{p.role ? ` (${p.role})` : ""}</option>
+                  ))}
+                </Select>
+              </div>
+            )}
             <TopicForm onCreate={(b) => createTopic.mutate(b)} />
           </Panel>
         )}
@@ -135,9 +162,7 @@ export default function Workspace() {
           <Panel>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
               <SectionLabel style={{ margin: 0, flex: 1 }}>Sessions</SectionLabel>
-              <Button onClick={() => spawn.mutate(undefined)} disabled={spawn.isPending}>+ New</Button>
-              <Button variant="primary" onClick={() => spawn.mutate("manager")} disabled={spawn.isPending}
-                title="Spawn as orchestrator: role=manager + worker-spawning MCP surface">+ Manager</Button>
+              <SpawnControls profileRole={selectedProfile?.role ?? null} onSpawn={(role) => spawn.mutate(role)} pending={spawn.isPending} />
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {orderedTop.map((s) => {
@@ -236,6 +261,44 @@ function WorkerGroup({ workers, open, onToggle, renderRow }:
         {busy > 0 && <span style={{ color: color.amber }}>· {busy} busy</span>}
       </button>
       {open && workers.map(renderRow)}
+    </div>
+  );
+}
+
+// Spawn split-button: the primary action spawns from the topic's profile (no role → the profile's role
+// applies server-side); the ▾ menu overrides the role per-spawn. "From profile" = auto, "Manager" =
+// explicit manager, "Plain" = force-plain (ignore the profile's role → a role-null session).
+function SpawnControls({ profileRole, onSpawn, pending }:
+  { profileRole: SessionRole | null; onSpawn: (role?: "manager" | "plain") => void; pending: boolean }) {
+  const [open, setOpen] = useState(false);
+  const options: { label: string; role?: "manager" | "plain" }[] = [
+    { label: "From profile (default)", role: undefined },
+    { label: "Manager", role: "manager" },
+    { label: "Plain", role: "plain" },
+  ];
+  return (
+    <div style={{ position: "relative", display: "inline-flex" }} onMouseLeave={() => setOpen(false)}>
+      <Button variant="primary" disabled={pending} onClick={() => { setOpen(false); onSpawn(undefined); }}
+        title={`Spawn from profile — role: ${profileRole ?? "plain"}`}
+        style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}>
+        Spawn{profileRole ? ` · ${profileRole}` : ""}
+      </Button>
+      <Button variant="primary" disabled={pending} onClick={() => setOpen((o) => !o)} title="Override the spawn role"
+        style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: "none", padding: "4px 6px" }}>▾</Button>
+      {open && (
+        <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 20, minWidth: 170,
+          background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: 4, overflow: "hidden",
+          display: "flex", flexDirection: "column" }}>
+          {options.map((o) => (
+            <button key={o.label} disabled={pending} onClick={() => { setOpen(false); onSpawn(o.role); }}
+              className="loom-btn loom-btn-ghost"
+              style={{ textAlign: "left", background: "transparent", border: "none", color: color.text,
+                fontFamily: font.mono, fontSize: 12, padding: "6px 10px", cursor: "pointer" }}>
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
