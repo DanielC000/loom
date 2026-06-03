@@ -1,4 +1,4 @@
-import type { Project, Agent, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, ShellTerminal } from "@loom/shared";
+import type { Project, Agent, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
@@ -115,4 +115,13 @@ export const api = {
   updateProfile: (id: string, patch: Partial<Omit<Profile, "id">>) => put<Profile>(`/api/profiles/${encodeURIComponent(id)}`, patch),
   deleteProfile: (id: string) => del<{ ok: boolean }>(`/api/profiles/${encodeURIComponent(id)}`),
   resetProfile: (id: string) => post<Profile>(`/api/profiles/${encodeURIComponent(id)}/reset`),
+
+  // --- Schedules (phase-2 Pillar B): cron triggers that boot a manager in `agentId` on each due
+  // boundary. HUMAN-managed (this page + REST) — there is no agent-writable MCP surface. createSchedule
+  // → 201; updateSchedule patches cron/enabled only (agentId is immutable) and recomputes nextFireAt
+  // server-side on a cron change. Both the create and the cron patch 400 on an invalid cron expression. ---
+  schedules: () => get<Schedule[]>("/api/schedules"),
+  createSchedule: (b: { agentId: string; cron: string; enabled?: boolean }) => post<Schedule>("/api/schedules", b),
+  updateSchedule: (id: string, patch: { cron?: string; enabled?: boolean }) => post<Schedule>(`/api/schedules/${encodeURIComponent(id)}`, patch),
+  deleteSchedule: (id: string) => del<{ ok: boolean }>(`/api/schedules/${encodeURIComponent(id)}`),
 };

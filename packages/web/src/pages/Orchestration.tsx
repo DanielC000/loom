@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
+import { useActiveProject } from "../lib/activeProject";
 import { bySessionActivity } from "../lib/sessions";
 import { Panel, Button, Select, SectionLabel, Badge, StatusPill, Chip, Meter } from "../components/ui";
 import { DiffView } from "../components/Diff";
@@ -14,8 +15,11 @@ import { color, font } from "../theme";
 
 export default function Orchestration() {
   const qc = useQueryClient();
+  const { projectId } = useActiveProject();
   const [managerId, setManagerId] = useState("");
   const [workerId, setWorkerId] = useState(""); // selected worker → diff panel
+  // The manager picker is scoped to the active project — clear the selection when the project changes.
+  useEffect(() => { setManagerId(""); setWorkerId(""); }, [projectId]);
 
   // Poll so the fleet updates live (processState/busy/ctx) without a manual refresh.
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 2000 });
@@ -24,9 +28,9 @@ export default function Orchestration() {
   const diff = useQuery({ queryKey: ["workerDiff", workerId], queryFn: () => api.workerDiff(workerId), enabled: !!workerId, placeholderData: keepPreviousData });
 
   const all = sessions.data ?? [];
-  // Shared activity ordering (live-first → most-recent → spawn-order) for the manager picker and the
-  // selected manager's worker list, consistent with every other session list.
-  const managers = all.filter((s) => s.role === "manager").sort(bySessionActivity);
+  // Managers are scoped to the active project, then ordered by the shared activity comparator
+  // (live-first → most-recent → spawn-order), consistent with every other session list.
+  const managers = all.filter((s) => s.role === "manager" && s.projectId === projectId).sort(bySessionActivity);
   const workers = all.filter((s) => s.parentSessionId === managerId).sort(bySessionActivity);
   const paused = status.data?.pausedScopes ?? [];
   const globalPaused = paused.includes("global");
@@ -47,7 +51,7 @@ export default function Orchestration() {
         <Select value={managerId} onChange={(e) => { setManagerId(e.target.value); setWorkerId(""); }}>
           <option value="">— select —</option>
           {managers.map((m) => (
-            <option key={m.id} value={m.id}>{m.projectName} · {m.agentName} · {m.id.slice(0, 8)} ({m.processState})</option>
+            <option key={m.id} value={m.id}>{m.agentName} · {m.id.slice(0, 8)} ({m.processState})</option>
           ))}
         </Select>
         <span style={{ flex: 1 }} />

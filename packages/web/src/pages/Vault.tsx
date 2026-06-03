@@ -1,22 +1,24 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { useActiveProject } from "../lib/activeProject";
 import Markdown from "../components/Markdown";
-import { Panel, Select } from "../components/ui";
+import { Panel } from "../components/ui";
 import { color, font } from "../theme";
 
 // Read-only vault browser + file viewer (§7: no editing from the UI in phase 1).
+// Scoped to the header's active project (see lib/activeProject).
 export default function Vault() {
-  const [projectId, setProjectId] = useState<string>("");
+  const { projectId } = useActiveProject();
   const [file, setFile] = useState<string>("");
+  useEffect(() => { setFile(""); }, [projectId]); // reset the open file when the active project changes
 
-  const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const tree = useQuery({ queryKey: ["vault", projectId], queryFn: () => api.vaultTree(projectId), enabled: !!projectId });
   const content = useQuery({ queryKey: ["vaultFile", projectId, file], queryFn: () => api.vaultFile(projectId, file), enabled: !!projectId && !!file, placeholderData: keepPreviousData });
 
   return (
     <div>
-      <ProjectSelect value={projectId} onChange={(v) => { setProjectId(v); setFile(""); }} projects={projects.data ?? []} />
+      {!projectId && <p style={{ color: color.textMuted }}>No project selected.</p>}
       {projectId && (
         <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 12, marginTop: 12 }}>
           <Panel style={{ height: "74vh", overflow: "auto", padding: 6 }}>
@@ -50,17 +52,5 @@ export default function Vault() {
         </div>
       )}
     </div>
-  );
-}
-
-export function ProjectSelect({ value, onChange, projects }: { value: string; onChange: (v: string) => void; projects: { id: string; name: string }[] }) {
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-      <span style={{ fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>Project</span>
-      <Select value={value} onChange={(e) => onChange(e.target.value)}>
-        <option value="">— select —</option>
-        {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-      </Select>
-    </span>
   );
 }
