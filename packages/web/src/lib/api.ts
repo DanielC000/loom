@@ -59,6 +59,15 @@ export const api = {
   vaultTree: (projectId: string) => get<VaultEntry[]>(`/api/projects/${projectId}/vault`),
   vaultFile: (projectId: string, path: string) =>
     get<{ path: string; content: string }>(`/api/projects/${projectId}/vault/file?path=${encodeURIComponent(path)}`),
+  // Vault WRITE (HUMAN-only; mirrors skills/profiles — no agent MCP surface). Each op commits
+  // through the daemon's shared vault-commit path. saveVaultFile = write/overwrite (PUT),
+  // createVaultFile = new file, 409 if exists (POST), deleteVaultFile = remove (DELETE).
+  saveVaultFile: (projectId: string, path: string, content: string) =>
+    put<{ ok: boolean; path: string; committed: boolean }>(`/api/projects/${projectId}/vault/file`, { path, content }),
+  createVaultFile: (projectId: string, path: string, content = "") =>
+    post<{ ok: boolean; path: string; committed: boolean }>(`/api/projects/${projectId}/vault/file`, { path, content }),
+  deleteVaultFile: (projectId: string, path: string) =>
+    del<{ ok: boolean; path: string; committed: boolean }>(`/api/projects/${projectId}/vault/file?path=${encodeURIComponent(path)}`),
   gitLog: (projectId: string) =>
     get<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/log`),
   gitBranches: (projectId: string) =>

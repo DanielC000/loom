@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule } from "@loom/shared";
@@ -18,6 +18,7 @@ import type { OrchestrationControl } from "../orchestration/control.js";
 import { GitReader } from "../git/reader.js";
 import { workerDiff } from "../git/worktrees.js";
 import { listVaultTree, readVaultFile } from "../vault/browser.js";
+import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, isValidSkillName, skillTemplate } from "../skills/store.js";
 import { validateProfile } from "../profiles/validate.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
@@ -254,6 +255,42 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const content = readVaultFile(p.vaultPath, rel);
     if (content === null) return reply.code(404).send({ error: "file not found" });
     return { path: rel, content };
+  });
+
+  // Vault WRITE (HUMAN/REST only — no MCP tool: agents already write via their session cwd +
+  // the auto-committer). Every op is vault-confined by writer.ts's path-traversal guard and
+  // commits through the SAME path as the auto-committer. A traversal escape → 400 (never writes).
+  const writeReply = (reply: FastifyReply, r: Awaited<ReturnType<typeof writeVaultFile>>, relPath: string) => {
+    if (r.ok) return { ok: true, path: relPath, committed: r.committed };
+    if (r.reason === "traversal") return reply.code(400).send({ error: "path escapes the vault root" });
+    if (r.reason === "exists") return reply.code(409).send({ error: "file already exists" });
+    if (r.reason === "not-found") return reply.code(404).send({ error: "file not found" });
+    if (r.reason === "is-dir") return reply.code(400).send({ error: "path is a directory" });
+    return reply.code(500).send({ error: "write failed" });
+  };
+  // Write/overwrite a file (Save).
+  app.put("/api/projects/:id/vault/file", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const b = (req.body ?? {}) as { path?: string; content?: string };
+    if (!b.path || typeof b.content !== "string") return reply.code(400).send({ error: "path and content required" });
+    return writeReply(reply, await writeVaultFile(p.vaultPath, b.path, b.content), b.path);
+  });
+  // Create a new file (409 if it already exists).
+  app.post("/api/projects/:id/vault/file", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const b = (req.body ?? {}) as { path?: string; content?: string };
+    if (!b.path) return reply.code(400).send({ error: "path required" });
+    return writeReply(reply, await createVaultFile(p.vaultPath, b.path, b.content ?? ""), b.path);
+  });
+  // Delete a file.
+  app.delete("/api/projects/:id/vault/file", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const rel = (req.query as { path?: string }).path ?? "";
+    if (!rel) return reply.code(400).send({ error: "path required" });
+    return writeReply(reply, await deleteVaultFile(p.vaultPath, rel), rel);
   });
 
   // Read-only git view (§: no commit/checkout/push from the UI in phase 1).
