@@ -6,7 +6,7 @@ import {
   type Session, type StopMode, type OrchestrationEvent,
   type Topic, type SessionRole, type ResolvedConfig, type PermissionPolicy,
 } from "@loom/shared";
-import type { Db } from "../db.js";
+import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, isBranchMerged } from "../git/worktrees.js";
 import { engineTranscriptExists } from "./transcript.js";
@@ -659,6 +659,60 @@ export class SessionService {
     setTimeout(() => { try { this.pty.stop(oldManagerId, "hard"); } catch { /* already gone */ } }, 3000);
 
     return { ...fresh, processState: "live" };
+  }
+
+  /**
+   * The manager-surface `idle_report` handler (Asleep-at-the-Wheel watchdog, §3 state→action table).
+   * A manager self-reports its idle disposition so the watchdog stops nudging it (or, later, knows to
+   * alert the human). Maps the reported state to a nudge policy on the P1 idle_nudge_* columns and, in
+   * EVERY case, leaves the unanswered-nudge counter at 0 (the manager engaged, so the escalation clock
+   * resets). resetIdleNudgeState clears policy+snooze+unanswered to the watching baseline; for
+   * snoozed/suppressed we reset FIRST (to zero the counter) then layer the target policy on — so we
+   * only ever touch the P1 accessors and never leave a stale count behind.
+   *
+   * NOTE: the `blocked_human`/`done` HUMAN-FACING alert is Task 4 — here we only set policy + audit the
+   * detail; we do NOT raise a notification. The nudge ticker that drives this is Task 3.
+   */
+  recordIdleReport(
+    sessionId: string,
+    state: "working" | "waiting" | "blocked_human" | "done",
+    opts: { detail?: string; minutes?: number } = {},
+  ): { recorded: boolean; state: string; policy: IdleNudgePolicy; snoozeUntil: string | null; unanswered: number } {
+    const session = this.db.getSession(sessionId);
+    if (!session) throw new Error("unknown session");
+    if (session.role !== "manager") throw new Error("idle_report is a manager-only surface");
+    const project = this.db.getProject(session.projectId);
+    if (!project) throw new Error("project not found");
+
+    let policy: IdleNudgePolicy;
+    let snoozeUntil: string | null = null;
+    // working → back at work: drop straight to the watching baseline (policy/snooze/unanswered all clear).
+    // waiting → snooze for `minutes` (or the per-project default) — silent until then.
+    // blocked_human / done → suppress (the human-facing alert is Task 4; here we just stop nudging).
+    if (state === "working") {
+      this.db.resetIdleNudgeState(sessionId);
+      policy = "watching";
+    } else if (state === "waiting") {
+      const mins = opts.minutes ?? resolveConfig(project.config).orchestration.idleDefaultSnoozeMinutes;
+      snoozeUntil = new Date(Date.now() + mins * 60_000).toISOString();
+      this.db.resetIdleNudgeState(sessionId); // zero the unanswered counter first (P1 setIdleNudgePolicy doesn't)
+      this.db.setIdleNudgePolicy(sessionId, "snoozed", snoozeUntil);
+      policy = "snoozed";
+    } else {
+      // blocked_human | done
+      this.db.resetIdleNudgeState(sessionId); // zero the unanswered counter first
+      this.db.setIdleNudgePolicy(sessionId, "suppressed");
+      policy = "suppressed";
+    }
+
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: sessionId, kind: "idle_report",
+      detail: { state, detail: opts.detail, minutes: opts.minutes, policy, snoozeUntil },
+    });
+
+    // resetIdleNudgeState always zeros the counter and we never re-bump it here ⇒ unanswered === 0.
+    return { recorded: true, state, policy, snoozeUntil, unanswered: 0 };
   }
 
   /**
