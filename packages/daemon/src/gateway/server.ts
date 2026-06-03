@@ -16,6 +16,7 @@ import type { PlatformMcpRouter } from "../mcp/platform.js";
 import { validateProjectConfigOverride } from "../mcp/platform.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { GitReader } from "../git/reader.js";
+import { GitWriter } from "../git/writer.js";
 import { workerDiff } from "../git/worktrees.js";
 import { listVaultTree, readVaultFile } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
@@ -293,7 +294,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return writeReply(reply, await deleteVaultFile(p.vaultPath, rel), rel);
   });
 
-  // Read-only git view (§: no commit/checkout/push from the UI in phase 1).
+  // Git view — read (log/branches) + write (checkout/commit/push/create-branch).
   app.get("/api/projects/:id/git/log", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
@@ -303,6 +304,40 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
     return new GitReader(p.repoPath).branches();
+  });
+
+  // Git WRITE — HUMAN/REST ONLY. This is a TRUST-BOUNDARY surface like the vault writer and
+  // gateCommand: checkout/commit and ESPECIALLY push (outward-facing, network, irreversible) are
+  // DELIBERATELY absent from every MCP server — no agent (loom-tasks/orchestration/platform) can
+  // checkout/commit/push. Every op is bounded + non-interactive in GitWriter (a hung push can't wedge
+  // the daemon). An EXPECTED git failure (dirty tree, no upstream, conflict) comes back as
+  // 200 { ok:false, error } so the UI shows the reason — never a 500.
+  app.post("/api/projects/:id/git/checkout", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const branch = ((req.body ?? {}) as { branch?: string }).branch;
+    if (!branch) return reply.code(400).send({ error: "branch required" });
+    return new GitWriter(p.repoPath).checkout(branch);
+  });
+  app.post("/api/projects/:id/git/branch", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const name = ((req.body ?? {}) as { name?: string }).name;
+    if (!name) return reply.code(400).send({ error: "name required" });
+    return new GitWriter(p.repoPath).createBranch(name);
+  });
+  app.post("/api/projects/:id/git/commit", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const message = ((req.body ?? {}) as { message?: string }).message;
+    if (!message) return reply.code(400).send({ error: "message required" });
+    // Plain commit under the repo's configured identity — no -c overrides, no Co-Authored-By trailer.
+    return new GitWriter(p.repoPath).commit(message);
+  });
+  app.post("/api/projects/:id/git/push", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    return new GitWriter(p.repoPath).push();
   });
 
   // --- REST: create / bind ---
