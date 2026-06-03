@@ -241,6 +241,31 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    server.registerTool(
+      "idle_report",
+      {
+        description:
+          "Tell Loom's idle watchdog your disposition so it stops nudging you (or, later, knows to alert " +
+          "the human) — call it when you end a turn with no active work. `state`: 'working' = back at it " +
+          "(resumes normal watching); 'waiting' = nothing to do until something lands — optionally snooze " +
+          "for `minutes` (defaults to the per-project idle snooze); 'blocked_human' = you need the human; " +
+          "'done' = this topic's work is complete. Always clears your unanswered-nudge counter. Pass a short " +
+          "`detail` to say why (recorded for the human).",
+        inputSchema: {
+          state: z.enum(["working", "waiting", "blocked_human", "done"]),
+          detail: z.string().optional(),
+          minutes: z.number().optional(),
+        },
+      },
+      async ({ state, detail, minutes }) => {
+        try {
+          return ok(sessions.recordIdleReport(managerSessionId, state, { detail, minutes }));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     return server;
   }
 
