@@ -16,10 +16,14 @@ import { resolveConfig } from "@loom/shared";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const BASE = "http://127.0.0.1:4317";
+const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
 if (!LOOM) { console.error("LOOM_HOME must be set (and match the daemon's)."); process.exit(2); }
 const get = async (u) => (await fetch(BASE + u)).json();
+const patchJson = async (u, body) => {
+  const r = await fetch(BASE + u, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  return { status: r.status, body: await r.json() };
+};
 const now = new Date().toISOString();
 
 // --- seed the daemon's DB directly: a host project/topic + one session per role ---
@@ -108,6 +112,28 @@ try {
   check("guardrail: project_configure with a bad type rejected", typeof badCfgConfigure.error === "string" && !badCfgConfigure.ok);
   const boardStill = await get(`/api/projects/${created.id}/board`);
   check("guardrail: a rejected configure did NOT change the project's config", JSON.stringify(boardStill.columns) === JSON.stringify(cfg.kanbanColumns));
+
+  // 7b) Trust boundary (audit M3) — `orchestration.gateCommand` is host-RCE-capable (daemon runs it
+  //     via spawnSync(shell:true) at the merge gate). The AGENT-facing loom-platform MCP path must NOT
+  //     be able to set it; the HUMAN-facing REST PATCH path must still accept it.
+  const configBeforeRce = (await get(`/api/projects/${created.id}/board`)).columns;
+  const rce = await call(PL, "project_configure", { projectId: created.id, config: { orchestration: { gateCommand: "calc.exe" } } });
+  check("trust-boundary: project_configure REJECTS orchestration.gateCommand (agent path)", typeof rce.error === "string" && !rce.ok);
+  const projAfterRce = (await get("/api/projects")).find((p) => p.id === created.id);
+  check("trust-boundary: rejected agent gateCommand left stored config UNCHANGED (default gateCommand)",
+    resolveConfig(projAfterRce.config).orchestration.gateCommand === "" &&
+    JSON.stringify((await get(`/api/projects/${created.id}/board`)).columns) === JSON.stringify(configBeforeRce));
+  // project_create's config is agent-writable too → it must reject gateCommand as well.
+  const nBeforeCreateRce = (await get("/api/projects")).length;
+  const createRce = await call(PL, "project_create", { name: "RceCreate", repoPath: gitRepo, config: { orchestration: { gateCommand: "rm -rf /" } } });
+  check("trust-boundary: project_create REJECTS a config with orchestration.gateCommand", typeof createRce.error === "string" && !createRce.id);
+  check("trust-boundary: rejected gateCommand create made NO project", (await get("/api/projects")).length === nBeforeCreateRce);
+
+  // The HUMAN/trusted REST path (PATCH /api/projects/:id/config) MUST still accept gateCommand.
+  const restGate = await patchJson(`/api/projects/${created.id}/config`, { config: { orchestration: { gateCommand: "pnpm build && pnpm test" } } });
+  check("trust-boundary: REST PATCH accepts gateCommand (human path)", restGate.status === 200 && !restGate.body.error);
+  const projAfterRest = (await get("/api/projects")).find((p) => p.id === created.id);
+  check("trust-boundary: REST-set gateCommand persisted", resolveConfig(projAfterRest.config).orchestration.gateCommand === "pnpm build && pnpm test");
 
   await PL.close();
 

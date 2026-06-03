@@ -38,14 +38,43 @@ const projectConfigOverrideSchema = z.object({
   docLint: z.boolean().optional(),
 }).strict();
 
+/**
+ * Agent-facing variant of the config schema. `orchestration.gateCommand` is a STRING the daemon
+ * later runs via `spawnSync(..., { shell: true })` on the host (see `confirmWorkerMerge` in
+ * sessions/service.ts) — i.e. host-RCE-capable by design. It is therefore TRUSTED/human-set only and
+ * MUST NOT be writable through the agent-facing loom-platform MCP path. We drop it from the
+ * orchestration shape; `.strict()` then makes any `gateCommand` key a REJECTED unknown key, so an
+ * agent attempting to set it gets an error and the stored config is left unchanged. DRY: this reuses
+ * the same base shapes — only `orchestration` is narrowed. The REST PATCH path keeps the full
+ * `projectConfigOverrideSchema` (the human/trusted path), so gateCommand stays human-settable there.
+ */
+const agentOrchestrationOverride = orchestrationOverride.omit({ gateCommand: true }).strict();
+const agentProjectConfigOverrideSchema = projectConfigOverrideSchema
+  .extend({ orchestration: agentOrchestrationOverride.optional() })
+  .strict();
+
+function formatZodIssues(error: z.ZodError): string {
+  return error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+}
+
+/** REST/human path validator: the full schema (gateCommand allowed). */
 export function validateProjectConfigOverride(
   raw: unknown,
 ): { ok: true; value: ProjectConfigOverride } | { ok: false; error: string } {
   const r = projectConfigOverrideSchema.safeParse(raw ?? {});
-  if (!r.success) {
-    const msg = r.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
-    return { ok: false, error: msg };
-  }
+  if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
+  return { ok: true, value: r.data as ProjectConfigOverride };
+}
+
+/**
+ * Agent (loom-platform MCP) path validator: identical to the REST validator EXCEPT it rejects
+ * `orchestration.gateCommand` (host-RCE-capable; trusted/human-set only — see schema note above).
+ */
+export function validateAgentProjectConfigOverride(
+  raw: unknown,
+): { ok: true; value: ProjectConfigOverride } | { ok: false; error: string } {
+  const r = agentProjectConfigOverrideSchema.safeParse(raw ?? {});
+  if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
   return { ok: true, value: r.data as ProjectConfigOverride };
 }
 
@@ -80,7 +109,7 @@ export class PlatformMcpRouter {
         },
       },
       async ({ name, repoPath, vaultPath, config }) => {
-        const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateProjectConfigOverride(config);
+        const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
         if (!(await isGitRepo(repoPath))) return ok({ error: `repoPath is not an existing git repository: ${repoPath}` });
         const project: Project = {
@@ -125,7 +154,7 @@ export class PlatformMcpRouter {
       },
       async ({ projectId, config }) => {
         if (!db.getProject(projectId)) return ok({ error: "project not found" });
-        const v = validateProjectConfigOverride(config);
+        const v = validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
         db.setProjectConfig(projectId, v.value);
         return ok({ ok: true, projectId, config: v.value });
