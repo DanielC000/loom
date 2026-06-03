@@ -1,4 +1,4 @@
-import type { Project, Agent, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal } from "@loom/shared";
+import type { Project, Agent, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
@@ -30,12 +30,35 @@ async function put<T>(url: string, body: unknown): Promise<T> {
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
   return r.json() as Promise<T>;
 }
+// PATCH that surfaces the server's JSON `{ error }` body as the thrown message — the config schema is
+// strict zod, so a rejected override comes back 400 with a readable reason the Settings UI shows verbatim.
+async function patch<T>(url: string, body: unknown): Promise<T> {
+  const r = await fetch(url, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) {
+    let msg = `${url} -> ${r.status}`;
+    try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON body */ }
+    throw new Error(msg);
+  }
+  return r.json() as Promise<T>;
+}
 
 export const api = {
   projects: () => get<Project[]>("/api/projects"),
   createProject: (b: { name: string; repoPath: string; vaultPath: string }) =>
     post<Project>("/api/projects", b),
   archiveProject: (id: string) => del<{ ok: boolean }>(`/api/projects/${id}`),
+  // --- Project config override (the human/REST path: full schema, gateCommand editable). The list
+  // endpoint already carries each project's stored override, so `projectConfig` reads it from there
+  // (no single-project GET exists); `updateProjectConfig` PATCHes the replacement override and returns
+  // the updated Project. The PATCH validator is strict zod — an invalid override 400s with a reason. ---
+  projectConfig: (id: string) =>
+    get<Project[]>("/api/projects").then((ps) => {
+      const p = ps.find((x) => x.id === id);
+      if (!p) throw new Error("project not found");
+      return p.config;
+    }),
+  updateProjectConfig: (id: string, config: ProjectConfigOverride) =>
+    patch<Project>(`/api/projects/${id}/config`, { config }),
   agents: (projectId: string) => get<Agent[]>(`/api/projects/${projectId}/agents`),
   createAgent: (projectId: string, b: { name: string; startupPrompt?: string }) =>
     post<Agent>(`/api/projects/${projectId}/agents`, b),

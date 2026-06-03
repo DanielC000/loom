@@ -13,6 +13,7 @@ import Skills from "./pages/Skills";
 import Profiles from "./pages/Profiles";
 import Schedules from "./pages/Schedules";
 import Usage from "./pages/Usage";
+import Settings from "./pages/Settings";
 import { NavTab, Badge, Select } from "./components/ui";
 import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
@@ -96,6 +97,7 @@ export default function App() {
             <NavTab to="/profiles">Profiles</NavTab>
             <NavTab to="/schedules">Schedules</NavTab>
             <NavTab to="/usage">Usage</NavTab>
+            <NavTab to="/settings">Settings</NavTab>
           </nav>
           <span style={{ flex: 1 }} />
           <ActiveProjectControl />
@@ -116,6 +118,7 @@ export default function App() {
             <Route path="/profiles" element={<Profiles />} />
             <Route path="/schedules" element={<Schedules />} />
             <Route path="/usage" element={<Usage />} />
+            <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>
       </div>
