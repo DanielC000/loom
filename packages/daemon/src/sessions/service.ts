@@ -632,6 +632,15 @@ export class SessionService {
     const rejectNotify = (msg: string) => { try { this.pty.enqueueStdin(managerSessionId, msg); } catch { /* manager not live */ } };
 
     // Build/DoD gate (fail-closed): run the configured command in the WORKTREE; non-zero rejects.
+    //
+    // ⚠️ TRUST BOUNDARY — HOST RCE BY DESIGN. `gate` is `orchestration.gateCommand` from the project
+    // config and is executed here as an arbitrary HOST shell command (`shell: true`). `shell:true` is
+    // intentional: real gates need it (e.g. `pnpm build && pnpm test`). This makes gateCommand
+    // host-RCE-capable, so it is TRUSTED / HUMAN-SET ONLY and MUST NEVER be agent-writable. The
+    // agent-facing loom-platform MCP path (project_create / project_configure) validates config with
+    // `validateAgentProjectConfigOverride`, which REJECTS `orchestration.gateCommand` (see
+    // mcp/platform.ts). Only the human/trusted REST path (PATCH /api/projects/:id/config) may set it.
+    // If you add another config-write surface reachable by an agent, it MUST use the agent validator.
     if (gate) {
       const res = spawnSync(gate, { cwd: worktreePath, shell: true, timeout: 120_000, stdio: "ignore" });
       const passed = res.status === 0 && !res.error;
