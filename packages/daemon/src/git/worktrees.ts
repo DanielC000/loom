@@ -87,6 +87,24 @@ export async function removeWorktree(repoPath: string, worktreePath: string): Pr
   await git.raw(["worktree", "prune"]); // reconcile the admin record with what's on disk
 }
 
+/**
+ * Is `branch` already fully merged into `base` (default: the repo's current HEAD — the canonical
+ * branch confirmWorkerMerge's `git merge` lands onto)? Used by the boot-time reconcile to finish a
+ * merge whose bookkeeping (worktree/branch/task) never completed (e.g. the daemon died right after
+ * the commit). Detected via `git branch --merged <base> --list <branch>` membership — exit-0 with a
+ * non-empty line only when the branch both exists AND is fully reachable from `base`. (We deliberately
+ * do NOT use `merge-base --is-ancestor`: simple-git's raw doesn't reject on its exit-1 "not-ancestor"
+ * signal, so a try/catch around it reads every branch as merged.) Returns false when the branch ref
+ * is gone (a completed merge deletes it), which keeps the reconcile idempotent.
+ */
+export async function isBranchMerged(repoPath: string, branch: string, base = "HEAD"): Promise<boolean> {
+  try {
+    return (await simpleGit(repoPath).raw(["branch", "--merged", base, "--list", branch])).trim() !== "";
+  } catch {
+    return false;
+  }
+}
+
 /** A branch's changes since it diverged from base — the manager's pre-merge diff review (#16). */
 export async function diffBranch(
   repoPath: string, branch: string, base = "HEAD",

@@ -52,6 +52,13 @@ async function main(): Promise<void> {
 
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design
   const sessions = new SessionService(db, pty, control);
+  // Boot-time orchestration reconcile (#22 run-2 + audit M4): finish any merge whose bookkeeping was
+  // interrupted (branch merged but task/worktree not reconciled) and GC orphaned worktrees from
+  // crashed workers. Runs AFTER recoverStaleSessions (no live pty holds a worktree) — pure git + db.
+  const reconciled = await sessions.reconcileOrchestrationOnBoot();
+  if (reconciled.mergesFinished || reconciled.worktreesPruned) {
+    console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s)`);
+  }
   // WakeService (the `wake_me` primitive) needs SessionService.resume (auto-resume on fire), so it
   // comes after sessions. Always on — recovery/continuation, not autonomy-gated (like the rate-limit
   // watcher). LOOM_WAKE_INTERVAL_MS tunes the tick for tests (default 60s).

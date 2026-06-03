@@ -1,9 +1,10 @@
+import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { resolveConfig, type Session, type StopMode, type OrchestrationEvent } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, isBranchMerged } from "../git/worktrees.js";
 import { engineTranscriptExists } from "./transcript.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit } from "../orchestration/usage-awareness.js";
@@ -628,10 +629,90 @@ export class SessionService {
     // Retire the worktree, delete the now-merged branch (so a later worker on this task — or any
     // id8-colliding task — doesn't hit "branch already exists"), and finish the task. The rejected
     // paths above return early WITHOUT deleting, so a re-task keeps its retained worktree + branch.
-    await removeWorktree(project.repoPath, worktreePath);
-    await deleteBranch(project.repoPath, branch);
-    if (taskId) this.db.updateTask(taskId, { columnKey: "done" });
-    evt("merge_done", { branch });
+    await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath });
     return { merged: true };
+  }
+
+  /**
+   * The post-merge bookkeeping shared by confirmWorkerMerge (the interactive merge path) and
+   * reconcileOrchestrationOnBoot (orphaned-merge recovery): retire the worktree, delete the
+   * now-merged branch, finish the task, and record `merge_done`. Factored out so the two callers
+   * can't drift. The CALLER guarantees no live pty holds the worktree cwd (confirmWorkerMerge
+   * hard-stops the worker first; at boot no pty from a prior run survives). Best-effort + idempotent:
+   * removeWorktree has its fs.rm backstop, deleteBranch swallows a missing branch, and updateTask is
+   * a no-op when the task is already `done`.
+   */
+  private async finalizeMerge(args: {
+    managerSessionId: string; workerSessionId: string; taskId: string | null;
+    worktreePath: string; branch: string; repoPath: string;
+  }): Promise<void> {
+    await removeWorktree(args.repoPath, args.worktreePath);
+    await deleteBranch(args.repoPath, args.branch);
+    if (args.taskId) this.db.updateTask(args.taskId, { columnKey: "done" });
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
+      taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch },
+    });
+  }
+
+  /**
+   * Boot-time orchestration reconcile (#22 run-2 + audit M4). Run once at daemon boot, AFTER
+   * recoverStaleSessions has marked prior-run ptys exited (so nothing live holds a worktree).
+   * Two surgical, idempotent passes:
+   *
+   *  A. Finish orphaned merges. confirmWorkerMerge commits the `git merge` BEFORE its bookkeeping
+   *     (removeWorktree → deleteBranch → updateTask done → merge_done). If the process dies in
+   *     between (e.g. the dev daemon runs from the repo it merged into, so the merge triggers a
+   *     `tsx watch` restart), the merge is correct but the task stays in_progress and the
+   *     worktree/branch leak. For each worker whose branch is ALREADY merged into the canonical
+   *     branch but whose task isn't done and/or whose worktree still exists, we run the SAME
+   *     finalizeMerge. Idempotent: deleteBranch makes the branch vanish, so a re-run no longer
+   *     detects it as merged.
+   *
+   *  B. GC orphaned worktrees (M4). For an exited/dead worker whose worktree dir still lingers and
+   *     isn't a finished merge handled in (A), prune the DIR ONLY (best-effort) so crashed-worker
+   *     worktrees don't accumulate (they otherwise feed the H1 re-task deadlock). We never delete
+   *     the branch here — any committed work stays on it and createWorktree re-attaches a fresh
+   *     worktree to it on a re-task.
+   */
+  async reconcileOrchestrationOnBoot(): Promise<{ mergesFinished: number; worktreesPruned: number }> {
+    const all = this.db.listAllSessions();
+    const handledWorktrees = new Set<string>();
+    let mergesFinished = 0;
+    let worktreesPruned = 0;
+
+    // A. Finish orphaned merges.
+    for (const s of all) {
+      if (s.role !== "worker" || !s.branch || !s.taskId) continue;
+      const project = this.db.getProject(s.projectId);
+      if (!project) continue;
+      if (!(await isBranchMerged(project.repoPath, s.branch))) continue;
+      const worktreePath = s.worktreePath ?? s.cwd;
+      const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
+      const taskDone = this.db.getTask(s.taskId)?.columnKey === "done";
+      if (taskDone && !worktreeOnDisk) continue; // already fully reconciled — nothing to finish
+      await this.finalizeMerge({
+        managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId,
+        worktreePath, branch: s.branch, repoPath: project.repoPath,
+      });
+      handledWorktrees.add(worktreePath);
+      mergesFinished++;
+    }
+
+    // B. GC orphaned worktrees (exited/dead, dir on disk, not handled in A).
+    for (const s of all) {
+      const worktreePath = s.worktreePath;
+      if (!worktreePath || handledWorktrees.has(worktreePath)) continue;
+      if (s.processState !== "exited" && s.resumability !== "dead") continue;
+      if (!fs.existsSync(worktreePath)) continue;
+      const project = this.db.getProject(s.projectId);
+      if (!project) continue;
+      try { await removeWorktree(project.repoPath, worktreePath); } catch { /* best-effort */ }
+      handledWorktrees.add(worktreePath); // recycle chains share a worktree → prune once
+      worktreesPruned++;
+    }
+
+    return { mergesFinished, worktreesPruned };
   }
 }
