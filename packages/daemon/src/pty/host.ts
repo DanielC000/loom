@@ -168,56 +168,16 @@ export function buildSpawnArgs(o: {
  */
 export class PtyHost {
   private live = new Map<string, Live>();
+  /**
+   * M2 tripwire: true ONLY while deliverHook is finalizing a turn (between lowering busy and draining
+   * the FIFO). deliverHook is fully synchronous, so an external `enqueueStdin` can NEVER observe this
+   * as true — unless a future edit introduces an `await` into that window. enqueueStdin asserts on it.
+   */
+  private finalizingTurn = false;
   constructor(private events: PtyHostEvents) {}
 
   spawn(opts: SpawnOpts): void {
-    const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
-    ensureTrusted(opts.cwd); // pre-accept the workspace-trust dialog so warmup never blocks
-    // Mirror Loom's managed skills into <cwd>/.claude/skills (project-local; shadow personal). Never
-    // let a skills hiccup block a spawn — a session must boot even if skill delivery fails.
-    try { injectSkills(opts.cwd); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
-    // Both managers AND workers get the orchestration MCP — but a role-gated surface: managers
-    // get the full coordination tools, workers get only worker_report (resolved server-side). A
-    // platform-lead instead gets the loom-platform MCP (project/topic creation, Pillar C). acceptEdits
-    // does NOT auto-approve MCP tools (the §9 lesson — why mcp__loom-tasks is in the default allow),
-    // so allowlist the role's MCP server too, else the agent hangs on a prompt.
-    const wantsOrch = opts.role === "manager" || opts.role === "worker";
-    const wantsPlatform = opts.role === "platform";
-    const extraAllow = wantsOrch ? ["mcp__loom-orchestration"] : wantsPlatform ? ["mcp__loom-platform"] : [];
-    const permission = extraAllow.length
-      ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
-      : opts.permission;
-    const settingsPath = writeSessionSettings(opts.sessionId, permission, opts.vaultPath);
-
-    // §6 scoping: route by session id in the URL path; daemon derives the project server-side.
-    const mcpServers: Record<string, unknown> = {
-      "loom-tasks": { type: "http", url: `http://127.0.0.1:${PORT}/mcp/${opts.sessionId}` },
-    };
-    if (wantsOrch) {
-      mcpServers["loom-orchestration"] = { type: "http", url: `http://127.0.0.1:${PORT}/mcp-orch/${opts.sessionId}` };
-    }
-    if (wantsPlatform) {
-      mcpServers["loom-platform"] = { type: "http", url: `http://127.0.0.1:${PORT}/mcp-platform/${opts.sessionId}` };
-    }
-    const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt });
-
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
-      if (v !== undefined) env[k] = v;
-    }
-    Object.assign(env, opts.sessionEnv);
-
-    // eslint-disable-next-line no-console
-    console.log(`[pty] spawn ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${opts.resumeId ?? "none"} args=${JSON.stringify(args)}`);
-    const pty = spawn(bin, args, {
-      name: "xterm-256color",
-      cols: opts.geometry.cols,
-      rows: opts.geometry.rows,
-      cwd: opts.cwd,
-      env,
-    });
-
+    const pty = this.createPty(opts);
     const live: Live = {
       pty, pid: pty.pid, cwd: opts.cwd,
       geometry: opts.geometry,
@@ -281,6 +241,65 @@ export class PtyHost {
     if (opts.startupPrompt) this.setBusy(opts.sessionId, true);
   }
 
+  /**
+   * Build the interactive `claude` pty for a session — the spike-validated, gate-free spawn recipe
+   * (absolute bin path for the Windows node-pty agent, env scrub of CLAUDECODE/CLAUDE_CODE_*,
+   * --strict-mcp-config WITH an explicit --mcp-config so the .mcp.json prompt never blocks,
+   * acceptEdits + allowlist, main-screen scrollback). Extracted as the ONE testable seam: the
+   * deterministic busy/drain unit test (test/pty-busy-drain.mjs) subclasses PtyHost and overrides
+   * this to return a FAKE pty — exercising the M1/M2 state machine with no real claude and no
+   * ~/.claude.json trust writes. Production NEVER overrides it; the recipe below is the only real one.
+   */
+  protected createPty(opts: SpawnOpts): IPty {
+    const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
+    ensureTrusted(opts.cwd); // pre-accept the workspace-trust dialog so warmup never blocks
+    // Mirror Loom's managed skills into <cwd>/.claude/skills (project-local; shadow personal). Never
+    // let a skills hiccup block a spawn — a session must boot even if skill delivery fails.
+    try { injectSkills(opts.cwd); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
+    // Both managers AND workers get the orchestration MCP — but a role-gated surface: managers
+    // get the full coordination tools, workers get only worker_report (resolved server-side). A
+    // platform-lead instead gets the loom-platform MCP (project/topic creation, Pillar C). acceptEdits
+    // does NOT auto-approve MCP tools (the §9 lesson — why mcp__loom-tasks is in the default allow),
+    // so allowlist the role's MCP server too, else the agent hangs on a prompt.
+    const wantsOrch = opts.role === "manager" || opts.role === "worker";
+    const wantsPlatform = opts.role === "platform";
+    const extraAllow = wantsOrch ? ["mcp__loom-orchestration"] : wantsPlatform ? ["mcp__loom-platform"] : [];
+    const permission = extraAllow.length
+      ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
+      : opts.permission;
+    const settingsPath = writeSessionSettings(opts.sessionId, permission, opts.vaultPath);
+
+    // §6 scoping: route by session id in the URL path; daemon derives the project server-side.
+    const mcpServers: Record<string, unknown> = {
+      "loom-tasks": { type: "http", url: `http://127.0.0.1:${PORT}/mcp/${opts.sessionId}` },
+    };
+    if (wantsOrch) {
+      mcpServers["loom-orchestration"] = { type: "http", url: `http://127.0.0.1:${PORT}/mcp-orch/${opts.sessionId}` };
+    }
+    if (wantsPlatform) {
+      mcpServers["loom-platform"] = { type: "http", url: `http://127.0.0.1:${PORT}/mcp-platform/${opts.sessionId}` };
+    }
+    const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt });
+
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
+      if (v !== undefined) env[k] = v;
+    }
+    Object.assign(env, opts.sessionEnv);
+
+    // eslint-disable-next-line no-console
+    console.log(`[pty] spawn ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${opts.resumeId ?? "none"} args=${JSON.stringify(args)}`);
+    const pty = spawn(bin, args, {
+      name: "xterm-256color",
+      cols: opts.geometry.cols,
+      rows: opts.geometry.rows,
+      cwd: opts.cwd,
+      env,
+    });
+    return pty;
+  }
+
   /** Called by the hook endpoint when a relayed hook arrives. Routes the busy state machine. */
   deliverHook(
     sessionId: string,
@@ -314,29 +333,45 @@ export class PtyHost {
         break;
       case "Stop":
       case "StopFailure": {
-        this.setBusy(sessionId, false); // falling edge — exactly one Stop per end-of-turn (no per-tool-use)
-        // Refresh context occupancy at the turn boundary. Cheap tail-read; done for EVERY session
-        // (the host doesn't know role — a manager's own occupancy matters too, "who recycles the manager").
-        if (live.engineSessionId) {
-          const stats = readContextStats(live.cwd, live.engineSessionId);
-          if (stats) this.events.onContextStats(sessionId, stats);
-        }
-        // §19c usage-limit park: a StopFailure with error==="rate_limit" means the turn died on the
-        // cap. The pty stays alive; we record the resume-at and do NOT drain a new turn into a capped
-        // account (the pending queue is held intact for #19c-b's resume). billing_error / a clean Stop
-        // fall through to the normal drain.
-        if (hook.hook_event_name === "StopFailure") {
-          const det = detectUsageLimit(hook);
-          if (det.limited) {
-            const until = rateLimitedUntil(det.resetsAtSeconds);
-            this.events.onRateLimited(sessionId, until, { resetsAtSeconds: det.resetsAtSeconds, message: `usage limit — resumes ${until}` });
-            break;
+        // ┌─ M2 INVARIANT (busy-gate drain ordering) — DO NOT INTRODUCE AN `await` IN THIS BRANCH ─┐
+        // │ From the setBusy(false) below to the drainPending below, execution MUST stay strictly  │
+        // │ SYNCHRONOUS. The busy-gate works because once the turn ends we lower busy and IMMEDIATELY│
+        // │ drain the FIFO head in the same tick — before control returns to the event loop, so no  │
+        // │ concurrent enqueueStdin can observe busy=false and submit() its own turn first. If a    │
+        // │ future edit `await`s anywhere in this window (e.g. an async context-stats read), an     │
+        // │ enqueueStdin scheduled during that yield would slip a second turn in, interleaving two  │
+        // │ turns into one session and breaking FIFO serialization. The `finalizingTurn` tripwire    │
+        // │ below makes that regression LOUD: enqueueStdin asserts it is never seen true (see there).│
+        // └────────────────────────────────────────────────────────────────────────────────────────┘
+        this.finalizingTurn = true;
+        try {
+          this.setBusy(sessionId, false); // falling edge — exactly one Stop per end-of-turn (no per-tool-use)
+          // Refresh context occupancy at the turn boundary. Cheap SYNCHRONOUS tail-read; done for EVERY
+          // session (the host doesn't know role — a manager's own occupancy matters too, "who recycles
+          // the manager"). Keep it sync — see the M2 box above before making this (or anything here) async.
+          if (live.engineSessionId) {
+            const stats = readContextStats(live.cwd, live.engineSessionId);
+            if (stats) this.events.onContextStats(sessionId, stats);
           }
+          // §19c usage-limit park: a StopFailure with error==="rate_limit" means the turn died on the
+          // cap. The pty stays alive; we record the resume-at and do NOT drain a new turn into a capped
+          // account (the pending queue is held intact for #19c-b's resume). billing_error / a clean Stop
+          // fall through to the normal drain. (The `finally` below still clears the tripwire on this break.)
+          if (hook.hook_event_name === "StopFailure") {
+            const det = detectUsageLimit(hook);
+            if (det.limited) {
+              const until = rateLimitedUntil(det.resetsAtSeconds);
+              this.events.onRateLimited(sessionId, until, { resetsAtSeconds: det.resetsAtSeconds, message: `usage limit — resumes ${until}` });
+              break;
+            }
+          }
+          // The turn ended → safe to write. Drain ONE queued message (FIFO), re-arming busy so the
+          // next Stop releases the next: strict per-session serialization. Writing only at the turn
+          // boundary is what keeps a running turn from being corrupted by a mid-turn write.
+          this.drainPending(sessionId);
+        } finally {
+          this.finalizingTurn = false;
         }
-        // The turn ended → safe to write. Drain ONE queued message (FIFO), re-arming busy so the
-        // next Stop releases the next: strict per-session serialization. Writing only at the turn
-        // boundary is what keeps a running turn from being corrupted by a mid-turn write.
-        this.drainPending(sessionId);
         break;
       }
     }
@@ -357,7 +392,20 @@ export class PtyHost {
     if (!live?.alive) return { delivered: false };
     this.healIfStuck(live, sessionId);
     if (!live.busy && !this.humanActivelyTyping(live)) {
+      // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
+      // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
+      // synchronous code this is unreachable — enqueueStdin runs as its own event-loop task, never
+      // interleaved with deliverHook. Tripping it would mean we're about to race a second turn in.
+      if (this.finalizingTurn) {
+        throw new Error("M2 invariant violated: enqueueStdin reached the idle-submit path mid turn-finalize — an `await` leaked between setBusy(false) and drainPending in deliverHook (host.ts).");
+      }
       this.submit(sessionId, text);
+      // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
+      // enqueue arriving next sees busy and QUEUES instead of racing this turn's pending `\r`. If busy
+      // is still false here, a future refactor deferred the set behind an await/callback — fail loud.
+      if (!live.busy) {
+        throw new Error("M1 invariant violated: submit() did not arm busy synchronously — the optimistic busy=true was deferred, so a concurrent enqueue could race the pending Enter (host.ts).");
+      }
       return { delivered: true };
     }
     live.pending.push(text);
@@ -410,8 +458,15 @@ export class PtyHost {
    * goes out as a BRACKETED PASTE (start marker, the chunked text, end marker) then Enter a beat
    * later — so claude treats even multi-line content as one paste unit and the trailing Enter
    * reliably submits (no more reports stuck un-submitted in the box). The markers are written on
-   * their own so chunking can't split a marker sequence. busy is armed synchronously, so a
-   * concurrent enqueueStdin queues rather than racing the pending Enter.
+   * their own so chunking can't split a marker sequence.
+   *
+   * M1 INVARIANT (optimistic busy): `setBusy(true)` is the LAST statement and runs SYNCHRONOUSLY —
+   * before submit() yields to the event loop. The actual Enter (`\r`) is written async, a beat later;
+   * the synchronous busy set is what closes the window between "we decided to submit" and "the turn is
+   * really in flight". A concurrent enqueueStdin (its own event-loop task) therefore always sees
+   * busy=true and QUEUES rather than racing the still-pending `\r`. DO NOT move this set behind an
+   * `await`/callback or make submit() async — that would reopen the race. enqueueStdin asserts the set
+   * landed synchronously (the M1 GUARD there).
    */
   private submit(sessionId: string, text: string): void {
     const live = this.live.get(sessionId);
@@ -426,7 +481,7 @@ export class PtyHost {
       l.pty.write(BRACKET_PASTE_END);
       setTimeout(() => { const x = this.live.get(sessionId); if (x?.alive) x.pty.write("\r"); }, SUBMIT_ENTER_DELAY_MS);
     });
-    this.setBusy(sessionId, true);
+    this.setBusy(sessionId, true); // M1: optimistic, SYNCHRONOUS — see the M1 INVARIANT note above. Keep last; keep sync.
   }
 
   /**
