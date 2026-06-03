@@ -14,6 +14,7 @@ import { Scheduler } from "./orchestration/scheduler.js";
 import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
 import { WakeService } from "./orchestration/wake.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
+import { IdleWatcher } from "./orchestration/idle-watcher.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "./orchestration/usage-limit.js";
 import { readRestartIntent, clearRestartIntent } from "./orchestration/restart.js";
@@ -139,6 +140,14 @@ async function main(): Promise<void> {
   contextWatcher.start();
   console.log(`[boot] context-recycle watcher on (ratio ${recycleRatio}, tick ${ctxWatchMs}ms)`);
 
+  // Asleep-at-the-Wheel watcher — nudges a LIVE manager that has silently dropped its orchestration
+  // loop (idle, no live workers, backlog open) to report why and resume. Per-project leash via
+  // resolveConfig (idleNudgeMinutes; 0 disables); recycle takes precedence (shares recycleRatio).
+  const idleWatchMs = Number(process.env.LOOM_IDLE_WATCH_INTERVAL_MS) || 60_000;
+  const idleWatcher = new IdleWatcher({ db, pty, control, recycleRatio, intervalMs: idleWatchMs });
+  idleWatcher.start();
+  console.log(`[boot] idle-manager watcher on (tick ${idleWatchMs}ms)`);
+
   // Self-host restart recovery (consume the intent read above): a manager deliberately restarted the
   // daemon (daemon_restart) to make merged code live. Re-resume its live workers, then the manager,
   // and tell the manager the rebuild+restart is done so it can carry on (e.g. verify the live daemon).
@@ -163,7 +172,7 @@ async function main(): Promise<void> {
   }
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); wakes.stop(); clearInterval(reconcileTimer); contextWatcher.stop(); process.exit(0); });
+    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); wakes.stop(); clearInterval(reconcileTimer); contextWatcher.stop(); idleWatcher.stop(); process.exit(0); });
   }
 }
 
