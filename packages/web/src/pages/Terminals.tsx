@@ -170,6 +170,9 @@ function ShellsSection() {
 }
 
 function ShellTile({ t, onKill, killing }: { t: ShellTerminal; onKill: () => void; killing: boolean }) {
+  // Kill hard-terminates the process tree, so gate it behind an inline confirm — mirrors the
+  // Schedules/Profiles/Skills delete pattern (a confirm/cancel pair in place of the action button).
+  const [confirmKill, setConfirmKill] = useState(false);
   return (
     <Panel style={{ height: 460, padding: 6, display: "flex", flexDirection: "column" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
@@ -177,9 +180,19 @@ function ShellTile({ t, onKill, killing }: { t: ShellTerminal; onKill: () => voi
           <StatusPill tone="phosphor" label="shell" />
           <span title={`${t.command}\n${t.cwd}`}>{t.label} · {t.id.slice(0, 8)}</span>
         </span>
-        <Button variant="danger" style={{ padding: "0 8px" }} disabled={killing}
-          title="Kill this shell — hard terminate the process tree"
-          onClick={(ev) => { ev.stopPropagation(); onKill(); }}>Kill</Button>
+        {confirmKill ? (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>kill shell?</span>
+            <Button variant="danger" style={{ padding: "0 8px" }} disabled={killing}
+              onClick={(ev) => { ev.stopPropagation(); onKill(); }}>Confirm</Button>
+            <Button style={{ padding: "0 8px" }}
+              onClick={(ev) => { ev.stopPropagation(); setConfirmKill(false); }}>Cancel</Button>
+          </span>
+        ) : (
+          <Button variant="danger" style={{ padding: "0 8px" }} disabled={killing}
+            title="Kill this shell — hard terminate the process tree"
+            onClick={(ev) => { ev.stopPropagation(); setConfirmKill(true); }}>Kill</Button>
+        )}
       </div>
       <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={t.id} resizable /></div>
     </Panel>

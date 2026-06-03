@@ -52,7 +52,7 @@ export default function Skills() {
           {skills.data?.map((s) => (
             <Button key={s.name} variant={s.name === selected ? "primary" : "default"} style={{ textAlign: "left" }}
               onClick={() => setSelected(s.name)} title={s.description || s.name}>
-              {s.name}{s.bundled ? "  ·  bundled" : ""}
+              {s.name}{s.bundled ? "  ·  bundled" : "  ·  local"}
             </Button>
           ))}
           {skills.data?.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No skills yet.</span>}
