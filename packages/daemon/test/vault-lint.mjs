@@ -40,9 +40,9 @@ try {
   const f1 = runHook(writeNote("update.md", "# Note\n\nThe value is 42.\n\nUPDATE: actually it is 43.\n"));
   check("append marker (UPDATE:) → flagged", !!f1 && /append marker/i.test(f1.systemMessage));
 
-  // 2) broken wikilink → flagged.
-  const f2 = runHook(writeNote("links.md", "# Links\n\nSee [[Nonexistent]] for details.\n"));
-  check("broken [[wikilink]] → flagged", !!f2 && /broken wikilink/i.test(f2.systemMessage));
+  // 2) broken wikilink WITH the opt-in flag → flagged (the check is opt-in / default-off now).
+  const f2 = runHook(writeNote("links.md", "---\ndoc-lint-links: true\n---\n# Links\n\nSee [[Nonexistent]] for details.\n"));
+  check("broken [[wikilink]] + doc-lint-links: true → flagged", !!f2 && /broken wikilink/i.test(f2.systemMessage));
 
   // 3) oversized note → flagged.
   const f3 = runHook(writeNote("big.md", Array.from({ length: 500 }, (_, i) => `line ${i}`).join("\n") + "\n"));
@@ -66,6 +66,25 @@ try {
   const f6b = runHook(writeNote("edited.md", "EDIT: bolted-on correction\n"), "Edit");
   check("Edit tool on a vault .md with an append marker → flagged", !!f6b && /append marker/i.test(f6b.systemMessage));
 
+  // --- false-positive guards ---
+
+  // a) `doc-lint: false` frontmatter → ALL checks skipped (append marker + broken link + oversized) → no flag.
+  const aBody = "# Note\n\nUPDATE: corrected.\n\nSee [[Nonexistent]].\n" + Array.from({ length: 500 }, (_, i) => `line ${i}`).join("\n") + "\n";
+  const fa = runHook(writeNote("optout.md", "---\ndoc-lint: false\ndoc-lint-links: true\n---\n" + aBody));
+  check("doc-lint: false → all checks skipped → no flag", fa === null);
+
+  // b) scar markers INSIDE a fenced code block → exempt; the SAME marker OUTSIDE the fence → flagged.
+  const fbIn = runHook(writeNote("fenced.md", "# Meta\n\nA doc about scars:\n\n```\nUPDATE: this is quoted\nEDIT: also quoted\n```\n\nClean prose.\n"));
+  check("append markers inside a ```fence``` → no flag", fbIn === null);
+  const fbOut = runHook(writeNote("unfenced.md", "# Meta\n\n```\nUPDATE: quoted\n```\n\nUPDATE: but this one is real.\n"));
+  check("append marker outside the fence (with one also inside) → flagged", !!fbOut && /append marker/i.test(fbOut.systemMessage));
+
+  // c) broken wikilink with NO opt-in → no flag (default off); same note with doc-lint-links: true → flagged.
+  const fcOff = runHook(writeNote("redlink.md", "# Red\n\nSee [[Nonexistent]] and [[Fire Studio]].\n"));
+  check("broken wikilink, no opt-in → no flag (default off)", fcOff === null);
+  const fcOn = runHook(writeNote("redlink-on.md", "---\ndoc-lint-links: true\n---\n# Red\n\nSee [[Nonexistent]].\n"));
+  check("broken wikilink + doc-lint-links: true → flagged", !!fcOn && /broken wikilink/i.test(fcOn.systemMessage));
+
   // 7) writeSessionSettings wires the PostToolUse Write|Edit entry pointing at the shipped script.
   ensureDirs();
   const perm = { mode: "acceptEdits", allow: [], deny: [] };
@@ -82,6 +101,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — vault-lint flags append markers / broken wikilinks / oversized notes on vault .md writes (advisory), ignores non-.md + out-of-vault writes, and is wired as a PostToolUse Write|Edit hook."
+  ? "\n✅ ALL PASS — vault-lint flags append markers (fence-exempt) + oversized notes on vault .md writes (advisory), honors the doc-lint:false opt-out and the doc-lint-links:true broken-wikilink opt-in, ignores non-.md + out-of-vault writes, and is wired as a PostToolUse Write|Edit hook."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
