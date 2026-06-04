@@ -13,6 +13,7 @@ import { engineTranscriptExists } from "./transcript.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit } from "../orchestration/usage-awareness.js";
 import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon } from "../orchestration/restart.js";
+import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 
@@ -285,6 +286,11 @@ export class SessionService {
     if (build.code !== 0) {
       return { restarting: false, error: `daemon build failed — NOT restarting (your code stays un-deployed but the daemon stays up). Fix and retry:\n${build.tail}` };
     }
+    // A restart is the riskiest moment (a bad merge that just built clean can still wedge boot) — snapshot
+    // the DB before we exit, after the green build. Best-effort: takeBackup never throws, so a backup
+    // failure can NEVER block the restart.
+    const backupCfg = resolveBackupConfig();
+    if (backupCfg.enabled) await takeBackup({ reason: "pre-restart", keep: backupCfg.keep });
     const workerSessionIds = this.db
       .listWorkers(managerSessionId)
       .filter((w) => w.processState === "live")

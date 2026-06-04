@@ -15,6 +15,7 @@ import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
 import { WakeService } from "./orchestration/wake.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
 import { IdleWatcher } from "./orchestration/idle-watcher.js";
+import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestration/db-backup.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "./orchestration/usage-limit.js";
 import { readRestartIntent, clearRestartIntent } from "./orchestration/restart.js";
@@ -24,6 +25,13 @@ async function main(): Promise<void> {
   ensureDirs();
   const seeded = seedGlobalSkills();
   if (seeded.length) console.log(`[boot] seeded global skill(s): ${seeded.join(", ")}`);
+  // Pre-migration safety snapshot: back up the EXISTING DB before we open it (migrations run in the Db
+  // constructor) and before boot-reconcile, so a bad migration/reconcile is recoverable to the pre-boot
+  // state. Best-effort — takeBackup never throws and skips a fresh install (no DB yet); awaited so the
+  // snapshot completes before the migrating connection opens. Gated on `enabled` (interval-0 only mutes
+  // the periodic ticker).
+  const backupCfg = resolveBackupConfig();
+  if (backupCfg.enabled) await takeBackup({ reason: "boot", keep: backupCfg.keep });
   const db = new Db();
   // Seed Loom's bundled Profiles (platform-level rig) into the profiles table, seed-if-absent
   // like the skills seed — additive, idempotent, preserves user edits. Phase-1 read path only.
@@ -148,6 +156,22 @@ async function main(): Promise<void> {
   idleWatcher.start();
   console.log(`[boot] idle-manager watcher on (tick ${idleWatchMs}ms)`);
 
+  // Automatic DB-backup ticker — periodic online snapshots of loom.db into ~/.loom/backups/auto/,
+  // rotated to the newest `keep`. Best-effort; never blocks/crashes. Disabled when backups are off or
+  // the interval is 0. LOOM_BACKUP_INTERVAL_MS overrides the tick cadence for tests (otherwise minutes).
+  const dbBackupWatcher = new DbBackupWatcher({
+    enabled: backupCfg.enabled,
+    intervalMinutes: backupCfg.intervalMinutes,
+    keep: backupCfg.keep,
+    intervalMs: Number(process.env.LOOM_BACKUP_INTERVAL_MS) || undefined,
+  });
+  dbBackupWatcher.start();
+  console.log(
+    backupCfg.enabled && backupCfg.intervalMinutes > 0
+      ? `[boot] db-backup ticker on (every ${backupCfg.intervalMinutes}m, keep ${backupCfg.keep})`
+      : `[boot] db-backup ticker off (${backupCfg.enabled ? "interval 0" : "disabled"})`,
+  );
+
   // Self-host restart recovery (consume the intent read above): a manager deliberately restarted the
   // daemon (daemon_restart) to make merged code live. Re-resume its live workers, then the manager,
   // and tell the manager the rebuild+restart is done so it can carry on (e.g. verify the live daemon).
@@ -194,7 +218,7 @@ async function main(): Promise<void> {
   }
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); wakes.stop(); clearInterval(reconcileTimer); contextWatcher.stop(); idleWatcher.stop(); process.exit(0); });
+    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); wakes.stop(); clearInterval(reconcileTimer); contextWatcher.stop(); idleWatcher.stop(); dbBackupWatcher.stop(); process.exit(0); });
   }
 }
 
