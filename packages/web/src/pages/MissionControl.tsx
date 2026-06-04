@@ -99,6 +99,7 @@ export default function MissionControl() {
           <Stat label="attention" value={attention.length} tone={attention.length ? "amber" : "muted"} />
         </div>
         <span style={{ flex: 1 }} />
+        <ClearUsageHoldButton onCleared={refreshSessions} />
         <Button variant="default" disabled={pause.isPending} onClick={() => pause.mutate()}>Pause</Button>
         <Button variant="default" disabled={resume.isPending} onClick={() => resume.mutate()}>Resume</Button>
         <Button variant="danger" disabled={kill.isPending} onClick={() => kill.mutate()}>Kill all</Button>
@@ -171,6 +172,26 @@ export default function MissionControl() {
         </div>
       </div>
     </div>
+  );
+}
+
+// Global usage-hold override: drop the awareness latch (~/.loom/tmp/claude-usage.json) so new
+// worker_spawn is unblocked WITHOUT touching any session — for a transient overload with real
+// headroom (the plan-usage strip above shows the real account figures). HUMAN-only; mirrors the
+// per-session "clear rate limit" but global. Shows a transient "✓ unblocked" on success; alerts on error.
+function ClearUsageHoldButton({ onCleared }: { onCleared: () => void }) {
+  const [done, setDone] = useState(false);
+  const clear = useMutation({
+    mutationFn: () => api.clearUsageHold(),
+    onSuccess: () => { setDone(true); onCleared(); window.setTimeout(() => setDone(false), 4000); },
+    onError: (e) => window.alert((e as Error).message),
+  });
+  return (
+    <Button variant="default" disabled={clear.isPending}
+      title="Clear the GLOBAL usage hold (the worker_spawn block) without touching any session — for a transient overload"
+      onClick={() => clear.mutate()}>
+      {done ? "✓ hold cleared" : clear.isPending ? "Clearing…" : "Clear usage hold"}
+    </Button>
   );
 }
 
