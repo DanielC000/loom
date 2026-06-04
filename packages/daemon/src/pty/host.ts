@@ -76,8 +76,59 @@ const collapseBoot = (s: string): string => s.replace(ANSI_CSI, "").replace(/\s+
 export function isResumeSummaryGate(flatCollapsed: string): boolean {
   return /resumefromsummary/i.test(flatCollapsed) && /resumefullsession/i.test(flatCollapsed);
 }
+
+/**
+ * The permission mode a spawned/resumed `claude` actually LANDED in, read from the TUI footer.
+ * "default" = the unlabeled normal mode (footer shows the Shift+Tab cycle hint but no "<x> on" label);
+ * "unknown" = no footer could be read (still booting / no output). OBSERVABILITY ONLY — see logLandedMode.
+ */
+export type LandedMode = "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "default" | "unknown";
+
+/** Charset-designation (ESC ( B …) + keypad-mode (ESC = / ESC >) escapes — not CSI, so ANSI_CSI misses them. */
+const ANSI_OTHER = new RegExp(ESC_KEY + "[()][0-9A-Za-z]|" + ESC_KEY + "[=>]", "g");
+/** Strip ALL TUI escapes and collapse whitespace. The footer is laid out with cursor-position escapes,
+ *  so after stripping the mode words run together ("accept edits on" → "accepteditson"). */
+const collapseFooter = (s: string): string => s.replace(ANSI_CSI, "").replace(ANSI_OTHER, "").replace(/\s+/g, "");
+
+/** Footer mode labels (collapsed, lowercase) → mode. acceptEdits/auto share the ⏵⏵ glyph; plan uses ⏸. */
+const MODE_TOKENS: { mode: LandedMode; token: string }[] = [
+  { mode: "plan", token: "planmodeon" },
+  { mode: "acceptEdits", token: "accepteditson" },
+  { mode: "auto", token: "automodeon" },
+  { mode: "bypassPermissions", token: "bypasspermissionson" },
+];
+
+/**
+ * Classify the permission mode from recent pty output by the LAST occurrence of a footer mode label
+ * (the footer is repainted continuously, so the last label is the current mode). Empirically mapped
+ * against real `claude` 2.1.163 (board card f05e4897; see test/_probe-resume-mode.mjs). PURE +
+ * exported for the hermetic regression test. Never throws.
+ *  - a labeled mode ("accept edits on"/"plan mode on"/"auto mode on"/"bypass permissions on") → that mode
+ *  - no label but the Shift+Tab cycle hint is present → "default" (the unlabeled normal mode)
+ *  - no footer readable at all → "unknown"
+ */
+export function detectPermissionMode(recentOutput: string): { mode: LandedMode; matchedToken: string | null } {
+  const flat = collapseFooter(recentOutput).toLowerCase();
+  let best: { mode: LandedMode; idx: number; token: string } | null = null;
+  for (const { mode, token } of MODE_TOKENS) {
+    const idx = flat.lastIndexOf(token);
+    if (idx >= 0 && (best === null || idx > best.idx)) best = { mode, idx, token };
+  }
+  if (best) return { mode: best.mode, matchedToken: best.token };
+  // No labeled mode. The cycle hint (tolerant of a char dropped across a line-wrap, e.g. "tabocycle")
+  // means we DID read a footer in the unlabeled default mode; otherwise we couldn't read a footer.
+  if (/shift\+tab[a-z]{0,3}cycle/.test(flat)) return { mode: "default", matchedToken: null };
+  return { mode: "unknown", matchedToken: null };
+}
+
 /** Settle window after SessionStart before sending the first mode-cycle keystroke (let the TUI's input attach). */
 const MODE_CYCLE_SETTLE_MS = 700;
+/**
+ * OBSERVABILITY (card f05e4897): after a session settles (markReady), poll the footer a few times
+ * (until a mode is read or this cap) and log the landed permission mode. Read-only — see logLandedMode.
+ */
+const MODE_LOG_POLL_MS = 500;
+const MODE_LOG_MAX_ATTEMPTS = 8; // ≤ ~4s of best-effort polling, then log whatever we have
 /** Gap between successive Shift+Tab presses so each cycle registers as a distinct key event. */
 const MODE_CYCLE_INTERVAL_MS = 120;
 /**
@@ -207,6 +258,8 @@ interface Live {
   bootScan: string;           // bounded rolling buffer of early boot output, scanned for that prompt
   resumeGateHandled: boolean; // guard: select "as-is" on the resume-from-summary gate at most once per session
   resumeGateScan: string;     // bounded rolling buffer scanned for that gate (separate from bootScan)
+  isResume: boolean;          // spawned with --resume (vs a fresh spawn) — for the landed-mode log only
+  modeLogged: boolean;        // guard: log the landed permission mode at most once per session (observability)
 }
 
 export interface SpawnOpts {
@@ -347,6 +400,8 @@ export class PtyHost {
       bootScan: "",
       resumeGateHandled: false,
       resumeGateScan: "",
+      isResume: !!opts.resumeId,
+      modeLogged: false,
     };
     this.live.set(opts.sessionId, live);
 
@@ -455,6 +510,7 @@ export class PtyHost {
       startupModeCycles: 0, startupCyclesDone: true,
       mcpPromptHandled: true, bootScan: "",
       resumeGateHandled: true, resumeGateScan: "",
+      isResume: false, modeLogged: true, // a shell has no claude footer/permission mode to read
     };
     this.live.set(opts.id, live);
     // Shell onData is minimal: NO boot-prompt / resume-gate scanning (those are Claude-TUI artifacts).
@@ -864,6 +920,44 @@ export class PtyHost {
     if (!live?.alive || live.ready) return;
     live.ready = true;
     this.drainPending(sessionId); // deliver the first queued injection now that the composer is live
+    this.logLandedMode(sessionId); // OBSERVABILITY: record what permission mode we actually landed in
+  }
+
+  /**
+   * OBSERVABILITY ONLY (card f05e4897) — record, to the daemon log, what permission mode a (re)spawned
+   * session actually LANDED in once it settled (mode-cycles/gate handling done + markReady). PURELY a
+   * READ + LOG: it never writes to the pty, never cycles or changes the mode, and never touches the
+   * readiness/busy/drain/gate machinery — boot behavior is byte-identical with or without it. It exists
+   * so a real prod `--resume` (esp. the large-session summary-gate path) gives ground truth on whether
+   * the session lands in plan vs acceptEdits/auto, instead of us guessing.
+   *
+   * Best-effort + bounded: polls the ring (the existing rolling output buffer) a few times to let the
+   * footer repaint into its final state, logs as soon as a mode is read, and gives up after a short cap
+   * (logging mode=unknown). Fires at most once per session (modeLogged guard). Shells are excluded.
+   */
+  private logLandedMode(sessionId: string): void {
+    const live = this.live.get(sessionId);
+    if (!live || live.kind !== "claude" || live.modeLogged) return;
+    live.modeLogged = true; // claim it once, up front — a repeat markReady won't re-schedule this
+    const isResume = live.isResume;
+    let attempts = 0;
+    const tryRead = (): void => {
+      const l = this.live.get(sessionId);
+      if (!l) return;
+      attempts++;
+      const recent = Buffer.concat(l.ring.chunks).toString("utf8").slice(-8192);
+      const { mode, matchedToken } = detectPermissionMode(recent);
+      // Keep polling only while we still can't read a footer at all (still booting). A definite read —
+      // incl. the unlabeled "default" — is final. Stop at the cap or once the pty is gone.
+      if (mode === "unknown" && attempts < MODE_LOG_MAX_ATTEMPTS && l.alive) {
+        setTimeout(tryRead, MODE_LOG_POLL_MS);
+        return;
+      }
+      const snippet = collapseFooter(recent).slice(-160); // short, ANSI-free evidence for the log
+      // eslint-disable-next-line no-console
+      console.log(`[resume-mode] ${sessionId} kind=${isResume ? "resume" : "fresh"} mode=${mode} matched=${matchedToken ?? "-"} footer=${JSON.stringify(snippet)}`);
+    };
+    setTimeout(tryRead, MODE_LOG_POLL_MS);
   }
 
   subscribe(sessionId: string, sub: Subscriber): () => void {

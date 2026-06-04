@@ -29,6 +29,7 @@
     "test:profiles-crud": "node test/profiles-crud.mjs",
     "test:profiles-rest": "node test/profiles-rest.mjs",
     "test:context": "node test/context-stats.mjs",
+    "test:resume-mode-detect": "node test/resume-mode-detect.mjs",
     "test:worktrees": "node test/worktrees.mjs",
     "test:worktree-provision": "node test/worktree-provision.mjs",
     "test:transcript-encode": "node test/transcript-encode.mjs",
