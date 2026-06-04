@@ -134,19 +134,23 @@ export class PlatformMcpRouter {
     server.registerTool(
       "agent_create",
       {
-        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent.",
+        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human-authored) profileId as the agent's rig — you can only assign a profile a human already created, never mint one (a non-existent profileId is rejected).",
         inputSchema: {
           projectId: z.string(),
           name: z.string(),
           startupPrompt: z.string().optional(),
+          profileId: z.string().optional(),
         },
       },
-      async ({ projectId, name, startupPrompt }) => {
+      async ({ projectId, name, startupPrompt, profileId }) => {
         if (!db.getProject(projectId)) return ok({ error: "project not found" });
+        // Option B: a manager/platform-lead may ASSIGN an existing human-authored profile but never
+        // create one — a provided profileId MUST resolve (else reject). Absent ⇒ profile-less agent.
+        if (profileId !== undefined && !db.getProfile(profileId)) return ok({ error: "profile not found" });
         const agent: Agent = {
           id: randomUUID(), projectId, name,
           startupPrompt: startupPrompt ?? "", position: db.listAgents(projectId).length,
-          profileId: null, // additive: agents start profile-less (P3 wires up profile assignment)
+          profileId: profileId ?? null, // assign the (validated) profile, or stay profile-less
         };
         db.insertAgent(agent);
         return ok(agent);

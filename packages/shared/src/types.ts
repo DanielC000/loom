@@ -146,7 +146,11 @@ export type OrchestrationEventKind =
   | "spawn_worker" | "message_worker" | "worker_report" | "stop_worker"
   | "recycle_begin" | "recycle_complete" | "merge_request" | "merge_done"
   | "merge_rejected" | "build_gate" | "kill_switch" | "schedule_fired"
-  | "wake_scheduled" | "wake_fired" | "wake_dropped" | "idle_report" | "idle_escalated";
+  | "wake_scheduled" | "wake_fired" | "wake_dropped" | "idle_report" | "idle_escalated"
+  // A manager self-service management action (assign profile / update agent / update or archive a
+  // project / create or update a schedule). `detail.action` discriminates; audit trail for the
+  // trust-boundary surface (managers ASSIGN existing capability sets + edit structure, never MINT).
+  | "manager_manage";
 
 export interface OrchestrationEvent {
   id: string;

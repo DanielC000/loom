@@ -288,6 +288,128 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    // --- Manager self-service management surface (Task 3de74275, Option B) -------------------------
+    // Additive, MANAGER-ONLY tools (registered only on this branch) so an autonomous run can provision
+    // its own rigs + structure instead of stalling on a human. The boundary (Option B): managers
+    // ASSIGN existing human-authored profiles and create/edit STRUCTURE, but NEVER mint capabilities —
+    // profile/skill/allowlist/gateCommand CREATE/edit stay human-only. gateCommand stays rejected on
+    // this agent path (project_update routes config through validateAgentProjectConfigOverride). Each
+    // tool re-checks the manager role server-side in the service (defense in depth).
+
+    server.registerTool(
+      "agent_assign_profile",
+      {
+        description:
+          "Assign an EXISTING (human-authored) profile to an agent, or clear it (profileId: null). The " +
+          "profile supplies role/model/allowlist/skills/browser at the agent's next NEW session. You can " +
+          "only ASSIGN a profile a human already created — you cannot create or edit one (profile authoring " +
+          "is human-only). A non-existent profileId is rejected. Use this to provision a rig (e.g. assign the " +
+          "human-authored 'QA Tester' browser profile) without waiting on a human.",
+        inputSchema: { agentId: z.string(), profileId: z.string().nullable() },
+      },
+      async ({ agentId, profileId }) => {
+        try {
+          return ok(sessions.assignAgentProfile(managerSessionId, agentId, profileId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
+      "agent_update",
+      {
+        description:
+          "Update an agent's name (title) and/or startupPrompt (the project-specific brief injected as the " +
+          "first turn of its next NEW session). Structural edit only — to change the agent's rig use " +
+          "agent_assign_profile. Omitted fields are left as-is.",
+        inputSchema: { agentId: z.string(), name: z.string().optional(), startupPrompt: z.string().optional() },
+      },
+      async ({ agentId, name, startupPrompt }) => {
+        try {
+          return ok(sessions.updateAgentPreset(managerSessionId, agentId, { name, startupPrompt }));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
+      "project_update",
+      {
+        description:
+          "Update a project's structural fields (name / vaultPath) and/or its config override. config is " +
+          "schema-validated on the AGENT path: orchestration.gateCommand (host-RCE) and unknown keys are " +
+          "REJECTED (that capability stays human-only). repoPath is not editable here. Omitted fields are " +
+          "left as-is.",
+        inputSchema: {
+          projectId: z.string(),
+          name: z.string().optional(),
+          vaultPath: z.string().optional(),
+          config: z.object({}).passthrough().optional(),
+        },
+      },
+      async ({ projectId, name, vaultPath, config }) => {
+        try {
+          return ok(sessions.updateProjectStructural(managerSessionId, projectId, { name, vaultPath, config }));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
+      "project_archive",
+      {
+        description:
+          "Soft-archive a project: it disappears from the active project list, but its rows and sessions are " +
+          "retained (not deleted). Structural, reversible-by-a-human.",
+        inputSchema: { projectId: z.string() },
+      },
+      async ({ projectId }) => {
+        try {
+          return ok(sessions.archiveProjectAsManager(managerSessionId, projectId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
+      "schedule_create",
+      {
+        description:
+          "Create a cron schedule that autonomously boots a manager session in an agent on each tick (5-field " +
+          "cron). enabled defaults to true. An invalid cron expression is rejected. Low-risk autonomous wake — " +
+          "the same kind of self-scheduling agents already do via wake_me.",
+        inputSchema: { agentId: z.string(), cron: z.string(), enabled: z.boolean().optional() },
+      },
+      async ({ agentId, cron, enabled }) => {
+        try {
+          return ok(sessions.createSchedule(managerSessionId, { agentId, cron, enabled }));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
+      "schedule_update",
+      {
+        description:
+          "Update a schedule's cron and/or enabled flag. A changed cron recomputes the next fire (rejected if " +
+          "invalid); enabled toggles the Scheduler on/off for this row. Omitted fields are left as-is.",
+        inputSchema: { scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional() },
+      },
+      async ({ scheduleId, cron, enabled }) => {
+        try {
+          return ok(sessions.updateScheduleAsManager(managerSessionId, scheduleId, { cron, enabled }));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     return server;
   }
 

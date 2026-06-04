@@ -28,7 +28,7 @@ const now = new Date().toISOString();
 
 // --- seed the daemon's DB directly: a host project/agent + one session per role ---
 const db = new Database(path.join(LOOM, "loom.db"));
-db.exec("DELETE FROM orchestration_events; DELETE FROM tasks; DELETE FROM sessions; DELETE FROM agents; DELETE FROM projects;");
+db.exec("DELETE FROM orchestration_events; DELETE FROM schedules; DELETE FROM tasks; DELETE FROM sessions; DELETE FROM agents; DELETE FROM projects;");
 db.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)")
   .run("projPL", "Platform", "C:/tmp/pl", "C:/tmp/pl", "{}", now);
 db.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)").run("tPL", "projPL", "lead", "");
@@ -65,8 +65,8 @@ try {
   // 1) Role gate: a platform-lead sees exactly the three platform tools.
   const PL = await connect("PL");
   const tools = (await PL.listTools()).tools.map((t) => t.name).sort();
-  check(`tools = project_configure,project_create,agent_create  (got ${tools.join(",")})`,
-    tools.join(",") === "project_configure,project_create,agent_create");
+  check(`tools = agent_create,project_configure,project_create  (got ${tools.join(",")})`,
+    tools.join(",") === "agent_create,project_configure,project_create");
 
   // 2) project_create with a REAL git repo → created + visible via the API. vaultPath omitted → defaults to repoPath.
   const before = (await get("/api/projects")).length;

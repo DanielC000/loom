@@ -290,6 +290,18 @@ export class Db {
        VALUES (@id,@name,@repoPath,@vaultPath,@config,@createdAt,@archivedAt)`,
     ).run({ ...p, config: JSON.stringify(p.config), archivedAt: p.archivedAt });
   }
+  /**
+   * Partial STRUCTURAL edit of a project (name / vaultPath). Provided fields are written; omitted
+   * are left as-is. Deliberately does NOT touch config (that goes through the validated
+   * setProjectConfig path) or repoPath (rebinding a live project's repo is out of scope).
+   */
+  updateProject(id: string, patch: { name?: string; vaultPath?: string }): void {
+    const cols: Record<string, unknown> = { name: patch.name, vault_path: patch.vaultPath };
+    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
+    if (names.length === 0) return;
+    const set = names.map((c) => `${c} = ?`).join(", ");
+    this.db.prepare(`UPDATE projects SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
   /** Replace a project's config override (Pillar C project_configure / PATCH config). */
   setProjectConfig(id: string, config: ProjectConfigOverride): void {
     this.db.prepare("UPDATE projects SET config_json = ? WHERE id = ?").run(JSON.stringify(config), id);

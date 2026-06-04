@@ -14,7 +14,7 @@ const now = new Date().toISOString();
 
 // --- seed the daemon's DB directly ---
 const db = new Database(path.join(process.env.LOOM_HOME || path.join(os.homedir(), ".loom"), "loom.db"));
-db.exec("DELETE FROM orchestration_events; DELETE FROM tasks; DELETE FROM sessions; DELETE FROM agents; DELETE FROM projects;");
+db.exec("DELETE FROM orchestration_events; DELETE FROM schedules; DELETE FROM tasks; DELETE FROM sessions; DELETE FROM agents; DELETE FROM projects;");
 db.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)")
   .run("projO", "Orch", "C:/tmp/o", "C:/tmp/o", "{}", now);
 db.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)")
@@ -47,9 +47,10 @@ const M = await connect("M");
 const toolList = (await M.listTools()).tools;
 const tools = toolList.map((t) => t.name).sort();
 // the worker_* coordination surface + the manager self-management tools (daemon_restart self-deploy,
-// idle_report for the asleep-at-the-wheel watcher, recycle_me for context-recycle). Keep in sync as
-// the manager-MCP surface grows.
-const expected = "daemon_restart,idle_report,recycle_me,worker_list,worker_merge,worker_merge_confirm,worker_message,worker_recycle,worker_spawn,worker_status,worker_stop,worker_transcript";
+// idle_report for the asleep-at-the-wheel watcher, inbox_pull fast-drain, recycle_me for context-recycle) + the manager
+// self-service management surface (agent_assign_profile/agent_update, project_update/project_archive,
+// schedule_create/schedule_update — Task 3de74275). Keep in sync as the manager-MCP surface grows.
+const expected = "agent_assign_profile,agent_update,daemon_restart,idle_report,inbox_pull,project_archive,project_update,recycle_me,schedule_create,schedule_update,worker_list,worker_merge,worker_merge_confirm,worker_message,worker_recycle,worker_spawn,worker_status,worker_stop,worker_transcript";
 check(`tools = ${expected}  (got ${tools.join(",")})`, tools.join(",") === expected);
 
 // 1b) H3: worker_spawn's advertised schema carries taskId + kickoffPrompt but NOT the removed,
