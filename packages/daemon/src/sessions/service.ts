@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import {
   resolveConfig, resolveProfile,
   type Session, type StopMode, type OrchestrationEvent,
-  type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy,
+  type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
@@ -13,6 +13,8 @@ import { engineTranscriptExists } from "./transcript.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit } from "../orchestration/usage-awareness.js";
 import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon } from "../orchestration/restart.js";
+import { nextFireAt } from "../orchestration/cron.js";
+import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
@@ -806,6 +808,142 @@ export class SessionService {
 
     // resetIdleNudgeState always zeros the counter and we never re-bump it here ⇒ unanswered === 0.
     return { recorded: true, state, policy, snoozeUntil, unanswered: 0 };
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Manager self-service management surface (Task 3de74275, Option B). Each method below backs ONE
+  // role-gated loom-orchestration MCP tool (registered ONLY on the manager branch — see
+  // mcp/orchestration.ts) and ALSO re-checks the caller's role server-side here (defense in depth,
+  // mirroring recordIdleReport's gate). The boundary is Option B: a manager may ASSIGN an existing,
+  // human-authored profile and create/edit STRUCTURE (agents, projects, schedules), but may NEVER
+  // CREATE/EDIT a profile, skill, allowlist, or gateCommand — the capability-minting monopoly stays
+  // with the human REST surface. gateCommand stays REJECTED on this agent path via the shared
+  // validateAgentProjectConfigOverride validator; profile assignment can only reference a profile a
+  // human already minted (getProfile must resolve), so assignment can't conjure a new capability.
+  // ---------------------------------------------------------------------------------------------
+
+  /** Role gate shared by the management methods: the caller must be a live MANAGER session. */
+  private requireManager(managerSessionId: string, surface: string): void {
+    const session = this.db.getSession(managerSessionId);
+    if (!session) throw new Error("unknown session");
+    if (session.role !== "manager") throw new Error(`${surface} is a manager-only surface`);
+  }
+
+  /** Audit one management action (single kind; detail.action discriminates). */
+  private auditManage(managerSessionId: string, action: string, detail: Record<string, unknown>): void {
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId, kind: "manager_manage", detail: { action, ...detail },
+    });
+  }
+
+  /**
+   * Assign an EXISTING human-authored profile to an agent (or clear it with `profileId: null`).
+   * Option B: profile CREATE/edit stays human-only, so any assignable profileId was minted by a
+   * human who intended it assignable — assignment can't escalate beyond what a human already blessed.
+   * No ⊆-capabilities check is needed under Option B. A non-null profileId MUST resolve (else reject).
+   */
+  assignAgentProfile(managerSessionId: string, agentId: string, profileId: string | null): Agent {
+    this.requireManager(managerSessionId, "agent_assign_profile");
+    const agent = this.db.getAgent(agentId);
+    if (!agent) throw new Error("agent not found");
+    if (profileId != null && !this.db.getProfile(profileId)) throw new Error("profile not found");
+    this.db.updateAgent(agentId, { profileId });
+    this.auditManage(managerSessionId, "agent_assign_profile", { agentId, profileId });
+    return this.db.getAgent(agentId)!;
+  }
+
+  /**
+   * Update an agent's structural fields — its name (title) and/or startupPrompt (the injected
+   * project-specifics). Capability-conferring fields (the profile) are NOT settable here; profile
+   * assignment is the separate, validated assignAgentProfile path.
+   */
+  updateAgentPreset(
+    managerSessionId: string, agentId: string, patch: { name?: string; startupPrompt?: string },
+  ): Agent {
+    this.requireManager(managerSessionId, "agent_update");
+    const agent = this.db.getAgent(agentId);
+    if (!agent) throw new Error("agent not found");
+    this.db.updateAgent(agentId, { name: patch.name, startupPrompt: patch.startupPrompt });
+    this.auditManage(managerSessionId, "agent_update", { agentId, fields: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined) });
+    return this.db.getAgent(agentId)!;
+  }
+
+  /**
+   * Update a project's STRUCTURAL fields (name / vaultPath) and/or its config override. Config is run
+   * through validateAgentProjectConfigOverride — the SAME agent-path validator project_configure uses
+   * — so `orchestration.gateCommand` (host-RCE) and any unknown key are REJECTED here, while the
+   * human REST PATCH keeps the full validator. repoPath is intentionally not editable (rebinding a
+   * live project's repo is out of scope).
+   */
+  updateProjectStructural(
+    managerSessionId: string, projectId: string,
+    patch: { name?: string; vaultPath?: string; config?: unknown },
+  ): { id: string; name: string; vaultPath: string } {
+    this.requireManager(managerSessionId, "project_update");
+    const project = this.db.getProject(projectId);
+    if (!project) throw new Error("project not found");
+    if (patch.config !== undefined) {
+      const v = validateAgentProjectConfigOverride(patch.config);
+      if (!v.ok) throw new Error(`invalid config: ${v.error}`);
+      this.db.setProjectConfig(projectId, v.value);
+    }
+    this.db.updateProject(projectId, { name: patch.name, vaultPath: patch.vaultPath });
+    this.auditManage(managerSessionId, "project_update", {
+      projectId, fields: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined),
+    });
+    const after = this.db.getProject(projectId)!;
+    return { id: after.id, name: after.name, vaultPath: after.vaultPath };
+  }
+
+  /** Soft-archive a project (hidden from listProjects; rows + sessions retained). Structural, low-risk. */
+  archiveProjectAsManager(managerSessionId: string, projectId: string): { archived: true; projectId: string } {
+    this.requireManager(managerSessionId, "project_archive");
+    if (!this.db.getProject(projectId)) throw new Error("project not found");
+    this.db.archiveProject(projectId);
+    this.auditManage(managerSessionId, "project_archive", { projectId });
+    return { archived: true, projectId };
+  }
+
+  /**
+   * Create a cron schedule that boots a manager in `agentId` on each tick (autonomous wake — agents
+   * already self-`wake_me`, so this is low-risk). next_fire_at is computed here (strictly-after);
+   * an invalid cron expression is rejected.
+   */
+  createSchedule(
+    managerSessionId: string, input: { agentId: string; cron: string; enabled?: boolean },
+  ): Schedule {
+    this.requireManager(managerSessionId, "schedule_create");
+    if (!this.db.getAgent(input.agentId)) throw new Error("agent not found");
+    let next: string;
+    try { next = nextFireAt(input.cron, new Date()); } catch { throw new Error("invalid cron expression"); }
+    const schedule: Schedule = {
+      id: randomUUID(), agentId: input.agentId, cron: input.cron,
+      enabled: input.enabled ?? true, nextFireAt: next, lastFiredAt: null, createdAt: new Date().toISOString(),
+    };
+    this.db.insertSchedule(schedule);
+    this.auditManage(managerSessionId, "schedule_create", { scheduleId: schedule.id, agentId: input.agentId, cron: input.cron });
+    return schedule;
+  }
+
+  /**
+   * Update a schedule's cron and/or enabled flag. A changed cron recomputes next_fire_at (rejected if
+   * invalid); enabled toggles the Scheduler on/off for this row.
+   */
+  updateScheduleAsManager(
+    managerSessionId: string, scheduleId: string, patch: { cron?: string; enabled?: boolean },
+  ): Schedule {
+    this.requireManager(managerSessionId, "schedule_update");
+    if (!this.db.getSchedule(scheduleId)) throw new Error("schedule not found");
+    const dbPatch: { cron?: string; enabled?: boolean; nextFireAt?: string } = {};
+    if (typeof patch.enabled === "boolean") dbPatch.enabled = patch.enabled;
+    if (typeof patch.cron === "string") {
+      try { dbPatch.nextFireAt = nextFireAt(patch.cron, new Date()); } catch { throw new Error("invalid cron expression"); }
+      dbPatch.cron = patch.cron;
+    }
+    this.db.updateSchedule(scheduleId, dbPatch);
+    this.auditManage(managerSessionId, "schedule_update", { scheduleId, cron: patch.cron, enabled: patch.enabled });
+    return this.db.getSchedule(scheduleId)!;
   }
 
   /**
