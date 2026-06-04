@@ -245,7 +245,14 @@ export class SessionService {
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd, // SAME cwd — Claude keys sessions to the project dir
-      permission: config.permission,
+      // RESUME asserts the exec mode DIFFERENTLY from a fresh spawn: pin startupModeCycles to 0 so the
+      // restored mode is left untouched. A fresh spawn boots at the gate-free `mode` (acceptEdits) and
+      // the config's 2 Shift+Tab cycles step it to the target. But `claude --resume` RESTORES the
+      // session's PERSISTED permission mode (it does NOT re-apply `--permission-mode`), so on resume the
+      // engine is already AT the target mode — running the same 2 cycles would OVERSHOOT it (acceptEdits
+      // +2 → plan, which wedges an auto-resumed manager: no spawns/merges/edits). Observed twice on
+      // 2026-06-04→05. So override cycles to 0 here (and ONLY here — fresh spawns keep the config's 2).
+      permission: { ...config.permission, startupModeCycles: 0 },
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook

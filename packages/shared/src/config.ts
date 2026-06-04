@@ -15,10 +15,14 @@ export interface PermissionPolicy {
   deny: string[];
   /**
    * Shift+Tab presses to inject shortly after the session starts, cycling the permission mode off
-   * the gate-free boot default (`mode`) into the desired one. The spawn always boots in `mode`
+   * the gate-free boot default (`mode`) into the desired one. A FRESH spawn always boots in `mode`
    * (acceptEdits) to dodge the bypass-mode acceptance gate; this then steps it the way a human would.
    * Default 2 (acceptEdits → … → bypassPermissions in the current CLI). 0 = leave the boot mode.
    * Version-sensitive: tied to the CLI's Shift+Tab cycle order, so it's tunable here.
+   * NOTE: the count is RELATIVE to the boot mode, so it's only correct from a known boot mode. A
+   * `--resume` RESTORES the session's persisted mode (it does not re-apply --permission-mode), so the
+   * resume path overrides this to 0 (SessionService.resume) — re-cycling there would overshoot the
+   * already-restored target into plan mode.
    */
   startupModeCycles?: number;
 }
