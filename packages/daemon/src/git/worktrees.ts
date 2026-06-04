@@ -166,6 +166,35 @@ export async function provisionWorktreeDeps(worktreePath: string, deps: Provisio
 }
 
 /**
+ * For a REUSED branch (either reuse path of {@link createWorktree}), re-cut an EMPTY/STALE branch onto
+ * the canonical main BEFORE handing the worktree to the worker — the fix for the stale-base bug
+ * (2026-06-04): a task whose worktree/branch survives from a PRIOR attempt was re-attached at its OLD
+ * base commit, so a "fresh" re-spawn silently inherited a stale tree (wrong toolchain/gate, phantom
+ * pre-existing failures, a big merge-conflict reconcile).
+ *
+ *   - ZERO commits ahead of canonical HEAD (empty/stale branch at an old base) → `reset --hard` the
+ *     worktree onto main's CURRENT sha: branch pointer AND checkout both move forward to current main.
+ *   - >0 commits ahead (RECOVERY case — the branch carries real unmerged work, e.g. a cherry-picked
+ *     recovery commit) → leave it EXACTLY as-is. The recovery flow RELIES on branch reuse; a branch
+ *     with unmerged work is NEVER reset/re-cut. This is the load-bearing invariant.
+ *
+ * "Commits ahead" = `git rev-list --count <mainSha>..<branch>` (0 ⇒ safe to re-cut): commits reachable
+ * from the branch but not from current main, which for an empty stale branch (tip is an ancestor of
+ * main) is 0, and for a recovery branch is its real prior commit(s). We reset to a SHA, never a branch
+ * name — a worktree can't check out a branch that's checked out elsewhere (canonical main lives in
+ * repoPath). Plain `git.raw` to match createWorktree's existing (unbounded) style; on the spawn hot
+ * path these are sub-second ref ops.
+ */
+async function recutStaleReusedBranch(repoPath: string, worktreePath: string, branch: string): Promise<void> {
+  const git = simpleGit(repoPath);
+  const mainSha = (await git.raw(["rev-parse", "HEAD"])).trim();
+  const ahead = parseInt((await git.raw(["rev-list", "--count", `${mainSha}..${branch}`])).trim(), 10) || 0;
+  if (ahead > 0) return; // RECOVERY: real unmerged work → leave the branch EXACTLY as-is (load-bearing).
+  // Empty/stale branch → re-cut its pointer + checkout onto current main (SHA, never a branch name).
+  await simpleGit(worktreePath).raw(["reset", "--hard", mainSha]);
+}
+
+/**
  * Create (or re-attach) an isolated git worktree for a worker (phase-2 §A5): a checkout under
  * ~/.loom/worktrees on branch `loom/<key>` off the repo's current HEAD. Worktrees share the repo's
  * object store (cheap) and live outside the repo so parallel workers can't corrupt one tree.
@@ -175,6 +204,11 @@ export async function provisionWorktreeDeps(worktreePath: string, deps: Provisio
  *   - worktree dir present  → reuse it as-is (the retained checkout carries the worker's changes);
  *   - branch present, dir gone → attach a fresh worktree to the existing branch (no -b);
  *   - neither               → fresh worktree on a new branch (-b).
+ *
+ * For BOTH reuse paths, an EMPTY/STALE branch (0 commits ahead of current main) is re-cut onto main
+ * first (see {@link recutStaleReusedBranch}) so a fresh re-spawn doesn't inherit a stale base; a branch
+ * carrying unmerged work (recovery) is left untouched. The fresh `-b` path already cuts off current
+ * HEAD, so it needs no re-cut.
  */
 export async function createWorktree(
   repoPath: string, projectId: string, taskId: string, deps: ProvisionDeps = {},
@@ -182,7 +216,12 @@ export async function createWorktree(
   const key = taskKey(taskId);
   const branch = `loom/${key}`;
   const worktreePath = path.join(WORKTREES_DIR, projectId, key);
-  if (fs.existsSync(worktreePath)) return { worktreePath, branch }; // retained worktree → reuse (already provisioned)
+  if (fs.existsSync(worktreePath)) {
+    // Retained worktree → reuse (already provisioned). Re-cut an empty/stale branch onto current main
+    // first; a recovery branch (unmerged work) is left exactly as-is.
+    await recutStaleReusedBranch(repoPath, worktreePath, branch);
+    return { worktreePath, branch };
+  }
 
   const git = simpleGit(repoPath);
   fs.mkdirSync(path.join(WORKTREES_DIR, projectId), { recursive: true });
@@ -191,6 +230,11 @@ export async function createWorktree(
   await git.raw(branchExists
     ? ["worktree", "add", worktreePath, branch]        // branch survived a worktree removal → re-attach
     : ["worktree", "add", worktreePath, "-b", branch]); // fresh task → new branch
+  if (branchExists) {
+    // Re-attached an existing branch at its old tip → same re-cut: empty/stale → current main; a
+    // recovery branch (unmerged work) → untouched.
+    await recutStaleReusedBranch(repoPath, worktreePath, branch);
+  }
 
   // Populate node_modules so the worker is build-ready without paying a full `pnpm install` first.
   // Best-effort + bounded; on failure the worker just installs on its own (see provisionWorktreeDeps).
