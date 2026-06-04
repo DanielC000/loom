@@ -20,7 +20,7 @@ import { GitWriter } from "../git/writer.js";
 import { workerDiff } from "../git/worktrees.js";
 import { listVaultTree, readVaultFile } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
-import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, isValidSkillName, skillTemplate } from "../skills/store.js";
+import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate } from "../skills/store.js";
 import { validateProfile } from "../profiles/validate.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
 
@@ -165,6 +165,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
     if (!resetSkillToBundled(name)) return reply.code(404).send({ error: "no bundled version for this skill" });
     return readSkill(name);
+  });
+  // Inverse of reset: publish the store's edited SKILL.md back into the repo's bundled asset so the edit
+  // becomes committable (HUMAN commits — this never commits). Restricted to existing bundled skills.
+  // Trust-boundary write like the vault/git writers — HUMAN-only REST, NO agent MCP tool exposes it.
+  app.post("/api/skills/:name/publish", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
+    if (!publishSkillToBundled(name)) return reply.code(404).send({ error: "no bundled version for this skill" });
+    return { ok: true };
   });
 
   // --- Profiles (platform-level rig: role + allow/skills/model/icon + a UI-only description; the

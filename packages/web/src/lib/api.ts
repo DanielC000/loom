@@ -146,6 +146,7 @@ export const api = {
   createSkill: (name: string) => post<{ name: string }>("/api/skills", { name }),
   deleteSkill: (name: string) => del<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}`),
   resetSkill: (name: string) => post<{ name: string; content: string }>(`/api/skills/${encodeURIComponent(name)}/reset`),
+  publishSkill: (name: string) => post<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}/publish`),
 
   // --- Profiles (platform-level rig: role + allow/skills/model/icon + a UI-only description; the
   // injected prompt comes from the agent). HUMAN-managed only — there is no agent-writable MCP
