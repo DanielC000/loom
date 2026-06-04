@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { simpleGit, type SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
@@ -67,6 +68,98 @@ function taskKey(taskId: string): string {
 }
 
 /**
+ * Per-creation ceiling for the at-creation dep install. Generous (a warm-store frozen install is
+ * usually seconds), but BOUNDED so a wedged/slow `pnpm install` can never hold up the spawn path
+ * indefinitely. Far larger than {@link GIT_OP_TIMEOUT_MS} because an install legitimately takes longer
+ * than a git ref op; on timeout the child is killed and provisioning DEGRADES (the worker installs on
+ * its own, exactly as before this change) rather than wedging the daemon.
+ */
+const PROVISION_TIMEOUT_MS = 180_000;
+
+/**
+ * Injectable seam for {@link provisionWorktreeDeps}. A test can swap in a fake installer (to assert the
+ * gate/bounding without running real pnpm) and/or shrink the timeout. Defaults to the real bounded
+ * `pnpm install`.
+ */
+export interface ProvisionDeps {
+  provision?: (worktreePath: string, timeoutMs: number) => Promise<{ ok: boolean; reason?: string }>;
+  timeoutMs?: number;
+}
+
+/**
+ * Run a BOUNDED, NON-INTERACTIVE `pnpm install --frozen-lockfile --prefer-offline` in `worktreePath`,
+ * killing the child if it exceeds `timeoutMs`. ASYNC (child_process.spawn, NOT spawnSync) on purpose:
+ * createWorktree is awaited on the worker-spawn hot path, and a synchronous spawnSync would freeze the
+ * single-threaded daemon event loop (every session/WS/PTY) for the whole install — unacceptable. This
+ * resolves a result object and NEVER rejects, so the caller's degrade-on-failure stays simple.
+ *
+ * The command is a HARDCODED constant (never agent input) ⇒ no gateCommand-style trust-boundary concern;
+ * `shell:true` only lets the OS resolve `pnpm` (pnpm.cmd on Windows) from PATH, mirroring the gate runner.
+ * `CI=1` keeps pnpm non-interactive (no update-notifier / prompts that could hang the child). Even if a
+ * killed child orphans a lingering pnpm on the rare timeout path, it is merely finishing the install we
+ * wanted; the function has already RETURNED within the bound, which is the load-bearing guarantee.
+ */
+function pnpmInstall(worktreePath: string, timeoutMs: number): Promise<{ ok: boolean; reason?: string }> {
+  return new Promise((resolve) => {
+    const child = spawn("pnpm install --frozen-lockfile --prefer-offline", {
+      cwd: worktreePath,
+      shell: true,
+      stdio: "ignore",
+      env: { ...process.env, CI: "1" },
+    });
+    let settled = false;
+    const done = (r: { ok: boolean; reason?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      done({ ok: false, reason: `pnpm install exceeded ${timeoutMs}ms (killed)` });
+    }, timeoutMs);
+    child.on("error", (e) => done({ ok: false, reason: e.message }));
+    child.on("exit", (code) => done(code === 0 ? { ok: true } : { ok: false, reason: `pnpm install exited ${code ?? "null"}` }));
+  });
+}
+
+/**
+ * Make a freshly-created worktree BUILD-READY by populating node_modules at creation, so the spawned
+ * worker doesn't pay a full `pnpm install` before it can build — and a worker whose install would
+ * fail/time out is caught HERE (bounded) instead of wedging the worker mid-task. (node_modules is
+ * gitignored, so `git worktree add` checks out the tree WITHOUT it.)
+ *
+ * SAFE-BY-CONSTRUCTION removal: a frozen `pnpm install` gives the worktree its OWN independent
+ * node_modules — hardlinks into the shared content-addressable store plus an internal `.pnpm` virtual
+ * store, all WITHIN the worktree. It is NOT a junction/symlink into the main checkout, so removeWorktree's
+ * recursive `fs.rm` only ever deletes the worktree's own links and can NEVER recurse into the main
+ * checkout's node_modules (the skill-store-nuke / junction-follow class of bug — see removeWorktree). The
+ * companion test proves this. Do NOT "optimize" this to junction node_modules → main; that reintroduces
+ * the landmine.
+ *
+ * BEST-EFFORT + BOUNDED: only acts on a pnpm workspace (a `pnpm-lock.yaml` at the worktree root is the
+ * marker — a non-pnpm repo, incl. the bare temp repos in tests, is skipped silently). Any failure/timeout
+ * is logged and SWALLOWED — the worker simply falls back to installing itself, exactly as before this
+ * change. It MUST NEVER throw past createWorktree or wedge the spawn path.
+ */
+export async function provisionWorktreeDeps(worktreePath: string, deps: ProvisionDeps = {}): Promise<void> {
+  if (!fs.existsSync(path.join(worktreePath, "pnpm-lock.yaml"))) return; // not a pnpm workspace → nothing to provision
+  const timeoutMs = deps.timeoutMs ?? PROVISION_TIMEOUT_MS;
+  const run = deps.provision ?? pnpmInstall;
+  try {
+    const res = await run(worktreePath, timeoutMs);
+    if (!res.ok) {
+      // eslint-disable-next-line no-console
+      console.warn(`[worktree] dep provisioning for ${worktreePath} did not complete (${res.reason}); the worker will install on its own.`);
+    }
+  } catch (e) {
+    // A provisioner should never throw, but belt-and-suspenders: a throw here must NOT abort createWorktree.
+    // eslint-disable-next-line no-console
+    console.warn(`[worktree] dep provisioning for ${worktreePath} threw (${(e as Error).message}); the worker will install on its own.`);
+  }
+}
+
+/**
  * Create (or re-attach) an isolated git worktree for a worker (phase-2 §A5): a checkout under
  * ~/.loom/worktrees on branch `loom/<key>` off the repo's current HEAD. Worktrees share the repo's
  * object store (cheap) and live outside the repo so parallel workers can't corrupt one tree.
@@ -77,11 +170,13 @@ function taskKey(taskId: string): string {
  *   - branch present, dir gone → attach a fresh worktree to the existing branch (no -b);
  *   - neither               → fresh worktree on a new branch (-b).
  */
-export async function createWorktree(repoPath: string, projectId: string, taskId: string): Promise<WorktreeInfo> {
+export async function createWorktree(
+  repoPath: string, projectId: string, taskId: string, deps: ProvisionDeps = {},
+): Promise<WorktreeInfo> {
   const key = taskKey(taskId);
   const branch = `loom/${key}`;
   const worktreePath = path.join(WORKTREES_DIR, projectId, key);
-  if (fs.existsSync(worktreePath)) return { worktreePath, branch }; // retained worktree → reuse
+  if (fs.existsSync(worktreePath)) return { worktreePath, branch }; // retained worktree → reuse (already provisioned)
 
   const git = simpleGit(repoPath);
   fs.mkdirSync(path.join(WORKTREES_DIR, projectId), { recursive: true });
@@ -90,6 +185,10 @@ export async function createWorktree(repoPath: string, projectId: string, taskId
   await git.raw(branchExists
     ? ["worktree", "add", worktreePath, branch]        // branch survived a worktree removal → re-attach
     : ["worktree", "add", worktreePath, "-b", branch]); // fresh task → new branch
+
+  // Populate node_modules so the worker is build-ready without paying a full `pnpm install` first.
+  // Best-effort + bounded; on failure the worker just installs on its own (see provisionWorktreeDeps).
+  await provisionWorktreeDeps(worktreePath, deps);
   return { worktreePath, branch };
 }
 

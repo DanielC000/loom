@@ -30,6 +30,7 @@
     "test:profiles-rest": "node test/profiles-rest.mjs",
     "test:context": "node test/context-stats.mjs",
     "test:worktrees": "node test/worktrees.mjs",
+    "test:worktree-provision": "node test/worktree-provision.mjs",
     "test:transcript-encode": "node test/transcript-encode.mjs",
     "test:claude-config": "node test/claude-config.mjs",
     "test:trust-lock": "node test/trust-lock.mjs",
