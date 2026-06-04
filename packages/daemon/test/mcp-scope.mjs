@@ -45,7 +45,7 @@ const tools = await A.listTools();
 const names = tools.tools.map((t) => t.name).sort();
 // tasks_* (the project-scoped board) + wake_* (the self-scheduled wake_me primitive) — both ride the
 // per-session loom-tasks surface. Keep this list in sync as the tasks-MCP tool surface grows.
-const expectedTaskTools = "tasks_create,tasks_list,tasks_update,wake_cancel,wake_list,wake_me";
+const expectedTaskTools = "tasks_create,tasks_get,tasks_list,tasks_update,wake_cancel,wake_list,wake_me";
 check(`tools = ${expectedTaskTools}  (got ${names.join(",")})`,
   names.join(",") === expectedTaskTools);
 const listSchema = JSON.stringify(tools.tools.find((t) => t.name === "tasks_list").inputSchema);

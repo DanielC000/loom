@@ -4,7 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import type { Db } from "../db.js";
 import type { WakeService } from "../orchestration/wake.js";
-import { listProjectTasks, createProjectTask, updateProjectTask } from "./tasks.js";
+import { listProjectTasks, getProjectTask, createProjectTask, updateProjectTask } from "./tasks.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -32,8 +32,24 @@ export class TaskMcpRouter {
 
     server.registerTool(
       "tasks_list",
-      { description: "List all tasks on the current project's board.", inputSchema: {} },
-      async () => ok(listProjectTasks(db, projectId)),
+      {
+        description:
+          "List this project's board tasks. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,updatedAt}) — task bodies are OMITTED and terminal/done cards are EXCLUDED, so repeated calls stay bounded. Pass includeBody:true for full bodies, or tasks_get(id) to read one card in full. Filter with columns:[...] (only those column keys) and/or excludeDone:false (include done cards).",
+        inputSchema: {
+          columns: z.array(z.string()).optional(),
+          excludeDone: z.boolean().optional(),
+          includeBody: z.boolean().optional(),
+        },
+      },
+      async (args) => ok(listProjectTasks(db, projectId, args)),
+    );
+    server.registerTool(
+      "tasks_get",
+      {
+        description: "Read ONE full task (title + body) by id, within the current project.",
+        inputSchema: { id: z.string() },
+      },
+      async ({ id }) => ok(getProjectTask(db, projectId, id)),
     );
     server.registerTool(
       "tasks_create",
