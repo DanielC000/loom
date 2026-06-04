@@ -33,7 +33,7 @@ gate command). This skill is the doctrine those plug into.
 
 ## Report protocol
 
-`worker_report` is your only orchestration tool. Use it to report:
+`worker_report` is your action tool — your only way to affect the tree. Use it to report:
 - **`done`** — stage + **commit** your verified work to your branch *first*, then report `done` with
   the **commit SHA** plus a one-line summary of what you did + your key decisions / anything the
   reviewer should check. Uncommitted work is invisible to your manager's merge gate — it sees
@@ -43,6 +43,10 @@ gate command). This skill is the doctrine those plug into.
 - **`progress`** — an optional checkpoint on a long task.
 
 You **receive** direction via `worker_message`. Act on it, then report again.
+
+You may also call **`my_context`** (no args) at a clean seam to self-assess your own context occupancy
+(returns your `pct` of your model's window). If you're getting heavy on a long task, `worker_report`
+`progress` and say so — let your manager decide whether to `worker_recycle` you.
 
 ## To start
 

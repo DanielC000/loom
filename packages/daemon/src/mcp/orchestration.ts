@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import type { SessionRole } from "@loom/shared";
+import { contextWindowForModel, type SessionRole } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript } from "../sessions/transcript.js";
@@ -29,12 +29,55 @@ export class OrchestrationMcpRouter {
     return role === "manager" || role === "worker" ? { id: sessionId, role } : null;
   }
 
+  /**
+   * The caller's OWN measured context occupancy (server-derived from the URL-path session id — a
+   * session can only ever read itself, so cross-session reads are impossible). Reuses the value the
+   * Stop-time measurement path persists (`ctx_input_tokens`, via sessions/context.ts) — NO new
+   * measurement. Returns `pct: null` + a note when not yet measured (never a fake 0%).
+   */
+  private myContext(sessionId: string): Record<string, unknown> {
+    const s = this.db.getSession(sessionId);
+    const model = s?.model ?? null;
+    const contextWindow = contextWindowForModel(model);
+    const ctxInputTokens = s?.ctxInputTokens ?? null;
+    const measuredAt = s?.ctxUpdatedAt ?? null;
+    if (ctxInputTokens == null) {
+      return { ctxInputTokens: null, contextWindow, pct: null, model, measuredAt,
+        note: "context not measured yet (no completed turn) — occupancy unknown" };
+    }
+    return {
+      ctxInputTokens,
+      contextWindow,
+      pct: Math.round((ctxInputTokens / contextWindow) * 100),
+      model,
+      measuredAt,
+    };
+  }
+
+  /** Register `my_context` — available to ANY role (manager + worker); read-only, no args, no gating. */
+  private registerMyContext(server: McpServer, sessionId: string): void {
+    server.registerTool(
+      "my_context",
+      {
+        description:
+          "Read YOUR OWN context occupancy (no args — server-derived from your session). Returns " +
+          "{ctxInputTokens, contextWindow, pct, model, measuredAt}: pct is your measured context size " +
+          "as a percentage of your model's window. Use it at a clean seam to self-assess — a manager to " +
+          "decide whether to recycle_me, a worker to worker_report that it's getting heavy. If not yet " +
+          "measured, pct is null with a note (not a fake 0).",
+        inputSchema: {},
+      },
+      async () => ok(this.myContext(sessionId)),
+    );
+  }
+
   private buildServer(sessionId: string, role: SessionRole): McpServer {
     const db = this.db;
     const sessions = this.sessions;
     const server = new McpServer({ name: "loom-orchestration", version: "0.1.0" });
 
     if (role === "worker") {
+      this.registerMyContext(server, sessionId);
       // A worker's ENTIRE surface: report up to its manager. No spawn/list/stop.
       server.registerTool(
         "worker_report",
@@ -55,6 +98,8 @@ export class OrchestrationMcpRouter {
 
     // role === "manager": the full coordination surface.
     const managerSessionId = sessionId;
+
+    this.registerMyContext(server, sessionId);
 
     server.registerTool(
       "worker_list",
