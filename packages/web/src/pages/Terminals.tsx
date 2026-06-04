@@ -9,8 +9,12 @@ import { SessionQueue } from "../components/SessionQueue";
 import { Panel, Button, Select, Input, StatusPill, SectionLabel } from "../components/ui";
 import { color, font } from "../theme";
 
-// Tiles flow horizontally then wrap; reused per-project group and for a single filtered project.
+// Tiles flow horizontally then wrap; reused per manager row and the catch-all rows.
 const gridStyle: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12 };
+
+// One rendered row of the Claude-sessions grid. A "manager" row = its manager tile first then the
+// workers it parented; "orphans"/"standalone" are the trailing catch-all rows (see the `rows` memo).
+type SessionRow = { key: string; kind: "manager" | "orphans" | "standalone"; list: SessionListItem[] };
 
 // Global Live Terminals grid: all running sessions, with a project filter, tiled, maximizable.
 // Also reachable per-project by pre-selecting the filter.
@@ -38,13 +42,35 @@ export default function Terminals() {
   // the session you're driving floats up, consistent with every other session list.
   const shown = (filter ? live.filter((s) => s.projectName === filter) : live)
     .slice().sort(bySessionActivity);
-  // When unfiltered ("All"), bucket the tiles by project so each project becomes its own horizontal
-  // group under a header. Within-group order follows the activity sort above; the lanes themselves
-  // rank by their most-recent-active member, so the busiest project sits up top.
-  const groups = useMemo(() => {
-    const m = new Map<string, SessionListItem[]>();
-    for (const s of shown) (m.get(s.projectName) ?? m.set(s.projectName, []).get(s.projectName)!).push(s);
-    return [...m.entries()].sort((a, b) => mostRecentActivity(b[1]) - mostRecentActivity(a[1]));
+  // Manager-centric layout: one ROW per manager — the manager tile leftmost, then ITS workers to
+  // the right ordered oldest→newest (createdAt asc). Workers attach to their manager via
+  // parentSessionId. Two catch-all rows trail the manager rows so nothing is dropped: orphan workers
+  // (parent absent from the live set — a recycled/stopped manager) and standalone sessions (no role /
+  // no parent — plain human sessions, platform leads — which must never anchor a manager row).
+  // Manager rows rank busiest-first (most-recent activity across the row), matching the live-first
+  // convention. Computed from `shown`, so the same layout holds inside a project filter.
+  const rows = useMemo<SessionRow[]>(() => {
+    const managers = shown.filter((s) => s.role === "manager");
+    const managerIds = new Set(managers.map((m) => m.id));
+    const workersByParent = new Map<string, SessionListItem[]>();
+    const orphans: SessionListItem[] = [];
+    const standalone: SessionListItem[] = [];
+    for (const s of shown) {
+      if (s.role === "manager") continue;
+      const pid = s.parentSessionId ?? null;
+      if (s.role === "worker" || pid) {
+        if (pid && managerIds.has(pid)) (workersByParent.get(pid) ?? workersByParent.set(pid, []).get(pid)!).push(s);
+        else orphans.push(s); // parent stopped/recycled or not a live manager — don't drop it
+      } else standalone.push(s); // no role / platform lead — its own trailing row
+    }
+    const byAge = (a: SessionListItem, b: SessionListItem) => a.createdAt.localeCompare(b.createdAt);
+    const managerRows: SessionRow[] = managers
+      .map((m) => ({ key: m.id, kind: "manager" as const, list: [m, ...(workersByParent.get(m.id) ?? []).slice().sort(byAge)] }))
+      .sort((a, b) => mostRecentActivity(b.list) - mostRecentActivity(a.list)); // busiest row up top
+    const trailing: SessionRow[] = [];
+    if (orphans.length) trailing.push({ key: "__orphans", kind: "orphans", list: orphans.slice().sort(byAge) });
+    if (standalone.length) trailing.push({ key: "__standalone", kind: "standalone", list: standalone.slice().sort(bySessionActivity) });
+    return [...managerRows, ...trailing];
   }, [shown]);
 
   const renderTile = (s: SessionListItem) => (
@@ -97,19 +123,12 @@ export default function Terminals() {
         </Select>
       </div>
       {shown.length === 0 && <p style={{ color: color.textMuted }}>No running sessions.</p>}
-      {filter ? (
-        <div style={gridStyle}>{shown.map(renderTile)}</div>
-      ) : (
-        groups.map(([name, list]) => (
-          <section key={name} style={{ marginBottom: 20 }}>
-            <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {name}
-              <span style={{ color: color.textMuted, fontWeight: 400 }}>({list.length})</span>
-            </SectionLabel>
-            <div style={gridStyle}>{list.map(renderTile)}</div>
-          </section>
-        ))
-      )}
+      {rows.map((row) => (
+        <section key={row.key} style={{ marginBottom: 20 }}>
+          <RowHeader row={row} />
+          <div style={gridStyle}>{row.list.map(renderTile)}</div>
+        </section>
+      ))}
     </div>
   );
 }
@@ -136,6 +155,33 @@ function TileTitle({ s }: { s: SessionListItem }) {
       <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} />
       <span>{s.projectName} · {s.agentName}{s.role ? ` · ${s.role}` : ""} · {s.id.slice(0, 8)}</span>
     </span>
+  );
+}
+
+// Header for one Claude-sessions row. A manager row names its manager (project · agent · id) and the
+// worker count; the catch-all rows get a plain descriptive label + member count.
+function RowHeader({ row }: { row: SessionRow }) {
+  if (row.kind === "manager") {
+    const m = row.list[0];
+    const workers = row.list.length - 1;
+    return (
+      <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <StatusPill tone={m.busy ? "amber" : "phosphor"} glow={m.busy} label="manager" />
+        <span style={{ fontFamily: font.mono, textTransform: "none", letterSpacing: 0 }}>
+          {m.projectName} · {m.agentName} · {m.id.slice(0, 8)}
+        </span>
+        <span style={{ color: color.textMuted, fontWeight: 400 }}>({workers} worker{workers === 1 ? "" : "s"})</span>
+      </SectionLabel>
+    );
+  }
+  const label = row.kind === "orphans"
+    ? "Orphan workers — parent manager stopped or recycled"
+    : "Standalone sessions";
+  return (
+    <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      {label}
+      <span style={{ color: color.textMuted, fontWeight: 400 }}>({row.list.length})</span>
+    </SectionLabel>
   );
 }
 
