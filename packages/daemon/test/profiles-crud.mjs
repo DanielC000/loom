@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Profiles CRUD seam test (Agents→Profiles P3). HERMETIC + CLAUDE-FREE like profiles.mjs /
 // profile-spawn.mjs: isolated LOOM_HOME, a REAL Db + SessionService driven against a FAKE pty (the
 // PtyHost createPty() seam) — no daemon, no real claude, no network. Covers the P3 BACKEND seam bits

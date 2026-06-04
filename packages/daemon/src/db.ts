@@ -1,5 +1,33 @@
+import os from "node:os";
+import path from "node:path";
 import Database from "better-sqlite3";
 import { DB_PATH } from "./paths.js";
+
+/**
+ * The REAL production database — `~/.loom/loom.db`, independent of any LOOM_HOME override. A worker
+ * once wiped this by running a daemon integration test with no env set (the test's bare `new Db()`
+ * opened it and DELETE'd everything). This is the last-line backstop against that class of accident.
+ */
+const REAL_PROD_DB = path.resolve(path.join(os.homedir(), ".loom", "loom.db"));
+
+/** True when this process is marked as a test run (the test guard / `test:daemon` wrapper sets these). */
+function inTestMode(): boolean {
+  return process.env.LOOM_TEST === "1" || process.env.NODE_ENV === "test";
+}
+
+/**
+ * Prod-guard: under a test marker, REFUSE to open the real prod DB. A hermetic test sets
+ * LOOM_HOME=<temp> so DB_PATH resolves to a throwaway db and this is a no-op; only a stray
+ * default-path `new Db()` with no isolation trips it. The prod daemon (no test marker) is unaffected.
+ */
+function assertNotProdDbInTest(file: string): void {
+  if (inTestMode() && path.resolve(file) === REAL_PROD_DB) {
+    throw new Error(
+      "refusing to open the prod DB (~/.loom/loom.db) under a test marker (LOOM_TEST/NODE_ENV=test) — " +
+        "set LOOM_HOME=<temp> so tests get an isolated database",
+    );
+  }
+}
 import type {
   Project, Agent, Session, Task, ProjectConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
@@ -185,6 +213,7 @@ export interface IdleNudgeState {
 export class Db {
   private db: Database.Database;
   constructor(file = DB_PATH) {
+    assertNotProdDbInTest(file);
     this.db = new Database(file);
     this.db.pragma("journal_mode = WAL");
     // One-shot structural rename (topics→agents) MUST run before exec(SCHEMA) — see the method doc.

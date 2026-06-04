@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Worker browser-automation (per-session Playwright MCP, opt-in via profile flag). DETERMINISTIC +
 // CLAUDE-FREE + NETWORK-FREE, hermetic like profile-spawn.mjs: isolated LOOM_HOME + a sandboxed HOME
 // (so resume's transcript check never touches the real ~/.claude), a REAL Db + SessionService driven

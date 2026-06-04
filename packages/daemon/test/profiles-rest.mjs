@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Profiles REST test (Agents→Profiles P3). Boots an ISOLATED daemon (temp LOOM_HOME + a
 // non-4317 LOOM_PORT) so it never touches a live :4317 daemon, exercises the new HTTP surface, then
 // tears the daemon down. NO claude is spawned (we never POST /sessions — the role→spawn seam is

@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Task priority (P0–P3) test. HERMETIC like tasks-filter.mjs: no daemon, no real claude — drives the
 // built business logic (dist/) against a throwaway SQLite Db. Asserts:
 //   (1) the guarded one-shot migration ADDs `priority` to a LEGACY tasks table (no priority column)

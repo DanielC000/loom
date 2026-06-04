@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Branch-gone dangling-merge recovery test (the daemon root-cause half of the lingering
 // MERGE-REQUEST-alert bug). REAL git on temp repos, NO claude and NO live daemon — drives
 // SessionService.reconcileOrchestrationOnBoot() directly against an isolated LOOM_HOME (so

@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Self-host daemon-restart support test (the `daemon_restart` manager tool). NO claude, NO live
 // daemon, NO process.exit — drives the restart module + SessionService directly against an isolated
 // LOOM_HOME. Proves:

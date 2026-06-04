@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // inbox_pull — the manager's pull-its-own-inbox path (task 56033796). The late-`[loom:worker-report]`
 // symptom was NOT duplicate delivery: the manager read each report proactively (worker_transcript)
 // while the single busy-gated queued copy sat in live.pending (delivered:false) and later drained
