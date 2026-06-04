@@ -725,10 +725,8 @@ export class PtyHost {
    */
   consumePending(sessionId: string): string[] {
     const live = this.live.get(sessionId);
-    if (!live) return [];
-    const out = live.pending;
-    live.pending = []; // detach: drainPending/getPending now see an empty queue
-    return out;
+    if (!live?.alive) return []; // dead/unknown session: nothing to consume (don't hand back a stale queue)
+    return live.pending.splice(0); // returns the removed messages (a copy) AND empties the queue in place
   }
 
   /** True while the human has uncommitted composer text (recent keystroke, no submit/clear since). */
