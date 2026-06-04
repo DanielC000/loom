@@ -12,6 +12,7 @@ import { PlatformMcpRouter } from "./mcp/platform.js";
 import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
 import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
+import { UsageStatusPoller } from "./orchestration/usage-status.js";
 import { WakeService } from "./orchestration/wake.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
 import { IdleWatcher } from "./orchestration/idle-watcher.js";
@@ -100,7 +101,12 @@ async function main(): Promise<void> {
   // Platform MCP (Pillar C) only needs the registry (project/agent creation + config).
   const platformMcp = new PlatformMcpRouter(db);
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, control });
+  // Account-wide Claude plan-usage poller — one shared cached fetch of the OAuth usage endpoint, served
+  // read-only to Mission Control via GET /api/usage/limits. Created here so the gateway can read its
+  // cache; started below (after listen). LOOM_USAGE_POLL_INTERVAL_MS tunes the cadence (default 60s).
+  const usageStatus = new UsageStatusPoller({ intervalMs: Number(process.env.LOOM_USAGE_POLL_INTERVAL_MS) || undefined });
+
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, control, usageStatus });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon listening on http://127.0.0.1:${PORT}`);
@@ -128,6 +134,11 @@ async function main(): Promise<void> {
   const rateLimitWatcher = new RateLimitWatcher({ db, pty, intervalMs: watchIntervalMs });
   rateLimitWatcher.start();
   console.log(`[boot] usage-limit resume watcher on (tick ${watchIntervalMs}ms)`);
+
+  // Account-wide plan-usage poller — start it now that the server is up (skips itself if there's no
+  // credentials file). Read-only god-eye data for Mission Control; failures degrade to unavailable.
+  usageStatus.start();
+  console.log("[boot] plan-usage poller on (GET /api/usage/limits)");
 
   // The self-scheduled wake-up ticker (always on; reconciles past-due wakes fire-once on start()).
   wakes.start();
@@ -218,7 +229,7 @@ async function main(): Promise<void> {
   }
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); wakes.stop(); clearInterval(reconcileTimer); contextWatcher.stop(); idleWatcher.stop(); dbBackupWatcher.stop(); process.exit(0); });
+    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); wakes.stop(); clearInterval(reconcileTimer); contextWatcher.stop(); idleWatcher.stop(); dbBackupWatcher.stop(); process.exit(0); });
   }
 }
 

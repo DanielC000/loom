@@ -15,6 +15,7 @@ import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
 import { validateProjectConfigOverride } from "../mcp/platform.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
+import type { UsageStatusPoller } from "../orchestration/usage-status.js";
 import { GitReader } from "../git/reader.js";
 import { GitWriter } from "../git/writer.js";
 import { workerDiff } from "../git/worktrees.js";
@@ -37,6 +38,7 @@ export interface GatewayDeps {
   orchMcp: OrchestrationMcpRouter;
   platformMcp: PlatformMcpRouter;
   control: OrchestrationControl;
+  usageStatus: UsageStatusPoller;
 }
 
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
@@ -79,6 +81,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.post("/api/orchestration/kill", async () => ({ stopped: deps.sessions.killAllWorkers() }));
   app.get("/api/orchestration/status", async () => ({ pausedScopes: deps.control.pausedScopes() }));
+  // --- God-eye read of the user's REAL Claude plan-usage (5h / 7d rate-limit windows). Served from a
+  // single daemon-side cached poller (NOT fetched per-request; NOT an MCP tool; NOT a write surface).
+  // Always 200: `available:false`+reason when the token is missing/expired or the upstream call failed. ---
+  app.get("/api/usage/limits", async () => deps.usageStatus.getStatus());
   // A manager's orchestration_events timeline (chronological). READ-ONLY — emits no event.
   app.get("/api/orchestration/events", async (req) => {
     const { managerId } = req.query as { managerId?: string };

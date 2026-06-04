@@ -1,4 +1,4 @@
-import type { Project, Agent, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride } from "@loom/shared";
+import type { Project, Agent, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, UsageLimitsStatus } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
@@ -126,6 +126,9 @@ export const api = {
   // merges (manager derived from the worker's parentSessionId server-side).
   mergeWorker: (sessionId: string) => post<{ merged: boolean; reason?: string }>(`/api/sessions/${sessionId}/merge`),
   orchestrationStatus: () => get<{ pausedScopes: string[] }>("/api/orchestration/status"),
+  // The user's REAL Claude plan-usage (account-wide rate-limit headroom) — one daemon-side cached
+  // poll of the OAuth usage endpoint. Always 200; `available:false`+reason when the daemon can't fetch it.
+  usageLimits: () => get<UsageLimitsStatus>("/api/usage/limits"),
   pauseOrchestration: (scope?: string) =>
     post<{ ok: boolean; pausedScopes: string[] }>("/api/orchestration/pause", scope ? { scope } : {}),
   resumeOrchestration: (scope?: string) =>

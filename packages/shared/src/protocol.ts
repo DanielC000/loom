@@ -55,3 +55,42 @@ export interface StopSessionRequest {
   sessionId: string;
   mode: StopMode;
 }
+
+// ── Plan-usage status (GET /api/usage/limits) ──────────────────────────────────
+// The user's REAL Claude *account/plan* usage (rate-limit headroom), fetched daemon-side from the
+// undocumented OAuth usage endpoint and cached. DISTINCT from Loom's /usage page (context occupancy
+// per session). Camel-cased here to match the rest of the REST DTOs; the raw endpoint is snake_case.
+
+/** One usage window: `utilization` is 0–100; `resetsAt` is an ISO-8601 instant or null (no active reset). */
+export interface UsageWindow {
+  utilization: number;
+  resetsAt: string | null;
+}
+
+/** Extra-usage (paid overflow) balance — only meaningful when `isEnabled`. */
+export interface UsageExtra {
+  isEnabled: boolean;
+  monthlyLimit: number | null;
+  usedCredits: number | null;
+  utilization: number | null; // 0–100, null when not yet metered
+}
+
+/**
+ * The parsed, cached plan-usage status. `available:false` is the graceful-degrade state (no token,
+ * expired, network/HTTP error, schema drift) — Mission Control renders a muted note, never an error.
+ */
+export type UsageLimitsStatus =
+  | {
+      available: true;
+      fetchedAt: string; // ISO — when this snapshot was fetched
+      fiveHour: UsageWindow;
+      sevenDay: UsageWindow;
+      sevenDayOpus: UsageWindow | null;
+      sevenDaySonnet: UsageWindow | null;
+      extraUsage: UsageExtra | null;
+    }
+  | {
+      available: false;
+      reason: string;
+      fetchedAt: string | null; // ISO of the last attempt, null if never tried
+    };

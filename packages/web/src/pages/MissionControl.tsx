@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
+import type { SessionListItem, OrchestrationEvent, UsageLimitsStatus, UsageWindow } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
 import { bySessionActivity, mostRecentActivity } from "../lib/sessions";
@@ -85,6 +85,10 @@ export default function MissionControl() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Plan-usage strip — the user's REAL Claude account headroom (5h / 7d), distinct from the
+          per-session context occupancy on the /usage page. */}
+      <PlanUsageStrip />
+
       {/* Global status strip */}
       <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
         <Badge tone={globalPaused ? "red" : "phosphor"}>{globalPaused ? "orchestration: paused" : "orchestration: running"}</Badge>
@@ -176,6 +180,93 @@ function Stat({ label, value, tone: t = "phosphor" }: { label: string; value: nu
       <span style={{ fontFamily: font.mono, fontSize: 20, color: tone[t] }}>{value}</span>
       <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>{label}</span>
     </span>
+  );
+}
+
+// ── Plan-usage strip ───────────────────────────────────────────────────────────
+// The user's REAL Claude *account/plan* usage (rate-limit headroom) — 5h + 7d windows, per-model
+// weekly + extra-usage — from the daemon's single cached OAuth poll (GET /api/usage/limits). The
+// daemon polls modestly; the UI just re-reads the cache. Every failure mode comes back as
+// `available:false` + a reason → a small muted note, never an error/crash.
+
+// Utilization → tone, consistent with CONTEXT_WARN_RATIO styling: phosphor < 80% ≤ amber < 95% ≤ red.
+function usageTone(utilization: number): Tone {
+  if (utilization >= 95) return "red";
+  if (utilization >= 80) return "amber";
+  return "phosphor";
+}
+
+// ms-from-now → "3d 4h" / "1h 42m" / "12m" / "now". "—" when there's no reset instant.
+function resetCountdown(resetsAt: string | null): string {
+  if (!resetsAt) return "—";
+  const ms = new Date(resetsAt).getTime() - Date.now();
+  if (!Number.isFinite(ms)) return "—";
+  if (ms <= 0) return "now";
+  const totalMin = Math.floor(ms / 60_000);
+  const d = Math.floor(totalMin / 1440), h = Math.floor((totalMin % 1440) / 60), m = totalMin % 60;
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function UsageGauge({ label, window: w }: { label: string; window: UsageWindow }) {
+  const util = Math.round(w.utilization);
+  const t = usageTone(w.utilization);
+  return (
+    <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 12px", minWidth: 132 }}>
+      <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+        <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>{label}</span>
+        <span style={{ flex: 1 }} />
+        <span style={{ fontFamily: font.mono, fontSize: 14, color: tone[t] }}>{util}%</span>
+      </span>
+      <Meter value={util} max={100} tone={t} width={110} />
+      <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>resets in {resetCountdown(w.resetsAt)}</span>
+    </div>
+  );
+}
+
+function PlanUsageStrip() {
+  // The daemon caches; a light refetch keeps the countdowns and percentages fresh.
+  const usage = useQuery<UsageLimitsStatus>({ queryKey: ["usageLimits"], queryFn: api.usageLimits, refetchInterval: 30_000 });
+  const data = usage.data;
+
+  if (!data || !data.available) {
+    const reason = data && !data.available ? data.reason : usage.isLoading ? "loading…" : "no data";
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>plan usage</span>
+        <span title={reason} style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>unavailable</span>
+      </div>
+    );
+  }
+
+  const extra = data.extraUsage;
+  // Extra-usage utilization is null until metered → derive from credits when we can.
+  const extraUtil = extra
+    ? extra.utilization ?? (extra.monthlyLimit && extra.usedCredits != null ? (extra.usedCredits / extra.monthlyLimit) * 100 : 0)
+    : 0;
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>plan usage</span>
+      <UsageGauge label="5h session" window={data.fiveHour} />
+      <UsageGauge label="7d weekly" window={data.sevenDay} />
+      {data.sevenDayOpus && <UsageGauge label="7d opus" window={data.sevenDayOpus} />}
+      {data.sevenDaySonnet && <UsageGauge label="7d sonnet" window={data.sevenDaySonnet} />}
+      {extra?.isEnabled && (
+        <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 12px", minWidth: 132 }}>
+          <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+            <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>extra usage</span>
+            <span style={{ flex: 1 }} />
+            <span style={{ fontFamily: font.mono, fontSize: 14, color: tone[usageTone(extraUtil)] }}>{Math.round(extraUtil)}%</span>
+          </span>
+          <Meter value={extraUtil} max={100} tone={usageTone(extraUtil)} width={110} />
+          <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>
+            {extra.usedCredits ?? 0}/{extra.monthlyLimit ?? "—"} credits
+          </span>
+        </div>
+      )}
+    </div>
   );
 }
 
