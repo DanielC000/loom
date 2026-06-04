@@ -36,9 +36,15 @@ export default function Skills() {
       setReloadNonce((n) => n + 1); // remount the editor onto the restored content
     },
   });
+  const publish = useMutation({
+    mutationFn: (name: string) => api.publishSkill(name),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["skills"] }); }, // refetch clears the "out of sync" flag
+  });
 
   const validNew = /^[a-z0-9][a-z0-9-]{0,63}$/.test(newName);
-  const bundled = skills.data?.find((s) => s.name === selected)?.bundled ?? false;
+  const selectedSkill = skills.data?.find((s) => s.name === selected);
+  const bundled = selectedSkill?.bundled ?? false;
+  const diverged = selectedSkill?.diverged ?? false;
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16 }}>
@@ -53,6 +59,7 @@ export default function Skills() {
             <Button key={s.name} variant={s.name === selected ? "primary" : "default"} style={{ textAlign: "left" }}
               onClick={() => setSelected(s.name)} title={s.description || s.name}>
               {s.name}{s.bundled ? "  ·  bundled" : "  ·  local"}
+              {s.diverged && <span style={{ color: color.amber }}>  ·  out of sync</span>}
             </Button>
           ))}
           {skills.data?.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No skills yet.</span>}
@@ -65,10 +72,11 @@ export default function Skills() {
 
       <Panel style={{ minHeight: "72vh", padding: 12 }}>
         {selected && current.data ? (
-          <SkillEditor key={`${selected}:${reloadNonce}`} name={selected} content={current.data.content} bundled={bundled}
+          <SkillEditor key={`${selected}:${reloadNonce}`} name={selected} content={current.data.content} bundled={bundled} diverged={diverged}
             onSave={(content) => save.mutate({ name: selected, content })} saving={save.isPending}
             onDelete={() => remove.mutate(selected)} deleting={remove.isPending}
-            onRevert={() => revert.mutate(selected)} reverting={revert.isPending} />
+            onRevert={() => revert.mutate(selected)} reverting={revert.isPending}
+            onPublish={() => publish.mutate(selected)} publishing={publish.isPending} />
         ) : <p style={{ color: color.textMuted, padding: 12 }}>Select a skill to edit its SKILL.md, or create a new one.</p>}
       </Panel>
     </div>
@@ -77,18 +85,20 @@ export default function Skills() {
 
 // Remounted per skill (key=name) so the textarea resets on switch; after Save the query refetches and
 // `dirty` clears against the new content. Mirrors the agent-preset / task-drawer editors.
-function SkillEditor({ name, content, bundled, onSave, saving, onDelete, deleting, onRevert, reverting }:
-  { name: string; content: string; bundled: boolean; onSave: (c: string) => void; saving: boolean;
-    onDelete: () => void; deleting: boolean; onRevert: () => void; reverting: boolean }) {
+function SkillEditor({ name, content, bundled, diverged, onSave, saving, onDelete, deleting, onRevert, reverting, onPublish, publishing }:
+  { name: string; content: string; bundled: boolean; diverged: boolean; onSave: (c: string) => void; saving: boolean;
+    onDelete: () => void; deleting: boolean; onRevert: () => void; reverting: boolean; onPublish: () => void; publishing: boolean }) {
   const [text, setText] = useState(content);
   const [confirmDel, setConfirmDel] = useState(false);
   const [confirmRevert, setConfirmRevert] = useState(false);
+  const [confirmPublish, setConfirmPublish] = useState(false);
   const dirty = text !== content;
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
         <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{name}</strong>
         {bundled && <Badge tone="cyan">bundled</Badge>}
+        {diverged && <Badge tone="amber">out of sync</Badge>}
         <span style={{ color: color.textMuted, fontSize: 12 }}>· SKILL.md</span>
         <span style={{ flex: 1 }} />
         {confirmDel ? (
@@ -111,6 +121,13 @@ function SkillEditor({ name, content, bundled, onSave, saving, onDelete, deletin
           ? <Button onClick={() => setText(content)}>Reset</Button>
           : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
         <span style={{ flex: 1 }} />
+        {bundled && (confirmPublish ? (
+          <>
+            <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>write store edits into the repo asset?</span>
+            <Button variant="primary" disabled={publishing} onClick={() => { onPublish(); setConfirmPublish(false); }}>Publish</Button>
+            <Button onClick={() => setConfirmPublish(false)}>Cancel</Button>
+          </>
+        ) : <Button onClick={() => setConfirmPublish(true)} title="Write this skill's store edits back into the repo's bundled asset (you commit it)">Publish to repo</Button>)}
         {bundled && (confirmRevert ? (
           <>
             <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>discard edits & restore shipped?</span>

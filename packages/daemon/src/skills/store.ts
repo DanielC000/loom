@@ -5,7 +5,9 @@ import type { SkillSummary } from "@loom/shared";
 import { SKILLS_DIR } from "../paths.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ASSET_SKILLS = path.join(__dirname, "..", "..", "assets", "skills"); // dist/skills -> daemon root -> assets/skills
+// dist/skills -> daemon root -> assets/skills. Overridable via LOOM_ASSET_SKILLS so hermetic tests can
+// point the bundled-asset side at a temp dir (publish writes here — never the real repo asset in a test).
+const ASSET_SKILLS = process.env.LOOM_ASSET_SKILLS || path.join(__dirname, "..", "..", "assets", "skills");
 
 /**
  * CRUD over the Loom skill store (~/.loom/skills). A skill is a directory with a SKILL.md playbook;
@@ -33,6 +35,26 @@ function bundledNames(): Set<string> {
   } catch { return new Set(); }
 }
 
+const assetMd = (name: string): string => path.join(ASSET_SKILLS, name, "SKILL.md");
+
+// LOAD-BEARING: store SKILL.md is written CRLF on Windows; the asset may be CRLF or LF. Normalize both
+// (CRLF/CR -> LF, strip trailing per-line whitespace, strip trailing newlines) BEFORE comparing, else a
+// clean skill reads permanently "out of sync" purely on line-ending difference.
+function normalizeForCompare(s: string): string {
+  return s
+    .replace(/\r\n?/g, "\n")
+    .split("\n").map((l) => l.replace(/[ \t]+$/, "")).join("\n")
+    .replace(/\n+$/, "");
+}
+
+// True when a bundled skill's store SKILL.md differs (modulo line-endings/whitespace) from its shipped
+// asset. Non-bundled or unreadable → false (nothing to be "out of sync" with).
+function divergedFromBundled(name: string, storeContent: string): boolean {
+  let assetContent: string;
+  try { assetContent = fs.readFileSync(assetMd(name), "utf8"); } catch { return false; }
+  return normalizeForCompare(storeContent) !== normalizeForCompare(assetContent);
+}
+
 export function listSkills(): SkillSummary[] {
   let entries: fs.Dirent[];
   try { entries = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }); } catch { return []; }
@@ -42,7 +64,13 @@ export function listSkills(): SkillSummary[] {
     if (!e.isDirectory()) continue;
     let content = "";
     try { content = fs.readFileSync(skillMd(e.name), "utf8"); } catch { continue; } // dir without SKILL.md → not a skill
-    out.push({ name: e.name, description: descriptionOf(content), bundled: bundled.has(e.name) });
+    const isBundled = bundled.has(e.name);
+    out.push({
+      name: e.name,
+      description: descriptionOf(content),
+      bundled: isBundled,
+      ...(isBundled ? { diverged: divergedFromBundled(e.name, content) } : {}),
+    });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -82,6 +110,26 @@ export function resetSkillToBundled(name: string): boolean {
   const dest = path.join(SKILLS_DIR, name);
   fs.rmSync(dest, { recursive: true, force: true });
   fs.cpSync(src, dest, { recursive: true });
+  return true;
+}
+
+/**
+ * Inverse of resetSkillToBundled: write the STORE's SKILL.md back into the repo's bundled asset so a
+ * UI edit becomes committable (the human commits — this never commits). RESTRICTED to names that
+ * already exist as a bundled asset; it won't mint a new asset dir for a user-created skill.
+ * Returns false if the skill has no bundled asset or no store SKILL.md.
+ * HUMAN-only (REST) — like the vault/git writers, NO agent MCP tool exposes this.
+ */
+export function publishSkillToBundled(name: string): boolean {
+  if (!isValidSkillName(name)) return false;
+  const destDir = path.join(ASSET_SKILLS, name);
+  try { if (!fs.statSync(destDir).isDirectory()) return false; } catch { return false; } // not a bundled skill
+  let content: string;
+  try { content = fs.readFileSync(skillMd(name), "utf8"); } catch { return false; } // no store SKILL.md to publish
+  const dest = path.join(destDir, "SKILL.md");
+  const tmp = `${dest}.tmp`;
+  fs.writeFileSync(tmp, content);
+  fs.renameSync(tmp, dest);
   return true;
 }
 

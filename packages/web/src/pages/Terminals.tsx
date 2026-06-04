@@ -162,7 +162,7 @@ function TileTitle({ s }: { s: SessionListItem }) {
 // worker count; the catch-all rows get a plain descriptive label + member count.
 function RowHeader({ row }: { row: SessionRow }) {
   if (row.kind === "manager") {
-    const m = row.list[0];
+    const m = row.list[0]!; // a manager row is built as [manager, ...workers], so [0] always exists
     const workers = row.list.length - 1;
     return (
       <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
