@@ -199,6 +199,7 @@ interface Live {
   lastOutputAt: number; // epoch ms of the last pty output — "is the engine actually producing?"
   lastHumanKeyAt: number | null; // epoch ms of the last human composer keystroke (collision guard)
   pending: string[];    // FIFO of messages held while busy / while the human types — drained on Stop + reconcile
+  stopping: boolean;    // a Stop is in flight — SUPPRESS drain/submit so a queued turn can't re-arm busy past it
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
   startupModeCycles: number; // Shift+Tab presses to inject once, after SessionStart, to reach the target mode
   startupCyclesDone: boolean; // guard so the cycle-inject fires at most once per session
@@ -335,6 +336,7 @@ export class PtyHost {
       lastOutputAt: Date.now(),
       lastHumanKeyAt: null,
       pending: [],
+      stopping: false,
       // The startup-prompt turn runs from a CLI arg (not submit()), so seed lastPrompt with it —
       // a cap on the FIRST turn must still be re-submittable on resume (§19c-b).
       lastPrompt: opts.startupPrompt ?? null,
@@ -391,6 +393,10 @@ export class PtyHost {
     });
     pty.onExit(({ exitCode }) => {
       live.alive = false;
+      // The pty is gone → empty the held queue so a stale "Queued (N)" can't linger after exit (the
+      // live entry survives in the map with alive=false, and getPending reads live.pending). Covers
+      // EVERY exit path — a Stop-initiated stop, a crash, a clean session end — not just stopWorker.
+      live.pending.length = 0;
       // eslint-disable-next-line no-console
       console.log(`[pty] exit ${opts.sessionId} code=${exitCode}`);
       try { live.logStream.end(); } catch { /* ignore */ }
@@ -445,7 +451,7 @@ export class PtyHost {
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
       busy: false, ready: true, busySince: null,
       lastOutputAt: Date.now(), lastHumanKeyAt: null,
-      pending: [], lastPrompt: null,
+      pending: [], stopping: false, lastPrompt: null,
       startupModeCycles: 0, startupCyclesDone: true,
       mcpPromptHandled: true, bootScan: "",
       resumeGateHandled: true, resumeGateScan: "",
@@ -682,7 +688,7 @@ export class PtyHost {
     // `ready` gate: a freshly (re)spawned pty is not ready until SessionStart. Submitting before then
     // writes into a still-booting TUI — the Enter is swallowed and the text strands in the composer
     // (the 2026-06-03 restart bug). Hold it FIFO; markReady drains it once the engine is up.
-    if (live.ready && !live.busy && !this.humanActivelyTyping(live)) {
+    if (live.ready && !live.busy && !live.stopping && !this.humanActivelyTyping(live)) {
       // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
       // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
       // synchronous code this is unreachable — enqueueStdin runs as its own event-loop task, never
@@ -747,6 +753,11 @@ export class PtyHost {
   private drainPending(sessionId: string): void {
     const live = this.live.get(sessionId);
     if (!live?.alive || !live.ready || live.busy || live.pending.length === 0) return;
+    // A Stop is in flight → do NOT submit a queued turn. The interrupt lowers busy and fires a Stop
+    // hook; draining here would re-arm busy and defeat the stop (the queued turn "fights" the stop —
+    // each Ctrl-C just interrupts the freshly-drained turn, so it takes N escalating clicks to land).
+    // stop() also clears the queue, so this is belt-and-suspenders for a late enqueue during the stop.
+    if (live.stopping) return;
     if (this.humanActivelyTyping(live)) return; // don't land on the human's half-typed text
     this.submit(sessionId, live.pending.shift()!);
   }
@@ -901,6 +912,13 @@ export class PtyHost {
   stop(sessionId: string, mode: StopMode): void {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
+    // A Stop intent must NOT be defeated by a queued inbound turn re-arming busy. Mark the session
+    // STOPPING (drainPending/enqueueStdin then refuse to submit a new turn) and CLEAR the held queue,
+    // so a queued composer turn ("sends when turn ends") can't be drained by the very Stop hook the
+    // interrupt fires — which used to re-arm busy and make stop take ~3 escalating clicks. Synchronous
+    // field writes only (no await) → the M2 lower-busy→drain window in deliverHook is untouched.
+    live.stopping = true;
+    live.pending.length = 0;
     if (mode === "hard") {
       live.pty.kill(); // TerminateProcess on Windows; node-pty Job Object kills the tree (no orphans)
       return;
