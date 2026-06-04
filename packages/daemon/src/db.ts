@@ -94,6 +94,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   body TEXT NOT NULL DEFAULT '',
   column_key TEXT NOT NULL,
   position REAL NOT NULL DEFAULT 0,
+  -- p0 (critical) → p3 (low); default p2 (normal). Added to existing DBs via migrateTasks() below.
+  priority TEXT NOT NULL DEFAULT 'p2',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -161,6 +163,13 @@ const PROFILE_ADDED_COLUMNS: Record<string, string> = {
   browser_testing: "INTEGER NOT NULL DEFAULT 0",
 };
 
+/** Columns added to `tasks` after phase-1; applied to existing DBs by migrateTasks(). */
+const TASK_ADDED_COLUMNS: Record<string, string> = {
+  // p0 (critical) → p3 (low). NOT NULL + constant DEFAULT 'p2' is legal on ALTER TABLE ADD COLUMN, so
+  // every legacy row backfills to 'p2' (Normal) in place — existing cards keep all other fields intact.
+  priority: "TEXT NOT NULL DEFAULT 'p2'",
+};
+
 type Row = Record<string, unknown>;
 
 /** Asleep-at-the-Wheel idle-watchdog nudge policy (foundation). */
@@ -184,6 +193,7 @@ export class Db {
     this.migrateSessions();
     this.migrateAgents();
     this.migrateProfiles();
+    this.migrateTasks();
   }
 
   /**
@@ -267,6 +277,21 @@ export class Db {
     );
     for (const [name, type] of Object.entries(PROFILE_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE profiles ADD COLUMN ${name} ${type}`);
+    }
+  }
+
+  /**
+   * Idempotent additive migration for `tasks` — ADD COLUMN any post-phase-1 column missing from an
+   * existing DB (fresh installs already have them via CREATE TABLE). Mirrors migrateProfiles; the
+   * NOT NULL + constant DEFAULT 'p2' backfills every legacy task row to Normal priority in place,
+   * leaving its other fields untouched.
+   */
+  private migrateTasks(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(TASK_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
     }
   }
 
@@ -635,17 +660,17 @@ export class Db {
   }
   insertTask(t: Task): void {
     this.db.prepare(
-      `INSERT INTO tasks (id,project_id,title,body,column_key,position,created_at,updated_at)
-       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@createdAt,@updatedAt)`,
-    ).run(t);
+      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,created_at,updated_at)
+       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@createdAt,@updatedAt)`,
+    ).run({ ...t, priority: t.priority ?? "p2" }); // default p2 when an (untyped) caller omits it
   }
-  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position">>): void {
+  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority">>): void {
     const cur = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     if (!cur) return;
     const t = toTask(cur);
     const next = { ...t, ...patch, updatedAt: new Date().toISOString() };
     this.db.prepare(
-      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, updated_at=@updatedAt WHERE id=@id",
+      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, updated_at=@updatedAt WHERE id=@id",
     ).run(next);
   }
 
@@ -790,6 +815,7 @@ function toTask(r0: unknown): Task {
   return {
     id: r.id as string, projectId: r.project_id as string, title: r.title as string,
     body: r.body as string, columnKey: r.column_key as string, position: r.position as number,
+    priority: (r.priority as Task["priority"]) ?? "p2",
     createdAt: r.created_at as string, updatedAt: r.updated_at as string,
   };
 }

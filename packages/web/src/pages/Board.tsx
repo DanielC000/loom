@@ -1,11 +1,27 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
-import type { Task, KanbanColumn, SessionListItem } from "@loom/shared";
+import type { Task, TaskPriority, KanbanColumn, SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Button, Input, SectionLabel, StatusPill, Chip } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
+
+// Priority metadata: low number = higher priority. Each maps to a theme tone for its card chip.
+// p2 (Normal) is the DEFAULT and stays understated; p0/p1 pop (filled chip) to draw the eye.
+const PRIORITY_META: Record<TaskPriority, { tone: Tone; label: string; short: string }> = {
+  p0: { tone: "red", label: "Critical", short: "P0" },
+  p1: { tone: "amber", label: "High", short: "P1" },
+  p2: { tone: "cyan", label: "Normal", short: "P2" },
+  p3: { tone: "muted", label: "Low", short: "P3" },
+};
+const PRIORITIES: TaskPriority[] = ["p0", "p1", "p2", "p3"];
+// Defensive read: a task served by a not-yet-restarted daemon (staggered deploy — web ships via HMR
+// before the daemon goes live) carries no `priority` field; treat it as the p2 default.
+const prio = (t: Task): TaskPriority => t.priority ?? "p2";
+// Sort a column's cards high→low priority (p0 first), then by position — strings p0<p1<p2<p3 sort right.
+const byPriorityThenPosition = (a: Task, b: Task) =>
+  prio(a) === prio(b) ? a.position - b.position : (prio(a) < prio(b) ? -1 : 1);
 
 // Per-project kanban. Reads/writes the SAME task store the MCP tools use — moving a card
 // POSTs columnKey, which a spawned agent's tasks_list immediately sees, and vice versa.
@@ -29,9 +45,9 @@ export default function Board() {
     mutationFn: (title: string) => api.createTask(projectId, { title, columnKey: "backlog" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["board", projectId] }),
   });
-  // Edit a task's title/description from the detail drawer (same store the MCP tools read/write).
+  // Edit a task's title/description/priority from the detail drawer (same store the MCP tools read/write).
   const edit = useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: { title?: string; body?: string } }) => api.updateTask(id, patch),
+    mutationFn: ({ id, patch }: { id: string; patch: { title?: string; body?: string; priority?: TaskPriority } }) => api.updateTask(id, patch),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["board", projectId] }),
   });
 
@@ -50,7 +66,8 @@ export default function Board() {
           <DndContext onDragEnd={onDragEnd}>
             <div style={{ display: "grid", gridTemplateColumns: `repeat(${board.data.columns.length}, 1fr)`, gap: 10, marginTop: 12 }}>
               {board.data.columns.map((col) => (
-                <Column key={col.key} col={col} tasks={board.data!.tasks.filter((t) => t.columnKey === col.key)}
+                <Column key={col.key} col={col}
+                  tasks={board.data!.tasks.filter((t) => t.columnKey === col.key).sort(byPriorityThenPosition)}
                   workers={workerByTask} onOpen={setOpenTaskId} />
               ))}
             </div>
@@ -93,6 +110,22 @@ function workerStatus(w: SessionListItem): { tone: Tone; label: string; glow?: b
   return w.busy ? { tone: "amber", label: "working", glow: true } : { tone: "phosphor", label: "idle" };
 }
 
+// Small colored priority chip shown on a card face. p0/p1 are filled (pop); p2/p3 are outlined
+// and understated so a board full of Normal cards stays calm.
+function PriorityChip({ priority }: { priority: TaskPriority }) {
+  const m = PRIORITY_META[priority];
+  const c = tone[m.tone];
+  const pop = priority === "p0" || priority === "p1";
+  return (
+    <span title={`Priority: ${m.label}`} style={{
+      flexShrink: 0, fontFamily: font.head, fontSize: 9, fontWeight: pop ? 700 : 500,
+      letterSpacing: "0.06em", lineHeight: "13px", padding: "0 4px", borderRadius: 3,
+      color: pop ? color.bg : c, background: pop ? c : "transparent", border: `1px solid ${c}`,
+      opacity: priority === "p2" ? 0.75 : 1,
+    }}>{m.short}</span>
+  );
+}
+
 function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; worker?: SessionListItem; onOpen: () => void }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id });
   const st = worker ? workerStatus(worker) : null;
@@ -112,6 +145,7 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
           style={{ cursor: "grab", color: color.textMuted, lineHeight: "16px", touchAction: "none", userSelect: "none" }}>⠿</span>
         <div onClick={onOpen} title="Open task" style={{ flex: 1, cursor: "pointer", minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+            <PriorityChip priority={prio(task)} />
             <span style={{ flex: 1 }}>{task.title}</span>
             {hasBody && <span title="has a description" style={{ color: color.textMuted, flexShrink: 0 }}>≣</span>}
           </div>
@@ -131,10 +165,11 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
 // MCP task tools read/write but the card never showed). Backdrop or Esc closes; keyed by task id so
 // switching cards resets the fields. Save patches the shared task store, then the board refetches.
 function TaskDrawer({ task, onClose, onSave, saving }:
-  { task: Task; onClose: () => void; onSave: (patch: { title?: string; body?: string }) => void; saving: boolean }) {
+  { task: Task; onClose: () => void; onSave: (patch: { title?: string; body?: string; priority?: TaskPriority }) => void; saving: boolean }) {
   const [title, setTitle] = useState(task.title);
   const [body, setBody] = useState(task.body ?? "");
-  const dirty = title !== task.title || body !== (task.body ?? "");
+  const [priority, setPriority] = useState<TaskPriority>(prio(task));
+  const dirty = title !== task.title || body !== (task.body ?? "") || priority !== prio(task);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -153,6 +188,25 @@ function TaskDrawer({ task, onClose, onSave, saving }:
         </div>
         <span style={labelStyle}>Title</span>
         <Input value={title} onChange={(e) => setTitle(e.target.value)} />
+        <span style={labelStyle}>Priority</span>
+        <div style={{ display: "flex", gap: 4 }}>
+          {PRIORITIES.map((p) => {
+            const m = PRIORITY_META[p];
+            const active = priority === p;
+            const c = tone[m.tone];
+            return (
+              <button key={p} type="button" onClick={() => setPriority(p)} title={m.label}
+                style={{
+                  flex: 1, cursor: "pointer", fontFamily: font.head, fontSize: 11, letterSpacing: "0.05em",
+                  padding: "5px 4px", borderRadius: 4, textTransform: "uppercase",
+                  color: active ? color.bg : c, background: active ? c : "transparent",
+                  border: `1px solid ${active ? c : color.border}`,
+                }}>
+                {m.short} <span style={{ fontSize: 9, opacity: 0.8 }}>{m.label}</span>
+              </button>
+            );
+          })}
+        </div>
         <span style={labelStyle}>Description</span>
         <textarea value={body} onChange={(e) => setBody(e.target.value)} spellCheck={false}
           placeholder="No description yet — agents fill this in via the task tools, or write one here."
@@ -162,9 +216,9 @@ function TaskDrawer({ task, onClose, onSave, saving }:
             background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
           }} />
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave({ title, body })}>{saving ? "Saving…" : "Save"}</Button>
+          <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave({ title, body, priority })}>{saving ? "Saving…" : "Save"}</Button>
           {dirty
-            ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); }}>Reset</Button>
+            ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); }}>Reset</Button>
             : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
         </div>
       </div>

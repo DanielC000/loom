@@ -174,6 +174,16 @@ export interface VaultEntry {
   type: "file" | "dir";
 }
 
+/**
+ * A board task's priority: four levels, LOW number = HIGHER priority. Each maps to a theme tone for
+ * its card chip (p0 red, p1 amber, p2 cyan/dim, p3 muted). `p2` (Normal) is the DEFAULT — every new
+ * task and every backfilled legacy row carries it. Columns order high→low (p0 first) by (priority,
+ * position).
+ */
+export type TaskPriority = "p0" | "p1" | "p2" | "p3";
+/** The default priority for a new / un-prioritized task (Normal). */
+export const DEFAULT_TASK_PRIORITY: TaskPriority = "p2";
+
 export interface Task {
   id: TaskId;
   projectId: ProjectId;
@@ -181,6 +191,7 @@ export interface Task {
   body: string;
   columnKey: string; // references a resolved kanban column key
   position: number;  // fractional index for cheap reordering
+  priority: TaskPriority; // p0 (critical) → p3 (low); default p2 (normal)
   createdAt: string;
   updatedAt: string;
 }

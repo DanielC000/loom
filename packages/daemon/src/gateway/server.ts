@@ -26,6 +26,9 @@ import { resetProfileToBundled } from "../profiles/seed.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
+/** Whitelist guard for the human REST task surfaces — rejects any value outside the p0–p3 enum. */
+const isTaskPriority = (v: unknown): v is Task["priority"] => v === "p0" || v === "p1" || v === "p2" || v === "p3";
+
 export interface GatewayDeps {
   db: Db;
   pty: PtyHost;
@@ -403,12 +406,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/projects/:id/tasks", async (req, reply) => {
     const projectId = (req.params as { id: string }).id;
     if (!deps.db.getProject(projectId)) return reply.code(404).send({ error: "project not found" });
-    const b = (req.body ?? {}) as { title?: string; body?: string; columnKey?: string };
+    const b = (req.body ?? {}) as { title?: string; body?: string; columnKey?: string; priority?: string };
     if (!b.title) return reply.code(400).send({ error: "title required" });
+    if (b.priority !== undefined && !isTaskPriority(b.priority)) return reply.code(400).send({ error: "priority must be one of p0|p1|p2|p3" });
     const now = new Date().toISOString();
     const task: Task = {
       id: randomUUID(), projectId, title: b.title, body: b.body ?? "",
-      columnKey: b.columnKey ?? "backlog", position: Date.now(), createdAt: now, updatedAt: now,
+      columnKey: b.columnKey ?? "backlog", position: Date.now(),
+      priority: b.priority ?? "p2", createdAt: now, updatedAt: now,
     };
     deps.db.insertTask(task);
     return reply.code(201).send(task);
@@ -416,9 +421,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
 
   // Update / move a task (kanban drag writes columnKey + position here — SAME store the
   // MCP task tools read/write, so UI and agent never diverge).
-  app.post("/api/tasks/:id", async (req) => {
+  app.post("/api/tasks/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position">>;
+    const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority">>;
+    if (b.priority !== undefined && !isTaskPriority(b.priority)) return reply.code(400).send({ error: "priority must be one of p0|p1|p2|p3" });
     deps.db.updateTask(id, b);
     return { ok: true };
   });

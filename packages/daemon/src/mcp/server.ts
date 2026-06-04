@@ -8,6 +8,9 @@ import { listProjectTasks, getProjectTask, createProjectTask, updateProjectTask 
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
+/** Task priority enum, shared by the create/update/list tool schemas (rejects any other string). */
+export const prioritySchema = z.enum(["p0", "p1", "p2", "p3"]);
+
 /**
  * Project-scoped task MCP server. The session id arrives in the URL path
  * (/mcp/:sessionId); we resolve session -> project SERVER-SIDE and bind every tool to that
@@ -34,11 +37,12 @@ export class TaskMcpRouter {
       "tasks_list",
       {
         description:
-          "List this project's board tasks. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,updatedAt}) — task bodies are OMITTED and terminal/done cards are EXCLUDED, so repeated calls stay bounded. Pass includeBody:true for full bodies, or tasks_get(id) to read one card in full. Filter with columns:[...] (only those column keys) and/or excludeDone:false (include done cards).",
+          "List this project's board tasks. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt}) — task bodies are OMITTED and terminal/done cards are EXCLUDED, so repeated calls stay bounded. Pass includeBody:true for full bodies, or tasks_get(id) to read one card in full. Filter with columns:[...] (only those column keys), excludeDone:false (include done cards), and/or minPriority:p0|p1|p2|p3 (only tasks at or above that priority; lower number = higher priority).",
         inputSchema: {
           columns: z.array(z.string()).optional(),
           excludeDone: z.boolean().optional(),
           includeBody: z.boolean().optional(),
+          minPriority: prioritySchema.optional(),
         },
       },
       async (args) => ok(listProjectTasks(db, projectId, args)),
@@ -54,21 +58,22 @@ export class TaskMcpRouter {
     server.registerTool(
       "tasks_create",
       {
-        description: "Create a task on the current project's board.",
-        inputSchema: { title: z.string(), body: z.string().optional(), columnKey: z.string().optional() },
+        description: "Create a task on the current project's board. priority is p0|p1|p2|p3 (low number = higher priority), default p2.",
+        inputSchema: { title: z.string(), body: z.string().optional(), columnKey: z.string().optional(), priority: prioritySchema.optional() },
       },
       async (args) => ok(createProjectTask(db, projectId, args)),
     );
     server.registerTool(
       "tasks_update",
       {
-        description: "Update a task by id, within the current project.",
+        description: "Update a task by id, within the current project. priority is p0|p1|p2|p3 (low number = higher priority).",
         inputSchema: {
           id: z.string(),
           title: z.string().optional(),
           body: z.string().optional(),
           columnKey: z.string().optional(),
           position: z.number().optional(),
+          priority: prioritySchema.optional(),
         },
       },
       async ({ id, ...patch }) => ok(updateProjectTask(db, projectId, id, patch)),
