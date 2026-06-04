@@ -19,10 +19,13 @@ export interface PermissionPolicy {
    * (acceptEdits) to dodge the bypass-mode acceptance gate; this then steps it the way a human would.
    * Default 2 (acceptEdits → … → bypassPermissions in the current CLI). 0 = leave the boot mode.
    * Version-sensitive: tied to the CLI's Shift+Tab cycle order, so it's tunable here.
-   * NOTE: the count is RELATIVE to the boot mode, so it's only correct from a known boot mode. A
-   * `--resume` RESTORES the session's persisted mode (it does not re-apply --permission-mode), so the
-   * resume path overrides this to 0 (SessionService.resume) — re-cycling there would overshoot the
-   * already-restored target into plan mode.
+   * NOTE: the count is RELATIVE to the boot mode, so it's only correct from a known boot mode. Both a
+   * fresh spawn AND `claude --resume` boot at the gate-free `mode` (acceptEdits) — `--resume` HONOURS
+   * `--permission-mode`, it does NOT restore the persisted mode (claude 2.1.163; card f05e4897). A fresh
+   * spawn blind-cycles this count to its target. The RESUME path instead feedback-cycles the footer
+   * ABSOLUTELY to the mode this count maps to (SessionService.resume → host.ts cycleResumeToMode), so it
+   * converges to the same target without depending on a fragile blind count on the boot-critical resume
+   * path (a blind count there half-landed on plan / left it one short of auto — see that code).
    */
   startupModeCycles?: number;
 }
