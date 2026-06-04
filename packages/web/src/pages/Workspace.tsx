@@ -86,6 +86,17 @@ export default function Workspace() {
     mutationFn: (id: string) => api.stopSession(id, "graceful"),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["sessions", agentId] }),
   });
+  // Manual rate-limit override + retry-now: clears the park + global latch and re-submits the held
+  // turn (server mirrors RateLimitWatcher.resume). On success the parked pill clears via refetch; the
+  // global RATE-LIMITED attention toast/item self-clears too. Errors surface like archive (alert).
+  const clearRl = useMutation({
+    mutationFn: (id: string) => api.clearSessionRateLimit(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["sessions", agentId] });
+      qc.invalidateQueries({ queryKey: ["allSessions"] });
+    },
+    onError: (e) => window.alert((e as Error).message),
+  });
   // Fork an idle session: branch its conversation into a fresh divergent session, then attach to it.
   const fork = useMutation({
     mutationFn: (id: string) => api.forkSession(id),
@@ -141,6 +152,7 @@ export default function Workspace() {
         onSelect={() => setSessionId(s.id)} onResume={() => resume.mutate(s.id)} resuming={resume.isPending}
         onStop={() => stop.mutate(s.id)} stopping={stop.isPending}
         onFork={() => fork.mutate(s.id)} forking={fork.isPending}
+        onClearRateLimit={() => clearRl.mutate(s.id)} clearingRateLimit={clearRl.isPending}
         onArchive={onArchive} archiving={archive.isPending} />
     );
   };
@@ -247,16 +259,22 @@ export default function Workspace() {
   );
 }
 
-function SessionRow({ s, selected, onSelect, onResume, resuming, onStop, stopping, onFork, forking, onArchive, archiving }:
+function SessionRow({ s, selected, onSelect, onResume, resuming, onStop, stopping, onFork, forking, onClearRateLimit, clearingRateLimit, onArchive, archiving }:
   { s: Session; selected: boolean; onSelect: () => void; onResume: () => void; resuming: boolean;
     onStop: () => void; stopping: boolean; onFork: () => void; forking: boolean;
+    onClearRateLimit: () => void; clearingRateLimit: boolean;
     onArchive: () => void; archiving: boolean }) {
   const isManager = s.role === "manager";
   const canResume = s.processState === "exited" && s.resumability !== "dead";
   const live = s.processState === "live";
-  const st = live
-    ? (s.busy ? { tone: "amber" as const, label: "busy", glow: true } : { tone: "phosphor" as const, label: "live" })
-    : { tone: "muted" as const, label: s.processState };
+  // §19c park: a usage cap parked this session until rateLimitedUntil. Surface it instead of the
+  // live/busy pill, with the reset time + a one-line "transient? clear & retry" hint and the override.
+  const rateLimited = !!s.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > Date.now();
+  const st = rateLimited
+    ? { tone: "red" as const, label: `rate-limited · ${new Date(s.rateLimitedUntil!).toLocaleTimeString()}` }
+    : live
+      ? (s.busy ? { tone: "amber" as const, label: "busy", glow: true } : { tone: "phosphor" as const, label: "live" })
+      : { tone: "muted" as const, label: s.processState };
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
       <Panel selected={selected} onClick={onSelect}
@@ -268,7 +286,14 @@ function SessionRow({ s, selected, onSelect, onResume, resuming, onStop, stoppin
           <span style={{ flex: 1 }} />
           <StatusPill tone={st.tone} label={st.label} glow={"glow" in st ? st.glow : undefined} />
         </div>
+        {rateLimited && (
+          <div style={{ marginTop: 4, fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>
+            transient overload? clear &amp; retry now — re-submits the held turn.
+          </div>
+        )}
       </Panel>
+      {rateLimited && <Button disabled={clearingRateLimit} title="Clear the rate-limit hold + the global usage latch and re-submit the held turn now (mirrors the auto-resume path)"
+        onClick={(ev) => { ev.stopPropagation(); onClearRateLimit(); }}>Clear rate limit &amp; retry now</Button>}
       {live && <Button disabled={forking || s.busy} onClick={(ev) => { ev.stopPropagation(); onFork(); }}
         title={s.busy ? "Fork is available when the session is idle" : "Fork — branch this conversation into a new divergent session"}>Fork</Button>}
       {live && <Button disabled={stopping} title="Stop this session — graceful Ctrl-C, clean and resumable"

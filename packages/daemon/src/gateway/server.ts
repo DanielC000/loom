@@ -16,6 +16,7 @@ import type { PlatformMcpRouter } from "../mcp/platform.js";
 import { validateProjectConfigOverride } from "../mcp/platform.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
+import { clearClaudeRateLimit } from "../orchestration/usage-awareness.js";
 import { GitReader } from "../git/reader.js";
 import { GitWriter } from "../git/writer.js";
 import { workerDiff } from "../git/worktrees.js";
@@ -85,6 +86,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // single daemon-side cached poller (NOT fetched per-request; NOT an MCP tool; NOT a write surface).
   // Always 200: `available:false`+reason when the token is missing/expired or the upstream call failed. ---
   app.get("/api/usage/limits", async () => deps.usageStatus.getStatus());
+  // Manual GLOBAL hold clear (HUMAN/REST only — trust boundary like the git/vault writers; NEVER an
+  // MCP tool). Drops the global usage-awareness latch (~/.loom/tmp/claude-usage.json) so new
+  // worker_spawn is unblocked WITHOUT touching any session — for a transient overload with real
+  // headroom. ADDITIVE: detection re-arms the latch on the next real cap.
+  app.post("/api/usage/clear-hold", async () => { clearClaudeRateLimit(); return { cleared: true }; });
   // A manager's orchestration_events timeline (chronological). READ-ONLY — emits no event.
   app.get("/api/orchestration/events", async (req) => {
     const { managerId } = req.query as { managerId?: string };
@@ -486,6 +492,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { mode } = (req.body as { mode?: "graceful" | "hard" }) ?? {};
     deps.pty.stop(id, mode === "hard" ? "hard" : "graceful");
     return reply.send({ ok: true });
+  });
+  // Manual per-session rate-limit override + retry-now (HUMAN/REST only — trust boundary like
+  // stop/merge, NEVER an MCP tool). MIRRORS RateLimitWatcher.resume() exactly (the proven recovery
+  // path): end the park, clear the episode deadline, relax the global awareness latch, and (if the
+  // session is live) re-submit the held turn — so a transient overload no longer strands a session
+  // for hours. No-op-safe on a session that isn't parked. ADDITIVE: the auto-resume watcher + the
+  // detect path are untouched. Returns the updated session (404 if unknown).
+  app.post("/api/sessions/:id/rate-limit/clear", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+    deps.db.setRateLimitedUntil(id, null, null);
+    deps.db.clearRateLimitDeadline(id);
+    clearClaudeRateLimit();
+    deps.pty.resumeAfterRateLimit(id); // re-submits the held turn; false (no-op) if not live
+    return reply.send(deps.db.getSession(id));
   });
   // Send a turn to a session through the busy-gated queue, so a human composer and the
   // programmatic worker_report enqueue share ONE coordinated submission path (the daemon owns

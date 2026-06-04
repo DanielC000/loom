@@ -103,6 +103,10 @@ export const api = {
     post<{ delivered: boolean; position?: number }>(`/api/sessions/${id}/input`, { text }),
   stopSession: (id: string, mode: "graceful" | "hard") =>
     post<{ ok: boolean }>(`/api/sessions/${id}/stop`, { mode }),
+  // Manual per-session rate-limit override + retry-now (HUMAN-only; mirrors stop — no agent MCP
+  // surface). Clears the park + episode deadline, drops the global usage latch, and re-submits the
+  // held turn if the session is live; returns the updated session (rateLimitedUntil now null).
+  clearSessionRateLimit: (id: string) => post<Session>(`/api/sessions/${id}/rate-limit/clear`),
   allSessions: () => get<SessionListItem[]>("/api/sessions"),
 
   // --- Per-project session Archive (HUMAN-only; mirrors stop/fork — no agent MCP surface). archive
@@ -163,6 +167,9 @@ export const api = {
   // The user's REAL Claude plan-usage (account-wide rate-limit headroom) — one daemon-side cached
   // poll of the OAuth usage endpoint. Always 200; `available:false`+reason when the daemon can't fetch it.
   usageLimits: () => get<UsageLimitsStatus>("/api/usage/limits"),
+  // Drop the GLOBAL usage-awareness latch so new worker_spawn is unblocked without touching any
+  // session — for a transient overload with real headroom (HUMAN-only; no agent MCP surface).
+  clearUsageHold: () => post<{ cleared: boolean }>("/api/usage/clear-hold"),
   pauseOrchestration: (scope?: string) =>
     post<{ ok: boolean; pausedScopes: string[] }>("/api/orchestration/pause", scope ? { scope } : {}),
   resumeOrchestration: (scope?: string) =>
