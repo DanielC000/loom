@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Recycle-handoff test: queued messages + scheduled wakes must move to the SUCCESSOR, and a recycled
 // session must never be resumable again (else a due wake / rate-limit / boot-resume zombie-resurrects
 // it alongside its successor — the 2026-06-03 incident). NO claude: exercises the new db primitives

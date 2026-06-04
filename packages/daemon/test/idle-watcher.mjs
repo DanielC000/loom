@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // IdleWatcher test (Asleep-at-the-Wheel idle-manager watchdog, Task 3). NO claude — the watcher takes
 // an injected pty-slice, so the tick tests use a RECORDING STUB and drive tick() directly. Hermetic
 // like context-watcher.mjs: each env gets its OWN temp .db, imports dist/* + @loom/shared, no daemon.

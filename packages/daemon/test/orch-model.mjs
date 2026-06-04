@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Orchestration data-model test (PR #10). HERMETIC like dead-id.mjs: isolated LOOM_HOME,
 // imports dist/db.js, no daemon, no real claude. Covers the additive schema + writers:
 //   (migration) a pre-#10 (phase-1) DB gains the new columns and its rows round-trip;

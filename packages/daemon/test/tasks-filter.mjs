@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // tasks_list filters/summary + tasks_get project-scoping test. HERMETIC like config-bounds.mjs:
 // no daemon, no real claude — drives the built business logic (dist/mcp/tasks.js) against a throwaway
 // SQLite Db. Asserts: (1) tasks_list defaults to a lightweight, done-excluded SUMMARY; (2) columns /

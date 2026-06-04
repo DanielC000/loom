@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Boot-time orchestration reconcile test (#22 run-2 + audit M4). REAL git on temp repos, NO claude
 // and NO live daemon — drives SessionService.reconcileOrchestrationOnBoot() directly against an
 // isolated LOOM_HOME (so WORKTREES_DIR + loom.db are hermetic; paths.ts reads LOOM_HOME at load).

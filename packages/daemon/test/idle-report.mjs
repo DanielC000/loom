@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Asleep-at-the-Wheel idle-manager watchdog — Task 2 (the `idle_report` manager-surface tool + the
 // SessionService.recordIdleReport it calls). HERMETIC like idle-watch-foundation.mjs / profiles.mjs:
 // isolated temp DB, imports dist/* + @loom/shared, NO daemon, NO real claude, NO pty. Covers:

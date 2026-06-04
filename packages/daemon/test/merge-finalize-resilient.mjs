@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // finalizeMerge worktree-removal resilience test. REAL git on a temp repo, NO claude and NO live
 // daemon — drives SessionService.confirmWorkerMerge() directly against an isolated LOOM_HOME (mirrors
 // boot-reconcile.mjs's in-process style). Regression for the Windows handle-release bug: a worker's

@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Dead-ID detection test (§12-Q5). Hermetic: uses an isolated LOOM_HOME so it never
 // touches the real dev DB. Seeds a session whose engine transcript does NOT exist on disk,
 // runs the sweep, asserts it flips to resumability:"dead".

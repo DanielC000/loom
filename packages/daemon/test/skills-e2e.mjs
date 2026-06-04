@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Live end-to-end for the skills feature, NON-DESTRUCTIVE to the user's running daemon: boots a
 // SEPARATE daemon (new build) on an alt port + temp LOOM_HOME, spawns a session into a FRESH project,
 // and proves the real spawn path now:
