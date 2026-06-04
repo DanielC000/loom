@@ -16,6 +16,7 @@ import { WakeService } from "./orchestration/wake.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
 import { IdleWatcher } from "./orchestration/idle-watcher.js";
 import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestration/db-backup.js";
+import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "./orchestration/usage-limit.js";
 import { readRestartIntent, clearRestartIntent } from "./orchestration/restart.js";
@@ -171,6 +172,15 @@ async function main(): Promise<void> {
       ? `[boot] db-backup ticker on (every ${backupCfg.intervalMinutes}m, keep ${backupCfg.keep})`
       : `[boot] db-backup ticker off (${backupCfg.enabled ? "interval 0" : "disabled"})`,
   );
+
+  // Outbound alert-webhook (external delivery): a passive listener on the orchestration event
+  // chokepoint that POSTs to a HUMAN-configured `orchestration.alertWebhook` URL on matching event
+  // kinds — best-effort + bounded, never blocks/breaks the event path. Registered AFTER the boot
+  // reconcile so a restart's recovery events don't fire stale alerts. No external delivery happens
+  // unless a human has configured a webhook for the project (default OFF).
+  const alertWebhook = new AlertWebhookEmitter({ db });
+  db.setEventListener((evt) => { void alertWebhook.onEvent(evt); });
+  console.log("[boot] alert-webhook emitter registered (external delivery on configured projects)");
 
   // Self-host restart recovery (consume the intent read above): a manager deliberately restarted the
   // daemon (daemon_restart) to make merged code live. Re-resume its live workers, then the manager,

@@ -1,6 +1,6 @@
 // Config model: platform default -> per-project override, resolved through ONE merge fn.
 // This is also the machine-writable schema phase-2 AI-driven project creation will target.
-import type { Profile, SessionRole } from "./types.js";
+import type { Profile, SessionRole, OrchestrationEventKind } from "./types.js";
 
 export interface KanbanColumn {
   key: string;
@@ -28,8 +28,32 @@ export interface PtyGeometry {
   rows: number;
 }
 
+/**
+ * Outbound alert webhook (Richer-notifications, external delivery). When set, the daemon POSTs a
+ * small JSON payload to `url` on each orchestration event whose `kind` is in `events`, so the human
+ * is alerted OUTSIDE the UI (a generic webhook works for Slack/Discord incoming-webhook URLs + any
+ * custom endpoint). Best-effort + bounded — never blocks or breaks the orchestration event path.
+ *
+ * ⚠️ TRUST BOUNDARY (DATA-EXFILTRATION vector): a webhook URL redirects orchestration data off-box,
+ * so — exactly like `gateCommand` — this is HUMAN-set ONLY. The agent-facing config validator
+ * (`validateAgentProjectConfigOverride`) REJECTS it; only the human REST path accepts it. An agent
+ * must never be able to point Loom's event stream at an attacker endpoint.
+ */
+export interface AlertWebhook {
+  /** The endpoint the daemon POSTs to (Slack/Discord incoming-webhook URL or any custom receiver). */
+  url: string;
+  /** Which orchestration event kinds trigger a POST (e.g. merge_done, merge_rejected, idle_escalated). */
+  events: OrchestrationEventKind[];
+}
+
 /** Phase-2 orchestration settings. */
 export interface OrchestrationConfig {
+  /**
+   * HUMAN-only outbound alert webhook (see AlertWebhook). Absent by default (no external delivery).
+   * Exfil-guarded: accepted on the human config path, REJECTED on the agent-facing path (like
+   * gateCommand). Read through resolveConfig by the daemon's alert emitter.
+   */
+  alertWebhook?: AlertWebhook;
   /**
    * Build/test command run in a worker's worktree before a merge (the build/DoD gate).
    * Empty string = no automated gate; at this stage the two-step manager review IS the gate.
@@ -285,6 +309,8 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
     sessionEnv: { ...d.sessionEnv, ...(override.sessionEnv ?? {}) },
     orchestration: {
       gateCommand: override.orchestration?.gateCommand ?? d.orchestration.gateCommand,
+      // Optional + absent by default (d has none): the override value or undefined (no external delivery).
+      alertWebhook: override.orchestration?.alertWebhook ?? d.orchestration.alertWebhook,
       maxConcurrentWorkers: override.orchestration?.maxConcurrentWorkers ?? d.orchestration.maxConcurrentWorkers,
       maxConcurrentManagers: override.orchestration?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers,
       schedulerEnabled: override.orchestration?.schedulerEnabled ?? d.orchestration.schedulerEnabled,
