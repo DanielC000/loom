@@ -606,11 +606,19 @@ export class PtyHost {
           this.broadcastControl(live, { type: "sessionId", id: hook.session_id });
         }
         // Claude is up → cycle the permission mode off the gate-free boot default into the target mode
-        // (the human Shift+Tab step), once per (re)spawn. NEEDED ON RESUME TOO: --permission-mode boots
-        // back at acceptEdits, so the cycles are what restore the target (e.g. auto) mode. The session
-        // is marked READY (which releases any queued injection) only AFTER the cycles land — so a
-        // boot-recovery nudge can't interleave with the Shift+Tabs. That interleave was the 2026-06-03
-        // restart bug: the nudge stranded un-submitted in the composer and the mode stuck mid-cycle on plan.
+        // (the human Shift+Tab step), once per (re)spawn. The cycle count is RELATIVE (a fixed number of
+        // Shift+Tabs from the boot mode), so it's only correct when the boot mode is known:
+        //   • FRESH spawn boots at the gate-free `mode` (acceptEdits via --permission-mode) → the config's
+        //     `startupModeCycles` (default 2) steps it to the target (e.g. auto/bypass).
+        //   • RESUME boots at the session's PERSISTED mode: `claude --resume` restores that and does NOT
+        //     re-apply --permission-mode, so the engine is ALREADY at the target — re-cycling would
+        //     OVERSHOOT (acceptEdits +2 → plan, wedging an auto-resumed manager; observed 2026-06-04→05).
+        //     The resume path therefore passes startupModeCycles:0 (see SessionService.resume), so this
+        //     block is a no-op cycle-wise on resume and the restored mode is left intact.
+        // The session is marked READY (which releases any queued injection) only AFTER the cycles land —
+        // so a boot-recovery nudge can't interleave with the Shift+Tabs. That interleave was the
+        // 2026-06-03 restart bug: the nudge stranded un-submitted in the composer and the mode stuck
+        // mid-cycle on plan.
         if (!live.startupCyclesDone) {
           live.startupCyclesDone = true;
           if (live.startupModeCycles > 0) {
