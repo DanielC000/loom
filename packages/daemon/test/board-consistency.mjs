@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // DoD for the Task board chunk: prove the kanban (REST) and the MCP task tools read/write
 // the SAME store with no divergence — including a column MOVE.
 //

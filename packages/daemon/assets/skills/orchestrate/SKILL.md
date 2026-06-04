@@ -57,7 +57,7 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   closed, just before opening a big new push — is the ideal moment to hand off, well before the nudge.
   A successor that begins a major effort on clean context outperforms one limping into it half-full, so
   when you reach such a seam, **check don't guess: call `my_context`** (no args — it returns your own
-  `pct` of your model's window). **From >35% a voluntary recycle is encouraged and needs no
+  `pct` of your model's window). **From >55% a voluntary recycle is encouraged and needs no
   authorization** — recognising the opportunity and taking it is exactly the job. (Don't churn over a
   barely-started session — below that floor, or with no genuine seam, keep going; this is for real
   seams, not every task boundary.) Choosing among your own

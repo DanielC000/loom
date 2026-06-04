@@ -251,6 +251,8 @@ export interface SkillSummary {
   name: string;
   description: string;
   bundled: boolean;
+  /** Bundled skills only: store SKILL.md differs from the shipped asset (UI edit not yet published). */
+  diverged?: boolean;
 }
 
 // --- Context-window sizing -------------------------------------------------------------------

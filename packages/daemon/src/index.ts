@@ -13,9 +13,12 @@ import { PlatformMcpRouter } from "./mcp/platform.js";
 import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
 import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
+import { UsageStatusPoller } from "./orchestration/usage-status.js";
 import { WakeService } from "./orchestration/wake.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
 import { IdleWatcher } from "./orchestration/idle-watcher.js";
+import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestration/db-backup.js";
+import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "./orchestration/usage-limit.js";
 import { readRestartIntent, clearRestartIntent } from "./orchestration/restart.js";
@@ -25,6 +28,13 @@ async function main(): Promise<void> {
   ensureDirs();
   const seeded = seedGlobalSkills();
   if (seeded.length) console.log(`[boot] seeded global skill(s): ${seeded.join(", ")}`);
+  // Pre-migration safety snapshot: back up the EXISTING DB before we open it (migrations run in the Db
+  // constructor) and before boot-reconcile, so a bad migration/reconcile is recoverable to the pre-boot
+  // state. Best-effort — takeBackup never throws and skips a fresh install (no DB yet); awaited so the
+  // snapshot completes before the migrating connection opens. Gated on `enabled` (interval-0 only mutes
+  // the periodic ticker).
+  const backupCfg = resolveBackupConfig();
+  if (backupCfg.enabled) await takeBackup({ reason: "boot", keep: backupCfg.keep });
   const db = new Db();
   // Seed Loom's bundled Profiles (platform-level rig) into the profiles table, seed-if-absent
   // like the skills seed — additive, idempotent, preserves user edits. Phase-1 read path only.
@@ -105,7 +115,12 @@ async function main(): Promise<void> {
   // Platform MCP (Pillar C) only needs the registry (project/agent creation + config).
   const platformMcp = new PlatformMcpRouter(db);
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, control });
+  // Account-wide Claude plan-usage poller — one shared cached fetch of the OAuth usage endpoint, served
+  // read-only to Mission Control via GET /api/usage/limits. Created here so the gateway can read its
+  // cache; started below (after listen). LOOM_USAGE_POLL_INTERVAL_MS tunes the cadence (default 60s).
+  const usageStatus = new UsageStatusPoller({ intervalMs: Number(process.env.LOOM_USAGE_POLL_INTERVAL_MS) || undefined });
+
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, control, usageStatus });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon listening on http://127.0.0.1:${PORT}`);
@@ -134,6 +149,11 @@ async function main(): Promise<void> {
   rateLimitWatcher.start();
   console.log(`[boot] usage-limit resume watcher on (tick ${watchIntervalMs}ms)`);
 
+  // Account-wide plan-usage poller — start it now that the server is up (skips itself if there's no
+  // credentials file). Read-only god-eye data for Mission Control; failures degrade to unavailable.
+  usageStatus.start();
+  console.log("[boot] plan-usage poller on (GET /api/usage/limits)");
+
   // The self-scheduled wake-up ticker (always on; reconciles past-due wakes fire-once on start()).
   wakes.start();
   console.log(`[boot] wake-up ticker on (tick ${wakeIntervalMs}ms)`);
@@ -160,6 +180,31 @@ async function main(): Promise<void> {
   const idleWatcher = new IdleWatcher({ db, pty, control, recycleRatio, intervalMs: idleWatchMs });
   idleWatcher.start();
   console.log(`[boot] idle-manager watcher on (tick ${idleWatchMs}ms)`);
+
+  // Automatic DB-backup ticker — periodic online snapshots of loom.db into ~/.loom/backups/auto/,
+  // rotated to the newest `keep`. Best-effort; never blocks/crashes. Disabled when backups are off or
+  // the interval is 0. LOOM_BACKUP_INTERVAL_MS overrides the tick cadence for tests (otherwise minutes).
+  const dbBackupWatcher = new DbBackupWatcher({
+    enabled: backupCfg.enabled,
+    intervalMinutes: backupCfg.intervalMinutes,
+    keep: backupCfg.keep,
+    intervalMs: Number(process.env.LOOM_BACKUP_INTERVAL_MS) || undefined,
+  });
+  dbBackupWatcher.start();
+  console.log(
+    backupCfg.enabled && backupCfg.intervalMinutes > 0
+      ? `[boot] db-backup ticker on (every ${backupCfg.intervalMinutes}m, keep ${backupCfg.keep})`
+      : `[boot] db-backup ticker off (${backupCfg.enabled ? "interval 0" : "disabled"})`,
+  );
+
+  // Outbound alert-webhook (external delivery): a passive listener on the orchestration event
+  // chokepoint that POSTs to a HUMAN-configured `orchestration.alertWebhook` URL on matching event
+  // kinds — best-effort + bounded, never blocks/breaks the event path. Registered AFTER the boot
+  // reconcile so a restart's recovery events don't fire stale alerts. No external delivery happens
+  // unless a human has configured a webhook for the project (default OFF).
+  const alertWebhook = new AlertWebhookEmitter({ db });
+  db.setEventListener((evt) => { void alertWebhook.onEvent(evt); });
+  console.log("[boot] alert-webhook emitter registered (external delivery on configured projects)");
 
   // Self-host restart recovery (consume the intent read above): a manager deliberately restarted the
   // daemon (daemon_restart) to make merged code live. Re-resume its live workers, then the manager,
@@ -207,7 +252,7 @@ async function main(): Promise<void> {
   }
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); wakes.stop(); clearInterval(reconcileTimer); contextWatcher.stop(); idleWatcher.stop(); process.exit(0); });
+    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); wakes.stop(); clearInterval(reconcileTimer); contextWatcher.stop(); idleWatcher.stop(); dbBackupWatcher.stop(); process.exit(0); });
   }
 }
 

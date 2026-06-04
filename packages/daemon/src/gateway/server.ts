@@ -15,12 +15,13 @@ import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
 import { validateProjectConfigOverride } from "../mcp/platform.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
+import type { UsageStatusPoller } from "../orchestration/usage-status.js";
 import { GitReader } from "../git/reader.js";
 import { GitWriter } from "../git/writer.js";
 import { workerDiff } from "../git/worktrees.js";
 import { listVaultTree, readVaultFile } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
-import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, isValidSkillName, skillTemplate } from "../skills/store.js";
+import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate } from "../skills/store.js";
 import { validateProfile } from "../profiles/validate.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
 
@@ -37,6 +38,7 @@ export interface GatewayDeps {
   orchMcp: OrchestrationMcpRouter;
   platformMcp: PlatformMcpRouter;
   control: OrchestrationControl;
+  usageStatus: UsageStatusPoller;
 }
 
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
@@ -79,6 +81,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.post("/api/orchestration/kill", async () => ({ stopped: deps.sessions.killAllWorkers() }));
   app.get("/api/orchestration/status", async () => ({ pausedScopes: deps.control.pausedScopes() }));
+  // --- God-eye read of the user's REAL Claude plan-usage (5h / 7d rate-limit windows). Served from a
+  // single daemon-side cached poller (NOT fetched per-request; NOT an MCP tool; NOT a write surface).
+  // Always 200: `available:false`+reason when the token is missing/expired or the upstream call failed. ---
+  app.get("/api/usage/limits", async () => deps.usageStatus.getStatus());
   // A manager's orchestration_events timeline (chronological). READ-ONLY — emits no event.
   app.get("/api/orchestration/events", async (req) => {
     const { managerId } = req.query as { managerId?: string };
@@ -165,6 +171,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
     if (!resetSkillToBundled(name)) return reply.code(404).send({ error: "no bundled version for this skill" });
     return readSkill(name);
+  });
+  // Inverse of reset: publish the store's edited SKILL.md back into the repo's bundled asset so the edit
+  // becomes committable (HUMAN commits — this never commits). Restricted to existing bundled skills.
+  // Trust-boundary write like the vault/git writers — HUMAN-only REST, NO agent MCP tool exposes it.
+  app.post("/api/skills/:name/publish", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
+    if (!publishSkillToBundled(name)) return reply.code(404).send({ error: "no bundled version for this skill" });
+    return { ok: true };
   });
 
   // --- Profiles (platform-level rig: role + allow/skills/model/icon + a UI-only description; the

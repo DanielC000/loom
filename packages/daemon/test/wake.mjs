@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // WakeService test (wake_me primitive). NO claude — WakeService takes an injected pty-slice +
 // resume fn, so the tick tests use RECORDING STUBS and drive tick()/start() directly. Hermetic:
 // each env gets its OWN temp .db (never the daemon's). Covers: schedule validation (floor/horizon/

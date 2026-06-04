@@ -1,10 +1,14 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // finalizeMerge worktree-removal resilience test. REAL git on a temp repo, NO claude and NO live
 // daemon — drives SessionService.confirmWorkerMerge() directly against an isolated LOOM_HOME (mirrors
 // boot-reconcile.mjs's in-process style). Regression for the Windows handle-release bug: a worker's
-// worktree dir can stay busy past fs.rm's retry budget right after a hard-stop, so removeWorktree
-// THROWS even though the `git merge` already committed. removeWorktree is the FIRST step of
-// finalizeMerge, so an unguarded throw used to abort the rest — branch not deleted, task left
+// worktree dir can stay busy past fs.rm's retry budget right after a hard-stop, so worktree removal
+// FAILS even though the `git merge` already committed. removeWorktree is the FIRST step of
+// finalizeMerge, so an unguarded failure there used to abort the rest — branch not deleted, task left
 // in_progress, no merge_done — and worker_merge_confirm returned an ERROR for an already-landed merge.
+// (removeWorktree itself now SWALLOWS+warns the fs.rm failure — the boot-hang hardening in
+// git/worktrees.ts — leaving the dir for boot-reconcile Pass B instead of throwing; finalizeMerge's
+// own try/catch stays as a belt-and-suspenders second guard. Either way the merge must still finalize.)
 //
 // Proves:
 //   (1) HAPPY path  — normal removal works: merged:true, worktree gone, branch deleted, task done,
@@ -105,9 +109,12 @@ try {
   check("(happy) merge_done event recorded (exactly 1)", mergeDoneCount(H.mgrId) === 1);
 
   // --- (2) BUSY-DIR path: force worktree removal to fail, prove the merge still finalizes. ---
-  // removeWorktree swallows the `git worktree remove` failure then falls back to fs.promises.rm; we
-  // make THAT reject (the busy-handle race fs.rm can't outwait) so removeWorktree throws — exactly the
-  // Windows symptom. Scoped to this one call, then restored.
+  // removeWorktree tries `git worktree remove` (swallowed), then falls back to fs.promises.rm; we make
+  // THAT reject (the busy-handle race fs.rm can't outwait) — exactly the Windows symptom. removeWorktree
+  // now SWALLOWS that rejection internally (the boot-hang hardening) and warns `[worktree] could not
+  // remove dir … left on disk for a later GC`, so finalizeMerge runs to completion; its own try/catch is
+  // the second guard. The merge bookkeeping must finish AND a warning about the un-removed dir must fire.
+  // Scoped to this one call, then restored.
   const warnings = [];
   const realWarn = console.warn;
   console.warn = (...a) => { warnings.push(a.join(" ")); };
@@ -126,7 +133,8 @@ try {
   check("(busy) task STILL moved to done", db.getTask(X.taskId).columnKey === "done");
   check("(busy) merge_done event STILL recorded (exactly 1)", mergeDoneCount(X.mgrId) === 1);
   check("(busy) worktree dir LEFT on disk for boot-reconcile Pass B to GC", fs.existsSync(X.worktreePath));
-  check("(busy) a warning about the un-removed worktree was emitted", warnings.some((w) => w.includes("finalizeMerge") && w.includes(X.worktreePath)));
+  check("(busy) a warning about the un-removed worktree (left on disk for GC) was emitted",
+    warnings.some((w) => w.includes(X.worktreePath) && /left on disk|boot-reconcile|Pass B|GC/i.test(w)));
 } finally {
   fs.promises.rm = realRm;
   db.close();

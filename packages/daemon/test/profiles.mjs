@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Profiles data-model + resolver test (Topics→Agents rename + Agent/Profile boundary). HERMETIC like
 // orch-model.mjs: isolated LOOM_HOME, imports dist/* + @loom/shared, no daemon, no real claude. Covers:
 //   (a) a legacy DB migrates: the structural rename `topics`→`agents` (+ FK columns) runs once, the

@@ -43,8 +43,12 @@
     "test:git-writer": "node test/git-writer.mjs",
     "test:shell": "node test/shell-terminal.mjs",
     "test:config-bounds": "node test/config-bounds.mjs",
+    "test:alert-webhook": "node test/alert-webhook.mjs",
     "test:tasks-filter": "node test/tasks-filter.mjs",
-    "test:session-archive": "node test/session-archive.mjs"
+    "test:session-archive": "node test/session-archive.mjs",
+    "test:db-backup": "node test/db-backup.mjs",
+    "test:prod-guard": "node test/prod-guard.mjs",
+    "test:daemon": "node scripts/test-daemon.mjs"
   },
   "dependencies": {
     "@fastify/static": "^8.0.0",

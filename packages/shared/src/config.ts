@@ -1,6 +1,6 @@
 // Config model: platform default -> per-project override, resolved through ONE merge fn.
 // This is also the machine-writable schema phase-2 AI-driven project creation will target.
-import type { Profile, SessionRole } from "./types.js";
+import type { Profile, SessionRole, OrchestrationEventKind } from "./types.js";
 
 export interface KanbanColumn {
   key: string;
@@ -28,8 +28,32 @@ export interface PtyGeometry {
   rows: number;
 }
 
+/**
+ * Outbound alert webhook (Richer-notifications, external delivery). When set, the daemon POSTs a
+ * small JSON payload to `url` on each orchestration event whose `kind` is in `events`, so the human
+ * is alerted OUTSIDE the UI (a generic webhook works for Slack/Discord incoming-webhook URLs + any
+ * custom endpoint). Best-effort + bounded — never blocks or breaks the orchestration event path.
+ *
+ * ⚠️ TRUST BOUNDARY (DATA-EXFILTRATION vector): a webhook URL redirects orchestration data off-box,
+ * so — exactly like `gateCommand` — this is HUMAN-set ONLY. The agent-facing config validator
+ * (`validateAgentProjectConfigOverride`) REJECTS it; only the human REST path accepts it. An agent
+ * must never be able to point Loom's event stream at an attacker endpoint.
+ */
+export interface AlertWebhook {
+  /** The endpoint the daemon POSTs to (Slack/Discord incoming-webhook URL or any custom receiver). */
+  url: string;
+  /** Which orchestration event kinds trigger a POST (e.g. merge_done, merge_rejected, idle_escalated). */
+  events: OrchestrationEventKind[];
+}
+
 /** Phase-2 orchestration settings. */
 export interface OrchestrationConfig {
+  /**
+   * HUMAN-only outbound alert webhook (see AlertWebhook). Absent by default (no external delivery).
+   * Exfil-guarded: accepted on the human config path, REJECTED on the agent-facing path (like
+   * gateCommand). Read through resolveConfig by the daemon's alert emitter.
+   */
+  alertWebhook?: AlertWebhook;
   /**
    * Build/test command run in a worker's worktree before a merge (the build/DoD gate).
    * Empty string = no automated gate; at this stage the two-step manager review IS the gate.
@@ -86,6 +110,22 @@ export interface OrchestrationConfig {
   idleDefaultSnoozeMinutes: number;
 }
 
+/**
+ * Daemon-global automatic-backup settings. NOT per-project — the SQLite DB is one file the whole
+ * daemon shares, so the daemon reads these off the platform default (like `schedulerEnabled`), not a
+ * per-project override. The auto-backup service snapshots `loom.db` on boot, on this interval, and
+ * before a self-host restart, rotating the newest `keep`.
+ */
+export interface BackupConfig {
+  /** Minutes between periodic auto-snapshots. 0 disables ONLY the periodic ticker (boot/pre-restart
+   *  snapshots still fire while `enabled`). Default 60. Env: LOOM_BACKUP_INTERVAL_MINUTES. */
+  intervalMinutes: number;
+  /** How many newest auto snapshots to retain in backups/auto/ (older pruned by mtime). Default 48. */
+  keep: number;
+  /** Master switch. false disables ALL auto backups (boot + periodic + pre-restart). Default true. */
+  enabled: boolean;
+}
+
 /** The fully-resolved, effective config for a project. */
 export interface ResolvedConfig {
   kanbanColumns: KanbanColumn[];
@@ -94,6 +134,8 @@ export interface ResolvedConfig {
   /** Extra env applied to spawned sessions (merged over the spawn baseline). */
   sessionEnv: Record<string, string>;
   orchestration: OrchestrationConfig;
+  /** Daemon-global auto-backup settings (read off the platform default; not per-project). */
+  backup: BackupConfig;
   /**
    * Pillar D: wire the mechanical vault-lint PostToolUse hook into this project's sessions
    * (flags doc-hygiene anti-patterns on .md vault writes). Default true; set false to disable.
@@ -108,6 +150,8 @@ export interface ProjectConfigOverride {
   pty?: Partial<PtyGeometry>;
   sessionEnv?: Record<string, string>;
   orchestration?: Partial<OrchestrationConfig>;
+  // NOTE: no `backup` key — auto-backup is daemon-GLOBAL (one shared DB file), not per-project. The
+  // daemon reads it off the platform default (+ LOOM_BACKUP_INTERVAL_MINUTES env), like schedulerEnabled.
   docLint?: boolean;
 }
 
@@ -146,6 +190,8 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
   orchestration: { gateCommand: "", maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30 },
+  // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
+  backup: { intervalMinutes: 60, keep: 48, enabled: true },
   docLint: true, // Pillar D vault-lint hook on by default
 };
 
@@ -220,15 +266,32 @@ function envIdleNudgeMinutes(): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+/**
+ * Read the LOOM_BACKUP_INTERVAL_MINUTES env override for the auto-backup periodic cadence. Returned
+ * at the platform-default layer of resolveConfig (a per-project override still wins). Mirrors
+ * envIdleNudgeMinutes: undefined when unset/blank/non-numeric so the hardcoded default applies, but an
+ * explicit "0" IS honored as a real value (0 disables the periodic ticker). Guarded for `process`-less
+ * environments (shared is also bundled into the browser web app, which never sets this var).
+ */
+function envBackupIntervalMinutes(): number | undefined {
+  const raw = typeof process !== "undefined" ? process.env?.LOOM_BACKUP_INTERVAL_MINUTES : undefined;
+  if (raw == null || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /** The single config-resolution mechanism, reused everywhere. */
 export function resolveConfig(override: ProjectConfigOverride | undefined): ResolvedConfig {
   const d = PLATFORM_DEFAULTS;
-  // The LOOM_IDLE_NUDGE_MINUTES env override applies at the platform-default layer, so it must be
-  // honored even on the no-override fast path (otherwise `resolveConfig(undefined)` would ignore it).
+  // The LOOM_IDLE_NUDGE_MINUTES / LOOM_BACKUP_INTERVAL_MINUTES env overrides apply at the platform-
+  // default layer, so they must be honored even on the no-override fast path (otherwise
+  // `resolveConfig(undefined)` would ignore them).
   const envIdle = envIdleNudgeMinutes();
+  const envBackup = envBackupIntervalMinutes();
   if (!override) {
     const base = structuredClone(d);
     if (envIdle !== undefined) base.orchestration.idleNudgeMinutes = envIdle;
+    if (envBackup !== undefined) base.backup.intervalMinutes = envBackup;
     return base;
   }
   return {
@@ -246,6 +309,8 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
     sessionEnv: { ...d.sessionEnv, ...(override.sessionEnv ?? {}) },
     orchestration: {
       gateCommand: override.orchestration?.gateCommand ?? d.orchestration.gateCommand,
+      // Optional + absent by default (d has none): the override value or undefined (no external delivery).
+      alertWebhook: override.orchestration?.alertWebhook ?? d.orchestration.alertWebhook,
       maxConcurrentWorkers: override.orchestration?.maxConcurrentWorkers ?? d.orchestration.maxConcurrentWorkers,
       maxConcurrentManagers: override.orchestration?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers,
       schedulerEnabled: override.orchestration?.schedulerEnabled ?? d.orchestration.schedulerEnabled,
@@ -255,6 +320,13 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
       idleNudgeMinutes: override.orchestration?.idleNudgeMinutes ?? envIdle ?? d.orchestration.idleNudgeMinutes,
       maxUnansweredNudges: override.orchestration?.maxUnansweredNudges ?? d.orchestration.maxUnansweredNudges,
       idleDefaultSnoozeMinutes: override.orchestration?.idleDefaultSnoozeMinutes ?? d.orchestration.idleDefaultSnoozeMinutes,
+    },
+    // Daemon-global (no per-project override): platform default, with the env applying to the cadence
+    // at this layer. `??` (not `||`) so an explicit env 0 is preserved (0 disables the periodic ticker).
+    backup: {
+      intervalMinutes: envBackup ?? d.backup.intervalMinutes,
+      keep: d.backup.keep,
+      enabled: d.backup.enabled,
     },
     docLint: override.docLint ?? d.docLint,
   };

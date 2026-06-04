@@ -31,7 +31,7 @@ export function SessionQueue({ sessionId }: { sessionId: string }) {
     );
   }
 
-  const peek = pending[0].replace(/\s+/g, " ").trim();
+  const peek = pending[0]!.replace(/\s+/g, " ").trim(); // length > 2 here, so [0] is defined
   return (
     <div style={{ marginTop: 4 }}>
       <div

@@ -3,9 +3,13 @@
 // manager's transcript snapshot, then drives the REST routes. Run against an ISOLATED daemon:
 //   LOOM_HOME=<temp> LOOM_PORT=4399 node dist/index.js        (background)
 //   LOOM_HOME=<temp> LOOM_PORT=4399 node test/_archive-rest-smoke.mjs
+import { requireHermeticEnv } from "./_guard.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
+
+// Live-BASE test (fetches a daemon + opens its DB directly): refuse to run against prod (4317/~/.loom).
+requireHermeticEnv({ port: true });
 
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT}`;
 const LOOM = process.env.LOOM_HOME;

@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Profile-driven spawn + M5 race test (Agents→Profiles P2). DETERMINISTIC + CLAUDE-FREE, hermetic
 // like profiles.mjs / pty-busy-drain.mjs: isolated LOOM_HOME, a REAL Db + SessionService driven
 // against a FAKE pty injected via PtyHost's createPty() seam — no real claude, no daemon, no network.

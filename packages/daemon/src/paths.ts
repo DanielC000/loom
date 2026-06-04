@@ -13,6 +13,13 @@ export const LOGS_DIR = path.join(LOOM_HOME, "logs");
 /** Per-worker git worktrees live outside the repo (share its object store; don't clutter it). */
 export const WORKTREES_DIR = path.join(LOOM_HOME, "worktrees");
 /**
+ * Automatic DB backups. The auto-backup service writes + rotates rolling snapshots under `auto/`;
+ * manual snapshots (e.g. `pre-*` dirs) live directly under `backups/` and are NEVER touched by
+ * rotation. The dir is created lazily by the backup module (only when a snapshot is actually taken).
+ */
+export const BACKUPS_DIR = path.join(LOOM_HOME, "backups");
+export const AUTO_BACKUP_DIR = path.join(BACKUPS_DIR, "auto");
+/**
  * Loom's OWN editable skill set (UI-managed). Each session gets these injected as PROJECT-LOCAL
  * skills (<cwd>/.claude/skills) so they're discovered as bare names and SHADOW the user's personal
  * ~/.claude/skills — keeping Loom's skills separate from the user's bespoke personal set (validated

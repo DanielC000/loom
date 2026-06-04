@@ -9,12 +9,15 @@
 //      an already-dead session (no JSONL) snapshots nothing, deleteArchivedTranscript removes it.
 //   E. restore brings one row back; permanent delete cascades + drops the snapshot.
 // Run: 1) build the daemon, 2) node test/session-archive.mjs
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { requireHermeticEnv } from "./_guard.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-archive-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+requireHermeticEnv(); // confirm LOOM_HOME is the throwaway temp dir, never the real ~/.loom
 
 const Database = (await import("better-sqlite3")).default;
 const { Db } = await import("../dist/db.js");

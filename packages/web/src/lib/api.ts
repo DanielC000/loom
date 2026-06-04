@@ -1,4 +1,4 @@
-import type { Project, Agent, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride } from "@loom/shared";
+import type { Project, Agent, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, UsageLimitsStatus } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
@@ -160,6 +160,9 @@ export const api = {
   // merges (manager derived from the worker's parentSessionId server-side).
   mergeWorker: (sessionId: string) => post<{ merged: boolean; reason?: string }>(`/api/sessions/${sessionId}/merge`),
   orchestrationStatus: () => get<{ pausedScopes: string[] }>("/api/orchestration/status"),
+  // The user's REAL Claude plan-usage (account-wide rate-limit headroom) — one daemon-side cached
+  // poll of the OAuth usage endpoint. Always 200; `available:false`+reason when the daemon can't fetch it.
+  usageLimits: () => get<UsageLimitsStatus>("/api/usage/limits"),
   pauseOrchestration: (scope?: string) =>
     post<{ ok: boolean; pausedScopes: string[] }>("/api/orchestration/pause", scope ? { scope } : {}),
   resumeOrchestration: (scope?: string) =>
@@ -180,6 +183,7 @@ export const api = {
   createSkill: (name: string) => post<{ name: string }>("/api/skills", { name }),
   deleteSkill: (name: string) => del<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}`),
   resetSkill: (name: string) => post<{ name: string; content: string }>(`/api/skills/${encodeURIComponent(name)}/reset`),
+  publishSkill: (name: string) => post<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}/publish`),
 
   // --- Profiles (platform-level rig: role + allow/skills/model/icon + a UI-only description; the
   // injected prompt comes from the agent). HUMAN-managed only — there is no agent-writable MCP

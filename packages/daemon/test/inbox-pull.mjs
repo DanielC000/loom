@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // inbox_pull — the manager's pull-its-own-inbox path (task 56033796). The late-`[loom:worker-report]`
 // symptom was NOT duplicate delivery: the manager read each report proactively (worker_transcript)
 // while the single busy-gated queued copy sat in live.pending (delivered:false) and later drained
@@ -162,8 +163,8 @@ process.env.LOOM_HOME = tmpHome;
   const workerTools = toolNames("worker");
   check("(T) inbox_pull IS registered on the MANAGER surface", managerTools.includes("inbox_pull"));
   check("(T) inbox_pull is NOT on the worker surface", !workerTools.includes("inbox_pull"));
-  check("(T) the worker surface is still exactly { worker_report } (depth-1 gate held)",
-    workerTools.length === 1 && workerTools[0] === "worker_report");
+  check("(T) the worker surface is still exactly { my_context, worker_report } (depth-1 gate held)",
+    workerTools.slice().sort().join(",") === "my_context,worker_report");
 
   db.close();
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }

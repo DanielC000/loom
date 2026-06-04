@@ -18,6 +18,8 @@ import { createWorktree, removeWorktree } from "../dist/git/worktrees.js";
 
 // Honors LOOM_PORT (same env the daemon's paths.ts reads) so a regression run can target an ISOLATED
 // daemon on a non-4317 port and leave a live :4317 daemon untouched. Defaults to 4317 as before.
+import { requireHermeticEnv } from "./_guard.mjs";
+requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
 if (!LOOM) { console.error("LOOM_HOME must be set (and match the daemon's)."); process.exit(2); }

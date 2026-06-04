@@ -26,6 +26,8 @@ import {
 } from "../dist/orchestration/usage-awareness.js";
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
+import { requireHermeticEnv } from "./_guard.mjs";
+requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
 if (!LOOM) { console.error("LOOM_HOME must be set (and match the daemon's)."); process.exit(2); }
