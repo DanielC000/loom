@@ -31,6 +31,12 @@ const GIT_OP_TIMEOUT_MS = 15_000;
 export interface BoundedGitDeps {
   gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw">;
   timeoutMs?: number;
+  /**
+   * Injectable filesystem remove for removeWorktree's backstop (defaults to the bounded recursive
+   * `fs.promises.rm`). Lets a test simulate a stuck Windows directory handle — an `fs.rm` that NEVER
+   * resolves (handle held by a separate process) — and prove the call still returns within `timeoutMs`.
+   */
+  rm?: (target: string) => Promise<void>;
 }
 
 /** Build the bounded git instance + resolve the timeout for one op, applying the seam's defaults. */
@@ -233,6 +239,18 @@ export async function deleteBranch(repoPath: string, branch: string, deps: Bound
  * {@link withTimeout} race, so the worst case is a BOUNDED failure within ~{@link GIT_OP_TIMEOUT_MS}
  * — the dir is left on disk for a later GC (boot-reconcile Pass B), NEVER an infinite hang. The
  * git instance/timeout is injectable via {@link BoundedGitDeps} so a test can prove the bound.
+ *
+ * The FILESYSTEM backstop is bounded too: boot-reconcile Pass B (reconcileOrchestrationOnBoot in
+ * index.ts) runs this DURING boot, BEFORE app.listen(), so an unbounded hang here wedges the WHOLE
+ * daemon — exactly the 2026-06-04 outage, where the recursive `fs.rm` on a worktree dir with a stuck
+ * Windows directory handle (held by a SEPARATE process — the documented inert orphans) blocked on the
+ * libuv threadpool and never returned, so boot never reached `listen` (port 4317 unbound ~5-6 min).
+ * The 2026-06-03 fix bounded only the git ops; this fs `rm` slipped through. It now runs through the
+ * same {@link withTimeout} race: on timeout we SWALLOW and leave the dir on disk for a later GC rather
+ * than block the caller. THREADPOOL CAVEAT: withTimeout only stops US waiting — the detached `fs.rm`
+ * keeps occupying one libuv threadpool slot until/unless the handle releases. Acceptable vs. a wedged
+ * daemon: the realistic count is the 1-2 inert orphans, not a slot leak that starves the pool. The fs
+ * remove is injectable via {@link BoundedGitDeps.rm} so a test can prove the bound on a never-releasing handle.
  */
 export async function removeWorktree(
   repoPath: string,
@@ -246,7 +264,16 @@ export async function removeWorktree(
     // A hang (timeout-kill), a busy handle, or git already de-registering the worktree without
     // deleting the dir — all fall through to the filesystem backstop.
   }
-  await fs.promises.rm(worktreePath, { recursive: true, force: true, maxRetries: 40, retryDelay: 200 });
+  const rm = deps.rm ?? ((p) => fs.promises.rm(p, { recursive: true, force: true, maxRetries: 40, retryDelay: 200 }));
+  try {
+    await withTimeout(rm(worktreePath), timeoutMs, "fs.rm worktree");
+  } catch (e) {
+    // A stuck directory handle (held by a separate process) makes the recursive remove block on the
+    // libuv threadpool forever — it never throws on its own. Bounded by withTimeout above: SWALLOW and
+    // leave the dir on disk for a later GC rather than wedge boot. See the threadpool caveat in the docstring.
+    // eslint-disable-next-line no-console
+    console.warn(`[worktree] could not remove dir ${worktreePath} (left on disk for a later GC): ${(e as Error).message}`);
+  }
   try {
     await withTimeout(git.raw(["worktree", "prune"]), timeoutMs, "git worktree prune");
   } catch {

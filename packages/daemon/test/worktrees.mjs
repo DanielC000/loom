@@ -162,12 +162,33 @@ try {
     await deleteBranch(repo, "loom/nonexistent", { gitFactory: (_p, ms) => { delDefMs = ms; return { raw: async () => "" }; } });
     check("(k2) default per-op block timeout is 15000ms", delDefMs === 15000);
   }
+
+  // (l) BOUNDED FILESYSTEM backstop — the 2026-06-04 outage fix. Even with the git ops bounded, the
+  //     recursive `fs.rm` backstop was UNBOUNDED: a worktree dir with a stuck Windows directory handle
+  //     (held by a SEPARATE process) makes the recursive remove block on the libuv threadpool FOREVER —
+  //     it never throws on its own. boot-reconcile Pass B calls removeWorktree DURING boot, before
+  //     app.listen(), so that hang wedged the whole daemon (port 4317 unbound ~5-6 min). Inject an `rm`
+  //     that NEVER resolves (a stuck handle) with a tiny timeout and prove removeWorktree still RETURNS
+  //     within the window — the stuck dir is left on disk + logged, never an infinite hang.
+  {
+    const stubFastGit = (_p, _ms) => ({ raw: async () => "" }); // git ops succeed fast → only the fs.rm hangs
+    const neverRm = () => new Promise(() => {}); // a stuck dir handle: this remove never settles
+    const tinyMs = 250;
+    const t0 = Date.now();
+    let resolved = false;
+    await removeWorktree(repo, path.join(process.env.LOOM_HOME, `stuck-${Date.now()}`),
+      { gitFactory: stubFastGit, rm: neverRm, timeoutMs: tinyMs }).then(() => { resolved = true; });
+    const elapsed = Date.now() - t0;
+    check("(l) removeWorktree RETURNS despite a never-resolving fs.rm (stuck dir handle, not an infinite hang)", resolved);
+    check(`(l) bounded by the timeout — returned in ${elapsed}ms (fs backstop capped at ${tinyMs}ms)`,
+      elapsed >= tinyMs && elapsed < tinyMs * 8 + 1500);
+  }
 } finally {
   fs.rmSync(repo, { recursive: true, force: true });
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worktree-per-worker isolates, merges + deletes the branch on a clean merge, tolerates re-spawn on a retained (rejected) task, never collides on the first 8 chars of a task id, and every boot-reconcile git op (removeWorktree, isBranchMerged, deleteBranch) is BOUNDED — a hung git can't wedge daemon boot anywhere in the reconcile path."
+  ? "\n✅ ALL PASS — worktree-per-worker isolates, merges + deletes the branch on a clean merge, tolerates re-spawn on a retained (rejected) task, never collides on the first 8 chars of a task id, and every boot-reconcile op (removeWorktree's git ops AND its filesystem backstop, isBranchMerged, deleteBranch) is BOUNDED — neither a hung git nor a stuck directory handle can wedge daemon boot anywhere in the reconcile path."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
