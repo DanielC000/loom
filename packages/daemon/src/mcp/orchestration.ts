@@ -152,6 +152,28 @@ export class OrchestrationMcpRouter {
     );
 
     server.registerTool(
+      "inbox_pull",
+      {
+        description:
+          "Pull (return AND clear) every queued inbound message in YOUR inbox — worker reports and Loom " +
+          "notifications that arrived while you were mid-turn and are waiting to be delivered. Use it when " +
+          "you've ALREADY handled work proactively (e.g. you read a worker's worker_transcript and merged it): " +
+          "those reports otherwise sit queued and later surface ONE-per-turn as redundant wasted turns. " +
+          "Pulling consumes them in one shot so they won't re-surface; the underlying events stay recorded. " +
+          "Returns {messages: string[]} (FIFO order, empty if your inbox is clear). If you DON'T pull, Loom " +
+          "still delivers them the normal way — this is an optional fast-drain, not required.",
+        inputSchema: {},
+      },
+      async () => {
+        try {
+          return ok(sessions.pullManagerInbox(managerSessionId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
       "worker_recycle",
       {
         description: "Recycle a worker whose context has grown too large: closes it and spawns a FRESH worker in the SAME git worktree (code state kept) seeded with your handoff summary (intent kept). Same task + branch; gen+1. Read worker_transcript first and write the summary.",

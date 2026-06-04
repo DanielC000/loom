@@ -537,6 +537,27 @@ export class SessionService {
   }
 
   /**
+   * A manager PULLS its own inbound inbox: returns AND removes every queued (busy-gated, not-yet-
+   * delivered) inbound message for the manager's OWN session. The manager's id is derived server-side
+   * from the URL path (no id to spoof), so this only ever drains the caller's own queue. Manager-only —
+   * mirrors recordIdleReport's role gate.
+   *
+   * WHY: a worker report enqueued while the manager is mid-turn sits in `live.pending` (delivered:false)
+   * and otherwise drains ONE-per-turn-boundary via drainPending. A manager that has already handled the
+   * work proactively (it read each worker's transcript directly) would then get those stale queued copies
+   * re-surfaced as wasted turns. inbox_pull lets it consume the whole inbox at once and discard/act as it
+   * sees fit. The underlying worker_report (and other) events stay recorded in the DB — this only clears
+   * the in-memory delivery queue, never the audit log. The auto-drain remains the safety net for a manager
+   * that doesn't pull; a pulled message is removed from the same FIFO, so it can't also drain later.
+   */
+  pullManagerInbox(managerSessionId: string): { messages: string[] } {
+    const session = this.db.getSession(managerSessionId);
+    if (!session) throw new Error("unknown session");
+    if (session.role !== "manager") throw new Error("inbox_pull is a manager-only surface");
+    return { messages: this.pty.consumePending(managerSessionId) };
+  }
+
+  /**
    * Stranded-worker guard. A worker only reaches its manager via worker_report's push; a worker
    * that ends its turn WITHOUT reporting goes idle silently and the manager — which has no
    * idle/exit signal for its children — waits forever. Called on every session's busy->false edge:
