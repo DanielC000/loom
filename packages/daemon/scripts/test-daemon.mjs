@@ -24,7 +24,7 @@ const HERMETIC = [
   "tasks-filter", "tasks-priority", "config-bounds", "transcript-encode", "alert-webhook",
   "claude-config", "trust-lock", "spawn-args",
   "context-watcher", "context-stats", "recycle-handoff", "wake",
-  "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull",
+  "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull", "usage-status",
   "skills-inject", "skills-store-durability", "vault-lint", "vault-browser", "vault-writer", "git-writer",
   "worker-diff", "worktrees", "worktree-provision", "merge-finalize-resilient",
   "pty-busy-drain", "pty-resume-readiness", "pty-stop-queue", "shell-terminal",
