@@ -24,10 +24,11 @@ const HERMETIC = [
   "tasks-filter", "tasks-priority", "config-bounds", "transcript-encode",
   "claude-config", "trust-lock", "spawn-args",
   "context-watcher", "context-stats", "recycle-handoff", "wake",
-  "idle-watch-foundation", "idle-watcher",
+  "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull",
   "skills-inject", "skills-store-durability", "vault-lint", "vault-browser", "vault-writer", "git-writer",
-  "worker-diff", "worktrees", "worktree-provision",
+  "worker-diff", "worktrees", "worktree-provision", "merge-finalize-resilient",
   "pty-busy-drain", "pty-resume-readiness", "pty-stop-queue", "shell-terminal",
+  "db-backup",
 ];
 
 // NOT run here (require a human-started isolated daemon and/or a real `claude` login, or are helpers):
@@ -37,9 +38,6 @@ const HERMETIC = [
 //     usage-limit-detect, usage-limit-resume, worker-report, autonomy-rails, busy-flag, merge-gate,
 //     board-consistency, skills-e2e, profiles-rest.
 //   • Helpers: _trust-writer (child worker for trust-lock).
-//   • KNOWN PRE-EXISTING failures (unrelated to isolation — fail identically on HEAD without the guard;
-//     tracked separately): merge-finalize-resilient, idle-report, inbox-pull (stale worker-surface
-//     assertion / console-warn capture). Re-add here once fixed.
 
 let pass = 0;
 const failed = [];
