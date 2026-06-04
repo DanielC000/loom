@@ -708,6 +708,27 @@ export class PtyHost {
     return [...(this.live.get(sessionId)?.pending ?? [])];
   }
 
+  /**
+   * CONSUME a session's queued (not-yet-delivered) inbound messages: return them in FIFO order AND
+   * CLEAR the queue, so they will NOT also drain later as injected turns. This is the manager's
+   * pull-its-own-inbox path (the inbox_pull tool) — strictly better than waiting for drainPending,
+   * which only releases ONE per turn boundary. A manager that read its reports proactively (via
+   * worker_transcript) can pull-and-discard the redundant queued copies in one shot instead of each
+   * draining as a wasted turn.
+   *
+   * SYNCHRONOUS by construction — it only detaches `live.pending` (no `await`, no submit()), so it
+   * never enters deliverHook's M2 lower-busy→drain window and the M2 invariant is untouched. It also
+   * adds NO "drain while busy" path: it removes messages, never writes them to the pty. Returns [] for
+   * an unknown session. The auto-drain (drainPending/reconcile) safety net is unaffected — a manager
+   * that never pulls still gets every message delivered the normal way; a pulled message is gone from
+   * the same `live.pending`, so it can't also drain.
+   */
+  consumePending(sessionId: string): string[] {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) return []; // dead/unknown session: nothing to consume (don't hand back a stale queue)
+    return live.pending.splice(0); // returns the removed messages (a copy) AND empties the queue in place
+  }
+
   /** True while the human has uncommitted composer text (recent keystroke, no submit/clear since). */
   private humanActivelyTyping(live: Live): boolean {
     return live.lastHumanKeyAt != null && Date.now() - live.lastHumanKeyAt < HUMAN_TYPING_GRACE_MS;
