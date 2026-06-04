@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Schedule } from "@loom/shared";
 import { api } from "../lib/api";
+import { useActiveProject } from "../lib/activeProject";
 import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components/ui";
 import { color, font } from "../theme";
 
@@ -18,8 +19,10 @@ function fmt(iso: string | null): string {
   return iso ? new Date(iso).toLocaleString() : "—";
 }
 
-// Flat list of every agent across all projects, with a "Project / Agent" label — schedules target an
-// agentId (project derived from it server-side), so the picker spans projects.
+// Flat list of every agent across all projects, with a "Project / Agent" label. Used ONLY for left-rail
+// LABEL resolution: the rail stays god-eye (shows schedules targeting any project) and a schedule's
+// agentId must resolve to its real "Project / Agent" name regardless of the active project. The
+// create-form dropdown does NOT use this — it is scoped to the active project (see ScheduleCreate).
 function useAllAgents() {
   return useQuery({
     queryKey: ["allAgents"],
@@ -39,12 +42,16 @@ function useAllAgents() {
 // effect on the next tick (the daemon re-reads the table each minute).
 export default function Schedules() {
   const qc = useQueryClient();
+  const { projectId } = useActiveProject();
   const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
   const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
+  // Cross-project map, for LEFT-RAIL label resolution only (the rail stays god-eye).
   const agents = useAllAgents();
   const agentLabel = (id: string) => agents.data?.find((a) => a.id === id)?.label ?? id;
+  // The create-form dropdown is scoped to the ACTIVE project's agents (re-scopes on project switch).
+  const projectAgents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
 
   const create = useMutation({
     mutationFn: (b: { agentId: string; cron: string; enabled: boolean }) => api.createSchedule(b),
@@ -88,7 +95,9 @@ export default function Schedules() {
 
       <Panel style={{ minHeight: "72vh", padding: 12 }}>
         {creating ? (
-          <ScheduleCreate agents={agents.data ?? []}
+          <ScheduleCreate key={projectId}
+            agents={(projectAgents.data ?? []).map((a) => ({ id: a.id, label: a.name }))}
+            loading={projectAgents.isLoading}
             onCreate={(b) => create.mutate(b)} creating={create.isPending} error={create.error as Error | null}
             onCancel={() => setCreating(false)} />
         ) : current ? (
@@ -104,13 +113,16 @@ export default function Schedules() {
 const fieldLabel = { fontFamily: font.head as string, fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: color.textDim };
 
 // Create form: agentId is immutable after create (the update endpoint only patches cron/enabled), so
-// the agent picker lives ONLY here.
-function ScheduleCreate({ agents, onCreate, creating, error, onCancel }:
-  { agents: { id: string; label: string }[]; onCreate: (b: { agentId: string; cron: string; enabled: boolean }) => void; creating: boolean; error: Error | null; onCancel: () => void }) {
+// the agent picker lives ONLY here. The picker is scoped to the ACTIVE project's agents (labels are
+// plain agent names — no "Project /" prefix since there's only one project in play); the parent keys
+// this component on the active project so a project switch remounts it and clears any stale agentId.
+function ScheduleCreate({ agents, loading, onCreate, creating, error, onCancel }:
+  { agents: { id: string; label: string }[]; loading: boolean; onCreate: (b: { agentId: string; cron: string; enabled: boolean }) => void; creating: boolean; error: Error | null; onCancel: () => void }) {
   const [agentId, setAgentId] = useState("");
   const [cron, setCron] = useState("0 * * * *");
   const [enabled, setEnabled] = useState(true);
 
+  const noAgents = !loading && agents.length === 0;
   const cronValid = looksLikeCron(cron);
   const valid = !!agentId && cronValid;
 
@@ -122,10 +134,11 @@ function ScheduleCreate({ agents, onCreate, creating, error, onCancel }:
 
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <span style={fieldLabel}>Target agent</span>
-        <Select value={agentId} onChange={(e) => setAgentId(e.target.value)}>
-          <option value="">— select an agent —</option>
+        <Select value={agentId} onChange={(e) => setAgentId(e.target.value)} disabled={loading || noAgents}>
+          <option value="">{loading ? "Loading agents…" : noAgents ? "— no agents in this project —" : "— select an agent —"}</option>
           {agents.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
         </Select>
+        {noAgents && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>This project has no agents yet — create one in Workspace first.</span>}
       </label>
 
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
