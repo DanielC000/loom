@@ -91,6 +91,18 @@ export default function Workspace() {
     mutationFn: (id: string) => api.forkSession(id),
     onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", agentId] }); },
   });
+  // Archive an EXITED session (a manager cascades to its workers) out of the rail. Clears the local
+  // selection if it pointed at an archived session, and invalidates the rail + god-eye queries so the
+  // session vanishes from Workspace/Terminals/Mission Control. A live group is rejected server-side.
+  const archive = useMutation({
+    mutationFn: (id: string) => api.archiveSession(id),
+    onSuccess: (r) => {
+      if (sessionId && r.archived.includes(sessionId)) setSessionId(null);
+      qc.invalidateQueries({ queryKey: ["sessions", agentId] });
+      qc.invalidateQueries({ queryKey: ["allSessions"] });
+    },
+    onError: (e) => window.alert((e as Error).message),
+  });
   // Manager first, then platform, then workers — so the orchestrator isn't lost among its workers.
   const roleRank = (r?: string | null) => (r === "manager" ? 0 : r === "platform" ? 1 : r === "worker" ? 2 : 3);
   // Fold each manager's workers into a collapsible group under it, so a manager with many workers
@@ -117,12 +129,21 @@ export default function Workspace() {
   const toggleManager = (id: string) =>
     setExpandedManagers((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
-  const renderRow = (s: Session) => (
-    <SessionRow key={s.id} s={s} selected={s.id === sessionId}
-      onSelect={() => setSessionId(s.id)} onResume={() => resume.mutate(s.id)} resuming={resume.isPending}
-      onStop={() => stop.mutate(s.id)} stopping={stop.isPending}
-      onFork={() => fork.mutate(s.id)} forking={fork.isPending} />
-  );
+  const renderRow = (s: Session) => {
+    // A manager with live-list workers confirms before archiving the whole group (cascade).
+    const workerCount = s.role === "manager" ? (workersByManager.get(s.id)?.length ?? 0) : 0;
+    const onArchive = () => {
+      if (workerCount > 0 && !window.confirm(`Archive this manager and its ${workerCount} worker${workerCount === 1 ? "" : "s"}? They'll move to the Archive tab.`)) return;
+      archive.mutate(s.id);
+    };
+    return (
+      <SessionRow key={s.id} s={s} selected={s.id === sessionId}
+        onSelect={() => setSessionId(s.id)} onResume={() => resume.mutate(s.id)} resuming={resume.isPending}
+        onStop={() => stop.mutate(s.id)} stopping={stop.isPending}
+        onFork={() => fork.mutate(s.id)} forking={fork.isPending}
+        onArchive={onArchive} archiving={archive.isPending} />
+    );
+  };
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 16 }}>
@@ -226,9 +247,10 @@ export default function Workspace() {
   );
 }
 
-function SessionRow({ s, selected, onSelect, onResume, resuming, onStop, stopping, onFork, forking }:
+function SessionRow({ s, selected, onSelect, onResume, resuming, onStop, stopping, onFork, forking, onArchive, archiving }:
   { s: Session; selected: boolean; onSelect: () => void; onResume: () => void; resuming: boolean;
-    onStop: () => void; stopping: boolean; onFork: () => void; forking: boolean }) {
+    onStop: () => void; stopping: boolean; onFork: () => void; forking: boolean;
+    onArchive: () => void; archiving: boolean }) {
   const isManager = s.role === "manager";
   const canResume = s.processState === "exited" && s.resumability !== "dead";
   const live = s.processState === "live";
@@ -253,6 +275,10 @@ function SessionRow({ s, selected, onSelect, onResume, resuming, onStop, stoppin
         onClick={(ev) => { ev.stopPropagation(); onStop(); }}>Stop</Button>}
       {canResume && <Button disabled={resuming} title="Resume this session and attach its terminal" onClick={onResume}>Resume</Button>}
       {s.resumability === "dead" && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>dead</span>}
+      {/* Archive is exited-only (a live session must be stopped first) — moves it (and a manager's
+          workers) out of the rail into the Archive tab. */}
+      {!live && <Button disabled={archiving} title="Archive this session out of the rail (a manager archives its workers too)"
+        onClick={(ev) => { ev.stopPropagation(); onArchive(); }}>Archive</Button>}
     </div>
   );
 }

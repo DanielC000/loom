@@ -75,7 +75,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   idle_nudge_policy TEXT NOT NULL DEFAULT 'watching', -- 'watching' | 'snoozed' | 'suppressed'
   idle_nudge_snooze_until TEXT,                        -- ISO ts | NULL (silent until this passes)
   last_idle_nudge_at TEXT,                             -- ISO ts | NULL (last nudge fired)
-  idle_nudge_unanswered INTEGER NOT NULL DEFAULT 0     -- consecutive unanswered nudges
+  idle_nudge_unanswered INTEGER NOT NULL DEFAULT 0,    -- consecutive unanswered nudges
+  -- Per-project session Archive (mirrors projects.archived_at): the ISO instant a dead/exited
+  -- session was archived out of the rail. NULL = not archived. Excluded from the live lists.
+  archived_at TEXT
 );
 -- Append-only orchestration audit trail (manager↔worker timeline; UI timeline in #18).
 CREATE TABLE IF NOT EXISTS orchestration_events (
@@ -150,6 +153,8 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   idle_nudge_snooze_until: "TEXT",
   last_idle_nudge_at: "TEXT",
   idle_nudge_unanswered: "INTEGER NOT NULL DEFAULT 0",
+  // Per-project session Archive (nullable; legacy rows backfill to NULL = not archived).
+  archived_at: "TEXT",
 };
 
 /** Columns added to `agents` after phase-1; applied to existing DBs by migrateAgents(). */
@@ -418,8 +423,12 @@ export class Db {
   }
 
   // --- sessions ---
+  // The rail/god-eye lists (listSessions/listAllSessions/listWorkers) EXCLUDE archived sessions so
+  // archiving clears them from Workspace/Terminals/Mission Control/Orchestration; the Archive tab
+  // reads them back via listArchivedSessions. getSession is unfiltered (an archived row is still
+  // addressable by id — the transcript route + restore/delete need it).
   listSessions(agentId: string): Session[] {
-    return this.db.prepare("SELECT * FROM sessions WHERE agent_id = ? ORDER BY last_activity DESC")
+    return this.db.prepare("SELECT * FROM sessions WHERE agent_id = ? AND archived_at IS NULL ORDER BY last_activity DESC")
       .all(agentId).map(toSession);
   }
   getSession(id: string): Session | undefined {
@@ -431,9 +440,52 @@ export class Db {
     const rows = this.db.prepare(
       `SELECT s.*, p.name AS project_name, a.name AS agent_name
        FROM sessions s JOIN projects p ON s.project_id = p.id JOIN agents a ON s.agent_id = a.id
+       WHERE s.archived_at IS NULL
        ORDER BY s.last_activity DESC`,
     ).all() as Row[];
     return rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string }));
+  }
+  /**
+   * EVERY session including archived, enriched with names — for the boot-time orchestration reconcile
+   * ONLY (finish orphaned merges + GC orphaned worktrees). An archived worker whose worktree still
+   * lingers must still be reconciled, so this deliberately bypasses the archived_at filter that the
+   * rail/god-eye listAllSessions applies. Not a UI feed.
+   */
+  listAllSessionsIncludingArchived(): SessionListItem[] {
+    const rows = this.db.prepare(
+      `SELECT s.*, p.name AS project_name, a.name AS agent_name
+       FROM sessions s JOIN projects p ON s.project_id = p.id JOIN agents a ON s.agent_id = a.id
+       ORDER BY s.last_activity DESC`,
+    ).all() as Row[];
+    return rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string }));
+  }
+  /** Archived sessions for a project's Archive tab, newest-archived first (enriched with names). */
+  listArchivedSessions(projectId: string): SessionListItem[] {
+    const rows = this.db.prepare(
+      `SELECT s.*, p.name AS project_name, a.name AS agent_name
+       FROM sessions s JOIN projects p ON s.project_id = p.id JOIN agents a ON s.agent_id = a.id
+       WHERE s.project_id = ? AND s.archived_at IS NOT NULL
+       ORDER BY s.archived_at DESC`,
+    ).all(projectId) as Row[];
+    return rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string }));
+  }
+  /** An archived manager's archived workers — for cascade restore/delete (NOT a rail feed). */
+  listArchivedWorkers(managerSessionId: string): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE parent_session_id = ? AND archived_at IS NOT NULL ORDER BY created_at")
+      .all(managerSessionId) as Row[]).map(toSession);
+  }
+  /** Soft-archive a session (stamp archived_at) — hidden from the rail/god-eye lists; row retained. */
+  archiveSession(id: string): void {
+    this.db.prepare("UPDATE sessions SET archived_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+  }
+  /** Restore an archived session back to the rail (clear archived_at). */
+  restoreSession(id: string): void {
+    this.db.prepare("UPDATE sessions SET archived_at = NULL WHERE id = ?").run(id);
+  }
+  /** Permanently delete a session row (the Archive tab's Delete). Also drops its pending wakes. */
+  deleteSession(id: string): void {
+    this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(id);
+    this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
   }
   insertSession(s: Session): void {
     this.db.prepare(
@@ -603,9 +655,9 @@ export class Db {
       kind: evt.kind, detailJson: evt.detail === undefined ? null : JSON.stringify(evt.detail),
     });
   }
-  /** The workers a manager spawned (its direct children). */
+  /** The workers a manager spawned (its direct children). Archived workers are excluded (rail feed). */
   listWorkers(managerSessionId: string): Session[] {
-    return (this.db.prepare("SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at")
+    return (this.db.prepare("SELECT * FROM sessions WHERE parent_session_id = ? AND archived_at IS NULL ORDER BY created_at")
       .all(managerSessionId) as Row[]).map(toSession);
   }
   /** Currently-LIVE manager sessions — the ContextWatcher's work set (recycle-by-context). */
@@ -797,6 +849,7 @@ function toSession(r0: unknown): Session {
     model: (r.model as string) ?? null,
     rateLimitedUntil: (r.rate_limited_until as string) ?? null,
     rateLimitDeadline: (r.rate_limit_deadline as string) ?? null,
+    archivedAt: (r.archived_at as string) ?? null,
   };
 }
 function toOrchestrationEvent(r0: unknown): OrchestrationEvent {

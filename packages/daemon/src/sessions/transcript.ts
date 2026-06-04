@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { LOOM_HOME } from "../paths.js";
 
 export interface TranscriptTurn {
   role: "user" | "assistant";
@@ -60,13 +61,8 @@ function extractText(content: unknown): string {
   return parts.join("\n");
 }
 
-/**
- * Render Claude's session JSONL into a clean, ordered transcript — the canonical
- * "read past conversation" surface (terminal scrollback is best-effort live-only).
- */
-export function readTranscript(cwd: string, engineSessionId: string): TranscriptTurn[] {
-  const file = resolveTranscriptFile(cwd, engineSessionId);
-  if (!file) return [];
+/** Parse one transcript JSONL file at `file` into clean, ordered turns (shared by live + archived). */
+function parseTranscriptFile(file: string): TranscriptTurn[] {
   let raw: string;
   try { raw = fs.readFileSync(file, "utf8"); } catch { return []; }
   const turns: TranscriptTurn[] = [];
@@ -80,4 +76,76 @@ export function readTranscript(cwd: string, engineSessionId: string): Transcript
     if (text.trim()) turns.push({ role: o.type, text });
   }
   return turns;
+}
+
+/**
+ * Render Claude's session JSONL into a clean, ordered transcript — the canonical
+ * "read past conversation" surface (terminal scrollback is best-effort live-only).
+ */
+export function readTranscript(cwd: string, engineSessionId: string): TranscriptTurn[] {
+  const file = resolveTranscriptFile(cwd, engineSessionId);
+  if (!file) return [];
+  return parseTranscriptFile(file);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────────────────────
+// Session Archive — transcript SNAPSHOT.
+//
+// Loom does NOT own transcripts; a session goes `resumability:"dead"` precisely BECAUSE Claude's
+// JSONL was deleted. So preserve (at EXIT, while the JSONL still exists) and archive (a later UI
+// tidy) are separate. snapshotTranscript copies the live JSONL into LOOM_HOME so an archived
+// session keeps a readable transcript even after Claude prunes the original. The snapshot is keyed
+// by (projectId, sessionId) — NOT the engine id — so it survives even if the engine id is reused.
+// ──────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Absolute path to a session's archived transcript snapshot under LOOM_HOME. */
+export function archivedTranscriptPath(projectId: string, sessionId: string): string {
+  return path.join(LOOM_HOME, "archives", projectId, `${sessionId}.jsonl`);
+}
+
+/** Whether a transcript snapshot was captured for this session. */
+export function archivedTranscriptExists(projectId: string, sessionId: string): boolean {
+  return fs.existsSync(archivedTranscriptPath(projectId, sessionId));
+}
+
+/**
+ * Best-effort snapshot of a session's engine transcript into the archive store. Called on the
+ * onExit transition (while the JSONL still exists). NEVER throws — the exit path must not be
+ * blocked. Idempotent: re-copies only when the snapshot is missing or older than the source (so a
+ * resumed-then-exited session refreshes its snapshot). Returns true iff a snapshot now exists.
+ * An already-dead session (no source JSONL) → no snapshot (returns false; the archive row then
+ * shows metadata only). Copy is atomic (temp + rename) so a concurrent read never sees a partial.
+ */
+export function snapshotTranscript(
+  cwd: string, engineSessionId: string, projectId: string, sessionId: string,
+): boolean {
+  try {
+    const src = resolveTranscriptFile(cwd, engineSessionId);
+    if (!src) return false; // already-dead session — nothing to preserve
+    const dest = archivedTranscriptPath(projectId, sessionId);
+    try {
+      const d = fs.statSync(dest);
+      const s = fs.statSync(src);
+      if (d.mtimeMs >= s.mtimeMs) return true; // snapshot already current — idempotent no-op
+    } catch { /* no snapshot yet — fall through and create it */ }
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    const tmp = `${dest}.tmp-${process.pid}`;
+    fs.copyFileSync(src, tmp);
+    fs.renameSync(tmp, dest); // atomic publish
+    return true;
+  } catch {
+    return false; // BEST-EFFORT — a snapshot failure must never disturb the exit path
+  }
+}
+
+/** Render an archived snapshot with the SAME parser as readTranscript. [] when no snapshot exists. */
+export function readArchivedTranscript(projectId: string, sessionId: string): TranscriptTurn[] {
+  const file = archivedTranscriptPath(projectId, sessionId);
+  if (!fs.existsSync(file)) return [];
+  return parseTranscriptFile(file);
+}
+
+/** Best-effort removal of a session's transcript snapshot (on permanent delete). Never throws. */
+export function deleteArchivedTranscript(projectId: string, sessionId: string): void {
+  try { fs.rmSync(archivedTranscriptPath(projectId, sessionId), { force: true }); } catch { /* best-effort */ }
 }

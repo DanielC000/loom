@@ -1,4 +1,4 @@
-import type { Project, Agent, Session, Task, SessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride } from "@loom/shared";
+import type { Project, Agent, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
@@ -30,6 +30,31 @@ async function put<T>(url: string, body: unknown): Promise<T> {
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
   return r.json() as Promise<T>;
 }
+// POST/DELETE that surface the server's JSON `{ error }` body as the thrown message — for the archive
+// surfaces, where an EXPECTED 400 (live group / not archived) carries a reason the UI shows verbatim.
+async function postErr<T>(url: string, body?: unknown): Promise<T> {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) {
+    let msg = `${url} -> ${r.status}`;
+    try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON */ }
+    throw new Error(msg);
+  }
+  return r.json() as Promise<T>;
+}
+async function delErr<T>(url: string): Promise<T> {
+  const r = await fetch(url, { method: "DELETE" });
+  if (!r.ok) {
+    let msg = `${url} -> ${r.status}`;
+    try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON */ }
+    throw new Error(msg);
+  }
+  return r.json() as Promise<T>;
+}
+
 // PATCH that surfaces the server's JSON `{ error }` body as the thrown message — the config schema is
 // strict zod, so a rejected override comes back 400 with a readable reason the Settings UI shows verbatim.
 async function patch<T>(url: string, body: unknown): Promise<T> {
@@ -79,6 +104,15 @@ export const api = {
   stopSession: (id: string, mode: "graceful" | "hard") =>
     post<{ ok: boolean }>(`/api/sessions/${id}/stop`, { mode }),
   allSessions: () => get<SessionListItem[]>("/api/sessions"),
+
+  // --- Per-project session Archive (HUMAN-only; mirrors stop/fork — no agent MCP surface). archive
+  // cascades a manager to its workers and 400s (with reason) if any group member is still live;
+  // restore brings one back to the rail (view-only if dead); deleteArchived is permanent (row(s) +
+  // snapshot). archivedSessions feeds the Archive tab (each row tagged snapshotExists). ---
+  archivedSessions: (projectId: string) => get<ArchivedSessionListItem[]>(`/api/projects/${projectId}/archive`),
+  archiveSession: (id: string) => postErr<{ archived: string[] }>(`/api/sessions/${id}/archive`),
+  restoreSession: (id: string) => postErr<{ restored: string }>(`/api/sessions/${id}/restore`),
+  deleteArchivedSession: (id: string) => delErr<{ deleted: string[] }>(`/api/sessions/${id}/archive`),
   vaultTree: (projectId: string) => get<VaultEntry[]>(`/api/projects/${projectId}/vault`),
   vaultFile: (projectId: string, path: string) =>
     get<{ path: string; content: string }>(`/api/projects/${projectId}/vault/file?path=${encodeURIComponent(path)}`),

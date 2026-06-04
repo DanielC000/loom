@@ -9,7 +9,7 @@ import {
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, isBranchMerged } from "../git/worktrees.js";
-import { engineTranscriptExists } from "./transcript.js";
+import { engineTranscriptExists, deleteArchivedTranscript } from "./transcript.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit } from "../orchestration/usage-awareness.js";
 import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon } from "../orchestration/restart.js";
@@ -378,6 +378,59 @@ export class SessionService {
       browserTesting: src.browserTesting ?? false,
     });
     return { ...session, processState: "live" };
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Per-project session Archive (HUMAN-only REST surface, like stop/fork — NEVER an MCP tool). A UI
+  // tidy action that moves a dead/exited session (and, for a manager, its workers) out of the
+  // Workspace rail + the god-eye views. Snapshot-on-exit (index.ts onExit) already preserved the
+  // transcript; these methods only flip the archived_at state + permanent delete.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Archive a session out of the rail. EXITED-only (a live session must be stopped first — the UI
+   * hides the button while live, and this re-checks server-side). A manager CASCADES to its workers;
+   * if ANY group member is still LIVE the whole archive is BLOCKED ("stop the fleet first"). The
+   * transcript snapshot was already captured on exit, so this is pure state. Idempotent: an
+   * already-archived session returns { archived: [] }.
+   */
+  archiveSession(sessionId: string): { archived: string[] } {
+    const s = this.db.getSession(sessionId);
+    if (!s) throw new Error("session not found");
+    if (s.archivedAt) return { archived: [] }; // already archived — idempotent no-op
+    // A manager carries its (non-archived) workers; any other session archives alone.
+    const group = [s, ...(s.role === "manager" ? this.db.listWorkers(s.id) : [])];
+    const live = group.filter((g) => g.processState === "live");
+    if (live.length > 0) {
+      throw new Error(`cannot archive a live session — stop the fleet first (${live.length} still live)`);
+    }
+    for (const g of group) this.db.archiveSession(g.id);
+    return { archived: group.map((g) => g.id) };
+  }
+
+  /** Restore an archived session back to the rail (single row — not a cascade). */
+  restoreSession(sessionId: string): { restored: string } {
+    const s = this.db.getSession(sessionId);
+    if (!s) throw new Error("session not found");
+    this.db.restoreSession(sessionId);
+    return { restored: sessionId };
+  }
+
+  /**
+   * Permanently delete an archived session: drop its row + transcript snapshot. A manager CASCADES
+   * to its archived workers (by the time a manager is archived, archiving already cascaded its
+   * workers, so they're archived too). Refuses a non-archived session (archive it first).
+   */
+  deleteArchivedSession(sessionId: string): { deleted: string[] } {
+    const s = this.db.getSession(sessionId);
+    if (!s) throw new Error("session not found");
+    if (!s.archivedAt) throw new Error("only an archived session can be permanently deleted");
+    const ids = [s.id, ...(s.role === "manager" ? this.db.listArchivedWorkers(s.id).map((w) => w.id) : [])];
+    for (const id of ids) {
+      deleteArchivedTranscript(s.projectId, id); // best-effort snapshot removal
+      this.db.deleteSession(id);
+    }
+    return { deleted: ids };
   }
 
   /**
@@ -1111,7 +1164,8 @@ export class SessionService {
    *     worktree to it on a re-task.
    */
   async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number }> {
-    const all = this.db.listAllSessions();
+    // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
+    const all = this.db.listAllSessionsIncludingArchived();
     const handledWorktrees = new Set<string>();
     let mergesFinished = 0;
     let mergesFailed = 0;
