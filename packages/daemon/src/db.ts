@@ -212,6 +212,13 @@ export interface IdleNudgeState {
 
 export class Db {
   private db: Database.Database;
+  /**
+   * Optional post-write listener for appended orchestration events — the chokepoint the outbound
+   * alert-webhook emitter hooks (wired at boot). Invoked AFTER the audit row is committed, in a
+   * try/catch, so a listener fault NEVER breaks the event path (best-effort by contract). Single
+   * listener by design (one emitter); not an event-bus.
+   */
+  private eventListener?: (evt: OrchestrationEvent) => void;
   constructor(file = DB_PATH) {
     assertNotProdDbInTest(file);
     this.db = new Database(file);
@@ -621,6 +628,10 @@ export class Db {
     this.db.prepare("UPDATE sessions SET idle_nudge_policy = 'watching', idle_nudge_snooze_until = NULL, idle_nudge_unanswered = 0 WHERE id = ?")
       .run(id);
   }
+  /** Register the post-write event listener (the alert-webhook emitter). At most one; replaces any prior. */
+  setEventListener(fn: (evt: OrchestrationEvent) => void): void {
+    this.eventListener = fn;
+  }
   /** Append an orchestration audit record (detail serialized to JSON). */
   appendEvent(evt: OrchestrationEvent): void {
     this.db.prepare(
@@ -631,6 +642,11 @@ export class Db {
       workerSessionId: evt.workerSessionId ?? null, taskId: evt.taskId ?? null,
       kind: evt.kind, detailJson: evt.detail === undefined ? null : JSON.stringify(evt.detail),
     });
+    // Notify the (optional) listener AFTER the row is committed. Best-effort: a listener fault must
+    // never propagate into the orchestration event path, so swallow it.
+    if (this.eventListener) {
+      try { this.eventListener(evt); } catch { /* listener faults never break the audit write */ }
+    }
   }
   /** The workers a manager spawned (its direct children). */
   listWorkers(managerSessionId: string): Session[] {

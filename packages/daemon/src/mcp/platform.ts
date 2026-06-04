@@ -22,8 +22,18 @@ const permissionOverride = z.object({
   deny: z.array(z.string()).optional(),
 }).strict();
 const ptyOverride = z.object({ cols: z.number().optional(), rows: z.number().optional() }).strict();
+// Outbound alert webhook (external delivery). `url` must be a real URL; `events` is the kind
+// subset to deliver on. Validated as strings here (the OrchestrationEventKind union is type-only —
+// the emitter just `.includes()`-matches, so an unrecognized kind harmlessly never fires).
+const alertWebhookSchema = z.object({
+  url: z.string().url(),
+  events: z.array(z.string().min(1)),
+}).strict();
 const orchestrationOverride = z.object({
   gateCommand: z.string().optional(),
+  // HUMAN-only (data-exfiltration vector — see agentOrchestrationOverride). Accepted on this human
+  // path; dropped from the agent path so an agent can't redirect orchestration data off-box.
+  alertWebhook: alertWebhookSchema.optional(),
   // Concurrency caps gate worker_spawn / Scheduler manager launches: whole-number, ≥1 (a cap of 0
   // would deadlock all spawning), with a generous safety ceiling so a fat-fingered value can't
   // authorize a fleet-bomb.
@@ -49,16 +59,18 @@ const projectConfigOverrideSchema = z.object({
 }).strict();
 
 /**
- * Agent-facing variant of the config schema. `orchestration.gateCommand` is a STRING the daemon
- * later runs via `spawnSync(..., { shell: true })` on the host (see `confirmWorkerMerge` in
- * sessions/service.ts) — i.e. host-RCE-capable by design. It is therefore TRUSTED/human-set only and
- * MUST NOT be writable through the agent-facing loom-platform MCP path. We drop it from the
- * orchestration shape; `.strict()` then makes any `gateCommand` key a REJECTED unknown key, so an
- * agent attempting to set it gets an error and the stored config is left unchanged. DRY: this reuses
- * the same base shapes — only `orchestration` is narrowed. The REST PATCH path keeps the full
- * `projectConfigOverrideSchema` (the human/trusted path), so gateCommand stays human-settable there.
+ * Agent-facing variant of the config schema. Two `orchestration` keys are TRUSTED/human-set ONLY and
+ * MUST NOT be writable through the agent-facing loom-platform MCP path:
+ *   - `gateCommand` — a STRING the daemon later runs via `spawnSync(..., { shell: true })` on the host
+ *     (see `confirmWorkerMerge` in sessions/service.ts), i.e. host-RCE-capable by design.
+ *   - `alertWebhook` — an outbound URL the daemon POSTs orchestration data to, i.e. a DATA-EXFILTRATION
+ *     vector: an agent that could set it would redirect the event stream to an attacker endpoint.
+ * We drop BOTH from the orchestration shape; `.strict()` then makes either key a REJECTED unknown key,
+ * so an agent attempting to set one gets an error and the stored config is left unchanged. DRY: this
+ * reuses the same base shapes — only `orchestration` is narrowed. The REST PATCH path keeps the full
+ * `projectConfigOverrideSchema` (the human/trusted path), so both stay human-settable there.
  */
-const agentOrchestrationOverride = orchestrationOverride.omit({ gateCommand: true }).strict();
+const agentOrchestrationOverride = orchestrationOverride.omit({ gateCommand: true, alertWebhook: true }).strict();
 const agentProjectConfigOverrideSchema = projectConfigOverrideSchema
   .extend({ orchestration: agentOrchestrationOverride.optional() })
   .strict();
@@ -77,8 +89,9 @@ export function validateProjectConfigOverride(
 }
 
 /**
- * Agent (loom-platform MCP) path validator: identical to the REST validator EXCEPT it rejects
- * `orchestration.gateCommand` (host-RCE-capable; trusted/human-set only — see schema note above).
+ * Agent (loom-platform MCP) path validator: identical to the REST validator EXCEPT it rejects the
+ * human-only `orchestration.gateCommand` (host-RCE-capable) and `orchestration.alertWebhook`
+ * (data-exfiltration vector) — see the schema note above.
  */
 export function validateAgentProjectConfigOverride(
   raw: unknown,
