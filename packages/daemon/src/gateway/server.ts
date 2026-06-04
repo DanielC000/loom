@@ -5,7 +5,7 @@ import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import { nextFireAt } from "../orchestration/cron.js";
-import { readTranscript } from "../sessions/transcript.js";
+import { readTranscript, readArchivedTranscript, archivedTranscriptExists } from "../sessions/transcript.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell } from "../pty/host.js";
@@ -238,10 +238,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!p) return reply.code(404).send({ error: "project not found" });
     return { columns: resolveConfig(p.config).kanbanColumns, tasks: deps.db.listTasks(p.id) };
   });
-  // Transcript = Claude's session JSONL rendered to clean turns (canonical history).
+  // Transcript = Claude's session JSONL rendered to clean turns (canonical history). For an ARCHIVED
+  // session the live JSONL is usually gone, so prefer the on-exit snapshot; fall through to the live
+  // transcript when no snapshot exists (a session archived while still dead has neither → []).
   app.get("/api/sessions/:id/transcript", async (req) => {
     const s = deps.db.getSession((req.params as { id: string }).id);
-    if (!s?.engineSessionId) return [];
+    if (!s) return [];
+    if (s.archivedAt && archivedTranscriptExists(s.projectId, s.id)) return readArchivedTranscript(s.projectId, s.id);
+    if (!s.engineSessionId) return [];
     return readTranscript(s.cwd, s.engineSessionId);
   });
   // A worker's branch diff for the orchestration view (read-only — does NOT call reviewWorkerMerge,
@@ -506,6 +510,37 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     } catch (e) {
       return reply.code(400).send({ error: (e as Error).message });
     }
+  });
+
+  // --- Per-project session Archive (HUMAN/REST only — like stop/fork/merge, NEVER an MCP tool).
+  // Archive moves a dead/exited session (a manager cascades to its workers) out of the rail + god-eye
+  // views; the snapshot was already captured on exit. Restore brings one back (view-only if dead);
+  // Delete is permanent (row(s) + snapshot). An EXPECTED failure (live group / not archived) comes
+  // back 400 with the reason so the UI shows it. ---
+  app.post("/api/sessions/:id/archive", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+    try { return reply.send(deps.sessions.archiveSession(id)); }
+    catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+  });
+  app.post("/api/sessions/:id/restore", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+    try { return reply.send(deps.sessions.restoreSession(id)); }
+    catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+  });
+  app.delete("/api/sessions/:id/archive", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+    try { return reply.send(deps.sessions.deleteArchivedSession(id)); }
+    catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+  });
+  // Archived sessions for a project's Archive tab, each tagged with whether a transcript snapshot
+  // was captured on exit (false ⇒ "no transcript captured" — it was already dead when archived).
+  app.get("/api/projects/:id/archive", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    return deps.db.listArchivedSessions(id).map((s) => ({ ...s, snapshotExists: archivedTranscriptExists(id, s.id) }));
   });
 
   // --- Plain SHELL terminals (human-only): spawn pwsh/cmd/bash in a project's repo cwd ---

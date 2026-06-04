@@ -2,6 +2,7 @@ import { resolveConfig } from "@loom/shared";
 import { ensureDirs, PORT } from "./paths.js";
 import { Db } from "./db.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
+import { snapshotTranscript } from "./sessions/transcript.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles } from "./profiles/seed.js";
 import { PtyHost } from "./pty/host.js";
@@ -64,7 +65,19 @@ async function main(): Promise<void> {
       recordClaudeRateLimit(detail.resetsAtSeconds);
     },
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
-    onExit: (sessionId) => { db.setProcessState(sessionId, "exited"); db.setBusy(sessionId, false); mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); },
+    onExit: (sessionId) => {
+      db.setProcessState(sessionId, "exited");
+      db.setBusy(sessionId, false);
+      // Auto-snapshot the engine transcript on exit, while the JSONL still exists — so an archived
+      // session keeps a readable transcript even after Claude later prunes the original (a session
+      // goes 'dead' BECAUSE its JSONL was deleted). Best-effort: snapshotTranscript never throws, and
+      // getSession is null for shell terminals (not DB sessions) → skipped.
+      try {
+        const s = db.getSession(sessionId);
+        if (s?.engineSessionId) snapshotTranscript(s.cwd, s.engineSessionId, s.projectId, s.id);
+      } catch { /* never disturb the exit path */ }
+      mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId);
+    },
   });
 
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design

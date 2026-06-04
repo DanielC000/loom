@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import MissionControl from "./pages/MissionControl";
 import Workspace from "./pages/Workspace";
+import Archive from "./pages/Archive";
 import Terminals from "./pages/Terminals";
 import Board from "./pages/Board";
 import Orchestration from "./pages/Orchestration";
@@ -31,6 +32,7 @@ export type NavPage = {
 export const NAV_PAGES: NavPage[] = [
   { label: "Mission Control", nav: "Mission", to: "/", end: true, element: <MissionControl /> },
   { label: "Workspace", to: "/workspace", element: <Workspace /> },
+  { label: "Archive", to: "/archive", element: <Archive /> },
   { label: "Terminals", to: "/terminals", element: <Terminals /> },
   { label: "Board", to: "/board", element: <Board /> },
   { label: "Orchestration", to: "/orchestration", element: <Orchestration /> },

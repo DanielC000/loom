@@ -22,6 +22,7 @@ const HERMETIC = [
   "orch-model", "dead-id", "boot-reconcile", "merge-done-crash-recovery", "restart-intent",
   "profiles", "profiles-crud", "profile-spawn", "browser-testing-spawn",
   "tasks-filter", "tasks-priority", "config-bounds", "transcript-encode", "alert-webhook",
+  "session-archive",
   "claude-config", "trust-lock", "spawn-args",
   "context-watcher", "context-stats", "recycle-handoff", "wake",
   "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull", "usage-status",

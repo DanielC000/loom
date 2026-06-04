@@ -139,6 +139,14 @@ export interface Session {
    * existing session ⇒ no Playwright MCP, byte-identical spawn.
    */
   browserTesting?: boolean;
+  /**
+   * Per-project session Archive: the ISO instant a session was archived (a UI tidy action that moves
+   * a dead/exited session out of the Workspace rail). null = not archived (every live/normal session).
+   * Archived sessions are EXCLUDED from the rail/god-eye lists and surface only in the Archive tab.
+   * Mirrors the project soft-archive pattern (`Project.archivedAt`). Only an EXITED session is
+   * archivable; archiving a manager cascades to its workers.
+   */
+  archivedAt?: string | null;
 }
 
 /** Append-only orchestration audit record (the manager↔worker timeline). */
@@ -166,6 +174,15 @@ export interface OrchestrationEvent {
 export interface SessionListItem extends Session {
   projectName: string;
   agentName: string;
+}
+
+/**
+ * An archived session row for the per-project Archive tab — a SessionListItem plus whether a
+ * transcript SNAPSHOT was captured on exit (false ⇒ "no transcript captured" — the session was
+ * already dead when archived, so its engine JSONL was gone before a snapshot could be taken).
+ */
+export interface ArchivedSessionListItem extends SessionListItem {
+  snapshotExists: boolean;
 }
 
 /** A read-only vault file-tree entry. */
