@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Dot } from "./ui";
@@ -9,14 +10,49 @@ import { color, font } from "../theme";
 // Renders nothing when the queue is empty, so it stays out of the way.
 export function SessionQueue({ sessionId }: { sessionId: string }) {
   const q = useQuery({ queryKey: ["queue", sessionId], queryFn: () => api.sessionQueue(sessionId), refetchInterval: 3000 });
+  const [expanded, setExpanded] = useState(false);
   const pending = q.data?.pending ?? [];
   if (pending.length === 0) return null;
+
+  const label = (
+    <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>
+      Queued ({pending.length})
+    </span>
+  );
+
+  // <=2: inline, today's behavior. >2: a single calm collapsed row (count + toggle + a one-line peek),
+  // clicking toggles to reveal all chips.
+  if (pending.length <= 2) {
+    return (
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 4 }}>
+        {label}
+        {pending.map((text, i) => <QueueChip key={i} text={text} />)}
+      </div>
+    );
+  }
+
+  const peek = pending[0].replace(/\s+/g, " ").trim();
   return (
-    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 4 }}>
-      <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>
-        Queued ({pending.length})
-      </span>
-      {pending.map((text, i) => <QueueChip key={i} text={text} />)}
+    <div style={{ marginTop: 4 }}>
+      <div
+        onClick={() => setExpanded((e) => !e)}
+        title={expanded ? "Collapse" : "Expand"}
+        style={{ display: "flex", gap: 6, alignItems: "center", cursor: "pointer", userSelect: "none" }}
+      >
+        <Dot tone="amber" />
+        {label}
+        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>{expanded ? "▾" : "▸"}</span>
+        {!expanded && (
+          <span title={pending[0]} style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 360 }}>
+            {peek}
+          </span>
+        )}
+      </div>
+      {expanded && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 4 }}>
+          {pending.map((text, i) => <QueueChip key={i} text={text} />)}
+        </div>
+      )}
     </div>
   );
 }
