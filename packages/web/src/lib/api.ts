@@ -65,7 +65,7 @@ export const api = {
   updateAgent: (id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null }) =>
     post<Agent>(`/api/agents/${id}`, patch),
   tasks: (projectId: string) => get<Task[]>(`/api/projects/${projectId}/tasks`),
-  createTask: (projectId: string, b: { title: string; body?: string; columnKey?: string }) =>
+  createTask: (projectId: string, b: { title: string; body?: string; columnKey?: string; priority?: Task["priority"] }) =>
     post<Task>(`/api/projects/${projectId}/tasks`, b),
   sessions: (agentId: string) => get<Session[]>(`/api/agents/${agentId}/sessions`),
   // role omitted/undefined = auto (the agent's profile role applies, server-side); "manager"/"platform"
@@ -108,7 +108,7 @@ export const api = {
     post<{ ok: boolean; branch?: string; error?: string }>(`/api/projects/${projectId}/git/push`),
   board: (projectId: string) =>
     get<{ columns: KanbanColumn[]; tasks: Task[] }>(`/api/projects/${projectId}/board`),
-  updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position">>) =>
+  updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority">>) =>
     post<{ ok: boolean }>(`/api/tasks/${id}`, patch),
   transcript: (sessionId: string) => get<TranscriptTurn[]>(`/api/sessions/${sessionId}/transcript`),
   // Pending one-shot wake-ups scheduled for a session (the wake_me primitive).
