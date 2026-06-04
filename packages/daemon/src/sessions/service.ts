@@ -8,6 +8,7 @@ import {
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, isBranchMerged } from "../git/worktrees.js";
 import { engineTranscriptExists, deleteArchivedTranscript } from "./transcript.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
@@ -245,14 +246,20 @@ export class SessionService {
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd, // SAME cwd — Claude keys sessions to the project dir
-      // RESUME asserts the exec mode DIFFERENTLY from a fresh spawn: pin startupModeCycles to 0 so the
-      // restored mode is left untouched. A fresh spawn boots at the gate-free `mode` (acceptEdits) and
-      // the config's 2 Shift+Tab cycles step it to the target. But `claude --resume` RESTORES the
-      // session's PERSISTED permission mode (it does NOT re-apply `--permission-mode`), so on resume the
-      // engine is already AT the target mode — running the same 2 cycles would OVERSHOOT it (acceptEdits
-      // +2 → plan, which wedges an auto-resumed manager: no spawns/merges/edits). Observed twice on
-      // 2026-06-04→05. So override cycles to 0 here (and ONLY here — fresh spawns keep the config's 2).
+      // RESUME mode convergence (card f05e4897) — SUPERSEDES Fix A's blind startupModeCycles:0. A
+      // `claude --resume` HONOURS `--permission-mode acceptEdits` and boots at acceptEdits — the SAME
+      // gate-free mode a fresh spawn boots in (probe-verified on 2.1.163; it does NOT restore the
+      // persisted mode, the opposite of Fix A's premise). A fresh spawn then blind-cycles the config's
+      // `startupModeCycles` (2) Shift+Tabs to the target (auto). On the resume path a blind count is
+      // unreliable (the old blind-2 half-landed on plan on the summary-gate path — the 2026-06-03 strand
+      // bug; Fix A's blind-0 left it ONE short, stuck at acceptEdits). So resume converges ABSOLUTELY:
+      // pass the target mode and host.ts feedback-cycles the footer to it (bounded + graceful — worst
+      // case stays at today's acceptEdits). The target is wherever a FRESH spawn of THIS config lands
+      // (modeAfterCyclesFromAcceptEdits of the same startupModeCycles → auto by default), so a resumed
+      // session matches a fresh one exactly. startupModeCycles is moot on this path (the feedback cycler,
+      // not the blind count, moves the mode) — pin it 0 so the FRESH blind branch stays inert here.
       permission: { ...config.permission, startupModeCycles: 0 },
+      resumeModeTarget: modeAfterCyclesFromAcceptEdits(config.permission.startupModeCycles ?? 0),
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook

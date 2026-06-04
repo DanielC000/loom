@@ -7,16 +7,19 @@
 //  • Shift+Tab cycle order from acceptEdits (period 4):
 //        acceptEdits →(+1) plan →(+2) auto →(+3) default/normal (no "X on" label) →(+4) acceptEdits.
 //    ⇒ the prod config's startupModeCycles:2 (fresh) lands a manager in AUTO (matches "acceptEdits/auto").
-//  • DECISIVE: a session PERSISTED IN PLAN, resumed with `--resume` + `--permission-mode acceptEdits`
-//    + startupModeCycles:0 (Fix A's EXACT prod resume opts) → lands in "accept edits on", NOT plan.
-//    So `claude --resume` HONORS `--permission-mode acceptEdits` and OVERRIDES the persisted mode —
-//    the OPPOSITE of the card's premise ("--permission-mode still passed, still ignored on resume").
-//  ⇒ The reported "resume lands in PLAN" bug does NOT reproduce on the installed claude; Fix A
-//    (startupModeCycles:0 on resume) already yields a correct, non-plan resume. See the worker report.
-//  • A bounded feedback-cycle on the resumed session DOES reach acceptEdits reliably (PHASE 5) — so a
-//    feedback-driven absolute assertion IS viable IF the bug ever resurfaces (footer is parseable, cycle
-//    deterministic). Not built here: the bug is unreproducible, so it would be an unverifiable change to
-//    the load-bearing boot recipe (per the card's "don't ship brittle/unsafe code on this path").
+//  • A session PERSISTED IN PLAN, resumed with `--resume` + `--permission-mode acceptEdits` lands in
+//    "accept edits on", NOT plan: `claude --resume` HONORS `--permission-mode acceptEdits` and boots at
+//    acceptEdits — the SAME gate-free mode a fresh spawn boots in (it does NOT restore the persisted mode).
+//  • THE FIX (card f05e4897): a daemon-resumed manager must land in AUTO (where a fresh manager lands),
+//    but with Fix A's blind startupModeCycles:0 a resume stops at acceptEdits — ONE short. So the resume
+//    path now feedback-cycles the footer to auto (host.ts cycleResumeToMode, driven by resumeModeTarget).
+//
+// ════════ WHAT THIS PROBE NOW VALIDATES (the DoD evidence) ════════
+//   PHASE 1: FRESH spawn with the prod startupModeCycles:2 → ASSERT footer reaches "auto mode on".
+//   PHASE 3: persist the session in PLAN (a NON-auto mode), seed a turn, capture the engine id.
+//   PHASE 4 (BEFORE): RESUME with NO resumeModeTarget (Fix A's blind-0) → observe it lands at acceptEdits.
+//   PHASE 5 (AFTER/THE FIX): RESUME with resumeModeTarget:"auto" → the host auto-feedback-cycles →
+//            ASSERT footer reaches "auto mode on". The BEFORE/AFTER footers are the before/after evidence.
 //
 // ISOLATION (HARD RULES): temp LOOM_HOME, port 4319 (NOT prod 4317), a throwaway temp git repo.
 // The relay POSTs hooks to OUR minimal server on 4319 — the prod daemon never sees these sessions.
@@ -152,29 +155,27 @@ async function waitForStop(id, sinceCount, timeoutMs) {
   return false;
 }
 
-try {
-  // ===== PHASE 1: FRESH boot, no cycles → observe pure boot mode =====
-  const A = "probe-fresh";
-  spawn(A);
-  console.log("[probe] fresh spawned; waiting for boot…");
-  await sleep(9000);
-  await reportFooter(A, "FRESH boot (startupModeCycles:0, --permission-mode acceptEdits)");
-  // dump a slice of the footer region (last ANSI-stripped lines) for the exact-string record
-  {
-    const lines = stripAnsi(cap(A).raw).split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
-    console.log("[probe] FRESH footer tail:\n" + lines.slice(-8).join("\n"));
-  }
+const results = []; // { label, pass } — printed as the final verdict
+const assert = (label, cond) => { results.push({ label, pass: !!cond }); console.log(`[probe] ${cond ? "PASS" : "FAIL"}  ${label}`); };
+const dumpTail = (id, label, n = 10) => {
+  const lines = stripAnsi(cap(id).raw).split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
+  console.log(`[probe] ${label} footer tail:\n` + lines.slice(-n).join("\n"));
+};
 
-  // ===== PHASE 2: map the FULL Shift+Tab cycle order from acceptEdits (clean reads) =====
-  console.log("[probe] --- mapping cycle order from acceptEdits (Shift+Tab x5, clean reads) ---");
-  for (let i = 1; i <= 5; i++) await cycleAndRead(A, `FRESH after ${i} Shift+Tab`);
+try {
+  // ===== PHASE 1: FRESH spawn with the PROD startupModeCycles:2 → must reach AUTO (host blind-cycles) =====
+  const A = "probe-fresh";
+  spawn(A, { permission: { ...permission, startupModeCycles: 2 } });
+  console.log("[probe] fresh spawned (startupModeCycles:2 — the prod fresh path); waiting for boot + cycle…");
+  await sleep(12000);
+  const ff = await reportFooter(A, "FRESH boot (startupModeCycles:2, --permission-mode acceptEdits)");
+  dumpTail(A, "FRESH");
+  assert("FRESH spawn (startupModeCycles:2) reaches AUTO — the host's blind cycle still works", ff.mode === "auto");
 
   // ===== PHASE 3: cycle to PLAN deliberately, then seed a turn so PLAN is the PERSISTED mode =====
-  // This is the decisive setup: persist a NON-acceptEdits mode, then resume WITH --permission-mode
-  // acceptEdits. If resume lands in plan → --resume restores PERSISTED + IGNORES the flag (the card's
-  // claim, and the real prod bug = the manager was persisted in plan). If it lands in acceptEdits →
-  // the flag IS honored on resume.
-  console.log("[probe] --- cycling to PLAN (bounded, feedback-driven) ---");
+  // Persist a NON-auto mode so the resume's BEFORE/AFTER is decisive (the persisted mode is plan, the
+  // boot mode is acceptEdits, the FIX must drive it to auto).
+  console.log("[probe] --- cycling FRESH → PLAN (bounded, feedback-driven) to seed a non-auto persisted mode ---");
   let cur = footer(A).mode;
   for (let i = 0; i < 6 && cur !== "plan"; i++) cur = (await cycleAndRead(A, `→plan step ${i + 1}`)).mode;
   console.log(`[probe] mode before seed = ${cur} (want plan)`);
@@ -192,27 +193,40 @@ try {
   host.stop(A, "graceful");
   await sleep(5000);
 
-  if (!eng) { console.log("[probe] NO ENGINE ID — cannot resume; aborting resume phases"); }
+  if (!eng) { assert("captured an engine id to resume (resume phases ran)", false); }
   else {
-    // ===== PHASE 4: RESUME (prod's exact resume opts) → THE DECISIVE OBSERVATION =====
-    const B = "probe-resume";
+    // ===== PHASE 4 (BEFORE): RESUME with Fix A's blind-0 + NO resumeModeTarget → lands at acceptEdits =====
+    // This is the BEFORE state the fix corrects: --resume honours --permission-mode → boots acceptEdits,
+    // and with no cycling it stays there (one short of auto).
+    const B = "probe-resume-before";
     captures.set(B, { raw: "" });
-    spawn(B, { resumeId: eng });
-    console.log("[probe] resumed; waiting for boot…");
-    await sleep(11000);
-    const rf = await reportFooter(B, "RESUME boot (persisted=plan, --permission-mode acceptEdits, cycles:0)");
-    console.log(`[probe] *** DECISIVE: --resume of a PLAN-persisted session with --permission-mode acceptEdits → ${rf.mode} ***`);
-    {
-      const lines = stripAnsi(cap(B).raw).split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
-      console.log("[probe] RESUME footer tail:\n" + lines.slice(-10).join("\n"));
-    }
+    spawn(B, { resumeId: eng, permission: { ...permission, startupModeCycles: 0 } });
+    console.log("[probe] resumed WITHOUT the fix (startupModeCycles:0, no resumeModeTarget); waiting for boot…");
+    await sleep(12000);
+    const rb = await reportFooter(B, "RESUME BEFORE (no fix): persisted=plan, --permission-mode acceptEdits, cycles:0");
+    dumpTail(B, "RESUME BEFORE");
+    assert("BEFORE: a resume with no convergence lands at acceptEdits (one short of auto — the bug)", rb.mode === "acceptEdits");
+    host.stop(B, "graceful");
+    await sleep(5000);
 
-    // ===== PHASE 5: feedback-cycle the RESUMED session to acceptEdits (validates the fix mechanism) =====
-    console.log("[probe] --- feedback-cycling RESUME → acceptEdits (bounded ≤6) ---");
-    let rcur = footer(B).mode;
-    for (let i = 0; i < 6 && rcur !== "acceptEdits"; i++) rcur = (await cycleAndRead(B, `RESUME →acceptEdits step ${i + 1}`)).mode;
-    console.log(`[probe] *** RESUME reached mode=${rcur} via feedback cycling (target acceptEdits) ***`);
+    // ===== PHASE 5 (AFTER / THE FIX): RESUME with resumeModeTarget:"auto" → host auto-cycles → AUTO =====
+    const C = "probe-resume-after";
+    captures.set(C, { raw: "" });
+    // resumeModeTarget drives host.ts cycleResumeToMode automatically after SessionStart — the probe does
+    // NOT press any keys here; it only reads the settled footer. This is the prod resume path under test.
+    spawn(C, { resumeId: eng, permission: { ...permission, startupModeCycles: 0 }, resumeModeTarget: "auto" });
+    console.log("[probe] resumed WITH the fix (resumeModeTarget:auto — host auto-feedback-cycles); waiting for boot + convergence…");
+    await sleep(20000); // boot (~11s) + the bounded feedback cycle (well under READY_FALLBACK_MS)
+    const ra = await reportFooter(C, "RESUME AFTER (fix): persisted=plan, resumeModeTarget=auto");
+    dumpTail(C, "RESUME AFTER");
+    assert("AFTER: the fix drives the resumed session to AUTO with NO probe keystrokes (host feedback-cycled)", ra.mode === "auto");
+    console.log(`[probe] *** BEFORE=${rb.mode}  →  AFTER=${ra.mode}  (target auto) ***`);
   }
+
+  const passed = results.filter((r) => r.pass).length;
+  console.log(`\n[probe] ${passed}/${results.length} assertions passed.`);
+  if (passed !== results.length) console.log("[probe] ❌ FAILURES:\n" + results.filter((r) => !r.pass).map((r) => "  - " + r.label).join("\n"));
+  else console.log("[probe] ✅ ALL PASS — FRESH→auto and RESUME→auto (the fix), with a decisive acceptEdits BEFORE.");
 } finally {
   console.log("[probe] cleanup — killing all probe claude…");
   for (const id of spawned) { try { host.stop(id, "hard"); } catch { /* ignore */ } }
