@@ -97,8 +97,8 @@ async function main(): Promise<void> {
   // dev daemon — and that would also block usage-limit auto-resume).
   try {
     const reconciled = await sessions.reconcileOrchestrationOnBoot(protectedSessionIds);
-    if (reconciled.mergesFinished || reconciled.mergesFailed || reconciled.staleMergesResolved || reconciled.worktreesPruned) {
-      console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${reconciled.mergesFailed} failed (retry next boot), resolved ${reconciled.staleMergesResolved} branch-gone dangling merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s)`);
+    if (reconciled.mergesFinished || reconciled.mergesFailed || reconciled.staleMergesResolved || reconciled.worktreesPruned || reconciled.worktreesKept) {
+      console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${reconciled.mergesFailed} failed (retry next boot), resolved ${reconciled.staleMergesResolved} branch-gone dangling merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s), kept ${reconciled.worktreesKept} holding unmerged/uncommitted work`);
     }
   } catch (err) {
     console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);

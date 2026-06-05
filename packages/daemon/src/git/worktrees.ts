@@ -350,6 +350,90 @@ export async function isBranchMerged(repoPath: string, branch: string, base = "H
   }
 }
 
+/**
+ * Does `git status --porcelain` output represent REAL worker work, or only daemon-injected noise?
+ * Loom mirrors its managed skills/settings into every worktree's `.claude/` (injectSkills); in a
+ * worktree those untracked files are hidden only via the SHARED main `.git/info/exclude` (hideFromGit
+ * no-ops in a worktree, where `.git` is a file), so a skill name not yet in that shared exclude
+ * surfaces as `?? .claude/…`. That is NEVER the worker's product — the product is src/, package files,
+ * tests, anything OUTSIDE `.claude/` — so an UNTRACKED path under `.claude/` is ignored. Everything
+ * else counts as work: tracked modifications ANYWHERE (incl. a tracked file under `.claude/`),
+ * staged/unstaged changes, and untracked paths OUTSIDE `.claude/`. Without this discriminator the
+ * injected noise would make a genuinely-merged worktree read dirty and block its legitimate cleanup
+ * (the merge-recovery regression). Exported so the guard's behavior is unit-testable in isolation.
+ */
+export function worktreeStatusHasWork(porcelain: string): boolean {
+  for (const line of porcelain.split(/\r?\n/)) {
+    if (line.trim() === "") continue;
+    // porcelain v1 line: 2 status chars, a space, then the path. `??` = untracked.
+    if (line.slice(0, 2) === "??") {
+      let p = line.slice(3);
+      if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1); // git quotes paths with special chars
+      if (p.startsWith(".claude/")) continue; // daemon-injected untracked noise → not the worker's product
+    }
+    return true; // any tracked change, or any untracked path outside `.claude/`, is real work
+  }
+  return false;
+}
+
+/**
+ * SAFE-TO-DISCARD guard for BOTH boot-reconcile passes (P0 data-loss fix, 2026-06-05). Does this
+ * worktree still hold work we'd LOSE by deleting it? "Work" = EITHER the working tree is DIRTY
+ * (real uncommitted/untracked changes — see {@link worktreeStatusHasWork}, which ignores daemon-injected
+ * `.claude/` noise) OR the branch is AHEAD OF `base` (commits not yet reachable from the canonical
+ * HEAD — `git rev-list --count base..branch` > 0).
+ *
+ * THE BUG IT GUARDS: a `daemon_restart` marks EVERY prior-run session `exited` at boot, so an unrelated
+ * manager's LIVE worker is misdetected at boot and its worktree deleted mid-task, pre-commit (confirmed
+ * data loss, 2026-06-05). TWO vectors, both gated by this:
+ *   - Pass B GC'd any exited+unprotected worktree (the branch-AHEAD case).
+ *   - Pass A treats a 0-commit branch as a merged orphan (its tip == HEAD), so a live worker with
+ *     UNCOMMITTED work and a not-yet-advanced branch was finalizeMerge'd — worktree removed AND task
+ *     marked done AND branch deleted. A genuine orphaned merge is clean AND 0-ahead → this returns
+ *     false → it finalizes normally (no merge-recovery regression).
+ *
+ * FAILS SAFE: every op is bounded by the same block-timeout + {@link withTimeout} guard as the other
+ * reconcile ops, so the check itself can never wedge boot; on ANY timeout/error/parse-failure we return
+ * TRUE (assume work) so a wedged or locked check can never CAUSE a delete. Worst case we keep a
+ * discardable dir for the next pass — never the reverse. The git seam is injectable ({@link BoundedGitDeps})
+ * so a test can prove both the work-detection and the fail-safe bound.
+ */
+export async function worktreeHasWork(
+  repoPath: string,
+  worktreePath: string,
+  branch: string | null,
+  base = "HEAD",
+  deps: BoundedGitDeps = {},
+): Promise<boolean> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+
+  // (1) Dirty working tree? Read porcelain status IN the worktree (its own index + working tree),
+  //     ignoring daemon-injected untracked `.claude/` noise (see worktreeStatusHasWork).
+  try {
+    const wt = makeGit(worktreePath, timeoutMs);
+    const porcelain = await withTimeout(wt.raw(["status", "--porcelain"]), timeoutMs, "git status --porcelain");
+    if (worktreeStatusHasWork(porcelain)) return true;
+  } catch {
+    return true; // bounded failure → fail SAFE (assume work, keep the dir)
+  }
+
+  // (2) Branch ahead of the canonical base? Any commit reachable from the branch but not from `base`.
+  if (branch) {
+    try {
+      const ahead = parseInt(
+        (await withTimeout(git.raw(["rev-list", "--count", `${base}..${branch}`]), timeoutMs, "git rev-list --count")).trim(),
+        10,
+      );
+      if (!Number.isFinite(ahead) || ahead > 0) return true; // NaN (parse/ref error) or >0 → fail SAFE / has work
+    } catch {
+      return true; // bounded failure → fail SAFE
+    }
+  }
+
+  return false;
+}
+
 /** A branch's changes since it diverged from base — the manager's pre-merge diff review (#16). */
 export async function diffBranch(
   repoPath: string, branch: string, base = "HEAD",

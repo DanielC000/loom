@@ -1,0 +1,185 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
+// P0 DATA-LOSS guard test (2026-06-05). boot-reconcile must NEVER auto-delete a worktree that still
+// holds the worker's work. recoverStaleSessions marks EVERY prior-run session `exited` at boot, so a
+// LIVE worker (e.g. an unrelated manager's, dropped by a daemon_restart) is misdetected and was deleted
+// mid-task. TWO vectors, both now gated by worktreeHasWork():
+//   - Pass B: GC'd any exited+unprotected worktree (the branch-AHEAD case).
+//   - Pass A: a 0-commit branch's tip == HEAD, so isBranchMerged()=true → finalizeMerge removed the
+//     worktree AND marked the task done AND deleted the branch — the worst case, for the literal
+//     "completed-but-uncommitted" shape.
+// REAL git on temp repos, NO claude + NO live daemon — drives reconcileOrchestrationOnBoot() directly
+// against an isolated LOOM_HOME. Proves:
+//   (a) a 0-ahead worktree with an UNCOMMITTED change, session exited+UNPROTECTED → routed through
+//       Pass A → SURVIVES with contents intact, task untouched, branch retained.
+//   (b) a worktree with an UNMERGED COMMIT (branch ahead) → routed through Pass B → SURVIVES.
+//   (c) a clean, genuinely-merged worktree of an exited session → STILL finalized/GC'd (no regression).
+//   (d) a merged worktree that ALSO has an untracked `.claude/skills/foo` file → STILL GC'd (proves the
+//       ignore-untracked-`.claude/` discriminator: injected noise must not block legitimate cleanup).
+//   (e) FAIL-SAFE: a bounded git error/timeout in the check → treated as has-work → KEEP (both the
+//       throwing and the never-resolving cases), proven directly on worktreeHasWork() + its parser.
+// Run: 1) build daemon, 2) node test/boot-reconcile-keep-work.mjs
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execSync } from "node:child_process";
+
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-bkw-home-${Date.now()}`);
+fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+
+const { Db } = await import("../dist/db.js");
+const { SessionService } = await import("../dist/sessions/service.js");
+const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { createWorktree, worktreeHasWork, worktreeStatusHasWork } = await import("../dist/git/worktrees.js");
+
+let failures = 0;
+const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+const GIT_ID = "-c user.email=bkw@loom -c user.name=bkw";
+const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
+const now = new Date().toISOString();
+
+const db = new Db();
+const sessions = new SessionService(db, {}, new OrchestrationControl());
+const mergeDoneCount = (mgrId) => db.listEvents(mgrId).filter((e) => e.kind === "merge_done").length;
+
+function seed(p) {
+  db.insertProject({ id: p.projId, name: "BKW", repoPath: p.repo, vaultPath: p.repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: p.agentId, projectId: p.projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: p.taskId, projectId: p.projId, title: "BKW-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: p.mgrId, projectId: p.projId, agentId: p.agentId, engineSessionId: null, title: null, cwd: p.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  // The worker is `exited` (recoverStaleSessions's effect) and is NOT in protectedSessionIds (we call
+  // reconcile with no protected set) — i.e. exactly an unrelated manager's live worker post-restart.
+  db.insertSession({ id: p.workerId, projectId: p.projId, agentId: p.agentId, engineSessionId: null, title: null, cwd: p.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: p.mgrId, taskId: p.taskId, worktreePath: p.worktreePath, branch: p.branch });
+}
+
+function initRepo(repo, readme) {
+  fs.mkdirSync(repo, { recursive: true });
+  fs.writeFileSync(path.join(repo, "README.md"), readme);
+  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+}
+
+// (a) live worker, work UNCOMMITTED, branch still at main (0 ahead) → Pass A misdetects as merged.
+async function setupUncommitted(p) {
+  initRepo(p.repo, "# bkw uncommitted\n");
+  const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
+  fs.mkdirSync(path.join(worktreePath, "src"), { recursive: true });
+  fs.writeFileSync(path.join(worktreePath, "src", p.file), "completed work, NOT yet committed\n"); // untracked product
+  p.worktreePath = worktreePath; p.branch = branch;
+  seed(p);
+}
+
+// (b) worker COMMITTED work to its branch but never merged (branch ahead) → Pass A skips → Pass B.
+async function setupUnmergedCommit(p) {
+  initRepo(p.repo, "# bkw unmerged-commit\n");
+  const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
+  fs.writeFileSync(path.join(worktreePath, p.file), "committed to branch, not merged\n");
+  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  p.worktreePath = worktreePath; p.branch = branch;
+  seed(p);
+}
+
+// (c)/(d) a genuinely-merged worktree (branch landed into main, worktree clean). (d) additionally drops
+//   an UNTRACKED `.claude/skills/foo` file to prove the injected-noise discriminator still GC's it.
+async function setupMerged(p, withClaudeNoise) {
+  initRepo(p.repo, "# bkw merged\n");
+  const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
+  fs.writeFileSync(path.join(worktreePath, p.file), "real merged work\n");
+  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  execSync(`git ${GIT_ID} merge --no-ff --no-edit ${branch}`, { cwd: p.repo }); // branch now reachable from HEAD
+  if (withClaudeNoise) {
+    const skillDir = path.join(worktreePath, ".claude", "skills", "foo");
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, "SKILL.md"), "# injected skill (untracked, daemon-managed)\n");
+  }
+  p.worktreePath = worktreePath; p.branch = branch;
+  seed(p);
+}
+
+const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+const mk = (tag, file) => ({ projId: `bkw-${tag}-proj-${sfx}`, agentId: `bkw-${tag}-top-${sfx}`, taskId: `bkw-${tag}-task-${sfx}`, mgrId: `bkw-${tag}-mgr-${sfx}`, workerId: `bkw-${tag}-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-bkw-${tag}-${sfx}`), file });
+const A = mk("a", "work.txt");   // uncommitted
+const B = mk("b", "feat.txt");   // unmerged commit
+const C = mk("c", "done.txt");   // clean merged
+const D = mk("d", "done.txt");   // merged + .claude noise
+
+try {
+  await setupUncommitted(A);
+  await setupUnmergedCommit(B);
+  await setupMerged(C, false);
+  await setupMerged(D, true);
+
+  // --- (e) FAIL-SAFE on the helper itself (before the reconcile so a thrown helper can't skew counts) ---
+  // A git whose `raw` THROWS → has-work (keep). A git whose `raw` never settles → bounded + has-work.
+  const throwGit = { raw: () => { throw new Error("simulated git failure"); } };
+  check("(e) worktreeHasWork fails SAFE on a throwing git → has-work (keep)",
+    (await worktreeHasWork(A.repo, A.worktreePath, A.branch, "HEAD", { gitFactory: () => throwGit })) === true);
+  const neverGit = { raw: () => new Promise(() => {}) }; // hung child: never settles
+  const t0 = Date.now();
+  const hung = await worktreeHasWork(A.repo, A.worktreePath, A.branch, "HEAD", { gitFactory: () => neverGit, timeoutMs: 250 });
+  const elapsed = Date.now() - t0;
+  check("(e) worktreeHasWork fails SAFE on a never-resolving git → has-work (keep)", hung === true);
+  check(`(e) the check is BOUNDED — returned in ${elapsed}ms (cap 250ms)`, elapsed >= 250 && elapsed < 250 * 8 + 1500);
+
+  // --- the .claude discriminator, unit level (independent of any worktree) ---
+  check("(e) parser: untracked .claude path alone → NOT work", worktreeStatusHasWork("?? .claude/skills/foo/SKILL.md\n") === false);
+  check("(e) parser: untracked product (src) → work", worktreeStatusHasWork("?? src/new.txt\n") === true);
+  check("(e) parser: tracked modification → work", worktreeStatusHasWork(" M packages/daemon/src/x.ts\n") === true);
+  check("(e) parser: mixed .claude noise + real product → work", worktreeStatusHasWork("?? .claude/skills/foo\n?? src/new.txt\n") === true);
+  check("(e) parser: empty status → NOT work", worktreeStatusHasWork("") === false);
+
+  // Sanity on the routing pre-conditions.
+  check("(a-pre) uncommitted branch reads as 'merged' (tip==HEAD) → would hit Pass A", git(A.repo, `branch --merged HEAD`).includes(A.branch));
+  check("(b-pre) unmerged-commit branch is NOT merged → would skip Pass A → Pass B", !git(B.repo, `branch --merged HEAD`).includes(B.branch));
+  check("(c-pre) merged branch is an ancestor of HEAD", git(C.repo, `branch --merged HEAD`).includes(C.branch));
+  check("(d-pre) merged-with-noise branch is an ancestor of HEAD", git(D.repo, `branch --merged HEAD`).includes(D.branch));
+
+  // --- THE RECONCILE (no protected set → every worker is exited+unprotected) ---
+  const r = await sessions.reconcileOrchestrationOnBoot();
+
+  // (a) Pass A vector — the worktree SURVIVES with its uncommitted work, task + branch untouched.
+  check("(a) uncommitted worktree KEPT (Pass A no longer deletes a misdetected live worker)", fs.existsSync(A.worktreePath));
+  check("(a) uncommitted work CONTENTS intact (src/work.txt survives)", fs.existsSync(path.join(A.worktreePath, "src", A.file)));
+  check("(a) uncommitted task NOT wrongly marked done", db.getTask(A.taskId).columnKey === "in_progress");
+  check("(a) uncommitted branch NOT deleted", git(A.repo, `branch --list ${A.branch}`).includes(A.branch));
+  check("(a) uncommitted recorded NO merge_done", mergeDoneCount(A.mgrId) === 0);
+
+  // (b) Pass B vector — the unmerged committed work SURVIVES.
+  check("(b) unmerged-commit worktree KEPT", fs.existsSync(B.worktreePath));
+  check("(b) unmerged-commit CONTENTS intact", fs.existsSync(path.join(B.worktreePath, B.file)));
+  check("(b) unmerged-commit task untouched (in_progress)", db.getTask(B.taskId).columnKey === "in_progress");
+  check("(b) unmerged-commit branch retained", git(B.repo, `branch --list ${B.branch}`).includes(B.branch));
+
+  // (c) no-regression — a clean, genuinely-merged worktree is STILL finalized/GC'd.
+  check("(c) clean merged worktree STILL removed (legitimate cleanup intact)", !fs.existsSync(C.worktreePath));
+  check("(c) clean merged task moved to done", db.getTask(C.taskId).columnKey === "done");
+  check("(c) clean merged branch deleted", git(C.repo, `branch --list ${C.branch}`) === "");
+  check("(c) clean merged merge_done appended", mergeDoneCount(C.mgrId) === 1);
+
+  // (d) discriminator — a merged worktree carrying ONLY untracked `.claude` noise is STILL GC'd.
+  check("(d) merged worktree with untracked .claude/skills/foo STILL removed (noise ignored)", !fs.existsSync(D.worktreePath));
+  check("(d) merged-with-noise task moved to done", db.getTask(D.taskId).columnKey === "done");
+  check("(d) merged-with-noise branch deleted", git(D.repo, `branch --list ${D.branch}`) === "");
+
+  // Aggregate counts: 2 kept (a + b), 2 finished merges (c + d), 0 pruned (Pass B kept its only candidate).
+  check("(agg) reconcile KEPT exactly 2 worktrees holding work", r.worktreesKept === 2);
+  check("(agg) reconcile FINISHED exactly 2 merges (c + d)", r.mergesFinished === 2);
+  check("(agg) reconcile pruned 0 via Pass B (its only candidate held work → kept)", r.worktreesPruned === 0);
+
+  // --- idempotent second run: keeps the same two, no new merges, no duplicate events ---
+  const r2 = await sessions.reconcileOrchestrationOnBoot();
+  check("(idem) second run keeps the same 2, finishes 0 merges", r2.worktreesKept === 2 && r2.mergesFinished === 0);
+  check("(idem) (a) worktree still present", fs.existsSync(A.worktreePath));
+  check("(idem) (b) worktree still present", fs.existsSync(B.worktreePath));
+  check("(idem) (c) merge_done NOT duplicated", mergeDoneCount(C.mgrId) === 1);
+} finally {
+  db.close();
+  for (const p of [A, B, C, D]) {
+    try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+  fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
+}
+
+console.log(failures === 0
+  ? "\n✅ ALL PASS — boot-reconcile never auto-deletes a worktree holding work: an uncommitted-0-ahead worker survives Pass A, an unmerged-commit worker survives Pass B, the check fails safe (error/timeout → keep), and a genuinely-merged worktree is STILL GC'd even when it carries untracked daemon-injected .claude noise."
+  : `\n❌ ${failures} FAILURE(S).`);
+process.exit(failures === 0 ? 0 : 1);

@@ -19,7 +19,7 @@ const TEST_DIR = path.join(__dirname, "..", "test");
 // (in-process Db/SessionService against a fake pty, or self-contained fs/git). Each is verified green.
 const HERMETIC = [
   "prod-guard",               // the guard itself
-  "orch-model", "dead-id", "boot-reconcile", "merge-done-crash-recovery", "restart-intent",
+  "orch-model", "dead-id", "boot-reconcile", "boot-reconcile-keep-work", "merge-done-crash-recovery", "restart-intent",
   "profiles", "profiles-crud", "profile-spawn", "browser-testing-spawn",
   "tasks-filter", "tasks-priority", "config-bounds", "transcript-encode", "alert-webhook",
   "session-archive", "all-archived-sessions",
