@@ -22,6 +22,11 @@ const prio = (t: Task): TaskPriority => t.priority ?? "p2";
 // Sort a column's cards high→low priority (p0 first), then by position — strings p0<p1<p2<p3 sort right.
 const byPriorityThenPosition = (a: Task, b: Task) =>
   prio(a) === prio(b) ? a.position - b.position : (prio(a) < prio(b) ? -1 : 1);
+// Done columns sort most-recently-done first. `updatedAt` (ISO string → lexical compare is chronological)
+// is the stand-in for completion time; tie-break on position then id so equal-timestamp cards never
+// reshuffle on the 3s refetch (deterministic, no flicker).
+const byRecentlyDone = (a: Task, b: Task) =>
+  a.updatedAt === b.updatedAt ? (a.position - b.position || (a.id < b.id ? -1 : 1)) : (a.updatedAt > b.updatedAt ? -1 : 1);
 
 // Per-project kanban. Reads/writes the SAME task store the MCP tools use — moving a card
 // POSTs columnKey, which a spawned agent's tasks_list immediately sees, and vice versa.
@@ -67,7 +72,8 @@ export default function Board() {
             <div style={{ display: "grid", gridTemplateColumns: `repeat(${board.data.columns.length}, 1fr)`, gap: 10, marginTop: 12 }}>
               {board.data.columns.map((col) => (
                 <Column key={col.key} col={col}
-                  tasks={board.data!.tasks.filter((t) => t.columnKey === col.key).sort(byPriorityThenPosition)}
+                  tasks={board.data!.tasks.filter((t) => t.columnKey === col.key)
+                    .sort(isDoneColumn(col.key) ? byRecentlyDone : byPriorityThenPosition)}
                   workers={workerByTask} onOpen={setOpenTaskId} />
               ))}
             </div>
@@ -82,10 +88,17 @@ export default function Board() {
   );
 }
 
+// A column counts as "done" when its key signals completion (done/complete/merged). Single source
+// of truth for both the phosphor tone and the recently-done sort, so the two never drift apart.
+function isDoneColumn(key: string): boolean {
+  const k = key.toLowerCase();
+  return k.includes("done") || k.includes("complete") || k.includes("merged");
+}
+
 // Map a column to a signal tone (done = phosphor, review = cyan, in-progress = amber, else muted).
 function columnTone(key: string): Tone {
   const k = key.toLowerCase();
-  if (k.includes("done") || k.includes("complete") || k.includes("merged")) return "phosphor";
+  if (isDoneColumn(key)) return "phosphor";
   if (k.includes("review")) return "cyan";
   if (k.includes("progress") || k.includes("doing") || k.includes("wip") || k.includes("active")) return "amber";
   return "muted";
@@ -95,11 +108,18 @@ function Column({ col, tasks, workers, onOpen }:
   { col: KanbanColumn; tasks: Task[]; workers: Map<string, SessionListItem>; onOpen: (id: string) => void }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key });
   const t = columnTone(col.key);
+  // Bounded, viewport-relative height so a long column scrolls internally instead of stretching the
+  // page. Flex column: header stays pinned; the card list is the lone flex:1 scroll region. The
+  // droppable ref stays on this outer wrapper, so a drop lands anywhere over the column (incl. when
+  // scrolled — dnd-kit measures this wrapper's rect, and its auto-scroll drives the inner list).
   return (
     <div ref={setNodeRef} className="loom-grid"
-      style={{ background: isOver ? color.phosphorDim : color.panel, border: `1px solid ${color.border}`, borderRadius: 4, padding: 12, minHeight: "60vh" }}>
-      <SectionLabel style={{ color: tone[t] }}>{col.label} ({tasks.length})</SectionLabel>
-      {tasks.map((task) => <Card key={task.id} task={task} accent={tone[t]} worker={workers.get(task.id)} onOpen={() => onOpen(task.id)} />)}
+      style={{ background: isOver ? color.phosphorDim : color.panel, border: `1px solid ${color.border}`, borderRadius: 4,
+        display: "flex", flexDirection: "column", minHeight: 200, maxHeight: "75vh" }}>
+      <SectionLabel style={{ color: tone[t], margin: 0, padding: "12px 12px 8px" }}>{col.label} ({tasks.length})</SectionLabel>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
+        {tasks.map((task) => <Card key={task.id} task={task} accent={tone[t]} worker={workers.get(task.id)} onOpen={() => onOpen(task.id)} />)}
+      </div>
     </div>
   );
 }
