@@ -13,7 +13,7 @@ import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, 
 import { engineTranscriptExists, deleteArchivedTranscript } from "./transcript.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit } from "../orchestration/usage-awareness.js";
-import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon } from "../orchestration/restart.js";
+import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
@@ -305,30 +305,34 @@ export class SessionService {
     // failure can NEVER block the restart.
     const backupCfg = resolveBackupConfig();
     if (backupCfg.enabled) await takeBackup({ reason: "pre-restart", keep: backupCfg.keep });
-    const workerSessionIds = this.db
-      .listWorkers(managerSessionId)
-      .filter((w) => w.processState === "live")
-      .map((w) => w.id);
+    // Capture the WHOLE live fleet — the daemon is ONE process for ALL projects, so this restart tears
+    // down every project's sessions, not just the requester's. Resuming only the requester (the old
+    // behavior) left every OTHER manager/worker/plain session `exited` AND unprotected → the worktree
+    // data-loss trigger (P1 17df54c5). We enumerate every LIVE session across all projects, preserving
+    // role + manager linkage so boot brings each back the same. A parked (rate-limited) session is still
+    // captured — boot brings its pty live (so the rate-limit watcher can recover it) but withholds the
+    // continuation nudge, honoring the park (see resumeFleetOnBoot).
+    const resume: RestartResumeEntry[] = this.liveFleetResumeSet();
     // Snapshot each resumed session's in-memory pending inbound FIFO so the undelivered queue survives
     // the process death and is replayed on boot (index.ts) — the persisted analogue of recycle's
-    // in-process carriedPending. Grab it NOW, while the pty is still alive (the queue dies with the
+    // in-process carriedPending. Grab it NOW, while the ptys are still alive (the queue dies with the
     // process on exit). Only non-empty FIFOs are included. Defensive caps keep the intent JSON small:
     // a real FIFO holds a handful of short messages, so clip a pathologically long queue and skip a
     // single absurdly large message rather than bloat the persisted intent.
     const PENDING_MAX_MSGS = 50;
     const PENDING_MAX_MSG_LEN = 100_000;
     const pending: Record<string, string[]> = {};
-    for (const id of [managerSessionId, ...workerSessionIds]) {
+    for (const { sessionId } of resume) {
       const snap = this.pty
-        .getPending(id)
+        .getPending(sessionId)
         .filter((m) => m.length <= PENDING_MAX_MSG_LEN)
         .slice(0, PENDING_MAX_MSGS);
-      if (snap.length > 0) pending[id] = snap;
+      if (snap.length > 0) pending[sessionId] = snap;
     }
     writeRestartIntent({
       reason,
       managerSessionId,
-      workerSessionIds,
+      resume,
       requestedAt: new Date().toISOString(),
       ...(Object.keys(pending).length > 0 ? { pending } : {}),
     });
@@ -336,6 +340,115 @@ export class SessionService {
     // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent.
     setTimeout(() => process.exit(RESTART_EXIT_CODE), 300);
     return { restarting: true };
+  }
+
+  /**
+   * Snapshot every LIVE session across ALL projects into a restart resume set (the capture half of P1
+   * 17df54c5). `listAllSessions` is already cross-project and excludes archived rows; we keep only the
+   * live ones (a parked/rate-limited session is still `live` — its pty isn't killed on a cap — so it is
+   * captured and recovered too). Each entry carries the identity boot needs to re-spawn it unchanged:
+   * its role (re-passed so the MCP surface returns) and, for a worker, its manager (parentSessionId).
+   * Recycled/exited prior generations are not `live`, so a superseded session is naturally excluded.
+   */
+  liveFleetResumeSet(): RestartResumeEntry[] {
+    return this.db
+      .listAllSessions()
+      .filter((s) => s.processState === "live")
+      .map((s) => ({ sessionId: s.id, role: s.role ?? null, parentSessionId: s.parentSessionId ?? null }));
+  }
+
+  /**
+   * Boot-time fleet resume (the resume half of P1 17df54c5) — re-spawn the WHOLE captured fleet after a
+   * `daemon_restart`, injecting NOTHING into the resume itself (the resume-injects-nothing invariant;
+   * `resume()` passes no startupPrompt and honors the resume hardening — readiness wait, summary-gate
+   * dismiss, mode convergence). Continuation NUDGES are post-resume enqueues (a resumed session gets no
+   * startup prompt, so without a nudge a worker/manager would sit idle — the stranded-worker hook can't
+   * catch a resume's direct setBusy(false)):
+   *   - the REQUESTING manager gets its "merged code is now live — continue/verify" re-prompt;
+   *   - every other manager/platform gets a neutral "you were resumed, continue orchestrating" note;
+   *   - every worker gets the "your worktree WIP is intact, continue your task" nudge;
+   *   - a plain (role-null) session is resumed but not nudged (no orchestration loop to re-engage);
+   *   - a PARKED (rate-limited) session is resumed live so the rate-limit watcher can recover it, but
+   *     its nudge + pending replay are WITHHELD — we never push a held turn back into the cap (honors
+   *     the park; a staggered resume via the watcher at reset). Its DB park state is left intact.
+   * Best-effort per session: an unresumable one (dead transcript / gone worktree) is skipped + counted.
+   * `resumeOne` is injectable for hermetic tests (default drives this.resume); `now` likewise for tests.
+   */
+  resumeFleetOnBoot(
+    intent: RestartIntent,
+    opts: { resumeOne?: (id: string) => boolean; now?: Date } = {},
+  ): { resumed: string[]; skippedParked: string[]; failed: string[] } {
+    const now = opts.now ?? new Date();
+    const resumeOne = opts.resumeOne ?? ((id: string): boolean => {
+      try { this.resume(id); return true; } catch { return false; }
+    });
+    const entries = resumeSetFromIntent(intent);
+    const reqId = intent.managerSessionId;
+    const resumed: string[] = [];
+    const skippedParked: string[] = [];
+    const failed: string[] = [];
+
+    // Replay a session's pre-restart pending inbound FIFO (snapshotted into the intent) onto the freshly
+    // resumed pty, IN ORDER and BEFORE its continuation nudge. These predate the restart, so FIFO order
+    // puts them ahead of the boot note. enqueueStdin is ready-gated (host.ts), so they queue until the
+    // resumed TUI boots, then drain cleanly.
+    const replayPending = (id: string): void => {
+      for (const m of intent.pending?.[id] ?? []) this.pty.enqueueStdin(id, m);
+    };
+    const isParked = (id: string): boolean => {
+      const s = this.db.getSession(id);
+      return !!s?.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > now.getTime();
+    };
+
+    const reqWorkers = entries.filter((e) => e.role === "worker" && e.parentSessionId === reqId).map((e) => e.sessionId);
+
+    // Resume everyone EXCEPT the requesting manager first (it gets the last word + its own summary nudge).
+    for (const e of entries) {
+      if (e.sessionId === reqId) continue;
+      const parked = isParked(e.sessionId);
+      if (!resumeOne(e.sessionId)) { failed.push(e.sessionId); continue; }
+      resumed.push(e.sessionId);
+      if (parked) { skippedParked.push(e.sessionId); continue; } // resumed live; honor the park — no nudge/replay
+      replayPending(e.sessionId);
+      if (e.role === "worker") {
+        this.pty.enqueueStdin(
+          e.sessionId,
+          `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — your worktree ` +
+          `WIP is intact. Continue your assigned task from where you left off. If you had already finished, ` +
+          `call worker_report (done/blocked) so your manager isn't left waiting.`,
+        );
+      } else if (e.role === "manager" || e.role === "platform") {
+        this.pty.enqueueStdin(
+          e.sessionId,
+          `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you + ` +
+          `your live workers were resumed — your worktrees are intact. Resume orchestrating from where you ` +
+          `left off (re-check your workers' state; some may have just been resumed too).`,
+        );
+      }
+      // role null (plain session): resumed, but no orchestration loop to re-engage → no nudge.
+    }
+
+    // The requesting manager last: bring it back with its "your code is live, verify + continue" prompt.
+    if (resumeOne(reqId)) {
+      resumed.push(reqId);
+      if (isParked(reqId)) {
+        skippedParked.push(reqId);
+      } else {
+        replayPending(reqId);
+        const reqWorkersResumed = reqWorkers.filter((id) => resumed.includes(id)).length;
+        this.pty.enqueueStdin(
+          reqId,
+          `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
+          `running daemon (reason: ${intent.reason}). ${reqWorkersResumed}/${reqWorkers.length} of your live ` +
+          `workers were resumed (the rest of the fleet across all projects was resumed too). You can now ` +
+          `end-to-end verify the live behavior. Continue.`,
+        );
+      }
+    } else {
+      failed.push(reqId);
+    }
+
+    return { resumed, skippedParked, failed };
   }
 
   /**

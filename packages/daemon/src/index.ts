@@ -21,7 +21,7 @@ import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestratio
 import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "./orchestration/usage-limit.js";
-import { readRestartIntent, clearRestartIntent } from "./orchestration/restart.js";
+import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent } from "./orchestration/restart.js";
 import { buildServer } from "./gateway/server.js";
 
 async function main(): Promise<void> {
@@ -83,12 +83,14 @@ async function main(): Promise<void> {
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design
   const sessions = new SessionService(db, pty, control);
   // Self-host restart recovery: a manager's `daemon_restart` left an intent naming the sessions to
-  // bring back. Read it BEFORE the reconcile so those workers' worktrees are PROTECTED from pass-B GC
-  // (recoverStaleSessions just marked them 'exited', which would otherwise prune the worktree we need
-  // to resume into). The actual resume happens after the server is listening (its ptys need the MCP
-  // endpoints up). null on a normal boot.
+  // bring back. Read it BEFORE the reconcile so the WHOLE fleet's worktrees are PROTECTED from pass-B GC
+  // (recoverStaleSessions just marked every prior-run session 'exited', which would otherwise prune a
+  // worktree we need to resume into). protectedIdsFromIntent spans the entire captured fleet across all
+  // projects (P1 17df54c5) and tolerates an OLD-format intent (degrades to the requester + its workers).
+  // The actual resume happens after the server is listening (its ptys need the MCP endpoints up). null
+  // on a normal boot.
   const restartIntent = readRestartIntent();
-  const protectedSessionIds = new Set(restartIntent?.workerSessionIds ?? []);
+  const protectedSessionIds = restartIntent ? protectedIdsFromIntent(restartIntent) : new Set<string>();
   // Boot-time orchestration reconcile (#22 run-2 + audit M4): finish any merge whose bookkeeping was
   // interrupted (branch merged but task/worktree not reconciled) and GC orphaned worktrees from
   // crashed workers. Runs AFTER recoverStaleSessions (no live pty holds a worktree) — pure git + db.
@@ -207,48 +209,20 @@ async function main(): Promise<void> {
   console.log("[boot] alert-webhook emitter registered (external delivery on configured projects)");
 
   // Self-host restart recovery (consume the intent read above): a manager deliberately restarted the
-  // daemon (daemon_restart) to make merged code live. Re-resume its live workers, then the manager,
-  // and tell the manager the rebuild+restart is done so it can carry on (e.g. verify the live daemon).
-  // Best-effort: an unresumable session is skipped (dead transcript / gone worktree). Runs once.
+  // daemon (daemon_restart) to make merged code live. The daemon is ONE process for ALL projects, so the
+  // restart tore down the WHOLE cross-project fleet — re-resume ALL of it (every manager, worker, plain
+  // session), not just the requester (P1 17df54c5). resumeFleetOnBoot re-spawns each with its role +
+  // linkage, injects nothing into the resume, gives the requester its "code is live" re-prompt and the
+  // rest a continuation nudge, and honors a parked session's usage hold. Best-effort + runs once.
   if (restartIntent) {
     clearRestartIntent();
-    const tryResume = (id: string): boolean => {
-      try { sessions.resume(id); return true; } catch { return false; }
-    };
-    // Replay a session's pre-restart pending inbound FIFO (snapshotted into the intent) onto the freshly
-    // resumed pty, IN ORDER and BEFORE its continuation nudge below. These messages predate the restart,
-    // so FIFO-correctness puts them ahead of the boot note. enqueueStdin is ready-gated (same as the
-    // nudge), so they queue until the resumed TUI boots, then drain cleanly.
-    const replayPending = (id: string): void => {
-      for (const m of restartIntent.pending?.[id] ?? []) pty.enqueueStdin(id, m);
-    };
-    // Resume the workers, then give EACH a continuation nudge. A resumed worker gets no startup prompt,
-    // so a mid-task one would otherwise sit idle (the stranded-worker guard can't catch it — that fires
-    // on a busy->false hook edge, which a resume's direct setBusy(false) doesn't produce). The nudge is
-    // ready-gated in enqueueStdin, so it queues until the worker's TUI boots, then submits cleanly.
-    const resumedWorkers = restartIntent.workerSessionIds.filter(tryResume);
-    for (const wid of resumedWorkers) {
-      replayPending(wid);
-      pty.enqueueStdin(
-        wid,
-        `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — your worktree ` +
-        `WIP is intact. Continue your assigned task from where you left off. If you had already finished, ` +
-        `call worker_report (done/blocked) so your manager isn't left waiting.`,
-      );
-    }
-    const workersResumed = resumedWorkers.length;
-    if (tryResume(restartIntent.managerSessionId)) {
-      replayPending(restartIntent.managerSessionId);
-      pty.enqueueStdin(
-        restartIntent.managerSessionId,
-        `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
-        `running daemon (reason: ${restartIntent.reason}). ${workersResumed}/${restartIntent.workerSessionIds.length} ` +
-        `of your live workers were resumed. You can now end-to-end verify the live behavior. Continue.`,
-      );
-      console.log(`[boot] self-host restart: resumed manager ${restartIntent.managerSessionId.slice(0, 8)} (+${workersResumed} worker(s))`);
-    } else {
-      console.warn(`[boot] self-host restart: manager ${restartIntent.managerSessionId.slice(0, 8)} could not be resumed`);
-    }
+    const { resumed, skippedParked, failed } = sessions.resumeFleetOnBoot(restartIntent);
+    console.log(
+      `[boot] self-host restart: resumed ${resumed.length} session(s) across the fleet` +
+      (skippedParked.length ? `, ${skippedParked.length} resumed-but-parked (usage hold honored)` : "") +
+      (failed.length ? `, ${failed.length} unresumable (skipped)` : "") +
+      ` (requester ${restartIntent.managerSessionId.slice(0, 8)})`,
+    );
   }
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
