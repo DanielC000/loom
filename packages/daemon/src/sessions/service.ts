@@ -236,6 +236,61 @@ export class SessionService {
     return { ...session, processState: "live" };
   }
 
+  /**
+   * Start a NEW PLATFORM-AUDITOR session in an agent (Platform Manager P5). Mirrors startPlatformLead,
+   * but passes callerRole "auditor" — and because an EXPLICIT caller role ALWAYS wins in
+   * resolveAgentSpawn, the session role is LOCKED to "auditor" regardless of the agent's profile role.
+   * This is the load-bearing security guarantee: the gate is keyed off the SESSION role, never the
+   * profile role, so even a mis-seeded/edited profile can't change what surface an Auditor session gets.
+   * An "auditor" session gets ONLY the restricted loom-audit MCP at spawn (buildMcpServers) — it 404s on
+   * /mcp-platform (resolveRole gates role==="platform") AND /mcp-orch (gates manager|worker), so a hostile
+   * transcript can never turn an audit into an outward/destructive action. Human-REST/scheduler-only
+   * (POST /api/agents/:id/sessions {role:"auditor"} + the Scheduler) — no agent/MCP path mints one.
+   */
+  startAuditor(agentId: string): Session {
+    const agent = this.db.getAgent(agentId);
+    if (!agent) throw new Error("agent not found");
+    const project = this.db.getProject(agent.projectId);
+    if (!project) throw new Error("project not found");
+    const config = resolveConfig(project.config);
+    // Explicit 'auditor' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
+    // allowDelta. The locked role — NOT the profile role — drives the restricted loom-audit surface.
+    const { role, startupPrompt, permission, browserTesting } = this.resolveAgentSpawn(agent, config, "auditor");
+
+    const now = new Date().toISOString();
+    const session: Session = {
+      id: randomUUID(),
+      projectId: project.id,
+      agentId,
+      engineSessionId: null,
+      title: null,
+      cwd: project.repoPath,
+      processState: "starting",
+      resumability: "unknown",
+      busy: false,
+      createdAt: now,
+      lastActivity: now,
+      lastError: null,
+      role,
+      browserTesting,
+    };
+    this.db.insertSession(session);
+    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
+    this.db.setProcessState(session.id, "live");
+    this.pty.spawn({
+      sessionId: session.id,
+      cwd: session.cwd,
+      permission,
+      geometry: config.pty,
+      sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      startupPrompt,
+      role,
+      browserTesting,
+    });
+    return { ...session, processState: "live" };
+  }
+
   /** Resume an existing session — NO prompt injection. */
   resume(sessionId: string, opts: { allowSuperseded?: boolean } = {}): Session {
     const session = this.db.getSession(sessionId);
@@ -612,7 +667,7 @@ export class SessionService {
     // coordination agent. The role is the agent's resolved PROFILE role (resolveProfile — the canonical
     // mechanism); a profile-less agent (Dev/Bugfix/Docs/QA today) resolves to null and is allowed.
     const profileRole = resolveProfile(workerAgent, workerAgent.profileId ? this.db.getProfile(workerAgent.profileId) : undefined).role;
-    if (profileRole === "manager" || profileRole === "platform") {
+    if (profileRole === "manager" || profileRole === "platform" || profileRole === "auditor") {
       throw new Error(`cannot spawn a worker under the '${workerAgent.name}' agent (a ${profileRole}-role profile); pick a worker agent (Dev/Bugfix/QA/Docs)`);
     }
     // Resolve THAT agent's profile for its browser-automation opt-in — a manager spawns a QA worker by
@@ -804,6 +859,58 @@ export class SessionService {
       try { delivered = this.pty.enqueueStdin(liveLead.id, note).delivered; } catch { /* Lead not live/ready — the board task stands */ }
     }
     return { taskId: task.id, projectId: home.id, delivered };
+  }
+
+  /**
+   * Platform Auditor finding (loom-audit `audit_file_finding`, P5) — the ONLY write the read-and-file-only
+   * Auditor can make. MIRRORS platformEscalate: files a DURABLE, structured TASK onto the reserved "Loom
+   * Platform" board (the triage inbox). The target project is HARDCODED to the reserved home (resolved via
+   * the `reserved` flag) — the Auditor may NOT name an arbitrary projectId, so this can never become a
+   * general cross-project task-write. Caller-role check (defense in depth — the tool is also auditor-gated at
+   * the router): refuses anything but an "auditor" session, so even if this method were reachable from
+   * elsewhere it can't be used to write findings under another role. NO git/vault/config/spawn — that
+   * capability simply doesn't exist on this path. Returns the created task id. Refuses (throws) if — impossibly
+   * — no reserved project exists.
+   */
+  auditFileFinding(
+    auditorSessionId: string,
+    input: { title: string; detail: string; severity?: string },
+  ): { taskId: string; projectId: string } {
+    const caller = this.db.getSession(auditorSessionId);
+    if (!caller || caller.role !== "auditor") throw new Error("audit_file_finding is an auditor-only surface");
+    // HARDCODED target: the reserved Platform home — never an arbitrary projectId from the Auditor.
+    const home = this.db.listAllProjects().find((p) => p.reserved);
+    if (!home) throw new Error("no reserved Loom Platform project exists — cannot file finding");
+
+    const severity = (input.severity ?? "").trim() || "unspecified";
+    const now = new Date().toISOString();
+    const body = [
+      "**Filed by the Platform Auditor** (scheduled, read-and-file-only transcript review).",
+      "",
+      `- **Severity:** ${severity}`,
+      "",
+      "## Finding / evidence",
+      "",
+      input.detail,
+    ].join("\n");
+    const task: Task = {
+      id: randomUUID(),
+      projectId: home.id,
+      title: input.title,
+      body,
+      columnKey: "backlog", // the Platform backlog (matches platformEscalate's landing column)
+      position: Date.now(),
+      priority: DEFAULT_TASK_PRIORITY,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.db.insertTask(task);
+    this.db.appendEvent({
+      id: randomUUID(), ts: now,
+      managerSessionId: auditorSessionId, taskId: task.id, kind: "audit_finding",
+      detail: { severity, platformProjectId: home.id, title: input.title },
+    });
+    return { taskId: task.id, projectId: home.id };
   }
 
   /**
@@ -1227,6 +1334,9 @@ export class SessionService {
     const schedule: Schedule = {
       id: randomUUID(), agentId: input.agentId, cron: input.cron,
       enabled: input.enabled ?? true, nextFireAt: next, lastFiredAt: null, createdAt: new Date().toISOString(),
+      // A manager's self-service schedule always boots a manager (P5 'auditor' schedules are a
+      // platform/human concern — created via the platform tool or REST, never this surface).
+      kind: "manager",
     };
     this.db.insertSchedule(schedule);
     this.auditManage(managerSessionId, "schedule_create", { scheduleId: schedule.id, agentId: input.agentId, cron: input.cron });

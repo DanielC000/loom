@@ -6,7 +6,7 @@ import { TranscriptPane } from "../components/TranscriptPane";
 import { Panel, Button, Input, SectionLabel, StatusPill, Chip, Badge } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
 
-const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber" };
+const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted" };
 
 // Cross-project Archive: dead/exited sessions tidied out of the Workspace rail, ACROSS ALL PROJECTS
 // (god-eye via GET /api/archived-sessions). Structured as a searchable, collapsible Project → Agent

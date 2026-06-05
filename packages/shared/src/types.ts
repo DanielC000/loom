@@ -96,8 +96,15 @@ export type Resumability = "unknown" | "resumable" | "dead";
  * - platform: a platform-lead — creates/configures projects + agents (loom-platform MCP, Pillar C).
  *   Kept distinct from manager so least-privilege holds: cross-project tools never leak into a
  *   project-scoped manager, and a platform-lead gets no worker-coordination tools.
+ * - auditor: the Platform Auditor (Platform Manager P5) — a scheduled, READ-AND-FILE-ONLY transcript
+ *   reviewer. A DISTINCT role from `platform` BY DESIGN (the load-bearing security boundary): it
+ *   ingests UNTRUSTED transcript content (a prompt-injection surface), so it gets ONLY the restricted
+ *   `loom-audit` surface (cross-project transcript reads + file-finding to the Platform backlog) and
+ *   NATURALLY 404s on the Lead's elevated `/mcp-platform` (resolveRole gates on role==="platform") AND
+ *   on `/mcp-orch` (gates on manager|worker). No agent/MCP path may mint one — only `startAuditor`
+ *   (human REST) and the human-configured Scheduler spawn it.
  */
-export type SessionRole = "manager" | "worker" | "platform";
+export type SessionRole = "manager" | "worker" | "platform" | "auditor";
 
 export interface Session {
   id: SessionId;
@@ -173,7 +180,11 @@ export type OrchestrationEventKind =
   // Manager→Platform UPWARD escalation (orchestration `platform_escalate`): a discovered Loom bug/friction
   // filed as a durable TASK on the reserved Platform board (the Lead's inbox). `detail` carries the origin
   // project, severity, and the created Platform task id. The ONLY cross-project write a manager may make.
-  | "platform_escalate";
+  | "platform_escalate"
+  // Platform Auditor finding (loom-audit `audit_file_finding`, P5): a transcript-review finding filed as a
+  // durable TASK on the reserved Platform board. `detail` carries the severity, title, and Platform task id.
+  // The ONLY write the read-and-file-only Auditor can make (it has no git/vault/config/spawn capability).
+  | "audit_finding";
 
 export interface OrchestrationEvent {
   id: string;
@@ -241,6 +252,15 @@ export interface Schedule {
   nextFireAt: string;        // ISO; the next scheduled fire
   lastFiredAt: string | null;
   createdAt: string;
+  /**
+   * What a fired schedule spawns (Platform Manager P5):
+   * - "manager" (DEFAULT) — boots a manager session that runs the Pillar-A loop (today's behavior).
+   * - "auditor" — boots the Platform Auditor via `startAuditor` (role locked to "auditor", the
+   *   read-and-file-only transcript reviewer). The Scheduler routes by this field.
+   * Additive + idempotent: legacy rows backfill to "manager" (column DEFAULT), so every existing
+   * schedule keeps spawning a manager exactly as before.
+   */
+  kind: "manager" | "auditor";
 }
 
 /**

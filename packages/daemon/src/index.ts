@@ -11,6 +11,7 @@ import { SessionService } from "./sessions/service.js";
 import { TaskMcpRouter } from "./mcp/server.js";
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
 import { PlatformMcpRouter } from "./mcp/platform.js";
+import { AuditMcpRouter } from "./mcp/audit.js";
 import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
 import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
@@ -142,6 +143,10 @@ async function main(): Promise<void> {
   // BOOT-BOUND git-write timeouts so the Lead's elevated git tools (git_checkout/commit/push) bound a
   // git op EXACTLY like the human REST git routes (gateway/server.ts resolves the same numbers).
   const platformMcp = new PlatformMcpRouter(db, sessions, { gitLocalMs: timeouts.gitLocalMs, gitPushMs: timeouts.gitPushMs });
+  // Audit MCP (P5) — the Platform Auditor's RESTRICTED read-and-file-only surface. Needs the registry
+  // (transcript reads + session list) AND SessionService (audit_file_finding → reserved Platform board).
+  // Deliberately gets NO git-write timeouts: it has no git/vault/config/spawn tools, by design.
+  const auditMcp = new AuditMcpRouter(db, sessions);
 
   // Account-wide Claude plan-usage poller — one shared cached fetch of the OAuth usage endpoint, served
   // read-only to Mission Control via GET /api/usage/limits. Created here so the gateway can read its
@@ -149,7 +154,7 @@ async function main(): Promise<void> {
   // (LOOM_USAGE_POLL_INTERVAL_MS env read + floor-clamped inside resolveConfig; default 60s).
   const usageStatus = new UsageStatusPoller({ intervalMs: watchers.usagePollMs });
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, control, usageStatus });
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, control, usageStatus });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon listening on http://127.0.0.1:${PORT}`);
@@ -164,7 +169,7 @@ async function main(): Promise<void> {
   // floor-clamped inside resolveConfig; default 60s).
   const intervalMs = watchers.schedulerMs;
   const maxConcurrentManagers = resolved.orchestration.maxConcurrentManagers;
-  const scheduler = new Scheduler({ db, control, startManager: (agentId) => sessions.startManager(agentId), intervalMs, maxConcurrentManagers });
+  const scheduler = new Scheduler({ db, control, startManager: (agentId) => sessions.startManager(agentId), startAuditor: (agentId) => sessions.startAuditor(agentId), intervalMs, maxConcurrentManagers });
   if (schedulerEnabled) {
     scheduler.start();
     console.log(`[boot] scheduler enabled (tick ${intervalMs}ms)`);

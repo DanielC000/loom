@@ -13,6 +13,7 @@ import type { SessionService } from "../sessions/service.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
+import type { AuditMcpRouter } from "../mcp/audit.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride } from "../mcp/platform.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
@@ -38,6 +39,7 @@ export interface GatewayDeps {
   mcp: TaskMcpRouter;
   orchMcp: OrchestrationMcpRouter;
   platformMcp: PlatformMcpRouter;
+  auditMcp: AuditMcpRouter;
   control: OrchestrationControl;
   usageStatus: UsageStatusPoller;
 }
@@ -76,6 +78,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     await deps.platformMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
 
+  // --- Platform-auditor MCP (role-gated to 'auditor'; READ-AND-FILE-ONLY transcript review — P5).
+  // A distinct route + router so an auditor session NEVER reaches the Lead's elevated /mcp-platform
+  // (its resolveRole gates role==="platform") — the load-bearing P5 prompt-injection containment. ---
+  app.all("/mcp-audit/:sessionId", async (req, reply) => {
+    const { sessionId } = req.params as { sessionId: string };
+    reply.hijack();
+    await deps.auditMcp.handle(req.raw, reply.raw, sessionId, req.body);
+  });
+
   // --- Orchestration safety rails (§17a): pause/kill switch + status. These gate worker_spawn
   // (server-side, in spawnWorker); kill also hard-stops in-flight workers. scope = "global"
   // (default) or a manager session id. ---
@@ -110,14 +121,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // create/update (the Scheduler advances it after each fire). ---
   app.get("/api/schedules", async () => deps.db.listSchedules());
   app.post("/api/schedules", async (req, reply) => {
-    const b = (req.body ?? {}) as { agentId?: string; cron?: string; enabled?: boolean };
+    const b = (req.body ?? {}) as { agentId?: string; cron?: string; enabled?: boolean; kind?: string };
     if (!b.agentId || !b.cron) return reply.code(400).send({ error: "agentId and cron required" });
     if (!deps.db.getAgent(b.agentId)) return reply.code(404).send({ error: "agent not found" });
+    // P5: kind selects what a fire spawns — "manager" (default) or "auditor" (the read-and-file-only
+    // Platform Auditor). Reject any other value rather than silently coercing.
+    if (b.kind !== undefined && b.kind !== "manager" && b.kind !== "auditor") {
+      return reply.code(400).send({ error: 'kind must be "manager" or "auditor"' });
+    }
     let next: string;
     try { next = nextFireAt(b.cron, new Date()); } catch { return reply.code(400).send({ error: "invalid cron expression" }); }
     const schedule: Schedule = {
       id: randomUUID(), agentId: b.agentId, cron: b.cron,
       enabled: b.enabled ?? true, nextFireAt: next, lastFiredAt: null, createdAt: new Date().toISOString(),
+      kind: (b.kind as Schedule["kind"]) ?? "manager",
     };
     deps.db.insertSchedule(schedule);
     return reply.code(201).send(schedule);
@@ -125,9 +142,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/schedules/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getSchedule(id)) return reply.code(404).send({ error: "schedule not found" });
-    const b = (req.body ?? {}) as { cron?: string; enabled?: boolean };
-    const patch: { cron?: string; enabled?: boolean; nextFireAt?: string } = {};
+    const b = (req.body ?? {}) as { cron?: string; enabled?: boolean; kind?: string };
+    if (b.kind !== undefined && b.kind !== "manager" && b.kind !== "auditor") {
+      return reply.code(400).send({ error: 'kind must be "manager" or "auditor"' });
+    }
+    const patch: { cron?: string; enabled?: boolean; nextFireAt?: string; kind?: "manager" | "auditor" } = {};
     if (typeof b.enabled === "boolean") patch.enabled = b.enabled;
+    if (b.kind === "manager" || b.kind === "auditor") patch.kind = b.kind;
     if (typeof b.cron === "string") {
       try { patch.nextFireAt = nextFireAt(b.cron, new Date()); } catch { return reply.code(400).send({ error: "invalid cron expression" }); }
       patch.cron = b.cron;
@@ -490,6 +511,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { role } = (req.body as { role?: string }) ?? {};
     if (role === "manager") return deps.sessions.startManager(id);
     if (role === "platform") return deps.sessions.startPlatformLead(id);
+    // P5: spawn the read-and-file-only Platform Auditor. HUMAN-REST only (like startPlatformLead) — the
+    // session role is locked to "auditor" via callerRole, regardless of the agent's profile role.
+    if (role === "auditor") return deps.sessions.startAuditor(id);
     // P3 force-plain override (web "Spawn → force plain"): a VANILLA session even in an agent with a
     // manager/platform profile — bypasses the profile entirely (role null, agent's own prompt, no allow
     // delta). Absent/undefined role = auto (the profile's role applies — P2 default).
