@@ -1,10 +1,12 @@
 import { useRef, useState, type ReactNode } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   resolveConfig,
   type Project,
   type ProjectConfigOverride,
   type OrchestrationConfig,
+  type PlatformConfig,
+  type PlatformConfigOverride,
 } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -22,17 +24,25 @@ export default function Settings() {
   const project = projects.find((p) => p.id === projectId) ?? null;
 
   return (
-    <div style={{ maxWidth: 820 }}>
-      <SectionLabel>Project Settings</SectionLabel>
-      {project ? (
-        <ConfigEditor key={project.id} project={project} />
-      ) : (
-        <Panel>
-          <p style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 13, margin: 0 }}>
-            No active project. Pick one in the header to edit its config.
-          </p>
-        </Panel>
-      )}
+    <div style={{ maxWidth: 820, display: "flex", flexDirection: "column", gap: 28 }}>
+      <div>
+        <SectionLabel>Project Settings</SectionLabel>
+        {project ? (
+          <ConfigEditor key={project.id} project={project} />
+        ) : (
+          <Panel>
+            <p style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 13, margin: 0 }}>
+              No active project. Pick one in the header to edit its config.
+            </p>
+          </Panel>
+        )}
+      </div>
+
+      {/* Daemon-global tuning — NOT keyed to the active project (one shared daemon). */}
+      <div>
+        <SectionLabel>Global / Daemon</SectionLabel>
+        <GlobalConfigEditor />
+      </div>
     </div>
   );
 }
@@ -83,6 +93,10 @@ function ConfigEditor({ project }: { project: Project }) {
   const [idleSnooze, setIdleSnooze] = useState(numStr(ov.orchestration?.idleDefaultSnoozeMinutes));
   const [scheduler, setScheduler] = useState(triStr(ov.orchestration?.schedulerEnabled));
   const [docLint, setDocLint] = useState(triStr(ov.docLint));
+  // Human-only timeouts (paired with gateCommand / alertWebhook). Stored canonical ms; the form shows
+  // SECONDS (÷1000 display, ×1000 store) — blank inherits the platform default.
+  const [gateTimeout, setGateTimeout] = useState(msStr(ov.orchestration?.gateCommandTimeoutMs, "s"));
+  const [webhookTimeout, setWebhookTimeout] = useState(msStr(ov.orchestration?.alertWebhookTimeoutMs, "s"));
 
   // Build the OVERRIDE from the current form. CRITICAL: the PATCH REPLACES the whole override, so we
   // start from a clone of the stored one and apply only the fields this UI models — preserving keys it
@@ -106,6 +120,8 @@ function ConfigEditor({ project }: { project: Project }) {
 
     const orch: Partial<OrchestrationConfig> = { ...o.orchestration };
     if (gateCommand.trim()) orch.gateCommand = gateCommand.trim(); else delete orch.gateCommand;
+    applyMs(orch, "gateCommandTimeoutMs", gateTimeout, "s");
+    applyMs(orch, "alertWebhookTimeoutMs", webhookTimeout, "s");
     applyNum(orch, "maxConcurrentWorkers", maxWorkers);
     applyNum(orch, "maxConcurrentManagers", maxManagers);
     applyNum(orch, "recycleAtContextRatio", recycle);
@@ -197,6 +213,10 @@ function ConfigEditor({ project }: { project: Project }) {
             <Hint>build/test command run in a worker's worktree before merge · {effHint(resolved.orchestration.gateCommand || "none")}</Hint>
           </label>
         </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+          <MsField label="Gate command timeout (s)" value={gateTimeout} set={setGateTimeout} effectiveMs={resolved.orchestration.gateCommandTimeoutMs} defMs={defaults.orchestration.gateCommandTimeoutMs} unit="s" />
+          <MsField label="Alert webhook timeout (s)" value={webhookTimeout} set={setWebhookTimeout} effectiveMs={resolved.orchestration.alertWebhookTimeoutMs} defMs={defaults.orchestration.alertWebhookTimeoutMs} unit="s" />
+        </div>
       </Panel>
 
       <Panel>
@@ -205,6 +225,158 @@ function ConfigEditor({ project }: { project: Project }) {
           <span style={fieldLabel}>Vault-lint hook on .md writes</span>
           <TriSelect value={docLint} set={setDocLint} def={defaults.docLint} />
         </label>
+      </Panel>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <Button variant="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
+          {save.isPending ? "Saving…" : "Save"}
+        </Button>
+        {dirty
+          ? <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>unsaved changes</span>
+          : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
+        <span style={{ flex: 1 }} />
+        {save.isError && (
+          <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
+            {(save.error as Error).message}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- Global / Daemon config (NOT project-scoped) ------------------------------------------------
+
+// The Tier-1 platform tuning fields, grouped into the three sub-panels. Each maps a canonical-ms key
+// to a human display unit. Keys are unique ACROSS groups, so the form holds one flat string dict. Units
+// follow the epic: rate-limit backoff/deadlines/windows in h/m, buffers + cadences + timeouts in s.
+type Grp = "rateLimit" | "watchers" | "timeouts";
+interface GlobalFieldDesc { grp: Grp; key: string; label: string; unit: Unit; }
+const GLOBAL_FIELDS: GlobalFieldDesc[] = [
+  // Rate Limits
+  { grp: "rateLimit", key: "defaultBackoffMs", label: "Default backoff (h)", unit: "h" },
+  { grp: "rateLimit", key: "deadlineAfterResetMs", label: "Deadline after reset (m)", unit: "m" },
+  { grp: "rateLimit", key: "deadlineNoResetMs", label: "Deadline, no reset (h)", unit: "h" },
+  { grp: "rateLimit", key: "recencyWindowMs", label: "Recency window (h)", unit: "h" },
+  { grp: "rateLimit", key: "resetBufferMs", label: "Reset buffer (s)", unit: "s" },
+  // Watcher Cadences
+  { grp: "watchers", key: "contextWatchMs", label: "Context watch (s)", unit: "s" },
+  { grp: "watchers", key: "idleWatchMs", label: "Idle watch (s)", unit: "s" },
+  { grp: "watchers", key: "rateLimitWatchMs", label: "Rate-limit watch (s)", unit: "s" },
+  { grp: "watchers", key: "usagePollMs", label: "Usage poll (s)", unit: "s" },
+  { grp: "watchers", key: "wakeMs", label: "Wake tick (s)", unit: "s" },
+  { grp: "watchers", key: "schedulerMs", label: "Scheduler tick (s)", unit: "s" },
+  { grp: "watchers", key: "reconcileMs", label: "Reconcile (s)", unit: "s" },
+  // Timeouts
+  { grp: "timeouts", key: "gitOpMs", label: "Git remote op (s)", unit: "s" },
+  { grp: "timeouts", key: "gitLocalMs", label: "Git local op (s)", unit: "s" },
+  { grp: "timeouts", key: "gitPushMs", label: "Git push (s)", unit: "s" },
+  { grp: "timeouts", key: "provisionMs", label: "Worktree provision (s)", unit: "s" },
+  { grp: "timeouts", key: "busyStaleMs", label: "PTY busy-stale (s)", unit: "s" },
+];
+
+// Loads /api/platform/config then mounts the form (state seeded from the loaded override). Keeping the
+// form behind the load means its state seeds once from real data — no init-from-async dance.
+function GlobalConfigEditor() {
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ["platformConfig"],
+    queryFn: () => api.getPlatformConfig(),
+  });
+  if (isLoading) {
+    return <Panel><Hint>loading daemon config…</Hint></Panel>;
+  }
+  if (isError || !data) {
+    return <Panel><span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/platform/config"}</span></Panel>;
+  }
+  return <GlobalConfigForm override={data.override} resolved={data.resolved} />;
+}
+
+function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOverride; resolved: PlatformConfig }) {
+  const qc = useQueryClient();
+  // The platform DEFAULT group (resolveConfig with no override) — what blanking a field reverts to, shown
+  // in the "inherit (…)" placeholder. Browser-pure (no daemon read), like the per-project `defaults`.
+  const defaults = resolveConfig(undefined).platform;
+
+  // One flat string dict keyed by field key (unique across groups). "" = inherit. Seeded from the loaded
+  // override, each value displayed in its human unit (canonical ms ÷ the unit).
+  const seed: Record<string, string> = {};
+  for (const f of GLOBAL_FIELDS) {
+    const ovVal = (override[f.grp] as Record<string, number> | undefined)?.[f.key];
+    seed[f.key] = msStr(ovVal, f.unit);
+  }
+  const [vals, setVals] = useState(seed);
+
+  // Build the override from the form — every non-blank field converted to canonical ms (× the unit).
+  // A blank field is omitted (inherits). A non-numeric entry sends NaN (→ null) so the strict-zod PATCH
+  // 400s with a readable reason — the demonstrable invalid path.
+  function buildGlobalOverride(): PlatformConfigOverride {
+    const o: PlatformConfigOverride = {};
+    for (const f of GLOBAL_FIELDS) {
+      const s = vals[f.key] ?? "";
+      if (s.trim() === "") continue;
+      const grp = ((o as Record<string, Record<string, number>>)[f.grp] ??= {});
+      grp[f.key] = Number(s) * UNIT_MS[f.unit];
+    }
+    return o;
+  }
+
+  const built = buildGlobalOverride();
+  const builtJson = JSON.stringify(built);
+  const baseline = useRef(builtJson);
+  const dirty = builtJson !== baseline.current;
+
+  const save = useMutation({
+    mutationFn: () => api.updatePlatformConfig(built),
+    meta: { inlineError: true },
+    onSuccess: () => {
+      baseline.current = builtJson;
+      qc.invalidateQueries({ queryKey: ["platformConfig"] });
+    },
+  });
+
+  const group = (grp: Grp) => GLOBAL_FIELDS.filter((f) => f.grp === grp);
+  // resolved/defaults sub-groups are typed structs (no index signature); the field key is known to
+  // exist, so read it through an `unknown`-cast Record. ?? 0 satisfies noUncheckedIndexedAccess.
+  const msOf = (g: PlatformConfig[Grp], key: string): number => (g as unknown as Record<string, number>)[key] ?? 0;
+  const renderField = (f: GlobalFieldDesc) => (
+    <MsField key={f.key} label={f.label} value={vals[f.key] ?? ""}
+      set={(v) => setVals((s) => ({ ...s, [f.key]: v }))}
+      effectiveMs={msOf(resolved[f.grp], f.key)}
+      defMs={msOf(defaults[f.grp], f.key)} unit={f.unit} />
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <Panel>
+        <p style={{ color: color.amber, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+          Watcher cadences and git/provision timeouts take effect after a daemon restart. Rate-limit and
+          webhook values apply immediately.
+        </p>
+        <p style={{ color: color.textMuted, fontSize: 11, margin: "6px 0 0", fontFamily: font.mono, lineHeight: 1.5 }}>
+          Daemon-wide (not per-project). Each field overrides the platform default; leave it blank /
+          <em> inherit</em> to fall back. The hint shows the current effective value.
+        </p>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Rate Limits</SectionLabel>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+          {group("rateLimit").map(renderField)}
+        </div>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Watcher Cadences</SectionLabel>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+          {group("watchers").map(renderField)}
+        </div>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Timeouts</SectionLabel>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+          {group("timeouts").map(renderField)}
+        </div>
       </Panel>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -255,6 +427,21 @@ function NumField({ label, value, set, effective, def }:
   );
 }
 
+// Unit-aware sibling of NumField for a CANONICAL-MS value. The form shows a human unit (s/m/h); the
+// stored value is always ms. `effectiveMs`/`defMs` are ms and rendered in `unit` (÷ the unit's ms).
+// Blank → inherit (the field is omitted from the override → falls back to the platform default).
+function MsField({ label, value, set, effectiveMs, defMs, unit }:
+  { label: string; value: string; set: (v: string) => void; effectiveMs: number; defMs: number; unit: Unit }) {
+  const div = UNIT_MS[unit];
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={fieldLabel}>{label}</span>
+      <Input value={value} onChange={(e) => set(e.target.value)} inputMode="decimal" placeholder={`inherit (${defMs / div}${unit})`} />
+      <Hint>{effHint(`${effectiveMs / div}${unit}`)}</Hint>
+    </label>
+  );
+}
+
 // `def` = the platform default shown in the "— inherit (…)" option (the revert target), NOT the
 // current override-effective value.
 function TriSelect({ value, set, def }:
@@ -283,4 +470,21 @@ function numStr(v: number | undefined): string {
 function applyNum(orch: Partial<OrchestrationConfig>, key: keyof OrchestrationConfig, s: string): void {
   if (s.trim() === "") delete (orch as Record<string, unknown>)[key];
   else (orch as Record<string, unknown>)[key] = Number(s);
+}
+
+// --- ms <-> human-unit helpers (display s/m/h, store canonical ms) -------------------------------
+
+type Unit = "s" | "m" | "h";
+const UNIT_MS: Record<Unit, number> = { s: 1000, m: 60000, h: 3600000 };
+
+// Canonical ms → display string in `unit` (÷). undefined → "" (inherit/blank).
+function msStr(v: number | undefined, unit: Unit): string {
+  return v === undefined ? "" : String(v / UNIT_MS[unit]);
+}
+// Set/clear a canonical-ms orchestration key from a form string in `unit`. Blank → delete (inherit the
+// default). A non-numeric entry passes through as NaN (→ null over JSON) so the strict-zod PATCH rejects
+// it with a readable error — the demonstrable invalid-value path (mirrors applyNum).
+function applyMs(orch: Partial<OrchestrationConfig>, key: keyof OrchestrationConfig, s: string, unit: Unit): void {
+  if (s.trim() === "") delete (orch as Record<string, unknown>)[key];
+  else (orch as Record<string, unknown>)[key] = Number(s) * UNIT_MS[unit];
 }
