@@ -295,9 +295,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { path: rel, content };
   });
 
-  // Vault WRITE (HUMAN/REST only — no MCP tool: agents already write via their session cwd +
-  // the auto-committer). Every op is vault-confined by writer.ts's path-traversal guard and
-  // commits through the SAME path as the auto-committer. A traversal escape → 400 (never writes).
+  // Vault WRITE (HUMAN/REST + the role-gated PLATFORM exception). No loom-tasks/orchestration MCP tool
+  // exposes it — ordinary agents already write via their session cwd + the auto-committer. The Platform
+  // Lead (P3) reaches writeVaultFile through the platform MCP `vault_write`, gated strictly to
+  // role==="platform". Every op is vault-confined by writer.ts's path-traversal guard and commits
+  // through the SAME path as the auto-committer. A traversal escape → 400 (never writes).
   const writeReply = (reply: FastifyReply, r: Awaited<ReturnType<typeof writeVaultFile>>, relPath: string) => {
     if (r.ok) return { ok: true, path: relPath, committed: r.committed };
     if (r.reason === "traversal") return reply.code(400).send({ error: "path escapes the vault root" });
@@ -343,12 +345,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return new GitReader(p.repoPath).branches();
   });
 
-  // Git WRITE — HUMAN/REST ONLY. This is a TRUST-BOUNDARY surface like the vault writer and
-  // gateCommand: checkout/commit and ESPECIALLY push (outward-facing, network, irreversible) are
-  // DELIBERATELY absent from every MCP server — no agent (loom-tasks/orchestration/platform) can
-  // checkout/commit/push. Every op is bounded + non-interactive in GitWriter (a hung push can't wedge
-  // the daemon). An EXPECTED git failure (dirty tree, no upstream, conflict) comes back as
-  // 200 { ok:false, error } so the UI shows the reason — never a 500.
+  // Git WRITE — HUMAN/REST + the role-gated PLATFORM exception. This is a TRUST-BOUNDARY surface like
+  // the vault writer and gateCommand: checkout/commit and ESPECIALLY push (outward-facing, network,
+  // irreversible) are absent from the loom-tasks/orchestration (manager/worker) MCP servers — no
+  // ordinary agent can checkout/commit/push. The Platform Lead (P3) reaches the SAME GitWriter through
+  // the platform MCP, gated strictly to role==="platform" (a human-created-only session). Every op is
+  // bounded + non-interactive in GitWriter (a hung push can't wedge the daemon). An EXPECTED git failure
+  // (dirty tree, no upstream, conflict) comes back as 200 { ok:false, error } so the UI shows the
+  // reason — never a 500.
   app.post("/api/projects/:id/git/checkout", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
