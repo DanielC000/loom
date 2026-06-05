@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import type { SessionRole } from "@loom/shared";
 import { LOOM_HOME } from "../paths.js";
 import { writeJsonAtomic } from "../pty/claude-config.js";
 
@@ -35,19 +36,77 @@ export const RESTART_EXIT_CODE = 75;
 
 const INTENT_PATH = path.join(LOOM_HOME, "restart-intent.json");
 
+/**
+ * One member of the live fleet to bring back on boot. The daemon is ONE process for ALL projects, so
+ * a restart tears down every project's sessions — the resume set therefore spans all projects, each
+ * entry carrying the identity needed to re-spawn it with the SAME role + lineage (a worker under its
+ * manager). (P1 17df54c5 — was previously only the requesting manager's own flat workerSessionIds.)
+ */
+export interface RestartResumeEntry {
+  sessionId: string;
+  /** The session's orchestration role, re-passed on resume so its MCP surface comes back. null = plain. */
+  role: SessionRole | null;
+  /** For a worker, the manager that spawned it (preserves manager↔worker linkage across the restart). */
+  parentSessionId: string | null;
+}
+
 export interface RestartIntent {
   reason: string;
+  /**
+   * The manager that REQUESTED the restart. It alone is re-prompted ("your merged code is now live —
+   * continue/verify"); every OTHER captured session resumes as-is. Always present in `resume` too (it
+   * is itself a live session) — this field only marks WHICH of them is the requester.
+   */
   managerSessionId: string;
-  /** The manager's workers that were live at restart time — resumed best-effort on boot. */
-  workerSessionIds: string[];
+  /**
+   * The FULL live fleet captured at restart time (every manager, worker, and plain/platform session
+   * that was live, across ALL projects). Boot re-resumes each with its role + linkage and protects
+   * each one's worktree from boot-reconcile GC. Absent on an OLD (pre-deploy) intent — boot then falls
+   * back to {managerSessionId} + workerSessionIds for that one file (see resumeSetFromIntent).
+   */
+  resume?: RestartResumeEntry[];
+  /**
+   * @deprecated superseded by `resume` (P1 17df54c5). Retained ONLY so an OLD on-disk intent written by
+   * a pre-deploy daemon still resumes the requester + its workers on the first boot after deploy.
+   */
+  workerSessionIds?: string[];
   /**
    * Per-session snapshot (sessionId → its in-memory pending inbound FIFO) taken at restart time, so the
    * undelivered queue survives the process death and is replayed on boot (index.ts) — the persisted
-   * analogue of recycle's in-process carriedPending. Only non-empty FIFOs of the manager + its resumed
-   * workers are included; absent when nothing was queued.
+   * analogue of recycle's in-process carriedPending. Only non-empty FIFOs of resumed sessions are
+   * included; absent when nothing was queued.
    */
   pending?: Record<string, string[]>;
   requestedAt: string;
+}
+
+/**
+ * The fleet to resume, tolerant of BOTH the current shape (`resume`) and the OLD on-disk shape
+ * (`workerSessionIds` only) — so the first boot after deploy reading a pre-deploy intent does NOT
+ * crash; it degrades to today's behavior (the requester + its workers) for that one file.
+ */
+export function resumeSetFromIntent(intent: RestartIntent): RestartResumeEntry[] {
+  if (intent.resume && intent.resume.length > 0) return intent.resume;
+  // OLD-format fallback: synthesize the requester (manager) + its flat workers.
+  const out: RestartResumeEntry[] = [
+    { sessionId: intent.managerSessionId, role: "manager", parentSessionId: null },
+  ];
+  for (const w of intent.workerSessionIds ?? []) {
+    out.push({ sessionId: w, role: "worker", parentSessionId: intent.managerSessionId });
+  }
+  return out;
+}
+
+/**
+ * Every session id boot must PROTECT from reconcile worktree-GC — the whole resume set plus the
+ * requester and any legacy workerSessionIds (belt-and-suspenders across both intent shapes). Boot
+ * seeds `protectedSessionIds` from this so Pass B skips ALL their worktrees.
+ */
+export function protectedIdsFromIntent(intent: RestartIntent): Set<string> {
+  const ids = new Set<string>(resumeSetFromIntent(intent).map((e) => e.sessionId));
+  ids.add(intent.managerSessionId);
+  for (const w of intent.workerSessionIds ?? []) ids.add(w);
+  return ids;
 }
 
 /** True only when running under the restart supervisor — i.e. `daemon_restart` can safely relaunch. */
