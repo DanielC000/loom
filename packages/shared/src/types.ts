@@ -166,7 +166,14 @@ export type OrchestrationEventKind =
   // A manager self-service management action (assign profile / update agent / update or archive a
   // project / create or update a schedule). `detail.action` discriminates; audit trail for the
   // trust-boundary surface (managers ASSIGN existing capability sets + edit structure, never MINT).
-  | "manager_manage";
+  | "manager_manage"
+  // Platform Lead cross-project message delivery (loom-platform `session_message`) — UN-scoped, above
+  // the manager/worker tree. `workerSessionId` carries the TARGET session id (delivery only, never spawn).
+  | "session_message"
+  // Manager→Platform UPWARD escalation (orchestration `platform_escalate`): a discovered Loom bug/friction
+  // filed as a durable TASK on the reserved Platform board (the Lead's inbox). `detail` carries the origin
+  // project, severity, and the created Platform task id. The ONLY cross-project write a manager may make.
+  | "platform_escalate";
 
 export interface OrchestrationEvent {
   id: string;

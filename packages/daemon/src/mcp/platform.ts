@@ -459,6 +459,30 @@ export class PlatformMcpRouter {
       },
     );
 
+    // === P4 — cross-project messaging (the Lead's side). session_message lets the Lead — which stands
+    // ABOVE the manager/worker tree — deliver a message to ANY live session in ANY project, with NO
+    // parent/child scoping (the deliberate widening over the manager's parent-gated worker_message). It is
+    // DELIVERY ONLY: it reuses the stdin-enqueue channel and never spawns. The upward half of the channel,
+    // platform_escalate, lives on the MANAGER surface (mcp/orchestration.ts) — NOT here. ===
+    server.registerTool(
+      "session_message",
+      {
+        description:
+          "Message ANY live session by id, cross-project (the Lead is above the manager/worker tree, so " +
+          "there is NO parent/child scoping). Submitted as a turn if the target is idle; queued FIFO and " +
+          "delivered on its next turn boundary if it's mid-turn. Framed [loom:from-platform] so the receiver " +
+          "knows the source. DELIVERY ONLY — this never spawns anything. 404 if the session is unknown or not live.",
+        inputSchema: { sessionId: z.string(), text: z.string() },
+      },
+      async ({ sessionId, text }) => {
+        try {
+          return ok(sessions.messageSessionAsPlatform(sessionId, text));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     return server;
   }
 
