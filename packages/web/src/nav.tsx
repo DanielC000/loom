@@ -11,6 +11,7 @@ import Skills from "./pages/Skills";
 import Profiles from "./pages/Profiles";
 import Schedules from "./pages/Schedules";
 import Usage from "./pages/Usage";
+import Platform from "./pages/Platform";
 import Settings from "./pages/Settings";
 
 export type NavPage = {
@@ -42,5 +43,8 @@ export const NAV_PAGES: NavPage[] = [
   { label: "Profiles", to: "/profiles", element: <Profiles /> },
   { label: "Schedules", to: "/schedules", element: <Schedules /> },
   { label: "Usage", to: "/usage", element: <Usage /> },
+  // The Platform section — the reserved "Loom Platform" home (Lead/Auditor + findings board), a
+  // top-level surface SEPARATE from the project picker (the reserved project stays out of that list).
+  { label: "Platform", to: "/platform", element: <Platform /> },
   { label: "Settings", to: "/settings", element: <Settings /> },
 ];

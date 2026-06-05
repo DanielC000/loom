@@ -21,10 +21,13 @@ const byRecentlyDone = (a: Task, b: Task) =>
 
 // Per-project kanban. Reads/writes the SAME task store the MCP tools use — moving a card
 // POSTs columnKey, which a spawned agent's tasks_list immediately sees, and vice versa.
-// Scoped to the header's active project (see lib/activeProject).
-export default function Board() {
+// Scoped to the header's active project by default; an explicit `projectId` prop points it at a
+// specific project instead — the Platform section reuses it pointed at the reserved "Loom Platform"
+// home so its board (the findings + escalations backlog) renders + triages with the same component.
+export default function Board({ projectId: propProjectId }: { projectId?: string } = {}) {
   const qc = useQueryClient();
-  const { projectId } = useActiveProject();
+  const active = useActiveProject();
+  const projectId = propProjectId ?? active.projectId;
   const [openTaskId, setOpenTaskId] = useState<string | null>(null); // task whose detail drawer is open
   const board = useQuery({ queryKey: ["board", projectId], queryFn: () => api.board(projectId), enabled: !!projectId, placeholderData: keepPreviousData });
   // Link the board to the orchestration spine: a worker carries its task id, so cards can show the

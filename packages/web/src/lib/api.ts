@@ -69,6 +69,10 @@ async function patch<T>(url: string, body: unknown): Promise<T> {
 
 export const api = {
   projects: () => get<Project[]>("/api/projects"),
+  // Platform Manager P6 — discover the reserved "Loom Platform" home (hidden from the ordinary picker)
+  // + its seeded agents (the Lead + Auditor), for the dedicated Platform section. READ-ONLY discovery;
+  // spawn/stop/schedule reuse the existing startSession / stopSession / createSchedule routes below.
+  platformHome: () => get<{ project: Project; agents: Agent[] }>("/api/platform/home"),
   createProject: (b: { name: string; repoPath: string; vaultPath: string }) =>
     post<Project>("/api/projects", b),
   archiveProject: (id: string) => del<{ ok: boolean }>(`/api/projects/${id}`),
@@ -102,8 +106,9 @@ export const api = {
     post<Task>(`/api/projects/${projectId}/tasks`, b),
   sessions: (agentId: string) => get<Session[]>(`/api/agents/${agentId}/sessions`),
   // role omitted/undefined = auto (the agent's profile role applies, server-side); "manager"/"platform"
-  // = explicit role; "plain" = force-plain (ignore the profile's role → a role-null session).
-  startSession: (agentId: string, role?: "manager" | "platform" | "plain") =>
+  // = explicit role; "auditor" = the read-and-file-only Platform Auditor (P5; locked role server-side);
+  // "plain" = force-plain (ignore the profile's role → a role-null session).
+  startSession: (agentId: string, role?: "manager" | "platform" | "auditor" | "plain") =>
     post<Session>(`/api/agents/${agentId}/sessions`, role ? { role } : undefined),
   resumeSession: (id: string) => post<Session>(`/api/sessions/${id}/resume`),
   forkSession: (id: string) => post<Session>(`/api/sessions/${id}/fork`),
@@ -220,7 +225,9 @@ export const api = {
   // → 201; updateSchedule patches cron/enabled only (agentId is immutable) and recomputes nextFireAt
   // server-side on a cron change. Both the create and the cron patch 400 on an invalid cron expression. ---
   schedules: () => get<Schedule[]>("/api/schedules"),
-  createSchedule: (b: { agentId: string; cron: string; enabled?: boolean }) => post<Schedule>("/api/schedules", b),
+  // `kind` (Platform Manager P5) selects what a fire spawns — "manager" (default) or "auditor" (the
+  // read-and-file-only Platform Auditor). The Platform section puts the Auditor on a cadence with it.
+  createSchedule: (b: { agentId: string; cron: string; enabled?: boolean; kind?: Schedule["kind"] }) => post<Schedule>("/api/schedules", b),
   updateSchedule: (id: string, patch: { cron?: string; enabled?: boolean }) => post<Schedule>(`/api/schedules/${encodeURIComponent(id)}`, patch),
   deleteSchedule: (id: string) => del<{ ok: boolean }>(`/api/schedules/${encodeURIComponent(id)}`),
 };

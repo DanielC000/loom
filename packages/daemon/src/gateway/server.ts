@@ -172,6 +172,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- REST: read ---
   app.get("/api/projects", async () => deps.db.listProjects());
 
+  // --- Platform home discovery (Platform Manager P6): the reserved "Loom Platform" project + its
+  // agents (the Platform Lead + Auditor), surfaced to the dedicated Platform UI section. The reserved
+  // project is HIDDEN from the ordinary picker (GET /api/projects excludes reserved), so this READ-ONLY
+  // endpoint is the one way the web discovers it. NO write/elevated capability lives here — the human
+  // spawn/stop/schedule controls reuse the EXISTING agent-session, stop, and schedule REST routes.
+  // 404 only if no reserved home exists (impossible after boot-seed). ---
+  app.get("/api/platform/home", async (_req, reply) => {
+    const project = deps.db.listAllProjects().find((p) => p.reserved);
+    if (!project) return reply.code(404).send({ error: "no reserved Loom Platform project" });
+    return { project, agents: deps.db.listAgents(project.id) };
+  });
+
   // --- Loom-managed skills (the UI-editable skill store; delivered to sessions project-local) ---
   app.get("/api/skills", async () => listSkills());
   app.get("/api/skills/:name", async (req, reply) => {
