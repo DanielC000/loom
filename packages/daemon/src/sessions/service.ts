@@ -9,7 +9,7 @@ import {
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, isBranchMerged } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, isBranchMerged, worktreeHasWork } from "../git/worktrees.js";
 import { engineTranscriptExists, deleteArchivedTranscript } from "./transcript.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit } from "../orchestration/usage-awareness.js";
@@ -1183,7 +1183,7 @@ export class SessionService {
    *     the branch here — any committed work stays on it and createWorktree re-attaches a fresh
    *     worktree to it on a re-task.
    */
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     const handledWorktrees = new Set<string>();
@@ -1191,6 +1191,7 @@ export class SessionService {
     let mergesFailed = 0;
     let staleMergesResolved = 0;
     let worktreesPruned = 0;
+    let worktreesKept = 0;
 
     // A. Finish orphaned merges. Best-effort PER SESSION: finalizeMerge now swallows a removeWorktree
     // throw internally (so a busy dir won't even abort the per-session finalize), but the try/catch
@@ -1207,6 +1208,19 @@ export class SessionService {
         if (!(await isBranchMerged(project.repoPath, s.branch))) continue;
         const worktreePath = s.worktreePath ?? s.cwd;
         const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
+        // SAFE-TO-DISCARD guard (P0 data-loss fix, 2026-06-05): a 0-commit branch is trivially "merged"
+        // (its tip == HEAD), so a LIVE worker just marked `exited` at boot is MISDETECTED here as an
+        // orphaned merge — finalizeMerge would removeWorktree (losing uncommitted work) AND mark the task
+        // done AND delete the branch. If the worktree still holds REAL work, KEEP it instead. A genuine
+        // orphaned merge is clean AND 0-ahead → worktreeHasWork=false → finalizes normally (no
+        // merge-recovery regression; injected `.claude/` noise is ignored). Fails safe (error → keep).
+        if (worktreeOnDisk && await worktreeHasWork(project.repoPath, worktreePath, s.branch)) {
+          // eslint-disable-next-line no-console
+          console.warn(`[reconcile] kept worktree ${worktreePath} — holds unmerged/uncommitted work (Pass A)`);
+          handledWorktrees.add(worktreePath);
+          worktreesKept++;
+          continue;
+        }
         const taskDone = this.db.getTask(s.taskId)?.columnKey === "done";
         if (taskDone && !worktreeOnDisk) continue; // already fully reconciled — nothing to finish
         await this.finalizeMerge({
@@ -1244,7 +1258,14 @@ export class SessionService {
       staleMergesResolved++;
     }
 
-    // B. GC orphaned worktrees (exited/dead, dir on disk, not handled in A).
+    // B. GC orphaned worktrees (exited/dead, dir on disk, not handled in A) — but NEVER one that still
+    // holds work. SAFE-TO-DISCARD guard (P0 data-loss fix, 2026-06-05): recoverStaleSessions marks EVERY
+    // prior-run session `exited` at boot, so without this the worktree of an UNRELATED manager's live
+    // worker (exited here, NOT in protectedSessionIds — only the requesting manager's workers are) was
+    // deleted mid-task, pre-commit. We now delete a worktree ONLY when it is provably disposable: no
+    // commits ahead of main AND a clean working tree (see worktreeHasWork, which FAILS SAFE → keep on
+    // any timeout/error). Anything still holding work is left on disk for a human/next pass. This holds
+    // for ALL sessions in Pass B, not just protected ones.
     for (const s of all) {
       const worktreePath = s.worktreePath;
       if (!worktreePath || handledWorktrees.has(worktreePath)) continue;
@@ -1253,11 +1274,17 @@ export class SessionService {
       if (!fs.existsSync(worktreePath)) continue;
       const project = this.db.getProject(s.projectId);
       if (!project) continue;
+      handledWorktrees.add(worktreePath); // recycle chains share a worktree → decide once
+      if (await worktreeHasWork(project.repoPath, worktreePath, s.branch ?? null)) {
+        // eslint-disable-next-line no-console
+        console.warn(`[reconcile] kept worktree ${worktreePath} — holds unmerged/uncommitted work (Pass B)`);
+        worktreesKept++;
+        continue;
+      }
       try { await removeWorktree(project.repoPath, worktreePath); } catch { /* best-effort */ }
-      handledWorktrees.add(worktreePath); // recycle chains share a worktree → prune once
       worktreesPruned++;
     }
 
-    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned };
+    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept };
   }
 }

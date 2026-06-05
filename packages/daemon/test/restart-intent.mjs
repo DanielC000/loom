@@ -7,9 +7,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (4) boot replay seam: replaying an intent's `pending` snapshot onto a resumed (not-yet-ready) pty
 //       re-enqueues each session's messages in FIFO order (getPending after replay == the snapshot) —
 //       the persisted analogue of recycle's in-process carriedPending, mirrored from index.ts boot.
-//   (2) reconcileOrchestrationOnBoot PROTECTS a restart-intent worker's worktree from pass-B GC —
-//       without protection the exited worker's worktree is pruned (and would be unresumable); WITH
-//       the worker in the protected set the worktree is RETAINED so boot can resume into it.
+//   (2) reconcileOrchestrationOnBoot PROTECTS a restart-intent worker's worktree from boot GC: WITH
+//       the worker in the protected set the worktree is RETAINED (prunes 0) so boot can resume into it.
+//       And WITHOUT protection the same work-holding worktree is STILL retained — now by the P0
+//       safe-to-discard guard (defense-in-depth: a worktree holding unmerged/uncommitted work is never
+//       auto-deleted on boot, protected or not). (Pre-guard the unprotected exited worktree was pruned —
+//       the data-loss bug that guard fixes.)
 //   (3) requestDaemonRestart REFUSES when unsupervised (LOOM_SUPERVISED unset) — returns
 //       {restarting:false,error} and writes NO intent + does NOT exit (so a dev/non-supervised
 //       daemon can't be killed with nothing to bring it back).
@@ -88,10 +91,12 @@ try {
   check("(2) protected reconcile pruned 0 worktrees", rProtected.worktreesPruned === 0);
   check("(2) protected worker's worktree RETAINED (resumable)", fs.existsSync(worktreePath));
 
-  // --- and WITHOUT protection, the same exited worktree IS pruned (proves the guard is load-bearing) ---
+  // --- and WITHOUT protection, the same worktree is STILL retained — now by the P0 safe-to-discard
+  //     guard (it holds unmerged committed work). Defense-in-depth: a work-holding worktree is NEVER
+  //     auto-deleted on boot, protected or not. (Pre-guard this exited worktree was pruned — the bug.) ---
   const rUnprotected = await sessions.reconcileOrchestrationOnBoot();
-  check("(2) unprotected reconcile prunes the orphaned worktree", rUnprotected.worktreesPruned === 1);
-  check("(2) unprotected worktree gone", !fs.existsSync(worktreePath));
+  check("(2) unprotected reconcile prunes 0 (work-holding worktree kept by the safety net)", rUnprotected.worktreesPruned === 0);
+  check("(2) unprotected work-holding worktree KEPT (never auto-deleted)", rUnprotected.worktreesKept === 1 && fs.existsSync(worktreePath));
 
   // --- (3) unsupervised refusal ---
   const refusal = await sessions.requestDaemonRestart(ids.mgrId, "should be refused");
@@ -138,6 +143,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — restart intent roundtrips (incl. the pending FIFO snapshot, replayed in order onto a resumed pty), the reconcile protects intent worktrees from GC, and an unsupervised/non-manager daemon_restart is refused without side effects."
+  ? "\n✅ ALL PASS — restart intent roundtrips (incl. the pending FIFO snapshot, replayed in order onto a resumed pty), the reconcile retains an intent worker's worktree (protected, and — defense-in-depth — even unprotected when it holds work), and an unsupervised/non-manager daemon_restart is refused without side effects."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
