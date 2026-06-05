@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, ShellTerminal, Task } from "@loom/shared";
 import { api } from "../lib/api";
-import { bySessionActivity, mostRecentActivity } from "../lib/sessions";
 import { TerminalPane } from "../components/Terminal";
 import { SessionWakes } from "../components/SessionWakes";
 import { SessionQueue } from "../components/SessionQueue";
@@ -52,17 +51,20 @@ export default function Terminals() {
   });
   const tasksById = new Map<string, Task>();
   for (const q of taskQueries) for (const t of q.data ?? []) tasksById.set(t.id, t);
-  // Tile order: the shared activity comparator (live-first → most-recent-active → spawn-order), so
-  // the session you're driving floats up, consistent with every other session list.
+  // Tile order: a STABLE key — createdAt ascending, tiebreak by id. A session keeps its slot whether
+  // it's busy or idle, so the grid never reshuffles on a poll (the old activity sort made rows jump).
+  const byCreated = (a: SessionListItem, b: SessionListItem) =>
+    a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
   const shown = (filter ? live.filter((s) => s.projectName === filter) : live)
-    .slice().sort(bySessionActivity);
+    .slice().sort(byCreated);
   // Manager-centric layout: one ROW per manager — the manager tile leftmost, then ITS workers to
   // the right ordered oldest→newest (createdAt asc). Workers attach to their manager via
   // parentSessionId. Two catch-all rows trail the manager rows so nothing is dropped: orphan workers
   // (parent absent from the live set — a recycled/stopped manager) and standalone sessions (no role /
   // no parent — plain human sessions, platform leads — which must never anchor a manager row).
-  // Manager rows rank busiest-first (most-recent activity across the row), matching the live-first
-  // convention. Computed from `shown`, so the same layout holds inside a project filter.
+  // Manager rows are ordered by a STABLE key (manager createdAt asc, tiebreak id, via `shown`) so a
+  // row never jumps when its manager/workers flip busy↔idle. Computed from `shown` (already in that
+  // stable order), so the same layout holds inside a project filter.
   const rows = useMemo<SessionRow[]>(() => {
     const managers = shown.filter((s) => s.role === "manager");
     const managerIds = new Set(managers.map((m) => m.id));
@@ -78,12 +80,13 @@ export default function Terminals() {
       } else standalone.push(s); // no role / platform lead — its own trailing row
     }
     const byAge = (a: SessionListItem, b: SessionListItem) => a.createdAt.localeCompare(b.createdAt);
+    // `managers` is already in stable createdAt/id order (from `shown`), so the rows are too — no
+    // re-sort, and a row holds its slot regardless of activity.
     const managerRows: SessionRow[] = managers
-      .map((m) => ({ key: m.id, kind: "manager" as const, list: [m, ...(workersByParent.get(m.id) ?? []).slice().sort(byAge)] }))
-      .sort((a, b) => mostRecentActivity(b.list) - mostRecentActivity(a.list)); // busiest row up top
+      .map((m) => ({ key: m.id, kind: "manager" as const, list: [m, ...(workersByParent.get(m.id) ?? []).slice().sort(byAge)] }));
     const trailing: SessionRow[] = [];
     if (orphans.length) trailing.push({ key: "__orphans", kind: "orphans", list: orphans.slice().sort(byAge) });
-    if (standalone.length) trailing.push({ key: "__standalone", kind: "standalone", list: standalone.slice().sort(bySessionActivity) });
+    if (standalone.length) trailing.push({ key: "__standalone", kind: "standalone", list: standalone.slice().sort(byCreated) });
     return [...managerRows, ...trailing];
   }, [shown]);
 
