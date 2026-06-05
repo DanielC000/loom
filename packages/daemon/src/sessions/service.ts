@@ -1166,6 +1166,39 @@ export class SessionService {
   }
 
   /**
+   * Platform-lead cross-project spawn (loom-platform `session_spawn`). Spawns a session into ANY
+   * project by explicit projectId + agentId. HARD INVARIANT — role ∈ {manager, plain} ONLY:
+   *   - NEVER 'platform' — a platform session is HUMAN-REST-only (startPlatformLead). Letting this
+   *     surface mint one would let anything reaching the platform MCP self-elevate to human-equivalent.
+   *   - NEVER 'worker' — a worker requires a manager parent + a task + a worktree; spawning one stays
+   *     a manager's orchestration job (spawnWorker), never a free-standing platform spawn.
+   * The role is narrowed to `"manager" | "plain"` at the TYPE level (the in-service backstop of the
+   * invariant the platform router also enforces at runtime). manager → startManager (orchestration
+   * surface); plain → startNew(forcePlain) (vanilla, role null — even on a profile agent).
+   */
+  spawnSessionAsPlatform(projectId: string, agentId: string, role: "manager" | "plain"): Session {
+    const project = this.db.getProject(projectId);
+    if (!project) throw new Error("project not found");
+    const agent = this.db.getAgent(agentId);
+    if (!agent) throw new Error("agent not found");
+    if (agent.projectId !== projectId) throw new Error("agent does not belong to the given project");
+    if (role === "manager") return this.startManager(agentId);
+    return this.startNew(agentId, { forcePlain: true });
+  }
+
+  /**
+   * Stop ANY session by id (loom-platform `session_stop`; the cross-project analogue of
+   * POST /api/sessions/:id/stop). graceful (Ctrl-C ×2, clean, default) | hard (pty.kill) — both
+   * resumable + orphan-free (node-pty Job Object). Unlike stopWorker this is NOT parent-scoped: the
+   * platform-lead is human-equivalent, above the manager/worker tree.
+   */
+  stopSession(sessionId: string, mode: StopMode): { stopped: true; sessionId: string } {
+    if (!this.db.getSession(sessionId)) throw new Error("session not found");
+    this.pty.stop(sessionId, mode);
+    return { stopped: true, sessionId };
+  }
+
+  /**
    * Step 1 of the two-step merge gate (#16): show the manager a worker's branch diff. NO merge
    * happens — this is the review the manager cannot skip (there is no worker-side merge tool).
    */

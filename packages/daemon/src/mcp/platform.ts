@@ -3,9 +3,12 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import type { Project, ProjectConfigOverride, PlatformConfigOverride, Agent } from "@loom/shared";
+import type { Project, ProjectConfigOverride, PlatformConfigOverride, Agent, Profile, Schedule } from "@loom/shared";
 import type { Db } from "../db.js";
+import type { SessionService } from "../sessions/service.js";
 import { isGitRepo } from "../git/reader.js";
+import { nextFireAt } from "../orchestration/cron.js";
+import { validateProfile } from "../profiles/validate.js";
 
 // Same envelope as the task / orchestration MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -171,7 +174,10 @@ export function validatePlatformConfigOverride(
  * McpServer+transport per request, so no cached transport can be wedged by a dropped stream.
  */
 export class PlatformMcpRouter {
-  constructor(private db: Db) {}
+  // `sessions` (the SessionService) drives session_spawn/session_stop — the cross-project lifecycle
+  // ops. Mirrors OrchestrationMcpRouter(db, sessions). `import type` keeps it a compile-time-only
+  // reference (service.ts imports a value from THIS module — a runtime import here would cycle).
+  constructor(private db: Db, private sessions: SessionService) {}
 
   /** Role gate: only a platform-lead gets this surface. */
   resolveRole(sessionId: string): { id: string } | null {
@@ -180,6 +186,7 @@ export class PlatformMcpRouter {
 
   private buildServer(): McpServer {
     const db = this.db;
+    const sessions = this.sessions;
     const server = new McpServer({ name: "loom-platform", version: "0.1.0" });
 
     server.registerTool(
@@ -248,6 +255,207 @@ export class PlatformMcpRouter {
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
         db.setProjectConfig(projectId, v.value);
         return ok({ ok: true, projectId, config: v.value });
+      },
+    );
+
+    // === P2 — the Lead's cross-project management surface (read + structural). All platform-role-gated
+    // (the router 404s a non-platform session). Each takes an explicit cross-project id and reuses the
+    // SAME service/Db methods the human REST paths use. The elevated outward/host ops (gateCommand,
+    // alertWebhook, git checkout/commit/push, vault writes) are P3 — deliberately NOT here. ===
+
+    // --- cross-project reads ---
+    server.registerTool(
+      "list_all_projects",
+      {
+        description: "List every live project across the platform, INCLUDING the reserved/system home (the ordinary project picker hides reserved ones; this admin view does not). Excludes archived projects. Returns project rows.",
+        inputSchema: {},
+      },
+      async () => ok(db.listAllProjects()),
+    );
+
+    server.registerTool(
+      "list_all_agents",
+      {
+        description: "List agents across the platform. Optional projectId narrows to one project (unknown id ⇒ []). With no filter, aggregates the agents of every live project (incl. the reserved home). Returns lightweight agent rows.",
+        inputSchema: { projectId: z.string().optional() },
+      },
+      async ({ projectId }) => {
+        if (projectId !== undefined) return ok(db.listAgents(projectId));
+        // No db.listAllAgents — aggregate across every live project (reuses listAllProjects + listAgents).
+        return ok(db.listAllProjects().flatMap((p) => db.listAgents(p.id)));
+      },
+    );
+
+    server.registerTool(
+      "list_all_sessions",
+      {
+        description: "List live sessions across the platform (the Mission-Control feed; archived excluded), each enriched with its project + agent name. Optional projectId narrows to one project. Returns lightweight session rows.",
+        inputSchema: { projectId: z.string().optional() },
+      },
+      async ({ projectId }) => {
+        const all = db.listAllSessions();
+        return ok(projectId === undefined ? all : all.filter((s) => s.projectId === projectId));
+      },
+    );
+
+    // --- profiles (cross-project rigs). HUMAN-EQUIVALENT ops — gated to the platform role only; the
+    // manager/worker surfaces can only ASSIGN a profile, never mint one. Same strict validator
+    // (validateProfile) the human REST profile endpoints use; validation is NOT loosened here. ---
+    server.registerTool(
+      "profile_create",
+      {
+        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting). Validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
+        inputSchema: { profile: z.object({}).passthrough() },
+      },
+      async ({ profile }) => {
+        const v = validateProfile(profile);
+        if (!v.ok) return ok({ error: `invalid profile: ${v.error}` });
+        const created: Profile = { id: randomUUID(), ...v.value };
+        db.insertProfile(created);
+        return ok(created);
+      },
+    );
+
+    server.registerTool(
+      "profile_update",
+      {
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        inputSchema: { profileId: z.string(), patch: z.object({}).passthrough() },
+      },
+      async ({ profileId, patch }) => {
+        const existing = db.getProfile(profileId);
+        if (!existing) return ok({ error: "profile not found" });
+        // Mirror the REST PUT: drop `id` from both sides so a verbatim round-trip doesn't trip .strict().
+        const { id: _pid, ...patchNoId } = patch as Record<string, unknown>;
+        const { id: _eid, ...base } = existing;
+        const v = validateProfile({ ...base, ...patchNoId });
+        if (!v.ok) return ok({ error: `invalid profile: ${v.error}` });
+        db.updateProfile(profileId, v.value);
+        return ok(db.getProfile(profileId));
+      },
+    );
+
+    server.registerTool(
+      "profile_assign",
+      {
+        description: "Assign an EXISTING profile to an agent (cross-project, explicit agentId). Both the agent and the profile must already exist (404 otherwise). Assignment only — it never mints a profile (use profile_create).",
+        inputSchema: { agentId: z.string(), profileId: z.string() },
+      },
+      async ({ agentId, profileId }) => {
+        if (!db.getAgent(agentId)) return ok({ error: "agent not found" });
+        if (!db.getProfile(profileId)) return ok({ error: "profile not found" });
+        db.updateAgent(agentId, { profileId });
+        return ok(db.getAgent(agentId));
+      },
+    );
+
+    // --- sessions (cross-project lifecycle) ---
+    server.registerTool(
+      "session_spawn",
+      {
+        description:
+          "Spawn a session into ANY project by explicit projectId + agentId. role MUST be \"manager\" or \"plain\" ONLY: \"manager\" gets the orchestration surface; \"plain\" is a vanilla role-null session (even on a profile agent). NEVER spawns a \"platform\" session (human-REST-only — no self-elevation) and NEVER a \"worker\" (a worker needs a manager parent + a task; that stays a manager's orchestration job). Any other role value is rejected.",
+        inputSchema: { projectId: z.string(), agentId: z.string(), role: z.string() },
+      },
+      async ({ projectId, agentId, role }) => {
+        // HARD INVARIANT (single most important of this phase): only manager|plain may be minted here.
+        // Reject platform (self-elevation) and worker (manager-owned) — and anything else — explicitly.
+        if (role !== "manager" && role !== "plain") {
+          return ok({
+            error: `session_spawn refuses role "${role}" — only "manager" or "plain" may be spawned here. ` +
+              "A platform session is human-REST-only (no self-elevation) and a worker requires a manager parent + task (a manager's orchestration job).",
+          });
+        }
+        try {
+          return ok(sessions.spawnSessionAsPlatform(projectId, agentId, role));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
+      "session_stop",
+      {
+        description: "Stop ANY session by id (cross-project). mode \"graceful\" (default — clean Ctrl-C ×2, resumable) or \"hard\" (pty.kill escalation); both orphan-free. Mirrors POST /api/sessions/:id/stop. 404 if the session is unknown.",
+        inputSchema: { sessionId: z.string(), mode: z.enum(["graceful", "hard"]).optional() },
+      },
+      async ({ sessionId, mode }) => {
+        try {
+          return ok(sessions.stopSession(sessionId, mode ?? "graceful"));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    // --- projects (cross-project structural edits; config changes go through project_configure) ---
+    server.registerTool(
+      "project_update",
+      {
+        description: "Structural edit of any project by id — name and/or vaultPath (omitted fields left as-is). Config changes go through project_configure. 404 if the project is unknown. Returns the updated project.",
+        inputSchema: { projectId: z.string(), name: z.string().optional(), vaultPath: z.string().optional() },
+      },
+      async ({ projectId, name, vaultPath }) => {
+        if (!db.getProject(projectId)) return ok({ error: "project not found" });
+        db.updateProject(projectId, { name, vaultPath });
+        return ok(db.getProject(projectId));
+      },
+    );
+
+    server.registerTool(
+      "project_archive",
+      {
+        description: "Soft-archive any project by id (hidden from the active list; rows + sessions retained). REFUSES a reserved/system project — the Lead must never archive the platform home. 404 if unknown.",
+        inputSchema: { projectId: z.string() },
+      },
+      async ({ projectId }) => {
+        const p = db.getProject(projectId);
+        if (!p) return ok({ error: "project not found" });
+        // Guard: never let the Lead archive its own reserved home (or any system project).
+        if (p.reserved) return ok({ error: "cannot archive a reserved/system project (the Loom Platform home)" });
+        db.archiveProject(projectId);
+        return ok({ archived: true, projectId });
+      },
+    );
+
+    // --- schedules (cross-project; explicit agentId — the platform analogue of the manager self-service
+    // schedule tools). Mirrors POST /api/schedules: validate agent, compute next_fire_at, persist. ---
+    server.registerTool(
+      "schedule_create",
+      {
+        description: "Create a cron schedule that boots a manager session in an agent (explicit cross-project agentId) on each tick (5-field cron). enabled defaults to true. An unknown agent or an invalid cron is rejected. next_fire_at is computed here.",
+        inputSchema: { agentId: z.string(), cron: z.string(), enabled: z.boolean().optional() },
+      },
+      async ({ agentId, cron, enabled }) => {
+        if (!db.getAgent(agentId)) return ok({ error: "agent not found" });
+        let next: string;
+        try { next = nextFireAt(cron, new Date()); } catch { return ok({ error: "invalid cron expression" }); }
+        const schedule: Schedule = {
+          id: randomUUID(), agentId, cron, enabled: enabled ?? true,
+          nextFireAt: next, lastFiredAt: null, createdAt: new Date().toISOString(),
+        };
+        db.insertSchedule(schedule);
+        return ok(schedule);
+      },
+    );
+
+    server.registerTool(
+      "schedule_update",
+      {
+        description: "Update a schedule's cron and/or enabled flag by id. A changed cron recomputes next_fire_at (rejected if invalid); enabled toggles the Scheduler for this row. Omitted fields are left as-is. 404 if the schedule is unknown.",
+        inputSchema: { scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional() },
+      },
+      async ({ scheduleId, cron, enabled }) => {
+        if (!db.getSchedule(scheduleId)) return ok({ error: "schedule not found" });
+        const patch: { cron?: string; enabled?: boolean; nextFireAt?: string } = {};
+        if (typeof enabled === "boolean") patch.enabled = enabled;
+        if (typeof cron === "string") {
+          try { patch.nextFireAt = nextFireAt(cron, new Date()); } catch { return ok({ error: "invalid cron expression" }); }
+          patch.cron = cron;
+        }
+        db.updateSchedule(scheduleId, patch);
+        return ok(db.getSchedule(scheduleId));
       },
     );
 
