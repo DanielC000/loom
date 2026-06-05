@@ -51,6 +51,41 @@ for (const key of ["idleNudgeMinutes", "maxUnansweredNudges", "idleDefaultSnooze
   check("agent path: valid orchestration override accepted", validateAgentProjectConfigOverride(orch({ recycleAtContextRatio: 0.75, maxConcurrentWorkers: 5, idleNudgeMinutes: 20 })).ok === true);
 }
 
+// --- per-project gate/webhook timeouts: HUMAN-only, bounded on the human path -----------------------
+// gateCommandTimeoutMs 1000–1800000; alertWebhookTimeoutMs 500–60000; both `.int()`.
+{
+  check("gateCommandTimeoutMs:999 (<floor) rejected", validateProjectConfigOverride(orch({ gateCommandTimeoutMs: 999 })).ok === false);
+  check("gateCommandTimeoutMs:1800001 (>ceiling) rejected", validateProjectConfigOverride(orch({ gateCommandTimeoutMs: 1800001 })).ok === false);
+  check("gateCommandTimeoutMs:1500.5 (non-integer) rejected", validateProjectConfigOverride(orch({ gateCommandTimeoutMs: 1500.5 })).ok === false);
+  check("gateCommandTimeoutMs:1000 (floor) accepted", validateProjectConfigOverride(orch({ gateCommandTimeoutMs: 1000 })).ok === true);
+  check("gateCommandTimeoutMs:1800000 (ceiling) accepted", validateProjectConfigOverride(orch({ gateCommandTimeoutMs: 1800000 })).ok === true);
+  check("gateCommandTimeoutMs:120000 (default) accepted", validateProjectConfigOverride(orch({ gateCommandTimeoutMs: 120000 })).ok === true);
+
+  check("alertWebhookTimeoutMs:499 (<floor) rejected", validateProjectConfigOverride(orch({ alertWebhookTimeoutMs: 499 })).ok === false);
+  check("alertWebhookTimeoutMs:60001 (>ceiling) rejected", validateProjectConfigOverride(orch({ alertWebhookTimeoutMs: 60001 })).ok === false);
+  check("alertWebhookTimeoutMs:5000.5 (non-integer) rejected", validateProjectConfigOverride(orch({ alertWebhookTimeoutMs: 5000.5 })).ok === false);
+  check("alertWebhookTimeoutMs:500 (floor) accepted", validateProjectConfigOverride(orch({ alertWebhookTimeoutMs: 500 })).ok === true);
+  check("alertWebhookTimeoutMs:60000 (ceiling) accepted", validateProjectConfigOverride(orch({ alertWebhookTimeoutMs: 60000 })).ok === true);
+  check("alertWebhookTimeoutMs:5000 (default) accepted", validateProjectConfigOverride(orch({ alertWebhookTimeoutMs: 5000 })).ok === true);
+
+  // HUMAN-only: both are OMITTED from the agent schema, so .strict() rejects them as unknown keys
+  // (exactly like the paired gateCommand/alertWebhook keys are dropped on the agent path).
+  check("agent path: gateCommandTimeoutMs REJECTED (human-only, omitted)", validateAgentProjectConfigOverride(orch({ gateCommandTimeoutMs: 120000 })).ok === false);
+  check("agent path: alertWebhookTimeoutMs REJECTED (human-only, omitted)", validateAgentProjectConfigOverride(orch({ alertWebhookTimeoutMs: 5000 })).ok === false);
+  // ...but an IN-RANGE value on the human path round-trips both through.
+  const human = validateProjectConfigOverride(orch({ gateCommandTimeoutMs: 90000, alertWebhookTimeoutMs: 8000 }));
+  check("human path: both timeouts round-trip unchanged", human.ok && human.value.orchestration?.gateCommandTimeoutMs === 90000 && human.value.orchestration?.alertWebhookTimeoutMs === 8000);
+}
+
+// --- daemon-GLOBAL `platform` key is human-only: REJECTED by BOTH project validators ---------------
+// The per-project schemas are .strict() and carry NO `platform` key, so an agent (or a fat-fingered
+// human PATCH) putting `platform:{}` on a PROJECT override is auto-rejected as an unknown key. The
+// global tuning surface is the separate /api/platform/config REST path (validatePlatformConfigOverride).
+{
+  check("project REST validator rejects a `platform` key (unknown)", validateProjectConfigOverride({ platform: {} }).ok === false);
+  check("project AGENT validator rejects a `platform` key (unknown)", validateAgentProjectConfigOverride({ platform: { watchers: { wakeMs: 60000 } } }).ok === false);
+}
+
 // --- a fully-valid override still round-trips, and .strict() unknown-key guard is intact ------------
 {
   const full = validateProjectConfigOverride(orch({ maxConcurrentWorkers: 4, maxConcurrentManagers: 2, recycleAtContextRatio: 0.9, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30 }));
@@ -60,6 +95,6 @@ for (const key of ["idleNudgeMinutes", "maxUnansweredNudges", "idleDefaultSnooze
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the project-config override schema bounds every orchestration numeric field (recycleAtContextRatio 0..1; caps int 1..100; minute fields/counter int ≥0), rejects out-of-range/negative/non-integer values with a field-named reason on BOTH the REST and agent paths, accepts valid + boundary + disable values, and keeps .strict() unknown-key rejection intact."
+  ? "\n✅ ALL PASS — the project-config override schema bounds every orchestration numeric field (recycleAtContextRatio 0..1; caps int 1..100; minute fields/counter int ≥0; gateCommandTimeoutMs int 1000..1800000; alertWebhookTimeoutMs int 500..60000), rejects out-of-range/negative/non-integer values with a field-named reason on the human REST path, REJECTS the two HUMAN-only timeouts on the agent path (omitted), rejects a daemon-global `platform` key on BOTH project validators (.strict() unknown key), and keeps the existing .strict()/bounds guarantees intact."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

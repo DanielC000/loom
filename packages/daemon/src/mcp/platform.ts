@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import type { Project, ProjectConfigOverride, Agent } from "@loom/shared";
+import type { Project, ProjectConfigOverride, PlatformConfigOverride, Agent } from "@loom/shared";
 import type { Db } from "../db.js";
 import { isGitRepo } from "../git/reader.js";
 
@@ -31,9 +31,15 @@ const alertWebhookSchema = z.object({
 }).strict();
 const orchestrationOverride = z.object({
   gateCommand: z.string().optional(),
+  // Per-project, HUMAN-only timeout (ms) capping a gateCommand run. Pairs with gateCommand and is
+  // omitted from the agent path with it (see agentOrchestrationOverride). Bounded 1000–1800000.
+  gateCommandTimeoutMs: z.number().int().min(1000).max(1800000).optional(),
   // HUMAN-only (data-exfiltration vector — see agentOrchestrationOverride). Accepted on this human
   // path; dropped from the agent path so an agent can't redirect orchestration data off-box.
   alertWebhook: alertWebhookSchema.optional(),
+  // Per-project, HUMAN-only timeout (ms) capping an alertWebhook POST. Pairs with alertWebhook and is
+  // omitted from the agent path with it (see agentOrchestrationOverride). Bounded 500–60000.
+  alertWebhookTimeoutMs: z.number().int().min(500).max(60000).optional(),
   // Concurrency caps gate worker_spawn / Scheduler manager launches: whole-number, ≥1 (a cap of 0
   // would deadlock all spawning), with a generous safety ceiling so a fat-fingered value can't
   // authorize a fleet-bomb.
@@ -65,12 +71,16 @@ const projectConfigOverrideSchema = z.object({
  *     (see `confirmWorkerMerge` in sessions/service.ts), i.e. host-RCE-capable by design.
  *   - `alertWebhook` — an outbound URL the daemon POSTs orchestration data to, i.e. a DATA-EXFILTRATION
  *     vector: an agent that could set it would redirect the event stream to an attacker endpoint.
- * We drop BOTH from the orchestration shape; `.strict()` then makes either key a REJECTED unknown key,
- * so an agent attempting to set one gets an error and the stored config is left unchanged. DRY: this
- * reuses the same base shapes — only `orchestration` is narrowed. The REST PATCH path keeps the full
- * `projectConfigOverrideSchema` (the human/trusted path), so both stay human-settable there.
+ * Their paired per-project timeouts (`gateCommandTimeoutMs`/`alertWebhookTimeoutMs`) are HUMAN-only too
+ * (lead decision) and dropped alongside them. We omit ALL FOUR from the orchestration shape; `.strict()`
+ * then makes any of them a REJECTED unknown key, so an agent attempting to set one gets an error and the
+ * stored config is left unchanged. DRY: this reuses the same base shapes — only `orchestration` is
+ * narrowed. The REST PATCH path keeps the full `projectConfigOverrideSchema` (the human/trusted path),
+ * so all four stay human-settable there.
  */
-const agentOrchestrationOverride = orchestrationOverride.omit({ gateCommand: true, alertWebhook: true }).strict();
+const agentOrchestrationOverride = orchestrationOverride
+  .omit({ gateCommand: true, gateCommandTimeoutMs: true, alertWebhook: true, alertWebhookTimeoutMs: true })
+  .strict();
 const agentProjectConfigOverrideSchema = projectConfigOverrideSchema
   .extend({ orchestration: agentOrchestrationOverride.optional() })
   .strict();
@@ -99,6 +109,58 @@ export function validateAgentProjectConfigOverride(
   const r = agentProjectConfigOverrideSchema.safeParse(raw ?? {});
   if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
   return { ok: true, value: r.data as ProjectConfigOverride };
+}
+
+/**
+ * Daemon-GLOBAL platform override schema — a strict zod mirror of `PlatformConfigOverride` (deep-partial
+ * of PlatformConfig). Every numeric is `.int()` and range-checked per the epic BOUNDS table, so an
+ * out-of-range tuning value is rejected before it can persist + corrupt watcher cadences / timeouts.
+ * `.strict()` on every sub-object rejects unknown keys (typo guard). This is HUMAN-only by construction:
+ * the per-project schemas are `.strict()` and carry NO `platform` key, so an agent's `platform:{}` is
+ * already a rejected unknown key — this schema only ever runs on the human REST `/api/platform/config`.
+ */
+const rateLimitOverride = z.object({
+  defaultBackoffMs: z.number().int().min(60000).max(86400000).optional(),
+  resetBufferMs: z.number().int().min(0).max(600000).optional(),
+  deadlineAfterResetMs: z.number().int().min(60000).max(86400000).optional(),
+  deadlineNoResetMs: z.number().int().min(600000).max(172800000).optional(),
+  recencyWindowMs: z.number().int().min(0).max(86400000).optional(),
+}).strict();
+// Every watcher cadence shares the §bounds 5000–3600000 range (5s floor guards against busy-looping).
+const watcherMs = z.number().int().min(5000).max(3600000).optional();
+const watchersOverride = z.object({
+  contextWatchMs: watcherMs,
+  idleWatchMs: watcherMs,
+  rateLimitWatchMs: watcherMs,
+  usagePollMs: watcherMs,
+  wakeMs: watcherMs,
+  schedulerMs: watcherMs,
+  reconcileMs: watcherMs,
+}).strict();
+const timeoutsOverride = z.object({
+  gitOpMs: z.number().int().min(1000).max(120000).optional(),
+  gitLocalMs: z.number().int().min(1000).max(120000).optional(),
+  gitPushMs: z.number().int().min(1000).max(600000).optional(),
+  provisionMs: z.number().int().min(10000).max(1800000).optional(),
+  busyStaleMs: z.number().int().min(30000).max(1800000).optional(),
+}).strict();
+const platformConfigOverrideSchema = z.object({
+  rateLimit: rateLimitOverride.optional(),
+  watchers: watchersOverride.optional(),
+  timeouts: timeoutsOverride.optional(),
+}).strict();
+
+/**
+ * Validate a daemon-global platform override (the human REST `/api/platform/config` PATCH body).
+ * Mirrors the project validators' shape: `{ok:true,value}` | `{ok:false,error}` with a field-named
+ * reason. No agent variant — globals are human-only (see platformConfigOverrideSchema note).
+ */
+export function validatePlatformConfigOverride(
+  raw: unknown,
+): { ok: true; value: PlatformConfigOverride } | { ok: false; error: string } {
+  const r = platformConfigOverrideSchema.safeParse(raw ?? {});
+  if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
+  return { ok: true, value: r.data as PlatformConfigOverride };
 }
 
 /**
