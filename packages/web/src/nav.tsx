@@ -4,6 +4,7 @@ import Workspace from "./pages/Workspace";
 import Archive from "./pages/Archive";
 import Terminals from "./pages/Terminals";
 import Board from "./pages/Board";
+import Runs from "./pages/Runs";
 import Orchestration from "./pages/Orchestration";
 import Vault from "./pages/Vault";
 import Git from "./pages/Git";
@@ -36,6 +37,7 @@ export const NAV_PAGES: NavPage[] = [
   { label: "Archive", to: "/archive", element: <Archive /> },
   { label: "Terminals", to: "/terminals", element: <Terminals /> },
   { label: "Board", to: "/board", element: <Board /> },
+  { label: "Runs", to: "/runs", element: <Runs /> },
   { label: "Orchestration", to: "/orchestration", element: <Orchestration /> },
   { label: "Vault", to: "/vault", element: <Vault /> },
   { label: "Git", to: "/git", element: <Git /> },
