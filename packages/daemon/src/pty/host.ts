@@ -268,6 +268,12 @@ export function playwrightMcpServer(): { type: "stdio"; command: string; args: s
 export function buildMcpServers(o: {
   sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean;
 }): Record<string, unknown> {
+  // Agent Runs R2: a `run` session gets ONLY the restricted run surface — NOT even loom-tasks. This is
+  // the one path that does not mount loom-tasks (every other role layers ON TOP of it). The early return
+  // keeps every non-run spawn byte-identical to today (a run is the only role that reaches this branch).
+  if (o.role === "run") {
+    return { "loom-run": { type: "http", url: `http://127.0.0.1:${o.port}/mcp-run/${o.sessionId}` } };
+  }
   const wantsOrch = o.role === "manager" || o.role === "worker";
   const wantsPlatform = o.role === "platform";
   const wantsAudit = o.role === "auditor";
@@ -703,13 +709,16 @@ export class PtyHost {
     const wantsOrch = opts.role === "manager" || opts.role === "worker";
     const wantsPlatform = opts.role === "platform";
     const wantsAudit = opts.role === "auditor";
+    const wantsRun = opts.role === "run";
     // A browser-testing session ALSO needs its Playwright MCP tools allowlisted — acceptEdits doesn't
     // auto-approve MCP tools (the §9 lesson), so without this the worker would hang on a permission
     // prompt the first time it calls a browser tool. Orthogonal to role (a browser session is a worker),
-    // so it layers ON TOP of the role surface rather than replacing it. (P5: auditor → loom-audit only.)
+    // so it layers ON TOP of the role surface rather than replacing it. (P5: auditor → loom-audit only;
+    // R2: run → loom-run only — acceptEdits doesn't auto-approve submit_result either, so allowlist it.)
     const roleAllow = wantsOrch ? ["mcp__loom-orchestration"]
       : wantsPlatform ? ["mcp__loom-platform"]
       : wantsAudit ? ["mcp__loom-audit"]
+      : wantsRun ? ["mcp__loom-run"]
       : [];
     const extraAllow = [
       ...roleAllow,

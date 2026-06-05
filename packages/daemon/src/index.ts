@@ -12,6 +12,7 @@ import { TaskMcpRouter } from "./mcp/server.js";
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
 import { PlatformMcpRouter } from "./mcp/platform.js";
 import { AuditMcpRouter } from "./mcp/audit.js";
+import { RunMcpRouter } from "./mcp/run.js";
 import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
 import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
@@ -93,11 +94,16 @@ async function main(): Promise<void> {
       // session keeps a readable transcript even after Claude later prunes the original (a session
       // goes 'dead' BECAUSE its JSONL was deleted). Best-effort: snapshotTranscript never throws, and
       // getSession is null for shell terminals (not DB sessions) → skipped.
+      let exited;
       try {
-        const s = db.getSession(sessionId);
-        if (s?.engineSessionId) snapshotTranscript(s.cwd, s.engineSessionId, s.projectId, s.id);
+        exited = db.getSession(sessionId);
+        if (exited?.engineSessionId) snapshotTranscript(exited.cwd, exited.engineSessionId, exited.projectId, exited.id);
       } catch { /* never disturb the exit path */ }
-      mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId);
+      // Agent Runs R2: finalize the run row + GC its disposable snapshot cwd (the pty is now gone, so
+      // its handles are released). Runs the SAME teardown whether the run completed via submit_result or
+      // the session died first (→ failed). Best-effort: a throw here must not disturb the exit path.
+      try { if (exited?.role === "run") sessions.onRunSessionExit(sessionId); } catch { /* never disturb the exit path */ }
+      mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); runMcp.dispose(sessionId);
     },
   }, { busyStaleMs: timeouts.busyStaleMs }); // BOOT-BOUND: stuck-busy self-heal threshold from resolved platform config
 
@@ -128,6 +134,15 @@ async function main(): Promise<void> {
   } catch (err) {
     console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);
   }
+  // Agent Runs R2: fail any run interrupted by a crash/restart (runs are ephemeral and do NOT resume) and
+  // sweep orphaned run-snapshot dirs. Pure DB + fs, best-effort — never gate boot. recoverStaleSessions
+  // already marked each interrupted run's `run` session exited, so this only finalizes the run rows.
+  try {
+    const runs = sessions.reconcileRunsOnBoot();
+    if (runs.failed > 0) console.log(`[boot] failed ${runs.failed} interrupted run(s) (ephemeral — no resume) + swept run snapshots`);
+  } catch (err) {
+    console.warn(`[boot] run reconcile failed (continuing boot): ${(err as Error).message}`);
+  }
   // WakeService (the `wake_me` primitive) needs SessionService.resume (auto-resume on fire), so it
   // comes after sessions. Always on — recovery/continuation, not autonomy-gated (like the rate-limit
   // watcher). BOOT-BOUND cadence from the resolved platform config (LOOM_WAKE_INTERVAL_MS env is read,
@@ -147,6 +162,9 @@ async function main(): Promise<void> {
   // (transcript reads + session list) AND SessionService (audit_file_finding → reserved Platform board).
   // Deliberately gets NO git-write timeouts: it has no git/vault/config/spawn tools, by design.
   const auditMcp = new AuditMcpRouter(db, sessions);
+  // Run MCP (Agent Runs R2) — the ephemeral run's restricted submit_result surface. Needs the registry
+  // (resolve session→run) AND SessionService (validate + record + teardown). Gets NO git/vault timeouts.
+  const runMcp = new RunMcpRouter(db, sessions);
 
   // Account-wide Claude plan-usage poller — one shared cached fetch of the OAuth usage endpoint, served
   // read-only to Mission Control via GET /api/usage/limits. Created here so the gateway can read its
@@ -154,7 +172,7 @@ async function main(): Promise<void> {
   // (LOOM_USAGE_POLL_INTERVAL_MS env read + floor-clamped inside resolveConfig; default 60s).
   const usageStatus = new UsageStatusPoller({ intervalMs: watchers.usagePollMs });
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, control, usageStatus });
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, runMcp, control, usageStatus });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon listening on http://127.0.0.1:${PORT}`);

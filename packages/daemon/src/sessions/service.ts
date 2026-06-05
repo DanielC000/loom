@@ -1,16 +1,20 @@
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { Ajv } from "ajv";
 import {
   resolveConfig, resolveProfile, DEFAULT_TASK_PRIORITY,
   type Session, type StopMode, type OrchestrationEvent, type Task,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
+  type AgentRun,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, isBranchMerged, worktreeHasWork } from "../git/worktrees.js";
-import { engineTranscriptExists, deleteArchivedTranscript } from "./transcript.js";
+import { engineTranscriptExists, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
+import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
+import { composeRunStartupPrompt } from "../runs/prompt.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit } from "../orchestration/usage-awareness.js";
 import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
@@ -21,6 +25,11 @@ import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 /** Floor (1s) for any threaded git-op timeout — a sub-second misconfig must never make every git op
  *  fail-fast (mirrors GitWriter's GIT_TIMEOUT_FLOOR_MS). Applied where the resolved value is threaded. */
 const GIT_TIMEOUT_FLOOR_MS = 1_000;
+
+/** Agent Runs R2: defer a completed run's graceful-stop this long so the `submit_result` {ok:true} tool
+ *  response flushes to the agent BEFORE its turn is interrupted (mirrors requestDaemonRestart's
+ *  respond-then-teardown 300ms). The run row is already terminal by the time this fires. */
+const RUN_TEARDOWN_DELAY_MS = 250;
 
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
@@ -426,7 +435,9 @@ export class SessionService {
   liveFleetResumeSet(): RestartResumeEntry[] {
     return this.db
       .listAllSessions()
-      .filter((s) => s.processState === "live")
+      // Exclude ephemeral `run` sessions (Agent Runs R2): runs do NOT resume — a daemon restart fails an
+      // in-flight run clean (reconcileRunsOnBoot), so a run must never be captured into the resume set.
+      .filter((s) => s.processState === "live" && s.role !== "run")
       .map((s) => ({ sessionId: s.id, role: s.role ?? null, parentSessionId: s.parentSessionId ?? null }));
   }
 
@@ -587,6 +598,170 @@ export class SessionService {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // Agent Runs (R2): the AgentRun primitive — an ephemeral `run` session that reuses the boot recipe
+  // VERBATIM but SUBTRACTS the worker machinery (no worktree/branch/merge), runs in a disposable
+  // read-only HEAD snapshot, gets ONLY the loom-run `submit_result` surface, and tears down on a
+  // terminal state. INTERNAL starter only in R2 (no public REST — that's R3). See [[Agent Runs]].
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Start an ephemeral AgentRun in `agentId` on `input` (optionally validated against a caller-supplied
+   * JSON `schema`). Mints the run row + the `run`-role session, snapshots the project's COMMITTED HEAD
+   * into a disposable cwd (NO git worktree/branch), and spawns the SAME gate-free recipe as every other
+   * session — the ONLY differences are the composed startup prompt (doctrine + input + schema) and that
+   * buildMcpServers mounts ONLY loom-run. `keyId` is null for an R2 internal start (R3's keyed REST sets it).
+   */
+  async startRun(opts: { agentId: string; input: unknown; schema?: unknown | null; keyId?: string | null }): Promise<{ run: AgentRun; session: Session }> {
+    const agent = this.db.getAgent(opts.agentId);
+    if (!agent) throw new Error("agent not found");
+    const project = this.db.getProject(agent.projectId);
+    if (!project) throw new Error("project not found");
+    const config = resolveConfig(project.config);
+
+    const now = new Date().toISOString();
+    const sessionId = randomUUID();
+    const runId = randomUUID();
+    const schema = opts.schema ?? null;
+
+    // Disposable read-only HEAD snapshot as cwd (runs/snapshot.ts — no .git, no branch, no worktree
+    // registration). A snapshot failure (e.g. an empty repo with no HEAD) fails the run cleanly BEFORE
+    // any session/pty exists — recorded as a failed run for auditability, then surfaced to the caller.
+    let snapshotDir: string;
+    try {
+      snapshotDir = await createRunSnapshot(project.repoPath, sessionId);
+    } catch (e) {
+      this.db.insertRun({
+        id: runId, projectId: project.id, agentId: agent.id, sessionId: null, keyId: opts.keyId ?? null,
+        status: "failed", input: opts.input, schema, result: null, usage: null, transcriptRef: null,
+        error: `run snapshot failed: ${(e as Error).message}`, createdAt: now, startedAt: null, endedAt: now,
+      });
+      throw new Error(`could not create run snapshot: ${(e as Error).message}`);
+    }
+
+    const run: AgentRun = {
+      id: runId, projectId: project.id, agentId: agent.id, sessionId,
+      keyId: opts.keyId ?? null, status: "starting",
+      input: opts.input, schema, result: null, usage: null, transcriptRef: null, error: null,
+      createdAt: now, startedAt: now, endedAt: null,
+    };
+    this.db.insertRun(run);
+
+    const session: Session = {
+      id: sessionId, projectId: project.id, agentId: agent.id,
+      engineSessionId: null, title: null,
+      cwd: snapshotDir, // the disposable snapshot — NEVER the live repoPath
+      processState: "starting", resumability: "unknown", busy: false,
+      createdAt: now, lastActivity: now, lastError: null,
+      role: "run", browserTesting: false,
+    };
+    this.db.insertSession(session);
+    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
+    this.db.setProcessState(session.id, "live");
+
+    const startupPrompt = composeRunStartupPrompt(agent.startupPrompt, opts.input, schema);
+    this.pty.spawn({
+      sessionId: session.id,
+      cwd: snapshotDir,
+      permission: config.permission, // VERBATIM boot recipe (acceptEdits) — only prompt + MCP surface differ
+      geometry: config.pty,
+      sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      startupPrompt,
+      role: "run", // buildMcpServers mounts ONLY loom-run; createPty allowlists mcp__loom-run
+      browserTesting: false,
+    });
+    this.db.setRunStatus(runId, "running"); // the startup-prompt turn is in flight
+    return { run: { ...run, status: "running" }, session: { ...session, processState: "live" } };
+  }
+
+  /**
+   * The `submit_result` contract (the run MCP's only tool, server-side). Resolve the run by its session
+   * id, VALIDATE the payload against the run's caller-supplied JSON Schema, and:
+   *   - mismatch → return a STRUCTURED error to the agent (NO teardown) so it self-corrects + retries;
+   *   - valid (or no schema → freeform accept) → record the result + mark the run `completed` (terminal)
+   *     FIRST, then graceful-stop the pty (teardown). onRunSessionExit then GCs the snapshot dir + retains
+   *     usage/transcript once the pty is gone (mark-terminal-first, then best-effort GC).
+   * A malformed caller schema degrades to freeform-accept (never crashes; see validateRunPayload).
+   */
+  submitRunResult(runSessionId: string, payload: unknown): { ok: true } | { ok: false; error: string; errors?: string[] } {
+    const run = this.db.getRunBySession(runSessionId);
+    if (!run) return { ok: false, error: "no run for this session" };
+    if (run.status === "completed" || run.status === "failed" || run.status === "timed_out" || run.status === "cancelled") {
+      return { ok: false, error: `run already ${run.status}` };
+    }
+    const v = this.validateRunPayload(run.schema, payload);
+    if (!v.ok) {
+      return { ok: false, error: "result did not match the required JSON Schema; correct it and call submit_result again", errors: v.errors };
+    }
+    this.db.recordRunResult(run.id, payload); // terminal (completed) BEFORE teardown
+    // Deferred deterministic graceful-stop: let the {ok:true} tool response flush to the agent first (the
+    // Ctrl-C goes to claude's stdin, independent of this HTTP response, but deferring guarantees the agent
+    // sees the acceptance before its turn unwinds). onRunSessionExit then GCs the snapshot on the pty exit.
+    setTimeout(() => this.pty.stop(runSessionId, "graceful"), RUN_TEARDOWN_DELAY_MS);
+    return { ok: true };
+  }
+
+  /**
+   * Validate a `submit_result` payload against the run's caller-supplied JSON Schema (ajv). No schema ⇒
+   * freeform accept. A schema that fails to COMPILE (malformed/garbage caller input) must NEVER crash the
+   * daemon AND must not trap the agent in an unsatisfiable retry loop, so it degrades to freeform-accept
+   * (logged). `strict:false` tolerates non-strict-mode schemas. Returns precise, agent-readable errors.
+   */
+  private validateRunPayload(schema: unknown, payload: unknown): { ok: true } | { ok: false; errors: string[] } {
+    if (schema == null) return { ok: true }; // freeform run — accept any JSON/text
+    let validate: ReturnType<Ajv["compile"]>;
+    try {
+      validate = new Ajv({ allErrors: true, strict: false }).compile(schema as object);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[run] caller schema failed to compile — accepting freeform: ${(e as Error).message}`);
+      return { ok: true };
+    }
+    if (validate(payload)) return { ok: true };
+    const errors = (validate.errors ?? []).map((er) => `${er.instancePath || "(root)"} ${er.message ?? "invalid"}`.trim());
+    return { ok: false, errors: errors.length ? errors : ["payload did not match the schema"] };
+  }
+
+  /**
+   * Finalize a `run` session as its pty exits (called from index.ts onExit, AFTER snapshotTranscript).
+   * If the session died WITHOUT a completed submit_result (agent crashed / never submitted / hard-stop),
+   * the run is terminally FAILED — never left dangling. Then retain the usage snapshot (engine ctx
+   * counters captured at the last turn boundary) + the transcript pointer, and best-effort GC the
+   * disposable snapshot cwd (handles are released now the pty is gone). Synchronous DB writes first
+   * (mark-terminal-first), then a fire-and-forget dir removal that never throws.
+   */
+  onRunSessionExit(sessionId: string): void {
+    const run = this.db.getRunBySession(sessionId);
+    if (!run) return;
+    const session = this.db.getSession(sessionId);
+    if (run.status !== "completed" && run.status !== "cancelled" && run.status !== "timed_out") {
+      this.db.failRun(run.id, "run session exited before submit_result");
+    }
+    const usage = session && (session.ctxInputTokens != null || session.ctxTurns != null)
+      ? { inputTokens: session.ctxInputTokens ?? null, turns: session.ctxTurns ?? null, model: session.model ?? null }
+      : null;
+    const transcriptRef = archivedTranscriptExists(run.projectId, sessionId) ? archivedTranscriptPath(run.projectId, sessionId) : null;
+    this.db.setRunTeardown(run.id, { usage, transcriptRef });
+    void removeRunSnapshot(sessionId); // best-effort; run row already terminal; lingering dir swept on next boot
+  }
+
+  /**
+   * Boot reconcile for runs (the restart-mid-run → fail-clean invariant). A run is EPHEMERAL and does
+   * NOT resume, so any run still in a non-terminal state at boot was interrupted by a crash/restart →
+   * mark it `failed`. recoverStaleSessions already flipped its `run` session to `exited`; this fails the
+   * run ROW and sweeps every orphaned run-snapshot dir (runs never resume ⇒ any dir at boot is orphaned).
+   * Returns how many runs were failed.
+   */
+  reconcileRunsOnBoot(): { failed: number } {
+    const interrupted = this.db.listInterruptedRuns();
+    for (const r of interrupted) {
+      this.db.failRun(r.id, "daemon restarted mid-run (runs are ephemeral and do not resume)");
+    }
+    sweepAllRunSnapshots();
+    return { failed: interrupted.length };
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Per-project session Archive (HUMAN-only REST surface, like stop/fork — NEVER an MCP tool). A UI
   // tidy action that moves a dead/exited session (and, for a manager, its workers) out of the
   // Workspace rail + the god-eye views. Snapshot-on-exit (index.ts onExit) already preserved the
@@ -667,7 +842,7 @@ export class SessionService {
     // coordination agent. The role is the agent's resolved PROFILE role (resolveProfile — the canonical
     // mechanism); a profile-less agent (Dev/Bugfix/Docs/QA today) resolves to null and is allowed.
     const profileRole = resolveProfile(workerAgent, workerAgent.profileId ? this.db.getProfile(workerAgent.profileId) : undefined).role;
-    if (profileRole === "manager" || profileRole === "platform" || profileRole === "auditor") {
+    if (profileRole === "manager" || profileRole === "platform" || profileRole === "auditor" || profileRole === "run") {
       throw new Error(`cannot spawn a worker under the '${workerAgent.name}' agent (a ${profileRole}-role profile); pick a worker agent (Dev/Bugfix/QA/Docs)`);
     }
     // Resolve THAT agent's profile for its browser-automation opt-in — a manager spawns a QA worker by
