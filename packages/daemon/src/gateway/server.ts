@@ -46,6 +46,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   await app.register(websocket);
 
+  // BOOT-BOUND git-write timeouts: resolve the daemon-global `platform.timeouts` ONCE at boot (this
+  // fn runs once, from index.ts) and thread gitLocalMs/gitPushMs into every GitWriter the human REST
+  // git routes construct. A PATCH to these takes effect on the next daemon restart (the lead verifies
+  // this post-merge). GitWriter floors each to ≥1s, so a misconfig can't make every git write fail-fast.
+  const gitWriteTimeouts = (() => {
+    const t = resolveConfig(undefined, deps.db.getPlatformConfig()).platform.timeouts;
+    return { gitLocalMs: t.gitLocalMs, gitPushMs: t.gitPushMs };
+  })();
+
   // --- Project-scoped task MCP (session id in the path; project resolved server-side) ---
   app.all("/mcp/:sessionId", async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
@@ -345,14 +354,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!p) return reply.code(404).send({ error: "project not found" });
     const branch = ((req.body ?? {}) as { branch?: string }).branch;
     if (!branch) return reply.code(400).send({ error: "branch required" });
-    return new GitWriter(p.repoPath).checkout(branch);
+    return new GitWriter(p.repoPath, gitWriteTimeouts).checkout(branch);
   });
   app.post("/api/projects/:id/git/branch", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
     const name = ((req.body ?? {}) as { name?: string }).name;
     if (!name) return reply.code(400).send({ error: "name required" });
-    return new GitWriter(p.repoPath).createBranch(name);
+    return new GitWriter(p.repoPath, gitWriteTimeouts).createBranch(name);
   });
   app.post("/api/projects/:id/git/commit", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
@@ -360,12 +369,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const message = ((req.body ?? {}) as { message?: string }).message;
     if (!message) return reply.code(400).send({ error: "message required" });
     // Plain commit under the repo's configured identity — no -c overrides, no Co-Authored-By trailer.
-    return new GitWriter(p.repoPath).commit(message);
+    return new GitWriter(p.repoPath, gitWriteTimeouts).commit(message);
   });
   app.post("/api/projects/:id/git/push", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
-    return new GitWriter(p.repoPath).push();
+    return new GitWriter(p.repoPath, gitWriteTimeouts).push();
   });
 
   // --- REST: create / bind ---

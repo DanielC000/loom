@@ -37,13 +37,22 @@ db.insertAgent({ id: "aBare", projectId: "pBare", name: "lead", startupPrompt: "
 db.insertSession({ id: "mBare", projectId: "pBare", agentId: "aBare", engineSessionId: null, title: null,
   cwd: "C:/tmp/bare", processState: "live", resumability: "unknown", busy: false,
   createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+// A third project with a webhook AND a per-project alertWebhookTimeoutMs override (Task C: the resolved
+// timeout is threaded RESOLVE-LIVE to the POST).
+db.insertProject({ id: "pTO", name: "Tuned", repoPath: "C:/tmp/to", vaultPath: "C:/tmp/to",
+  config: { orchestration: { alertWebhook: { url: "https://hooks.example.com/tuned", events: ["merge_done"] }, alertWebhookTimeoutMs: 1234 } },
+  createdAt: now, archivedAt: null });
+db.insertAgent({ id: "aTO", projectId: "pTO", name: "lead", startupPrompt: "", position: 0 });
+db.insertSession({ id: "mTO", projectId: "pTO", agentId: "aTO", engineSessionId: null, title: null,
+  cwd: "C:/tmp/to", processState: "live", resumability: "unknown", busy: false,
+  createdAt: now, lastActivity: now, lastError: null, role: "manager" });
 
 const evt = (kind, managerSessionId, extra = {}) => ({ id: `e-${kind}-${managerSessionId}`, ts: now, managerSessionId, kind, ...extra });
 
 // --- (1) matching kind -> exactly one POST with the expected payload -------------------------------
 {
   const posts = [];
-  const emitter = new AlertWebhookEmitter({ db, post: async (url, body) => { posts.push({ url, body }); } });
+  const emitter = new AlertWebhookEmitter({ db, post: async (url, body, timeoutMs) => { posts.push({ url, body, timeoutMs }); } });
   await emitter.onEvent(evt("merge_done", "mWH", { workerSessionId: "w1", taskId: "t1", detail: { branch: "feat/x" } }));
   check("matching event POSTs exactly once", posts.length === 1);
   const p = posts[0] ?? {};
@@ -51,6 +60,25 @@ const evt = (kind, managerSessionId, extra = {}) => ({ id: `e-${kind}-${managerS
   check("payload carries event kind + ts", p.body?.event === "merge_done" && p.body?.ts === now);
   check("payload carries project {id,name}", p.body?.project?.id === "pWH" && p.body?.project?.name === "Hooked");
   check("payload carries detail + lineage ids", p.body?.detail?.branch === "feat/x" && p.body?.workerSessionId === "w1" && p.body?.taskId === "t1");
+  // Task C: with no per-project override, the resolved DEFAULT alertWebhookTimeoutMs (5000) is threaded.
+  check("POST carries the resolved default timeout (5000ms)", p.timeoutMs === 5000);
+}
+
+// --- (1b) RESOLVE-LIVE timeout: a per-project alertWebhookTimeoutMs override is threaded to the POST --
+{
+  const posts = [];
+  const emitter = new AlertWebhookEmitter({ db, post: async (url, body, timeoutMs) => { posts.push({ url, body, timeoutMs }); } });
+  await emitter.onEvent(evt("merge_done", "mTO"));
+  check("override project POSTs once", posts.length === 1);
+  check("POST carries the per-project resolved timeout (1234ms, not the 5000 default)", posts[0]?.timeoutMs === 1234);
+}
+
+// --- (1c) a test-injected deps.timeoutMs WINS over the resolved per-project value (deterministic bound) -
+{
+  const posts = [];
+  const emitter = new AlertWebhookEmitter({ db, timeoutMs: 77, post: async (url, body, timeoutMs) => { posts.push({ url, body, timeoutMs }); } });
+  await emitter.onEvent(evt("merge_done", "mTO")); // project says 1234, but the injected override wins
+  check("injected deps.timeoutMs overrides the resolved value", posts[0]?.timeoutMs === 77);
 }
 
 // --- (2) non-matching kind -> NO POST (subscribed to merge_done/merge_rejected only) ---------------

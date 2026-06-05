@@ -13,9 +13,16 @@ import { simpleGit, type SimpleGit } from "simple-git";
  * outage). A push that needs credentials, or a child stuck on a locked ref, must fail within this
  * window — never hang. Mirrors GIT_OP_TIMEOUT_MS in git/worktrees.ts (push gets a longer budget than
  * a local op because a reachable remote can be legitimately slow, but it is still bounded).
+ *
+ * These are the DEFAULTS / test seams; the live values are `platform.timeouts.gitLocalMs`/`gitPushMs`,
+ * threaded in via the {@link GitWriter} constructor opts (the gateway passes the resolved numbers at
+ * boot — BOOT-BOUND). A misconfigured (sub-second) value is FLOORED to {@link GIT_TIMEOUT_FLOOR_MS} so
+ * a bad config can never make every git write fail-fast.
  */
 const GIT_LOCAL_TIMEOUT_MS = 15_000;
 const GIT_PUSH_TIMEOUT_MS = 45_000;
+/** Hard floor (1s) for any threaded git-write timeout — never let a misconfig fail-fast every op. */
+const GIT_TIMEOUT_FLOOR_MS = 1_000;
 
 /**
  * Env that forces git to FAIL FAST instead of blocking on any interactive prompt:
@@ -91,8 +98,17 @@ function isNoUpstreamError(e: unknown): boolean {
  */
 export class GitWriter {
   private repoPath: string;
-  constructor(repoPath: string) {
+  private readonly localMs: number;
+  private readonly pushMs: number;
+  /**
+   * `opts` (the gateway passes the resolved `platform.timeouts.gitLocalMs`/`gitPushMs`) override the
+   * module-const defaults; absent → the consts (today's behavior, e.g. the 1-arg test constructor).
+   * Each is FLOORED to GIT_TIMEOUT_FLOOR_MS so a sub-second misconfig can't make every git write fail-fast.
+   */
+  constructor(repoPath: string, opts?: { gitLocalMs?: number; gitPushMs?: number }) {
     this.repoPath = repoPath;
+    this.localMs = Math.max(GIT_TIMEOUT_FLOOR_MS, opts?.gitLocalMs ?? GIT_LOCAL_TIMEOUT_MS);
+    this.pushMs = Math.max(GIT_TIMEOUT_FLOOR_MS, opts?.gitPushMs ?? GIT_PUSH_TIMEOUT_MS);
   }
 
   /** A simpleGit bound to this repo with a kill-the-hung-child block timeout + the non-interactive env. */
@@ -105,8 +121,8 @@ export class GitWriter {
   async checkout(branch: string): Promise<GitWriteResult<{ branch: string }>> {
     if (!branch?.trim()) return { ok: false, error: "branch name required" };
     try {
-      const git = this.git(GIT_LOCAL_TIMEOUT_MS);
-      await withTimeout(git.checkout(branch.trim()), GIT_LOCAL_TIMEOUT_MS, "git checkout");
+      const git = this.git(this.localMs);
+      await withTimeout(git.checkout(branch.trim()), this.localMs, "git checkout");
       const current = (await git.branchLocal()).current;
       return { ok: true, branch: current };
     } catch (e) {
@@ -119,8 +135,8 @@ export class GitWriter {
   async createBranch(name: string): Promise<GitWriteResult<{ branch: string }>> {
     if (!name?.trim()) return { ok: false, error: "branch name required" };
     try {
-      const git = this.git(GIT_LOCAL_TIMEOUT_MS);
-      await withTimeout(git.checkoutLocalBranch(name.trim()), GIT_LOCAL_TIMEOUT_MS, "git checkout -b");
+      const git = this.git(this.localMs);
+      await withTimeout(git.checkoutLocalBranch(name.trim()), this.localMs, "git checkout -b");
       return { ok: true, branch: name.trim() };
     } catch (e) {
       return { ok: false, error: gitError(e) };
@@ -133,12 +149,12 @@ export class GitWriter {
   async commit(message: string): Promise<GitWriteResult<{ hash: string }>> {
     if (!message?.trim()) return { ok: false, error: "commit message required" };
     try {
-      const git = this.git(GIT_LOCAL_TIMEOUT_MS);
+      const git = this.git(this.localMs);
       // Nothing staged AND nothing to stage → don't even attempt the commit (git would exit 1).
-      const status = await withTimeout(git.status(), GIT_LOCAL_TIMEOUT_MS, "git status");
+      const status = await withTimeout(git.status(), this.localMs, "git status");
       if (status.isClean()) return { ok: false, error: "nothing to commit (working tree clean)" };
-      await withTimeout(git.raw(["add", "-A"]), GIT_LOCAL_TIMEOUT_MS, "git add -A");
-      const res = await withTimeout(git.commit(message.trim()), GIT_LOCAL_TIMEOUT_MS, "git commit");
+      await withTimeout(git.raw(["add", "-A"]), this.localMs, "git add -A");
+      const res = await withTimeout(git.commit(message.trim()), this.localMs, "git commit");
       const hash = res.commit || (await git.revparse(["HEAD"])).trim();
       return { ok: true, hash };
     } catch (e) {
@@ -158,15 +174,15 @@ export class GitWriter {
    */
   async push(): Promise<GitWriteResult<{ branch: string }>> {
     try {
-      const git = this.git(GIT_PUSH_TIMEOUT_MS);
+      const git = this.git(this.pushMs);
       const branch = (await git.branchLocal()).current;
       try {
-        await withTimeout(git.raw(["push"]), GIT_PUSH_TIMEOUT_MS, "git push");
+        await withTimeout(git.raw(["push"]), this.pushMs, "git push");
       } catch (e) {
         if (!isNoUpstreamError(e)) throw e;
         await withTimeout(
           git.raw(["push", "-u", "origin", branch]),
-          GIT_PUSH_TIMEOUT_MS,
+          this.pushMs,
           "git push -u origin",
         );
       }

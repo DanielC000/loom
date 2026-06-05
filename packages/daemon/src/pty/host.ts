@@ -44,6 +44,9 @@ const BRACKET_PASTE_END = "\x1b[201~";
  * really started, or a missed Stop hook) and self-healed to idle so its queued messages can drain
  * and the UI stops showing a phantom 'busy'. Conservative — a genuinely long, silent tool call is
  * rare — so a false heal can't clobber a live turn. (The robust follow-up is transcript-based.)
+ *
+ * DAEMON-GLOBAL tunable: this const is the default / test seam; the live value is `platform.timeouts.busyStaleMs`,
+ * threaded in via the PtyHost constructor opt (index.ts passes the resolved number at boot — BOOT-BOUND).
  */
 const BUSY_STALE_MS = 5 * 60_000;
 
@@ -428,7 +431,12 @@ export class PtyHost {
    * as true — unless a future edit introduces an `await` into that window. enqueueStdin asserts on it.
    */
   private finalizingTurn = false;
-  constructor(private events: PtyHostEvents) {}
+  /** Stuck-busy self-heal threshold (ms). Defaults to BUSY_STALE_MS; index.ts overrides with the
+   *  resolved `platform.timeouts.busyStaleMs` at boot (BOOT-BOUND). */
+  private readonly busyStaleMs: number;
+  constructor(private events: PtyHostEvents, opts?: { busyStaleMs?: number }) {
+    this.busyStaleMs = opts?.busyStaleMs ?? BUSY_STALE_MS;
+  }
 
   spawn(opts: SpawnOpts): void {
     const pty = this.createPty(opts);
@@ -873,7 +881,7 @@ export class PtyHost {
   private healIfStuck(live: Live, sessionId: string): void {
     const now = Date.now();
     if (live.busy && live.busySince != null
-      && now - live.busySince > BUSY_STALE_MS && now - live.lastOutputAt > BUSY_STALE_MS) {
+      && now - live.busySince > this.busyStaleMs && now - live.lastOutputAt > this.busyStaleMs) {
       this.setBusy(sessionId, false);
     }
   }

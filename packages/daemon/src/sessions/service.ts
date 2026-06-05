@@ -18,9 +18,27 @@ import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 
+/** Floor (1s) for any threaded git-op timeout — a sub-second misconfig must never make every git op
+ *  fail-fast (mirrors GitWriter's GIT_TIMEOUT_FLOOR_MS). Applied where the resolved value is threaded. */
+const GIT_TIMEOUT_FLOOR_MS = 1_000;
+
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
-  constructor(private db: Db, private pty: PtyHost, private control: OrchestrationControl) {}
+  /**
+   * BOOT-BOUND git timeouts (resolved `platform.timeouts.gitOpMs`/`provisionMs`), threaded by index.ts
+   * at boot into the bounded-git / provision deps seams at this service's call-sites. `undefined` when
+   * not supplied (the 3-arg test constructor), in which case each git fn falls back to its OWN module
+   * const — so existing tests are byte-identical. The git-op value is floored to ≥1s here.
+   */
+  private readonly gitOpMs: number | undefined;
+  private readonly provisionMs: number | undefined;
+  constructor(
+    private db: Db, private pty: PtyHost, private control: OrchestrationControl,
+    opts?: { gitOpMs?: number; provisionMs?: number },
+  ) {
+    this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
+    this.provisionMs = opts?.provisionMs;
+  }
 
   /**
    * Phase-2 profile-driven spawn (Agents→Profiles P2): resolve an agent's OPTIONAL Profile into
@@ -592,13 +610,15 @@ export class SessionService {
     // Safety rails (§17a) — refuse NEW work before any side effect (worktree/pty). In-flight
     // workers are untouched. Pause is global-or-this-manager; the cap counts LIVE children only.
     if (this.control.isPaused(managerSessionId)) throw new Error("orchestration paused");
-    // §19c: don't spawn a worker into a known usage-limited account (whole-queue awareness).
-    if (isLikelyNearClaudeUsageLimit()) throw new Error("usage limit active");
+    // §19c: don't spawn a worker into a known usage-limited account (whole-queue awareness). The recency
+    // window is the daemon-global `platform.rateLimit.recencyWindowMs`, resolved LIVE here (db in scope).
+    const recencyWindowMs = resolveConfig(undefined, this.db.getPlatformConfig()).platform.rateLimit.recencyWindowMs;
+    if (isLikelyNearClaudeUsageLimit(new Date(), recencyWindowMs)) throw new Error("usage limit active");
     const liveWorkers = this.db.listWorkers(managerSessionId).filter((w) => w.processState === "live").length;
     const cap = config.orchestration.maxConcurrentWorkers;
     if (liveWorkers >= cap) throw new Error(`concurrency cap reached (${cap})`);
 
-    const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, opts.taskId);
+    const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, opts.taskId, { timeoutMs: this.provisionMs });
 
     const now = new Date().toISOString();
     const worker: Session = {
@@ -1170,7 +1190,11 @@ export class SessionService {
     const worktreePath = worker.worktreePath ?? worker.cwd;
     const taskId = worker.taskId ?? null;
     const branch = worker.branch;
-    const gate = resolveConfig(project.config).orchestration.gateCommand;
+    // RESOLVE-LIVE: read the gate command AND its per-project timeout fresh here, so a human PATCH to
+    // either takes effect with no daemon restart.
+    const orchestration = resolveConfig(project.config).orchestration;
+    const gate = orchestration.gateCommand;
+    const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
     const evt = (kind: OrchestrationEvent["kind"], detail?: Record<string, unknown>) => this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId, taskId, kind, detail,
     });
@@ -1187,7 +1211,7 @@ export class SessionService {
     // mcp/platform.ts). Only the human/trusted REST path (PATCH /api/projects/:id/config) may set it.
     // If you add another config-write surface reachable by an agent, it MUST use the agent validator.
     if (gate) {
-      const res = spawnSync(gate, { cwd: worktreePath, shell: true, timeout: 120_000, stdio: "ignore" });
+      const res = spawnSync(gate, { cwd: worktreePath, shell: true, timeout: gateTimeoutMs, stdio: "ignore" });
       const passed = res.status === 0 && !res.error;
       evt("build_gate", { passed });
       if (!passed) {
@@ -1250,7 +1274,7 @@ export class SessionService {
     worktreePath: string; branch: string; repoPath: string;
   }): Promise<void> {
     try {
-      await removeWorktree(args.repoPath, args.worktreePath);
+      await removeWorktree(args.repoPath, args.worktreePath, { timeoutMs: this.gitOpMs });
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn(`[finalizeMerge] could not remove worktree ${args.worktreePath} (dir busy?); ` +
@@ -1263,7 +1287,7 @@ export class SessionService {
       managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
       taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch },
     });
-    await deleteBranch(args.repoPath, args.branch);
+    await deleteBranch(args.repoPath, args.branch, { timeoutMs: this.gitOpMs });
   }
 
   /**
@@ -1318,7 +1342,7 @@ export class SessionService {
       const project = this.db.getProject(s.projectId);
       if (!project) continue;
       try {
-        if (!(await isBranchMerged(project.repoPath, s.branch))) continue;
+        if (!(await isBranchMerged(project.repoPath, s.branch, "HEAD", { timeoutMs: this.gitOpMs }))) continue;
         const worktreePath = s.worktreePath ?? s.cwd;
         const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
         // SAFE-TO-DISCARD guard (P0 data-loss fix, 2026-06-05): a 0-commit branch is trivially "merged"
@@ -1394,7 +1418,7 @@ export class SessionService {
         worktreesKept++;
         continue;
       }
-      try { await removeWorktree(project.repoPath, worktreePath); } catch { /* best-effort */ }
+      try { await removeWorktree(project.repoPath, worktreePath, { timeoutMs: this.gitOpMs }); } catch { /* best-effort */ }
       worktreesPruned++;
     }
 

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
 import { nextFireAt } from "./cron.js";
@@ -16,9 +17,10 @@ export interface SchedulerDeps {
   intervalMs?: number;
   /**
    * §19c: "are we near the Claude usage limit?" — defaults to the global awareness record. Injectable
-   * so a test can drive the limit-skip deterministically without writing the awareness file.
+   * so a test can drive the limit-skip deterministically without writing the awareness file. The
+   * optional 2nd arg is the resolved recency window (ms); a test stub may ignore it.
    */
-  isUsageLimited?: (now: Date) => boolean;
+  isUsageLimited?: (now: Date, recencyWindowMs?: number) => boolean;
   /**
    * §19a hardening: hard cap on concurrently-LIVE managers the Scheduler will spawn. Wired from
    * `orchestration.maxConcurrentManagers` in index.ts; defaults to DEFAULT_MAX_CONCURRENT_MANAGERS.
@@ -59,7 +61,10 @@ export class Scheduler {
     if (this.deps.control.pausedScopes().includes("global")) return;
     // §19c usage-limit gate: don't boot a manager into a known-limited account (whole-queue
     // awareness). Same shape as the pause gate — next_fire_at stays, retried once the limit clears.
-    if ((this.deps.isUsageLimited ?? isLikelyNearClaudeUsageLimit)(now)) return;
+    // The recency window is the daemon-global `platform.rateLimit.recencyWindowMs`, resolved LIVE here
+    // (an injected test stub ignores the extra arg).
+    const recencyWindowMs = resolveConfig(undefined, this.deps.db.getPlatformConfig()).platform.rateLimit.recencyWindowMs;
+    if ((this.deps.isUsageLimited ?? isLikelyNearClaudeUsageLimit)(now, recencyWindowMs)) return;
 
     const cap = this.deps.maxConcurrentManagers ?? DEFAULT_MAX_CONCURRENT_MANAGERS;
     let liveManagers = this.deps.db.countLiveManagers(); // managers persisting from prior ticks
