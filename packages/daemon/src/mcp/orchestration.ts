@@ -455,6 +455,40 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    // --- Manager→Platform escalation (Platform Manager P4) ----------------------------------------
+    // The ONE upward channel: a project manager reports a discovered Loom bug / friction UP to the
+    // Platform Lead. DURABLE by design — it files a structured TASK onto the reserved "Loom Platform"
+    // project's board (the Lead's inbox), which survives the common case where no Lead session is live.
+    // This is the ONLY cross-project write a manager gets, and ONLY this structured escalation: the
+    // target board is HARDCODED to the reserved home server-side (the manager never names a projectId),
+    // so it can never become a general cross-project task-write. Down-tree messaging stays parent-scoped
+    // (worker_message); session_message (the Lead's un-scoped delivery) is the PLATFORM surface, not here.
+    server.registerTool(
+      "platform_escalate",
+      {
+        description:
+          "Escalate a discovered Loom bug or friction UP to the Platform Lead. Files a DURABLE, structured " +
+          "task on the reserved Loom Platform board (the Lead's inbox — it survives whether or not a Lead " +
+          "session is live), capturing your origin project + this manager session, the title, the detail/" +
+          "evidence, and a severity. This is the ONLY cross-project write you have, and ONLY this escalation: " +
+          "the target is the Platform board, fixed server-side (you cannot pick a project). Returns the created " +
+          "Platform task id. Use it for platform-level problems (a Loom bug, a confusing tool/skill, friction " +
+          "that slowed your workers) — NOT for your own project's task board (use tasks_create there).",
+        inputSchema: {
+          title: z.string(),
+          detail: z.string(),
+          severity: z.enum(["low", "medium", "high", "critical"]).optional(),
+        },
+      },
+      async ({ title, detail, severity }) => {
+        try {
+          return ok(sessions.platformEscalate(managerSessionId, { title, detail, severity }));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     return server;
   }
 

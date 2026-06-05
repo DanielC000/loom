@@ -2,8 +2,8 @@ import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
-  resolveConfig, resolveProfile,
-  type Session, type StopMode, type OrchestrationEvent,
+  resolveConfig, resolveProfile, DEFAULT_TASK_PRIORITY,
+  type Session, type StopMode, type OrchestrationEvent, type Task,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
@@ -716,6 +716,94 @@ export class SessionService {
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "message_worker",
     });
     return r;
+  }
+
+  /**
+   * Platform-Lead cross-project message delivery (loom-platform `session_message`, P4). UN-scoped: where
+   * messageWorker is parent/child-gated, the Lead stands ABOVE the whole manager/worker tree and may
+   * message ANY session in ANY project — no parentSessionId check. Reuses the SAME stdin-enqueue channel
+   * (submitted as a turn when idle, queued FIFO and drained on the next turn boundary when busy). Framed
+   * `[loom:from-platform]` so the receiver knows the source is the platform operator, not its own manager.
+   * DELIVERY ONLY — it never spawns anything. Throws (→ the router's error envelope) if the target session
+   * is unknown or not live.
+   */
+  messageSessionAsPlatform(sessionId: string, text: string): { delivered: boolean; position?: number } {
+    const session = this.db.getSession(sessionId);
+    if (!session) throw new Error("session not found");
+    if (session.processState !== "live") throw new Error("session is not live");
+    const framed = `[loom:from-platform]\n${text}`;
+    const r = this.pty.enqueueStdin(sessionId, framed);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: "", workerSessionId: sessionId, taskId: session.taskId ?? null, kind: "session_message",
+    });
+    return r;
+  }
+
+  /**
+   * Manager→Platform UPWARD escalation (orchestration `platform_escalate`, P4) — the ONE channel a project
+   * manager has to report a discovered Loom bug / friction UP to the platform. DURABLE by design: it files
+   * a structured TASK onto the reserved "Loom Platform" project's board (the Lead's inbox), so the report
+   * survives the common case where no Lead session is live. The target project is HARDCODED to the reserved
+   * home (resolved via the `reserved` flag) — a manager may NOT name an arbitrary projectId; this structured
+   * escalation is the only cross-project write a manager gets. The body captures origin (project + manager
+   * session id), severity, and the detail/evidence so a fix can be scoped. Returns the created task id.
+   * Refuses (throws) if — impossibly — no reserved project exists. Manager-only (defense in depth; the tool
+   * is also manager-gated at the router).
+   */
+  platformEscalate(
+    managerSessionId: string,
+    input: { title: string; detail: string; severity?: string },
+  ): { taskId: string; projectId: string; delivered: boolean } {
+    const caller = this.db.getSession(managerSessionId);
+    if (!caller || caller.role !== "manager") throw new Error("platform_escalate is a manager-only surface");
+    // HARDCODED target: the reserved Platform home — never an arbitrary projectId from the manager.
+    const home = this.db.listAllProjects().find((p) => p.reserved);
+    if (!home) throw new Error("no reserved Loom Platform project exists — cannot escalate");
+
+    const origin = this.db.getProject(caller.projectId);
+    const originName = origin?.name ?? caller.projectId;
+    const severity = (input.severity ?? "").trim() || "unspecified";
+    const now = new Date().toISOString();
+    const body = [
+      "**Escalated by a project manager** (manager→Platform upward channel).",
+      "",
+      `- **Origin project:** ${originName} (\`${caller.projectId}\`)`,
+      `- **Manager session:** \`${managerSessionId}\``,
+      `- **Severity:** ${severity}`,
+      "",
+      "## Detail / evidence",
+      "",
+      input.detail,
+    ].join("\n");
+    const task: Task = {
+      id: randomUUID(),
+      projectId: home.id,
+      title: input.title,
+      body,
+      columnKey: "backlog", // the Platform backlog (matches createProjectTask's default landing column)
+      position: Date.now(),
+      priority: DEFAULT_TASK_PRIORITY,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.db.insertTask(task);
+    this.db.appendEvent({
+      id: randomUUID(), ts: now,
+      managerSessionId, taskId: task.id, kind: "platform_escalate",
+      detail: { originProjectId: caller.projectId, severity, platformProjectId: home.id, title: input.title },
+    });
+
+    // Additive best-effort live nudge: if a Lead session happens to be live, push a heads-up via the same
+    // enqueue channel — but the board TASK is the durable source of truth (the Lead reads escalations as
+    // tasks on its home board). This never builds a fragile live-only inbox; it just saves the Lead a poll.
+    let delivered = false;
+    const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live");
+    if (liveLead) {
+      const note = `[loom:escalation] ${originName} manager escalated a Loom issue → Platform board task ${task.id}: ${input.title} (severity: ${severity})`;
+      try { delivered = this.pty.enqueueStdin(liveLead.id, note).delivered; } catch { /* Lead not live/ready — the board task stands */ }
+    }
+    return { taskId: task.id, projectId: home.id, delivered };
   }
 
   /**
