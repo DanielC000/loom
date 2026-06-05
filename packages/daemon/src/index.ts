@@ -137,8 +137,9 @@ async function main(): Promise<void> {
   const mcp = new TaskMcpRouter(db, wakes);
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after.
   const orchMcp = new OrchestrationMcpRouter(db, sessions);
-  // Platform MCP (Pillar C) only needs the registry (project/agent creation + config).
-  const platformMcp = new PlatformMcpRouter(db);
+  // Platform MCP (Pillar C / P2) needs the registry (project/agent/profile/schedule + config) AND
+  // SessionService (the cross-project session_spawn/session_stop lifecycle ops).
+  const platformMcp = new PlatformMcpRouter(db, sessions);
 
   // Account-wide Claude plan-usage poller — one shared cached fetch of the OAuth usage endpoint, served
   // read-only to Mission Control via GET /api/usage/limits. Created here so the gateway can read its
