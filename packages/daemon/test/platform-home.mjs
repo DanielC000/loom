@@ -7,8 +7,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (b) the reserved project is EXCLUDED from db.listProjects() (the picker) and INCLUDED in
 //       db.listAllProjects() (the inclusive admin feed); an ordinary project shows in BOTH;
 //   (c) the two agents (Platform Lead / Platform Auditor) are seeded with NON-empty default prompts and
-//       bound to the bundled Platform-lead / Platform-audit profiles (role platform), and the two
-//       doctrine skills (platform-lead / platform-audit) seed into the Loom skill store;
+//       bound to the bundled Platform-lead (role platform) / Platform-audit (role auditor — P5) profiles,
+//       and the two doctrine skills (platform-lead / platform-audit) seed into the Loom skill store;
 //   (d) THE INVARIANT — no agent/MCP path can spawn a platform-role session: spawnWorker (what
 //       worker_spawn calls) hardcodes role=worker and REJECTS a platform-profile agent; the ONLY platform
 //       spawn is startPlatformLead (the human REST path), which takes NO role param from any agent.
@@ -102,14 +102,14 @@ check("(c) Platform Lead bound to the Platform-lead profile (role platform)",
 check("(c) Platform Lead prompt references its /platform-lead doctrine skill", lead.startupPrompt.includes("/platform-lead"));
 check("(c) Platform Auditor seeded with a NON-empty default startupPrompt",
   typeof auditor?.startupPrompt === "string" && auditor.startupPrompt.length > 200);
-check("(c) Platform Auditor bound to the Platform-audit profile (role platform)",
-  profById.get(auditor?.profileId)?.name === "Platform-audit" && profById.get(auditor?.profileId)?.role === "platform");
+check("(c) Platform Auditor bound to the Platform-audit profile (role auditor — P5)",
+  profById.get(auditor?.profileId)?.name === "Platform-audit" && profById.get(auditor?.profileId)?.role === "auditor");
 check("(c) Platform Auditor prompt references its /platform-audit skill + the read+file-only posture",
   auditor.startupPrompt.includes("/platform-audit") && /READ \+ FILE-ONLY/i.test(auditor.startupPrompt));
-// Both bundled platform profiles exist as platform-role rigs.
+// Both bundled platform rigs exist: Platform-lead (role platform) + Platform-audit (role auditor — P5).
 const profsByName = new Map(db3.listProfiles().map((p) => [p.name, p]));
-check("(c) both bundled platform profiles present + role=platform",
-  profsByName.get("Platform-lead")?.role === "platform" && profsByName.get("Platform-audit")?.role === "platform");
+check("(c) both bundled platform profiles present (Platform-lead=platform, Platform-audit=auditor)",
+  profsByName.get("Platform-lead")?.role === "platform" && profsByName.get("Platform-audit")?.role === "auditor");
 // The two doctrine skills seed into the Loom skill store (the real seedGlobalSkills path over the assets).
 seedGlobalSkills();
 for (const skill of ["platform-lead", "platform-audit"]) {

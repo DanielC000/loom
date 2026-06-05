@@ -5,10 +5,11 @@ import type { Db } from "../db.js";
 /**
  * Loom's bundled Profiles — the reusable, platform-level "rig" (role + model + allow-delta +
  * skill-subset + icon) an agent runs under. Orchestrator=manager, Dev/Bugfix=worker, Planning &
- * Triage / Content Strategy = plain (role null), plus the two platform rigs (role=platform; today
- * REST/internal-only): Platform-lead (full operator) and Platform-audit (the read-and-file-only
- * scheduled transcript reviewer, privilege-tempered in P5). Cross-project, so NO project FK. Keyed by NAME for the seed-if-absent
- * idempotent seed (UUID id assigned on first seed); "reset to bundled" restores a row to these.
+ * Triage / Content Strategy = plain (role null), plus the two platform rigs: Platform-lead
+ * (role=platform — the full human-equivalent operator) and Platform-audit (role=auditor — the
+ * lower-privilege, read-and-file-only scheduled transcript reviewer; P5). Cross-project, so NO project
+ * FK. Keyed by NAME for the seed-if-absent idempotent seed (UUID id assigned on first seed); "reset to
+ * bundled" restores a row to these.
  *
  * NOTE: a Profile carries NO injected prompt — `description` is a UI-only blurb describing what the
  * rig is for. The startup prompt always comes from the Agent (resolveProfile sources it there).
@@ -86,12 +87,16 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
   },
   {
     name: "Platform-audit",
-    // Role 'platform' so it is recognised as a platform agent (and can never be spawned as a worker).
-    // NOTE: the Auditor is READ + FILE-ONLY by design — it ingests UNTRUSTED transcript content, so its
-    // restricted tool-surface (no host-RCE/git-push/vault-write, only cross-project transcript reads +
-    // tasks_create into the Platform backlog) is enforced in PHASE 5, NOT here. P1 only seeds the
-    // profile/agent/skill/prompt; the Auditor is NOT spawned and NOT scheduled in this phase.
-    role: "platform",
+    // Role 'auditor' (P5): the DISTINCT, lower-privilege role that gets ONLY the restricted loom-audit
+    // surface (cross-project transcript reads + file-finding to the Platform backlog) and 404s on the
+    // Lead's elevated /mcp-platform AND on /mcp-orch — the load-bearing prompt-injection containment for
+    // an agent that ingests UNTRUSTED transcript content. NOTE: the session role is what gates the
+    // surface, and startAuditor LOCKS it to "auditor" via callerRole regardless of this profile role —
+    // so this value is COSMETIC for routing (it just keeps a fresh seed self-consistent + lets an
+    // auditor-kind schedule that routes by profile role resolve correctly). An already-seeded prod row
+    // (P1 seeded it as 'platform') will NOT auto-update (seed-if-absent); reset it via
+    // POST /api/profiles/:id/reset post-deploy to make the row match.
+    role: "auditor",
     description:
       "Platform-audit rig: the scheduled, read-and-file-only transcript reviewer. Scans recent session transcripts across projects for Loom bugs, agent friction, and vague skill/prompt instructions, and files structured findings onto the Platform backlog. Lower-privilege than the Lead by design (it reads untrusted content).",
     allowDelta: [],

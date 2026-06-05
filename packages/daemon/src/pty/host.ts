@@ -234,16 +234,21 @@ export function playwrightMcpServer(): { type: "stdio"; command: string; args: s
 /**
  * Assemble the `--mcp-config` mcpServers map for a Claude spawn (extracted from createPty as the ONE
  * testable seam for the MCP surface). ALWAYS the project-scoped `loom-tasks` HTTP server; PLUS the
- * role-gated surface (manager/worker → loom-orchestration, platform → loom-platform); PLUS — only when
- * `browserTesting` is set — the per-session stdio Playwright MCP. The browser server is fully ADDITIVE:
- * with the flag off the map is byte-identical to today's. Pure + deterministic (no pty, no network),
- * so the spawn-config test can assert the iff-browserTesting inclusion directly.
+ * role-gated surface (manager/worker → loom-orchestration, platform → loom-platform, auditor → loom-audit);
+ * PLUS — only when `browserTesting` is set — the per-session stdio Playwright MCP. The browser server is
+ * fully ADDITIVE: with the flag off the map is byte-identical to today's. Pure + deterministic (no pty, no
+ * network), so the spawn-config test can assert the iff-browserTesting inclusion directly.
+ *
+ * SECURITY (P5): an "auditor" session gets ONLY loom-tasks + loom-audit — NEVER loom-platform and NEVER
+ * loom-orchestration. The restricted loom-audit surface (read transcripts + file findings) is its whole
+ * tool world, so a prompt-injection in an audited transcript has no outward/destructive tool to reach.
  */
 export function buildMcpServers(o: {
   sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean;
 }): Record<string, unknown> {
   const wantsOrch = o.role === "manager" || o.role === "worker";
   const wantsPlatform = o.role === "platform";
+  const wantsAudit = o.role === "auditor";
   const mcpServers: Record<string, unknown> = {
     "loom-tasks": { type: "http", url: `http://127.0.0.1:${o.port}/mcp/${o.sessionId}` },
   };
@@ -252,6 +257,9 @@ export function buildMcpServers(o: {
   }
   if (wantsPlatform) {
     mcpServers["loom-platform"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-platform/${o.sessionId}` };
+  }
+  if (wantsAudit) {
+    mcpServers["loom-audit"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-audit/${o.sessionId}` };
   }
   // Opt-in: a per-session stdio Playwright MCP for a browser-testing worker (each gets its OWN
   // isolated headless browser — parallelizable, no shared extension/auth/state). Omitted for every
@@ -672,12 +680,17 @@ export class PtyHost {
     // so allowlist the role's MCP server too, else the agent hangs on a prompt.
     const wantsOrch = opts.role === "manager" || opts.role === "worker";
     const wantsPlatform = opts.role === "platform";
+    const wantsAudit = opts.role === "auditor";
     // A browser-testing session ALSO needs its Playwright MCP tools allowlisted — acceptEdits doesn't
     // auto-approve MCP tools (the §9 lesson), so without this the worker would hang on a permission
     // prompt the first time it calls a browser tool. Orthogonal to role (a browser session is a worker),
-    // so it layers ON TOP of the role surface rather than replacing it.
+    // so it layers ON TOP of the role surface rather than replacing it. (P5: auditor → loom-audit only.)
+    const roleAllow = wantsOrch ? ["mcp__loom-orchestration"]
+      : wantsPlatform ? ["mcp__loom-platform"]
+      : wantsAudit ? ["mcp__loom-audit"]
+      : [];
     const extraAllow = [
-      ...(wantsOrch ? ["mcp__loom-orchestration"] : wantsPlatform ? ["mcp__loom-platform"] : []),
+      ...roleAllow,
       ...(opts.browserTesting ? ["mcp__playwright"] : []),
     ];
     const permission = extraAllow.length

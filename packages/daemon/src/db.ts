@@ -142,7 +142,10 @@ CREATE TABLE IF NOT EXISTS schedules (
   enabled INTEGER NOT NULL DEFAULT 1,
   next_fire_at TEXT NOT NULL,
   last_fired_at TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- What a fired schedule spawns (Platform Manager P5): 'manager' (default) or 'auditor' (the
+  -- read-and-file-only Platform Auditor, spawned via startAuditor). Legacy rows backfill to 'manager'.
+  kind TEXT NOT NULL DEFAULT 'manager'
 );
 -- One-shot self-scheduled wake-ups (the agent wake_me primitive): the daemon WakeService
 -- re-nudges session_id with its note when wake_at passes, then deletes the row (one-shot).
@@ -217,6 +220,13 @@ const PROFILE_ADDED_COLUMNS: Record<string, string> = {
   browser_testing: "INTEGER NOT NULL DEFAULT 0",
 };
 
+/** Columns added to `schedules` after phase-2; applied to existing DBs by migrateSchedules(). */
+const SCHEDULE_ADDED_COLUMNS: Record<string, string> = {
+  // Platform Manager P5: what a fired schedule spawns. NOT NULL + constant DEFAULT 'manager' is legal
+  // on ALTER TABLE ADD COLUMN, so every legacy schedule row backfills to 'manager' (today's behavior).
+  kind: "TEXT NOT NULL DEFAULT 'manager'",
+};
+
 /** Columns added to `tasks` after phase-1; applied to existing DBs by migrateTasks(). */
 const TASK_ADDED_COLUMNS: Record<string, string> = {
   // p0 (critical) → p3 (low). NOT NULL + constant DEFAULT 'p2' is legal on ALTER TABLE ADD COLUMN, so
@@ -257,6 +267,7 @@ export class Db {
     this.migrateAgents();
     this.migrateProfiles();
     this.migrateTasks();
+    this.migrateSchedules();
   }
 
   /**
@@ -369,6 +380,21 @@ export class Db {
     );
     for (const [name, type] of Object.entries(TASK_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
+    }
+  }
+
+  /**
+   * Idempotent additive migration for `schedules` (Platform Manager P5) — ADD COLUMN any post-phase-2
+   * column missing from an existing DB (fresh installs already have them via CREATE TABLE). Mirrors
+   * migrateTasks; the NOT NULL + constant DEFAULT 'manager' backfills every legacy schedule row to
+   * kind='manager' in place, so existing schedules keep booting a manager exactly as before.
+   */
+  private migrateSchedules(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(schedules)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(SCHEDULE_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE schedules ADD COLUMN ${name} ${type}`);
     }
   }
 
@@ -865,9 +891,9 @@ export class Db {
   // --- schedules (phase-2 Pillar B) ---
   insertSchedule(s: Schedule): void {
     this.db.prepare(
-      `INSERT INTO schedules (id,agent_id,cron,enabled,next_fire_at,last_fired_at,created_at)
-       VALUES (@id,@agentId,@cron,@enabled,@nextFireAt,@lastFiredAt,@createdAt)`,
-    ).run({ ...s, enabled: s.enabled ? 1 : 0, lastFiredAt: s.lastFiredAt ?? null });
+      `INSERT INTO schedules (id,agent_id,cron,enabled,next_fire_at,last_fired_at,created_at,kind)
+       VALUES (@id,@agentId,@cron,@enabled,@nextFireAt,@lastFiredAt,@createdAt,@kind)`,
+    ).run({ ...s, enabled: s.enabled ? 1 : 0, lastFiredAt: s.lastFiredAt ?? null, kind: s.kind ?? "manager" });
   }
   listSchedules(): Schedule[] {
     return (this.db.prepare("SELECT * FROM schedules ORDER BY created_at").all() as Row[]).map(toSchedule);
@@ -877,12 +903,13 @@ export class Db {
     return r ? toSchedule(r) : undefined;
   }
   /** Partial edit (REST): any provided field is written; omitted fields are left as-is. */
-  updateSchedule(id: string, patch: { cron?: string; enabled?: boolean; nextFireAt?: string; lastFiredAt?: string | null }): void {
+  updateSchedule(id: string, patch: { cron?: string; enabled?: boolean; nextFireAt?: string; lastFiredAt?: string | null; kind?: "manager" | "auditor" }): void {
     const cols: Record<string, unknown> = {
       cron: patch.cron,
       enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
       next_fire_at: patch.nextFireAt,
       last_fired_at: patch.lastFiredAt,
+      kind: patch.kind,
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
@@ -1016,6 +1043,7 @@ function toSchedule(r0: unknown): Schedule {
     enabled: (r.enabled as number) === 1,
     nextFireAt: r.next_fire_at as string, lastFiredAt: (r.last_fired_at as string) ?? null,
     createdAt: r.created_at as string,
+    kind: (r.kind as Schedule["kind"]) ?? "manager", // legacy rows (pre-P5) → manager
   };
 }
 function toWake(r0: unknown): Wake {

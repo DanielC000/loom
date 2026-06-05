@@ -13,6 +13,13 @@ export interface SchedulerDeps {
    * SessionService.startManager; the test injects a recording stub (keeps this PR claude-free).
    */
   startManager: (agentId: string) => { id: string };
+  /**
+   * Boots the read-and-file-only Platform Auditor session (P5) — the spawn for a schedule whose
+   * `kind` is "auditor". Prod-wired to SessionService.startAuditor; a test injects a recording stub.
+   * Optional: a schedule defaults to kind "manager", so a wiring that omits this still drives every
+   * legacy (manager) schedule correctly — an auditor schedule then falls back to startManager.
+   */
+  startAuditor?: (agentId: string) => { id: string };
   /** Tick cadence; defaults to 60s. Injectable so a test can drive tick() directly instead. */
   intervalMs?: number;
   /**
@@ -88,12 +95,19 @@ export class Scheduler {
         // Finding 2 — claim the slot FIRST: advance next_fire_at before any side effect, so a
         // failed spawn/event can't leave the slot un-advanced and re-fire (double-spawn) next tick.
         this.deps.db.markFired(s.id, now.toISOString(), nextFireAt(s.cron, now));
-        const mgr = this.deps.startManager(s.agentId);
+        // P5: route by the schedule's kind. An "auditor" schedule spawns the read-and-file-only Platform
+        // Auditor (startAuditor — role locked to "auditor"); everything else (incl. legacy rows that
+        // backfilled to "manager") boots a manager. startAuditor is optional in the deps, so a wiring that
+        // omits it falls back to startManager (keeps the manager path unchanged when auditor isn't wired).
+        const startFn = s.kind === "auditor" && this.deps.startAuditor ? this.deps.startAuditor : this.deps.startManager;
+        const spawned = startFn(s.agentId);
         this.deps.db.appendEvent({
           id: randomUUID(), ts: now.toISOString(),
-          managerSessionId: mgr.id, kind: "schedule_fired",
-          detail: { scheduleId: s.id, cron: s.cron },
+          managerSessionId: spawned.id, kind: "schedule_fired",
+          detail: { scheduleId: s.id, cron: s.cron, kind: s.kind },
         });
+        // Count every scheduler spawn (manager OR auditor) against the per-tick cap so a fired auditor
+        // can't let the loop exceed the bound (the cap is a general scheduler-spawn ceiling here).
         liveManagers++;
       } catch (e) {
         // eslint-disable-next-line no-console
