@@ -1,4 +1,4 @@
-import type { Project, Agent, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus } from "@loom/shared";
+import type { Project, Agent, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
@@ -165,6 +165,16 @@ export const api = {
   updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority">>) =>
     post<{ ok: boolean }>(`/api/tasks/${id}`, patch),
   transcript: (sessionId: string) => get<TranscriptTurn[]>(`/api/sessions/${sessionId}/transcript`),
+
+  // --- Agent Runs (R4b Runs UI; HUMAN/loopback REST, project-scoped, no auth — mirrors the other
+  // /api/projects/:id surfaces, DELIBERATELY off the R3 key-authed path). list returns FULL AgentRun
+  // rows newest-first (across every key); run is one full row; cancelRun teardowns an in-flight run
+  // (idempotent no-op on a terminal one) and returns its now-final status. There is NO key-admin /
+  // endpoint-flag surface here — Runs is observability-only (see the deferred follow-up). ---
+  runs: (projectId: string) => get<AgentRun[]>(`/api/projects/${projectId}/runs`),
+  run: (projectId: string, runId: string) => get<AgentRun>(`/api/projects/${projectId}/runs/${runId}`),
+  cancelRun: (projectId: string, runId: string) =>
+    post<{ runId: string; status: AgentRun["status"] }>(`/api/projects/${projectId}/runs/${runId}/cancel`),
   // Pending one-shot wake-ups scheduled for a session (the wake_me primitive).
   sessionWakes: (sessionId: string) => get<Wake[]>(`/api/sessions/${sessionId}/wakes`),
   cancelWake: (sessionId: string, wakeId: string) =>
