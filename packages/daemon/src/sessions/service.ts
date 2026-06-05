@@ -31,6 +31,35 @@ const GIT_TIMEOUT_FLOOR_MS = 1_000;
  *  respond-then-teardown 300ms). The run row is already terminal by the time this fires. */
 const RUN_TEARDOWN_DELAY_MS = 250;
 
+/**
+ * Agent Runs R3: the run-completion webhook (POSTed the run summary on a terminal transition). The
+ * network primitive is injectable (tests stub it); the default is a SINGLE bounded fetch. Mirrors the
+ * alert-webhook + bounded-git posture EXACTLY: a hard timeout caps a hung/garbage endpoint and ALL
+ * errors are swallowed/logged, so a delivery fault can NEVER throw into / wedge the teardown path.
+ */
+export type RunWebhookPoster = (url: string, body: unknown, timeoutMs: number) => Promise<void>;
+
+/** Per-POST ceiling for a run webhook (bounds a hung endpoint, like GIT_*_TIMEOUT_MS). Test-overridable. */
+const RUN_WEBHOOK_TIMEOUT_MS = 5_000;
+/** At most this many delivery attempts (best-effort; the design calls for ≤1–2 retries). */
+const RUN_WEBHOOK_ATTEMPTS = 2;
+
+/** Default run-webhook poster: one bounded `fetch` POST; the AbortController caps a hung endpoint. */
+const defaultRunWebhookPost: RunWebhookPoster = async (url, body, timeoutMs) => {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
   /**
@@ -41,12 +70,17 @@ export class SessionService {
    */
   private readonly gitOpMs: number | undefined;
   private readonly provisionMs: number | undefined;
+  /** Agent Runs R3 run-webhook delivery (injectable for tests; defaults to a bounded fetch + 5s cap). */
+  private readonly runWebhookPost: RunWebhookPoster;
+  private readonly runWebhookTimeoutMs: number;
   constructor(
     private db: Db, private pty: PtyHost, private control: OrchestrationControl,
-    opts?: { gitOpMs?: number; provisionMs?: number },
+    opts?: { gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
     this.provisionMs = opts?.provisionMs;
+    this.runWebhookPost = opts?.runWebhookPost ?? defaultRunWebhookPost;
+    this.runWebhookTimeoutMs = opts?.runWebhookTimeoutMs ?? RUN_WEBHOOK_TIMEOUT_MS;
   }
 
   /**
@@ -610,8 +644,10 @@ export class SessionService {
    * into a disposable cwd (NO git worktree/branch), and spawns the SAME gate-free recipe as every other
    * session — the ONLY differences are the composed startup prompt (doctrine + input + schema) and that
    * buildMcpServers mounts ONLY loom-run. `keyId` is null for an R2 internal start (R3's keyed REST sets it).
+   * R3 also threads through the caller's `webhook` URL + `idempotencyKey`, persisted on the run row (the
+   * webhook fires on teardown; the idempotency key is covered by the db's per-key unique index).
    */
-  async startRun(opts: { agentId: string; input: unknown; schema?: unknown | null; keyId?: string | null }): Promise<{ run: AgentRun; session: Session }> {
+  async startRun(opts: { agentId: string; input: unknown; schema?: unknown | null; keyId?: string | null; webhook?: string | null; idempotencyKey?: string | null }): Promise<{ run: AgentRun; session: Session }> {
     const agent = this.db.getAgent(opts.agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -633,7 +669,9 @@ export class SessionService {
       this.db.insertRun({
         id: runId, projectId: project.id, agentId: agent.id, sessionId: null, keyId: opts.keyId ?? null,
         status: "failed", input: opts.input, schema, result: null, usage: null, transcriptRef: null,
-        error: `run snapshot failed: ${(e as Error).message}`, createdAt: now, startedAt: null, endedAt: now,
+        error: `run snapshot failed: ${(e as Error).message}`,
+        webhookUrl: opts.webhook ?? null, idempotencyKey: opts.idempotencyKey ?? null,
+        createdAt: now, startedAt: null, endedAt: now,
       });
       throw new Error(`could not create run snapshot: ${(e as Error).message}`);
     }
@@ -642,6 +680,7 @@ export class SessionService {
       id: runId, projectId: project.id, agentId: agent.id, sessionId,
       keyId: opts.keyId ?? null, status: "starting",
       input: opts.input, schema, result: null, usage: null, transcriptRef: null, error: null,
+      webhookUrl: opts.webhook ?? null, idempotencyKey: opts.idempotencyKey ?? null,
       createdAt: now, startedAt: now, endedAt: null,
     };
     this.db.insertRun(run);
@@ -743,6 +782,56 @@ export class SessionService {
     const transcriptRef = archivedTranscriptExists(run.projectId, sessionId) ? archivedTranscriptPath(run.projectId, sessionId) : null;
     this.db.setRunTeardown(run.id, { usage, transcriptRef });
     void removeRunSnapshot(sessionId); // best-effort; run row already terminal; lingering dir swept on next boot
+    // Agent Runs R3: this IS the single LIVE terminal/teardown path (completed via submit_result, cancelled
+    // via cancelRun, or failed because the session died first) — fire the run webhook HERE, from the now-final
+    // row. Best-effort + bounded (a hung endpoint can't wedge teardown); a run with no webhookUrl is a no-op.
+    const finalRun = this.db.getRun(run.id);
+    if (finalRun) this.fireRunWebhook(finalRun);
+  }
+
+  /**
+   * Agent Runs R3: cancel a run. Non-terminal → mark `cancelled` FIRST (mark-terminal-first, mirroring
+   * submitRunResult) then graceful-stop its `run` session via the R2 teardown path (the pty exit drives
+   * onRunSessionExit, which finalizes + fires the webhook with status=cancelled). Already-terminal → a
+   * no-op that returns the run's current state (idempotent). The keyed REST route owns the own-run-scope
+   * + existence checks; this trusts a resolved runId.
+   */
+  cancelRun(runId: string): { status: AgentRun["status"] } {
+    const run = this.db.getRun(runId);
+    if (!run) throw new Error("run not found");
+    const terminal = run.status === "completed" || run.status === "failed" || run.status === "timed_out" || run.status === "cancelled";
+    if (terminal) return { status: run.status }; // idempotent no-op on an already-terminal run
+    this.db.failRun(run.id, "cancelled by caller", "cancelled"); // terminal BEFORE teardown
+    if (run.sessionId) this.pty.stop(run.sessionId, "graceful"); // R2 teardown path → onRunSessionExit fires the webhook
+    return { status: "cancelled" };
+  }
+
+  /**
+   * Fire the run-completion webhook for a TERMINAL run (Agent Runs R3). Fully error-guarded + bounded —
+   * a missing url is a no-op; otherwise it kicks off a fire-and-forget bounded delivery (≤RUN_WEBHOOK_ATTEMPTS
+   * tries) whose promise is `.catch`-guarded so a fault NEVER throws into the teardown caller. Mirrors the
+   * alert-webhook + bounded-git posture. The returned promise is exposed (already guarded) only so a test
+   * can deterministically await delivery.
+   * // future: restrict to http(s)/non-internal hosts if Agent Runs ever leaves first-party + loopback.
+   */
+  fireRunWebhook(run: AgentRun): Promise<void> {
+    const url = run.webhookUrl;
+    if (!url) return Promise.resolve();
+    const payload = { runId: run.id, status: run.status, result: run.result ?? null, error: run.error ?? null };
+    return this.deliverRunWebhook(url, payload).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn(`[run-webhook] delivery failed for ${run.id}: ${(err as Error).message}`);
+    });
+  }
+
+  /** Bounded, best-effort delivery with ≤RUN_WEBHOOK_ATTEMPTS attempts; rethrows only if EVERY attempt failed. */
+  private async deliverRunWebhook(url: string, payload: unknown): Promise<void> {
+    let lastErr: unknown;
+    for (let i = 0; i < RUN_WEBHOOK_ATTEMPTS; i++) {
+      try { await this.runWebhookPost(url, payload, this.runWebhookTimeoutMs); return; }
+      catch (e) { lastErr = e; }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
   }
 
   /**
@@ -751,6 +840,12 @@ export class SessionService {
    * mark it `failed`. recoverStaleSessions already flipped its `run` session to `exited`; this fails the
    * run ROW and sweeps every orphaned run-snapshot dir (runs never resume ⇒ any dir at boot is orphaned).
    * Returns how many runs were failed.
+   *
+   * R3 DECISION (reported up): webhooks fire ONLY on the LIVE teardown path (onRunSessionExit), NOT here.
+   * A restart-interrupted run is failed silently and the app learns of it via GET polling + idempotency
+   * (the design's "the app retries via the idempotency key"). This keeps a fragile best-effort-only boot
+   * free of outbound network. // future: fireRunWebhook(this.db.getRun(r.id)) per failed run would add it
+   * (already fully error-guarded) if a webhook-on-restart need appears.
    */
   reconcileRunsOnBoot(): { failed: number } {
     const interrupted = this.db.listInterruptedRuns();

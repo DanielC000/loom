@@ -213,6 +213,17 @@ export interface AgentRun {
   transcriptRef: string | null;
   /** Terminal error detail for a failed/timed-out run; null otherwise. */
   error: string | null;
+  /**
+   * Caller-supplied webhook URL POSTed the run summary on a terminal transition (Agent Runs R3); null
+   * when the caller didn't pass one. Best-effort + bounded — never blocks/wedges teardown.
+   */
+  webhookUrl: string | null;
+  /**
+   * Caller-supplied idempotency key (Agent Runs R3) — a per-key exactly-once dispatch token. A retry
+   * with the same `(keyId, idempotencyKey)` returns THIS run (no second start, no double-spend). null
+   * when the caller didn't pass one (a unique index covers only the non-null pairs).
+   */
+  idempotencyKey: string | null;
   createdAt: string;
   startedAt: string | null;
   endedAt: string | null;

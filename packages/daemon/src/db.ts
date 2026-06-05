@@ -116,6 +116,11 @@ CREATE TABLE IF NOT EXISTS runs (
   usage_json TEXT,                                      -- usage snapshot at teardown (NULL until then)
   transcript_ref TEXT,                                  -- retained transcript snapshot pointer
   error TEXT,                                           -- terminal error detail (failed/timed_out)
+  -- Agent Runs R3: caller-supplied webhook URL (POSTed the run summary on a terminal transition) + the
+  -- per-key idempotency token. Both NULL on R2 internal runs. Brought to existing R2 DBs by migrateRuns()
+  -- (additive ALTER, exactly like the other post-phase migrations); fresh DBs get them via this CREATE.
+  webhook_url TEXT,
+  idempotency_key TEXT,
   created_at TEXT NOT NULL,
   started_at TEXT,
   ended_at TEXT
@@ -283,6 +288,15 @@ const SCHEDULE_ADDED_COLUMNS: Record<string, string> = {
   kind: "TEXT NOT NULL DEFAULT 'manager'",
 };
 
+/** Columns added to `runs` after R2; applied to existing DBs by migrateRuns() (Agent Runs R3). */
+const RUN_ADDED_COLUMNS: Record<string, string> = {
+  // Both nullable (R2 internal runs carry neither). The unique partial index on (key_id,
+  // idempotency_key) is created in migrateRuns() — NOT in SCHEMA — because a legacy R2 DB lacks the
+  // column until the ALTER below runs (exec(SCHEMA) precedes the migrations).
+  webhook_url: "TEXT",
+  idempotency_key: "TEXT",
+};
+
 /** Columns added to `tasks` after phase-1; applied to existing DBs by migrateTasks(). */
 const TASK_ADDED_COLUMNS: Record<string, string> = {
   // p0 (critical) → p3 (low). NOT NULL + constant DEFAULT 'p2' is legal on ALTER TABLE ADD COLUMN, so
@@ -340,6 +354,7 @@ export class Db {
     this.migrateProfiles();
     this.migrateTasks();
     this.migrateSchedules();
+    this.migrateRuns();
   }
 
   /**
@@ -468,6 +483,26 @@ export class Db {
     for (const [name, type] of Object.entries(SCHEDULE_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE schedules ADD COLUMN ${name} ${type}`);
     }
+  }
+
+  /**
+   * Idempotent additive migration for `runs` (Agent Runs R3) — ADD COLUMN any post-R2 column missing
+   * from an existing DB (fresh installs already have them via CREATE TABLE), then create the per-key
+   * idempotency unique index. Mirrors migrateSessions (which likewise creates an index depending on a
+   * migrated column). The index is PARTIAL — `WHERE idempotency_key IS NOT NULL` — so the many R2/keyless
+   * runs (both columns NULL) are exempt, and uniqueness holds only across non-null (key_id, idempotency_key)
+   * pairs: a retry with the same pair collides; a fresh key/token does not.
+   */
+  private migrateRuns(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(RUN_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${name} ${type}`);
+    }
+    this.db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idempotency ON runs(key_id, idempotency_key) WHERE idempotency_key IS NOT NULL",
+    );
   }
 
   /** Release the SQLite handle (used by hermetic tests to free the file before cleanup). */
@@ -727,9 +762,9 @@ export class Db {
   insertRun(r: AgentRun): void {
     this.db.prepare(
       `INSERT INTO runs
-         (id,project_id,agent_id,session_id,key_id,status,input_json,schema_json,result_json,usage_json,transcript_ref,error,created_at,started_at,ended_at)
+         (id,project_id,agent_id,session_id,key_id,status,input_json,schema_json,result_json,usage_json,transcript_ref,error,webhook_url,idempotency_key,created_at,started_at,ended_at)
        VALUES
-         (@id,@projectId,@agentId,@sessionId,@keyId,@status,@inputJson,@schemaJson,@resultJson,@usageJson,@transcriptRef,@error,@createdAt,@startedAt,@endedAt)`,
+         (@id,@projectId,@agentId,@sessionId,@keyId,@status,@inputJson,@schemaJson,@resultJson,@usageJson,@transcriptRef,@error,@webhookUrl,@idempotencyKey,@createdAt,@startedAt,@endedAt)`,
     ).run({
       id: r.id, projectId: r.projectId, agentId: r.agentId,
       sessionId: r.sessionId ?? null, keyId: r.keyId ?? null, status: r.status,
@@ -738,11 +773,24 @@ export class Db {
       resultJson: r.result == null ? null : JSON.stringify(r.result),
       usageJson: r.usage == null ? null : JSON.stringify(r.usage),
       transcriptRef: r.transcriptRef ?? null, error: r.error ?? null,
+      // Agent Runs R3: NULL on R2 internal runs (additive). The unique index covers the non-null pairs.
+      webhookUrl: r.webhookUrl ?? null, idempotencyKey: r.idempotencyKey ?? null,
       createdAt: r.createdAt, startedAt: r.startedAt ?? null, endedAt: r.endedAt ?? null,
     });
   }
   getRun(id: string): AgentRun | undefined {
     const row = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(id) as Row | undefined;
+    return row ? toRun(row) : undefined;
+  }
+  /**
+   * Agent Runs R3 idempotency lookup: the existing run for a `(keyId, idempotencyKey)` pair, if any.
+   * The keyed POST /api/runs consults this BEFORE starting — a hit returns the SAME runId with no second
+   * start (no double-spend). Both args are non-null by contract (the route only calls this when the caller
+   * supplied an idempotencyKey, and an authed run always carries a keyId), matching the partial index.
+   */
+  getRunByIdempotency(keyId: string, idempotencyKey: string): AgentRun | undefined {
+    const row = this.db.prepare("SELECT * FROM runs WHERE key_id = ? AND idempotency_key = ?")
+      .get(keyId, idempotencyKey) as Row | undefined;
     return row ? toRun(row) : undefined;
   }
   /** The run driving a given `run` session (1:1) — the run MCP resolves session→run server-side. */
@@ -1286,6 +1334,7 @@ function toRun(r0: unknown): AgentRun {
     result: r.result_json == null ? null : parseJsonOrNull(r.result_json as string),
     usage: r.usage_json == null ? null : parseJsonOrNull(r.usage_json as string),
     transcriptRef: (r.transcript_ref as string) ?? null, error: (r.error as string) ?? null,
+    webhookUrl: (r.webhook_url as string) ?? null, idempotencyKey: (r.idempotency_key as string) ?? null,
     createdAt: r.created_at as string, startedAt: (r.started_at as string) ?? null, endedAt: (r.ended_at as string) ?? null,
   };
 }
