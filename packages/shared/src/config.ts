@@ -62,11 +62,24 @@ export interface OrchestrationConfig {
    */
   alertWebhook?: AlertWebhook;
   /**
+   * Per-project, HUMAN-only timeout (ms) for an outbound `alertWebhook` POST — pairs with
+   * `alertWebhook`. Bounds the best-effort delivery so a hung receiver can't stall the event path.
+   * Default 5000. No env layer (per-project + global only). Omitted from the agent-facing validator
+   * (human-only, like its paired `alertWebhook`).
+   */
+  alertWebhookTimeoutMs: number;
+  /**
    * Build/test command run in a worker's worktree before a merge (the build/DoD gate).
    * Empty string = no automated gate; at this stage the two-step manager review IS the gate.
    * (#17 will REQUIRE a non-empty gate before autonomy is enabled.)
    */
   gateCommand: string;
+  /**
+   * Per-project, HUMAN-only timeout (ms) for a `gateCommand` run — pairs with `gateCommand`. Caps how
+   * long the build/DoD gate may run before it's killed. Default 120000. No env layer (per-project +
+   * global only). Omitted from the agent-facing validator (human-only, like its paired `gateCommand`).
+   */
+  gateCommandTimeoutMs: number;
   /**
    * Safety rail (§17a): hard cap on concurrently-LIVE workers per manager, gating worker_spawn.
    * At the cap the manager's next spawn is refused; in-flight workers keep running. Default 3.
@@ -133,6 +146,77 @@ export interface BackupConfig {
   enabled: boolean;
 }
 
+/**
+ * Daemon-global rate-limit handling numbers (used by usage-limit/usage-awareness). DAEMON-GLOBAL —
+ * not per-project; the daemon reads these off the resolved `platform` grouping (the daemon supplies
+ * the global override from its SQLite store; `shared` stays browser-pure). HUMAN-only.
+ */
+export interface RateLimitConfig {
+  /** Backoff (ms) applied when a rate limit is hit with no parseable reset time. Default 18000000 (5h). */
+  defaultBackoffMs: number;
+  /** Slack (ms) added past a parsed reset time before resuming, so we don't wake a hair early. Default 10000. */
+  resetBufferMs: number;
+  /** Max wait (ms) we'll schedule a resume for when a reset time WAS parsed. Default 1800000 (30m). */
+  deadlineAfterResetMs: number;
+  /** Max wait (ms) we'll schedule a resume for when NO reset time was parsed. Default 21600000 (6h). */
+  deadlineNoResetMs: number;
+  /** How recent (ms) a rate-limit signal must be to still count as active. Default 21600000 (6h). */
+  recencyWindowMs: number;
+}
+
+/**
+ * Daemon-global watcher/ticker cadences (ms). DAEMON-GLOBAL — read off the resolved `platform`
+ * grouping at boot (these are boot-bound: a change needs a daemon restart). Each cadence has a
+ * matching `LOOM_*_INTERVAL_MS` env override, read in the resolver beneath the global override and
+ * FLOOR-CLAMPED to the §bounds watcher floor (5000ms) so a stray `…=0` can't busy-loop the daemon.
+ */
+export interface WatcherConfig {
+  /** ContextWatcher tick (LOOM_CONTEXT_WATCH_INTERVAL_MS). Default 60000. */
+  contextWatchMs: number;
+  /** IdleWatcher tick (LOOM_IDLE_WATCH_INTERVAL_MS). Default 60000. */
+  idleWatchMs: number;
+  /** RateLimitWatcher tick (LOOM_RATE_LIMIT_WATCH_INTERVAL_MS). Default 60000. */
+  rateLimitWatchMs: number;
+  /** UsageStatusPoller cadence (LOOM_USAGE_POLL_INTERVAL_MS). Default 60000. */
+  usagePollMs: number;
+  /** Wake/scheduler-due tick (LOOM_WAKE_INTERVAL_MS). Default 60000. */
+  wakeMs: number;
+  /** Cron Scheduler tick (LOOM_SCHEDULER_INTERVAL_MS). Default 60000. */
+  schedulerMs: number;
+  /** Boot-reconcile cadence (LOOM_RECONCILE_INTERVAL_MS). Default 10000. */
+  reconcileMs: number;
+}
+
+/**
+ * Daemon-global operation timeouts (ms). DAEMON-GLOBAL — read off the resolved `platform` grouping.
+ * The git/provision timeouts are boot-bound (threaded into bounded-git/provision deps at boot);
+ * `busyStaleMs` is a pty-host constructor opt. No env layer. HUMAN-only.
+ */
+export interface TimeoutConfig {
+  /** Bounded remote git op (fetch/push paths via worktrees). Default 15000. */
+  gitOpMs: number;
+  /** Bounded LOCAL git op. Default 15000. */
+  gitLocalMs: number;
+  /** Bounded git PUSH. Default 45000. */
+  gitPushMs: number;
+  /** Worktree provision timeout. Default 180000. */
+  provisionMs: number;
+  /** PTY busy-flag stale threshold. Default 300000. */
+  busyStaleMs: number;
+}
+
+/**
+ * Daemon-global "platform" tuning grouping: rate-limit numbers, watcher cadences, operation timeouts.
+ * NOT per-project — like `backup`/`schedulerEnabled`, the daemon shares ONE of these. The daemon
+ * supplies an optional global override (its SQLite-persisted singleton blob) as the 2nd arg to
+ * `resolveConfig`; `shared` itself stays browser-pure and only reads `process`-guarded `LOOM_*` env.
+ */
+export interface PlatformConfig {
+  rateLimit: RateLimitConfig;
+  watchers: WatcherConfig;
+  timeouts: TimeoutConfig;
+}
+
 /** The fully-resolved, effective config for a project. */
 export interface ResolvedConfig {
   kanbanColumns: KanbanColumn[];
@@ -143,6 +227,11 @@ export interface ResolvedConfig {
   orchestration: OrchestrationConfig;
   /** Daemon-global auto-backup settings (read off the platform default; not per-project). */
   backup: BackupConfig;
+  /**
+   * Daemon-global platform tuning (rate-limit numbers, watcher cadences, op timeouts). Not
+   * per-project; resolved from the optional global override (2nd arg) ?? LOOM_* env ?? defaults.
+   */
+  platform: PlatformConfig;
   /**
    * Pillar D: wire the mechanical vault-lint PostToolUse hook into this project's sessions
    * (flags doc-hygiene anti-patterns on .md vault writes). Default true; set false to disable.
@@ -159,7 +248,21 @@ export interface ProjectConfigOverride {
   orchestration?: Partial<OrchestrationConfig>;
   // NOTE: no `backup` key — auto-backup is daemon-GLOBAL (one shared DB file), not per-project. The
   // daemon reads it off the platform default (+ LOOM_BACKUP_INTERVAL_MINUTES env), like schedulerEnabled.
+  // NOTE: no `platform` key either — platform tuning is daemon-GLOBAL (one shared daemon), supplied as
+  // resolveConfig's SEPARATE 2nd arg (PlatformConfigOverride), never nested in a per-project override.
   docLint?: boolean;
+}
+
+/**
+ * Daemon-global platform override — the SEPARATE 2nd arg to `resolveConfig`, NOT part of a per-project
+ * override. Deep-partial of PlatformConfig: each sub-group optional, each field within it optional, so
+ * the human can tune one number and inherit the rest. The daemon loads this from its SQLite singleton
+ * blob and threads it in; absent → platform defaults (+ LOOM_* watcher env) = today's behavior.
+ */
+export interface PlatformConfigOverride {
+  rateLimit?: Partial<RateLimitConfig>;
+  watchers?: Partial<WatcherConfig>;
+  timeouts?: Partial<TimeoutConfig>;
 }
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
@@ -196,9 +299,17 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30 },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
+  // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
+  // mirror the hardcoded module consts at each call-site; the global override (resolveConfig's 2nd arg)
+  // + LOOM_* watcher env layer beneath. See RateLimitConfig/WatcherConfig/TimeoutConfig for unit docs.
+  platform: {
+    rateLimit: { defaultBackoffMs: 18000000, resetBufferMs: 10000, deadlineAfterResetMs: 1800000, deadlineNoResetMs: 21600000, recencyWindowMs: 21600000 },
+    watchers: { contextWatchMs: 60000, idleWatchMs: 60000, rateLimitWatchMs: 60000, usagePollMs: 60000, wakeMs: 60000, schedulerMs: 60000, reconcileMs: 10000 },
+    timeouts: { gitOpMs: 15000, gitLocalMs: 15000, gitPushMs: 45000, provisionMs: 180000, busyStaleMs: 300000 },
+  },
   docLint: true, // Pillar D vault-lint hook on by default
 };
 
@@ -287,8 +398,73 @@ function envBackupIntervalMinutes(): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-/** The single config-resolution mechanism, reused everywhere. */
-export function resolveConfig(override: ProjectConfigOverride | undefined): ResolvedConfig {
+/**
+ * §bounds watcher floor (ms): the minimum any watcher cadence may resolve to. The global override is
+ * range-checked on the human path (task B's validator); but the LOOM_*_INTERVAL_MS ENV reads are not
+ * validated anywhere, so we floor-clamp them HERE — a stray `LOOM_CONTEXT_WATCH_INTERVAL_MS=0` would
+ * otherwise busy-loop the daemon. Mirrors the §bounds `watchers.* 5000–3600000` lower bound.
+ */
+const WATCHER_FLOOR_MS = 5000;
+
+/**
+ * Read a watcher-cadence `LOOM_*_INTERVAL_MS` env override (ms). Mirrors envIdleNudgeMinutes: undefined
+ * when unset/blank/non-numeric so the layer beneath applies, and `process`-guarded (shared is bundled
+ * into the browser, which never sets these). UNLIKE the minute helpers, an explicit "0" is NOT
+ * swallowed at parse (so the env IS treated as set — `??` discipline) but is then FLOOR-CLAMPED to
+ * WATCHER_FLOOR_MS so it can't busy-loop. Negatives clamp up too.
+ */
+function envWatcherIntervalMs(name: string): number | undefined {
+  const raw = typeof process !== "undefined" ? process.env?.[name] : undefined;
+  if (raw == null || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.max(n, WATCHER_FLOOR_MS);
+}
+
+/**
+ * Resolve the daemon-global `platform` grouping. Per global value the precedence is
+ * **global override ?? LOOM_* env ?? hardcoded default** — there is NO per-project layer for globals.
+ * Only the watcher cadences have an env layer (floor-clamped); rateLimit + timeouts are override-or-default.
+ * `??` (not `||`) so an explicit 0 in the override survives where it's meaningful (e.g. resetBufferMs).
+ */
+function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig {
+  const d = PLATFORM_DEFAULTS.platform;
+  return {
+    rateLimit: {
+      defaultBackoffMs: po?.rateLimit?.defaultBackoffMs ?? d.rateLimit.defaultBackoffMs,
+      resetBufferMs: po?.rateLimit?.resetBufferMs ?? d.rateLimit.resetBufferMs,
+      deadlineAfterResetMs: po?.rateLimit?.deadlineAfterResetMs ?? d.rateLimit.deadlineAfterResetMs,
+      deadlineNoResetMs: po?.rateLimit?.deadlineNoResetMs ?? d.rateLimit.deadlineNoResetMs,
+      recencyWindowMs: po?.rateLimit?.recencyWindowMs ?? d.rateLimit.recencyWindowMs,
+    },
+    watchers: {
+      contextWatchMs: po?.watchers?.contextWatchMs ?? envWatcherIntervalMs("LOOM_CONTEXT_WATCH_INTERVAL_MS") ?? d.watchers.contextWatchMs,
+      idleWatchMs: po?.watchers?.idleWatchMs ?? envWatcherIntervalMs("LOOM_IDLE_WATCH_INTERVAL_MS") ?? d.watchers.idleWatchMs,
+      rateLimitWatchMs: po?.watchers?.rateLimitWatchMs ?? envWatcherIntervalMs("LOOM_RATE_LIMIT_WATCH_INTERVAL_MS") ?? d.watchers.rateLimitWatchMs,
+      usagePollMs: po?.watchers?.usagePollMs ?? envWatcherIntervalMs("LOOM_USAGE_POLL_INTERVAL_MS") ?? d.watchers.usagePollMs,
+      wakeMs: po?.watchers?.wakeMs ?? envWatcherIntervalMs("LOOM_WAKE_INTERVAL_MS") ?? d.watchers.wakeMs,
+      schedulerMs: po?.watchers?.schedulerMs ?? envWatcherIntervalMs("LOOM_SCHEDULER_INTERVAL_MS") ?? d.watchers.schedulerMs,
+      reconcileMs: po?.watchers?.reconcileMs ?? envWatcherIntervalMs("LOOM_RECONCILE_INTERVAL_MS") ?? d.watchers.reconcileMs,
+    },
+    timeouts: {
+      gitOpMs: po?.timeouts?.gitOpMs ?? d.timeouts.gitOpMs,
+      gitLocalMs: po?.timeouts?.gitLocalMs ?? d.timeouts.gitLocalMs,
+      gitPushMs: po?.timeouts?.gitPushMs ?? d.timeouts.gitPushMs,
+      provisionMs: po?.timeouts?.provisionMs ?? d.timeouts.provisionMs,
+      busyStaleMs: po?.timeouts?.busyStaleMs ?? d.timeouts.busyStaleMs,
+    },
+  };
+}
+
+/**
+ * The single config-resolution mechanism, reused everywhere. The optional 2nd arg `platformOverride`
+ * is the daemon-GLOBAL tuning override (the daemon's SQLite singleton blob); absent → platform defaults
+ * + LOOM_* env = today's behavior, so every existing single-arg caller is byte-identical.
+ */
+export function resolveConfig(
+  override: ProjectConfigOverride | undefined,
+  platformOverride?: PlatformConfigOverride,
+): ResolvedConfig {
   const d = PLATFORM_DEFAULTS;
   // The LOOM_IDLE_NUDGE_MINUTES / LOOM_BACKUP_INTERVAL_MINUTES env overrides apply at the platform-
   // default layer, so they must be honored even on the no-override fast path (otherwise
@@ -299,6 +475,9 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
     const base = structuredClone(d);
     if (envIdle !== undefined) base.orchestration.idleNudgeMinutes = envIdle;
     if (envBackup !== undefined) base.backup.intervalMinutes = envBackup;
+    // Daemon-global tuning still applies on the no-(project)-override fast path: the global override
+    // (2nd arg) + LOOM_* watcher env layer beneath, so `resolveConfig(undefined, po)` honors them.
+    base.platform = resolvePlatform(platformOverride);
     return base;
   }
   return {
@@ -316,8 +495,12 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
     sessionEnv: { ...d.sessionEnv, ...(override.sessionEnv ?? {}) },
     orchestration: {
       gateCommand: override.orchestration?.gateCommand ?? d.orchestration.gateCommand,
+      // Per-project timeout pairing gateCommand (no env layer). `??` so an explicit value survives.
+      gateCommandTimeoutMs: override.orchestration?.gateCommandTimeoutMs ?? d.orchestration.gateCommandTimeoutMs,
       // Optional + absent by default (d has none): the override value or undefined (no external delivery).
       alertWebhook: override.orchestration?.alertWebhook ?? d.orchestration.alertWebhook,
+      // Per-project timeout pairing alertWebhook (no env layer). `??` so an explicit value survives.
+      alertWebhookTimeoutMs: override.orchestration?.alertWebhookTimeoutMs ?? d.orchestration.alertWebhookTimeoutMs,
       maxConcurrentWorkers: override.orchestration?.maxConcurrentWorkers ?? d.orchestration.maxConcurrentWorkers,
       maxConcurrentManagers: override.orchestration?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers,
       schedulerEnabled: override.orchestration?.schedulerEnabled ?? d.orchestration.schedulerEnabled,
@@ -335,6 +518,8 @@ export function resolveConfig(override: ProjectConfigOverride | undefined): Reso
       keep: d.backup.keep,
       enabled: d.backup.enabled,
     },
+    // Daemon-global (no per-project layer): global override (2nd arg) ?? LOOM_* watcher env ?? default.
+    platform: resolvePlatform(platformOverride),
     docLint: override.docLint ?? d.docLint,
   };
 }
