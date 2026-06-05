@@ -114,6 +114,9 @@ export const api = {
   // restore brings one back to the rail (view-only if dead); deleteArchived is permanent (row(s) +
   // snapshot). archivedSessions feeds the Archive tab (each row tagged snapshotExists). ---
   archivedSessions: (projectId: string) => get<ArchivedSessionListItem[]>(`/api/projects/${projectId}/archive`),
+  // Cross-project (god-eye) archive: archived sessions across ALL projects, each enriched with
+  // projectId/projectName + snapshotExists — feeds the grouped Project → Agent Archive page.
+  allArchivedSessions: () => get<ArchivedSessionListItem[]>("/api/archived-sessions"),
   archiveSession: (id: string) => postErr<{ archived: string[] }>(`/api/sessions/${id}/archive`),
   restoreSession: (id: string) => postErr<{ restored: string }>(`/api/sessions/${id}/restore`),
   deleteArchivedSession: (id: string) => delErr<{ deleted: string[] }>(`/api/sessions/${id}/archive`),

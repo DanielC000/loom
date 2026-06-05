@@ -505,6 +505,17 @@ export class Db {
     ).all(projectId) as Row[];
     return rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string }));
   }
+  /** Archived sessions across ALL projects, newest-archived first (enriched with names) — the
+   * cross-project Archive view. Mirrors listArchivedSessions but unscoped (no project filter). */
+  listAllArchivedSessions(): SessionListItem[] {
+    const rows = this.db.prepare(
+      `SELECT s.*, p.name AS project_name, a.name AS agent_name
+       FROM sessions s JOIN projects p ON s.project_id = p.id JOIN agents a ON s.agent_id = a.id
+       WHERE s.archived_at IS NOT NULL
+       ORDER BY s.archived_at DESC`,
+    ).all() as Row[];
+    return rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string }));
+  }
   /** An archived manager's archived workers — for cascade restore/delete (NOT a rail feed). */
   listArchivedWorkers(managerSessionId: string): Session[] {
     return (this.db.prepare("SELECT * FROM sessions WHERE parent_session_id = ? AND archived_at IS NOT NULL ORDER BY created_at")
