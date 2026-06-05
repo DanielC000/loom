@@ -563,6 +563,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
     return deps.db.listArchivedSessions(id).map((s) => ({ ...s, snapshotExists: archivedTranscriptExists(id, s.id) }));
   });
+  // Cross-project Archive (god-eye): archived sessions across ALL projects, each enriched with
+  // projectId/projectName (already on the SessionListItem) + snapshotExists, newest-archived first.
+  // Read-only; the cross-project Archive page groups these Project → Agent.
+  app.get("/api/archived-sessions", async () =>
+    deps.db.listAllArchivedSessions().map((s) => ({ ...s, snapshotExists: archivedTranscriptExists(s.projectId, s.id) })));
 
   // --- Plain SHELL terminals (human-only): spawn pwsh/cmd/bash in a project's repo cwd ---
   //
