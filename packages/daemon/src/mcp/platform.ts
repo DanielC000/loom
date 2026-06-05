@@ -251,6 +251,10 @@ export class PlatformMcpRouter {
           id: randomUUID(), projectId, name,
           startupPrompt: startupPrompt ?? "", position: db.listAgents(projectId).length,
           profileId: profileId ?? null, // assign the (validated) profile, or stay profile-less
+          // Agent Runs R1: an agent created via MCP is NEVER an endpoint — publishing an agent as an API
+          // endpoint is a HUMAN-only trust-boundary action (the agent-edit REST surface), so this
+          // capability-gated create path always mints a non-endpoint agent.
+          endpoint: false, ioSchema: null,
         };
         db.insertAgent(agent);
         return ok(agent);

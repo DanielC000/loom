@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import { nextFireAt } from "../orchestration/cron.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists } from "../sessions/transcript.js";
@@ -473,23 +473,127 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       id: randomUUID(), projectId, name: b.name,
       startupPrompt: b.startupPrompt ?? "", position: deps.db.listAgents(projectId).length,
       profileId: null, // additive: agents start profile-less (P3 wires up profile assignment)
+      endpoint: false, ioSchema: null, // Agent Runs R1: new agents are non-endpoint (flip via PATCH below)
     };
     deps.db.insertAgent(agent);
     return reply.code(201).send(agent);
   });
 
-  // Edit an agent preset (name / startup prompt). Same store the spawn path reads, so a saved
-  // prompt is injected as the first turn of the NEXT new session in this agent.
+  // Edit an agent preset (name / startup prompt / profile / Agent Runs endpoint flag). Same store the
+  // spawn path reads, so a saved prompt is injected as the first turn of the NEXT new session.
+  // The `endpoint` flag + `ioSchema` are a HUMAN-only trust-boundary surface (Agent Runs R1): flagging
+  // an agent API-exposable is exposed ONLY here on the loopback REST, NEVER via an MCP tool (the
+  // orchestration/platform agent-write tools enumerate name/startupPrompt/profileId only) — an agent
+  // can never self-publish as an endpoint, mirroring how profile role / gateCommand are gated.
   app.post("/api/agents/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getAgent(id)) return reply.code(404).send({ error: "agent not found" });
-    const b = (req.body ?? {}) as { name?: string; startupPrompt?: string; profileId?: string | null };
+    const b = (req.body ?? {}) as { name?: string; startupPrompt?: string; profileId?: string | null; endpoint?: unknown; ioSchema?: unknown };
     // Assigning a profile: a non-null profileId must reference a real profile (null CLEARS — the agent
     // falls back to the plain backstop). Pass the whole patch through; updateAgent writes only the
     // provided keys (`profileId: null` clears, an absent key leaves the assignment as-is).
     if (b.profileId != null && !deps.db.getProfile(b.profileId)) return reply.code(404).send({ error: "profile not found" });
-    deps.db.updateAgent(id, b);
+    if (b.endpoint !== undefined && typeof b.endpoint !== "boolean") return reply.code(400).send({ error: "endpoint must be a boolean" });
+    // Build the patch so only PRESENT keys reach updateAgent ("ioSchema" in patch is the clear signal).
+    const patch: { name?: string; startupPrompt?: string; profileId?: string | null; endpoint?: boolean; ioSchema?: unknown | null } = {};
+    if ("name" in b) patch.name = b.name;
+    if ("startupPrompt" in b) patch.startupPrompt = b.startupPrompt;
+    if ("profileId" in b) patch.profileId = b.profileId;
+    if (b.endpoint !== undefined) patch.endpoint = b.endpoint as boolean;
+    if ("ioSchema" in b) patch.ioSchema = b.ioSchema ?? null;
+    deps.db.updateAgent(id, patch);
     return deps.db.getAgent(id);
+  });
+
+  // --- Agent Runs R1: project-scoped API keys (HUMAN-only, loopback REST — a TRUST-BOUNDARY surface
+  // like the git/vault writers + the platform elevated surface). Minting / rotating / revoking a key
+  // and editing its endpoint-agent allowlist are exposed ONLY here; NO MCP server (loom-tasks /
+  // loom-orchestration / loom-platform / loom-audit) carries a key tool, so no agent can self-mint or
+  // publish a key. The SECRET is hashed at rest (db) and returned PLAINTEXT exactly ONCE (on create +
+  // rotate) — list/get never carry the secret or its hash. No run execution here (that's R2/R3). ---
+  const KEY_STATUSES = new Set(["active", "paused", "revoked"]);
+  // Validate the per-key caps blob: each dimension is omitted/null (uncapped) or a non-negative finite
+  // number. Returns the normalized ApiKeyCaps, or an error string.
+  const parseCaps = (raw: unknown): { ok: true; caps: ApiKeyCaps } | { ok: false; error: string } => {
+    const src = (raw ?? {}) as Record<string, unknown>;
+    const fields = ["maxConcurrentRuns", "dailyTokenCap", "dailySpendCap"] as const;
+    const caps: ApiKeyCaps = { maxConcurrentRuns: null, dailyTokenCap: null, dailySpendCap: null };
+    for (const f of fields) {
+      const v = src[f];
+      if (v === undefined || v === null) { caps[f] = null; continue; }
+      if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return { ok: false, error: `${f} must be a non-negative number or null` };
+      caps[f] = v;
+    }
+    return { ok: true, caps };
+  };
+  // Validate an endpoint-agent allowlist: an array whose every id is an endpoint=true agent in the project.
+  const parseAllowlist = (projectId: string, raw: unknown): { ok: true; ids: string[] } | { ok: false; error: string } => {
+    if (raw === undefined) return { ok: true, ids: [] };
+    if (!Array.isArray(raw) || !raw.every((x) => typeof x === "string")) return { ok: false, error: "endpointAgentIds must be a string[]" };
+    const v = deps.db.validateEndpointAllowlist(projectId, raw as string[]);
+    if (!v.ok) return { ok: false, error: `agent ${v.badId} is not an endpoint agent in this project` };
+    return { ok: true, ids: raw as string[] };
+  };
+
+  app.get("/api/projects/:id/keys", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    return deps.db.listApiKeys(id); // PUBLIC metadata only (no secret/hash)
+  });
+  app.post("/api/projects/:id/keys", async (req, reply) => {
+    const projectId = (req.params as { id: string }).id;
+    if (!deps.db.getProject(projectId)) return reply.code(404).send({ error: "project not found" });
+    const b = (req.body ?? {}) as { name?: string; endpointAgentIds?: unknown; caps?: unknown; status?: unknown };
+    if (b.status !== undefined && !KEY_STATUSES.has(b.status as string)) return reply.code(400).send({ error: "status must be active|paused|revoked" });
+    const allow = parseAllowlist(projectId, b.endpointAgentIds);
+    if (!allow.ok) return reply.code(400).send({ error: allow.error });
+    const caps = parseCaps(b.caps);
+    if (!caps.ok) return reply.code(400).send({ error: caps.error });
+    const { key, plaintext } = deps.db.createApiKey({
+      projectId, name: (b.name ?? "").toString(), endpointAgentIds: allow.ids, caps: caps.caps,
+      status: b.status as ApiKeyStatus | undefined,
+    });
+    // The ONE time the plaintext is returned — the client must store it now (never recoverable after).
+    return reply.code(201).send({ key, plaintext });
+  });
+  // Edit a key's metadata: name / endpoint-agent allowlist / caps / status (pause + revoke live here).
+  app.post("/api/keys/:keyId", async (req, reply) => {
+    const keyId = (req.params as { keyId: string }).keyId;
+    const existing = deps.db.getApiKey(keyId);
+    if (!existing) return reply.code(404).send({ error: "key not found" });
+    const b = (req.body ?? {}) as { name?: string; endpointAgentIds?: unknown; caps?: unknown; status?: unknown };
+    const patch: { name?: string; endpointAgentIds?: string[]; caps?: ApiKeyCaps; status?: ApiKeyStatus } = {};
+    if (typeof b.name === "string") patch.name = b.name;
+    if (b.endpointAgentIds !== undefined) {
+      const allow = parseAllowlist(existing.projectId, b.endpointAgentIds);
+      if (!allow.ok) return reply.code(400).send({ error: allow.error });
+      patch.endpointAgentIds = allow.ids;
+    }
+    if (b.caps !== undefined) {
+      const caps = parseCaps(b.caps);
+      if (!caps.ok) return reply.code(400).send({ error: caps.error });
+      patch.caps = caps.caps;
+    }
+    if (b.status !== undefined) {
+      if (!KEY_STATUSES.has(b.status as string)) return reply.code(400).send({ error: "status must be active|paused|revoked" });
+      patch.status = b.status as ApiKeyStatus;
+    }
+    deps.db.updateApiKey(keyId, patch);
+    return deps.db.getApiKey(keyId);
+  });
+  // Rotate a key's secret — invalidates the old plaintext, returns the new plaintext ONCE.
+  app.post("/api/keys/:keyId/rotate", async (req, reply) => {
+    const keyId = (req.params as { keyId: string }).keyId;
+    const rotated = deps.db.rotateApiKey(keyId);
+    if (!rotated) return reply.code(404).send({ error: "key not found" });
+    return reply.send(rotated); // { key, plaintext }
+  });
+  // Hard-delete a key (permanent). A soft revoke (keep the audit row) is POST /api/keys/:id {status:'revoked'}.
+  app.delete("/api/keys/:keyId", async (req, reply) => {
+    const keyId = (req.params as { keyId: string }).keyId;
+    if (!deps.db.getApiKey(keyId)) return reply.code(404).send({ error: "key not found" });
+    deps.db.deleteApiKey(keyId);
+    return { ok: true };
   });
 
   app.post("/api/projects/:id/tasks", async (req, reply) => {

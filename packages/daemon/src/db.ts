@@ -32,7 +32,9 @@ import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake,
+  ApiKey, ApiKeyStatus, ApiKeyCaps,
 } from "@loom/shared";
+import { mintApiKey, parseApiKey, verifySecret } from "./keys/hash.js";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects (
@@ -70,7 +72,31 @@ CREATE TABLE IF NOT EXISTS agents (
   position INTEGER NOT NULL DEFAULT 0,
   -- nullable Profile ref (also added to existing DBs via the idempotent migration below).
   -- plain TEXT (no FK), matching the migration's ADD COLUMN so fresh + migrated DBs converge.
-  profile_id TEXT
+  profile_id TEXT,
+  -- Agent Runs R1: marks an agent API-exposable (allowlist-eligible). NOT NULL + constant DEFAULT 0 is
+  -- legal on ALTER TABLE ADD COLUMN, so legacy rows backfill to 0 (not an endpoint). Fully additive —
+  -- the flag changes NO spawn behavior. io_schema is an OPTIONAL JSON blob (NULL on non-endpoint agents).
+  endpoint INTEGER NOT NULL DEFAULT 0,
+  io_schema TEXT
+);
+-- Agent Runs R1: project-scoped API keys (durable, hashed at rest — NEVER plaintext). The secret is a
+-- salted SHA-256 (salt+hash columns); the plaintext is shown to the human ONCE at create/rotate. A key
+-- binds a project to an allowlist of its endpoint=true agents (JSON id array) + per-key caps + status.
+-- Brand-new table ⇒ CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER needed); an
+-- existing DB simply gains an empty table on next boot. HUMAN-managed only (loopback REST) — no MCP tool.
+CREATE TABLE IF NOT EXISTS api_keys (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  name TEXT NOT NULL DEFAULT '',
+  salt TEXT NOT NULL,                                   -- per-key random salt (hex)
+  hash TEXT NOT NULL,                                   -- salted SHA-256 of the secret (hex) — never plaintext
+  endpoint_agent_ids TEXT NOT NULL DEFAULT '[]',        -- JSON string[] of allowlisted endpoint-agent ids
+  max_concurrent_runs INTEGER,                          -- per-key caps (NULL = uncapped); R3/R4 enforce
+  daily_token_cap INTEGER,
+  daily_spend_cap REAL,
+  status TEXT NOT NULL DEFAULT 'active',                -- 'active' | 'paused' | 'revoked'
+  created_at TEXT NOT NULL,
+  rotated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
@@ -167,6 +193,7 @@ CREATE TABLE IF NOT EXISTS platform_config (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
+CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_fire_at);
 CREATE INDEX IF NOT EXISTS idx_wakes_due ON wakes(wake_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id, last_activity DESC);
@@ -212,6 +239,10 @@ const PROJECT_ADDED_COLUMNS: Record<string, string> = {
 /** Columns added to `agents` after phase-1; applied to existing DBs by migrateAgents(). */
 const AGENT_ADDED_COLUMNS: Record<string, string> = {
   profile_id: "TEXT",
+  // Agent Runs R1: API-exposable flag (NOT NULL + constant DEFAULT 0 is legal on ALTER TABLE ADD
+  // COLUMN, so legacy rows backfill to endpoint=0) + an optional JSON I/O schema blob (NULL on legacy).
+  endpoint: "INTEGER NOT NULL DEFAULT 0",
+  io_schema: "TEXT",
 };
 
 /** Columns added to `profiles` after the initial rig schema; applied to existing DBs by migrateProfiles(). */
@@ -235,6 +266,22 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
 };
 
 type Row = Record<string, unknown>;
+
+/**
+ * Agent Runs R1 — the db-INTERNAL api-key record: the public {@link ApiKey} metadata PLUS the
+ * salt+hash that never leave the daemon. The REST layer maps this to the public `ApiKey` (dropping
+ * salt/hash) so the secret material is never serialized to a client. Returned only by internal
+ * accessors (getApiKeyRecord / authenticate); the public list/get accessors return `ApiKey`.
+ */
+export interface ApiKeyRecord extends ApiKey {
+  salt: string;
+  hash: string;
+}
+
+/** Result of authenticating a presented API-key token (Agent Runs R1; nothing CALLS auth yet — R3 does). */
+export type ApiKeyAuth =
+  | { ok: true; key: ApiKey }
+  | { ok: false; reason: "malformed" | "unknown" | "bad-secret" | "paused" | "revoked" };
 
 /** Asleep-at-the-Wheel idle-watchdog nudge policy (foundation). */
 export type IdleNudgePolicy = "watching" | "snoozed" | "suppressed";
@@ -494,9 +541,14 @@ export class Db {
   }
   insertAgent(a: Agent): void {
     this.db.prepare(
-      `INSERT INTO agents (id,project_id,name,startup_prompt,position,profile_id)
-       VALUES (@id,@projectId,@name,@startupPrompt,@position,@profileId)`,
-    ).run({ ...a, profileId: a.profileId ?? null });
+      `INSERT INTO agents (id,project_id,name,startup_prompt,position,profile_id,endpoint,io_schema)
+       VALUES (@id,@projectId,@name,@startupPrompt,@position,@profileId,@endpoint,@ioSchema)`,
+    ).run({
+      ...a, profileId: a.profileId ?? null,
+      // Agent Runs R1: absent on plain phase-1/2 agent literals ⇒ endpoint 0 + io_schema NULL (additive).
+      endpoint: a.endpoint ? 1 : 0,
+      ioSchema: a.ioSchema == null ? null : JSON.stringify(a.ioSchema),
+    });
   }
   /**
    * Partial edit of an agent (name / startup prompt / assigned Profile). Omitted fields are left
@@ -504,17 +556,142 @@ export class Db {
    * backstop). `?? null` coerces a provided-but-undefined value so an explicit clear reaches the
    * column (a truly absent key is filtered out and left as-is).
    */
-  updateAgent(id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null }): void {
+  updateAgent(id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null; endpoint?: boolean; ioSchema?: unknown | null }): void {
     const cols: Record<string, unknown> = {
       name: patch.name,
       startup_prompt: patch.startupPrompt,
       // present (incl. null → clear) writes; absent (undefined) is filtered out below and left as-is.
       profile_id: "profileId" in patch ? patch.profileId ?? null : undefined,
+      // Agent Runs R1 (HUMAN-only — only the agent-edit REST surface passes these; no MCP path does,
+      // so an agent can never flip its own endpoint flag). `endpoint` present writes 0/1; `ioSchema`
+      // present writes JSON text (null clears). updateAgentPreset/assign_profile omit both ⇒ left as-is.
+      endpoint: patch.endpoint === undefined ? undefined : patch.endpoint ? 1 : 0,
+      io_schema: "ioSchema" in patch ? (patch.ioSchema == null ? null : JSON.stringify(patch.ioSchema)) : undefined,
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
     const set = names.map((c) => `${c} = ?`).join(", ");
     this.db.prepare(`UPDATE agents SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
+
+  // --- api keys (Agent Runs R1: project-scoped, hashed-at-rest, human-managed) -------------------
+  // Durable in SQLite ("SQLite owns durable state"). The SECRET never persists — only a salted SHA-256
+  // (salt+hash); the plaintext is returned ONCE by createApiKey/rotateApiKey and never again. The
+  // PUBLIC accessors (listApiKeys/getApiKey) return `ApiKey` metadata with no salt/hash; the internal
+  // record (getApiKeyRecord/authenticate) keeps them daemon-side. There is intentionally NO MCP path to
+  // any of this — only the loopback human REST surface calls these (trust boundary like the git/vault writers).
+
+  /** True iff every id is an `endpoint=true` agent in `projectId` — the allowlist-eligibility gate.
+   *  Returns the first offending id (a non-endpoint, wrong-project, or unknown agent) so the caller can 400. */
+  validateEndpointAllowlist(projectId: string, agentIds: string[]): { ok: true } | { ok: false; badId: string } {
+    for (const id of agentIds) {
+      const a = this.getAgent(id);
+      if (!a || a.projectId !== projectId || !a.endpoint) return { ok: false, badId: id };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Mint a project API key: persist the salt+hash (never the secret) + metadata, and RETURN the
+   * one-time plaintext token alongside the stored public metadata. The ONLY place the plaintext exists.
+   */
+  createApiKey(input: {
+    projectId: string; name: string; endpointAgentIds: string[]; caps: ApiKeyCaps; status?: ApiKeyStatus;
+  }): { key: ApiKey; plaintext: string } {
+    const minted = mintApiKey();
+    const createdAt = new Date().toISOString();
+    const rec: ApiKeyRecord = {
+      id: minted.id, projectId: input.projectId, name: input.name,
+      endpointAgentIds: input.endpointAgentIds, caps: input.caps,
+      status: input.status ?? "active", createdAt, rotatedAt: null,
+      salt: minted.salt, hash: minted.hash,
+    };
+    this.insertApiKeyRecord(rec);
+    return { key: toApiKeyPublic(rec), plaintext: minted.plaintext };
+  }
+
+  private insertApiKeyRecord(rec: ApiKeyRecord): void {
+    this.db.prepare(
+      `INSERT INTO api_keys
+         (id,project_id,name,salt,hash,endpoint_agent_ids,max_concurrent_runs,daily_token_cap,daily_spend_cap,status,created_at,rotated_at)
+       VALUES (@id,@projectId,@name,@salt,@hash,@endpointAgentIds,@maxConcurrentRuns,@dailyTokenCap,@dailySpendCap,@status,@createdAt,@rotatedAt)`,
+    ).run({
+      id: rec.id, projectId: rec.projectId, name: rec.name, salt: rec.salt, hash: rec.hash,
+      endpointAgentIds: JSON.stringify(rec.endpointAgentIds ?? []),
+      maxConcurrentRuns: rec.caps.maxConcurrentRuns ?? null,
+      dailyTokenCap: rec.caps.dailyTokenCap ?? null,
+      dailySpendCap: rec.caps.dailySpendCap ?? null,
+      status: rec.status, createdAt: rec.createdAt, rotatedAt: rec.rotatedAt ?? null,
+    });
+  }
+
+  /** A project's keys as PUBLIC metadata (NO secret/hash), newest first. */
+  listApiKeys(projectId: string): ApiKey[] {
+    return (this.db.prepare("SELECT * FROM api_keys WHERE project_id = ? ORDER BY created_at DESC").all(projectId) as Row[])
+      .map(toApiKeyRecord).map(toApiKeyPublic);
+  }
+  /** One key as PUBLIC metadata (NO secret/hash); undefined if absent. */
+  getApiKey(id: string): ApiKey | undefined {
+    const rec = this.getApiKeyRecord(id);
+    return rec ? toApiKeyPublic(rec) : undefined;
+  }
+  /** INTERNAL: the full record incl. salt+hash (for authenticate). Never serialize this to a client. */
+  getApiKeyRecord(id: string): ApiKeyRecord | undefined {
+    const r = this.db.prepare("SELECT * FROM api_keys WHERE id = ?").get(id) as Row | undefined;
+    return r ? toApiKeyRecord(r) : undefined;
+  }
+
+  /** Partial edit of a key's metadata — allowlist / caps / status / name. Omitted fields are left as-is.
+   *  The secret is NEVER touched here (rotateApiKey is the only secret-changing path). */
+  updateApiKey(id: string, patch: { name?: string; endpointAgentIds?: string[]; caps?: ApiKeyCaps; status?: ApiKeyStatus }): void {
+    const cols: Record<string, unknown> = {
+      name: patch.name,
+      endpoint_agent_ids: patch.endpointAgentIds === undefined ? undefined : JSON.stringify(patch.endpointAgentIds),
+      max_concurrent_runs: patch.caps === undefined ? undefined : patch.caps.maxConcurrentRuns ?? null,
+      daily_token_cap: patch.caps === undefined ? undefined : patch.caps.dailyTokenCap ?? null,
+      daily_spend_cap: patch.caps === undefined ? undefined : patch.caps.dailySpendCap ?? null,
+      status: patch.status,
+    };
+    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
+    if (names.length === 0) return;
+    const set = names.map((c) => `${c} = ?`).join(", ");
+    this.db.prepare(`UPDATE api_keys SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
+
+  /**
+   * Rotate a key's SECRET: mint a fresh secret for the SAME row id, overwrite salt+hash, stamp
+   * rotated_at. The old plaintext stops verifying immediately (different hash); the new plaintext is
+   * returned ONCE. Identity, allowlist, caps and status are preserved. Returns null if the id is unknown.
+   */
+  rotateApiKey(id: string): { key: ApiKey; plaintext: string } | null {
+    const existing = this.getApiKeyRecord(id);
+    if (!existing) return null;
+    const minted = mintApiKey(id); // same id ⇒ row identity preserved, only the secret changes
+    const rotatedAt = new Date().toISOString();
+    this.db.prepare("UPDATE api_keys SET salt = ?, hash = ?, rotated_at = ? WHERE id = ?")
+      .run(minted.salt, minted.hash, rotatedAt, id);
+    return { key: toApiKeyPublic({ ...existing, salt: minted.salt, hash: minted.hash, rotatedAt }), plaintext: minted.plaintext };
+  }
+
+  /** Permanently delete a key row (hard revoke + cleanup). A soft revoke is `updateApiKey(id, {status:'revoked'})`. */
+  deleteApiKey(id: string): void {
+    this.db.prepare("DELETE FROM api_keys WHERE id = ?").run(id);
+  }
+
+  /**
+   * Authenticate a presented token (Agent Runs R1 builds it; R3's run REST is the first CALLER).
+   * Parse → O(1) lookup by embedded id → CONSTANT-TIME secret verify → status gate. Verify the secret
+   * BEFORE consulting status so a wrong secret never reveals whether a key is paused/revoked.
+   */
+  authenticateApiKey(token: unknown): ApiKeyAuth {
+    const parsed = parseApiKey(token);
+    if (!parsed) return { ok: false, reason: "malformed" };
+    const rec = this.getApiKeyRecord(parsed.id);
+    if (!rec) return { ok: false, reason: "unknown" };
+    if (!verifySecret(parsed.secret, rec.salt, rec.hash)) return { ok: false, reason: "bad-secret" };
+    if (rec.status === "revoked") return { ok: false, reason: "revoked" };
+    if (rec.status === "paused") return { ok: false, reason: "paused" };
+    return { ok: true, key: toApiKeyPublic(rec) };
   }
 
   // --- profiles (platform-level rigs; read path + seed) ---
@@ -973,7 +1150,37 @@ function toAgent(r0: unknown): Agent {
     startupPrompt: r.startup_prompt as string, position: r.position as number,
     // null on legacy/plain rows ⇒ resolveProfile maps to today's behavior
     profileId: (r.profile_id as string) ?? null,
+    // Agent Runs R1: 0/NULL on legacy rows ⇒ endpoint false + ioSchema null (additive). io_schema is
+    // stored as JSON text; parse it back (a corrupt blob never wedges a read → null).
+    endpoint: (r.endpoint as number) === 1,
+    ioSchema: parseJsonOrNull(r.io_schema as string | null),
   };
+}
+/** Parse a nullable JSON text column back to its value; null on absent/empty/corrupt (never throws). */
+function parseJsonOrNull(s: string | null | undefined): unknown {
+  if (s == null || s === "") return null;
+  try { return JSON.parse(s); } catch { return null; }
+}
+/** Map an api_keys row to the db-internal record (incl. salt+hash). */
+function toApiKeyRecord(r0: unknown): ApiKeyRecord {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, projectId: r.project_id as string, name: (r.name as string) ?? "",
+    salt: r.salt as string, hash: r.hash as string,
+    endpointAgentIds: (parseJsonOrNull(r.endpoint_agent_ids as string) as string[]) ?? [],
+    caps: {
+      maxConcurrentRuns: (r.max_concurrent_runs as number) ?? null,
+      dailyTokenCap: (r.daily_token_cap as number) ?? null,
+      dailySpendCap: (r.daily_spend_cap as number) ?? null,
+    },
+    status: (r.status as ApiKeyStatus) ?? "active",
+    createdAt: r.created_at as string, rotatedAt: (r.rotated_at as string) ?? null,
+  };
+}
+/** Strip the secret material — the PUBLIC `ApiKey` surfaced over REST never carries salt/hash. */
+function toApiKeyPublic(rec: ApiKeyRecord): ApiKey {
+  const { salt: _s, hash: _h, ...pub } = rec;
+  return pub;
 }
 function toProfile(r0: unknown): Profile {
   const r = r0 as Row;

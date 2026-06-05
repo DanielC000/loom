@@ -111,6 +111,7 @@ export function seedPlatformHome(db: Db): string[] {
       startupPrompt: spec.startupPrompt,
       position: i,
       profileId: profile?.id ?? null, // plain backstop if the bundled profile is unexpectedly absent
+      endpoint: false, ioSchema: null, // Agent Runs R1: platform agents are not API endpoints
     };
     db.insertAgent(agent);
     seeded.push(`agent:${spec.name}`);

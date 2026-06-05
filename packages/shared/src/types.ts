@@ -7,6 +7,7 @@ export type AgentId = string;
 export type SessionId = string; // Loom's own id
 export type TaskId = string;
 export type ProfileId = string;
+export type ApiKeyId = string;
 
 /** A project's two bindings + its config override blob. */
 export interface Project {
@@ -49,6 +50,23 @@ export interface Agent {
    * longer carries a prompt — its `description` is a UI-only blurb).
    */
   profileId: ProfileId | null;
+  /**
+   * Agent Runs R1: marks this agent as *API-exposable* — only an `endpoint=true` agent may be put
+   * on a project API key's allowlist (the Agent Runs run-invocation surface, R2+). Default **false**
+   * and FULLY ADDITIVE: the flag changes NO spawn behavior in R1 (a session in an endpoint agent
+   * spawns byte-identically to one in a non-endpoint agent) — it only gates allowlist eligibility +
+   * which agents the future run API may invoke. HUMAN-set only (the agent-edit REST surface); NO
+   * agent MCP tool can flip it (same trust-boundary posture as profile role / gateCommand). Legacy
+   * rows backfill to false (0). See `[[Agent Runs]]`.
+   */
+  endpoint: boolean;
+  /**
+   * Agent Runs R1: an OPTIONAL JSON I/O schema blob describing the agent's expected input/output for
+   * runs (advisory in R1 — nothing reads it yet; R2's `submit_result` validates against a
+   * caller-supplied-per-call schema, not this one). Nullable + additive (null on every existing /
+   * non-endpoint agent). Stored verbatim as a JSON value.
+   */
+  ioSchema: unknown | null;
 }
 
 /**
@@ -84,6 +102,45 @@ export interface Profile {
    * tool (a browser is a navigate-anywhere capability — same capability-gating posture as gateCommand).
    */
   browserTesting?: boolean;
+}
+
+// --- Agent Runs API keys (R1) ---------------------------------------------------------------------
+/** A project API key's lifecycle status: active (auths), paused (temporarily blocked), revoked (dead). */
+export type ApiKeyStatus = "active" | "paused" | "revoked";
+
+/**
+ * Per-key usage ceilings (Agent Runs R1 STORES them; R3/R4 enforce — nothing reads them in R1).
+ * `null` on any field = uncapped for that dimension.
+ */
+export interface ApiKeyCaps {
+  /** Max simultaneously-running runs this key may have in flight. */
+  maxConcurrentRuns: number | null;
+  /** Daily token budget across this key's runs. */
+  dailyTokenCap: number | null;
+  /** Daily spend budget (USD) across this key's runs. */
+  dailySpendCap: number | null;
+}
+
+/**
+ * A project-scoped API key (Agent Runs R1). The key SECRET is NEVER part of this shape — only a
+ * salted hash lives at rest (db-internal); the plaintext token is returned exactly ONCE at creation
+ * and at each rotation, never again. This is the public METADATA the human-only key-admin REST
+ * surfaces (list/create/rotate/edit) — list must never leak the secret or its hash. The key binds a
+ * project to an allowlist of that project's `endpoint=true` agents (R2+ run-invocation scope) plus
+ * per-key caps. Human-managed only — no agent MCP tool can mint/rotate/revoke one. See `[[Agent Runs]]`.
+ */
+export interface ApiKey {
+  id: ApiKeyId;
+  projectId: ProjectId;
+  /** Human label for the key (e.g. "Invest app — prod"). */
+  name: string;
+  /** Allowlist of endpoint-agent ids this key may invoke; every id is an `endpoint=true` agent in the project. */
+  endpointAgentIds: AgentId[];
+  caps: ApiKeyCaps;
+  status: ApiKeyStatus;
+  createdAt: string;
+  /** When the secret was last rotated (null = never rotated since creation). */
+  rotatedAt: string | null;
 }
 
 // --- Session FSM (explicit; replaces Jinn's loose status enum) ---
