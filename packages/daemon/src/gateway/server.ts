@@ -14,6 +14,7 @@ import type { TaskMcpRouter } from "../mcp/server.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
 import type { AuditMcpRouter } from "../mcp/audit.js";
+import type { RunMcpRouter } from "../mcp/run.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride } from "../mcp/platform.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
@@ -40,6 +41,7 @@ export interface GatewayDeps {
   orchMcp: OrchestrationMcpRouter;
   platformMcp: PlatformMcpRouter;
   auditMcp: AuditMcpRouter;
+  runMcp: RunMcpRouter;
   control: OrchestrationControl;
   usageStatus: UsageStatusPoller;
 }
@@ -85,6 +87,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { sessionId } = req.params as { sessionId: string };
     reply.hijack();
     await deps.auditMcp.handle(req.raw, reply.raw, sessionId, req.body);
+  });
+
+  // --- Agent-Run MCP (role-gated to 'run'; the ephemeral run's ONLY tool is submit_result — R2). A
+  // distinct route + router so a `run` session reaches NOTHING but its restricted surface (it 404s on
+  // every other /mcp* route, and buildMcpServers mounts only loom-run for it — not even loom-tasks). ---
+  app.all("/mcp-run/:sessionId", async (req, reply) => {
+    const { sessionId } = req.params as { sessionId: string };
+    reply.hijack();
+    await deps.runMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
 
   // --- Orchestration safety rails (§17a): pause/kill switch + status. These gate worker_spawn
@@ -622,9 +633,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true };
   });
 
-  app.post("/api/agents/:id/sessions", async (req) => {
+  app.post("/api/agents/:id/sessions", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const { role } = (req.body as { role?: string }) ?? {};
+    // Agent Runs R2: a `run` session is EPHEMERAL and internally-started only — no human/agent spawn route
+    // mints one (the public keyed POST /api/runs trigger is R3). Refuse it the way platform/auditor are
+    // role-locked, so role="run" can never be created via this surface.
+    if (role === "run") { reply.code(400); return { error: "the 'run' session kind is not human-spawnable; Agent Runs are started internally (R3 adds the keyed trigger)" }; }
     if (role === "manager") return deps.sessions.startManager(id);
     if (role === "platform") return deps.sessions.startPlatformLead(id);
     // P5: spawn the read-and-file-only Platform Auditor. HUMAN-REST only (like startPlatformLead) — the

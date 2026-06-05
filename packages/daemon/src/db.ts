@@ -32,7 +32,7 @@ import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake,
-  ApiKey, ApiKeyStatus, ApiKeyCaps,
+  ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus,
 } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret } from "./keys/hash.js";
 
@@ -97,6 +97,28 @@ CREATE TABLE IF NOT EXISTS api_keys (
   status TEXT NOT NULL DEFAULT 'active',                -- 'active' | 'paused' | 'revoked'
   created_at TEXT NOT NULL,
   rotated_at TEXT
+);
+-- Agent Runs R2: ephemeral AgentRun records (one row per endpoint-agent invocation). Brand-new table ⇒
+-- CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER), exactly like api_keys; an
+-- existing DB simply gains an empty table on next boot. key_id is NULL in R2 (runs are started
+-- internally; R3's keyed REST sets it). input/schema/result/usage are JSON text; session_id is the 1:1
+-- ephemeral run session driving the run. Runs do NOT resume — an interrupted one is failed at boot.
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  session_id TEXT,                                      -- the ephemeral run session (1:1; NULL pre-spawn)
+  key_id TEXT,                                          -- triggering API key (NULL in R2; R3 sets it)
+  status TEXT NOT NULL DEFAULT 'queued',                -- queued|starting|running|completed|failed|timed_out|cancelled
+  input_json TEXT NOT NULL DEFAULT 'null',              -- caller input (JSON)
+  schema_json TEXT,                                     -- caller-supplied JSON Schema (NULL ⇒ freeform)
+  result_json TEXT,                                     -- submit_result payload (NULL until completed)
+  usage_json TEXT,                                      -- usage snapshot at teardown (NULL until then)
+  transcript_ref TEXT,                                  -- retained transcript snapshot pointer
+  error TEXT,                                           -- terminal error detail (failed/timed_out)
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  ended_at TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
@@ -194,6 +216,9 @@ CREATE TABLE IF NOT EXISTS platform_config (
 );
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id);
+CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_fire_at);
 CREATE INDEX IF NOT EXISTS idx_wakes_due ON wakes(wake_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id, last_activity DESC);
@@ -694,6 +719,73 @@ export class Db {
     return { ok: true, key: toApiKeyPublic(rec) };
   }
 
+  // --- agent runs (R2: ephemeral AgentRun records) ----------------------------------------------
+  // Durable in SQLite. The run row is the source of truth for a run's lifecycle; the ephemeral `run`
+  // session that drives it is 1:1 via session_id. JSON columns (input/schema/result/usage) round-trip
+  // through toRun. Internal-only in R2 (the run-starter calls insertRun/setRun*); R3's keyed REST layers on.
+
+  insertRun(r: AgentRun): void {
+    this.db.prepare(
+      `INSERT INTO runs
+         (id,project_id,agent_id,session_id,key_id,status,input_json,schema_json,result_json,usage_json,transcript_ref,error,created_at,started_at,ended_at)
+       VALUES
+         (@id,@projectId,@agentId,@sessionId,@keyId,@status,@inputJson,@schemaJson,@resultJson,@usageJson,@transcriptRef,@error,@createdAt,@startedAt,@endedAt)`,
+    ).run({
+      id: r.id, projectId: r.projectId, agentId: r.agentId,
+      sessionId: r.sessionId ?? null, keyId: r.keyId ?? null, status: r.status,
+      inputJson: JSON.stringify(r.input ?? null),
+      schemaJson: r.schema == null ? null : JSON.stringify(r.schema),
+      resultJson: r.result == null ? null : JSON.stringify(r.result),
+      usageJson: r.usage == null ? null : JSON.stringify(r.usage),
+      transcriptRef: r.transcriptRef ?? null, error: r.error ?? null,
+      createdAt: r.createdAt, startedAt: r.startedAt ?? null, endedAt: r.endedAt ?? null,
+    });
+  }
+  getRun(id: string): AgentRun | undefined {
+    const row = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(id) as Row | undefined;
+    return row ? toRun(row) : undefined;
+  }
+  /** The run driving a given `run` session (1:1) — the run MCP resolves session→run server-side. */
+  getRunBySession(sessionId: string): AgentRun | undefined {
+    const row = this.db.prepare("SELECT * FROM runs WHERE session_id = ?").get(sessionId) as Row | undefined;
+    return row ? toRun(row) : undefined;
+  }
+  /** A project's runs, newest first (R3's "Runs" view + diagnostics). */
+  listRuns(projectId: string): AgentRun[] {
+    return (this.db.prepare("SELECT * FROM runs WHERE project_id = ? ORDER BY created_at DESC").all(projectId) as Row[]).map(toRun);
+  }
+  /** Move a run to a (typically in-flight) status, optionally stamping started_at. */
+  setRunStatus(id: string, status: RunStatus, opts: { startedAt?: string } = {}): void {
+    const cols: Record<string, unknown> = { status, started_at: opts.startedAt };
+    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
+    const set = names.map((c) => `${c} = ?`).join(", ");
+    this.db.prepare(`UPDATE runs SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
+  /** Record a completed run's result and mark it terminal (status=completed, ended_at stamped). */
+  recordRunResult(id: string, result: unknown, endedAt = new Date().toISOString()): void {
+    this.db.prepare("UPDATE runs SET result_json = ?, status = 'completed', ended_at = ? WHERE id = ?")
+      .run(JSON.stringify(result ?? null), endedAt, id);
+  }
+  /** Mark a run terminally failed/timed_out/cancelled with an error detail (idempotent for already-terminal). */
+  failRun(id: string, error: string, status: Extract<RunStatus, "failed" | "timed_out" | "cancelled"> = "failed", endedAt = new Date().toISOString()): void {
+    this.db.prepare("UPDATE runs SET status = ?, error = ?, ended_at = ? WHERE id = ?").run(status, error, endedAt, id);
+  }
+  /** Retain a run's usage snapshot + transcript pointer at teardown (omitted fields left as-is). */
+  setRunTeardown(id: string, patch: { usage?: unknown; transcriptRef?: string | null }): void {
+    const cols: Record<string, unknown> = {
+      usage_json: patch.usage === undefined ? undefined : patch.usage == null ? null : JSON.stringify(patch.usage),
+      transcript_ref: "transcriptRef" in patch ? patch.transcriptRef ?? null : undefined,
+    };
+    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
+    if (names.length === 0) return;
+    const set = names.map((c) => `${c} = ?`).join(", ");
+    this.db.prepare(`UPDATE runs SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
+  /** In-flight (non-terminal) runs — the boot reconcile fails these (runs do NOT resume). */
+  listInterruptedRuns(): AgentRun[] {
+    return (this.db.prepare("SELECT * FROM runs WHERE status IN ('queued','starting','running') ORDER BY created_at").all() as Row[]).map(toRun);
+  }
+
   // --- profiles (platform-level rigs; read path + seed) ---
   listProfiles(): Profile[] {
     return (this.db.prepare("SELECT * FROM profiles ORDER BY name").all() as Row[]).map(toProfile);
@@ -1181,6 +1273,21 @@ function toApiKeyRecord(r0: unknown): ApiKeyRecord {
 function toApiKeyPublic(rec: ApiKeyRecord): ApiKey {
   const { salt: _s, hash: _h, ...pub } = rec;
   return pub;
+}
+/** Map a runs row → AgentRun, parsing the JSON columns (a corrupt blob degrades to null, never throws). */
+function toRun(r0: unknown): AgentRun {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, projectId: r.project_id as string, agentId: r.agent_id as string,
+    sessionId: (r.session_id as string) ?? null, keyId: (r.key_id as string) ?? null,
+    status: r.status as RunStatus,
+    input: parseJsonOrNull((r.input_json as string) ?? "null"),
+    schema: r.schema_json == null ? null : parseJsonOrNull(r.schema_json as string),
+    result: r.result_json == null ? null : parseJsonOrNull(r.result_json as string),
+    usage: r.usage_json == null ? null : parseJsonOrNull(r.usage_json as string),
+    transcriptRef: (r.transcript_ref as string) ?? null, error: (r.error as string) ?? null,
+    createdAt: r.created_at as string, startedAt: (r.started_at as string) ?? null, endedAt: (r.ended_at as string) ?? null,
+  };
 }
 function toProfile(r0: unknown): Profile {
   const r = r0 as Row;

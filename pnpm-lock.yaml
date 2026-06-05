@@ -35,6 +35,9 @@ importers:
       '@playwright/mcp':
         specifier: 0.0.75
         version: 0.0.75
+      ajv:
+        specifier: ^8.17.1
+        version: 8.20.0
       better-sqlite3:
         specifier: ^11.8.0
         version: 11.10.0

@@ -8,6 +8,7 @@ export type SessionId = string; // Loom's own id
 export type TaskId = string;
 export type ProfileId = string;
 export type ApiKeyId = string;
+export type RunId = string;
 
 /** A project's two bindings + its config override blob. */
 export interface Project {
@@ -160,8 +161,62 @@ export type Resumability = "unknown" | "resumable" | "dead";
  *   NATURALLY 404s on the Lead's elevated `/mcp-platform` (resolveRole gates on role==="platform") AND
  *   on `/mcp-orch` (gates on manager|worker). No agent/MCP path may mint one — only `startAuditor`
  *   (human REST) and the human-configured Scheduler spawn it.
+ * - run: an EPHEMERAL Agent-Run session (Agent Runs R2) — a curated endpoint agent invoked on one input
+ *   to return a structured answer, then torn down. It SUBTRACTS the worker machinery (NO worktree /
+ *   branch / merge gate), runs in a disposable read-only snapshot of the project's HEAD, and gets ONLY
+ *   the restricted `loom-run` surface (`submit_result`), gated to role==="run" — so it 404s on every
+ *   other MCP surface AND does not even mount `loom-tasks`. Runs are NOT resumable (ephemeral by design;
+ *   a daemon restart mid-run fails the run clean). Started ONLY by the internal run-starter — no
+ *   human/agent session-spawn route mints one (the public keyed trigger is R3). See `[[Agent Runs]]`.
  */
-export type SessionRole = "manager" | "worker" | "platform" | "auditor";
+export type SessionRole = "manager" | "worker" | "platform" | "auditor" | "run";
+
+// --- Agent Runs (R2): the AgentRun primitive ------------------------------------------------------
+/**
+ * An AgentRun's lifecycle status (Agent Runs R2). queued/starting/running are in-flight; the rest are
+ * terminal. completed = `submit_result` recorded a (schema-valid) answer; failed = the run errored or
+ * its session exited before submitting (incl. a daemon restart mid-run — runs do NOT resume); timed_out
+ * = a hard timeout/cap teardown; cancelled = a deliberate cancel (R3 surfaces the trigger). Terminal
+ * runs retain `{result, usage, transcriptRef, error}` on the row for audit.
+ */
+export type RunStatus = "queued" | "starting" | "running" | "completed" | "failed" | "timed_out" | "cancelled";
+
+/**
+ * An **AgentRun** (Agent Runs R2) — one ephemeral invocation of an endpoint agent on a caller `input`,
+ * returning a structured `result` via `submit_result`. Distinct from a worker: NO worktree/branch/merge;
+ * it runs in a disposable read-only HEAD snapshot of the project repo and tears down on a terminal state.
+ *
+ * Durable in SQLite (the `runs` table). `sessionId` is the ephemeral `run` session driving it (1:1; null
+ * only in the instant before the session is minted). `keyId` is null in R2 (runs are started internally;
+ * R3's keyed REST sets it). `schema` is the caller-supplied JSON Schema `submit_result` validates the
+ * answer against (null ⇒ freeform accept). `result`/`usage`/`transcriptRef`/`error` are populated at
+ * teardown. See `[[Agent Runs]]`.
+ */
+export interface AgentRun {
+  id: RunId;
+  projectId: ProjectId;
+  agentId: AgentId;
+  /** The ephemeral `run` session driving this run (null only before it's minted). */
+  sessionId: SessionId | null;
+  /** The API key that triggered the run; null in R2 (internal starter) — R3's keyed REST sets it. */
+  keyId: ApiKeyId | null;
+  status: RunStatus;
+  /** The caller's input, treated as DATA (injection hygiene), injected into the run's startup prompt. */
+  input: unknown;
+  /** Caller-supplied JSON Schema the answer must match; null ⇒ `submit_result` accepts freeform JSON. */
+  schema: unknown | null;
+  /** The `submit_result` payload (null until completed). */
+  result: unknown | null;
+  /** Usage snapshot captured at teardown (engine context counters in R2; null until then). */
+  usage: unknown | null;
+  /** Pointer to the retained transcript snapshot (path under LOOM_HOME); null until captured at teardown. */
+  transcriptRef: string | null;
+  /** Terminal error detail for a failed/timed-out run; null otherwise. */
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+}
 
 export interface Session {
   id: SessionId;

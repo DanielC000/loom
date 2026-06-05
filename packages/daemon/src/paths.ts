@@ -13,6 +13,13 @@ export const LOGS_DIR = path.join(LOOM_HOME, "logs");
 /** Per-worker git worktrees live outside the repo (share its object store; don't clutter it). */
 export const WORKTREES_DIR = path.join(LOOM_HOME, "worktrees");
 /**
+ * Agent Runs (R2): each ephemeral `run` session gets a disposable, read-only snapshot of the project's
+ * HEAD as its cwd under `runs/<sessionId>/`. NOT a git worktree (no .git, no branch, no admin record —
+ * sidesteps the worktree-GC bug class); hard-deleted on teardown, and the whole tree is swept on boot
+ * (runs never resume, so any dir lingering at boot is orphaned by definition).
+ */
+export const RUNS_DIR = path.join(LOOM_HOME, "runs");
+/**
  * Automatic DB backups. The auto-backup service writes + rotates rolling snapshots under `auto/`;
  * manual snapshots (e.g. `pre-*` dirs) live directly under `backups/` and are NEVER touched by
  * rotation. The dir is created lazily by the backup module (only when a snapshot is actually taken).
@@ -35,5 +42,5 @@ export const VAULT_LINT_SCRIPT = path.join(__dirname, "..", "assets", "vault-lin
 export const PORT = Number(process.env.LOOM_PORT || 4317);
 
 export function ensureDirs(): void {
-  for (const d of [LOOM_HOME, SETTINGS_DIR, LOGS_DIR, WORKTREES_DIR, SKILLS_DIR]) fs.mkdirSync(d, { recursive: true });
+  for (const d of [LOOM_HOME, SETTINGS_DIR, LOGS_DIR, WORKTREES_DIR, RUNS_DIR, SKILLS_DIR]) fs.mkdirSync(d, { recursive: true });
 }
