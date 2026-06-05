@@ -44,7 +44,12 @@ export interface AlertWebhookDeps {
   db: DbReads;
   /** Network primitive override (tests inject a stub). Defaults to a bounded fetch POST. */
   post?: WebhookPoster;
-  /** Per-POST timeout in ms (bounds a hung endpoint). Default 5000. */
+  /**
+   * Per-POST timeout in ms (bounds a hung endpoint). TEST OVERRIDE only: when set it wins, so a test
+   * can pin the bound deterministically. In production this is LEFT UNSET and the timeout is read
+   * RESOLVE-LIVE per event from the project's `orchestration.alertWebhookTimeoutMs` (default 5000) —
+   * so a human PATCH to that value takes effect with no daemon restart.
+   */
   timeoutMs?: number;
   /** Optional structured log sink for swallowed delivery errors (defaults to console.warn). */
   onError?: (message: string) => void;
@@ -53,13 +58,14 @@ export interface AlertWebhookDeps {
 export class AlertWebhookEmitter {
   private readonly db: DbReads;
   private readonly post: WebhookPoster;
-  private readonly timeoutMs: number;
+  /** Test override; undefined in production (the per-project resolved timeout is used instead). */
+  private readonly timeoutMs: number | undefined;
   private readonly onError: (message: string) => void;
 
   constructor(deps: AlertWebhookDeps) {
     this.db = deps.db;
     this.post = deps.post ?? defaultPost;
-    this.timeoutMs = deps.timeoutMs ?? 5_000;
+    this.timeoutMs = deps.timeoutMs;
     this.onError = deps.onError ?? ((m) => console.warn(`[alert-webhook] ${m}`));
   }
 
@@ -78,8 +84,12 @@ export class AlertWebhookEmitter {
   private async deliver(evt: OrchestrationEvent): Promise<void> {
     const project = this.resolveProject(evt);
     if (!project) return;
-    const hook = resolveConfig(project.config).orchestration.alertWebhook;
+    // RESOLVE-LIVE: read the webhook AND its per-POST timeout fresh from the project config each event,
+    // so a human PATCH to either takes effect with no daemon restart. A test-injected `timeoutMs` wins.
+    const orchestration = resolveConfig(project.config).orchestration;
+    const hook = orchestration.alertWebhook;
     if (!hook?.url || !hook.events.includes(evt.kind)) return; // not configured / kind not subscribed
+    const timeoutMs = this.timeoutMs ?? orchestration.alertWebhookTimeoutMs;
     // Payload the human's endpoint receives. Matches the card shape ({event, project, ts, detail})
     // plus the lineage ids so an alert says WHICH worker/task it concerns.
     const payload = {
@@ -91,7 +101,7 @@ export class AlertWebhookEmitter {
       workerSessionId: evt.workerSessionId ?? null,
       taskId: evt.taskId ?? null,
     };
-    await this.post(hook.url, payload, this.timeoutMs);
+    await this.post(hook.url, payload, timeoutMs);
   }
 
   /** Every event carries a managerSessionId; derive its project (server-side, never agent-supplied). */

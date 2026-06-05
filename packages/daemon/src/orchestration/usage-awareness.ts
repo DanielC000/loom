@@ -67,12 +67,19 @@ export function getClaudeExpectedResetAt(now: Date = new Date()): Date | undefin
   return d;
 }
 
+/** Module-const recency window (ms) — the 6h heuristic. Kept as the fallback / test seam. */
+const RECENCY_WINDOW_MS = 6 * 60 * 60_000;
+
 /**
  * Are we likely near the Claude usage limit right now? A known reset that has passed clears it;
- * otherwise a hit within the last 6h (the recency heuristic — slightly wider than the 5h cap
- * window to stay conservative about firing into a still-capped account).
+ * otherwise a hit within `recencyWindowMs` (the recency heuristic — default 6h, slightly wider than
+ * the 5h cap window to stay conservative about firing into a still-capped account).
+ *
+ * `recencyWindowMs` is an OPTIONAL daemon-global tunable (the resolved `platform.rateLimit.recencyWindowMs`);
+ * the daemon caller does the SQLite read + resolve and passes it in. Absent → the module const (6h) =
+ * today's behavior. This module stays PURE (no db import) — the caller threads the number.
  */
-export function isLikelyNearClaudeUsageLimit(now: Date = new Date()): boolean {
+export function isLikelyNearClaudeUsageLimit(now: Date = new Date(), recencyWindowMs: number = RECENCY_WINDOW_MS): boolean {
   const state = readClaudeUsageState();
   if (!state.lastRateLimitAt) return false;
 
@@ -83,5 +90,5 @@ export function isLikelyNearClaudeUsageLimit(now: Date = new Date()): boolean {
 
   const hitAt = new Date(state.lastRateLimitAt);
   if (Number.isNaN(hitAt.getTime())) return false;
-  return now.getTime() - hitAt.getTime() < 6 * 60 * 60_000;
+  return now.getTime() - hitAt.getTime() < recencyWindowMs;
 }

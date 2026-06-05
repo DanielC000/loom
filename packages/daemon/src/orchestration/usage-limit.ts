@@ -8,7 +8,12 @@
  * for a future claude that stops sending the exact field — matched against the error text only.
  *
  * This module is pure (no fs / no clock beyond the injected `now`) so it unit-tests deterministically.
+ * The park-time numbers are DAEMON-GLOBAL tunables: each math fn takes an OPTIONAL `RateLimitConfig`
+ * (the resolved `platform.rateLimit`), falling back to the module consts below when absent. The daemon
+ * caller (index.ts) does the SQLite read + resolve and passes it in — this module never imports `db`
+ * (stays pure; a type-only import is erased at compile). Omitting the arg = byte-identical to before.
  */
+import type { RateLimitConfig } from "@loom/shared";
 
 /** Backstop pattern (Jinn's), matched against StopFailure error text if `error` isn't exactly "rate_limit". */
 export const RATE_LIMIT_ERROR_RE =
@@ -72,12 +77,21 @@ export function detectUsageLimit(hook: UsageLimitHook | undefined): UsageLimitDe
   return { limited: false };
 }
 
-/** The ISO instant a parked session may resume: reset+buffer if known, else now + default backoff. */
-export function rateLimitedUntil(resetsAtSeconds: number | undefined, now: Date = new Date()): string {
+/**
+ * The ISO instant a parked session may resume: reset+buffer if known, else now + default backoff.
+ * `cfg` (resolved `platform.rateLimit`) overrides the resetBuffer/defaultBackoff numbers when supplied;
+ * absent → the module consts (today's behavior). `??` so an explicit 0 in the config survives.
+ */
+export function rateLimitedUntil(
+  resetsAtSeconds: number | undefined, now: Date = new Date(),
+  cfg?: Pick<RateLimitConfig, "resetBufferMs" | "defaultBackoffMs">,
+): string {
+  const resetBufferMs = cfg?.resetBufferMs ?? RESET_BUFFER_MS;
+  const defaultBackoffMs = cfg?.defaultBackoffMs ?? DEFAULT_RATE_LIMIT_BACKOFF_MS;
   if (typeof resetsAtSeconds === "number" && Number.isFinite(resetsAtSeconds)) {
-    return new Date(resetsAtSeconds * 1000 + RESET_BUFFER_MS).toISOString();
+    return new Date(resetsAtSeconds * 1000 + resetBufferMs).toISOString();
   }
-  return new Date(now.getTime() + DEFAULT_RATE_LIMIT_BACKOFF_MS).toISOString();
+  return new Date(now.getTime() + defaultBackoffMs).toISOString();
 }
 
 /**
@@ -85,9 +99,14 @@ export function rateLimitedUntil(resetsAtSeconds: number | undefined, now: Date 
  * Jinn's `computeRateLimitDeadlineMs`. Computed ONCE at the first cap and kept across re-caps, so a
  * never-clearing cap is eventually abandoned rather than retried forever.
  */
-export function rateLimitDeadline(resetsAtSeconds: number | undefined, now: Date = new Date()): string {
+export function rateLimitDeadline(
+  resetsAtSeconds: number | undefined, now: Date = new Date(),
+  cfg?: Pick<RateLimitConfig, "deadlineAfterResetMs" | "deadlineNoResetMs">,
+): string {
+  const deadlineAfterResetMs = cfg?.deadlineAfterResetMs ?? DEADLINE_AFTER_RESET_MS;
+  const deadlineNoResetMs = cfg?.deadlineNoResetMs ?? DEADLINE_NO_RESET_MS;
   if (typeof resetsAtSeconds === "number" && Number.isFinite(resetsAtSeconds)) {
-    return new Date(resetsAtSeconds * 1000 + DEADLINE_AFTER_RESET_MS).toISOString();
+    return new Date(resetsAtSeconds * 1000 + deadlineAfterResetMs).toISOString();
   }
-  return new Date(now.getTime() + DEADLINE_NO_RESET_MS).toISOString();
+  return new Date(now.getTime() + deadlineNoResetMs).toISOString();
 }

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { Wake } from "@loom/shared";
 import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
@@ -25,9 +26,10 @@ export interface WakeServiceDeps {
    * "Is the account near its Claude usage limit?" — defaults to the global awareness record. A wake
    * that needs an auto-RESUME is deferred while limited (don't re-spawn into a known cap); a wake to
    * an already-live session fires regardless (it's a self-continuation, not new work). Injectable so
-   * a test drives the gate deterministically.
+   * a test drives the gate deterministically. The optional 2nd arg is the resolved recency window (ms);
+   * a test stub may ignore it.
    */
-  isUsageLimited?: (now: Date) => boolean;
+  isUsageLimited?: (now: Date, recencyWindowMs?: number) => boolean;
 }
 
 /** Min delay floor (anti busy-poll: a wake is a WAIT primitive, not a poll loop). */
@@ -126,7 +128,10 @@ export class WakeService {
   async tick(now: Date = new Date()): Promise<void> {
     const due = this.deps.db.listDueWakes(now.toISOString());
     if (due.length === 0) return;
-    const usageLimited = (this.deps.isUsageLimited ?? isLikelyNearClaudeUsageLimit)(now);
+    // Recency window = daemon-global `platform.rateLimit.recencyWindowMs`, resolved LIVE (a test stub
+    // ignores the extra arg).
+    const recencyWindowMs = resolveConfig(undefined, this.deps.db.getPlatformConfig()).platform.rateLimit.recencyWindowMs;
+    const usageLimited = (this.deps.isUsageLimited ?? isLikelyNearClaudeUsageLimit)(now, recencyWindowMs);
 
     for (const w of due) {
       this.deps.db.deleteWake(w.id); // claim the slot first

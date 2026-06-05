@@ -20,7 +20,7 @@ import { IdleWatcher } from "./orchestration/idle-watcher.js";
 import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestration/db-backup.js";
 import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
-import { rateLimitDeadline } from "./orchestration/usage-limit.js";
+import { rateLimitDeadline, rateLimitedUntil } from "./orchestration/usage-limit.js";
 import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent } from "./orchestration/restart.js";
 import { buildServer } from "./gateway/server.js";
 
@@ -40,6 +40,13 @@ async function main(): Promise<void> {
   // like the skills seed — additive, idempotent, preserves user edits. Phase-1 read path only.
   const seededProfiles = seedDefaultProfiles(db);
   if (seededProfiles.length) console.log(`[boot] seeded default profile(s): ${seededProfiles.join(", ")}`);
+  // Resolve the daemon-global platform tuning ONCE at boot (SQLite singleton override ?? LOOM_* env ??
+  // defaults). Every BOOT-BOUND consumer below — PtyHost busy-stale, SessionService git timeouts, the
+  // watcher cadences — reads from this. A PATCH to platform.watchers/timeouts therefore takes effect on
+  // the NEXT daemon restart (the resolve-live values — gate/webhook/rate-limit — re-resolve per call).
+  const platformOverride = db.getPlatformConfig();
+  const resolved = resolveConfig(undefined, platformOverride);
+  const { watchers, timeouts } = resolved.platform;
   const recovered = db.recoverStaleSessions();
   if (recovered > 0) console.log(`[boot] reconciled ${recovered} stale session(s) -> exited`);
   const dead = sweepDeadSessions(db);
@@ -59,9 +66,15 @@ async function main(): Promise<void> {
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
     // the Scheduler / worker_spawn won't fire into a known-limited account).
-    onRateLimited: (sessionId, until, detail) => {
-      db.setRateLimitedUntil(sessionId, until, detail.message);
-      db.armRateLimitDeadline(sessionId, rateLimitDeadline(detail.resetsAtSeconds));
+    onRateLimited: (sessionId, _until, detail) => {
+      // RESOLVE-LIVE: re-derive the authoritative park (resume-at) + episode give-up deadline from the
+      // daemon-global rate-limit knobs HERE, where db is in scope — so a PATCH to platform.rateLimit
+      // takes effect with no restart. PtyHost is db-unaware by design (layering boundary); the `_until`
+      // it passes is a module-default fallback we deliberately re-derive with the resolved config.
+      const rl = resolveConfig(undefined, db.getPlatformConfig()).platform.rateLimit;
+      const until = rateLimitedUntil(detail.resetsAtSeconds, new Date(), rl);
+      db.setRateLimitedUntil(sessionId, until, `usage limit — resumes ${until}`);
+      db.armRateLimitDeadline(sessionId, rateLimitDeadline(detail.resetsAtSeconds, new Date(), rl));
       recordClaudeRateLimit(detail.resetsAtSeconds);
     },
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
@@ -78,10 +91,12 @@ async function main(): Promise<void> {
       } catch { /* never disturb the exit path */ }
       mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId);
     },
-  });
+  }, { busyStaleMs: timeouts.busyStaleMs }); // BOOT-BOUND: stuck-busy self-heal threshold from resolved platform config
 
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design
-  const sessions = new SessionService(db, pty, control);
+  // BOOT-BOUND: thread the resolved git-op / provision timeouts into the bounded-git + provision seams
+  // at SessionService's call-sites (worktree create/remove/branch-delete/merge-detect during boot-reconcile).
+  const sessions = new SessionService(db, pty, control, { gitOpMs: timeouts.gitOpMs, provisionMs: timeouts.provisionMs });
   // Self-host restart recovery: a manager's `daemon_restart` left an intent naming the sessions to
   // bring back. Read it BEFORE the reconcile so the WHOLE fleet's worktrees are PROTECTED from pass-B GC
   // (recoverStaleSessions just marked every prior-run session 'exited', which would otherwise prune a
@@ -107,8 +122,9 @@ async function main(): Promise<void> {
   }
   // WakeService (the `wake_me` primitive) needs SessionService.resume (auto-resume on fire), so it
   // comes after sessions. Always on — recovery/continuation, not autonomy-gated (like the rate-limit
-  // watcher). LOOM_WAKE_INTERVAL_MS tunes the tick for tests (default 60s).
-  const wakeIntervalMs = Number(process.env.LOOM_WAKE_INTERVAL_MS) || 60_000;
+  // watcher). BOOT-BOUND cadence from the resolved platform config (LOOM_WAKE_INTERVAL_MS env is read,
+  // floor-clamped, inside resolveConfig; default 60s).
+  const wakeIntervalMs = watchers.wakeMs;
   const wakes = new WakeService({ db, pty, resume: (id) => sessions.resume(id), intervalMs: wakeIntervalMs });
   // The task MCP hosts the universal wake tools, so it takes the WakeService.
   const mcp = new TaskMcpRouter(db, wakes);
@@ -119,8 +135,9 @@ async function main(): Promise<void> {
 
   // Account-wide Claude plan-usage poller — one shared cached fetch of the OAuth usage endpoint, served
   // read-only to Mission Control via GET /api/usage/limits. Created here so the gateway can read its
-  // cache; started below (after listen). LOOM_USAGE_POLL_INTERVAL_MS tunes the cadence (default 60s).
-  const usageStatus = new UsageStatusPoller({ intervalMs: Number(process.env.LOOM_USAGE_POLL_INTERVAL_MS) || undefined });
+  // cache; started below (after listen). BOOT-BOUND cadence from the resolved platform config
+  // (LOOM_USAGE_POLL_INTERVAL_MS env read + floor-clamped inside resolveConfig; default 60s).
+  const usageStatus = new UsageStatusPoller({ intervalMs: watchers.usagePollMs });
 
   const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, control, usageStatus });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
@@ -132,9 +149,11 @@ async function main(): Promise<void> {
   // platform config OR the LOOM_SCHEDULER_ENABLED=1 env override. LOOM_SCHEDULER_INTERVAL_MS tunes
   // the tick cadence (default 60s) — tests use a short interval to avoid a 60s wait.
   const schedulerEnabled =
-    process.env.LOOM_SCHEDULER_ENABLED === "1" || resolveConfig(undefined).orchestration.schedulerEnabled;
-  const intervalMs = Number(process.env.LOOM_SCHEDULER_INTERVAL_MS) || 60_000;
-  const maxConcurrentManagers = resolveConfig(undefined).orchestration.maxConcurrentManagers;
+    process.env.LOOM_SCHEDULER_ENABLED === "1" || resolved.orchestration.schedulerEnabled;
+  // BOOT-BOUND cadence from the resolved platform config (LOOM_SCHEDULER_INTERVAL_MS env read +
+  // floor-clamped inside resolveConfig; default 60s).
+  const intervalMs = watchers.schedulerMs;
+  const maxConcurrentManagers = resolved.orchestration.maxConcurrentManagers;
   const scheduler = new Scheduler({ db, control, startManager: (agentId) => sessions.startManager(agentId), intervalMs, maxConcurrentManagers });
   if (schedulerEnabled) {
     scheduler.start();
@@ -146,7 +165,7 @@ async function main(): Promise<void> {
   // §19c-b usage-limit RESUME watcher — ALWAYS ON (recovery ≠ autonomy; a manually-started session
   // can hit the cap too), so it runs regardless of schedulerEnabled. LOOM_RATE_LIMIT_WATCH_INTERVAL_MS
   // tunes the tick for tests (default 60s).
-  const watchIntervalMs = Number(process.env.LOOM_RATE_LIMIT_WATCH_INTERVAL_MS) || 60_000;
+  const watchIntervalMs = watchers.rateLimitWatchMs;
   const rateLimitWatcher = new RateLimitWatcher({ db, pty, intervalMs: watchIntervalMs });
   rateLimitWatcher.start();
   console.log(`[boot] usage-limit resume watcher on (tick ${watchIntervalMs}ms)`);
@@ -163,14 +182,14 @@ async function main(): Promise<void> {
   // Input-queue reconcile: self-heal stuck-busy sessions and drain any message held while the session
   // was busy / the human was typing — so a worker report never strands behind a phantom 'busy' or an
   // unfinished compose. The Stop hook is the fast path; this is the safety net (10s).
-  const reconcileMs = Number(process.env.LOOM_RECONCILE_INTERVAL_MS) || 10_000;
+  const reconcileMs = watchers.reconcileMs;
   const reconcileTimer = setInterval(() => pty.reconcile(), reconcileMs);
   console.log(`[boot] input-queue reconcile on (tick ${reconcileMs}ms)`);
 
   // Manager context-recycle watcher — nudges a manager nearing its model's context window to hand off
   // to a fresh successor (run /session-end → recycle_me). Ratio scales with the model. 0 disables.
-  const recycleRatio = Number(process.env.LOOM_RECYCLE_CONTEXT_RATIO) || resolveConfig(undefined).orchestration.recycleAtContextRatio;
-  const ctxWatchMs = Number(process.env.LOOM_CONTEXT_WATCH_INTERVAL_MS) || 60_000;
+  const recycleRatio = Number(process.env.LOOM_RECYCLE_CONTEXT_RATIO) || resolved.orchestration.recycleAtContextRatio;
+  const ctxWatchMs = watchers.contextWatchMs;
   const contextWatcher = new ContextWatcher({ db, pty, ratio: recycleRatio, intervalMs: ctxWatchMs });
   contextWatcher.start();
   console.log(`[boot] context-recycle watcher on (ratio ${recycleRatio}, tick ${ctxWatchMs}ms)`);
@@ -178,7 +197,7 @@ async function main(): Promise<void> {
   // Asleep-at-the-Wheel watcher — nudges a LIVE manager that has silently dropped its orchestration
   // loop (idle, no live workers, backlog open) to report why and resume. Per-project leash via
   // resolveConfig (idleNudgeMinutes; 0 disables); recycle takes precedence (shares recycleRatio).
-  const idleWatchMs = Number(process.env.LOOM_IDLE_WATCH_INTERVAL_MS) || 60_000;
+  const idleWatchMs = watchers.idleWatchMs;
   const idleWatcher = new IdleWatcher({ db, pty, control, recycleRatio, intervalMs: idleWatchMs });
   idleWatcher.start();
   console.log(`[boot] idle-manager watcher on (tick ${idleWatchMs}ms)`);
