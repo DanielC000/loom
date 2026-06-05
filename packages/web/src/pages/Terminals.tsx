@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { SessionListItem, ShellTerminal } from "@loom/shared";
+import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
+import type { SessionListItem, ShellTerminal, Task } from "@loom/shared";
 import { api } from "../lib/api";
 import { bySessionActivity, mostRecentActivity } from "../lib/sessions";
 import { TerminalPane } from "../components/Terminal";
 import { SessionWakes } from "../components/SessionWakes";
 import { SessionQueue } from "../components/SessionQueue";
+import { SessionTaskCard } from "../components/SessionTaskCard";
 import { Panel, Button, Select, Input, StatusPill, SectionLabel } from "../components/ui";
 import { color, font } from "../theme";
 
@@ -38,6 +39,19 @@ export default function Terminals() {
   });
   const live = (sessions.data ?? []).filter((s) => s.processState === "live");
   const projectNames = useMemo(() => [...new Set(live.map((s) => s.projectName))].sort(), [live]);
+  // Resolve the board task each BOUND session is working on (web-only, no daemon change → HMR-live):
+  // fetch tasks for each distinct project that owns a bound session via the existing api.tasks, then
+  // index by id. A tile reads its thin card from this map; an id that doesn't resolve (deleted task,
+  // or tasks not yet loaded) is simply absent → that tile renders no card (graceful).
+  const boundProjectIds = useMemo(
+    () => [...new Set(live.filter((s) => s.taskId).map((s) => s.projectId))],
+    [live],
+  );
+  const taskQueries = useQueries({
+    queries: boundProjectIds.map((pid) => ({ queryKey: ["tasks", pid], queryFn: () => api.tasks(pid), staleTime: 4000 })),
+  });
+  const tasksById = new Map<string, Task>();
+  for (const q of taskQueries) for (const t of q.data ?? []) tasksById.set(t.id, t);
   // Tile order: the shared activity comparator (live-first → most-recent-active → spawn-order), so
   // the session you're driving floats up, consistent with every other session list.
   const shown = (filter ? live.filter((s) => s.projectName === filter) : live)
@@ -73,7 +87,9 @@ export default function Terminals() {
     return [...managerRows, ...trailing];
   }, [shown]);
 
-  const renderTile = (s: SessionListItem) => (
+  const renderTile = (s: SessionListItem) => {
+    const task = s.taskId ? tasksById.get(s.taskId) : undefined;
+    return (
     <Panel key={s.id} style={{ height: 460, padding: 6, display: "flex", flexDirection: "column" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
         <TileTitle s={s} />
@@ -83,11 +99,13 @@ export default function Terminals() {
           <Button style={{ padding: "0 6px" }} onClick={() => setMaximized(s.id)}>⤢</Button>
         </div>
       </div>
+      {task && <SessionTaskCard task={task} />}
       <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
       <SessionWakes sessionId={s.id} />
       <SessionQueue sessionId={s.id} />
     </Panel>
-  );
+    );
+  };
 
   if (maximized) {
     const s = live.find((x) => x.id === maximized);
@@ -103,6 +121,7 @@ export default function Terminals() {
                 <StopButton onStop={() => stop.mutate(s.id)} stopping={stop.isPending} />
               </div>
             </div>
+            {s.taskId && tasksById.get(s.taskId) && <SessionTaskCard task={tasksById.get(s.taskId)!} />}
             <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
             <SessionWakes sessionId={s.id} />
       <SessionQueue sessionId={s.id} />
