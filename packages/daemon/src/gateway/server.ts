@@ -606,6 +606,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deps.db.deleteApiKey(keyId);
     return { ok: true };
   });
+  // Agent Runs R4a — per-key KILL-SWITCH (HUMAN-only, loopback, same trust-boundary surface as the key
+  // admin above; NO MCP path). Pause the key FIRST (R1's authenticateApiKey blocks `paused`, so no NEW
+  // run can auth mid-cancel), THEN cancel every in-flight run for the key via the R2/R3 teardown path.
+  // The "buggy app looping runs burns the Max sub" guard — stronger than pause/revoke, which only block
+  // NEW runs. Returns { cancelled: n }. Idempotent: a re-kill cancels nothing new and stays paused.
+  app.post("/api/keys/:keyId/kill", async (req, reply) => {
+    const keyId = (req.params as { keyId: string }).keyId;
+    if (!deps.db.getApiKey(keyId)) return reply.code(404).send({ error: "key not found" });
+    deps.db.updateApiKey(keyId, { status: "paused" });
+    const inflight = deps.db.listInFlightRunsForKey(keyId);
+    for (const r of inflight) deps.sessions.cancelRun(r.id);
+    return { cancelled: inflight.length };
+  });
 
   // --- Agent Runs R3: the PUBLIC key-authed run API (the FIRST authed surface). Still LOOPBACK (the whole
   // daemon binds 127.0.0.1; this adds Bearer auth ON TOP — the human-only routes above stay unauthed-loopback,
@@ -653,6 +666,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const existing = deps.db.getRunByIdempotency(key.id, idempotencyKey);
       if (existing) return reply.code(202).send({ runId: existing.id });
     }
+    // Agent Runs R4a — per-key caps, enforced ONLY when actually about to START a new run (AFTER the
+    // idempotency replay above, which starts nothing). Concurrency is the deterministic must-have; the
+    // daily token cap is a coarse best-effort backstop over the R2 usage snapshot (no spend cap — Loom
+    // has no cost model yet; see [[Agent Runs]]). At/over a cap → 429 and NO run starts.
+    if (key.caps.maxConcurrentRuns != null && deps.db.countInFlightRunsForKey(key.id) >= key.caps.maxConcurrentRuns) {
+      return reply.code(429).send({ error: "concurrency cap reached" });
+    }
+    if (key.caps.dailyTokenCap != null) {
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      if (deps.db.sumKeyTokensSince(key.id, since) >= key.caps.dailyTokenCap) {
+        return reply.code(429).send({ error: "daily token cap reached" });
+      }
+    }
     try {
       const { run } = await deps.sessions.startRun({
         agentId: b.agent, input: b.input ?? null, schema: b.schema ?? null, keyId: key.id, webhook, idempotencyKey,
@@ -693,6 +719,32 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const id = (req.params as { id: string }).id;
     const run = deps.db.getRun(id);
     if (!run || run.keyId !== key.id) return reply.code(404).send({ error: "run not found" });
+    const { status } = deps.sessions.cancelRun(run.id);
+    return reply.send({ runId: run.id, status });
+  });
+
+  // --- Agent Runs R4a: the HUMAN run REST (the R4b Runs UI's data source). UNAUTHED loopback, like every
+  // other /api/projects/:id route — DELIBERATELY OFF the R3 key-authed path (no Bearer) and OUT of every
+  // MCP surface (no agent reaches it). Project-scoped (not key-scoped): the human operator sees ALL of a
+  // project's runs across every key, with the FULL row (incl. keyId/input/result/usage/error/timestamps).
+  // The per-run view is a DISTINCT path from the key-authed GET /api/runs/:id (which stays own-run-scoped). ---
+  app.get("/api/projects/:id/runs", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    return deps.db.listRuns(id); // full AgentRun rows, newest first
+  });
+  app.get("/api/projects/:id/runs/:runId", async (req, reply) => {
+    const { id, runId } = req.params as { id: string; runId: string };
+    const run = deps.db.getRun(runId);
+    if (!run || run.projectId !== id) return reply.code(404).send({ error: "run not found" });
+    return run; // full AgentRun row (human view)
+  });
+  // Human cancel — reuse the same teardown path as the key-authed cancel (cancelRun is idempotent on a
+  // terminal run). Project-scoped existence check (a run in another project → 404).
+  app.post("/api/projects/:id/runs/:runId/cancel", async (req, reply) => {
+    const { id, runId } = req.params as { id: string; runId: string };
+    const run = deps.db.getRun(runId);
+    if (!run || run.projectId !== id) return reply.code(404).send({ error: "run not found" });
     const { status } = deps.sessions.cancelRun(run.id);
     return reply.send({ runId: run.id, status });
   });
