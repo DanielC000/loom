@@ -1,4 +1,4 @@
-import type { Project, Agent, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, UsageLimitsStatus } from "@loom/shared";
+import type { Project, Agent, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
@@ -84,6 +84,14 @@ export const api = {
     }),
   updateProjectConfig: (id: string, config: ProjectConfigOverride) =>
     patch<Project>(`/api/projects/${id}/config`, { config }),
+  // --- Daemon-global platform tuning (HUMAN-only; NOT project-scoped — one shared daemon). GET returns
+  // the stored override + the RESOLVED effective platform group (for the "effective:" hints); update
+  // PATCHes the replacement override under `{ config }`. The validator is strict zod with §bounds — an
+  // out-of-range value 400s with a reason the Global section shows verbatim (same as projectConfig). ---
+  getPlatformConfig: () =>
+    get<{ override: PlatformConfigOverride; resolved: PlatformConfig }>("/api/platform/config"),
+  updatePlatformConfig: (config: PlatformConfigOverride) =>
+    patch<{ ok: boolean; override: PlatformConfigOverride }>("/api/platform/config", { config }),
   agents: (projectId: string) => get<Agent[]>(`/api/projects/${projectId}/agents`),
   createAgent: (projectId: string, b: { name: string; startupPrompt?: string }) =>
     post<Agent>(`/api/projects/${projectId}/agents`, b),
