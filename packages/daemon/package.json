@@ -54,6 +54,7 @@
     "test:session-archive": "node test/session-archive.mjs",
     "test:db-backup": "node test/db-backup.mjs",
     "test:prod-guard": "node test/prod-guard.mjs",
+    "test:agent-runs-rest": "node test/agent-runs-rest.mjs",
     "test:daemon": "node scripts/test-daemon.mjs"
   },
   "dependencies": {

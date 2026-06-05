@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import { nextFireAt } from "../orchestration/cron.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists } from "../sessions/transcript.js";
@@ -605,6 +605,96 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!deps.db.getApiKey(keyId)) return reply.code(404).send({ error: "key not found" });
     deps.db.deleteApiKey(keyId);
     return { ok: true };
+  });
+
+  // --- Agent Runs R3: the PUBLIC key-authed run API (the FIRST authed surface). Still LOOPBACK (the whole
+  // daemon binds 127.0.0.1; this adds Bearer auth ON TOP — the human-only routes above stay unauthed-loopback,
+  // unchanged). FAIL CLOSED: a missing/invalid key NEVER falls through to starting a run. A key reaches ONLY
+  // its own project's allowlisted endpoint agents, and GET/cancel are own-run-scoped (another key's run → 404).
+  // Caps are STORED (R1) but NOT enforced here (R4); runs start immediately (no queue backpressure — R4). ---
+
+  /** Extract the Bearer token (the raw key plaintext); null when the header is absent/non-Bearer. */
+  const bearerToken = (req: { headers: Record<string, unknown> }): string | null => {
+    const h = req.headers["authorization"];
+    if (typeof h !== "string" || !h.startsWith("Bearer ")) return null;
+    const t = h.slice("Bearer ".length).trim();
+    return t.length ? t : null;
+  };
+  /**
+   * Authenticate a run request, FAILING CLOSED. On success → the public ApiKey. On failure → sends the
+   * reply (401 for malformed/unknown/bad-secret — NEVER leaking which; 403 for paused/revoked, a valid
+   * secret on a deactivated key) and returns null so the caller aborts. A missing token authenticates as
+   * `malformed` (db.authenticateApiKey(null)) → 401.
+   */
+  const authRunKey = (req: { headers: Record<string, unknown> }, reply: FastifyReply): ApiKey | null => {
+    const auth = deps.db.authenticateApiKey(bearerToken(req));
+    if (auth.ok) return auth.key;
+    if (auth.reason === "paused" || auth.reason === "revoked") { reply.code(403).send({ error: `API key ${auth.reason}` }); return null; }
+    reply.code(401).send({ error: "invalid API key" }); // malformed | unknown | bad-secret — do NOT distinguish
+    return null;
+  };
+
+  // POST /api/runs — start a run (key-authed, async). 202 + { runId } on success.
+  app.post("/api/runs", async (req, reply) => {
+    const key = authRunKey(req, reply);
+    if (!key) return reply; // authRunKey already sent 401/403
+    const b = (req.body ?? {}) as { agent?: unknown; input?: unknown; schema?: unknown; webhook?: unknown; idempotencyKey?: unknown };
+    if (typeof b.agent !== "string" || !b.agent) return reply.code(400).send({ error: "agent (id) required" });
+    // Authorize: the agent MUST be on THIS key's endpoint allowlist (⇒ endpoint=true + same project, per R1).
+    // A key can reach ONLY its own project's allowlisted endpoint agents — never another project's.
+    if (!key.endpointAgentIds.includes(b.agent)) return reply.code(403).send({ error: "agent not allowlisted for this key" });
+    if (b.webhook !== undefined && b.webhook !== null && typeof b.webhook !== "string") return reply.code(400).send({ error: "webhook must be a string URL" });
+    if (b.idempotencyKey !== undefined && b.idempotencyKey !== null && typeof b.idempotencyKey !== "string") return reply.code(400).send({ error: "idempotencyKey must be a string" });
+    const webhook = (b.webhook as string | undefined) ?? null;
+    const idempotencyKey = typeof b.idempotencyKey === "string" && b.idempotencyKey ? b.idempotencyKey : null;
+    // Idempotency: a prior run for THIS (key, idempotencyKey) → return it, starting NO second run (no
+    // double-spend of Max quota). Checked before AND, on a lost race, after the start (unique-index catch).
+    if (idempotencyKey) {
+      const existing = deps.db.getRunByIdempotency(key.id, idempotencyKey);
+      if (existing) return reply.code(202).send({ runId: existing.id });
+    }
+    try {
+      const { run } = await deps.sessions.startRun({
+        agentId: b.agent, input: b.input ?? null, schema: b.schema ?? null, keyId: key.id, webhook, idempotencyKey,
+      });
+      return reply.code(202).send({ runId: run.id });
+    } catch (e) {
+      // A concurrent same-idempotency start lost the unique-index race → return the winner's run, no double-start.
+      if (idempotencyKey) {
+        const existing = deps.db.getRunByIdempotency(key.id, idempotencyKey);
+        if (existing) return reply.code(202).send({ runId: existing.id });
+      }
+      return reply.code(500).send({ error: `could not start run: ${(e as Error).message}` });
+    }
+  });
+
+  // GET /api/runs/:id — poll a run (key-authed, OWN-run-scoped). A run owned by another key → 404 (never
+  // reveal another key's run exists). Returns the public job view: { status, result?, usage?, transcriptRef?, error? }.
+  app.get("/api/runs/:id", async (req, reply) => {
+    const key = authRunKey(req, reply);
+    if (!key) return reply;
+    const id = (req.params as { id: string }).id;
+    const run = deps.db.getRun(id);
+    if (!run || run.keyId !== key.id) return reply.code(404).send({ error: "run not found" });
+    return reply.send({
+      status: run.status,
+      result: run.result ?? null,
+      usage: run.usage ?? null,
+      transcriptRef: run.transcriptRef ?? null,
+      error: run.error ?? null,
+    });
+  });
+
+  // POST /api/runs/:id/cancel — cancel a run (key-authed, OWN-run-scoped). Non-terminal → cancelled +
+  // teardown (R2 graceful-stop path); already-terminal → idempotent no-op returning its state.
+  app.post("/api/runs/:id/cancel", async (req, reply) => {
+    const key = authRunKey(req, reply);
+    if (!key) return reply;
+    const id = (req.params as { id: string }).id;
+    const run = deps.db.getRun(id);
+    if (!run || run.keyId !== key.id) return reply.code(404).send({ error: "run not found" });
+    const { status } = deps.sessions.cancelRun(run.id);
+    return reply.send({ runId: run.id, status });
   });
 
   app.post("/api/projects/:id/tasks", async (req, reply) => {
