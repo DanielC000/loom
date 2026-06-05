@@ -5,7 +5,9 @@ import { commitVault } from "./versioner.js";
 // Sibling to browser.ts: the WRITE side of the vault. Every operation is confined to the
 // project's vault dir by a mandatory path-traversal guard (see resolveInVault), and on success
 // flows through the SAME commit path as the auto-committer (versioner.commitVault) so vault
-// history stays consistent. HUMAN/REST surface only — agents already write via their session cwd.
+// history stays consistent. Reached from the human REST path and — as a role-gated trust elevation
+// (Platform Manager P3) — from the platform MCP `vault_write`, gated strictly to role==="platform".
+// Ordinary agents (loom-tasks/orchestration) never call this — they write via their session cwd.
 
 export type VaultWriteOutcome =
   | { ok: true; committed: boolean }

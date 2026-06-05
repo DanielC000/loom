@@ -138,8 +138,10 @@ async function main(): Promise<void> {
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after.
   const orchMcp = new OrchestrationMcpRouter(db, sessions);
   // Platform MCP (Pillar C / P2) needs the registry (project/agent/profile/schedule + config) AND
-  // SessionService (the cross-project session_spawn/session_stop lifecycle ops).
-  const platformMcp = new PlatformMcpRouter(db, sessions);
+  // SessionService (the cross-project session_spawn/session_stop lifecycle ops). P3 also threads the
+  // BOOT-BOUND git-write timeouts so the Lead's elevated git tools (git_checkout/commit/push) bound a
+  // git op EXACTLY like the human REST git routes (gateway/server.ts resolves the same numbers).
+  const platformMcp = new PlatformMcpRouter(db, sessions, { gitLocalMs: timeouts.gitLocalMs, gitPushMs: timeouts.gitPushMs });
 
   // Account-wide Claude plan-usage poller — one shared cached fetch of the OAuth usage endpoint, served
   // read-only to Mission Control via GET /api/usage/limits. Created here so the gateway can read its

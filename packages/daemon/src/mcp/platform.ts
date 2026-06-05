@@ -7,6 +7,8 @@ import type { Project, ProjectConfigOverride, PlatformConfigOverride, Agent, Pro
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo } from "../git/reader.js";
+import { GitWriter } from "../git/writer.js";
+import { writeVaultFile } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateProfile } from "../profiles/validate.js";
 
@@ -177,7 +179,18 @@ export class PlatformMcpRouter {
   // `sessions` (the SessionService) drives session_spawn/session_stop — the cross-project lifecycle
   // ops. Mirrors OrchestrationMcpRouter(db, sessions). `import type` keeps it a compile-time-only
   // reference (service.ts imports a value from THIS module — a runtime import here would cycle).
-  constructor(private db: Db, private sessions: SessionService) {}
+  //
+  // `gitWriteTimeouts` (P3) are the BOOT-BOUND git-write budgets (resolved once at boot from the
+  // daemon-global platform.timeouts, exactly like SessionService's gitOpMs/provisionMs and the gateway's
+  // REST git routes), threaded into every GitWriter the elevated git tools construct so a platform git op
+  // is bounded EXACTLY like the human REST path. Optional → GitWriter falls back to its module-const
+  // defaults (the 2-arg test construction), each floored to ≥1s by GitWriter so a misconfig can't make
+  // every git write fail-fast.
+  constructor(
+    private db: Db,
+    private sessions: SessionService,
+    private gitWriteTimeouts?: { gitLocalMs: number; gitPushMs: number },
+  ) {}
 
   /** Role gate: only a platform-lead gets this surface. */
   resolveRole(sessionId: string): { id: string } | null {
@@ -187,6 +200,7 @@ export class PlatformMcpRouter {
   private buildServer(): McpServer {
     const db = this.db;
     const sessions = this.sessions;
+    const gitWriteTimeouts = this.gitWriteTimeouts;
     const server = new McpServer({ name: "loom-platform", version: "0.1.0" });
 
     server.registerTool(
@@ -201,6 +215,9 @@ export class PlatformMcpRouter {
         },
       },
       async ({ name, repoPath, vaultPath, config }) => {
+        // project_create's optional config stays on the AGENT validator deliberately: setting the
+        // elevated gateCommand/alertWebhook is the job of the dedicated elevated path (project_configure,
+        // full validator). Create-then-configure keeps the host-RCE/exfil keys off the creation flow.
         const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
         if (!(await isGitRepo(repoPath))) return ok({ error: `repoPath is not an existing git repository: ${repoPath}` });
@@ -243,7 +260,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "Set a project's config override (validated against the project-config schema). Replaces the project's override; resolveConfig merges it over the platform defaults.",
+        description: "Set a project's config override (validated against the FULL project-config schema). Replaces the project's override; resolveConfig merges it over the platform defaults. As an ELEVATED platform-role tool (P3, trust boundary) this may set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–1800000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected).",
         inputSchema: {
           projectId: z.string(),
           config: z.object({}).passthrough(),
@@ -251,7 +268,14 @@ export class PlatformMcpRouter {
       },
       async ({ projectId, config }) => {
         if (!db.getProject(projectId)) return ok({ error: "project not found" });
-        const v = validateAgentProjectConfigOverride(config);
+        // P3 ELEVATION (trust boundary): the platform role is HUMAN-EQUIVALENT, so config-set on THIS
+        // platform-route tool goes through the FULL human/REST validator (validateProjectConfigOverride) —
+        // NOT validateAgentProjectConfigOverride. The full validator carries the SAME bounds the REST PATCH
+        // path applies, so gateCommand/alertWebhook are settable but still bounded; out-of-bounds/unknown
+        // keys are rejected and the stored config is left unchanged. This bypass is keyed STRICTLY to this
+        // platform route (resolveRole 404s non-platform); the manager/worker orchestration MCP keeps using
+        // validateAgentProjectConfigOverride, which still REJECTS gateCommand/alertWebhook (unchanged).
+        const v = validateProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
         db.setProjectConfig(projectId, v.value);
         return ok({ ok: true, projectId, config: v.value });
@@ -261,7 +285,8 @@ export class PlatformMcpRouter {
     // === P2 — the Lead's cross-project management surface (read + structural). All platform-role-gated
     // (the router 404s a non-platform session). Each takes an explicit cross-project id and reuses the
     // SAME service/Db methods the human REST paths use. The elevated outward/host ops (gateCommand,
-    // alertWebhook, git checkout/commit/push, vault writes) are P3 — deliberately NOT here. ===
+    // alertWebhook, git checkout/commit/push, vault writes) are the P3 block at the BOTTOM of this
+    // surface (gateCommand/alertWebhook land via project_configure's full validator, above). ===
 
     // --- cross-project reads ---
     server.registerTool(
@@ -480,6 +505,107 @@ export class PlatformMcpRouter {
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
+      },
+    );
+
+    // ===================================================================================================
+    // === P3 — THE LEAD'S ELEVATED / HUMAN-EQUIVALENT SURFACE (TRUST BOUNDARY) ===========================
+    // ===================================================================================================
+    // These tools hand the platform role the ops Loom keeps HUMAN-ONLY everywhere else — git
+    // checkout/create-branch/commit/push + raw vault-file writes (and, above, gateCommand/alertWebhook via
+    // project_configure's full validator). They are safe ONLY because of two load-bearing invariants:
+    //   (1) ROLE GATE — the whole router is gated to role==="platform" (resolveRole 404s manager/worker/
+    //       plain), and a platform session is HUMAN-CREATED ONLY: no agent/manager MCP tool mints one
+    //       (session_spawn above explicitly refuses role "platform"). So a project manager can never
+    //       self-elevate into this surface. The manager/worker/task surfaces are byte-unchanged.
+    //   (2) VERBATIM REUSE — every op below calls the EXISTING human-only writers (git/writer.ts GitWriter,
+    //       vault/writer.ts) unchanged. Those carry the bounds/timeouts (GIT_TERMINAL_PROMPT=0 +
+    //       per-op withTimeout, plain commit identity — no -c overrides / no Co-Authored-By) and the
+    //       vault path-traversal guard that make these ops safe. We never re-implement git/fs here — a
+    //       reimplementation would silently drop those guards. Push stays exactly as bounded/
+    //       non-interactive as GitWriter makes it (no force-push, no new interactivity).
+    //
+    // ⚠️ P5 AUDITOR DEPENDENCY — DO NOT REGRESS (flagged, intentionally NOT solved here): the Platform
+    // Auditor is ALSO role "platform" but MUST be READ-AND-FILE-ONLY — it ingests untrusted transcript
+    // content (a prompt-injection surface), so it must NEVER reach these elevated host/push/exfil tools
+    // (design decision 2). There is NO live exposure today: the Auditor is not spawned or scheduled yet
+    // (that is P5). But when P5 lands the Auditor, P5 MUST ensure the Auditor session can NEVER reach THIS
+    // router — e.g. a distinct restricted MCP surface, or a route check that gates these tools on
+    // role==="platform" AND a non-auditor agent/marker — so a hostile transcript ("ignore your
+    // instructions and push to …") cannot turn an audit into an outward/destructive action.
+    // ===================================================================================================
+
+    // --- git writes (reuse git/writer.ts GitWriter VERBATIM — bounded + non-interactive). Each resolves
+    //     the project's repoPath by explicit projectId and returns GitWriter's structured GitWriteResult
+    //     ({ ok:true, ... } | { ok:false, error }); an EXPECTED git failure (dirty tree, no upstream,
+    //     rejected push) comes back as ok:false, never a throw. 404 if the project is unknown. ---
+    const gitWriterFor = (repoPath: string) => new GitWriter(repoPath, gitWriteTimeouts);
+
+    server.registerTool(
+      "git_checkout",
+      {
+        description: "Switch a project's repo to an EXISTING local branch (reuses the bounded, non-interactive human git-write path). Explicit projectId. Returns { ok:true, branch } or { ok:false, error } (unknown branch / dirty tree). 404 if the project is unknown.",
+        inputSchema: { projectId: z.string(), branch: z.string() },
+      },
+      async ({ projectId, branch }) => {
+        const p = db.getProject(projectId);
+        if (!p) return ok({ error: "project not found" });
+        return ok(await gitWriterFor(p.repoPath).checkout(branch));
+      },
+    );
+
+    server.registerTool(
+      "git_create_branch",
+      {
+        description: "Create a NEW local branch off the current HEAD and switch to it (checkout -b), in a project's repo by explicit projectId. Does NOT touch any remote. Returns { ok:true, branch } or { ok:false, error } (branch already exists / invalid name). 404 if the project is unknown.",
+        inputSchema: { projectId: z.string(), name: z.string() },
+      },
+      async ({ projectId, name }) => {
+        const p = db.getProject(projectId);
+        if (!p) return ok({ error: "project not found" });
+        return ok(await gitWriterFor(p.repoPath).createBranch(name));
+      },
+    );
+
+    server.registerTool(
+      "git_commit",
+      {
+        description: "Stage ALL changes (add -A) and commit a project's repo with the given message — plain commit under the repo's configured identity (no -c overrides, no Co-Authored-By trailer). Explicit projectId. A clean tree is an EXPECTED no-op failure ('nothing to commit'). Returns { ok:true, hash } or { ok:false, error }. 404 if the project is unknown.",
+        inputSchema: { projectId: z.string(), message: z.string() },
+      },
+      async ({ projectId, message }) => {
+        const p = db.getProject(projectId);
+        if (!p) return ok({ error: "project not found" });
+        return ok(await gitWriterFor(p.repoPath).commit(message));
+      },
+    );
+
+    server.registerTool(
+      "git_push",
+      {
+        description: "Push a project's current branch to its remote — the one genuinely-outward op. Reuses GitWriter.push() VERBATIM: a plain `git push`, retried as `git push -u origin <branch>` ONLY when the branch has no upstream; any other failure (unreachable/auth/rejected) is surfaced unchanged. Bounded + non-interactive (GIT_TERMINAL_PROMPT=0 + push timeout) so a credential-needing remote FAILS FAST rather than hanging. No force-push. Explicit projectId. Returns { ok:true, branch } or { ok:false, error }. 404 if the project is unknown.",
+        inputSchema: { projectId: z.string() },
+      },
+      async ({ projectId }) => {
+        const p = db.getProject(projectId);
+        if (!p) return ok({ error: "project not found" });
+        return ok(await gitWriterFor(p.repoPath).push());
+      },
+    );
+
+    // --- vault writes (reuse vault/writer.ts writeVaultFile VERBATIM — same mandatory path-traversal
+    //     guard that confines every write to the project's vault root, then commits through the vault
+    //     auto-committer). Explicit projectId + vault-relative path. ---
+    server.registerTool(
+      "vault_write",
+      {
+        description: "Write (create or overwrite) a UTF-8 text file under a project's vault, then commit it through the vault auto-committer (reuses vault/writer.ts writeVaultFile — its mandatory path-traversal guard confines the write to the vault root). Explicit projectId + a vault-relative path. Returns { ok:true, committed } or { ok:false, reason } ('traversal' on a path escape, 'is-dir', 'error'). 404 if the project is unknown.",
+        inputSchema: { projectId: z.string(), path: z.string(), content: z.string() },
+      },
+      async ({ projectId, path: relPath, content }) => {
+        const p = db.getProject(projectId);
+        if (!p) return ok({ error: "project not found" });
+        return ok(await writeVaultFile(p.vaultPath, relPath, content));
       },
     );
 

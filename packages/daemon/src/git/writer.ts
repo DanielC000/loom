@@ -1,11 +1,14 @@
 import { simpleGit, type SimpleGit } from "simple-git";
 
 // The WRITE side of the project git view — sibling to reader.ts (which stays read-only introspection).
-// HUMAN/REST surface ONLY. Like the vault writer (vault/writer.ts) and gateCommand, git writes are a
-// TRUST-BOUNDARY surface: checkout/commit and ESPECIALLY push (outward-facing, network, irreversible)
-// must be reachable only from the human REST path. NO git-write tool is exposed on ANY MCP server
-// (loom-tasks / orchestration / platform) — an agent must never be able to checkout/commit/push. The
-// REST endpoints in gateway/server.ts that call into here carry the same trust-boundary comment.
+// Like the vault writer (vault/writer.ts) and gateCommand, git writes are a TRUST-BOUNDARY surface:
+// checkout/commit and ESPECIALLY push (outward-facing, network, irreversible) are reachable from the
+// human REST path AND — as a deliberate, role-gated trust elevation (Platform Manager P3) — from the
+// PLATFORM MCP, whose tools are gated strictly to role==="platform" (the human-equivalent Lead, a
+// human-created-only session). NO git-write tool is exposed on the loom-tasks or orchestration
+// (manager/worker) MCP servers — an ordinary agent must never checkout/commit/push. The platform tools
+// REUSE this class verbatim, so its bounds/timeouts/identity guarantees hold there too. The REST
+// endpoints in gateway/server.ts and the platform git tools in mcp/platform.ts call into here.
 
 /**
  * Per-op ceiling. Every git write runs BOUNDED + NON-INTERACTIVE: this repo has been bitten twice by

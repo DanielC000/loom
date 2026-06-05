@@ -64,11 +64,17 @@ execSync(`git init -q && git add . && git -c user.email=p@loom -c user.name=p co
 fs.mkdirSync(nonGit, { recursive: true });
 
 try {
-  // 1) Role gate: a platform-lead sees exactly the three platform tools.
+  // 1) Role gate: a platform-lead sees the platform surface (P1 create/configure + the P2 management,
+  //    P4 messaging, and P3 elevated tools). Membership check (the surface grows phase by phase).
   const PL = await connect("PL");
-  const tools = (await PL.listTools()).tools.map((t) => t.name).sort();
-  check(`tools = agent_create,project_configure,project_create  (got ${tools.join(",")})`,
-    tools.join(",") === "agent_create,project_configure,project_create");
+  const tools = (await PL.listTools()).tools.map((t) => t.name);
+  const mustHave = [
+    "project_create", "agent_create", "project_configure",                          // P1
+    "list_all_projects", "session_spawn", "session_message",                        // P2 / P4 (representative)
+    "git_checkout", "git_create_branch", "git_commit", "git_push", "vault_write",    // P3 elevated
+  ];
+  check(`platform surface includes the P1–P4 tools incl. the P3 elevated ones (missing: ${mustHave.filter((t) => !tools.includes(t)).join(",") || "none"})`,
+    mustHave.every((t) => tools.includes(t)));
 
   // 2) project_create with a REAL git repo → created + visible via the API. vaultPath omitted → defaults to repoPath.
   const before = (await get("/api/projects")).length;
@@ -115,27 +121,30 @@ try {
   const boardStill = await get(`/api/projects/${created.id}/board`);
   check("guardrail: a rejected configure did NOT change the project's config", JSON.stringify(boardStill.columns) === JSON.stringify(cfg.kanbanColumns));
 
-  // 7b) Trust boundary (audit M3) — `orchestration.gateCommand` is host-RCE-capable (daemon runs it
-  //     via spawnSync(shell:true) at the merge gate). The AGENT-facing loom-platform MCP path must NOT
-  //     be able to set it; the HUMAN-facing REST PATCH path must still accept it.
-  const configBeforeRce = (await get(`/api/projects/${created.id}/board`)).columns;
-  const rce = await call(PL, "project_configure", { projectId: created.id, config: { orchestration: { gateCommand: "calc.exe" } } });
-  check("trust-boundary: project_configure REJECTS orchestration.gateCommand (agent path)", typeof rce.error === "string" && !rce.ok);
-  const projAfterRce = (await get("/api/projects")).find((p) => p.id === created.id);
-  check("trust-boundary: rejected agent gateCommand left stored config UNCHANGED (default gateCommand)",
-    resolveConfig(projAfterRce.config).orchestration.gateCommand === "" &&
-    JSON.stringify((await get(`/api/projects/${created.id}/board`)).columns) === JSON.stringify(configBeforeRce));
-  // project_create's config is agent-writable too → it must reject gateCommand as well.
+  // 7b) Trust boundary (Platform Manager P3) — `orchestration.gateCommand` is host-RCE-capable (daemon
+  //     runs it via spawnSync(shell:true) at the merge gate) and `alertWebhook` is a data-exfil vector.
+  //     As the ELEVATED platform role (human-equivalent), project_configure now routes through the FULL
+  //     validator, so the Lead MAY set them — but still BOUNDED exactly as the human REST path. The
+  //     create flow (project_create) stays on the AGENT validator and must still reject them; the
+  //     manager/worker MCP path is byte-unchanged (it never had this surface).
+  const gate = await call(PL, "project_configure", { projectId: created.id, config: { orchestration: { gateCommand: "pnpm build && pnpm test" } } });
+  check("trust-boundary (P3): project_configure ACCEPTS gateCommand (full validator, platform role)", gate.ok === true && !gate.error);
+  const projAfterGate = (await get("/api/projects")).find((p) => p.id === created.id);
+  check("trust-boundary (P3): the platform-set gateCommand persisted", resolveConfig(projAfterGate.config).orchestration.gateCommand === "pnpm build && pnpm test");
+  // Bounded the same as the REST path: an out-of-bounds elevated value is still rejected.
+  const badGate = await call(PL, "project_configure", { projectId: created.id, config: { orchestration: { gateCommandTimeoutMs: 999 } } });
+  check("trust-boundary (P3): an out-of-bounds gateCommandTimeoutMs (<1000) is rejected", typeof badGate.error === "string" && !badGate.ok);
+  // project_create's config stays on the AGENT validator → it must still reject gateCommand.
   const nBeforeCreateRce = (await get("/api/projects")).length;
   const createRce = await call(PL, "project_create", { name: "RceCreate", repoPath: gitRepo, config: { orchestration: { gateCommand: "rm -rf /" } } });
-  check("trust-boundary: project_create REJECTS a config with orchestration.gateCommand", typeof createRce.error === "string" && !createRce.id);
+  check("trust-boundary: project_create REJECTS a config with orchestration.gateCommand (agent validator)", typeof createRce.error === "string" && !createRce.id);
   check("trust-boundary: rejected gateCommand create made NO project", (await get("/api/projects")).length === nBeforeCreateRce);
 
   // The HUMAN/trusted REST path (PATCH /api/projects/:id/config) MUST still accept gateCommand.
-  const restGate = await patchJson(`/api/projects/${created.id}/config`, { config: { orchestration: { gateCommand: "pnpm build && pnpm test" } } });
+  const restGate = await patchJson(`/api/projects/${created.id}/config`, { config: { orchestration: { gateCommand: "echo human-path" } } });
   check("trust-boundary: REST PATCH accepts gateCommand (human path)", restGate.status === 200 && !restGate.body.error);
   const projAfterRest = (await get("/api/projects")).find((p) => p.id === created.id);
-  check("trust-boundary: REST-set gateCommand persisted", resolveConfig(projAfterRest.config).orchestration.gateCommand === "pnpm build && pnpm test");
+  check("trust-boundary: REST-set gateCommand persisted", resolveConfig(projAfterRest.config).orchestration.gateCommand === "echo human-path");
 
   await PL.close();
 
