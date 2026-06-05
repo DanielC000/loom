@@ -600,12 +600,25 @@ export class SessionService {
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
 
-    // The worker runs in the agent the manager nominated (or its own). Resolve THAT agent's profile to
-    // see whether it opts into browser-automation — a manager spawns a QA worker by pointing it at a
-    // browserTesting profile (e.g. the bundled "QA Tester"). Explicit role is "worker"; we read ONLY
-    // browserTesting (permission stays config.permission, byte-identical to today for non-browser workers).
-    const workerAgent = this.db.getAgent(opts.agentId ?? manager.agentId);
-    const browserTesting = workerAgent ? this.resolveAgentSpawn(workerAgent, config, "worker").browserTesting : false;
+    // The worker runs in the agent the manager NOMINATED — never a silent fallback to the manager's own
+    // agent. That fallback (`opts.agentId ?? manager.agentId`) was a footgun: an omitted agentId bound the
+    // worker to the manager-role agent, mis-grouping it AND inheriting that agent's browserTesting. The
+    // agentId must be an explicit WORKER agent; defend at runtime so the service is robust regardless of
+    // caller (the MCP schema also marks it required).
+    if (!opts.agentId) throw new Error("worker_spawn requires an explicit worker agentId (a Dev/Bugfix/QA/Docs agent) — never the manager's own agent");
+    const workerAgent = this.db.getAgent(opts.agentId);
+    if (!workerAgent) throw new Error(`worker_spawn agentId '${opts.agentId}' does not resolve to an existing agent`);
+    // Reject a manager/platform-role rig: a worker must run under a worker (or plain) agent, never a
+    // coordination agent. The role is the agent's resolved PROFILE role (resolveProfile — the canonical
+    // mechanism); a profile-less agent (Dev/Bugfix/Docs/QA today) resolves to null and is allowed.
+    const profileRole = resolveProfile(workerAgent, workerAgent.profileId ? this.db.getProfile(workerAgent.profileId) : undefined).role;
+    if (profileRole === "manager" || profileRole === "platform") {
+      throw new Error(`cannot spawn a worker under the '${workerAgent.name}' agent (a ${profileRole}-role profile); pick a worker agent (Dev/Bugfix/QA/Docs)`);
+    }
+    // Resolve THAT agent's profile for its browser-automation opt-in — a manager spawns a QA worker by
+    // pointing it at a browserTesting profile (e.g. the bundled "QA Tester"). Explicit role is "worker";
+    // we read ONLY browserTesting (permission stays config.permission, byte-identical to today).
+    const browserTesting = this.resolveAgentSpawn(workerAgent, config, "worker").browserTesting;
 
     // Safety rails (§17a) — refuse NEW work before any side effect (worktree/pty). In-flight
     // workers are untouched. Pause is global-or-this-manager; the cap counts LIVE children only.
@@ -624,7 +637,7 @@ export class SessionService {
     const worker: Session = {
       id: randomUUID(),
       projectId: manager.projectId,
-      agentId: opts.agentId ?? manager.agentId,
+      agentId: opts.agentId,
       engineSessionId: null,
       title: null,
       cwd: worktreePath, // worker runs IN its worktree (parallel-worker isolation)

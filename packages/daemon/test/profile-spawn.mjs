@@ -133,7 +133,8 @@ try {
   check("(b) session is live", db.getSession(sB.id).processState === "live");
 
   // ===================== (c) worker_spawn still produces a worker (explicit role wins) =====================
-  const w = await svc.spawnWorker("mgr1", { taskId: "taskW", kickoffPrompt: "WORKER_KICKOFF" });
+  // agentId is now REQUIRED (no silent ?? manager.agentId fallback) — nominate the plain worker agent.
+  const w = await svc.spawnWorker("mgr1", { taskId: "taskW", agentId: "agentPlain", kickoffPrompt: "WORKER_KICKOFF" });
   workerWorktree = w.worktreePath;
   const oW = optsFor(w.id);
   check("(c) worker_spawn returns role=worker", w.role === "worker");
