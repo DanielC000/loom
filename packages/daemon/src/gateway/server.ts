@@ -13,7 +13,7 @@ import type { SessionService } from "../sessions/service.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
-import { validateProjectConfigOverride } from "../mcp/platform.js";
+import { validateProjectConfigOverride, validatePlatformConfigOverride } from "../mcp/platform.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
 import { clearClaudeRateLimit } from "../orchestration/usage-awareness.js";
@@ -398,6 +398,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!v.ok) return reply.code(400).send({ error: `invalid config: ${v.error}` });
     deps.db.setProjectConfig(id, v.value);
     return deps.db.getProject(id);
+  });
+
+  // --- Daemon-GLOBAL platform tuning (rate-limit numbers / watcher cadences / op timeouts) ---
+  // HUMAN-only + NOT project-scoped (one shared daemon), exactly like the trust-boundary project
+  // config PATCH above: NO agent MCP tool exposes this surface — globals are human-set only. GET
+  // returns the stored override + the resolved platform group; PATCH validates → 400 on bad, else
+  // upserts the singleton blob. (Boot-bound values take effect on the next daemon restart; rate-limit
+  // & webhook timeouts resolve live — see the epic's restart-split.)
+  app.get("/api/platform/config", async () => {
+    const override = deps.db.getPlatformConfig();
+    return { override, resolved: resolveConfig(undefined, override).platform };
+  });
+  app.patch("/api/platform/config", async (req, reply) => {
+    const v = validatePlatformConfigOverride((req.body as { config?: unknown })?.config ?? req.body);
+    if (!v.ok) return reply.code(400).send({ error: `invalid platform config: ${v.error}` });
+    deps.db.setPlatformConfig(v.value);
+    return { ok: true, override: v.value };
   });
 
   app.post("/api/projects/:id/agents", async (req, reply) => {

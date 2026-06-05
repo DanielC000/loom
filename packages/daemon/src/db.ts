@@ -29,7 +29,7 @@ function assertNotProdDbInTest(file: string): void {
   }
 }
 import type {
-  Project, Agent, Session, Task, ProjectConfigOverride, Profile,
+  Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake,
 } from "@loom/shared";
@@ -148,6 +148,16 @@ CREATE TABLE IF NOT EXISTS wakes (
   wake_at TEXT NOT NULL,
   note TEXT NOT NULL,
   created_at TEXT NOT NULL
+);
+-- Daemon-GLOBAL platform tuning override (rate-limit numbers / watcher cadences / op timeouts), held
+-- as a single JSON blob in a SINGLETON row (id pinned to 1 by the CHECK). NOT per-project — the daemon
+-- shares one of these (like backup/schedulerEnabled). Persisted in SQLite so a backup captures it. The
+-- daemon reads override_json, resolveConfig(undefined, override) merges it BENEATH per-project values.
+-- Additive: CREATE TABLE IF NOT EXISTS, so existing DBs get an empty store (→ {} → platform defaults).
+CREATE TABLE IF NOT EXISTS platform_config (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  override_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_fire_at);
@@ -375,6 +385,30 @@ export class Db {
   /** Soft-remove a project: stamp archived_at so listProjects() hides it (rows + sessions kept). */
   archiveProject(id: string): void {
     this.db.prepare("UPDATE projects SET archived_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+  }
+
+  // --- platform config (daemon-GLOBAL tuning override; singleton row, JSON blob) ---
+  /**
+   * Read the daemon-global platform override blob. Returns `{}` when the singleton row is absent
+   * (fresh/empty store) OR its JSON is unparseable — a corrupt blob must never wedge boot, so we
+   * try/catch → `{}` (today's behavior: platform defaults). The caller threads the result into
+   * resolveConfig's 2nd arg; it is NOT re-validated here (the human PATCH path validates on write).
+   */
+  getPlatformConfig(): PlatformConfigOverride {
+    const r = this.db.prepare("SELECT override_json FROM platform_config WHERE id = 1").get() as Row | undefined;
+    if (!r) return {};
+    try {
+      return (JSON.parse((r.override_json as string) || "{}") as PlatformConfigOverride) ?? {};
+    } catch {
+      return {};
+    }
+  }
+  /** Upsert the singleton platform override blob (validated by the caller); stamps updated_at. */
+  setPlatformConfig(override: PlatformConfigOverride): void {
+    this.db.prepare(
+      `INSERT INTO platform_config (id, override_json, updated_at) VALUES (1, @json, @updatedAt)
+       ON CONFLICT(id) DO UPDATE SET override_json = @json, updated_at = @updatedAt`,
+    ).run({ json: JSON.stringify(override ?? {}), updatedAt: new Date().toISOString() });
   }
 
   // --- agents ---
