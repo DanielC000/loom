@@ -27,6 +27,7 @@
     "test:profile-spawn": "node test/profile-spawn.mjs",
     "test:browser-testing": "node test/browser-testing-spawn.mjs",
     "test:profiles-crud": "node test/profiles-crud.mjs",
+    "test:platform-home": "node test/platform-home.mjs",
     "test:profiles-rest": "node test/profiles-rest.mjs",
     "test:context": "node test/context-stats.mjs",
     "test:resume-mode-detect": "node test/resume-mode-detect.mjs",

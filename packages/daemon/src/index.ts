@@ -5,6 +5,7 @@ import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles } from "./profiles/seed.js";
+import { seedPlatformHome } from "./platform/seed.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
 import { TaskMcpRouter } from "./mcp/server.js";
@@ -40,6 +41,12 @@ async function main(): Promise<void> {
   // like the skills seed — additive, idempotent, preserves user edits. Phase-1 read path only.
   const seededProfiles = seedDefaultProfiles(db);
   if (seededProfiles.length) console.log(`[boot] seeded default profile(s): ${seededProfiles.join(", ")}`);
+  // Platform Manager P1: seed the reserved "Loom Platform" home + its Platform Lead / Platform Auditor
+  // agents, seed-if-absent (idempotent; runs AFTER seedDefaultProfiles so the bundled platform profiles
+  // exist to assign). Hidden from the project picker (db.listProjects), still Mission-Control visible.
+  // The Lead is NOT spawned here (human REST action) and the Auditor is NOT scheduled here (P5).
+  const seededPlatform = seedPlatformHome(db);
+  if (seededPlatform.length) console.log(`[boot] seeded platform home: ${seededPlatform.join(", ")}`);
   // Resolve the daemon-global platform tuning ONCE at boot (SQLite singleton override ?? LOOM_* env ??
   // defaults). Every BOOT-BOUND consumer below — PtyHost busy-stale, SessionService git timeouts, the
   // watcher cadences — reads from this. A PATCH to platform.watchers/timeouts therefore takes effect on

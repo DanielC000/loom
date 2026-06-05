@@ -42,7 +42,11 @@ CREATE TABLE IF NOT EXISTS projects (
   vault_path TEXT NOT NULL,
   config_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL,
-  archived_at TEXT
+  archived_at TEXT,
+  -- Reserved/system project flag (the seeded "Loom Platform" home). 1 = hidden from the project
+  -- picker (listProjects) but still admin/Mission-Control visible. Added to existing DBs via the
+  -- idempotent migration below; NOT NULL + constant DEFAULT 0 backfills legacy rows to 0 (ordinary).
+  reserved INTEGER NOT NULL DEFAULT 0
 );
 -- Profiles (platform-level rig: role + model + permission-delta + skill-subset + icon). NO project
 -- FK — a profile is cross-project, reused by agents across projects. allow_delta/skills are JSON text.
@@ -195,6 +199,13 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   archived_at: "TEXT",
 };
 
+/** Columns added to `projects` after phase-1; applied to existing DBs by migrateProjects(). */
+const PROJECT_ADDED_COLUMNS: Record<string, string> = {
+  // Reserved/system project flag (Platform Manager P1). NOT NULL + constant DEFAULT 0 is legal on
+  // ALTER TABLE ADD COLUMN, so every legacy project row backfills to 0 (ordinary, picker-visible).
+  reserved: "INTEGER NOT NULL DEFAULT 0",
+};
+
 /** Columns added to `agents` after phase-1; applied to existing DBs by migrateAgents(). */
 const AGENT_ADDED_COLUMNS: Record<string, string> = {
   profile_id: "TEXT",
@@ -242,6 +253,7 @@ export class Db {
     this.migrateTopicsToAgents();
     this.db.exec(SCHEMA);
     this.migrateSessions();
+    this.migrateProjects();
     this.migrateAgents();
     this.migrateProfiles();
     this.migrateTasks();
@@ -303,6 +315,20 @@ export class Db {
   }
 
   /**
+   * Idempotent additive migration for `projects` — ADD COLUMN any post-phase-1 column missing from
+   * an existing DB (fresh installs already have them via CREATE TABLE). Mirrors migrateAgents; the
+   * NOT NULL + constant DEFAULT 0 backfills every legacy project row to reserved=0 (ordinary).
+   */
+  private migrateProjects(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(projects)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(PROJECT_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE projects ADD COLUMN ${name} ${type}`);
+    }
+  }
+
+  /**
    * Idempotent additive migration for `agents` — ADD COLUMN any post-phase-1 column missing from an
    * existing DB (fresh installs already have them via CREATE TABLE). Mirrors migrateSessions; the
    * nullable `profile_id` defaults to NULL on legacy rows ⇒ resolveProfile maps them to today's
@@ -352,9 +378,29 @@ export class Db {
   }
 
   // --- projects ---
+  /**
+   * The project PICKER feed (GET /api/projects → the web project selector). EXCLUDES reserved/system
+   * projects (the seeded "Loom Platform" home) as well as archived ones — a reserved project is a
+   * Loom-internal admin scope, never an ordinary pick target. Admin/god-eye surfaces that must see the
+   * platform home use listAllProjects(); Mission Control gets it for free via listAllSessions (which
+   * JOINs the project name by id, with no reserved filter).
+   */
   listProjects(): Project[] {
+    return this.db.prepare("SELECT * FROM projects WHERE archived_at IS NULL AND reserved = 0 ORDER BY name")
+      .all().map(toProject);
+  }
+  /**
+   * INCLUSIVE list — every live project INCLUDING reserved/system ones (still excludes archived).
+   * For admin/platform surfaces that legitimately need the platform home alongside ordinary projects;
+   * the ordinary picker uses listProjects() (reserved excluded).
+   */
+  listAllProjects(): Project[] {
     return this.db.prepare("SELECT * FROM projects WHERE archived_at IS NULL ORDER BY name")
       .all().map(toProject);
+  }
+  /** True iff a reserved/system project already exists — the idempotency gate for seedPlatformHome. */
+  hasReservedProject(): boolean {
+    return !!this.db.prepare("SELECT 1 FROM projects WHERE reserved = 1 LIMIT 1").get();
   }
   getProject(id: string): Project | undefined {
     const r = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Row | undefined;
@@ -362,9 +408,9 @@ export class Db {
   }
   insertProject(p: Project): void {
     this.db.prepare(
-      `INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at)
-       VALUES (@id,@name,@repoPath,@vaultPath,@config,@createdAt,@archivedAt)`,
-    ).run({ ...p, config: JSON.stringify(p.config), archivedAt: p.archivedAt });
+      `INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at,reserved)
+       VALUES (@id,@name,@repoPath,@vaultPath,@config,@createdAt,@archivedAt,@reserved)`,
+    ).run({ ...p, config: JSON.stringify(p.config), archivedAt: p.archivedAt, reserved: p.reserved ? 1 : 0 });
   }
   /**
    * Partial STRUCTURAL edit of a project (name / vaultPath). Provided fields are written; omitted
@@ -890,6 +936,7 @@ function toProject(r0: unknown): Project {
     repoPath: r.repo_path as string, vaultPath: r.vault_path as string,
     config: JSON.parse((r.config_json as string) || "{}") as ProjectConfigOverride,
     createdAt: r.created_at as string, archivedAt: (r.archived_at as string) ?? null,
+    reserved: (r.reserved as number) === 1,
   };
 }
 function toAgent(r0: unknown): Agent {

@@ -200,6 +200,7 @@ export class PlatformMcpRouter {
         const project: Project = {
           id: randomUUID(), name, repoPath, vaultPath: vaultPath ?? repoPath,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
+          reserved: false, // an agent-created project is NEVER a reserved/system one (boot-seed only)
         };
         db.insertProject(project);
         return ok(project);
