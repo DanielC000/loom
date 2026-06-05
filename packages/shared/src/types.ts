@@ -18,6 +18,14 @@ export interface Project {
   config: ProjectConfigOverride;
   createdAt: string;
   archivedAt: string | null;
+  /**
+   * Reserved/system project: a Loom-internal project (the seeded "Loom Platform" home for the
+   * Platform Lead/Auditor agents) that is HIDDEN from the normal project picker (`db.listProjects`)
+   * but still addressable + visible to admin surfaces (Mission Control, the future Platform UI).
+   * false on every ordinary user project; only the boot-seeded platform home is true. Additive —
+   * legacy rows backfill to false (0).
+   */
+  reserved: boolean;
 }
 
 /**

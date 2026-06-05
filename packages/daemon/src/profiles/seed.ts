@@ -5,8 +5,9 @@ import type { Db } from "../db.js";
 /**
  * Loom's bundled Profiles — the reusable, platform-level "rig" (role + model + allow-delta +
  * skill-subset + icon) an agent runs under. Orchestrator=manager, Dev/Bugfix=worker, Planning &
- * Triage / Content Strategy = plain (role null), plus a Platform-lead (role=platform; today
- * REST/internal-only). Cross-project, so NO project FK. Keyed by NAME for the seed-if-absent
+ * Triage / Content Strategy = plain (role null), plus the two platform rigs (role=platform; today
+ * REST/internal-only): Platform-lead (full operator) and Platform-audit (the read-and-file-only
+ * scheduled transcript reviewer, privilege-tempered in P5). Cross-project, so NO project FK. Keyed by NAME for the seed-if-absent
  * idempotent seed (UUID id assigned on first seed); "reset to bundled" restores a row to these.
  *
  * NOTE: a Profile carries NO injected prompt — `description` is a UI-only blurb describing what the
@@ -81,7 +82,22 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
     allowDelta: [],
     skills: null,
     model: null,
-    icon: null,
+    icon: "🛰️",
+  },
+  {
+    name: "Platform-audit",
+    // Role 'platform' so it is recognised as a platform agent (and can never be spawned as a worker).
+    // NOTE: the Auditor is READ + FILE-ONLY by design — it ingests UNTRUSTED transcript content, so its
+    // restricted tool-surface (no host-RCE/git-push/vault-write, only cross-project transcript reads +
+    // tasks_create into the Platform backlog) is enforced in PHASE 5, NOT here. P1 only seeds the
+    // profile/agent/skill/prompt; the Auditor is NOT spawned and NOT scheduled in this phase.
+    role: "platform",
+    description:
+      "Platform-audit rig: the scheduled, read-and-file-only transcript reviewer. Scans recent session transcripts across projects for Loom bugs, agent friction, and vague skill/prompt instructions, and files structured findings onto the Platform backlog. Lower-privilege than the Lead by design (it reads untrusted content).",
+    allowDelta: [],
+    skills: null,
+    model: null,
+    icon: "🔎",
   },
 ];
 

@@ -385,6 +385,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const project: Project = {
       id: randomUUID(), name: b.name, repoPath: b.repoPath, vaultPath: b.vaultPath,
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
+      reserved: false, // a human-created project via REST is an ordinary project (never reserved/system)
     };
     deps.db.insertProject(project);
     return reply.code(201).send(project);
