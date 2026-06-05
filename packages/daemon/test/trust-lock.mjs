@@ -94,7 +94,10 @@ const main = async () => {
     ensureTrusted(projB); // must NOT hang on the held lock
     const dt = Date.now() - t0;
 
-    check(`(b) held lock → ensureTrusted returns bounded (${dt}ms, timeout 500ms)`, dt < 2500);
+    // The bound only proves "bounded, no hang" (it must sit above the 500ms timeout, since by
+    // design this waits the held lock out then degrades). Kept generous so a loaded machine's
+    // sleep overshoot can't flip it — the exact wall-clock value is not what's under test.
+    check(`(b) held lock → ensureTrusted returns bounded (${dt}ms, timeout 500ms)`, dt < 3000);
     check("(b) held lock → ensureTrusted still wrote best-effort (degrades to today's behavior)", trusted(isoJson, keyFor(projB)));
     try { fs.rmSync(lockPath); } catch { /* the held lock may have been treated stale & broken */ }
     delete process.env.CLAUDE_CONFIG_DIR;
@@ -108,17 +111,22 @@ const main = async () => {
     const isoJson = path.join(configDir, ".claude.json");
     const lockPath = `${isoJson}.loom-lock`;
     fs.writeFileSync(lockPath, "crashed-holder");
-    const old = (Date.now() - 60_000) / 1000; // 60s old → stale vs 500ms timeout
+    const old = (Date.now() - 60_000) / 1000; // 60s old (stale vs the 5000ms timeout)
     fs.utimesSync(lockPath, old, old);
     process.env.CLAUDE_CONFIG_DIR = configDir;
-    process.env.LOOM_TRUST_LOCK_MS = "500";
+    // Generous timeout so the assertion proves a BEHAVIOR (a stale lock is broken on the first
+    // loop iteration, NOT waited out) rather than a tight wall-clock bound. A regression that
+    // failed to detect staleness would wait the full 5000ms and trip dt < 2500; a healthy break
+    // returns near-instantly, leaving ample headroom for a slow/loaded machine. (Was a flaky
+    // dt < 500 against a 500ms timeout — bound == timeout, so load flipped it: observed 513ms.)
+    process.env.LOOM_TRUST_LOCK_MS = "5000";
     const projS = path.join(root, "stale-proj");
 
     const t0 = Date.now();
     ensureTrusted(projS);
     const dt = Date.now() - t0;
 
-    check(`(b2) stale lock broken → write succeeds promptly (${dt}ms)`, dt < 500 && trusted(isoJson, keyFor(projS)));
+    check(`(b2) stale lock broken → write succeeds without waiting out the timeout (${dt}ms, timeout 5000ms)`, dt < 2500 && trusted(isoJson, keyFor(projS)));
     delete process.env.CLAUDE_CONFIG_DIR;
     delete process.env.LOOM_TRUST_LOCK_MS;
   }
