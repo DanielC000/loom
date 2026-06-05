@@ -190,6 +190,28 @@ const RESUME_MODE_MAX_PRESSES = Number(process.env.LOOM_RESUME_MODE_MAX_PRESSES)
 const READY_FALLBACK_MS = Number(process.env.LOOM_READY_FALLBACK_MS) || 20_000;
 
 /**
+ * Graceful-stop escalation — makes a graceful stop ALWAYS terminate the session (the deterministic-stop
+ * fix). A double Ctrl-C EXITS an IDLE `claude` (the second press exits from an empty prompt), but on a
+ * session that's mid-turn the two Ctrl-Cs only INTERRUPT the running turn — the pty stays alive at a (now)
+ * idle prompt and, because no Stop hook fires after the interrupt, the busy flag stays stale. So the
+ * operator sees a "stopped" session that's actually still live+busy (the board bug). Fix: after the
+ * initial interrupt sequence, if the pty is STILL alive, RE-SEND the exit sequence (the turn has since
+ * unwound to an idle prompt, where the double Ctrl-C exits); and if it STILL refuses to exit within a hard
+ * bound (a wedged TUI / a tool call that swallows Ctrl-C), ESCALATE to a hard `pty.kill()` (node-pty Job
+ * Object — orphan-free, kills the tree). An IDLE session exits on the very FIRST sequence, so the escalation
+ * timers always find `!alive` and are pure no-ops — its graceful stop is unchanged. All three are
+ * env-overridable so the hermetic test drives the whole escalation in milliseconds (default unset =
+ * production behaviour: the first two Ctrl-Cs keep their original 600ms gap).
+ *   GAP   — gap between the two Ctrl-Cs of one exit sequence (was the inline 600ms literal)
+ *   RETRY — re-send the exit sequence at this point if the session is still live after the interrupt
+ *   KILL  — hard bound after which an un-exited pty is killed (RETRY+GAP < KILL, so the re-send gets a
+ *           full window to land before the kill)
+ */
+const GRACEFUL_STOP_GAP_MS = Number(process.env.LOOM_GRACEFUL_GAP_MS) || 600;
+const GRACEFUL_STOP_RETRY_MS = Number(process.env.LOOM_GRACEFUL_RETRY_MS) || 2_000;
+const GRACEFUL_STOP_KILL_MS = Number(process.env.LOOM_GRACEFUL_KILL_MS) || 6_000;
+
+/**
  * Resolve the per-session Playwright MCP (`@playwright/mcp`) stdio server entry, injected at spawn
  * ONLY for a browserTesting session (opt-in, gated). Built with ABSOLUTE paths — the same lesson as
  * the absolute-claude-path invariant: node-pty's Windows agent does NOT search %PATH%, and a bare
@@ -1179,9 +1201,43 @@ export class PtyHost {
       live.pty.kill(); // TerminateProcess on Windows; node-pty Job Object kills the tree (no orphans)
       return;
     }
-    // graceful: double Ctrl-C, leaves the session resumable
+    // graceful: double Ctrl-C exits an IDLE claude (resumable, clean) — and for an idle session this is
+    // the whole story (it exits here; the escalation below is a no-op). A BUSY/mid-turn session instead
+    // has its turn INTERRUPTED by the two Ctrl-Cs and stays alive at an idle prompt (no Stop hook fires,
+    // so busy stays stale) — escalateGracefulStop is what then drives it deterministically to exit.
     live.pty.write("\x03");
-    setTimeout(() => { if (live.alive) live.pty.write("\x03"); }, 600);
+    setTimeout(() => { if (live.alive) live.pty.write("\x03"); }, GRACEFUL_STOP_GAP_MS);
+    this.escalateGracefulStop(sessionId, live);
+  }
+
+  /**
+   * Deterministic graceful-stop escalation (see GRACEFUL_STOP_* for the why). Drives a BUSY/mid-turn
+   * session — whose turn the initial double Ctrl-C only INTERRUPTED, leaving the pty alive — the rest of
+   * the way to `exited`, so a graceful stop ALWAYS terminates and never leaves a "stopped" session live.
+   *   • Stage 2 (RETRY): still alive → the turn has unwound to an idle prompt; re-send the exit sequence.
+   *   • Stage 3 (KILL): STILL alive at the hard bound → a wedged turn that ignores Ctrl-C; hard-kill the
+   *     pty (Job Object, orphan-free). This is the backstop that makes "graceful" deterministic.
+   * Every timer captures the SAME `live` and guards on `live.alive`, so once the pty exits (or its Live is
+   * REPLACED by a resume's fresh spawn — the old object keeps alive=false forever) each timer is an inert
+   * no-op. It therefore can NEVER kill a resumed session, and an IDLE stop (exited on stage 1) runs neither
+   * stage — its behaviour is unchanged. The pty.kill goes through the same orphan-free path as a hard stop.
+   */
+  private escalateGracefulStop(sessionId: string, live: Live): void {
+    // Stage 2: the interrupt didn't exit the process → re-send the exit sequence from the idle prompt.
+    setTimeout(() => {
+      if (!live.alive) return; // idle session already exited on the first sequence — nothing to escalate
+      // eslint-disable-next-line no-console
+      console.log(`[pty] ${sessionId} graceful stop: still live after interrupt — re-sending exit sequence`);
+      live.pty.write("\x03");
+      setTimeout(() => { if (live.alive) live.pty.write("\x03"); }, GRACEFUL_STOP_GAP_MS);
+    }, GRACEFUL_STOP_RETRY_MS);
+    // Stage 3: a turn that ignores Ctrl-C entirely must still die — bounded hard-kill escalation.
+    setTimeout(() => {
+      if (!live.alive) return;
+      // eslint-disable-next-line no-console
+      console.log(`[pty] ${sessionId} graceful stop: still live after ${GRACEFUL_STOP_KILL_MS}ms — escalating to hard kill`);
+      live.pty.kill();
+    }, GRACEFUL_STOP_KILL_MS);
   }
 
   isAlive(sessionId: string): boolean {
