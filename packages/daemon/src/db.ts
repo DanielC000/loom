@@ -833,6 +833,31 @@ export class Db {
   listInterruptedRuns(): AgentRun[] {
     return (this.db.prepare("SELECT * FROM runs WHERE status IN ('queued','starting','running') ORDER BY created_at").all() as Row[]).map(toRun);
   }
+  // --- Agent Runs R4a: per-key cap accessors + the kill-switch's in-flight set ---------------------
+  /** How many runs THIS key currently has in flight (queued/starting/running) — the concurrency-cap counter. */
+  countInFlightRunsForKey(keyId: string): number {
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM runs WHERE key_id = ? AND status IN ('queued','starting','running')")
+      .get(keyId) as { c: number }).c;
+  }
+  /** THIS key's in-flight runs (queued/starting/running), oldest first — the per-key kill-switch's cancel set. */
+  listInFlightRunsForKey(keyId: string): AgentRun[] {
+    return (this.db.prepare("SELECT * FROM runs WHERE key_id = ? AND status IN ('queued','starting','running') ORDER BY created_at")
+      .all(keyId) as Row[]).map(toRun);
+  }
+  /**
+   * Best-effort daily TOKEN usage for a key: sum the `inputTokens` field of every retained run-usage
+   * snapshot for THIS key created at/after `sinceIso` (the trailing-24h window the caller computes).
+   * ⚠️ This is the R2 usage SNAPSHOT (engine context occupancy at the last turn boundary), NOT a precise
+   * cumulative billed-token meter — Loom has no per-token/cost accounting yet (a USD spend cap is
+   * deliberately out of R4a; see `[[Agent Runs]]`). Runs with no usage_json (in-flight / never recorded)
+   * contribute 0. Used by the POST /api/runs daily-token-cap gate as a coarse backstop.
+   */
+  sumKeyTokensSince(keyId: string, sinceIso: string): number {
+    const row = this.db.prepare(
+      "SELECT COALESCE(SUM(json_extract(usage_json, '$.inputTokens')), 0) AS t FROM runs WHERE key_id = ? AND created_at >= ? AND usage_json IS NOT NULL",
+    ).get(keyId, sinceIso) as { t: number | null };
+    return row.t ?? 0;
+  }
 
   // --- profiles (platform-level rigs; read path + seed) ---
   listProfiles(): Profile[] {
