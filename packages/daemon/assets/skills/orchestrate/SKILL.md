@@ -143,7 +143,12 @@ scope, and never address the human. You make the call and `worker_message` it ba
    the prioritized backlog, key decisions, open findings + gotchas, where things stand. Update it after
    each meaningful step. This single doc IS your recycle handoff and your re-orientation after a pause.
 9. **Verify the whole, not just the parts.** Before declaring a phase done, require an integrated
-   end-to-end pass; eyeball what can't be verified automatically.
+   end-to-end pass; eyeball what can't be verified automatically. For visual/UI work the eyeball is
+   *yours* — verifying it "done" means *seeing* it. If your session is browser-capable (a headless
+   browser tool surface is provisioned and allowlisted), drive it to the running app and confirm the
+   change actually renders and behaves before you call the task done; you are standing-authorized to do
+   this, so never park UI work as "eyeball pending, needs a human." Workers don't drive the browser —
+   they report UI work up and you, the manager, verify it.
 
 ## Self-hosting — when your project IS Loom itself
 
