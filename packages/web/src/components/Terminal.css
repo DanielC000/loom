@@ -2,6 +2,7 @@
    region. Wheel-scroll of the scrollback still works; this only removes the visible bar. */
 .xterm-viewport {
   scrollbar-width: none; /* Firefox */
+  overscroll-behavior: contain; /* don't chain scroll to the page at top/bottom */
 }
 .xterm-viewport::-webkit-scrollbar {
   display: none; /* WebKit / Chromium */
