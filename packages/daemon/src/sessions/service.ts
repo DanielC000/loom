@@ -500,6 +500,12 @@ export class SessionService {
         .slice(0, PENDING_MAX_MSGS);
       if (snap.length > 0) pending[sessionId] = snap;
     }
+    // Crash/shutdown transcript backstop (same as the SIGTERM/SIGINT path): snapshot every LIVE
+    // session's engine transcript before we exit. The restart kills every pty; resume re-attaches the
+    // SAME engine JSONL so the happy path keeps it, but this is pure insurance for a session that fails
+    // to resume. Best-effort + never-throws; runs synchronously BEFORE the intent write so it can never
+    // delay or clobber it.
+    this.snapshotAllLive();
     writeRestartIntent({
       reason,
       managerSessionId,
@@ -528,6 +534,28 @@ export class SessionService {
       // in-flight run clean (reconcileRunsOnBoot), so a run must never be captured into the resume set.
       .filter((s) => s.processState === "live" && s.role !== "run")
       .map((s) => ({ sessionId: s.id, role: s.role ?? null, parentSessionId: s.parentSessionId ?? null }));
+  }
+
+  /**
+   * Graceful-shutdown transcript backstop (crash / SIGTERM / SIGINT / daemon_restart). The pty `onExit`
+   * hook (index.ts) is the PRIMARY snapshot trigger, but a daemon stop kills every LIVE pty WITHOUT
+   * firing `onExit` per session — so a long-lived session that never exited on its own would lose its
+   * transcript once Claude later prunes the JSONL (a session goes 'dead' BECAUSE its JSONL was deleted).
+   * This snapshots EVERY live session that has an `engineSessionId`, while the JSONL still exists, before
+   * the process exits — mirroring `onExit`'s snapshot exactly (no run-exclusion: a run with a transcript
+   * is preserved too, same as the per-exit path). BOUNDED + best-effort per session: `snapshotTranscript`
+   * is idempotent + mtime-guarded + never-throws, and each session is additionally try-guarded so one
+   * failure can never block the others or hang shutdown. Returns the count actually snapshotted.
+   */
+  snapshotAllLive(): number {
+    let snapshotted = 0;
+    for (const s of this.db.listAllSessions()) {
+      if (s.processState !== "live" || !s.engineSessionId) continue;
+      try {
+        if (snapshotTranscript(s.cwd, s.engineSessionId, s.projectId, s.id)) snapshotted++;
+      } catch { /* never let one session block shutdown */ }
+    }
+    return snapshotted;
   }
 
   /**
