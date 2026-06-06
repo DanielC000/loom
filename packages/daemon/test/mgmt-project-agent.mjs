@@ -109,6 +109,13 @@ try {
   db.insertSchedule(mkSchedule("schCas1", "aCas1"));
   const keyCas = db.createApiKey({ projectId: "pCas", name: "k", endpointAgentIds: [], caps: { maxConcurrentRuns: null, dailyTokenCap: null, dailySpendCap: null } });
   db.insertRun({ id: "rCas1", projectId: "pCas", agentId: "aCas1", sessionId: null, keyId: keyCas.key.id, status: "completed", input: null, schema: null, result: null, usage: null, transcriptRef: null, error: null, webhookUrl: null, idempotencyKey: null, createdAt: now, startedAt: null, endedAt: null });
+  // orchestration_events are session-keyed (manager OR worker) with NO project_id — a permanent delete
+  // must clear them so the cross-project Activity feed shows no orphans. Seed: one row where BOTH ids are
+  // under pCas (manager-branch match) + one where only the WORKER is under pCas but the manager is an
+  // unrelated survivor (worker-branch match — proves the OR clause, not just the manager column).
+  db.appendEvent({ id: "evCas1", ts: now, managerSessionId: "sCas2", workerSessionId: "sCas1", taskId: null, kind: "worker_report", detail: null });
+  db.appendEvent({ id: "evCas2", ts: now, managerSessionId: "survivorMgr", workerSessionId: "sCas1", taskId: null, kind: "worker_report", detail: null });
+  check("E: orchestration_events seeded before delete", db.listEvents("sCas2").length === 1 && db.listEvents("survivorMgr").length === 1);
   // Seed an on-disk transcript snapshot for one session so the dir-removal is provable.
   fs.mkdirSync(claudeDir, { recursive: true });
   fs.writeFileSync(claudeFile, '{"type":"user","message":{"content":"hi"}}\n');
@@ -123,6 +130,8 @@ try {
   check("E: tasks cascaded", db.listTasks("pCas").length === 0 && !db.getTask("tCas1"));
   check("E: schedules cascaded", !db.getSchedule("schCas1") && !db.listSchedules().some((s) => s.id === "schCas1"));
   check("E: keys + runs cascaded", db.listApiKeys("pCas").length === 0 && !db.getRun("rCas1"));
+  check("E: orchestration_events cascaded (manager-branch + worker-branch from a survivor manager)",
+    db.listEvents("sCas2").length === 0 && db.listEvents("survivorMgr").length === 0);
   check("E: on-disk snapshot dir removed (archives/pCas gone)",
     !archivedTranscriptExists("pCas", "sCas1") && !fs.existsSync(path.dirname(archivedTranscriptPath("pCas", "sCas1"))));
 
@@ -135,13 +144,23 @@ try {
   db.insertSession(mkSession("sKeep", "pAg", "aKeep"));
   db.insertSchedule(mkSchedule("schGone", "aGone"));
   db.insertSchedule(mkSchedule("schKeep", "aKeep"));
+  // orchestration_events for the agent's sessions (manager + worker branch) + a run-keyed run_event for
+  // one of the agent's runs — both must cascade with the agent (but NOT the sibling aKeep's audit row).
+  db.appendEvent({ id: "evGone1", ts: now, managerSessionId: "sGone1", workerSessionId: "sGone2", taskId: null, kind: "worker_report", detail: null });
+  db.appendEvent({ id: "evGone2", ts: now, managerSessionId: "survivorMgr2", workerSessionId: "sGone1", taskId: null, kind: "worker_report", detail: null });
+  db.appendEvent({ id: "evKeep", ts: now, managerSessionId: "sKeep", workerSessionId: null, taskId: null, kind: "worker_report", detail: null });
+  db.insertRun({ id: "rGone", projectId: "pAg", agentId: "aGone", sessionId: null, keyId: null, status: "completed", input: null, schema: null, result: null, usage: null, transcriptRef: null, error: null, webhookUrl: null, idempotencyKey: null, createdAt: now, startedAt: null, endedAt: null });
+  db.insertRunEvent({ id: "reGone", projectId: "pAg", keyId: null, runId: "rGone", kind: "cap_rejected", detail: null, createdAt: now });
   const delA = await app.inject({ method: "DELETE", url: "/api/agents/aGone" });
   check("E: delete agent → 200", delA.statusCode === 200 && JSON.parse(delA.body).deleted.sessions === 2);
   check("E: agent row gone", !db.getAgent("aGone"));
   check("E: agent's sessions cascaded", !db.getSession("sGone1") && !db.getSession("sGone2"));
   check("E: agent's schedule cascaded", !db.getSchedule("schGone"));
-  check("E: sibling agent + its session/schedule UNTOUCHED",
-    !!db.getAgent("aKeep") && !!db.getSession("sKeep") && !!db.getSchedule("schKeep") && !!db.getProject("pAg"));
+  check("E: agent's orchestration_events cascaded (manager + worker branch)",
+    db.listEvents("sGone1").length === 0 && db.listEvents("survivorMgr2").length === 0);
+  check("E: agent's run + its run_event cascaded", !db.getRun("rGone") && !db.listRunEvents("pAg").some((e) => e.id === "reGone"));
+  check("E: sibling agent + its session/schedule/audit-event UNTOUCHED",
+    !!db.getAgent("aKeep") && !!db.getSession("sKeep") && !!db.getSchedule("schKeep") && !!db.getProject("pAg") && db.listEvents("sKeep").length === 1);
   const delMissing = await app.inject({ method: "DELETE", url: "/api/agents/nope" });
   check("E: delete unknown agent → 404", delMissing.statusCode === 404);
 } finally {
