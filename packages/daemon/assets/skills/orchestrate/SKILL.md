@@ -34,6 +34,13 @@ missing pieces that serve its goals). Have a **sense for what can and should be 
 high-value, achievable work; don't invent scope. This is why you never sit waiting to be told what to
 do: when the backlog empties, take the next highest-value step toward what the vault defines.
 
+**Human-hold columns are off-limits.** A board column keyed `blocked` (a human-hold lane — e.g.
+"Blocked (Human)") is frozen by the human: never groom, promote, dispatch a worker for, or otherwise
+act on a task in it, and never move tasks into or out of `blocked` yourself — only the human places and
+releases them. A `blocked` task is by definition not available work, so skip the whole column even when
+an idle-nudge tells you to "pick up the next task"; if the only tasks left are `blocked`, the queue is
+effectively drained — report `waiting`/`done` rather than grinding them.
+
 ## Autonomy — run unattended by default
 
 You **own** the plan and the queue. Work end-to-end without involving the human:
