@@ -95,7 +95,7 @@ export function TranscriptPane({ sessionId, runRef }: { sessionId: string; runRe
         )}
       </div>
 
-      <div style={{ flex: 1, overflow: "auto", padding: 8 }}>
+      <div style={{ flex: 1, overflow: "auto", padding: 8, overscrollBehavior: "contain" }}>
         {turns?.length === 0 && (
           <p style={{ color: color.textMuted }}>No transcript yet (engine session id not captured, or no turns).</p>
         )}
