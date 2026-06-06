@@ -39,6 +39,14 @@ const RUN_TEARDOWN_DELAY_MS = 250;
  */
 export type RunWebhookPoster = (url: string, body: unknown, timeoutMs: number) => Promise<void>;
 
+/**
+ * Agent Runs (capstone fix): fallback hard run-timeout (ms) when the boot-bound `platform.timeouts.runMs`
+ * isn't threaded in (the 3-arg test constructor). A run still non-terminal after this is force-marked
+ * `timed_out` + torn down — the backstop for an agent that finishes WITHOUT calling submit_result (which
+ * otherwise hangs the run `running` + the session live forever). Mirrors the git-timeout module fallback.
+ */
+const RUN_TIMEOUT_MS = 600_000; // 10 min
+
 /** Per-POST ceiling for a run webhook (bounds a hung endpoint, like GIT_*_TIMEOUT_MS). Test-overridable. */
 const RUN_WEBHOOK_TIMEOUT_MS = 5_000;
 /** At most this many delivery attempts (best-effort; the design calls for ≤1–2 retries). */
@@ -73,14 +81,27 @@ export class SessionService {
   /** Agent Runs R3 run-webhook delivery (injectable for tests; defaults to a bounded fetch + 5s cap). */
   private readonly runWebhookPost: RunWebhookPoster;
   private readonly runWebhookTimeoutMs: number;
+  /**
+   * Agent Runs (capstone fix): BOOT-BOUND hard run-timeout (resolved `platform.timeouts.runMs`), threaded
+   * by index.ts like the git timeouts; falls back to RUN_TIMEOUT_MS for the 3-arg test constructor. Tests
+   * pass a tiny value to exercise the timeout deterministically.
+   */
+  private readonly runTimeoutMs: number;
+  /**
+   * Live per-run hard-timeout handles, keyed by runId. Armed in startRun; CLEARED on every terminal
+   * transition (submit / cancel / timeout-fire / session-exit) so a timer never fires late or
+   * double-tears-down. A run absent from the map has no pending timer (already terminal or never armed).
+   */
+  private readonly runTimers = new Map<string, ReturnType<typeof setTimeout>>();
   constructor(
     private db: Db, private pty: PtyHost, private control: OrchestrationControl,
-    opts?: { gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number },
+    opts?: { gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number; runTimeoutMs?: number },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
     this.provisionMs = opts?.provisionMs;
     this.runWebhookPost = opts?.runWebhookPost ?? defaultRunWebhookPost;
     this.runWebhookTimeoutMs = opts?.runWebhookTimeoutMs ?? RUN_WEBHOOK_TIMEOUT_MS;
+    this.runTimeoutMs = opts?.runTimeoutMs ?? RUN_TIMEOUT_MS;
   }
 
   /**
@@ -710,7 +731,35 @@ export class SessionService {
       browserTesting: false,
     });
     this.db.setRunStatus(runId, "running"); // the startup-prompt turn is in flight
+    // Arm the hard run-timeout (capstone BUG 2): if the agent finishes WITHOUT submit_result, nothing
+    // else makes the run terminal — this backstop force-marks it `timed_out` + tears down. Cleared on any
+    // terminal transition. `unref` so a pending timer never keeps the daemon process alive on its own.
+    const timer = setTimeout(() => this.onRunTimeout(runId), this.runTimeoutMs);
+    timer.unref?.();
+    this.runTimers.set(runId, timer);
     return { run: { ...run, status: "running" }, session: { ...session, processState: "live" } };
+  }
+
+  /** Clear (and drop) a run's pending hard-timeout handle, if any. Idempotent — safe on an unarmed run. */
+  private clearRunTimer(runId: string): void {
+    const timer = this.runTimers.get(runId);
+    if (timer) { clearTimeout(timer); this.runTimers.delete(runId); }
+  }
+
+  /**
+   * Hard run-timeout fired (capstone BUG 2): the run sat non-terminal for runTimeoutMs. If a terminal
+   * transition already won the race (submit/cancel/exit), do nothing; otherwise force it `timed_out`
+   * (terminal BEFORE teardown, mirroring cancelRun) and graceful-stop its session → onRunSessionExit
+   * finalizes + fires the webhook with status=timed_out.
+   */
+  private onRunTimeout(runId: string): void {
+    this.runTimers.delete(runId); // the handle has fired; drop it
+    const run = this.db.getRun(runId);
+    if (!run) return;
+    const terminal = run.status === "completed" || run.status === "failed" || run.status === "timed_out" || run.status === "cancelled";
+    if (terminal) return; // a terminal transition beat the timer — nothing to do
+    this.db.failRun(run.id, `run exceeded the hard timeout (${this.runTimeoutMs}ms) without calling submit_result`, "timed_out");
+    if (run.sessionId) this.pty.stop(run.sessionId, "graceful"); // R2 teardown path → onRunSessionExit fires the webhook
   }
 
   /**
@@ -730,9 +779,15 @@ export class SessionService {
     }
     const v = this.validateRunPayload(run.schema, payload);
     if (!v.ok) {
-      return { ok: false, error: "result did not match the required JSON Schema; correct it and call submit_result again", errors: v.errors };
+      // Capstone BUG 1: when a STRING payload still fails, hint that result should be a JSON value/object,
+      // not a stringified JSON string (the common LLM failure that looped a real agent 7×).
+      const hint = v.stringHint
+        ? " — NOTE: you passed `result` as a STRING; pass it as a JSON object/value matching the schema, NOT a stringified JSON string"
+        : "";
+      return { ok: false, error: `result did not match the required JSON Schema; correct it and call submit_result again${hint}`, errors: v.errors };
     }
-    this.db.recordRunResult(run.id, payload); // terminal (completed) BEFORE teardown
+    this.clearRunTimer(run.id); // terminal transition — disarm the hard run-timeout
+    this.db.recordRunResult(run.id, v.value); // record the NORMALIZED value (parsed if it was stringified-JSON) — terminal (completed) BEFORE teardown
     // Deferred deterministic graceful-stop: let the {ok:true} tool response flush to the agent first (the
     // Ctrl-C goes to claude's stdin, independent of this HTTP response, but deferring guarantees the agent
     // sees the acceptance before its turn unwinds). onRunSessionExit then GCs the snapshot on the pty exit.
@@ -741,24 +796,48 @@ export class SessionService {
   }
 
   /**
-   * Validate a `submit_result` payload against the run's caller-supplied JSON Schema (ajv). No schema ⇒
-   * freeform accept. A schema that fails to COMPILE (malformed/garbage caller input) must NEVER crash the
-   * daemon AND must not trap the agent in an unsatisfiable retry loop, so it degrades to freeform-accept
-   * (logged). `strict:false` tolerates non-strict-mode schemas. Returns precise, agent-readable errors.
+   * Validate a `submit_result` payload against the run's caller-supplied JSON Schema (ajv) and return the
+   * NORMALIZED value to record. No schema ⇒ freeform accept. A schema that fails to COMPILE
+   * (malformed/garbage caller input) must NEVER crash the daemon AND must not trap the agent in an
+   * unsatisfiable retry loop, so it degrades to freeform-accept (logged). `strict:false` tolerates
+   * non-strict-mode schemas. Returns precise, agent-readable errors on a real mismatch.
+   *
+   * Capstone BUG 1 — TOLERATE a stringified-JSON result. The validate-raw-FIRST ordering is the safety
+   * guarantee: a result that already matches (incl. a legitimately-string result against {type:"string"})
+   * is accepted + recorded VERBATIM. ONLY when the raw payload fails AND it is a string do we attempt
+   * `JSON.parse` and re-validate the PARSED value — so the very common LLM habit of stringifying the JSON
+   * answer is accepted and the run records the parsed OBJECT, while a real string result is never
+   * double-parsed. `stringHint` flags a still-failing string payload so the caller can nudge the agent.
    */
-  private validateRunPayload(schema: unknown, payload: unknown): { ok: true } | { ok: false; errors: string[] } {
-    if (schema == null) return { ok: true }; // freeform run — accept any JSON/text
+  private validateRunPayload(schema: unknown, payload: unknown):
+    | { ok: true; value: unknown }
+    | { ok: false; errors: string[]; stringHint: boolean } {
+    if (schema == null) return { ok: true, value: payload }; // freeform run — accept any JSON/text
     let validate: ReturnType<Ajv["compile"]>;
     try {
       validate = new Ajv({ allErrors: true, strict: false }).compile(schema as object);
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn(`[run] caller schema failed to compile — accepting freeform: ${(e as Error).message}`);
-      return { ok: true };
+      return { ok: true, value: payload };
     }
-    if (validate(payload)) return { ok: true };
-    const errors = (validate.errors ?? []).map((er) => `${er.instancePath || "(root)"} ${er.message ?? "invalid"}`.trim());
-    return { ok: false, errors: errors.length ? errors : ["payload did not match the schema"] };
+    const errorsOf = (v: ReturnType<Ajv["compile"]>): string[] => {
+      const errors = (v.errors ?? []).map((er) => `${er.instancePath || "(root)"} ${er.message ?? "invalid"}`.trim());
+      return errors.length ? errors : ["payload did not match the schema"];
+    };
+    // Validate the RAW payload first — a result that already matches (incl. a real string result) is
+    // recorded verbatim, NEVER double-parsed.
+    if (validate(payload)) return { ok: true, value: payload };
+    const rawErrors = errorsOf(validate);
+    // Raw failed AND it's a string → try parsing it and validating the parsed value (the stringified-JSON
+    // tolerance). On success, accept + record the PARSED value (not the string).
+    if (typeof payload === "string") {
+      let parsed: unknown;
+      try { parsed = JSON.parse(payload); } catch { return { ok: false, errors: rawErrors, stringHint: true }; }
+      if (validate(parsed)) return { ok: true, value: parsed };
+      return { ok: false, errors: errorsOf(validate), stringHint: true };
+    }
+    return { ok: false, errors: rawErrors, stringHint: false };
   }
 
   /**
@@ -772,6 +851,7 @@ export class SessionService {
   onRunSessionExit(sessionId: string): void {
     const run = this.db.getRunBySession(sessionId);
     if (!run) return;
+    this.clearRunTimer(run.id); // catch-all: a session exit is terminal for its run — disarm any pending timer
     const session = this.db.getSession(sessionId);
     if (run.status !== "completed" && run.status !== "cancelled" && run.status !== "timed_out") {
       this.db.failRun(run.id, "run session exited before submit_result");
@@ -802,6 +882,7 @@ export class SessionService {
     const terminal = run.status === "completed" || run.status === "failed" || run.status === "timed_out" || run.status === "cancelled";
     if (terminal) return { status: run.status }; // idempotent no-op on an already-terminal run
     this.db.failRun(run.id, "cancelled by caller", "cancelled"); // terminal BEFORE teardown
+    this.clearRunTimer(run.id); // disarm the hard run-timeout
     if (run.sessionId) this.pty.stop(run.sessionId, "graceful"); // R2 teardown path → onRunSessionExit fires the webhook
     return { status: "cancelled" };
   }
