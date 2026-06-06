@@ -219,6 +219,18 @@ async function main(): Promise<void> {
   const reconcileTimer = setInterval(() => pty.reconcile(), reconcileMs);
   console.log(`[boot] input-queue reconcile on (tick ${reconcileMs}ms)`);
 
+  // Periodic transcript-snapshot backstop — closes the hard-crash-no-signal gap the graceful
+  // SIGINT/SIGTERM hook (5f838ef) can't cover: a kill-9 / power-loss fires NO signal, and a long-lived
+  // session has no snapshot until it exits. A low-frequency timer snapshots every LIVE session's engine
+  // transcript; snapshotTranscript is mtime-guarded → a cheap no-op when a session's JSONL is unchanged.
+  // Best-effort: snapshotAllLive swallows per-session failures and never throws; the try guards the rest.
+  // BOOT-BOUND cadence from the resolved platform config (LOOM_SNAPSHOT_INTERVAL_MS env, default ~7m).
+  const snapshotMs = watchers.snapshotMs;
+  const snapshotTimer = setInterval(() => {
+    try { sessions.snapshotAllLive(); } catch { /* never let the periodic ticker throw */ }
+  }, snapshotMs);
+  console.log(`[boot] periodic transcript-snapshot on (tick ${snapshotMs}ms)`);
+
   // Manager context-recycle watcher — nudges a manager nearing its model's context window to hand off
   // to a fresh successor (run /session-end → recycle_me). Ratio scales with the model. 0 disables.
   const recycleRatio = Number(process.env.LOOM_RECYCLE_CONTEXT_RATIO) || resolved.orchestration.recycleAtContextRatio;
@@ -284,7 +296,7 @@ async function main(): Promise<void> {
       // without this a long-lived session loses its transcript when Claude later prunes the JSONL.
       // Best-effort + never-throws (snapshotAllLive swallows per-session failures); must not block exit.
       try { const n = sessions.snapshotAllLive(); if (n > 0) console.log(`[shutdown] snapshotted ${n} live transcript(s)`); } catch { /* never block the exit */ }
-      scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); wakes.stop(); clearInterval(reconcileTimer); contextWatcher.stop(); idleWatcher.stop(); dbBackupWatcher.stop(); process.exit(0);
+      scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); dbBackupWatcher.stop(); process.exit(0);
     });
   }
 }

@@ -141,6 +141,7 @@ const watchersOverride = z.object({
   wakeMs: watcherMs,
   schedulerMs: watcherMs,
   reconcileMs: watcherMs,
+  snapshotMs: watcherMs,
 }).strict();
 const timeoutsOverride = z.object({
   gitOpMs: z.number().int().min(1000).max(120000).optional(),

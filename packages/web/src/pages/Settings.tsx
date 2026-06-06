@@ -267,6 +267,7 @@ const GLOBAL_FIELDS: GlobalFieldDesc[] = [
   { grp: "watchers", key: "wakeMs", label: "Wake tick (s)", unit: "s" },
   { grp: "watchers", key: "schedulerMs", label: "Scheduler tick (s)", unit: "s" },
   { grp: "watchers", key: "reconcileMs", label: "Reconcile (s)", unit: "s" },
+  { grp: "watchers", key: "snapshotMs", label: "Transcript snapshot (s)", unit: "s" },
   // Timeouts
   { grp: "timeouts", key: "gitOpMs", label: "Git remote op (s)", unit: "s" },
   { grp: "timeouts", key: "gitLocalMs", label: "Git local op (s)", unit: "s" },
