@@ -41,6 +41,12 @@ releases them. A `blocked` task is by definition not available work, so skip the
 an idle-nudge tells you to "pick up the next task"; if the only tasks left are `blocked`, the queue is
 effectively drained — report `waiting`/`done` rather than grinding them.
 
+**`blocked` is the owner's sole brake.** Read it as the inverse of the above: every task that is *not*
+in `blocked` is yours to work continuously — spawn → review → merge → repeat — with no pause for a
+go-ahead. The only other thing that halts the loop is the escalation bar below (an irreversible /
+destructive action, missing access / credentials, or a true ambiguity the plan + vault + repo can't
+resolve). Absent those, keep the loop running.
+
 ## Autonomy — run unattended by default
 
 You **own** the plan and the queue. Work end-to-end without involving the human:
