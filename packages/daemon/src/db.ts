@@ -587,6 +587,39 @@ export class Db {
   archiveProject(id: string): void {
     this.db.prepare("UPDATE projects SET archived_at = ? WHERE id = ?").run(new Date().toISOString(), id);
   }
+  /** Restore a soft-archived project (clear archived_at) — mirrors restoreSession. */
+  restoreProject(id: string): void {
+    this.db.prepare("UPDATE projects SET archived_at = NULL WHERE id = ?").run(id);
+  }
+  /**
+   * PERMANENTLY delete a project and EVERYTHING under it, in ONE transaction (all-or-nothing) — the
+   * irreversible counterpart to archiveProject. Cascades the project's agents, their sessions (+ each
+   * session's pending wakes), tasks, the agents' schedules, plus the project-scoped api_keys / runs /
+   * run_events so no orphan rows survive. SQLite FKs are not enforced (no PRAGMA foreign_keys=ON), so
+   * order is for clarity, not constraint-safety. Owns ROWS ONLY — on-disk transcript snapshots are the
+   * caller's job (gateway), mirroring deleteSession; returns the deleted session ids so the caller can
+   * drop their snapshots. Does NOT guard reserved/live — the REST layer enforces those FIRST.
+   */
+  deleteProject(id: string): { sessionIds: string[] } {
+    const sessionIds = (this.db.prepare("SELECT id FROM sessions WHERE project_id = ?").all(id) as Row[]).map((r) => r.id as string);
+    const agentIds = (this.db.prepare("SELECT id FROM agents WHERE project_id = ?").all(id) as Row[]).map((r) => r.id as string);
+    this.db.transaction(() => {
+      for (const sid of sessionIds) this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sid);
+      for (const aid of agentIds) this.db.prepare("DELETE FROM schedules WHERE agent_id = ?").run(aid);
+      this.db.prepare("DELETE FROM run_events WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM runs WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM api_keys WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM tasks WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM sessions WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM agents WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+    })();
+    return { sessionIds };
+  }
+  /** Count of a project's sessions still in processState 'live' — the archive/delete guard ("stop the fleet first"). */
+  countLiveSessionsInProject(id: string): number {
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE project_id = ? AND process_state = 'live'").get(id) as { c: number }).c;
+  }
 
   // --- platform config (daemon-GLOBAL tuning override; singleton row, JSON blob) ---
   /**
@@ -654,6 +687,27 @@ export class Db {
     if (names.length === 0) return;
     const set = names.map((c) => `${c} = ?`).join(", ");
     this.db.prepare(`UPDATE agents SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
+  /**
+   * PERMANENTLY delete an agent and CASCADE its sessions (+ each session's pending wakes), the agent's
+   * schedules, and any runs that referenced it — in ONE transaction. Owns ROWS ONLY; the caller drops
+   * the deleted sessions' on-disk transcript snapshots (mirrors deleteSession), so returns the deleted
+   * session ids. Does NOT guard live sessions — the REST layer blocks that FIRST ("stop the fleet first").
+   */
+  deleteAgent(id: string): { sessionIds: string[] } {
+    const sessionIds = (this.db.prepare("SELECT id FROM sessions WHERE agent_id = ?").all(id) as Row[]).map((r) => r.id as string);
+    this.db.transaction(() => {
+      for (const sid of sessionIds) this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sid);
+      this.db.prepare("DELETE FROM schedules WHERE agent_id = ?").run(id);
+      this.db.prepare("DELETE FROM runs WHERE agent_id = ?").run(id);
+      this.db.prepare("DELETE FROM sessions WHERE agent_id = ?").run(id);
+      this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+    })();
+    return { sessionIds };
+  }
+  /** Count of an agent's sessions still in processState 'live' — the agent-delete guard ("stop the fleet first"). */
+  countLiveSessionsForAgent(id: string): number {
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE agent_id = ? AND process_state = 'live'").get(id) as { c: number }).c;
   }
 
   // --- api keys (Agent Runs R1: project-scoped, hashed-at-rest, human-managed) -------------------

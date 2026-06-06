@@ -149,3 +149,12 @@ export function readArchivedTranscript(projectId: string, sessionId: string): Tr
 export function deleteArchivedTranscript(projectId: string, sessionId: string): void {
   try { fs.rmSync(archivedTranscriptPath(projectId, sessionId), { force: true }); } catch { /* best-effort */ }
 }
+
+/**
+ * Best-effort removal of ALL transcript snapshots for a project (on PERMANENT project delete) — drops
+ * the whole `LOOM_HOME/archives/<projectId>` dir in one shot, so no orphan snapshot survives the
+ * cascade. Never throws (mirrors deleteArchivedTranscript). A project with no snapshots dir is a no-op.
+ */
+export function deleteProjectArchives(projectId: string): void {
+  try { fs.rmSync(path.join(LOOM_HOME, "archives", projectId), { recursive: true, force: true }); } catch { /* best-effort */ }
+}
