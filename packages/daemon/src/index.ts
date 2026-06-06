@@ -20,6 +20,7 @@ import { UsageStatusPoller } from "./orchestration/usage-status.js";
 import { WakeService } from "./orchestration/wake.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
 import { IdleWatcher } from "./orchestration/idle-watcher.js";
+import { BusyWorkerWatcher } from "./orchestration/busy-worker-watcher.js";
 import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestration/db-backup.js";
 import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
@@ -246,6 +247,14 @@ async function main(): Promise<void> {
   const idleWatcher = new IdleWatcher({ db, pty, control, recycleRatio, intervalMs: idleWatchMs });
   idleWatcher.start();
   console.log(`[boot] idle-manager watcher on (tick ${idleWatchMs}ms)`);
+
+  // Busy-worker stuck watchdog — the inverse of the idle-manager watcher: surfaces a LIVE worker stuck
+  // `busy` past the per-project `stuckWorkerMinutes` window (no turn boundary → stale lastActivity) to
+  // its OWNING MANAGER as a `worker_stuck` event + a nudge it can act on (re-nudge / recycle). Never a
+  // hard kill. Shares the idle-watch cadence (sibling watchdog); 0 disables per project.
+  const busyWorkerWatcher = new BusyWorkerWatcher({ db, pty, control, intervalMs: idleWatchMs });
+  busyWorkerWatcher.start();
+  console.log(`[boot] busy-worker stuck watchdog on (tick ${idleWatchMs}ms)`);
 
   // Automatic DB-backup ticker — periodic online snapshots of loom.db into ~/.loom/backups/auto/,
   // rotated to the newest `keep`. Best-effort; never blocks/crashes. Disabled when backups are off or
