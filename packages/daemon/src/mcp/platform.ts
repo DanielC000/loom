@@ -148,6 +148,7 @@ const timeoutsOverride = z.object({
   gitPushMs: z.number().int().min(1000).max(600000).optional(),
   provisionMs: z.number().int().min(10000).max(1800000).optional(),
   busyStaleMs: z.number().int().min(30000).max(1800000).optional(),
+  runMs: z.number().int().min(30000).max(3600000).optional(), // Agent Runs hard run-timeout: 30s..1h
 }).strict();
 const platformConfigOverrideSchema = z.object({
   rateLimit: rateLimitOverride.optional(),

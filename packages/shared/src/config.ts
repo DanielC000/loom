@@ -203,6 +203,12 @@ export interface TimeoutConfig {
   provisionMs: number;
   /** PTY busy-flag stale threshold. Default 300000. */
   busyStaleMs: number;
+  /**
+   * Agent Runs hard run-timeout (ms): the wall-clock ceiling an ephemeral `run` may stay non-terminal
+   * before it is force-marked `timed_out` + torn down (backstops an agent that finishes without ever
+   * calling submit_result). Boot-bound into SessionService like the git timeouts. Default 600000 (10m).
+   */
+  runMs: number;
 }
 
 /**
@@ -308,7 +314,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   platform: {
     rateLimit: { defaultBackoffMs: 18000000, resetBufferMs: 10000, deadlineAfterResetMs: 1800000, deadlineNoResetMs: 21600000, recencyWindowMs: 21600000 },
     watchers: { contextWatchMs: 60000, idleWatchMs: 60000, rateLimitWatchMs: 60000, usagePollMs: 60000, wakeMs: 60000, schedulerMs: 60000, reconcileMs: 10000 },
-    timeouts: { gitOpMs: 15000, gitLocalMs: 15000, gitPushMs: 45000, provisionMs: 180000, busyStaleMs: 300000 },
+    timeouts: { gitOpMs: 15000, gitLocalMs: 15000, gitPushMs: 45000, provisionMs: 180000, busyStaleMs: 300000, runMs: 600000 },
   },
   docLint: true, // Pillar D vault-lint hook on by default
 };
@@ -452,6 +458,7 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
       gitPushMs: po?.timeouts?.gitPushMs ?? d.timeouts.gitPushMs,
       provisionMs: po?.timeouts?.provisionMs ?? d.timeouts.provisionMs,
       busyStaleMs: po?.timeouts?.busyStaleMs ?? d.timeouts.busyStaleMs,
+      runMs: po?.timeouts?.runMs ?? d.timeouts.runMs,
     },
   };
 }

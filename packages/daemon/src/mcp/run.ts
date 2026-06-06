@@ -40,11 +40,13 @@ export class RunMcpRouter {
       "submit_result",
       {
         description:
-          "Submit your final answer for this run and END. Pass your answer as `result`. If this run has a " +
-          "JSON Schema, `result` is validated against it server-side: on a mismatch you get a structured " +
-          "validation error back — CORRECT your output and call submit_result again (this is the only way to " +
-          "finish). On success the run is recorded + completed and your session is torn down — do NOT keep " +
-          "working after it accepts. With no schema, any JSON/text is accepted.",
+          "Submit your final answer for this run and END. Pass your answer as `result` — a JSON " +
+          "object/value matching the schema, NOT a stringified JSON string (e.g. pass {\"answer\":42}, " +
+          "not \"{\\\"answer\\\":42}\"). If this run has a JSON Schema, `result` is validated against it " +
+          "server-side: on a mismatch you get a structured validation error back — CORRECT your output and " +
+          "call submit_result again (this is the only way to finish). On success the run is recorded + " +
+          "completed and your session is torn down — do NOT keep working after it accepts. With no schema, " +
+          "any JSON/text is accepted.",
         inputSchema: { result: z.any() },
       },
       async ({ result }) => {

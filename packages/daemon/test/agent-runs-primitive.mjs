@@ -192,6 +192,67 @@ try {
   check("5 RunMcpRouter.resolveRole is NON-null for a run session", runRouter.resolveRole(s3.id) !== null);
   check("5 RunMcpRouter.resolveRole is null for a non-run (plain) session", runRouter.resolveRole(plain.id) === null);
   check("5 RunMcpRouter.resolveRole is null for an unknown session", runRouter.resolveRole("does-not-exist") === null);
+
+  // ===================== 6. CAPSTONE FIXES — stringified-result tolerance (BUG 1) + hard run-timeout (BUG 2) =====================
+  // These reproduce what the real-claude capstone surfaced (the hermetic R2 tests missed them: they pass
+  // `result` as an OBJECT and drive teardown directly). The fakes here let us prove both fixes claude-free.
+
+  // --- BUG 1: submit_result tolerates a STRINGIFIED-JSON result against an OBJECT schema (the exact case
+  //     that looped a real agent 7×) and RECORDS the parsed OBJECT, not the raw string. ---
+  const objSchema = { type: "object", required: ["answer"], additionalProperties: true,
+    properties: { answer: { type: "number" }, reply: { type: "string" } } };
+  const { run: rStr, session: sStr } = await svc.startRun({ agentId: "agentEndpoint", input: { q: "ping" }, schema: objSchema });
+  const strRes = svc.submitRunResult(sStr.id, '{"reply":"pong","answer":42}'); // result passed as a STRINGIFIED JSON
+  check("6 BUG1: a stringified-JSON result is ACCEPTED against an object schema", strRes.ok === true);
+  const recStr = db.getRun(rStr.id);
+  check("6 BUG1: the run records the PARSED OBJECT (not the raw string)",
+    recStr.status === "completed" && typeof recStr.result === "object" && recStr.result !== null
+    && recStr.result.answer === 42 && recStr.result.reply === "pong");
+
+  // --- BUG 1 safety: a REAL {type:"string"} schema still validates a plain string (raw validated FIRST,
+  //     so a legitimately-string result is NEVER double-parsed) — incl. a JSON-looking string recorded verbatim. ---
+  const { run: rRealStr, session: sRealStr } = await svc.startRun({ agentId: "agentEndpoint", input: {}, schema: { type: "string" } });
+  const realStr = svc.submitRunResult(sRealStr.id, "hello world");
+  check("6 BUG1: a real {type:'string'} schema accepts a plain string result",
+    realStr.ok === true && db.getRun(rRealStr.id).result === "hello world");
+  const { run: rNumLike, session: sNumLike } = await svc.startRun({ agentId: "agentEndpoint", input: {}, schema: { type: "string" } });
+  const numLike = svc.submitRunResult(sNumLike.id, "42"); // parses to a number, but raw is already valid → must stay the STRING "42"
+  check("6 BUG1: a JSON-looking string against {type:'string'} is recorded VERBATIM (not double-parsed)",
+    numLike.ok === true && db.getRun(rNumLike.id).result === "42");
+
+  // --- BUG 1: a NON-JSON string against an object schema → still a clean structured error WITH the string hint. ---
+  const { run: rBadStr, session: sBadStr } = await svc.startRun({ agentId: "agentEndpoint", input: {}, schema: objSchema });
+  const badStr = svc.submitRunResult(sBadStr.id, "not json at all");
+  check("6 BUG1: a non-JSON string against an object schema → clean structured error (ok:false + errors[])",
+    badStr.ok === false && Array.isArray(badStr.errors) && badStr.errors.length > 0);
+  check("6 BUG1: the failure error carries the stringified-JSON hint",
+    /string/i.test(badStr.error) && /not a stringified JSON/i.test(badStr.error));
+  check("6 BUG1: a failed string submit leaves the run in-flight (the agent can self-correct)",
+    db.getRun(rBadStr.id).status === "running" && db.getRun(rBadStr.id).result === null);
+
+  // --- BUG 2: the hard run-timeout fires → run `timed_out` + teardown. A SECOND service with a tiny
+  //     injected runTimeoutMs exercises it deterministically (default is 10 min). Shares the same db+host;
+  //     the events sink (bound to `svc`) still finalizes teardown on the pty exit. ---
+  const svcFast = new SessionService(db, host, new OrchestrationControl(), { runTimeoutMs: 50 });
+  const { run: rTo, session: sTo } = await svcFast.startRun({ agentId: "agentEndpoint", input: {}, schema: null });
+  check("6 BUG2: a fresh run is non-terminal (running) with its hard timer armed",
+    db.getRun(rTo.id).status === "running" && svcFast.runTimers.has(rTo.id));
+  await sleep(150); // past the 50ms hard timeout
+  check("6 BUG2: the hard timeout FIRES → run marked timed_out (with an error)",
+    db.getRun(rTo.id).status === "timed_out" && !!db.getRun(rTo.id).error);
+  check("6 BUG2: the fired timer is dropped from the run-timer registry", !svcFast.runTimers.has(rTo.id));
+  host.fireExit(sTo.id); // the graceful-stop's pty exit → onRunSessionExit finalizes teardown
+  check("6 BUG2: a timed_out run's session is torn down (exited, no zombie)", db.getSession(sTo.id).processState === "exited");
+  check("6 BUG2: a timed_out run stays timed_out through teardown (not re-failed)", db.getRun(rTo.id).status === "timed_out");
+
+  // --- BUG 2: a NORMAL submit CLEARS the timer — no late timeout / double-teardown. ---
+  const { run: rClr, session: sClr } = await svcFast.startRun({ agentId: "agentEndpoint", input: {}, schema: null });
+  const clrRes = svcFast.submitRunResult(sClr.id, { done: true }); // submit BEFORE the 50ms timer
+  check("6 BUG2: a submit before the timeout completes the run", clrRes.ok === true && db.getRun(rClr.id).status === "completed");
+  check("6 BUG2: the hard timer is CLEARED from the registry on submit", !svcFast.runTimers.has(rClr.id));
+  await sleep(150); // well past the 50ms hard timeout — a late fire would flip it to timed_out
+  check("6 BUG2: the completed run never flips to timed_out (timer was cleared, no late fire)",
+    db.getRun(rClr.id).status === "completed");
 } finally {
   db.close(); // free the WAL handle before removing the temp dir (Windows)
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }

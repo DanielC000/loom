@@ -110,7 +110,7 @@ async function main(): Promise<void> {
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design
   // BOOT-BOUND: thread the resolved git-op / provision timeouts into the bounded-git + provision seams
   // at SessionService's call-sites (worktree create/remove/branch-delete/merge-detect during boot-reconcile).
-  const sessions = new SessionService(db, pty, control, { gitOpMs: timeouts.gitOpMs, provisionMs: timeouts.provisionMs });
+  const sessions = new SessionService(db, pty, control, { gitOpMs: timeouts.gitOpMs, provisionMs: timeouts.provisionMs, runTimeoutMs: timeouts.runMs });
   // Self-host restart recovery: a manager's `daemon_restart` left an intent naming the sessions to
   // bring back. Read it BEFORE the reconcile so the WHOLE fleet's worktrees are PROTECTED from pass-B GC
   // (recoverStaleSessions just marked every prior-run session 'exited', which would otherwise prune a
