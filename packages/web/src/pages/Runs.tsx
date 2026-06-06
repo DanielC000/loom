@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { AgentRun, RunStatus } from "@loom/shared";
+import type { AgentRun, RunStatus, RunEvent } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { TranscriptPane } from "../components/TranscriptPane";
@@ -53,6 +53,16 @@ export default function Runs() {
     refetchInterval: 4000, // keep in-flight rows + the open detail fresh
   });
 
+  // Follow-up #1: the run audit trail — chiefly cap-rejections (a 429 at POST /api/runs creates NO run row,
+  // so a throttled key is otherwise invisible here). Compact strip above the runs list.
+  const events = useQuery({
+    queryKey: ["run-events", projectId],
+    queryFn: () => api.runEvents(projectId),
+    enabled: !!projectId,
+    refetchInterval: 4000,
+  });
+  const capRejections = (events.data ?? []).filter((e) => e.kind === "cap_rejected");
+
   const rows = runs.data ?? [];
   // Resolve the selected run from the live list so the drawer tracks status changes (running → done).
   const selected = rows.find((r) => r.id === runId) ?? null;
@@ -75,8 +85,9 @@ export default function Runs() {
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 16 }}>
-      {/* LEFT: the project's runs, newest-first */}
+      {/* LEFT: the project's runs, newest-first (preceded by the cap-rejection audit strip) */}
       <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+        {capRejections.length > 0 && <CapRejections events={capRejections} agentName={agentName} />}
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <SectionLabel style={{ margin: 0 }}>Runs ({rows.length})</SectionLabel>
           <span style={{ flex: 1 }} />
@@ -104,6 +115,37 @@ export default function Runs() {
           {selected && <RunDetail run={selected} agentName={agentName(selected.agentId)}
             onCancel={() => cancel.mutate(selected.id)} cancelling={cancel.isPending} />}
         </Panel>
+      </div>
+    </div>
+  );
+}
+
+// Follow-up #1 — the compact cap-rejection audit strip. Each row is a 429 at POST /api/runs that started
+// NO run (so it never appears in the runs list below): which key was throttled, which cap, and observed/limit.
+function CapRejections({ events, agentName }: { events: RunEvent[]; agentName: (id: string) => string }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <SectionLabel style={{ margin: "0 0 8px" }}>Recent cap rejections ({events.length})</SectionLabel>
+      <div style={{ maxHeight: "22vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, paddingRight: 4 }}>
+        {events.map((e) => {
+          const d = (e.detail ?? {}) as { cap?: string; limit?: number; observed?: number; agentId?: string };
+          const capLabel = d.cap === "daily_token" ? "daily token" : d.cap === "concurrency" ? "concurrency" : (d.cap ?? "cap");
+          return (
+            <Panel key={e.id} style={{ padding: "6px 10px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <StatusPill tone="red" label="429" />
+                <span style={{ fontSize: 12, color: color.text }}>{capLabel} cap</span>
+                <span style={{ flex: 1 }} />
+                <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{ts(e.createdAt)}</span>
+              </div>
+              <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <Chip label="key" value={e.keyId ? e.keyId.slice(0, 8) : "—"} />
+                {d.agentId && <Chip label="agent" value={agentName(d.agentId)} tone="cyan" />}
+                {d.observed != null && d.limit != null && <Chip label="observed" value={`${d.observed} / ${d.limit}`} />}
+              </div>
+            </Panel>
+          );
+        })}
       </div>
     </div>
   );

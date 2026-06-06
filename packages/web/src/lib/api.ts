@@ -1,4 +1,4 @@
-import type { Project, Agent, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun } from "@loom/shared";
+import type { Project, Agent, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
@@ -180,6 +180,9 @@ export const api = {
     get<TranscriptTurn[]>(`/api/projects/${projectId}/runs/${runId}/transcript`),
   cancelRun: (projectId: string, runId: string) =>
     post<{ runId: string; status: AgentRun["status"] }>(`/api/projects/${projectId}/runs/${runId}/cancel`),
+  // Run audit trail (follow-up #1) — chiefly cap-rejections (a 429 at POST /api/runs makes NO run row, so
+  // it's invisible in the runs list). Project-scoped, newest-first, bounded; same unauthed-loopback posture.
+  runEvents: (projectId: string) => get<RunEvent[]>(`/api/projects/${projectId}/run-events`),
   // Pending one-shot wake-ups scheduled for a session (the wake_me primitive).
   sessionWakes: (sessionId: string) => get<Wake[]>(`/api/sessions/${sessionId}/wakes`),
   cancelWake: (sessionId: string, wakeId: string) =>

@@ -674,12 +674,31 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // idempotency replay above, which starts nothing). Concurrency is the deterministic must-have; the
     // daily token cap is a coarse best-effort backstop over the R2 usage snapshot (no spend cap — Loom
     // has no cost model yet; see [[Agent Runs]]). At/over a cap → 429 and NO run starts.
-    if (key.caps.maxConcurrentRuns != null && deps.db.countInFlightRunsForKey(key.id) >= key.caps.maxConcurrentRuns) {
-      return reply.code(429).send({ error: "concurrency cap reached" });
+    // Agent Runs follow-up #1 — best-effort run AUDIT at a cap-rejection. A 429 here creates NO run row, so
+    // without this record the throttle is completely invisible (nothing in the runs list/UI). Wrapped so an
+    // audit-store fault NEVER changes the 429 response or the cap logic — we only ADD the record alongside
+    // the (unchanged) enforcement below. `observed` is captured from the SAME query the gate compares.
+    const recordCapReject = (cap: "concurrency" | "daily_token", limit: number, observed: number) => {
+      try {
+        deps.db.insertRunEvent({
+          id: randomUUID(), projectId: key.projectId, keyId: key.id, runId: null,
+          kind: "cap_rejected", detail: { cap, limit, observed, agentId: b.agent },
+          createdAt: new Date().toISOString(),
+        });
+      } catch { /* audit is best-effort — a write fault must never break the 429 / cap path */ }
+    };
+    if (key.caps.maxConcurrentRuns != null) {
+      const inFlight = deps.db.countInFlightRunsForKey(key.id);
+      if (inFlight >= key.caps.maxConcurrentRuns) {
+        recordCapReject("concurrency", key.caps.maxConcurrentRuns, inFlight);
+        return reply.code(429).send({ error: "concurrency cap reached" });
+      }
     }
     if (key.caps.dailyTokenCap != null) {
       const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      if (deps.db.sumKeyTokensSince(key.id, since) >= key.caps.dailyTokenCap) {
+      const used = deps.db.sumKeyTokensSince(key.id, since);
+      if (used >= key.caps.dailyTokenCap) {
+        recordCapReject("daily_token", key.caps.dailyTokenCap, used);
         return reply.code(429).send({ error: "daily token cap reached" });
       }
     }
@@ -765,6 +784,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!run || run.projectId !== id) return reply.code(404).send({ error: "run not found" });
     const { status } = deps.sessions.cancelRun(run.id);
     return reply.send({ runId: run.id, status });
+  });
+  // Agent Runs follow-up #1 — the run AUDIT TRAIL reader (HUMAN/loopback, project-scoped; SAME unauthed
+  // posture as the runs list above, OFF the R3 key-authed path + every MCP surface). Surfaces the events
+  // that have no run row of their own — chiefly cap-rejections (a 429 at POST /api/runs creates NO run, so
+  // it's otherwise invisible) — newest-first, bounded (default 200; optional ?limit clamped to [1,1000]).
+  app.get("/api/projects/:id/run-events", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    const raw = parseInt(String((req.query as { limit?: string })?.limit ?? ""), 10);
+    const limit = Number.isFinite(raw) ? Math.min(Math.max(raw, 1), 1000) : 200;
+    return deps.db.listRunEvents(id, limit); // full RunEvent rows, newest first
   });
 
   app.post("/api/projects/:id/tasks", async (req, reply) => {

@@ -32,7 +32,7 @@ import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake,
-  ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus,
+  ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind,
 } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret } from "./keys/hash.js";
 
@@ -124,6 +124,21 @@ CREATE TABLE IF NOT EXISTS runs (
   created_at TEXT NOT NULL,
   started_at TEXT,
   ended_at TEXT
+);
+-- Agent Runs follow-up #1: a run-scoped audit trail. Brand-new ⇒ CREATE TABLE IF NOT EXISTS is itself the
+-- additive migration (no ALTER), exactly like the runs/api_keys tables; an existing DB simply gains an empty
+-- table on next boot. Captures the genuinely-invisible case: a 429 cap-rejection at POST /api/runs that makes
+-- NO run row. Distinct from orchestration_events (manager-tree shaped, manager_session_id NOT NULL, readers
+-- session-keyed) — a cap-reject has no session. key_id/run_id are nullable (a cap_rejected carries the
+-- throttled key but no run); detail_json is kind-specific JSON. Run lifecycle stays on the runs row.
+CREATE TABLE IF NOT EXISTS run_events (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  key_id TEXT,                                          -- the key the event concerns (NULL if not key-scoped)
+  run_id TEXT,                                          -- the run it concerns (NULL for cap_rejected — none made)
+  kind TEXT NOT NULL,                                  -- cap_rejected (+ optional future lifecycle markers)
+  detail_json TEXT,                                    -- kind-specific JSON ({cap,limit,observed,agentId})
+  created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
@@ -224,6 +239,7 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id, created_
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+CREATE INDEX IF NOT EXISTS idx_run_events_project ON run_events(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_fire_at);
 CREATE INDEX IF NOT EXISTS idx_wakes_due ON wakes(wake_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id, last_activity DESC);
@@ -859,6 +875,29 @@ export class Db {
     return row.t ?? 0;
   }
 
+  // --- Agent Runs follow-up #1: the run-scoped audit trail (cap-rejections) -------------------------
+  // Project-scoped, NOT session-keyed (orchestration_events doesn't fit — a cap-reject has no session).
+  // The core write is the 429 cap-rejection at POST /api/runs (no run row is created there, so this is the
+  // ONLY trace). The route's call site swallows any fault from insertRunEvent — audit is best-effort and
+  // must never change the 429 response or the cap enforcement.
+
+  /** Append a run-scoped audit event (detail serialized to JSON). */
+  insertRunEvent(e: RunEvent): void {
+    this.db.prepare(
+      `INSERT INTO run_events (id,project_id,key_id,run_id,kind,detail_json,created_at)
+       VALUES (@id,@projectId,@keyId,@runId,@kind,@detailJson,@createdAt)`,
+    ).run({
+      id: e.id, projectId: e.projectId, keyId: e.keyId ?? null, runId: e.runId ?? null,
+      kind: e.kind, detailJson: e.detail == null ? null : JSON.stringify(e.detail),
+      createdAt: e.createdAt,
+    });
+  }
+  /** A project's run-events, newest first, bounded (default 200) — the Runs-page cap-rejection strip. */
+  listRunEvents(projectId: string, limit = 200): RunEvent[] {
+    return (this.db.prepare("SELECT * FROM run_events WHERE project_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
+      .all(projectId, limit) as Row[]).map(toRunEvent);
+  }
+
   // --- profiles (platform-level rigs; read path + seed) ---
   listProfiles(): Profile[] {
     return (this.db.prepare("SELECT * FROM profiles ORDER BY name").all() as Row[]).map(toProfile);
@@ -1361,6 +1400,16 @@ function toRun(r0: unknown): AgentRun {
     transcriptRef: (r.transcript_ref as string) ?? null, error: (r.error as string) ?? null,
     webhookUrl: (r.webhook_url as string) ?? null, idempotencyKey: (r.idempotency_key as string) ?? null,
     createdAt: r.created_at as string, startedAt: (r.started_at as string) ?? null, endedAt: (r.ended_at as string) ?? null,
+  };
+}
+function toRunEvent(r0: unknown): RunEvent {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, projectId: r.project_id as string,
+    keyId: (r.key_id as string) ?? null, runId: (r.run_id as string) ?? null,
+    kind: r.kind as RunEventKind,
+    detail: r.detail_json ? (JSON.parse(r.detail_json as string) as Record<string, unknown>) : null,
+    createdAt: r.created_at as string,
   };
 }
 function toProfile(r0: unknown): Profile {
