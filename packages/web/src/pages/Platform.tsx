@@ -82,7 +82,19 @@ export default function Platform() {
         <AuditorSchedules auditorId={auditor?.id} />
       </section>
 
-      {/* --- 5. Auditor history — every audit RUN (auditor session), newest-first, live+exited+archived --- */}
+      {/* --- 5a. Lead history — every Lead RUN (role:"platform" session), newest-first, live+exited+archived --- */}
+      <section>
+        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          Lead history
+          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
+            every Lead run — when it ran, context cost, duration; expand to read the transcript
+          </span>
+        </SectionLabel>
+        <RunHistory reservedProjectId={project.id} sessions={platformSessions} role="platform"
+          emptyLabel="No Lead runs yet — the Platform Lead hasn’t run." />
+      </section>
+
+      {/* --- 5b. Auditor history — every audit RUN (auditor session), newest-first, live+exited+archived --- */}
       <section>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           Auditor history
@@ -90,7 +102,8 @@ export default function Platform() {
             every audit run — trigger, context cost, findings filed; expand to read the transcript
           </span>
         </SectionLabel>
-        <AuditorHistory reservedProjectId={project.id} sessions={platformSessions} />
+        <RunHistory reservedProjectId={project.id} sessions={platformSessions} role="auditor"
+          emptyLabel="No audit runs yet — the Auditor hasn’t run." showFindings />
       </section>
 
       {/* --- 3. The Platform board — findings + escalations backlog (reused Board component) --- */}
@@ -268,17 +281,20 @@ function fmtDur(startIso: string, endIso: string): string {
   return `${h}h ${m % 60}m`;
 }
 
-// The Auditor's run history — every audit RUN is a role:"auditor" session in the reserved project.
-// Runs = api.allSessions() (live+exited) ∪ api.allArchivedSessions() (god-eye archive, already enriched
-// with projectId), filtered to the reserved project's auditor sessions, newest-first by createdAt. The
-// trigger (a schedule's cron, or "manual") and the findings-filed list both come from a run's
-// orchestrationEvents (schedule_fired / audit_finding) — resolved against schedules() + the reserved
-// board() here. Everything reuses EXISTING api methods — no new daemon/REST. The live+exited reserved
+// A platform agent's run history — every RUN of a given `role` is a session of that role in the reserved
+// project. Used for BOTH the Auditor (role:"auditor", showFindings) and the Lead (role:"platform", no
+// findings — the Lead files no audit_finding events). Runs = api.allSessions() (live+exited) ∪
+// api.allArchivedSessions() (god-eye archive, already enriched with projectId), filtered to the reserved
+// project's sessions of this role, newest-first by createdAt. The trigger (a schedule's cron, or
+// "manual") comes from a run's orchestrationEvents (schedule_fired); the findings-filed list (Auditor
+// only) comes from audit_finding events resolved against the reserved board() — fetched only when
+// showFindings. Everything reuses EXISTING api methods — no new daemon/REST. The live+exited reserved
 // sessions are passed in (already filtered by the page); we add the archive locally.
-function AuditorHistory({ reservedProjectId, sessions }: { reservedProjectId: string; sessions: SessionListItem[] }) {
+function RunHistory({ reservedProjectId, sessions, role, emptyLabel, showFindings = false }:
+  { reservedProjectId: string; sessions: SessionListItem[]; role: SessionRole; emptyLabel: string; showFindings?: boolean }) {
   const archived = useQuery({ queryKey: ["allArchivedSessions"], queryFn: api.allArchivedSessions, refetchInterval: 8000 });
   const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
-  const board = useQuery({ queryKey: ["board", reservedProjectId], queryFn: () => api.board(reservedProjectId), refetchInterval: 8000 });
+  const board = useQuery({ queryKey: ["board", reservedProjectId], queryFn: () => api.board(reservedProjectId), refetchInterval: 8000, enabled: showFindings });
 
   // SINGLE-OPEN / LAZY-MOUNT: at most one expanded run's TranscriptPane is mounted (it refetches ~5s, so
   // mounting N would hammer the daemon). Mirrors the Overview Fleet accordion's openId pattern.
@@ -286,30 +302,31 @@ function AuditorHistory({ reservedProjectId, sessions }: { reservedProjectId: st
   const toggle = (id: string) => setOpenId((cur) => (cur === id ? null : id));
 
   const runs = useMemo(() => {
-    const live = sessions.filter((s) => s.role === "auditor"); // already reserved-project + non-archived
-    const arch = (archived.data ?? []).filter((s) => s.projectId === reservedProjectId && s.role === "auditor");
+    const live = sessions.filter((s) => s.role === role); // already reserved-project + non-archived
+    const arch = (archived.data ?? []).filter((s) => s.projectId === reservedProjectId && s.role === role);
     return [...live, ...arch].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }, [sessions, archived.data, reservedProjectId]);
+  }, [sessions, archived.data, reservedProjectId, role]);
 
   if (runs.length === 0) {
-    return <Panel style={{ padding: 12 }}><span style={{ color: color.textMuted, fontSize: 12 }}>No audit runs yet — the Auditor hasn’t run.</span></Panel>;
+    return <Panel style={{ padding: 12 }}><span style={{ color: color.textMuted, fontSize: 12 }}>{emptyLabel}</span></Panel>;
   }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       {runs.map((run) => (
-        <AuditorRunRow key={run.id} run={run} schedules={schedules.data ?? []} tasks={board.data?.tasks ?? []}
-          open={openId === run.id} onToggle={() => toggle(run.id)} />
+        <RunRow key={run.id} run={run} schedules={schedules.data ?? []} tasks={board.data?.tasks ?? []}
+          showFindings={showFindings} open={openId === run.id} onToggle={() => toggle(run.id)} />
       ))}
     </div>
   );
 }
 
-// One audit run: timing + a live/exited/archived status pill + trigger (schedule cadence or "manual") +
-// model/ctx counters + lastError + the findings it filed (resolved to their board cards), with the
-// transcript expanding inline when open. The trigger + findings come from this run's orchestrationEvents
-// (the auditor session id IS the managerSessionId those events are keyed by). Refetch only while live.
-function AuditorRunRow({ run, schedules, tasks, open, onToggle }:
-  { run: SessionListItem; schedules: Schedule[]; tasks: Task[]; open: boolean; onToggle: () => void }) {
+// One run: timing + a live/exited/archived status pill + trigger (schedule cadence or "manual") +
+// model/ctx counters + lastError + (Auditor only, when showFindings) the findings it filed (resolved to
+// their board cards), with the transcript expanding inline when open. The trigger + findings come from
+// this run's orchestrationEvents (the session id IS the managerSessionId those events are keyed by).
+// Refetch only while live. The Lead (role:"platform") files no findings, so showFindings is false there.
+function RunRow({ run, schedules, tasks, showFindings, open, onToggle }:
+  { run: SessionListItem; schedules: Schedule[]; tasks: Task[]; showFindings: boolean; open: boolean; onToggle: () => void }) {
   const live = !run.archivedAt && run.processState === "live";
   const events = useQuery({
     queryKey: ["orchestrationEvents", run.id],
@@ -349,7 +366,7 @@ function AuditorRunRow({ run, schedules, tasks, open, onToggle }:
         {run.model && <Chip label="model" value={run.model} />}
         {run.ctxInputTokens != null && <Chip label="ctx" value={run.ctxInputTokens.toLocaleString()} />}
         {run.ctxTurns != null && <Chip label="turns" value={run.ctxTurns} />}
-        <Chip label="filed" value={findings.length} tone={findings.length ? "phosphor" : "muted"} />
+        {showFindings && <Chip label="filed" value={findings.length} tone={findings.length ? "phosphor" : "muted"} />}
         <span style={{ flex: 1 }} />
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>last · {fmt(run.lastActivity)} · {run.id.slice(0, 8)}</span>
       </div>
@@ -360,7 +377,7 @@ function AuditorRunRow({ run, schedules, tasks, open, onToggle }:
         </div>
       )}
 
-      {findings.length > 0 && (
+      {showFindings && findings.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", padding: "0 10px 8px 30px" }}>
           <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>findings</span>
           {findings.map((f) => {
