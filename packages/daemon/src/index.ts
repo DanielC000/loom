@@ -278,7 +278,14 @@ async function main(): Promise<void> {
   }
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => { scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); wakes.stop(); clearInterval(reconcileTimer); contextWatcher.stop(); idleWatcher.stop(); dbBackupWatcher.stop(); process.exit(0); });
+    process.on(sig, () => {
+      // Crash/shutdown transcript backstop: snapshot every LIVE session's engine transcript BEFORE we
+      // exit. The pty onExit hook (the per-session snapshot trigger) never fires on a signal-kill, so
+      // without this a long-lived session loses its transcript when Claude later prunes the JSONL.
+      // Best-effort + never-throws (snapshotAllLive swallows per-session failures); must not block exit.
+      try { const n = sessions.snapshotAllLive(); if (n > 0) console.log(`[shutdown] snapshotted ${n} live transcript(s)`); } catch { /* never block the exit */ }
+      scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); wakes.stop(); clearInterval(reconcileTimer); contextWatcher.stop(); idleWatcher.stop(); dbBackupWatcher.stop(); process.exit(0);
+    });
   }
 }
 

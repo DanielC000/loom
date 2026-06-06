@@ -52,6 +52,7 @@
     "test:alert-webhook": "node test/alert-webhook.mjs",
     "test:tasks-filter": "node test/tasks-filter.mjs",
     "test:session-archive": "node test/session-archive.mjs",
+    "test:shutdown-snapshot": "node test/shutdown-snapshot.mjs",
     "test:db-backup": "node test/db-backup.mjs",
     "test:prod-guard": "node test/prod-guard.mjs",
     "test:agent-runs-rest": "node test/agent-runs-rest.mjs",
