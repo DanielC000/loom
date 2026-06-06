@@ -678,7 +678,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // without this record the throttle is completely invisible (nothing in the runs list/UI). Wrapped so an
     // audit-store fault NEVER changes the 429 response or the cap logic — we only ADD the record alongside
     // the (unchanged) enforcement below. `observed` is captured from the SAME query the gate compares.
-    const recordCapReject = (cap: "concurrency" | "daily_token", limit: number, observed: number) => {
+    const recordCapReject = (cap: "concurrency" | "daily_token" | "daily_spend", limit: number, observed: number) => {
       try {
         deps.db.insertRunEvent({
           id: randomUUID(), projectId: key.projectId, keyId: key.id, runId: null,
@@ -700,6 +700,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (used >= key.caps.dailyTokenCap) {
         recordCapReject("daily_token", key.caps.dailyTokenCap, used);
         return reply.code(429).send({ error: "daily token cap reached" });
+      }
+    }
+    // Agent Runs #2 — daily SPEND cap (USD): mirrors the token-cap branch over `db.sumKeySpendSince`
+    // (sum of per-run `usage.costUsd` across the trailing 24h). At/over the cap → 429 and NO run starts;
+    // a cap_rejected audit row records it (best-effort, same store as the other caps). Best-effort by
+    // nature — costUsd is 0 for unpriced models — so it's a backstop, not a hard billing guarantee.
+    if (key.caps.dailySpendCap != null) {
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const spent = deps.db.sumKeySpendSince(key.id, since);
+      if (spent >= key.caps.dailySpendCap) {
+        recordCapReject("daily_spend", key.caps.dailySpendCap, spent);
+        return reply.code(429).send({ error: "daily spend cap reached" });
       }
     }
     try {

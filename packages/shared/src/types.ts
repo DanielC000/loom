@@ -207,7 +207,13 @@ export interface AgentRun {
   schema: unknown | null;
   /** The `submit_result` payload (null until completed). */
   result: unknown | null;
-  /** Usage snapshot captured at teardown (engine context counters in R2; null until then). */
+  /**
+   * Usage snapshot captured at teardown; null until then. Agent Runs #2 made this CUMULATIVE per-run usage
+   * `{ inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, turns, model, costUsd }` (summed
+   * across all turns + priced via the per-model table). `inputTokens` is cumulative billed input (NOT the
+   * old last-turn occupancy). Degrades to the legacy `{ inputTokens, turns, model }` last-turn snapshot
+   * only when the transcript was unreadable at teardown.
+   */
   usage: unknown | null;
   /** Pointer to the retained transcript snapshot (path under LOOM_HOME); null until captured at teardown. */
   transcriptRef: string | null;
@@ -243,7 +249,7 @@ export type RunEventKind = "cap_rejected";
  * (`managerSessionId` is NOT NULL and its readers are session-keyed); a cap-rejection has no session at all,
  * so it needs this separate store. Durable in SQLite (the `run_events` table). `keyId`/`runId` are nullable
  * (a `cap_rejected` carries the throttled `keyId` but NO `runId` — none was created). `detail` is
- * kind-specific JSON (`cap_rejected`: `{ cap: "concurrency"|"daily_token", limit, observed, agentId }`).
+ * kind-specific JSON (`cap_rejected`: `{ cap: "concurrency"|"daily_token"|"daily_spend", limit, observed, agentId }`).
  * See `[[Agent Runs]]`.
  */
 export interface RunEvent {

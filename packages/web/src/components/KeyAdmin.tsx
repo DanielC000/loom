@@ -205,11 +205,8 @@ function KeyRow({ k, agentName, onEdit, onRotate, onKill, onDelete, onRevoke, on
       <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <Chip label="concurrency" value={cap(k.caps.maxConcurrentRuns)} />
         <Chip label="daily tokens" value={cap(k.caps.dailyTokenCap)} />
-        <Chip label="daily spend" value={k.caps.dailySpendCap == null ? "∞" : `$${k.caps.dailySpendCap}`} tone="muted" />
+        <Chip label="daily spend" value={k.caps.dailySpendCap == null ? "∞" : `$${k.caps.dailySpendCap}`} />
       </div>
-      {k.caps.dailySpendCap != null && (
-        <div style={{ marginTop: 4, fontSize: 11, color: color.textMuted }}>daily spend cap is stored — not yet enforced</div>
-      )}
 
       <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         <span style={{ fontSize: 11, color: color.textMuted, fontFamily: font.mono }}>endpoints:</span>
