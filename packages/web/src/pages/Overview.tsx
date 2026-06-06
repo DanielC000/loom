@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole } from "@loom/shared";
@@ -158,6 +158,15 @@ export default function Overview() {
         {all.length > 0 && fleetOpen && (
           <FleetAccordion managers={managers} workers={workers} looseWorkers={looseWorkers} />
         )}
+      </section>
+
+      {/* --- Live terminals (the project's live sessions) --- */}
+      <section>
+        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          Terminals
+          <span style={{ color: color.textMuted, fontWeight: 400 }}>({all.filter((s) => s.processState === "live").length} live)</span>
+        </SectionLabel>
+        <ProjectTerminals sessions={all} />
       </section>
 
       {/* --- Board (the project's kanban — same component, project-scoped) --- */}
@@ -365,6 +374,37 @@ function SessionCockpit({ sessionId }: { sessionId: string }) {
       <SessionWakes sessionId={sessionId} />
       <SessionQueue sessionId={sessionId} />
       <Composer sessionId={sessionId} />
+    </div>
+  );
+}
+
+// The project's live-session terminals, tiled with a graceful-stop control. Mirrors Platform's
+// PlatformSessions — only the live set renders (dead/exited rows drop out).
+function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
+  const qc = useQueryClient();
+  const stop = useMutation({
+    mutationFn: (id: string) => api.stopSession(id, "graceful"),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
+  });
+  const live = sessions.filter((s) => s.processState === "live").sort(bySessionActivity);
+  if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>No live sessions in this project. Spawn the manager above.</p>;
+  const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12 };
+  return (
+    <div style={grid}>
+      {live.map((s) => (
+        <Panel key={s.id} style={{ height: 440, padding: 6, display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
+              <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} />
+              <span>{s.agentName}{s.role ? ` · ${s.role}` : ""} · {s.id.slice(0, 8)}</span>
+            </span>
+            <Button style={{ padding: "0 8px" }} disabled={stop.isPending}
+              title="Stop this session — graceful Ctrl-C, clean and resumable"
+              onClick={() => stop.mutate(s.id)}>Stop</Button>
+          </div>
+          <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
+        </Panel>
+      ))}
     </div>
   );
 }
