@@ -75,7 +75,24 @@ export const api = {
   platformHome: () => get<{ project: Project; agents: Agent[] }>("/api/platform/home"),
   createProject: (b: { name: string; repoPath: string; vaultPath: string }) =>
     post<Project>("/api/projects", b),
-  archiveProject: (id: string) => del<{ ok: boolean }>(`/api/projects/${id}`),
+  // --- HUMAN-only project/agent management (rename / archive / restore / PERMANENT delete + agent
+  // delete). DESTRUCTIVE, loopback-only — there is NO agent MCP path to any of these (same posture as
+  // session archive/delete + gateCommand). All surface the server's `{ error }` body verbatim (via
+  // *Err) so the reserved-home + live-session ("stop the fleet first") guards show inline. ---
+  // STRUCTURAL edit (name / vaultPath) — distinct from updateProjectConfig (the validated machine config).
+  updateProject: (id: string, body: { name?: string; vaultPath?: string }) =>
+    patch<Project>(`/api/projects/${id}`, body),
+  // Soft-archive (reversible "delete"). 400s on the reserved home or a live fleet (surfaced via delErr).
+  archiveProject: (id: string) => delErr<{ ok: boolean }>(`/api/projects/${id}`),
+  // Soft-archived projects (the "Archived" section) → restore / permanent-delete.
+  archivedProjects: () => get<Project[]>("/api/projects/archived"),
+  restoreProject: (id: string) => postErr<Project>(`/api/projects/${id}/restore`),
+  // IRREVERSIBLE cascade (agents/sessions/tasks/schedules/keys/runs + on-disk snapshots) — distinct from
+  // the bare archive. The strong type-the-name confirm is the web's job; the server just runs the guards.
+  deleteProjectPermanent: (id: string) =>
+    delErr<{ ok: boolean; deleted: { project: string; sessions: number } }>(`/api/projects/${id}/permanent`),
+  // Permanently delete an agent (cascade its sessions). 400s while any of its sessions is live.
+  deleteAgent: (id: string) => delErr<{ ok: boolean; deleted: { agent: string; sessions: number } }>(`/api/agents/${id}`),
   // --- Project config override (the human/REST path: full schema, gateCommand editable). The list
   // endpoint already carries each project's stored override, so `projectConfig` reads it from there
   // (no single-project GET exists); `updateProjectConfig` PATCHes the replacement override and returns

@@ -1,6 +1,6 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Agent, Session, SessionRole } from "@loom/shared";
+import type { Agent, Project, Session, SessionRole } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { bySessionActivity } from "../lib/sessions";
@@ -51,6 +51,18 @@ export default function Workspace() {
   // Profiles are platform-level (cross-project), so this is a single global query, not project-scoped.
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const sessions = useQuery({ queryKey: ["sessions", agentId], queryFn: () => api.sessions(agentId!), enabled: !!agentId });
+  // Cross-project live sessions — the source for the "stop the fleet first" guard on destructive
+  // project/agent ops (archive/delete disable while a related session is live). Archived projects feed
+  // the restore / permanent-delete section. Both are cheap loopback reads, invalidated by the mutations.
+  const globalSessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const archivedProjects = useQuery({ queryKey: ["archivedProjects"], queryFn: api.archivedProjects });
+  const liveByProject = new Map<string, number>();
+  const liveByAgent = new Map<string, number>();
+  for (const s of globalSessions.data ?? []) {
+    if (s.processState !== "live") continue;
+    liveByProject.set(s.projectId, (liveByProject.get(s.projectId) ?? 0) + 1);
+    liveByAgent.set(s.agentId, (liveByAgent.get(s.agentId) ?? 0) + 1);
+  }
 
   const createProject = useMutation({
     mutationFn: async (b: { name: string; repoPath: string; vaultPath: string; seedAgents: boolean }) => {
@@ -116,6 +128,50 @@ export default function Workspace() {
     },
     onError: (e) => window.alert((e as Error).message),
   });
+  // --- HUMAN-only project/agent management (rename / archive / restore / PERMANENT delete + agent
+  // delete). All DESTRUCTIVE ops invalidate the relevant react-query keys; the server enforces the
+  // reserved-home + live-session guards and returns the reason, surfaced verbatim via the *Err clients. ---
+  const updateProject = useMutation({
+    mutationFn: (v: { id: string; patch: { name?: string; vaultPath?: string } }) => api.updateProject(v.id, v.patch),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["projects"] }),
+    onError: (e) => window.alert((e as Error).message),
+  });
+  const archiveProject = useMutation({
+    mutationFn: (id: string) => api.archiveProject(id),
+    onSuccess: (_r, id) => {
+      if (projectId === id) { setProjectId(""); setAgentId(null); setSessionId(null); }
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      qc.invalidateQueries({ queryKey: ["archivedProjects"] });
+    },
+    onError: (e) => window.alert((e as Error).message),
+  });
+  const restoreProject = useMutation({
+    mutationFn: (id: string) => api.restoreProject(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      qc.invalidateQueries({ queryKey: ["archivedProjects"] });
+    },
+    onError: (e) => window.alert((e as Error).message),
+  });
+  const deleteProject = useMutation({
+    mutationFn: (id: string) => api.deleteProjectPermanent(id),
+    onSuccess: (_r, id) => {
+      if (projectId === id) { setProjectId(""); setAgentId(null); setSessionId(null); }
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      qc.invalidateQueries({ queryKey: ["archivedProjects"] });
+    },
+    onError: (e) => window.alert((e as Error).message),
+  });
+  const deleteAgent = useMutation({
+    mutationFn: (id: string) => api.deleteAgent(id),
+    onSuccess: (_r, id) => {
+      if (agentId === id) { setAgentId(null); setSessionId(null); }
+      qc.invalidateQueries({ queryKey: ["agents", projectId] });
+      qc.invalidateQueries({ queryKey: ["allSessions"] });
+    },
+    onError: (e) => window.alert((e as Error).message),
+  });
+  const selectedProject = projects.data?.find((p) => p.id === projectId) ?? null;
   // Manager first, then platform, then workers — so the orchestrator isn't lost among its workers.
   const roleRank = (r?: string | null) => (r === "manager" ? 0 : r === "platform" ? 1 : r === "worker" ? 2 : 3);
   // Fold each manager's workers into a collapsible group under it, so a manager with many workers
@@ -170,7 +226,20 @@ export default function Workspace() {
                 onClick={() => { setProjectId(p.id); setAgentId(null); setSessionId(null); }}>{p.name}</Button>
             ))}
           </div>
+          {selectedProject && (
+            <ProjectManage key={selectedProject.id} project={selectedProject}
+              liveCount={liveByProject.get(selectedProject.id) ?? 0}
+              onSave={(patch) => updateProject.mutate({ id: selectedProject.id, patch })}
+              onArchive={() => archiveProject.mutate(selectedProject.id)}
+              onDelete={() => deleteProject.mutate(selectedProject.id)}
+              saving={updateProject.isPending} archiving={archiveProject.isPending} deleting={deleteProject.isPending} />
+          )}
           <ProjectForm onCreate={(b) => createProject.mutate(b)} />
+          {(archivedProjects.data?.length ?? 0) > 0 && (
+            <ArchivedProjects projects={archivedProjects.data!}
+              onRestore={(id) => restoreProject.mutate(id)}
+              onDelete={(p) => { const t = window.prompt(deletePrompt(p.name)); if (t === p.name) deleteProject.mutate(p.id); else if (t !== null) window.alert("name did not match — not deleted"); }} />
+          )}
         </Panel>
 
         {projectId && (
@@ -201,6 +270,19 @@ export default function Workspace() {
                     <option key={p.id} value={p.id}>{p.icon ? `${p.icon} ` : ""}{p.name}{p.role ? ` (${p.role})` : ""}</option>
                   ))}
                 </Select>
+                {/* Permanently delete this agent (cascades its sessions). Disabled while it has a live
+                    session — the server blocks it too ("stop the fleet first"). Behind a confirm. */}
+                {(() => {
+                  const liveAgent = liveByAgent.get(selectedAgent.id) ?? 0;
+                  return (
+                    <Button variant="danger" disabled={liveAgent > 0 || deleteAgent.isPending}
+                      title={liveAgent > 0 ? "stop the fleet first — this agent has a live session" : "permanently delete this agent and its sessions"}
+                      style={{ marginTop: 8, width: "100%" }}
+                      onClick={() => { if (window.confirm(`Permanently delete agent "${selectedAgent.name}" and ALL its sessions? This cannot be undone.`)) deleteAgent.mutate(selectedAgent.id); }}>
+                      {deleteAgent.isPending ? "Deleting…" : "Delete agent"}
+                    </Button>
+                  );
+                })()}
               </div>
             )}
             <AgentForm onCreate={(b) => createAgent.mutate(b)} />
@@ -321,6 +403,97 @@ function WorkerGroup({ workers, open, onToggle, renderRow }:
         {busy > 0 && <span style={{ color: color.amber }}>· {busy} busy</span>}
       </button>
       {open && workers.map(renderRow)}
+    </div>
+  );
+}
+
+// The strong-confirm body for a PERMANENT project delete — names the irreversible cascade and asks the
+// human to type the project name back. Shared by the manage panel + the archived-projects list.
+function deletePrompt(name: string): string {
+  return `PERMANENTLY delete "${name}" and ALL of it — its agents, sessions, tasks, schedules, API keys, runs and saved transcripts. This CANNOT be undone.\n\nType the project name (${name}) to confirm:`;
+}
+
+// Per-project management: rename + edit vaultPath (Save), soft-archive (reversible "delete"), and a
+// PERMANENT delete behind a type-the-name confirm naming the cascade. Archive + permanent-delete are
+// DISABLED while the project has a live session (the server blocks them too — "stop the fleet first").
+// Reserved/system projects never reach here (they're excluded from the project list this renders from).
+function ProjectManage(
+  { project, liveCount, onSave, onArchive, onDelete, saving, archiving, deleting }:
+  { project: Project; liveCount: number; onSave: (patch: { name?: string; vaultPath?: string }) => void;
+    onArchive: () => void; onDelete: () => void; saving: boolean; archiving: boolean; deleting: boolean },
+) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState(project.name);
+  const [vaultPath, setVault] = useState(project.vaultPath);
+  const [confirmText, setConfirmText] = useState("");
+  const [showDelete, setShowDelete] = useState(false);
+  const dirty = (name.trim() !== project.name || vaultPath.trim() !== project.vaultPath) && !!name.trim() && !!vaultPath.trim();
+  const live = liveCount > 0;
+  const liveTitle = live ? `stop the fleet first — ${liveCount} live session${liveCount === 1 ? "" : "s"}` : undefined;
+  return (
+    <div style={{ marginTop: 10, borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+      <button onClick={() => setOpen((o) => !o)}
+        style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
+          background: "transparent", border: "none", padding: "2px 0",
+          fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim }}>
+        <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>Manage · {project.name}
+      </button>
+      {open && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+          <Input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
+          <Input placeholder="vault path" value={vaultPath} onChange={(e) => setVault(e.target.value)} />
+          <Button variant="primary" disabled={!dirty || saving}
+            onClick={() => onSave({ name: name.trim(), vaultPath: vaultPath.trim() })}>{saving ? "Saving…" : "Save changes"}</Button>
+          <Button disabled={live || archiving} title={liveTitle}
+            onClick={() => { if (window.confirm(`Archive "${project.name}"? It moves to the Archived section and can be restored later.`)) onArchive(); }}>
+            {archiving ? "Archiving…" : "Archive (reversible)"}
+          </Button>
+          {!showDelete
+            ? <Button variant="danger" disabled={live} title={liveTitle} onClick={() => { setShowDelete(true); setConfirmText(""); }}>Delete permanently…</Button>
+            : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, border: `1px solid ${color.red}`, borderRadius: 4, padding: 8 }}>
+                <span style={{ fontFamily: font.mono, fontSize: 11, color: color.red }}>
+                  Permanently delete this project and ALL of it — agents, sessions, tasks, schedules, keys, runs, transcripts. Cannot be undone. Type <strong>{project.name}</strong> to confirm:
+                </span>
+                <Input autoFocus placeholder={project.name} value={confirmText} onChange={(e) => setConfirmText(e.target.value)} />
+                <div style={{ display: "flex", gap: 6 }}>
+                  <Button variant="danger" disabled={confirmText !== project.name || live || deleting} title={liveTitle}
+                    onClick={onDelete}>{deleting ? "Deleting…" : "Delete forever"}</Button>
+                  <Button onClick={() => setShowDelete(false)}>Cancel</Button>
+                </div>
+              </div>
+            )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Soft-archived projects — restore back to the picker, or permanently delete (strong type-the-name
+// confirm via deletePrompt). Collapsed by default so it never crowds the live project list.
+function ArchivedProjects(
+  { projects, onRestore, onDelete }: { projects: Project[]; onRestore: (id: string) => void; onDelete: (p: Project) => void },
+) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ marginTop: 10, borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+      <button onClick={() => setOpen((o) => !o)}
+        style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
+          background: "transparent", border: "none", padding: "2px 0",
+          fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim }}>
+        <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>Archived · {projects.length}
+      </button>
+      {open && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+          {projects.map((p) => (
+            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: 12, color: color.textDim }}>{p.name}</span>
+              <Button onClick={() => onRestore(p.id)}>Restore</Button>
+              <Button variant="danger" onClick={() => onDelete(p)}>Delete</Button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
