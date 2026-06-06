@@ -733,6 +733,12 @@ export class SessionService {
   async startRun(opts: { agentId: string; input: unknown; schema?: unknown | null; keyId?: string | null; webhook?: string | null; idempotencyKey?: string | null }): Promise<{ run: AgentRun; session: Session }> {
     const agent = this.db.getAgent(opts.agentId);
     if (!agent) throw new Error("agent not found");
+    // Agent Runs R3 hardening: re-check the LIVE endpoint flag at the choke point — a key authorizes on
+    // its allowlist MEMBERSHIP (R1), but un-endpointing an agent (PATCH {endpoint:false}) leaves that
+    // stale membership intact, so the allowlist check alone can't stop a run on a now-un-endpointed agent.
+    // Gating here (the single path ALL run starts funnel through) keeps the guard on the live flag, not
+    // stale auth state. The R3 route ALSO pre-checks this for a clean 4xx; this throw is the invariant.
+    if (agent.endpoint !== true) throw new Error("agent is not an endpoint");
     const project = this.db.getProject(agent.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
