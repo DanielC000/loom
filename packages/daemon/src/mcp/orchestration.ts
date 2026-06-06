@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { contextWindowForModel, type SessionRole } from "@loom/shared";
+import { contextWindowForModel, resolveProfile, type SessionRole } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript } from "../sessions/transcript.js";
@@ -370,6 +370,37 @@ export class OrchestrationMcpRouter {
     // profile/skill/allowlist/gateCommand CREATE/edit stay human-only. gateCommand stays rejected on
     // this agent path (project_update routes config through validateAgentProjectConfigOverride). Each
     // tool re-checks the manager role server-side in the service (defense in depth).
+
+    // Read-only agent directory (same scoping posture as worker_list): list the project's agents so a
+    // manager can resolve a recycle/handoff's agent-id PREFIX (e.g. "b5d7304f…") to a full id, and pick
+    // the right worker agent for worker_spawn — WITHOUT raw loom.db or REST. Project is derived
+    // SERVER-SIDE from this manager's session (the agent passes no projectId), so it can never list
+    // another project's agents. `role` is the agent's resolved PROFILE role (resolveProfile — the
+    // canonical mechanism, exactly as the platform page derives it); null for a plain/profile-less agent.
+    server.registerTool(
+      "agent_list",
+      {
+        description:
+          "List the agents (rigs) in YOUR project — read-only. Use it to resolve a recycle/handoff's " +
+          "agent-id PREFIX (e.g. 'b5d7304f…') to a full id, and to choose the right worker agent for " +
+          "worker_spawn. Your project is derived SERVER-SIDE from your session (you pass NO projectId, so " +
+          "you can never list another project's agents — same scoping as worker_list). Returns each agent's " +
+          "{id, name, role (resolved from its bound profile — null for a plain agent), profileId, position}, " +
+          "ordered by position.",
+        inputSchema: {},
+      },
+      async () => {
+        const projectId = db.getSession(managerSessionId)?.projectId;
+        if (!projectId) return ok({ error: "no project for this session" });
+        return ok(db.listAgents(projectId).map((a) => ({
+          id: a.id,
+          name: a.name,
+          role: resolveProfile(a, a.profileId ? db.getProfile(a.profileId) : undefined).role,
+          profileId: a.profileId,
+          position: a.position,
+        })));
+      },
+    );
 
     server.registerTool(
       "agent_assign_profile",

@@ -16,11 +16,21 @@ const now = new Date().toISOString();
 
 // --- seed the daemon's DB directly ---
 const db = new Database(path.join(process.env.LOOM_HOME || path.join(os.homedir(), ".loom"), "loom.db"));
-db.exec("DELETE FROM orchestration_events; DELETE FROM schedules; DELETE FROM tasks; DELETE FROM sessions; DELETE FROM agents; DELETE FROM projects;");
+db.exec("DELETE FROM orchestration_events; DELETE FROM schedules; DELETE FROM tasks; DELETE FROM sessions; DELETE FROM agents; DELETE FROM profiles; DELETE FROM projects;");
 db.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)")
   .run("projO", "Orch", "C:/tmp/o", "C:/tmp/o", "{}", now);
+// A SECOND project + agent — agent_list on a projO manager must NEVER surface projX's agent (scope proof).
+db.prepare("INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at) VALUES (?,?,?,?,?,?,NULL)")
+  .run("projX", "Other", "C:/tmp/x", "C:/tmp/x", "{}", now);
+db.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)")
+  .run("aX", "projX", "other-work", "");
+// A Dev profile (role 'worker') bound to a projO agent — exercises agent_list's resolved-role field.
+db.prepare("INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon) VALUES (?,?,?,?,?,?,?,?)")
+  .run("profDev", "Dev", "worker", "", "[]", null, null, null);
 db.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position) VALUES (?,?,?,?,0)")
   .run("tO", "projO", "work", "");
+db.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position,profile_id) VALUES (?,?,?,?,1,?)")
+  .run("tD", "projO", "dev-rig", "", "profDev");
 const sess = db.prepare(`INSERT INTO sessions
   (id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,created_at,last_activity,last_error,role,parent_session_id,task_id,branch)
   VALUES (@id,'projO','tO',NULL,NULL,'C:/tmp/o','live','unknown',@busy,@now,@now,NULL,@role,@parent,@taskId,@branch)`);
@@ -55,9 +65,10 @@ const tools = toolList.map((t) => t.name).sort();
 // the worker_* coordination surface + my_context (own-occupancy self-assessment, any role) + the
 // manager self-management tools (daemon_restart self-deploy, idle_report for the asleep-at-the-wheel
 // watcher, inbox_pull fast-drain, recycle_me for context-recycle) + the manager self-service management
-// surface (agent_assign_profile/agent_update, project_update/project_archive, schedule_create/schedule_update
-// — Task 3de74275). Keep in sync as the manager-MCP surface grows.
-const expected = "agent_assign_profile,agent_update,daemon_restart,idle_report,inbox_pull,my_context,project_archive,project_update,recycle_me,schedule_create,schedule_update,worker_list,worker_merge,worker_merge_confirm,worker_message,worker_recycle,worker_spawn,worker_status,worker_stop,worker_transcript";
+// surface (agent_list read-only directory, agent_assign_profile/agent_update, project_update/project_archive,
+// schedule_create/schedule_update — Task 3de74275) + platform_escalate (the one upward channel to the
+// Platform Lead). Keep in sync as the manager-MCP surface grows.
+const expected = "agent_assign_profile,agent_list,agent_update,daemon_restart,idle_report,inbox_pull,my_context,platform_escalate,project_archive,project_update,recycle_me,schedule_create,schedule_update,worker_list,worker_merge,worker_merge_confirm,worker_message,worker_recycle,worker_spawn,worker_status,worker_stop,worker_transcript";
 check(`tools = ${expected}  (got ${tools.join(",")})`, tools.join(",") === expected);
 
 // 1b) H3: worker_spawn's advertised schema carries taskId + kickoffPrompt but NOT the removed,
@@ -89,6 +100,19 @@ const myCtx = parse(await M.callTool({ name: "my_context", arguments: {} }));
 check(`my_context(M) = {ctxInputTokens:120000, contextWindow:1M, pct:12, model:opus-4-8} (got ${JSON.stringify(myCtx)})`,
   myCtx.ctxInputTokens === 120_000 && myCtx.contextWindow === 1_000_000 && myCtx.pct === 12 &&
   myCtx.model === "claude-opus-4-8" && myCtx.measuredAt === now);
+
+// 4c) agent_list (no args) — project-scoped SERVER-SIDE: M (in projO) sees projO's agents [tO, tD]
+//     ordered by position, and NEVER projX's agent aX. Carries id/name/role/profileId/position; the
+//     role is resolved from the bound profile (tD→'worker' via profDev; tO→null, no profile).
+const agents = parse(await M.callTool({ name: "agent_list", arguments: {} }));
+const ids = agents.map((a) => a.id);
+check(`agent_list on M = projO's agents [tO,tD] by position, NEVER projX's aX  (got ${JSON.stringify(ids)})`,
+  ids.length === 2 && ids[0] === "tO" && ids[1] === "tD" && !ids.includes("aX"));
+const tD = agents.find((a) => a.id === "tD");
+const tO = agents.find((a) => a.id === "tO");
+check("agent_list DTO carries name/profileId/position + role resolved from the bound profile",
+  tD?.name === "dev-rig" && tD?.profileId === "profDev" && tD?.role === "worker" && tD?.position === 1 &&
+  tO?.role === null && tO?.profileId === null);
 
 await M.close();
 
