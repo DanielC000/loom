@@ -12,7 +12,7 @@ import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, isBranchMerged, worktreeHasWork } from "../git/worktrees.js";
-import { engineTranscriptExists, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
+import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
@@ -947,9 +947,13 @@ export class SessionService {
   /**
    * Archive a session out of the rail. EXITED-only (a live session must be stopped first — the UI
    * hides the button while live, and this re-checks server-side). A manager CASCADES to its workers;
-   * if ANY group member is still LIVE the whole archive is BLOCKED ("stop the fleet first"). The
-   * transcript snapshot was already captured on exit, so this is pure state. Idempotent: an
-   * already-archived session returns { archived: [] }.
+   * if ANY group member is still LIVE the whole archive is BLOCKED ("stop the fleet first").
+   * Snapshot-on-exit (index.ts onExit) is the primary preservation path, but onExit can be missed
+   * (hard-kill / daemon crash) — so re-snapshot each group member here as a backstop BEFORE flipping
+   * state, while the JSONL may still exist. snapshotTranscript is idempotent + best-effort + atomic
+   * and a no-op when a current snapshot exists or the JSONL is already gone, so this can't regress the
+   * happy path; it's pure insurance against a lost transcript. Idempotent: an already-archived session
+   * returns { archived: [] }.
    */
   archiveSession(sessionId: string): { archived: string[] } {
     const s = this.db.getSession(sessionId);
@@ -960,6 +964,11 @@ export class SessionService {
     const live = group.filter((g) => g.processState === "live");
     if (live.length > 0) {
       throw new Error(`cannot archive a live session — stop the fleet first (${live.length} still live)`);
+    }
+    // Backstop the on-exit snapshot: if onExit never fired, this is the last chance to preserve the
+    // transcript before Claude prunes the JSONL. Best-effort + idempotent — never blocks the archive.
+    for (const g of group) {
+      if (g.engineSessionId) snapshotTranscript(g.cwd, g.engineSessionId, g.projectId, g.id);
     }
     for (const g of group) this.db.archiveSession(g.id);
     return { archived: group.map((g) => g.id) };
