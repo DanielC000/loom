@@ -516,8 +516,14 @@ export class Db {
     for (const [name, type] of Object.entries(RUN_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${name} ${type}`);
     }
+    // Idempotency-on-failure (Agent Runs #4): the unique index is partial on STATUS too, so a
+    // terminal-FAILURE run leaves the index (SQLite re-evaluates the partial predicate on UPDATE —
+    // verified) and frees the (key_id, idempotency_key) pair for a retry, while at most one
+    // non-failed run (queued/starting/running/completed) per pair still holds. DROP-then-CREATE so an
+    // existing DB carrying the old key-only predicate converts in place; both statements idempotent.
+    this.db.exec("DROP INDEX IF EXISTS idx_runs_idempotency");
     this.db.exec(
-      "CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idempotency ON runs(key_id, idempotency_key) WHERE idempotency_key IS NOT NULL",
+      "CREATE UNIQUE INDEX idx_runs_idempotency ON runs(key_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND status NOT IN ('failed','timed_out','cancelled')",
     );
   }
 
@@ -803,10 +809,16 @@ export class Db {
    * The keyed POST /api/runs consults this BEFORE starting — a hit returns the SAME runId with no second
    * start (no double-spend). Both args are non-null by contract (the route only calls this when the caller
    * supplied an idempotencyKey, and an authed run always carries a keyId), matching the partial index.
+   *
+   * Idempotency-on-failure (Agent Runs #4): EXCLUDE terminal-failure runs (mirrors the index
+   * predicate) — a pair whose only run(s) FAILED/timed_out/cancelled returns undefined, so POST
+   * /api/runs starts a FRESH attempt; a completed/in-flight run still replays (true idempotency for
+   * successes + in-flight preserved).
    */
   getRunByIdempotency(keyId: string, idempotencyKey: string): AgentRun | undefined {
-    const row = this.db.prepare("SELECT * FROM runs WHERE key_id = ? AND idempotency_key = ?")
-      .get(keyId, idempotencyKey) as Row | undefined;
+    const row = this.db.prepare(
+      "SELECT * FROM runs WHERE key_id = ? AND idempotency_key = ? AND status NOT IN ('failed','timed_out','cancelled')",
+    ).get(keyId, idempotencyKey) as Row | undefined;
     return row ? toRun(row) : undefined;
   }
   /** The run driving a given `run` session (1:1) — the run MCP resolves session→run server-side. */
