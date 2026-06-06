@@ -8,6 +8,7 @@ import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
 import { api } from "./lib/api";
 import { useAttention, useNewAttention, type AttentionItem } from "./lib/attention";
+import { useDismissable } from "./lib/useDismissable";
 import { ActiveProjectProvider, useActiveProject } from "./lib/activeProject";
 import { color, font, radius, tone } from "./theme";
 import { Dot } from "./components/ui";
@@ -80,9 +81,10 @@ function HeaderDivider() {
 }
 
 // The "More ▾" overflow menu: the non-primary nav pages, grouped by section. Mirrors the
-// SpawnControls dropdown pattern (position:relative + onMouseLeave-close, Panel/borderStrong/token
-// styling, zIndex). The button shows the active (phosphor) state when the current route is one of
-// its items, so a nested page still reads as "selected" from the collapsed header.
+// SpawnControls dropdown pattern (position:relative wrapper, useDismissable click-outside/Escape
+// close, Panel/borderStrong/token styling, zIndex). The button shows the active (phosphor) state
+// when the current route is one of its items, so a nested page still reads as "selected" from the
+// collapsed header.
 const MORE_GROUPS: { key: NavGroup; label: string }[] = [
   { key: "operate", label: "Operate" },
   { key: "project", label: "Project" },
@@ -96,9 +98,10 @@ function MoreMenu() {
   const location = useLocation();
   const items = NAV_PAGES.filter((p) => !p.primary);
   const isActive = items.some((p) => p.to === location.pathname);
+  const ref = useDismissable<HTMLDivElement>(open, () => setOpen(false));
 
   return (
-    <div style={{ position: "relative", display: "inline-flex" }} onMouseLeave={() => setOpen(false)}>
+    <div ref={ref} style={{ position: "relative", display: "inline-flex" }}>
       <button onClick={() => setOpen((o) => !o)} className={`loom-navtab${isActive ? " is-active" : ""}`}
         style={{ background: "transparent", border: "none", borderBottom: `2px solid ${isActive ? color.phosphor : "transparent"}`, cursor: "pointer" }}>
         More ▾
