@@ -261,6 +261,32 @@ export class SessionService {
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
     if (!project) throw new Error("project not found");
+
+    // SINGLETON (P1 bug fix): the Platform Lead is a standing singleton, so this is RESUME-OR-CREATE,
+    // not the old unconditional create — which minted a fresh row on EVERY "open the Lead" and every
+    // re-open after a stop, accumulating duplicate Lead sessions (and, mid-go-live, duplicate LIVE
+    // Leads). Reuse the agent's latest NON-archived platform session: live → return it as-is (its pty
+    // outlived the viewer — closing a ws never kills it — so there is nothing to re-spawn); exited but
+    // resumable → resume() it (the EXISTING resume primitive does the transcript/reconcile check and
+    // carries the platform role + MCP surface back), with NO new row. ONLY when none exists, or the
+    // latest is unresumable (dead transcript / recycled / never captured an engine id), do we fall
+    // through and INSERT a fresh one — we PREFER attach/resume over a hard refuse so a wedged Lead can
+    // never lock the human out of opening the Lead.
+    //
+    // Scope: this is the HUMAN platform route only (gateway POST /api/agents/:id/sessions {role:
+    // "platform"}); no agent/MCP path reaches here, so "platform sessions are human-created only"
+    // stands. The Auditor (startAuditor) is deliberately LEFT create-only — each scheduled fire spawns
+    // a fresh ephemeral read-and-file audit session, where a singleton would be wrong.
+    const latestPlatform = this.db.listSessions(agentId).find((s) => s.role === "platform");
+    if (latestPlatform) {
+      if (latestPlatform.processState === "live") return latestPlatform; // already attached — reuse, no new row
+      try {
+        return this.resume(latestPlatform.id); // exited but resumable → reconcile + resume, no new row
+      } catch {
+        // unresumable (dead transcript / recycled / no engine id) → fall through and create a fresh one.
+      }
+    }
+
     const config = resolveConfig(project.config);
     // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. No profile ⇒ byte-identical to today's platform-lead spawn.
