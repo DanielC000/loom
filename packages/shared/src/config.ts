@@ -128,6 +128,17 @@ export interface OrchestrationConfig {
    * manager can always pass explicit `minutes` for a longer wait. Confirm/adjust when wiring.
    */
   idleDefaultSnoozeMinutes: number;
+  /**
+   * Busy-worker stuck watchdog: minutes a LIVE worker may sit `busy` in a SINGLE uninterrupted turn
+   * (no turn boundary → `lastActivity` not advancing, since `setBusy` re-stamps it on every turn edge)
+   * before the BusyWorkerWatcher surfaces it to the OWNING MANAGER as an attention signal (a
+   * `worker_stuck` event + a busy-gated nudge the manager can act on — re-nudge or recycle; never a
+   * hard kill). Sibling of `idleNudgeMinutes`, but for stuck workers rather than idle managers.
+   * Default 20; 0 disables the watcher entirely. Conservative by design so a legitimately long single
+   * tool call (a big build / test run, which is one turn) clears before the window — raise it per
+   * project if your builds routinely run longer.
+   */
+  stuckWorkerMinutes: number;
 }
 
 /**
@@ -314,7 +325,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, stuckWorkerMinutes: 20 },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -527,6 +538,8 @@ export function resolveConfig(
       idleNudgeMinutes: override.orchestration?.idleNudgeMinutes ?? envIdle ?? d.orchestration.idleNudgeMinutes,
       maxUnansweredNudges: override.orchestration?.maxUnansweredNudges ?? d.orchestration.maxUnansweredNudges,
       idleDefaultSnoozeMinutes: override.orchestration?.idleDefaultSnoozeMinutes ?? d.orchestration.idleDefaultSnoozeMinutes,
+      // `??` (not `||`) so an explicit 0 (disables the watcher) survives the merge.
+      stuckWorkerMinutes: override.orchestration?.stuckWorkerMinutes ?? d.orchestration.stuckWorkerMinutes,
     },
     // Daemon-global (no per-project override): platform default, with the env applying to the cadence
     // at this layer. `??` (not `||`) so an explicit env 0 is preserved (0 disables the periodic ticker).

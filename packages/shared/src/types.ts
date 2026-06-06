@@ -329,6 +329,12 @@ export type OrchestrationEventKind =
   | "recycle_begin" | "recycle_complete" | "merge_request" | "merge_done"
   | "merge_rejected" | "build_gate" | "kill_switch" | "schedule_fired"
   | "wake_scheduled" | "wake_fired" | "wake_dropped" | "idle_report" | "idle_escalated"
+  // Busy-worker stuck watchdog (BusyWorkerWatcher): a LIVE worker has been `busy` in a single
+  // uninterrupted turn past the `stuckWorkerMinutes` window with no progress. Filed under the OWNING
+  // MANAGER (managerSessionId) with workerSessionId/taskId set; `detail` carries minutesBusy + reason.
+  // The human-/manager-facing signal that the worker may be hung — surfaced, never a hard kill. Emitted
+  // ONCE per stuck episode (re-arms when the worker makes progress, i.e. lastActivity advances).
+  | "worker_stuck"
   // A manager self-service management action (assign profile / update agent / update or archive a
   // project / create or update a schedule). `detail.action` discriminates; audit trail for the
   // trust-boundary surface (managers ASSIGN existing capability sets + edit structure, never MINT).

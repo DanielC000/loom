@@ -1311,6 +1311,11 @@ export class Db {
     return (this.db.prepare("SELECT * FROM sessions WHERE role = 'manager' AND process_state = 'live'")
       .all() as Row[]).map(toSession);
   }
+  /** Currently-LIVE worker sessions across all projects — the BusyWorkerWatcher's work set (stuck-busy). */
+  listLiveWorkers(): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE role = 'worker' AND process_state = 'live'")
+      .all() as Row[]).map(toSession);
+  }
   /** Re-parent a recycled manager's LIVE workers onto its successor so the fleet survives the handoff. */
   reparentLiveWorkers(oldManagerId: string, newManagerId: string): number {
     return this.db.prepare("UPDATE sessions SET parent_session_id = ? WHERE parent_session_id = ? AND process_state = 'live'")
