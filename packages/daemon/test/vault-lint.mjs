@@ -85,6 +85,29 @@ try {
   const fcOn = runHook(writeNote("redlink-on.md", "---\ndoc-lint-links: true\n---\n# Red\n\nSee [[Nonexistent]].\n"));
   check("broken wikilink + doc-lint-links: true → flagged", !!fcOn && /broken wikilink/i.test(fcOn.systemMessage));
 
+  // d) wikilink RESOLUTION matches Obsidian (regression guard for the false-positive flood, task 469ba89a):
+  //    with doc-lint-links: true a VALID aliased / cross-folder / special-char (& / em-dash / spaces) link
+  //    must produce ZERO warnings, while a genuinely dangling target still flags. The resolver strips
+  //    |alias and #heading/#^block, resolves a bare basename against the WHOLE vault, and handles Folder/Name.
+  fs.mkdirSync(path.join(VAULT, "Projects", "Loom"), { recursive: true });
+  fs.writeFileSync(path.join(VAULT, "Projects", "Loom", "Architecture.md"), "# Architecture\n");
+  fs.writeFileSync(path.join(VAULT, "Projects", "Loom", "Vision & Architecture.md"), "# Vision\n");
+  fs.writeFileSync(path.join(VAULT, "Projects", "Loom", "Operational Notes — Gotchas.md"), "# Ops\n"); // em-dash filename
+  const validLinks = [
+    "[[Architecture|the arch doc]]",                 // aliased, cross-folder, bare basename
+    "[[Projects/Loom/Architecture]]",                // full Folder/Name path
+    "[[Vision & Architecture]]",                      // ampersand + spaces
+    "[[Vision & Architecture|vision]]",              // ampersand + alias
+    "[[Operational Notes — Gotchas#Section]]",  // em-dash filename + #heading
+  ].join(" and ");
+  const fdOk = runHook(writeNote("resolves.md", `---\ndoc-lint-links: true\n---\n# Links\n\nSee ${validLinks}.\n`));
+  check("valid aliased / cross-folder / special-char wikilinks + opt-in → ZERO warnings", fdOk === null);
+  const fdBad = runHook(writeNote("resolves-bad.md",
+    "---\ndoc-lint-links: true\n---\n# Links\n\nSee [[Vision & Architecture]] (valid) and [[Totally Nonexistent Note]] (dangling).\n"));
+  check("a genuinely dangling target STILL flags (among valid special-char links)",
+    !!fdBad && /broken wikilink/i.test(fdBad.systemMessage) && /Totally Nonexistent Note/.test(fdBad.systemMessage)
+      && !/Vision & Architecture/.test(fdBad.systemMessage));
+
   // 7) writeSessionSettings wires the PostToolUse Write|Edit entry pointing at the shipped script.
   ensureDirs();
   const perm = { mode: "acceptEdits", allow: [], deny: [] };
