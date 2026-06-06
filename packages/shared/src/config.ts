@@ -185,6 +185,13 @@ export interface WatcherConfig {
   schedulerMs: number;
   /** Boot-reconcile cadence (LOOM_RECONCILE_INTERVAL_MS). Default 10000. */
   reconcileMs: number;
+  /**
+   * Periodic transcript-snapshot tick (LOOM_SNAPSHOT_INTERVAL_MS). Default 420000 (7m). A low-frequency
+   * backstop that snapshots every LIVE session's engine transcript, closing the hard-crash-no-signal gap
+   * the graceful SIGINT/SIGTERM hook can't cover (kill-9/power-loss fires no signal; a long-lived session
+   * has no snapshot until it exits). Cheap — snapshotTranscript is mtime-guarded → a no-op when unchanged.
+   */
+  snapshotMs: number;
 }
 
 /**
@@ -314,7 +321,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   // + LOOM_* watcher env layer beneath. See RateLimitConfig/WatcherConfig/TimeoutConfig for unit docs.
   platform: {
     rateLimit: { defaultBackoffMs: 18000000, resetBufferMs: 10000, deadlineAfterResetMs: 1800000, deadlineNoResetMs: 21600000, recencyWindowMs: 21600000 },
-    watchers: { contextWatchMs: 60000, idleWatchMs: 60000, rateLimitWatchMs: 60000, usagePollMs: 60000, wakeMs: 60000, schedulerMs: 60000, reconcileMs: 10000 },
+    watchers: { contextWatchMs: 60000, idleWatchMs: 60000, rateLimitWatchMs: 60000, usagePollMs: 60000, wakeMs: 60000, schedulerMs: 60000, reconcileMs: 10000, snapshotMs: 420000 },
     timeouts: { gitOpMs: 15000, gitLocalMs: 15000, gitPushMs: 45000, provisionMs: 180000, busyStaleMs: 300000, runMs: 600000 },
   },
   docLint: true, // Pillar D vault-lint hook on by default
@@ -452,6 +459,7 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
       wakeMs: po?.watchers?.wakeMs ?? envWatcherIntervalMs("LOOM_WAKE_INTERVAL_MS") ?? d.watchers.wakeMs,
       schedulerMs: po?.watchers?.schedulerMs ?? envWatcherIntervalMs("LOOM_SCHEDULER_INTERVAL_MS") ?? d.watchers.schedulerMs,
       reconcileMs: po?.watchers?.reconcileMs ?? envWatcherIntervalMs("LOOM_RECONCILE_INTERVAL_MS") ?? d.watchers.reconcileMs,
+      snapshotMs: po?.watchers?.snapshotMs ?? envWatcherIntervalMs("LOOM_SNAPSHOT_INTERVAL_MS") ?? d.watchers.snapshotMs,
     },
     timeouts: {
       gitOpMs: po?.timeouts?.gitOpMs ?? d.timeouts.gitOpMs,
