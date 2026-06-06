@@ -553,6 +553,15 @@ export class Db {
     return this.db.prepare("SELECT * FROM projects WHERE archived_at IS NULL ORDER BY name")
       .all().map(toProject);
   }
+  /**
+   * Soft-archived projects, newest-archived first — feeds the web "Archived projects" section (the
+   * source for restore / permanent-delete). EXCLUDES reserved (a reserved project is never archivable,
+   * so it can never appear here, but the filter keeps the contract explicit). Mirrors listArchivedSessions.
+   */
+  listArchivedProjects(): Project[] {
+    return this.db.prepare("SELECT * FROM projects WHERE archived_at IS NOT NULL AND reserved = 0 ORDER BY archived_at DESC")
+      .all().map(toProject);
+  }
   /** True iff a reserved/system project already exists — the idempotency gate for seedPlatformHome. */
   hasReservedProject(): boolean {
     return !!this.db.prepare("SELECT 1 FROM projects WHERE reserved = 1 LIMIT 1").get();
@@ -586,6 +595,45 @@ export class Db {
   /** Soft-remove a project: stamp archived_at so listProjects() hides it (rows + sessions kept). */
   archiveProject(id: string): void {
     this.db.prepare("UPDATE projects SET archived_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+  }
+  /** Restore a soft-archived project (clear archived_at) — mirrors restoreSession. */
+  restoreProject(id: string): void {
+    this.db.prepare("UPDATE projects SET archived_at = NULL WHERE id = ?").run(id);
+  }
+  /**
+   * PERMANENTLY delete a project and EVERYTHING under it, in ONE transaction (all-or-nothing) — the
+   * irreversible counterpart to archiveProject. Cascades the project's agents, their sessions (+ each
+   * session's pending wakes), tasks, the agents' schedules, plus the project-scoped api_keys / runs /
+   * run_events so no orphan rows survive — INCLUDING the orchestration_events audit rows keyed by this
+   * project's session ids (they surface in the cross-project Activity feed, so a permanent delete must
+   * clear them). SQLite FKs are not enforced (no PRAGMA foreign_keys=ON), so order is for clarity, not
+   * constraint-safety. Owns ROWS ONLY — on-disk transcript snapshots are the caller's job (gateway),
+   * mirroring deleteSession; returns the deleted session ids so the caller can drop their snapshots.
+   * Does NOT guard reserved/live — the REST layer enforces those FIRST.
+   */
+  deleteProject(id: string): { sessionIds: string[] } {
+    const sessionIds = (this.db.prepare("SELECT id FROM sessions WHERE project_id = ?").all(id) as Row[]).map((r) => r.id as string);
+    const agentIds = (this.db.prepare("SELECT id FROM agents WHERE project_id = ?").all(id) as Row[]).map((r) => r.id as string);
+    this.db.transaction(() => {
+      for (const sid of sessionIds) {
+        this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sid);
+        // orchestration_events is session-keyed (manager OR worker) with no project_id — drop per session id.
+        this.db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ?").run(sid, sid);
+      }
+      for (const aid of agentIds) this.db.prepare("DELETE FROM schedules WHERE agent_id = ?").run(aid);
+      this.db.prepare("DELETE FROM run_events WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM runs WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM api_keys WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM tasks WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM sessions WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM agents WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+    })();
+    return { sessionIds };
+  }
+  /** Count of a project's sessions still in processState 'live' — the archive/delete guard ("stop the fleet first"). */
+  countLiveSessionsInProject(id: string): number {
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE project_id = ? AND process_state = 'live'").get(id) as { c: number }).c;
   }
 
   // --- platform config (daemon-GLOBAL tuning override; singleton row, JSON blob) ---
@@ -654,6 +702,35 @@ export class Db {
     if (names.length === 0) return;
     const set = names.map((c) => `${c} = ?`).join(", ");
     this.db.prepare(`UPDATE agents SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
+  /**
+   * PERMANENTLY delete an agent and CASCADE its sessions (+ each session's pending wakes + the
+   * session-keyed orchestration_events), the agent's schedules, and the runs that referenced it (+ the
+   * run-keyed run_events for those runs) — in ONE transaction, so no orphan rows survive. Owns ROWS
+   * ONLY; the caller drops the deleted sessions' on-disk transcript snapshots (mirrors deleteSession),
+   * so returns the deleted session ids. Does NOT guard live sessions — the REST layer blocks that FIRST
+   * ("stop the fleet first").
+   */
+  deleteAgent(id: string): { sessionIds: string[] } {
+    const sessionIds = (this.db.prepare("SELECT id FROM sessions WHERE agent_id = ?").all(id) as Row[]).map((r) => r.id as string);
+    const runIds = (this.db.prepare("SELECT id FROM runs WHERE agent_id = ?").all(id) as Row[]).map((r) => r.id as string);
+    this.db.transaction(() => {
+      for (const sid of sessionIds) {
+        this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ?").run(sid, sid);
+      }
+      // run_events is project/run-keyed (not agent-keyed) — drop only the rows for THIS agent's runs.
+      for (const rid of runIds) this.db.prepare("DELETE FROM run_events WHERE run_id = ?").run(rid);
+      this.db.prepare("DELETE FROM schedules WHERE agent_id = ?").run(id);
+      this.db.prepare("DELETE FROM runs WHERE agent_id = ?").run(id);
+      this.db.prepare("DELETE FROM sessions WHERE agent_id = ?").run(id);
+      this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+    })();
+    return { sessionIds };
+  }
+  /** Count of an agent's sessions still in processState 'live' — the agent-delete guard ("stop the fleet first"). */
+  countLiveSessionsForAgent(id: string): number {
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE agent_id = ? AND process_state = 'live'").get(id) as { c: number }).c;
   }
 
   // --- api keys (Agent Runs R1: project-scoped, hashed-at-rest, human-managed) -------------------

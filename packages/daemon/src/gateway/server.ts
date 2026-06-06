@@ -5,7 +5,7 @@ import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import { nextFireAt } from "../orchestration/cron.js";
-import { readTranscript, readArchivedTranscript, archivedTranscriptExists, engineTranscriptExists } from "../sessions/transcript.js";
+import { readTranscript, readArchivedTranscript, archivedTranscriptExists, engineTranscriptExists, deleteArchivedTranscript, deleteProjectArchives } from "../sessions/transcript.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell } from "../pty/host.js";
@@ -439,12 +439,83 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return reply.code(201).send(project);
   });
 
-  // Soft-remove (archive) a project — hides it from the project list; rows/sessions are retained.
-  app.delete("/api/projects/:id", async (req, reply) => {
+  // Soft-archived projects (read-only) — the web "Archived" section that surfaces restore / permanent-
+  // delete. Static path, declared before /api/projects/:id so it never collides with the param routes.
+  app.get("/api/projects/archived", async () => deps.db.listArchivedProjects());
+
+  // --- HUMAN-only project management (rename / archive / restore / PERMANENT delete). These are
+  // DESTRUCTIVE, trust-boundary surfaces exposed ONLY here on the loopback REST — exactly like session
+  // archive/delete + gateCommand. NO agent MCP tool (loom-tasks / loom-orchestration / loom-platform /
+  // loom-audit) reaches any of them: an agent can never rename, archive, or delete a project/agent.
+  // Two GUARDS, server-side with clear 4xx: (a) the reserved "Loom Platform" home is NEVER archivable
+  // or deletable; (b) a project/agent with any LIVE session is blocked ("stop the fleet first"). ---
+
+  // STRUCTURAL edit of a project (name / vaultPath). Distinct from the config PATCH below (the
+  // validated machine config). Allowed on a reserved project (metadata only — not a removal).
+  app.patch("/api/projects/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    const b = (req.body ?? {}) as { name?: unknown; vaultPath?: unknown };
+    if (b.name !== undefined && (typeof b.name !== "string" || !b.name.trim()))
+      return reply.code(400).send({ error: "name must be a non-empty string" });
+    if (b.vaultPath !== undefined && (typeof b.vaultPath !== "string" || !b.vaultPath.trim()))
+      return reply.code(400).send({ error: "vaultPath must be a non-empty string" });
+    deps.db.updateProject(id, {
+      name: b.name === undefined ? undefined : (b.name as string).trim(),
+      vaultPath: b.vaultPath === undefined ? undefined : (b.vaultPath as string).trim(),
+    });
+    return deps.db.getProject(id);
+  });
+
+  // Soft-remove (archive) a project — hides it from the project list; rows/sessions are retained.
+  // GUARD: refuse the reserved home; refuse while any session is live (stop the fleet first).
+  app.delete("/api/projects/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const p = deps.db.getProject(id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    if (p.reserved) return reply.code(400).send({ error: "cannot archive the reserved Loom Platform project" });
+    const live = deps.db.countLiveSessionsInProject(id);
+    if (live > 0) return reply.code(400).send({ error: `cannot archive a project with live sessions — stop the fleet first (${live} still live)` });
     deps.db.archiveProject(id);
     return { ok: true };
+  });
+
+  // Restore a soft-archived project back to the picker (clear archived_at) — mirrors session restore.
+  app.post("/api/projects/:id/restore", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    deps.db.restoreProject(id);
+    return deps.db.getProject(id);
+  });
+
+  // PERMANENTLY delete a project (DISTINCT from the bare DELETE archive above) — irreversible CASCADE of
+  // its agents/sessions/tasks/schedules/keys/runs + their on-disk transcript snapshots. The strong
+  // type-the-name confirm is the web's job; this just enforces the guards then executes. GUARD: refuse
+  // the reserved home; refuse while any session is live.
+  app.delete("/api/projects/:id/permanent", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const p = deps.db.getProject(id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    if (p.reserved) return reply.code(400).send({ error: "cannot delete the reserved Loom Platform project" });
+    const live = deps.db.countLiveSessionsInProject(id);
+    if (live > 0) return reply.code(400).send({ error: `cannot delete a project with live sessions — stop the fleet first (${live} still live)` });
+    const { sessionIds } = deps.db.deleteProject(id);
+    deleteProjectArchives(id); // best-effort: drop the whole LOOM_HOME/archives/<id> snapshot dir
+    return { ok: true, deleted: { project: id, agents: true, sessions: sessionIds.length } };
+  });
+
+  // PERMANENTLY delete an agent (CASCADE its sessions + their wakes/snapshots, its schedules, its runs).
+  // HUMAN-only; no archive intermediate (an agent has no soft-archive). GUARD: refuse while any of the
+  // agent's sessions is live ("stop the fleet first"). The web hides this for the reserved project's agents.
+  app.delete("/api/agents/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const a = deps.db.getAgent(id);
+    if (!a) return reply.code(404).send({ error: "agent not found" });
+    const live = deps.db.countLiveSessionsForAgent(id);
+    if (live > 0) return reply.code(400).send({ error: `cannot delete an agent with live sessions — stop the fleet first (${live} still live)` });
+    const { sessionIds } = deps.db.deleteAgent(id);
+    for (const sid of sessionIds) deleteArchivedTranscript(a.projectId, sid); // best-effort snapshot cleanup
+    return { ok: true, deleted: { agent: id, sessions: sessionIds.length } };
   });
 
   // Set a project's config override (the machine-writable config, schema-validated). Mirrors the
