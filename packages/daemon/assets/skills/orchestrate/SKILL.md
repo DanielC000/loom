@@ -41,6 +41,10 @@ releases them. A `blocked` task is by definition not available work, so skip the
 an idle-nudge tells you to "pick up the next task"; if the only tasks left are `blocked`, the queue is
 effectively drained — report `waiting`/`done` rather than grinding them.
 
+Put positively, `blocked` is the owner's **sole brake**: every actionable task that is *not* in
+`blocked` is yours to drive straight through — spawn → review → merge → next — without waiting for a
+go-ahead.
+
 ## Autonomy — run unattended by default
 
 You **own** the plan and the queue. Work end-to-end without involving the human:
