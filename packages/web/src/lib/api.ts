@@ -1,4 +1,4 @@
-import type { Project, Agent, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent } from "@loom/shared";
+import type { Project, Agent, AgentId, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
@@ -99,7 +99,9 @@ export const api = {
   agents: (projectId: string) => get<Agent[]>(`/api/projects/${projectId}/agents`),
   createAgent: (projectId: string, b: { name: string; startupPrompt?: string }) =>
     post<Agent>(`/api/projects/${projectId}/agents`, b),
-  updateAgent: (id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null }) =>
+  // `endpoint` flags an agent as API-exposable (Agent Runs R1) — only an endpoint=true agent may be put
+  // on a key's allowlist. HUMAN-only trust-boundary surface (no agent MCP path); reuses this same route.
+  updateAgent: (id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null; endpoint?: boolean }) =>
     post<Agent>(`/api/agents/${id}`, patch),
   tasks: (projectId: string) => get<Task[]>(`/api/projects/${projectId}/tasks`),
   createTask: (projectId: string, b: { title: string; body?: string; columnKey?: string; priority?: Task["priority"] }) =>
@@ -169,8 +171,8 @@ export const api = {
   // --- Agent Runs (R4b Runs UI; HUMAN/loopback REST, project-scoped, no auth — mirrors the other
   // /api/projects/:id surfaces, DELIBERATELY off the R3 key-authed path). list returns FULL AgentRun
   // rows newest-first (across every key); run is one full row; cancelRun teardowns an in-flight run
-  // (idempotent no-op on a terminal one) and returns its now-final status. There is NO key-admin /
-  // endpoint-flag surface here — Runs is observability-only (see the deferred follow-up). ---
+  // (idempotent no-op on a terminal one) and returns its now-final status. The key-admin / endpoint-flag
+  // surface (the trust-boundary write side) lives in the separate block below + the Keys & Endpoints view. ---
   runs: (projectId: string) => get<AgentRun[]>(`/api/projects/${projectId}/runs`),
   run: (projectId: string, runId: string) => get<AgentRun>(`/api/projects/${projectId}/runs/${runId}`),
   // A run's transcript: the live engine JSONL while it exists, else the retained snapshot (transcriptRef).
@@ -183,6 +185,22 @@ export const api = {
   // Run audit trail (follow-up #1) — chiefly cap-rejections (a 429 at POST /api/runs makes NO run row, so
   // it's invisible in the runs list). Project-scoped, newest-first, bounded; same unauthed-loopback posture.
   runEvents: (projectId: string) => get<RunEvent[]>(`/api/projects/${projectId}/run-events`),
+
+  // --- Agent Runs key & endpoint admin (R1 + R4a kill-switch). HUMAN/loopback REST, project-scoped,
+  // NO auth and NO agent MCP path — the trust-boundary key surface (mint/rotate/revoke/kill a key,
+  // mirroring how gateCommand / profile role are gated). `keys` returns PUBLIC metadata only (no secret
+  // or hash). `createKey` + `rotateKey` return the plaintext token EXACTLY ONCE as `{ key, plaintext }`
+  // — the caller must store it immediately; it is never recoverable after (never persist/refetch it).
+  // `killKey` pauses the key + cancels its in-flight runs (`{ cancelled }`). Mutations 400 with a
+  // readable `{ error }` (bad caps / non-endpoint agent in the allowlist), surfaced inline via postErr. ---
+  keys: (projectId: string) => get<ApiKey[]>(`/api/projects/${projectId}/keys`),
+  createKey: (projectId: string, b: { name: string; endpointAgentIds: AgentId[]; caps: ApiKeyCaps; status?: ApiKeyStatus }) =>
+    postErr<{ key: ApiKey; plaintext: string }>(`/api/projects/${projectId}/keys`, b),
+  updateKey: (keyId: string, patch: { name?: string; endpointAgentIds?: AgentId[]; caps?: ApiKeyCaps; status?: ApiKeyStatus }) =>
+    postErr<ApiKey>(`/api/keys/${keyId}`, patch),
+  rotateKey: (keyId: string) => postErr<{ key: ApiKey; plaintext: string }>(`/api/keys/${keyId}/rotate`),
+  killKey: (keyId: string) => postErr<{ cancelled: number }>(`/api/keys/${keyId}/kill`),
+  deleteKey: (keyId: string) => delErr<{ ok: boolean }>(`/api/keys/${keyId}`),
   // Pending one-shot wake-ups scheduled for a session (the wake_me primitive).
   sessionWakes: (sessionId: string) => get<Wake[]>(`/api/sessions/${sessionId}/wakes`),
   cancelWake: (sessionId: string, wakeId: string) =>
