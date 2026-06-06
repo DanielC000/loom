@@ -1,10 +1,11 @@
-import { useState, type CSSProperties } from "react";
+import { useMemo, useState, type CSSProperties } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Agent, SessionListItem, SessionRole, Schedule } from "@loom/shared";
+import type { Agent, SessionListItem, SessionRole, Schedule, Task } from "@loom/shared";
 import { api } from "../lib/api";
 import Board from "./Board";
 import { TerminalPane } from "../components/Terminal";
-import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../components/ui";
+import { TranscriptPane } from "../components/TranscriptPane";
+import { Panel, Button, Input, SectionLabel, StatusPill, Badge, Chip } from "../components/ui";
 import { color, font } from "../theme";
 
 // Platform Manager P6 — the top-level "Platform" section, SEPARATE from the project picker. The
@@ -79,6 +80,17 @@ export default function Platform() {
       <section>
         <SectionLabel>Auditor schedule</SectionLabel>
         <AuditorSchedules auditorId={auditor?.id} />
+      </section>
+
+      {/* --- 5. Auditor history — every audit RUN (auditor session), newest-first, live+exited+archived --- */}
+      <section>
+        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          Auditor history
+          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
+            every audit run — trigger, context cost, findings filed; expand to read the transcript
+          </span>
+        </SectionLabel>
+        <AuditorHistory reservedProjectId={project.id} sessions={platformSessions} />
       </section>
 
       {/* --- 3. The Platform board — findings + escalations backlog (reused Board component) --- */}
@@ -241,5 +253,138 @@ function AuditorScheduleRow({ s, onToggle, onRemove, busy }:
       <Button style={{ padding: "0 8px" }} disabled={busy} onClick={() => onToggle(!s.enabled)}>{s.enabled ? "Disable" : "Enable"}</Button>
       <Button variant="danger" style={{ padding: "0 8px" }} disabled={busy} onClick={onRemove}>Delete</Button>
     </div>
+  );
+}
+
+// Human duration between two ISO instants (run start → end). Coarse on purpose (s / m / h).
+function fmtDur(startIso: string, endIso: string): string {
+  const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+// The Auditor's run history — every audit RUN is a role:"auditor" session in the reserved project.
+// Runs = api.allSessions() (live+exited) ∪ api.allArchivedSessions() (god-eye archive, already enriched
+// with projectId), filtered to the reserved project's auditor sessions, newest-first by createdAt. The
+// trigger (a schedule's cron, or "manual") and the findings-filed list both come from a run's
+// orchestrationEvents (schedule_fired / audit_finding) — resolved against schedules() + the reserved
+// board() here. Everything reuses EXISTING api methods — no new daemon/REST. The live+exited reserved
+// sessions are passed in (already filtered by the page); we add the archive locally.
+function AuditorHistory({ reservedProjectId, sessions }: { reservedProjectId: string; sessions: SessionListItem[] }) {
+  const archived = useQuery({ queryKey: ["allArchivedSessions"], queryFn: api.allArchivedSessions, refetchInterval: 8000 });
+  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
+  const board = useQuery({ queryKey: ["board", reservedProjectId], queryFn: () => api.board(reservedProjectId), refetchInterval: 8000 });
+
+  // SINGLE-OPEN / LAZY-MOUNT: at most one expanded run's TranscriptPane is mounted (it refetches ~5s, so
+  // mounting N would hammer the daemon). Mirrors the Overview Fleet accordion's openId pattern.
+  const [openId, setOpenId] = useState<string | null>(null);
+  const toggle = (id: string) => setOpenId((cur) => (cur === id ? null : id));
+
+  const runs = useMemo(() => {
+    const live = sessions.filter((s) => s.role === "auditor"); // already reserved-project + non-archived
+    const arch = (archived.data ?? []).filter((s) => s.projectId === reservedProjectId && s.role === "auditor");
+    return [...live, ...arch].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [sessions, archived.data, reservedProjectId]);
+
+  if (runs.length === 0) {
+    return <Panel style={{ padding: 12 }}><span style={{ color: color.textMuted, fontSize: 12 }}>No audit runs yet — the Auditor hasn’t run.</span></Panel>;
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {runs.map((run) => (
+        <AuditorRunRow key={run.id} run={run} schedules={schedules.data ?? []} tasks={board.data?.tasks ?? []}
+          open={openId === run.id} onToggle={() => toggle(run.id)} />
+      ))}
+    </div>
+  );
+}
+
+// One audit run: timing + a live/exited/archived status pill + trigger (schedule cadence or "manual") +
+// model/ctx counters + lastError + the findings it filed (resolved to their board cards), with the
+// transcript expanding inline when open. The trigger + findings come from this run's orchestrationEvents
+// (the auditor session id IS the managerSessionId those events are keyed by). Refetch only while live.
+function AuditorRunRow({ run, schedules, tasks, open, onToggle }:
+  { run: SessionListItem; schedules: Schedule[]; tasks: Task[]; open: boolean; onToggle: () => void }) {
+  const live = !run.archivedAt && run.processState === "live";
+  const events = useQuery({
+    queryKey: ["orchestrationEvents", run.id],
+    queryFn: () => api.orchestrationEvents(run.id),
+    refetchInterval: live ? 6000 : false,
+  });
+  const evs = events.data ?? [];
+
+  // Status: archived (archivedAt set) → live (running) → exited.
+  const status: { label: string; tone: "phosphor" | "cyan" | "muted"; glow?: boolean } =
+    run.archivedAt ? { label: "archived", tone: "cyan" }
+      : live ? { label: "live", tone: "phosphor", glow: true }
+        : { label: "exited", tone: "muted" };
+
+  // Trigger: a schedule_fired event → its scheduleId resolved to the schedule's cron (fall back to the
+  // cron stamped on the event if the schedule was since deleted); no such event → a manual spawn.
+  const fired = evs.find((e) => e.kind === "schedule_fired");
+  const firedSchedId = fired?.detail?.scheduleId as string | undefined;
+  const firedCron = fired?.detail?.cron as string | undefined;
+  const trigger = fired
+    ? (schedules.find((s) => s.id === firedSchedId)?.cron ?? firedCron ?? "scheduled")
+    : "manual";
+
+  // Findings filed: each audit_finding event → its taskId resolved against the reserved board's tasks.
+  const findings = evs.filter((e) => e.kind === "audit_finding");
+
+  const end = live ? new Date().toISOString() : run.lastActivity;
+  return (
+    <Panel style={{ padding: 0 }}>
+      <div onClick={onToggle} title={open ? "Collapse" : "Expand to read this run’s transcript"}
+        style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", cursor: "pointer", flexWrap: "wrap" }}>
+        <span style={{ color: open ? color.phosphor : color.textDim, fontFamily: font.mono, fontSize: 12 }}>{open ? "▾" : "▸"}</span>
+        <StatusPill tone={status.tone} glow={status.glow} label={status.label} />
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text }}>{fmt(run.createdAt)}</span>
+        <Chip label="dur" value={fmtDur(run.createdAt, end)} />
+        <Chip label={fired ? "cron" : "trigger"} value={trigger} tone={fired ? "cyan" : "muted"} />
+        {run.model && <Chip label="model" value={run.model} />}
+        {run.ctxInputTokens != null && <Chip label="ctx" value={run.ctxInputTokens.toLocaleString()} />}
+        {run.ctxTurns != null && <Chip label="turns" value={run.ctxTurns} />}
+        <Chip label="filed" value={findings.length} tone={findings.length ? "phosphor" : "muted"} />
+        <span style={{ flex: 1 }} />
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>last · {fmt(run.lastActivity)} · {run.id.slice(0, 8)}</span>
+      </div>
+
+      {run.lastError && (
+        <div style={{ padding: "0 10px 8px 30px", color: color.red, fontFamily: font.mono, fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          {run.lastError}
+        </div>
+      )}
+
+      {findings.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", padding: "0 10px 8px 30px" }}>
+          <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>findings</span>
+          {findings.map((f) => {
+            const task = tasks.find((t) => t.id === f.taskId);
+            const title = task?.title ?? (f.detail?.title as string | undefined) ?? "finding";
+            const severity = f.detail?.severity as string | undefined;
+            return (
+              <span key={f.id} title={task ? title : `${title} (no longer on the board)`}
+                style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: font.mono, fontSize: 11,
+                  border: `1px solid ${task ? color.cyan : color.border}`, borderRadius: 4, padding: "1px 6px",
+                  color: task ? color.cyan : color.textMuted, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {severity && <span style={{ color: color.amber }}>{severity}</span>}
+                {title}{!task && " ·gone"}
+              </span>
+            );
+          })}
+        </div>
+      )}
+
+      {open && (
+        <div style={{ height: 420, margin: "0 10px 10px 30px", border: `1px solid ${color.border}`, borderRadius: 4, overflow: "hidden" }}>
+          <TranscriptPane sessionId={run.id} />
+        </div>
+      )}
+    </Panel>
   );
 }
