@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { SessionRole } from "@loom/shared";
 import { Button } from "./ui";
 import { color, font } from "../theme";
+import { useDismissable } from "../lib/useDismissable";
 
 // Spawn split-button: the primary action spawns from the agent's profile (no role → the profile's role
 // applies server-side); the ▾ menu overrides the role per-spawn. "From profile" = auto, "Manager" =
@@ -13,13 +14,14 @@ import { color, font } from "../theme";
 export function SpawnControls({ profileRole, onSpawn, pending }:
   { profileRole: SessionRole | null; onSpawn: (role?: "manager" | "plain") => void; pending: boolean }) {
   const [open, setOpen] = useState(false);
+  const ref = useDismissable<HTMLDivElement>(open, () => setOpen(false));
   const options: { label: string; role?: "manager" | "plain" }[] = [
     { label: "From profile (default)", role: undefined },
     { label: "Manager", role: "manager" },
     { label: "Plain", role: "plain" },
   ];
   return (
-    <div style={{ position: "relative", display: "inline-flex" }} onMouseLeave={() => setOpen(false)}>
+    <div ref={ref} style={{ position: "relative", display: "inline-flex" }}>
       <Button variant="primary" disabled={pending} onClick={() => { setOpen(false); onSpawn(undefined); }}
         title={`Spawn from profile — role: ${profileRole ?? "plain"}`}
         style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}>
