@@ -70,6 +70,9 @@ try {
   check("B: bare DELETE soft-archives (200, ok)", arch.statusCode === 200 && JSON.parse(arch.body).ok === true);
   check("B: archived project hidden from listProjects + archivedAt stamped",
     !db.listProjects().some((p) => p.id === "pEdit") && !!db.getProject("pEdit").archivedAt);
+  const archList = await app.inject({ method: "GET", url: "/api/projects/archived" });
+  check("B: GET /api/projects/archived surfaces the archived project",
+    archList.statusCode === 200 && JSON.parse(archList.body).some((p) => p.id === "pEdit"));
   const rest = await app.inject({ method: "POST", url: "/api/projects/pEdit/restore" });
   check("B: POST /restore clears archivedAt (200)", rest.statusCode === 200 && db.getProject("pEdit").archivedAt === null);
   check("B: restored project back in listProjects", db.listProjects().some((p) => p.id === "pEdit"));

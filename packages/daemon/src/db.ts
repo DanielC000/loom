@@ -553,6 +553,15 @@ export class Db {
     return this.db.prepare("SELECT * FROM projects WHERE archived_at IS NULL ORDER BY name")
       .all().map(toProject);
   }
+  /**
+   * Soft-archived projects, newest-archived first — feeds the web "Archived projects" section (the
+   * source for restore / permanent-delete). EXCLUDES reserved (a reserved project is never archivable,
+   * so it can never appear here, but the filter keeps the contract explicit). Mirrors listArchivedSessions.
+   */
+  listArchivedProjects(): Project[] {
+    return this.db.prepare("SELECT * FROM projects WHERE archived_at IS NOT NULL AND reserved = 0 ORDER BY archived_at DESC")
+      .all().map(toProject);
+  }
   /** True iff a reserved/system project already exists — the idempotency gate for seedPlatformHome. */
   hasReservedProject(): boolean {
     return !!this.db.prepare("SELECT 1 FROM projects WHERE reserved = 1 LIMIT 1").get();

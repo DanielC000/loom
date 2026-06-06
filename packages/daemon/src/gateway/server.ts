@@ -439,6 +439,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return reply.code(201).send(project);
   });
 
+  // Soft-archived projects (read-only) — the web "Archived" section that surfaces restore / permanent-
+  // delete. Static path, declared before /api/projects/:id so it never collides with the param routes.
+  app.get("/api/projects/archived", async () => deps.db.listArchivedProjects());
+
   // --- HUMAN-only project management (rename / archive / restore / PERMANENT delete). These are
   // DESTRUCTIVE, trust-boundary surfaces exposed ONLY here on the loopback REST — exactly like session
   // archive/delete + gateCommand. NO agent MCP tool (loom-tasks / loom-orchestration / loom-platform /
