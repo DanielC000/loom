@@ -277,11 +277,19 @@ export class SessionService {
     // "platform"}); no agent/MCP path reaches here, so "platform sessions are human-created only"
     // stands. The Auditor (startAuditor) is deliberately LEFT create-only — each scheduled fire spawns
     // a fresh ephemeral read-and-file audit session, where a singleton would be wrong.
-    const latestPlatform = this.db.listSessions(agentId).find((s) => s.role === "platform");
-    if (latestPlatform) {
-      if (latestPlatform.processState === "live") return latestPlatform; // already attached — reuse, no new row
+    // LIVE-PRECEDENCE (load-bearing): listSessions is ordered by last_activity DESC, so a recently-
+    // STOPPED Lead (frozen last_activity) can sort AHEAD of an idle-but-LIVE Lead. Picking "the latest"
+    // and only then checking liveness would resume() the exited one alongside the still-live one — the
+    // very duplicate-live-Lead bug this fixes. So: reuse ANY live platform session FIRST (there should
+    // be ≤1; if legacy accumulation left >1, the most-recently-active live one wins). Only when none is
+    // live do we consider resuming the newest exited one; only when that's unresumable do we create.
+    const platforms = this.db.listSessions(agentId).filter((s) => s.role === "platform");
+    const live = platforms.find((s) => s.processState === "live");
+    if (live) return live; // already attached — reuse, no new row, no spawn
+    const latestExited = platforms[0]; // newest by last_activity (none is live at this point)
+    if (latestExited) {
       try {
-        return this.resume(latestPlatform.id); // exited but resumable → reconcile + resume, no new row
+        return this.resume(latestExited.id); // exited but resumable → reconcile + resume, no new row
       } catch {
         // unresumable (dead transcript / recycled / no engine id) → fall through and create a fresh one.
       }

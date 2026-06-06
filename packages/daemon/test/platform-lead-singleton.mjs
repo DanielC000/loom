@@ -96,6 +96,24 @@ try {
   check("(1) live Lead → still exactly ONE platform row", platformRows("agentLive").length === 1);
   check("(1) live Lead → NO new pty spawned (already attached)", host.spawned.length === 0);
 
+  // === (1b) LIVE-PRECEDENCE — a live Lead + a MORE-RECENTLY-ACTIVE exited Lead → reuse the LIVE one ===
+  // This is the duplicate-live-Lead failure: a recently-STOPPED Lead's frozen last_activity sorts AHEAD
+  // of the idle-but-live Lead, so a naive "latest, then check liveness" would resume() the exited one
+  // alongside the live one. Live-precedence must return the LIVE id with no new row + no resume spawn.
+  const recentExited = "live-prec-recent-exited"; // last_activity AFTER the live seed → sorts first
+  db.insertSession({
+    id: recentExited, projectId: "pHome", agentId: "agentLive", engineSessionId: "eng-recent-exited", title: null,
+    cwd: repo, processState: "exited", resumability: "unknown", busy: false,
+    createdAt: now, lastActivity: new Date(Date.parse(now) + 60_000).toISOString(), lastError: null,
+    role: "platform", parentSessionId: null,
+  });
+  writeTranscript(repo, "eng-recent-exited"); // make the exited one genuinely resumable — so ONLY live-precedence (not unresumability) keeps it from being resumed
+  const spawnedBeforePrec = host.spawned.length;
+  const r1b = svc.startPlatformLead("agentLive");
+  check("(1b) live-precedence → returns the LIVE id even though an exited Lead is more recently active", r1b.id === liveSeed);
+  check("(1b) live-precedence → NO resume/new spawn (the exited one was NOT resumed)", host.spawned.length === spawnedBeforePrec);
+  check("(1b) live-precedence → the exited row stays exited (not resumed)", db.getSession(recentExited)?.processState === "exited");
+
   // ============================ (2) existing EXITED-RESUMABLE Lead → resume, no new row ===============
   const exitedSeed = "exited-lead-seed";
   writeTranscript(repo, "eng-exited"); // make it genuinely resumable
