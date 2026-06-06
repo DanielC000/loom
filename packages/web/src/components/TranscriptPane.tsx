@@ -34,8 +34,15 @@ function highlight(text: string, q: string): ReactNode {
 // Renders Claude's session JSONL as a clean, ordered conversation — the canonical history
 // surface (terminal scrollback is best-effort live-only). Refreshes periodically.
 // Search filters/highlights turns in-memory; role chips narrow to user/assistant.
-export function TranscriptPane({ sessionId }: { sessionId: string }) {
-  const t = useQuery({ queryKey: ["transcript", sessionId], queryFn: () => api.transcript(sessionId), refetchInterval: 5000 });
+// Source = a plain session transcript (default) OR a run-scoped one. Run runs serve the retained
+// snapshot (transcriptRef) when the live JSONL is gone, which the session-transcript route can't do
+// for a run session (it only snapshot-falls-back on archivedAt). Pass `runRef` to use the run route.
+export function TranscriptPane({ sessionId, runRef }: { sessionId: string; runRef?: { projectId: string; runId: string } }) {
+  const t = useQuery(
+    runRef
+      ? { queryKey: ["run-transcript", runRef.projectId, runRef.runId], queryFn: () => api.runTranscript(runRef.projectId, runRef.runId), refetchInterval: 5000 }
+      : { queryKey: ["transcript", sessionId], queryFn: () => api.transcript(sessionId), refetchInterval: 5000 },
+  );
   const turns = t.data;
 
   const [query, setQuery] = useState("");

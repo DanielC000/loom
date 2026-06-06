@@ -173,6 +173,11 @@ export const api = {
   // endpoint-flag surface here — Runs is observability-only (see the deferred follow-up). ---
   runs: (projectId: string) => get<AgentRun[]>(`/api/projects/${projectId}/runs`),
   run: (projectId: string, runId: string) => get<AgentRun>(`/api/projects/${projectId}/runs/${runId}`),
+  // A run's transcript: the live engine JSONL while it exists, else the retained snapshot (transcriptRef).
+  // Run-scoped (NOT the session-transcript route, which only snapshot-falls-back on archivedAt — runs
+  // never get it, so old runs read "" there despite a retained snapshot).
+  runTranscript: (projectId: string, runId: string) =>
+    get<TranscriptTurn[]>(`/api/projects/${projectId}/runs/${runId}/transcript`),
   cancelRun: (projectId: string, runId: string) =>
     post<{ runId: string; status: AgentRun["status"] }>(`/api/projects/${projectId}/runs/${runId}/cancel`),
   // Pending one-shot wake-ups scheduled for a session (the wake_me primitive).

@@ -179,14 +179,14 @@ function RunDetail({ run, agentName, onCancel, cancelling }:
       )}
       {run.webhookUrl && <Field label="Webhook"><span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, wordBreak: "break-all" }}>{run.webhookUrl}</span></Field>}
 
-      {/* Transcript: the run's retained conversation, served by the shared session-transcript viewer
-          keyed on the run's ephemeral session id. transcriptRef (set at teardown) signals a snapshot
-          was retained; while in-flight the viewer shows the live transcript. */}
+      {/* Transcript: the run's retained conversation via the RUN-scoped transcript route — live engine
+          JSONL while in-flight, else the retained snapshot (transcriptRef). The session-transcript route
+          can't serve an old run's snapshot (it only snapshot-falls-back on archivedAt, which runs lack). */}
       <Field label={`Transcript${run.transcriptRef ? " · retained" : ""}`}>
         {run.sessionId
           ? (
             <div style={{ height: "40vh", border: `1px solid ${color.border}`, borderRadius: 4 }}>
-              <TranscriptPane sessionId={run.sessionId} />
+              <TranscriptPane sessionId={run.sessionId} runRef={{ projectId: run.projectId, runId: run.id }} />
             </div>
           )
           : <span style={{ color: color.textMuted, fontSize: 12 }}>No session — the run failed before one was minted.</span>}

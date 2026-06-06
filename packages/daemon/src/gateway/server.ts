@@ -5,7 +5,7 @@ import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import { nextFireAt } from "../orchestration/cron.js";
-import { readTranscript, readArchivedTranscript, archivedTranscriptExists } from "../sessions/transcript.js";
+import { readTranscript, readArchivedTranscript, archivedTranscriptExists, engineTranscriptExists } from "../sessions/transcript.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell } from "../pty/host.js";
@@ -656,6 +656,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // Authorize: the agent MUST be on THIS key's endpoint allowlist (⇒ endpoint=true + same project, per R1).
     // A key can reach ONLY its own project's allowlisted endpoint agents — never another project's.
     if (!key.endpointAgentIds.includes(b.agent)) return reply.code(403).send({ error: "agent not allowlisted for this key" });
+    // R3 hardening: re-check the LIVE endpoint flag — allowlist membership is captured at allowlist-edit
+    // time, so un-endpointing an agent (PATCH {endpoint:false}) doesn't scrub it from keys that already
+    // listed it. Refuse here for a clean 403 (startRun ALSO enforces this as the choke-point invariant).
+    if (deps.db.getAgent(b.agent)?.endpoint !== true) return reply.code(403).send({ error: "agent is not an endpoint" });
     if (b.webhook !== undefined && b.webhook !== null && typeof b.webhook !== "string") return reply.code(400).send({ error: "webhook must be a string URL" });
     if (b.idempotencyKey !== undefined && b.idempotencyKey !== null && typeof b.idempotencyKey !== "string") return reply.code(400).send({ error: "idempotencyKey must be a string" });
     const webhook = (b.webhook as string | undefined) ?? null;
@@ -738,6 +742,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const run = deps.db.getRun(runId);
     if (!run || run.projectId !== id) return reply.code(404).send({ error: "run not found" });
     return run; // full AgentRun row (human view)
+  });
+  // A run's transcript for the R4b Runs detail pane. R2 retains a snapshot at `transcriptRef` so the
+  // transcript survives JSONL pruning, but the session-transcript route (GET /api/sessions/:id/transcript)
+  // only falls back to a snapshot on `archivedAt`, which run sessions never get → old runs showed "No
+  // transcript yet" despite a retained snapshot. Serve it run-scoped instead: prefer the LIVE engine JSONL
+  // while it exists (fresh runs), else the retained snapshot (keyed by projectId+sessionId, == transcriptRef).
+  app.get("/api/projects/:id/runs/:runId/transcript", async (req, reply) => {
+    const { id, runId } = req.params as { id: string; runId: string };
+    const run = deps.db.getRun(runId);
+    if (!run || run.projectId !== id) return reply.code(404).send({ error: "run not found" });
+    if (!run.sessionId) return []; // a snapshot-failed run never spawned a session — nothing to read
+    const s = deps.db.getSession(run.sessionId);
+    if (s?.engineSessionId && engineTranscriptExists(s.cwd, s.engineSessionId)) return readTranscript(s.cwd, s.engineSessionId);
+    return readArchivedTranscript(run.projectId, run.sessionId); // retained snapshot (transcriptRef); [] if none
   });
   // Human cancel — reuse the same teardown path as the key-authed cancel (cancelRun is idempotent on a
   // terminal run). Project-scoped existence check (a run in another project → 404).
