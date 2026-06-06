@@ -28,7 +28,10 @@ fs.mkdirSync(fakeProjDir, { recursive: true });
 for (const eng of [engOld, engOther]) fs.writeFileSync(path.join(fakeProjDir, `${eng}.jsonl`), '{"type":"x"}\n');
 
 const mkSession = (id, eng, extra = {}) => ({
-  id, projectId: projId, agentId, engineSessionId: eng, title: null, cwd: projId,
+  // cwd must be a REAL dir: resume() now guards a missing worktree/cwd (the ghost-resume guard) before
+  // the successor check, so a fake cwd would be refused for that reason instead of reaching this test's
+  // logic. The transcript is found via engineTranscriptExists' id-scan fallback regardless of cwd.
+  id, projectId: projId, agentId, engineSessionId: eng, title: null, cwd: os.tmpdir(),
   processState: "exited", resumability: "resumable", busy: false,
   createdAt: now, lastActivity: now, lastError: null, role: "manager", ...extra,
 });

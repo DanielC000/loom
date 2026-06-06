@@ -31,6 +31,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
+const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -58,7 +59,9 @@ const mkTask = (id, projId) => db.insertTask({ id, projectId: projId, title: id,
 function mkSession(o) {
   db.insertSession({
     id: o.id, projectId: o.projId, agentId: o.agentId, engineSessionId: o.engineSessionId ?? `eng-${o.id}`,
-    title: null, cwd: o.cwd ?? "/tmp", processState: o.processState ?? "live", resumability: "unknown",
+    // cwd defaults to a REAL dir (os.tmpdir) — liveFleetResumeSet() now filters out sessions whose cwd
+    // is gone (the ghost-resume guard), so a non-existent default would wrongly drop every seeded row.
+    title: null, cwd: o.cwd ?? os.tmpdir(), processState: o.processState ?? "live", resumability: "unknown",
     busy: false, createdAt: now, lastActivity: now, lastError: null,
     role: o.role ?? null, parentSessionId: o.parentSessionId ?? null,
     taskId: o.taskId ?? null, worktreePath: o.worktreePath ?? null, branch: o.branch ?? null,
@@ -68,6 +71,7 @@ function mkSession(o) {
 }
 
 const repoRoots = [];
+const transcriptDirs = []; // real ~/.claude/projects/<encoded> dirs created for the ghost-resume test
 try {
   // ============================ (1) CAPTURE — liveFleetResumeSet ============================
   // Project A: managerA + 2 workers (one PARKED) + a plain session. Project B: managerB + 1 worker.
@@ -199,15 +203,60 @@ try {
   check("(4) NEW resume array round-trips on disk (full fleet persisted)",
     readBack && Array.isArray(readBack.resume) && readBack.resume.length === resumeSet.length && readBack.resume[0].sessionId === resumeSet[0].sessionId);
   restart.clearRestartIntent();
+
+  // ============================ (5) GHOST-RESUME GUARD (worktree/cwd removed) ======================
+  // A worker whose task merged + worktree was GC'd can still be flagged `live` with a VALID engine
+  // transcript — the transcript lives under ~/.claude keyed by cwd, so it SURVIVES the worktree's
+  // removal and the pre-existing transcript guard passes. Without a cwd guard, boot fleet-resume then
+  // spawns a doomed `claude --resume` into the now-missing cwd that dies code=1 (the ghost resume).
+  const ghostMissingCwd = path.join(os.tmpdir(), `loom-rf-gone-${sfx}`); // deliberately NEVER created
+  check("(5-pre) the ghost cwd really is absent on disk", !fs.existsSync(ghostMissingCwd));
+
+  // (5a) Belt-and-suspenders: liveFleetResumeSet() SKIPS a live session whose cwd is already gone, so a
+  // dead-worktree row never even enters the restart intent — while an intact-cwd session is still kept.
+  const ghostCapId = `rf-ghostcap-${sfx}`;
+  mkSession({ id: ghostCapId, projId: A.proj, agentId: A.agent, role: "worker", parentSessionId: id.mgrA, cwd: ghostMissingCwd });
+  const fleet2Ids = new Set(sessions.liveFleetResumeSet().map((e) => e.sessionId));
+  check("(5a) liveFleetResumeSet EXCLUDES a live session whose cwd is gone", !fleet2Ids.has(ghostCapId));
+  check("(5a) an intact-cwd live session is STILL captured (guard is surgical)", fleet2Ids.has(id.mgrA));
+
+  // (5b) resume() ITSELF refuses a missing cwd EVEN with a live engine transcript — proving the NEW cwd
+  // guard (not the pre-existing transcript guard) is what stops the doomed spawn. Materialize a real
+  // transcript at the computed path so engineTranscriptExists passes, then resume into the missing cwd
+  // and assert: throws (worktree/cwd missing), marks resumability:"dead", and spawns NO pty.
+  const ghostResId = `rf-ghostres-${sfx}`;
+  const ghostEng = `eng-${ghostResId}`;
+  const tFile = engineTranscriptPath(ghostMissingCwd, ghostEng);
+  fs.mkdirSync(path.dirname(tFile), { recursive: true });
+  transcriptDirs.push(path.dirname(tFile));
+  fs.writeFileSync(tFile, JSON.stringify({ type: "user", message: { content: "seed" } }) + "\n");
+  mkSession({ id: ghostResId, projId: A.proj, agentId: A.agent, engineSessionId: ghostEng, role: "worker", parentSessionId: id.mgrA, cwd: ghostMissingCwd });
+  // A spawn-recording pty so we can prove resume() never reached pty.spawn for the missing cwd.
+  class SpawnRecPty {
+    constructor() { this.spawns = []; this.q = new Map(); }
+    spawn(o) { this.spawns.push(o); }
+    enqueueStdin(i, t) { const a = this.q.get(i) ?? []; a.push(t); this.q.set(i, a); return { delivered: false, position: a.length }; }
+    getPending(i) { return [...(this.q.get(i) ?? [])]; }
+  }
+  const recPty = new SpawnRecPty();
+  const sessions5 = new SessionService(db, recPty, new OrchestrationControl());
+  let threw = null;
+  try { sessions5.resume(ghostResId); } catch (e) { threw = e; }
+  check("(5b) resume() THROWS when cwd is missing (even with a live transcript)", !!threw && /worktree\/cwd missing/.test(String(threw?.message)));
+  check("(5b) resume() marks the session resumability:dead", db.getSession(ghostResId)?.resumability === "dead");
+  check("(5b) resume() spawned NO pty (no doomed --resume)", recPty.spawns.length === 0);
 } finally {
   db.close();
   for (const repo of repoRoots) {
     try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ }
   }
+  for (const dir of transcriptDirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a daemon_restart captures the WHOLE live cross-project fleet, resumes every session (requester re-prompted, others nudged, plain/parked honored, dead skipped), protects every project's worktree, and tolerates an old-format intent."
+  ? "\n✅ ALL PASS — a daemon_restart captures the WHOLE live cross-project fleet, resumes every session (requester re-prompted, others nudged, plain/parked honored, dead skipped), protects every project's worktree, tolerates an old-format intent, and refuses a ghost resume whose worktree/cwd was removed (no doomed --resume spawn)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

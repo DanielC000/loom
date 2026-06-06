@@ -401,6 +401,14 @@ export class SessionService {
       this.db.setResumability(session.id, "dead");
       throw new Error("session is no longer resumable (engine transcript missing)");
     }
+    // Ghost-resume guard: the engine transcript lives under ~/.claude keyed by cwd, so it SURVIVES the
+    // worktree's removal — a worker whose task merged + worktree was GC'd still passes the transcript
+    // guard above, but a `--resume` spawn into the now-missing cwd dies code=1. Refuse here so the boot
+    // fleet-resume path counts it `failed` instead of spawning a doomed pty.
+    if (!fs.existsSync(session.cwd)) {
+      this.db.setResumability(session.id, "dead");
+      throw new Error("session is no longer resumable (worktree/cwd missing)");
+    }
     // A RECYCLED session has a successor that took over its work + fleet (and inherited its wakes +
     // queued messages). Block AUTOMATIC resurrection — a due wake, a rate-limit resume, or boot-resume
     // would otherwise zombie it ALONGSIDE its successor (two managers on one agent). A HUMAN can still
@@ -534,7 +542,9 @@ export class SessionService {
       .listAllSessions()
       // Exclude ephemeral `run` sessions (Agent Runs R2): runs do NOT resume — a daemon restart fails an
       // in-flight run clean (reconcileRunsOnBoot), so a run must never be captured into the resume set.
-      .filter((s) => s.processState === "live" && s.role !== "run")
+      // Belt-and-suspenders for the ghost-resume guard in resume(): also skip a session whose worktree/cwd
+      // is already gone at capture time, so a dead-worktree row never even enters the restart intent.
+      .filter((s) => s.processState === "live" && s.role !== "run" && fs.existsSync(s.cwd))
       .map((s) => ({ sessionId: s.id, role: s.role ?? null, parentSessionId: s.parentSessionId ?? null }));
   }
 
