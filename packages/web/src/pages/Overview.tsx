@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Agent, SessionListItem, OrchestrationEvent, Schedule } from "@loom/shared";
@@ -8,6 +8,11 @@ import { useAttention } from "../lib/attention";
 import { bySessionActivity } from "../lib/sessions";
 import Board from "./Board";
 import { TerminalPane } from "../components/Terminal";
+import { TranscriptPane } from "../components/TranscriptPane";
+import { Composer } from "../components/Composer";
+import { SessionWakes } from "../components/SessionWakes";
+import { SessionQueue } from "../components/SessionQueue";
+import { SessionActions } from "../components/SessionActions";
 import { Panel, Button, SectionLabel, StatusPill, Badge, Chip, Meter } from "../components/ui";
 import {
   Stat, FleetCard, FleetRow, AttentionRow, EventRow, fleetRollup, worstContext,
@@ -146,30 +151,8 @@ export default function Overview() {
           </div>
         )}
         {all.length > 0 && fleetOpen && (
-          <Panel>
-            {managers.map((m) => (
-              <div key={m.id} style={{ marginBottom: 8 }}>
-                <FleetRow s={m} star />
-                {workers.filter((w) => w.parentSessionId === m.id).sort(bySessionActivity).map((w) => (
-                  <div key={w.id} style={{ paddingLeft: 16 }}><FleetRow s={w} /></div>
-                ))}
-              </div>
-            ))}
-            {looseWorkers.map((w) => <FleetRow key={w.id} s={w} />)}
-            {managers.length === 0 && looseWorkers.length === 0 && (
-              <span style={{ color: color.textMuted, fontSize: 12 }}>idle — no live manager</span>
-            )}
-          </Panel>
+          <FleetAccordion managers={managers} workers={workers} looseWorkers={looseWorkers} />
         )}
-      </section>
-
-      {/* --- Live terminals (the project's live sessions) --- */}
-      <section>
-        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          Terminals
-          <span style={{ color: color.textMuted, fontWeight: 400 }}>({all.filter((s) => s.processState === "live").length} live)</span>
-        </SectionLabel>
-        <ProjectTerminals sessions={all} />
       </section>
 
       {/* --- Board (the project's kanban — same component, project-scoped) --- */}
@@ -248,33 +231,128 @@ function ManagerControl({ agent, session }: { agent: Agent; session?: SessionLis
   );
 }
 
-// The project's live-session terminals, tiled with a graceful-stop control. Mirrors Platform's
-// PlatformSessions — only the live set renders (dead/exited rows drop out).
-function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
+// The expanded Fleet as an inline-accordion session cockpit: the managers→workers hierarchy, where
+// each row carries its state-appropriate quick-actions (the SHARED SessionActions cluster, identical
+// to Workspace) + an expand caret. Clicking a row expands IN PLACE to that session's cockpit
+// (Terminal⇄Transcript + wakes/queue/composer), nested under the row.
+//
+// SINGLE-OPEN / LAZY-MOUNT (the load-bearing perf constraint): one `openId` — at most one row is
+// expanded, so at most ONE SessionCockpit (hence ONE TerminalPane + its websocket) is mounted across
+// the whole fleet. The cockpit mounts on expand and unmounts on collapse or when another row opens
+// (conditional render off `openId`), so we never run N live xterms at once. This replaced the old
+// standalone ProjectTerminals "Terminals" section (which tiled ALL live terminals simultaneously —
+// directly contradicting this constraint); the all-terminals view still lives on the /terminals page.
+//
+// All mutations already exist (mirrors Workspace's wiring) and invalidate the shared ["allSessions"]
+// query the page reads — ZERO new daemon/REST. The manager-archive worker-count confirm is built per
+// row here, matching Workspace exactly.
+function FleetAccordion({ managers, workers, looseWorkers }: {
+  managers: SessionListItem[]; workers: SessionListItem[]; looseWorkers: SessionListItem[];
+}) {
   const qc = useQueryClient();
-  const stop = useMutation({
-    mutationFn: (id: string) => api.stopSession(id, "graceful"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
+  const [openId, setOpenId] = useState<string | null>(null);
+  const toggle = (id: string) => setOpenId((cur) => (cur === id ? null : id));
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["allSessions"] });
+
+  const resume = useMutation({ mutationFn: (id: string) => api.resumeSession(id), onSuccess: invalidate });
+  const stop = useMutation({ mutationFn: (id: string) => api.stopSession(id, "graceful"), onSuccess: invalidate });
+  const fork = useMutation({ mutationFn: (id: string) => api.forkSession(id), onSuccess: invalidate });
+  const clearRl = useMutation({
+    mutationFn: (id: string) => api.clearSessionRateLimit(id),
+    onSuccess: invalidate, onError: (e) => window.alert((e as Error).message),
   });
-  const live = sessions.filter((s) => s.processState === "live").sort(bySessionActivity);
-  if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>No live sessions in this project. Spawn the manager above.</p>;
-  const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12 };
+  const archive = useMutation({
+    mutationFn: (id: string) => api.archiveSession(id),
+    onSuccess: invalidate, onError: (e) => window.alert((e as Error).message),
+  });
+
+  // Build the SessionActions props for a row. For a manager, the archive handler confirms the
+  // worker-count cascade first (byte-identical to Workspace's renderRow).
+  const actionsFor = (s: SessionListItem) => {
+    const workerCount = s.role === "manager" ? workers.filter((w) => w.parentSessionId === s.id).length : 0;
+    const onArchive = () => {
+      if (workerCount > 0 && !window.confirm(`Archive this manager and its ${workerCount} worker${workerCount === 1 ? "" : "s"}? They'll move to the Archive tab.`)) return;
+      archive.mutate(s.id);
+    };
+    return {
+      onResume: () => resume.mutate(s.id), resuming: resume.isPending,
+      onStop: () => stop.mutate(s.id), stopping: stop.isPending,
+      onFork: () => fork.mutate(s.id), forking: fork.isPending,
+      onClearRateLimit: () => clearRl.mutate(s.id), clearingRateLimit: clearRl.isPending,
+      onArchive, archiving: archive.isPending,
+    };
+  };
+
   return (
-    <div style={grid}>
-      {live.map((s) => (
-        <Panel key={s.id} style={{ height: 440, padding: 6, display: "flex", flexDirection: "column" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
-              <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} />
-              <span>{s.agentName}{s.role ? ` · ${s.role}` : ""} · {s.id.slice(0, 8)}</span>
-            </span>
-            <Button style={{ padding: "0 8px" }} disabled={stop.isPending}
-              title="Stop this session — graceful Ctrl-C, clean and resumable"
-              onClick={() => stop.mutate(s.id)}>Stop</Button>
-          </div>
-          <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
-        </Panel>
+    <Panel>
+      {managers.map((m) => (
+        <div key={m.id} style={{ marginBottom: 8 }}>
+          <FleetCockpitRow s={m} star open={openId === m.id} onToggle={() => toggle(m.id)} actions={actionsFor(m)} />
+          {workers.filter((w) => w.parentSessionId === m.id).sort(bySessionActivity).map((w) => (
+            <div key={w.id} style={{ paddingLeft: 16 }}>
+              <FleetCockpitRow s={w} open={openId === w.id} onToggle={() => toggle(w.id)} actions={actionsFor(w)} />
+            </div>
+          ))}
+        </div>
       ))}
+      {looseWorkers.map((w) => (
+        <FleetCockpitRow key={w.id} s={w} open={openId === w.id} onToggle={() => toggle(w.id)} actions={actionsFor(w)} />
+      ))}
+      {managers.length === 0 && looseWorkers.length === 0 && (
+        <span style={{ color: color.textMuted, fontSize: 12 }}>idle — no live manager</span>
+      )}
+    </Panel>
+  );
+}
+
+// One fleet row: the read-only FleetRow summary + a caret + the shared per-state action cluster, with
+// the session's cockpit expanding nested below when `open`. The cockpit (and its lone TerminalPane) is
+// rendered ONLY when open — the single-open lazy-mount that bounds the page to one live xterm.
+function FleetCockpitRow({ s, star, open, onToggle, actions }: {
+  s: SessionListItem; star?: boolean; open: boolean; onToggle: () => void;
+  actions: Omit<Parameters<typeof SessionActions>[0], "s">;
+}) {
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <button onClick={onToggle} title={open ? "Collapse this session" : "Expand to this session's cockpit"}
+          style={{ background: "transparent", border: "none", cursor: "pointer", padding: "0 2px",
+            color: open ? color.phosphor : color.textDim, fontFamily: font.mono, fontSize: 12 }}>
+          {open ? "▾" : "▸"}
+        </button>
+        <div style={{ flex: 1, minWidth: 0 }}><FleetRow s={s} star={star} /></div>
+        <SessionActions s={s} {...actions} />
+      </div>
+      {open && (
+        <div style={{ marginLeft: 10, marginTop: 6, paddingLeft: 10, borderLeft: `1px solid ${color.phosphor}` }}>
+          <SessionCockpit sessionId={s.id} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A single session's inline cockpit — Terminal⇄Transcript tabs over a bounded pane, plus the session's
+// wakes / queued turns / composer. Reuses the standalone components AS-IS; mirrors Workspace's
+// right-hand cockpit. Mounted only by an OPEN FleetCockpitRow, so its TerminalPane is the one live
+// terminal on the page (single-open). The pane height is fixed (the page itself scrolls).
+function SessionCockpit({ sessionId }: { sessionId: string }) {
+  const [tab, setTab] = useState<"terminal" | "transcript">("terminal");
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <div style={{ marginBottom: 6, display: "flex", gap: 6 }}>
+        {(["terminal", "transcript"] as const).map((t) => (
+          <Button key={t} variant={tab === t ? "primary" : "default"} onClick={() => setTab(t)}>
+            {t === "terminal" ? "Terminal" : "Transcript"}
+          </Button>
+        ))}
+      </div>
+      <div style={{ height: 440, minHeight: 0 }}>
+        {tab === "terminal" ? <TerminalPane sessionId={sessionId} /> : <TranscriptPane sessionId={sessionId} />}
+      </div>
+      <SessionWakes sessionId={sessionId} />
+      <SessionQueue sessionId={sessionId} />
+      <Composer sessionId={sessionId} />
     </div>
   );
 }
