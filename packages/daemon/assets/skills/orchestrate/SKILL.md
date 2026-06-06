@@ -188,6 +188,11 @@ the now-live behavior. Caveats: changes under `packages/daemon/assets/**` (skill
 isn't supervised, flag that the human must restart for your code to go live. Use this only when a
 change actually needs to be *running* to verify — not after every daemon merge.
 
+**A low-urgency deploy that should wait for the fleet to go quiet is a park, not a poll.** Don't re-run
+`worker_list` in a wake loop watching for quiet — note the held restart in your resume doc,
+`idle_report('waiting', minutes=…)`, and resume on the next genuine event (a worker report, a wake);
+then re-check quietness **once** and fire `daemon_restart`.
+
 After **any** daemon restart — *especially one you did not initiate* (e.g. the owner deploying) —
 don't trust the auto-resume to have actually put your workers back to work: run `worker_list` and read
 each live worker's transcript. A worker resumed but left **idle mid-task** (a generic "Continue" just
