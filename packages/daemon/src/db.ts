@@ -863,14 +863,28 @@ export class Db {
   /**
    * Best-effort daily TOKEN usage for a key: sum the `inputTokens` field of every retained run-usage
    * snapshot for THIS key created at/after `sinceIso` (the trailing-24h window the caller computes).
-   * ⚠️ This is the R2 usage SNAPSHOT (engine context occupancy at the last turn boundary), NOT a precise
-   * cumulative billed-token meter — Loom has no per-token/cost accounting yet (a USD spend cap is
-   * deliberately out of R4a; see `[[Agent Runs]]`). Runs with no usage_json (in-flight / never recorded)
-   * contribute 0. Used by the POST /api/runs daily-token-cap gate as a coarse backstop.
+   * Agent Runs #2 MIGRATED `usage.inputTokens` from the last-turn occupancy snapshot to CUMULATIVE
+   * billed input tokens (summed across all the run's turns; see `readRunUsage`), so this sum is now a
+   * genuine trailing-24h input-token meter rather than a coarse occupancy proxy. Runs with no usage_json
+   * (in-flight / never recorded) contribute 0. Used by the POST /api/runs daily-token-cap gate.
    */
   sumKeyTokensSince(keyId: string, sinceIso: string): number {
     const row = this.db.prepare(
       "SELECT COALESCE(SUM(json_extract(usage_json, '$.inputTokens')), 0) AS t FROM runs WHERE key_id = ? AND created_at >= ? AND usage_json IS NOT NULL",
+    ).get(keyId, sinceIso) as { t: number | null };
+    return row.t ?? 0;
+  }
+
+  /**
+   * Best-effort daily SPEND (USD) for a key: sum the `costUsd` field of every retained run-usage snapshot
+   * for THIS key created at/after `sinceIso` (Agent Runs #2). `costUsd` is computed at teardown from the
+   * run's cumulative usage × the per-model price table (see `sessions/pricing.ts`); an unknown model
+   * records 0 (never throws), so this is a best-effort backstop, not a billing ledger. Runs with no
+   * usage_json (or no costUsd) contribute 0. Used by the POST /api/runs daily-spend-cap gate.
+   */
+  sumKeySpendSince(keyId: string, sinceIso: string): number {
+    const row = this.db.prepare(
+      "SELECT COALESCE(SUM(json_extract(usage_json, '$.costUsd')), 0) AS t FROM runs WHERE key_id = ? AND created_at >= ? AND usage_json IS NOT NULL",
     ).get(keyId, sinceIso) as { t: number | null };
     return row.t ?? 0;
   }

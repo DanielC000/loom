@@ -13,6 +13,8 @@ import type { PtyHost } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, isBranchMerged, worktreeHasWork } from "../git/worktrees.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
+import { readRunUsage, readRunUsageFromFile } from "./context.js";
+import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
@@ -924,10 +926,29 @@ export class SessionService {
     if (run.status !== "completed" && run.status !== "cancelled" && run.status !== "timed_out") {
       this.db.failRun(run.id, "run session exited before submit_result");
     }
-    const usage = session && (session.ctxInputTokens != null || session.ctxTurns != null)
-      ? { inputTokens: session.ctxInputTokens ?? null, turns: session.ctxTurns ?? null, model: session.model ?? null }
-      : null;
     const transcriptRef = archivedTranscriptExists(run.projectId, sessionId) ? archivedTranscriptPath(run.projectId, sessionId) : null;
+    // Agent Runs #2 — capture CUMULATIVE per-run usage (summed across all turns), then price it. Read from
+    // the archived snapshot if it exists (stable; captured just above on this exit), else the still-live
+    // engine transcript. `usage.inputTokens` now means cumulative billed input (NOT last-turn occupancy);
+    // see readRunUsage + db.sumKeyTokensSince. Degrade gracefully to the old last-turn snapshot if the
+    // transcript is unreadable (so the token cap still sees something). costUsd is best-effort: an unknown
+    // model → 0 (computeRunCostUsd never throws), so a missing price can't disturb this teardown path.
+    const cumulative =
+      (transcriptRef ? readRunUsageFromFile(transcriptRef) : null) ??
+      (session?.engineSessionId ? readRunUsage(session.cwd, session.engineSessionId) : null);
+    const usage = cumulative
+      ? {
+          inputTokens: cumulative.inputTokens,
+          outputTokens: cumulative.outputTokens,
+          cacheCreationTokens: cumulative.cacheCreationTokens,
+          cacheReadTokens: cumulative.cacheReadTokens,
+          turns: cumulative.turns,
+          model: cumulative.model,
+          costUsd: computeRunCostUsd(cumulative),
+        }
+      : session && (session.ctxInputTokens != null || session.ctxTurns != null)
+        ? { inputTokens: session.ctxInputTokens ?? null, turns: session.ctxTurns ?? null, model: session.model ?? null }
+        : null;
     this.db.setRunTeardown(run.id, { usage, transcriptRef });
     void removeRunSnapshot(sessionId); // best-effort; run row already terminal; lingering dir swept on next boot
     // Agent Runs R3: this IS the single LIVE terminal/teardown path (completed via submit_result, cancelled
