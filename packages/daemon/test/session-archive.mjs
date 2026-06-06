@@ -8,6 +8,8 @@
 //   D. snapshotTranscript copies the engine JSONL (idempotent), readArchivedTranscript renders it,
 //      an already-dead session (no JSONL) snapshots nothing, deleteArchivedTranscript removes it.
 //   E. restore brings one row back; permanent delete cascades + drops the snapshot.
+//   F. archive-time backstop: an exited session WITH a JSONL but NO prior snapshot (onExit missed)
+//      gets one at archive time; the already-snapshotted path is a mtime-guard no-op (no double-work).
 // Run: 1) build the daemon, 2) node test/session-archive.mjs
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 import fs from "node:fs";
@@ -143,6 +145,34 @@ try {
   check("E: deleted rows are gone", !db.getSession("mgr") && !db.getSession("w2"));
   check("E: restored w1 row survives the manager delete", !!db.getSession("w1"));
   check("E: deleted snapshots removed", !archivedTranscriptExists("pA", "mgr") && !archivedTranscriptExists("pA", "w2"));
+
+  // ════════ F. archive-time backstop re-snapshot (onExit missed: hard-kill / crash) ════════
+  // The source JSONL from section D still exists on disk. An exited session that has an engineSessionId
+  // but NO prior snapshot (onExit never fired) must get one AT ARCHIVE TIME, before state flips.
+  db.insertSession(mkSession("bsExit", { engineSessionId: engineId, cwd: fakeCwd }));
+  check("F: no snapshot for bsExit before archive", !archivedTranscriptExists("pA", "bsExit"));
+  const bsRes = sessions.archiveSession("bsExit");
+  check("F: archiveSession still archives the row", bsRes.archived.length === 1 && bsRes.archived[0] === "bsExit");
+  check("F: archive produced the backstop snapshot", archivedTranscriptExists("pA", "bsExit"));
+  const bsTurns = readArchivedTranscript("pA", "bsExit");
+  check("F: backstop snapshot renders the transcript (2 turns)",
+    bsTurns.length === 2 && bsTurns[0].text === "hello" && bsTurns[1].text === "hi there");
+
+  // The already-snapshotted path is UNAFFECTED: pre-seed a current snapshot, archive, and confirm the
+  // mtime guard made it a no-op (dest unchanged — no double-copy) while still archiving the row.
+  db.insertSession(mkSession("bsPre", { engineSessionId: engineId, cwd: fakeCwd }));
+  snapshotTranscript(fakeCwd, engineId, "pA", "bsPre"); // pre-existing current snapshot
+  const preMtime = fs.statSync(archivedTranscriptPath("pA", "bsPre")).mtimeMs;
+  const preRes = sessions.archiveSession("bsPre");
+  check("F: already-snapshotted session still archives", preRes.archived.length === 1 && preRes.archived[0] === "bsPre");
+  check("F: pre-existing snapshot untouched (mtime-guard no-op, no double-work)",
+    archivedTranscriptExists("pA", "bsPre") && fs.statSync(archivedTranscriptPath("pA", "bsPre")).mtimeMs === preMtime);
+
+  // A session with no engineSessionId is skipped (no snapshot, archives cleanly — no throw).
+  db.insertSession(mkSession("bsNoEngine"));
+  const neRes = sessions.archiveSession("bsNoEngine");
+  check("F: session without an engineSessionId archives with no snapshot",
+    neRes.archived.length === 1 && !archivedTranscriptExists("pA", "bsNoEngine"));
 } finally {
   try { fs.rmSync(claudeDir, { recursive: true, force: true }); } catch { /* ignore */ }
   try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); } catch { /* ignore */ }
