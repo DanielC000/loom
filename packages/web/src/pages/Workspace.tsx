@@ -9,6 +9,7 @@ import { TranscriptPane } from "../components/TranscriptPane";
 import { Composer } from "../components/Composer";
 import { SessionWakes } from "../components/SessionWakes";
 import { SessionQueue } from "../components/SessionQueue";
+import { SessionActions } from "../components/SessionActions";
 import { Panel, Button, Input, Select, SectionLabel, StatusPill } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
 
@@ -265,7 +266,6 @@ function SessionRow({ s, selected, onSelect, onResume, resuming, onStop, stoppin
     onClearRateLimit: () => void; clearingRateLimit: boolean;
     onArchive: () => void; archiving: boolean }) {
   const isManager = s.role === "manager";
-  const canResume = s.processState === "exited" && s.resumability !== "dead";
   const live = s.processState === "live";
   // §19c park: a usage cap parked this session until rateLimitedUntil. Surface it instead of the
   // live/busy pill, with the reset time + a one-line "transient? clear & retry" hint and the override.
@@ -292,18 +292,12 @@ function SessionRow({ s, selected, onSelect, onResume, resuming, onStop, stoppin
           </div>
         )}
       </Panel>
-      {rateLimited && <Button disabled={clearingRateLimit} title="Clear the rate-limit hold + the global usage latch and re-submit the held turn now (mirrors the auto-resume path)"
-        onClick={(ev) => { ev.stopPropagation(); onClearRateLimit(); }}>Clear rate limit &amp; retry now</Button>}
-      {live && <Button disabled={forking || s.busy} onClick={(ev) => { ev.stopPropagation(); onFork(); }}
-        title={s.busy ? "Fork is available when the session is idle" : "Fork — branch this conversation into a new divergent session"}>Fork</Button>}
-      {live && <Button disabled={stopping} title="Stop this session — graceful Ctrl-C, clean and resumable"
-        onClick={(ev) => { ev.stopPropagation(); onStop(); }}>Stop</Button>}
-      {canResume && <Button disabled={resuming} title="Resume this session and attach its terminal" onClick={onResume}>Resume</Button>}
-      {s.resumability === "dead" && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>dead</span>}
-      {/* Archive is exited-only (a live session must be stopped first) — moves it (and a manager's
-          workers) out of the rail into the Archive tab. */}
-      {!live && <Button disabled={archiving} title="Archive this session out of the rail (a manager archives its workers too)"
-        onClick={(ev) => { ev.stopPropagation(); onArchive(); }}>Archive</Button>}
+      <SessionActions s={s}
+        onResume={onResume} resuming={resuming}
+        onStop={onStop} stopping={stopping}
+        onFork={onFork} forking={forking}
+        onClearRateLimit={onClearRateLimit} clearingRateLimit={clearingRateLimit}
+        onArchive={onArchive} archiving={archiving} />
     </div>
   );
 }
