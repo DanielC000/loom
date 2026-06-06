@@ -41,7 +41,7 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
     onSuccess: () => qc.invalidateQueries({ queryKey: ["board", projectId] }),
   });
   const create = useMutation({
-    mutationFn: (title: string) => api.createTask(projectId, { title, columnKey: "backlog" }),
+    mutationFn: (title: string) => api.createTask(projectId, { title, columnKey: "inbox" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["board", projectId] }),
   });
   // Edit a task's title/description/priority from the detail drawer (same store the MCP tools read/write).

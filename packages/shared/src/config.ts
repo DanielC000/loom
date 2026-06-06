@@ -280,6 +280,7 @@ export interface PlatformConfigOverride {
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
   kanbanColumns: [
+    { key: "inbox", label: "Inbox" },
     { key: "backlog", label: "Backlog" },
     { key: "blocked", label: "Blocked (Human)" },
     { key: "todo", label: "To Do" },
