@@ -22,7 +22,7 @@ const HERMETIC = [
   "orch-model", "dead-id", "boot-reconcile", "boot-reconcile-keep-work", "merge-done-crash-recovery", "restart-intent", "restart-fleet",
   "profiles", "profiles-crud", "profile-spawn", "browser-testing-spawn", "platform-home", "platform-mgmt-surface", "platform-elevated-surface", "audit-surface",
   "agent-runs-keys", "agent-runs-primitive", "agent-runs-rest", "agent-runs-caps", "agent-runs-hardening", "agent-runs-audit",
-  "tasks-filter", "tasks-priority", "config-bounds", "transcript-encode", "alert-webhook",
+  "tasks-filter", "tasks-priority", "config-bounds", "kanban-defaults", "transcript-encode", "alert-webhook",
   "session-archive", "all-archived-sessions",
   "claude-config", "trust-lock", "spawn-args",
   "context-watcher", "context-stats", "recycle-handoff", "wake",
