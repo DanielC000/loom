@@ -101,9 +101,38 @@ export class OrchestrationMcpRouter {
 
     this.registerMyContext(server, sessionId);
 
+    // Additive "reported / awaiting-review" projection (read-only — never touches report DELIVERY).
+    // A worker that called worker_report(done|blocked) ends its turn and sits at busy:false —
+    // indistinguishable in the raw session record from a plain idle-live worker. Derive it from the
+    // worker's orchestration_events so a manager can SEE "reported, awaiting review" in
+    // worker_status/worker_list without reading the transcript.
+    //
+    // FRESHNESS — mirrors the busy-worker-watcher's "is this the worker's latest relevant event?"
+    // test (it skips a worker_stuck older than the current turn). We can't reuse its `ts > lastActivity`
+    // compare directly: setBusy re-stamps last_activity on the end-of-turn FALLING edge too, so a
+    // just-reported idle worker's lastActivity lands just AFTER its report — a ts compare couldn't tell
+    // "still waiting" from "resumed a new turn." Event ORDERING can: every exit from awaiting-review
+    // (manager message_worker → new turn, recycle, stop, merge_request/merge_done) appends a LATER
+    // worker-keyed event. So the report is "current" iff it is the worker's MOST-RECENT event
+    // (listEventsForWorker is chronological). A later worker_report(progress) is not terminal → not
+    // awaiting. reportedState carries the live state when awaiting, else null (kept consistent with
+    // awaitingReview so a non-null reportedState always means "waiting on my review right now").
+    const reportedProjection = (workerSessionId: string): {
+      reportedState: "done" | "blocked" | null;
+      awaitingReview: boolean;
+    } => {
+      const events = db.listEventsForWorker(workerSessionId);
+      const latest = events[events.length - 1];
+      const status =
+        latest?.kind === "worker_report" ? (latest.detail?.status as string | undefined) : undefined;
+      return status === "done" || status === "blocked"
+        ? { reportedState: status, awaitingReview: true }
+        : { reportedState: null, awaitingReview: false };
+    };
+
     server.registerTool(
       "worker_list",
-      { description: "List the workers you (this manager) have spawned — your direct children.", inputSchema: {} },
+      { description: "List the workers you (this manager) have spawned — your direct children. `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged).", inputSchema: {} },
       async () => ok(db.listWorkers(managerSessionId).map((w) => ({
         workerSessionId: w.id,
         taskId: w.taskId ?? null,
@@ -113,19 +142,20 @@ export class OrchestrationMcpRouter {
         ctxInputTokens: w.ctxInputTokens ?? null,
         model: w.model ?? null,
         lastActivity: w.lastActivity,
+        ...reportedProjection(w.id),
       }))),
     );
 
     server.registerTool(
       "worker_status",
       {
-        description: "Get the full session record for one of your workers, by workerSessionId.",
+        description: "Get the full session record for one of your workers, by workerSessionId. Includes the derived `reportedState` (done|blocked|null) + `awaitingReview` flag — set when the worker has called worker_report and is idle awaiting your review, cleared once it resumes a turn / is merged.",
         inputSchema: { workerSessionId: z.string() },
       },
       async ({ workerSessionId }) => {
         const w = db.getSession(workerSessionId);
         if (!w || w.parentSessionId !== managerSessionId) return ok({ error: "not your worker" });
-        return ok(w);
+        return ok({ ...w, ...reportedProjection(w.id) });
       },
     );
 
