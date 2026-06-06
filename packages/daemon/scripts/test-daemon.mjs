@@ -21,7 +21,7 @@ const HERMETIC = [
   "prod-guard",               // the guard itself
   "orch-model", "dead-id", "boot-reconcile", "boot-reconcile-keep-work", "merge-done-crash-recovery", "restart-intent", "restart-fleet",
   "profiles", "profiles-crud", "profile-spawn", "browser-testing-spawn", "platform-home", "platform-mgmt-surface", "platform-elevated-surface", "audit-surface",
-  "agent-runs-keys", "agent-runs-primitive", "agent-runs-rest", "agent-runs-caps", "agent-runs-spend", "agent-runs-hardening", "agent-runs-audit",
+  "agent-runs-keys", "agent-runs-primitive", "agent-runs-rest", "agent-runs-idempotency", "agent-runs-caps", "agent-runs-spend", "agent-runs-hardening", "agent-runs-audit",
   "tasks-filter", "tasks-priority", "config-bounds", "kanban-defaults", "transcript-encode", "alert-webhook",
   "session-archive", "all-archived-sessions", "periodic-snapshot",
   "claude-config", "trust-lock", "spawn-args",
