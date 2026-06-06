@@ -11,6 +11,7 @@ import { GitWriter } from "../git/writer.js";
 import { writeVaultFile } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateProfile } from "../profiles/validate.js";
+import { projectSessionList } from "./sessionView.js";
 
 // Same envelope as the task / orchestration MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -320,12 +321,18 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_sessions",
       {
-        description: "List live sessions across the platform (the Mission-Control feed; archived excluded), each enriched with its project + agent name. Optional projectId narrows to one project. Returns lightweight session rows.",
-        inputSchema: { projectId: z.string().optional() },
+        description: "List live sessions across the platform (the Mission-Control feed; archived excluded), each enriched with its project + agent name. Optional projectId narrows to one project. DEFAULT returns a lightweight SUMMARY per session (id, projectId, projectName, agentName, role, processState, busy, archivedAt, createdAt, lastActivity, model, ctxInputTokens, ctxTurns) so the list stays bounded; heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. Pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first).",
+        inputSchema: {
+          projectId: z.string().optional(),
+          full: z.boolean().optional(),
+          limit: z.number().int().positive().optional(),
+          offset: z.number().int().nonnegative().optional(),
+        },
       },
-      async ({ projectId }) => {
+      async ({ projectId, full, limit, offset }) => {
         const all = db.listAllSessions();
-        return ok(projectId === undefined ? all : all.filter((s) => s.projectId === projectId));
+        const filtered = projectId === undefined ? all : all.filter((s) => s.projectId === projectId);
+        return ok(projectSessionList(filtered, { full, limit, offset }));
       },
     );
 

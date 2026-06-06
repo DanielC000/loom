@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript, readArchivedTranscript } from "../sessions/transcript.js";
+import { projectSessionList } from "./sessionView.js";
 
 // Same envelope as the task / orchestration / platform MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -52,20 +53,27 @@ export class AuditMcpRouter {
         description:
           "List sessions across the platform to choose which transcripts to audit. scope (default \"all\"): " +
           "\"live\" = currently-live sessions only; \"archived\" = archived sessions only; \"all\" = every session " +
-          "including archived. Optional projectId narrows to one project. Each row is enriched with its project " +
-          "+ agent name and carries id, projectId, role, processState, archivedAt and the engine session id — " +
-          "feed (projectId, id, archived) into transcript_read.",
+          "including archived. Optional projectId narrows to one project. DEFAULT returns a lightweight SUMMARY " +
+          "per session (id, projectId, projectName, agentName, role, processState, busy, archivedAt, createdAt, " +
+          "lastActivity, model, ctxInputTokens, ctxTurns) — enough to feed (projectId, id, archived: archivedAt!=null) " +
+          "into transcript_read while keeping the list bounded; heavy fields (title, cwd, engineSessionId, branch, " +
+          "worktree, lineage, errors) are dropped. Pass full:true for whole session records. Optional limit/offset " +
+          "paginate (rows are ordered by last activity, newest first).",
         inputSchema: {
           scope: z.enum(["all", "live", "archived"]).optional(),
           projectId: z.string().optional(),
+          full: z.boolean().optional(),
+          limit: z.number().int().positive().optional(),
+          offset: z.number().int().nonnegative().optional(),
         },
       },
-      async ({ scope, projectId }) => {
+      async ({ scope, projectId, full, limit, offset }) => {
         const all =
           scope === "live" ? db.listAllSessions()
           : scope === "archived" ? db.listAllArchivedSessions()
           : db.listAllSessionsIncludingArchived(); // "all" (default): every session incl. archived
-        return ok(projectId === undefined ? all : all.filter((s) => s.projectId === projectId));
+        const filtered = projectId === undefined ? all : all.filter((s) => s.projectId === projectId);
+        return ok(projectSessionList(filtered, { full, limit, offset }));
       },
     );
 
