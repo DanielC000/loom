@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import MissionControl from "./pages/MissionControl";
 import Workspace from "./pages/Workspace";
+import Overview from "./pages/Overview";
 import Archive from "./pages/Archive";
 import Terminals from "./pages/Terminals";
 import Board from "./pages/Board";
@@ -34,6 +35,10 @@ export type NavPage = {
 export const NAV_PAGES: NavPage[] = [
   { label: "Mission Control", nav: "Mission", to: "/", end: true, element: <MissionControl /> },
   { label: "Workspace", to: "/workspace", element: <Workspace /> },
+  // The project-scoped Overview — the analog of the Platform page for the header's active project
+  // (identity + fleet + go-live + board + schedules + attention/activity + archive count, all rescoped
+  // when you switch the active project). Composes the shared fleet widgets off existing endpoints.
+  { label: "Overview", to: "/overview", element: <Overview /> },
   { label: "Archive", to: "/archive", element: <Archive /> },
   { label: "Terminals", to: "/terminals", element: <Terminals /> },
   { label: "Board", to: "/board", element: <Board /> },
