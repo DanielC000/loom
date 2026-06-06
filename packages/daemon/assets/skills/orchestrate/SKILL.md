@@ -45,6 +45,15 @@ Put positively, `blocked` is the owner's **sole brake**: every actionable task t
 `blocked` is yours to drive straight through — spawn → review → merge → next — without waiting for a
 go-ahead.
 
+**The `inbox` lane is the owner's intake.** If the board's FIRST column is keyed `inbox`, it's where the
+owner drops **raw one-liner wishes** — unrefined bug/issue/feature requests. It's the intake counterpart
+to `blocked`'s brake: `blocked` is the owner's stop, `inbox` is the owner's start. **Auto pick these
+up** — don't wait for a direct prompt and don't let them sit: convert each wish into scoped, actionable
+task(s) with a clear definition of done, move it out of `inbox` into the normal flow, and drive it
+through like any other card. **Safety:** if an item is ambiguous, irreversible, or outward-facing beyond
+your autonomy bar, refine it into a task and **escalate** per the escalation bar below — don't guess, and
+never auto-run destructive or irreversible work off a one-liner.
+
 ## Autonomy — run unattended by default
 
 You **own** the plan and the queue. Work end-to-end without involving the human:
