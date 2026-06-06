@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Agent, SessionListItem, OrchestrationEvent, Schedule } from "@loom/shared";
+import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention } from "../lib/attention";
@@ -13,11 +13,15 @@ import { Composer } from "../components/Composer";
 import { SessionWakes } from "../components/SessionWakes";
 import { SessionQueue } from "../components/SessionQueue";
 import { SessionActions } from "../components/SessionActions";
+import { SpawnControls } from "../components/SpawnControls";
 import { Panel, Button, SectionLabel, StatusPill, Badge, Chip, Meter } from "../components/ui";
 import {
   Stat, FleetCard, FleetRow, AttentionRow, EventRow, fleetRollup, worstContext,
 } from "../components/fleet";
-import { color, font, tone } from "../theme";
+import { color, font, tone, type Tone } from "../theme";
+
+// Profile-role → badge tone, mirroring Workspace's roleTone (null/plain → muted).
+const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", run: "muted" };
 
 // PROJECT OVERVIEW — the project-scoped analog of the Platform page: one scrolling cockpit for the
 // active project (header-selected via useActiveProject). It composes the SAME fleet widgets Mission
@@ -84,11 +88,12 @@ export default function Overview() {
   if (!projectId) return <p style={{ color: color.textMuted, fontFamily: font.mono }}>No project selected — pick a project in the header.</p>;
 
   const roleOf = (a: Agent) => profiles.data?.find((p) => p.id === a.profileId)?.role ?? null;
-  // The project's manager agents — those whose bound Profile resolves to the "manager" role. Each gets
-  // a go-live card. (A project without a manager-role profile shows the hint below.)
-  const managerAgents = (agents.data ?? []).filter((a) => roleOf(a) === "manager");
-  const liveManagerFor = (agentId: string) =>
-    all.find((s) => s.agentId === agentId && s.role === "manager" && s.processState === "live");
+  // ALL the project's agents get a spawn card (mirroring Workspace, which offers spawn for any agent —
+  // not just managers). Each card resolves its agent's profile role for the badge + the spawn default.
+  const projectAgents = agents.data ?? [];
+  // Any live session for this agent — drives the live-status pill and the manager go-live guard below.
+  const liveSessionFor = (agentId: string) =>
+    all.find((s) => s.agentId === agentId && s.processState === "live");
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -120,18 +125,18 @@ export default function Overview() {
         </div>
       </div>
 
-      {/* --- Agents go-live (the project's manager agents) --- */}
+      {/* --- Agents spawn (every project agent — spawn from profile or override the role) --- */}
       <section>
         <SectionLabel>Agents</SectionLabel>
-        {managerAgents.length === 0 ? (
+        {projectAgents.length === 0 ? (
           <Panel style={{ padding: 12 }}>
             <span style={{ color: color.amber, fontFamily: font.mono, fontSize: 12 }}>
-              No manager-role agent in this project — assign a manager Profile to an agent in Workspace to enable go-live here.
+              No agents in this project — create one in Workspace.
             </span>
           </Panel>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))", gap: 12 }}>
-            {managerAgents.map((a) => <ManagerControl key={a.id} agent={a} session={liveManagerFor(a.id)} />)}
+            {projectAgents.map((a) => <AgentControl key={a.id} agent={a} role={roleOf(a)} session={liveSessionFor(a.id)} />)}
           </div>
         )}
       </section>
@@ -190,13 +195,21 @@ export default function Overview() {
   );
 }
 
-// One manager agent's go-live card — mirrors Platform's AgentControl: live status + a spawn button
-// (disabled while a session is live) and a graceful-stop button. Spawns from the agent's Profile (no
-// role override → the profile's manager role applies server-side), so the manager boots with its rig.
-function ManagerControl({ agent, session }: { agent: Agent; session?: SessionListItem }) {
+// One agent's spawn card — the Overview analog of Workspace's Sessions-header spawn, brought to EVERY
+// project agent (not just managers). It shows the agent's profile-role badge, its name, a live pill if
+// the agent has a live session, and the SHARED SpawnControls split-button (spawn from profile, or
+// override the role → manager/plain) wired to api.startSession(agent.id, role).
+//
+// MANAGER GO-LIVE GUARD (preserved from the old ManagerControl): a manager-role agent that's ALREADY
+// live must not be re-spawned — a human double-spawning the orchestrator is a footgun — so it keeps the
+// disabled "Live" button + a graceful Stop instead of the spawn split-button. Every other agent (incl.
+// a non-manager that happens to be live) keeps spawn always-enabled, matching Workspace (which never
+// disables spawn). Live-session management (Fork/Resume/Stop) lives in the Fleet accordion below, so
+// this card stays spawn-focused; only the manager Stop is retained here as part of the guard.
+function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRole | null; session?: SessionListItem }) {
   const qc = useQueryClient();
   const spawn = useMutation({
-    mutationFn: () => api.startSession(agent.id),
+    mutationFn: (r?: "manager" | "plain") => api.startSession(agent.id, r),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
   });
   const stop = useMutation({
@@ -204,23 +217,22 @@ function ManagerControl({ agent, session }: { agent: Agent; session?: SessionLis
     onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
   });
   const live = session?.processState === "live";
+  const managerLive = role === "manager" && live;
   return (
     <Panel style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <Badge tone="phosphor">Manager</Badge>
+        <Badge tone={role ? roleTone[role] : "muted"}>{role ?? "plain"}</Badge>
         <strong style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{agent.name}</strong>
         <span style={{ flex: 1 }} />
-        {live
-          ? <StatusPill tone={session!.busy ? "amber" : "phosphor"} glow={session!.busy} label={session!.busy ? "busy" : "idle"} />
-          : <StatusPill tone="muted" label="offline" />}
+        {live && <StatusPill tone={session!.busy ? "amber" : "phosphor"} glow={session!.busy} label={session!.busy ? "busy" : "live"} />}
       </div>
-      <div style={{ display: "flex", gap: 8 }}>
-        <Button variant="primary" disabled={live || spawn.isPending}
-          title={live ? "Manager is already live" : "Spawn the manager (human go-live)"}
-          onClick={() => spawn.mutate()}>
-          {spawn.isPending ? "Spawning…" : live ? "Live" : "Spawn Manager"}
-        </Button>
-        {live && (
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        {managerLive ? (
+          <Button variant="primary" disabled title="Manager is already live">Live</Button>
+        ) : (
+          <SpawnControls profileRole={role} onSpawn={(r) => spawn.mutate(r)} pending={spawn.isPending} />
+        )}
+        {managerLive && (
           <Button variant="danger" disabled={stop.isPending}
             title="Stop this session — graceful Ctrl-C, clean and resumable"
             onClick={() => stop.mutate(session!.id)}>{stop.isPending ? "Stopping…" : "Stop"}</Button>

@@ -10,6 +10,7 @@ import { Composer } from "../components/Composer";
 import { SessionWakes } from "../components/SessionWakes";
 import { SessionQueue } from "../components/SessionQueue";
 import { SessionActions } from "../components/SessionActions";
+import { SpawnControls } from "../components/SpawnControls";
 import { Panel, Button, Input, Select, SectionLabel, StatusPill } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
 
@@ -320,44 +321,6 @@ function WorkerGroup({ workers, open, onToggle, renderRow }:
         {busy > 0 && <span style={{ color: color.amber }}>· {busy} busy</span>}
       </button>
       {open && workers.map(renderRow)}
-    </div>
-  );
-}
-
-// Spawn split-button: the primary action spawns from the agent's profile (no role → the profile's role
-// applies server-side); the ▾ menu overrides the role per-spawn. "From profile" = auto, "Manager" =
-// explicit manager, "Plain" = force-plain (ignore the profile's role → a role-null session).
-function SpawnControls({ profileRole, onSpawn, pending }:
-  { profileRole: SessionRole | null; onSpawn: (role?: "manager" | "plain") => void; pending: boolean }) {
-  const [open, setOpen] = useState(false);
-  const options: { label: string; role?: "manager" | "plain" }[] = [
-    { label: "From profile (default)", role: undefined },
-    { label: "Manager", role: "manager" },
-    { label: "Plain", role: "plain" },
-  ];
-  return (
-    <div style={{ position: "relative", display: "inline-flex" }} onMouseLeave={() => setOpen(false)}>
-      <Button variant="primary" disabled={pending} onClick={() => { setOpen(false); onSpawn(undefined); }}
-        title={`Spawn from profile — role: ${profileRole ?? "plain"}`}
-        style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}>
-        Spawn{profileRole ? ` · ${profileRole}` : ""}
-      </Button>
-      <Button variant="primary" disabled={pending} onClick={() => setOpen((o) => !o)} title="Override the spawn role"
-        style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: "none", padding: "4px 6px" }}>▾</Button>
-      {open && (
-        <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 20, minWidth: 170,
-          background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: 4, overflow: "hidden",
-          display: "flex", flexDirection: "column" }}>
-          {options.map((o) => (
-            <button key={o.label} disabled={pending} onClick={() => { setOpen(false); onSpawn(o.role); }}
-              className="loom-btn loom-btn-ghost"
-              style={{ textAlign: "left", background: "transparent", border: "none", color: color.text,
-                fontFamily: font.mono, fontSize: 12, padding: "6px 10px", cursor: "pointer" }}>
-              {o.label}
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
