@@ -229,6 +229,36 @@ export interface AgentRun {
   endedAt: string | null;
 }
 
+/**
+ * A run-scoped audit event kind (Agent Runs follow-up #1). `cap_rejected` is the core, genuinely-invisible
+ * case: a 429 at POST /api/runs (concurrency or daily-token cap) creates NO run row, so without an explicit
+ * audit record a throttled key leaves no trace anywhere. Run LIFECYCLE (status/timestamps) is already on the
+ * `runs` row and is deliberately NOT duplicated here.
+ */
+export type RunEventKind = "cap_rejected";
+
+/**
+ * A **RunEvent** (Agent Runs follow-up #1) — a project-scoped audit record for a run-related event that has
+ * NO run row of its own. Distinct from {@link OrchestrationEvent}, which is manager-tree shaped
+ * (`managerSessionId` is NOT NULL and its readers are session-keyed); a cap-rejection has no session at all,
+ * so it needs this separate store. Durable in SQLite (the `run_events` table). `keyId`/`runId` are nullable
+ * (a `cap_rejected` carries the throttled `keyId` but NO `runId` — none was created). `detail` is
+ * kind-specific JSON (`cap_rejected`: `{ cap: "concurrency"|"daily_token", limit, observed, agentId }`).
+ * See `[[Agent Runs]]`.
+ */
+export interface RunEvent {
+  id: string;
+  projectId: ProjectId;
+  /** The API key the event concerns (a cap-rejection is per-key); null if not key-scoped. */
+  keyId: ApiKeyId | null;
+  /** The run this event concerns; null for a `cap_rejected` (no run row was ever created). */
+  runId: RunId | null;
+  kind: RunEventKind;
+  /** Kind-specific detail JSON (`cap_rejected`: `{ cap, limit, observed, agentId }`); null when none. */
+  detail: Record<string, unknown> | null;
+  createdAt: string;
+}
+
 export interface Session {
   id: SessionId;
   projectId: ProjectId;
