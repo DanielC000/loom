@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { Route, Routes, useNavigate } from "react-router-dom";
+import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import ReviewPanel from "./pages/ReviewPanel";
-import { NAV_PAGES } from "./nav";
+import { NAV_PAGES, type NavGroup } from "./nav";
 import { NavTab, Badge, Select } from "./components/ui";
 import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
@@ -48,19 +48,88 @@ function Bell() {
 }
 
 // Header active-project selector. Persists the one project that scopes the detail pages
-// (Board / Git / Vault / Orchestration). Mission Control + Terminals stay god-eye and ignore it —
-// hence the quiet hint rather than hiding the control per route.
+// (the nav items marked with a scope dot — Overview / Board / Runs / Orchestration / Vault /
+// Git / Schedules / Settings). Mission Control, Terminals and the other god-eye pages ignore it
+// — hence the quiet tooltip rather than hiding the control per route. Lives on the LEFT, right
+// after the logo, so the active scope reads before the destinations it scopes.
 function ActiveProjectControl() {
   const { projectId, setProjectId, projects } = useActiveProject();
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
       <span style={{ fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>Project</span>
-      <Select value={projects.length ? projectId : ""} onChange={(e) => setProjectId(e.target.value)}>
+      <Select value={projects.length ? projectId : ""} onChange={(e) => setProjectId(e.target.value)}
+        title="Scopes the project-scoped pages (marked with a dot). God-eye pages ignore this.">
         {projects.length === 0 && <option value="">— none —</option>}
         {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
       </Select>
-      <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>(scopes detail pages)</span>
     </span>
+  );
+}
+
+// A subtle marker on nav items that respond to the active-project picker (see ActiveProjectControl).
+function ScopeDot() {
+  return (
+    <span title="scoped to the active project"
+      style={{ width: 4, height: 4, borderRadius: 4, background: color.cyan, opacity: 0.85, display: "inline-block", marginLeft: 5, flex: "none", verticalAlign: "middle" }} />
+  );
+}
+
+// Thin vertical hairline used to separate the header's left-cluster groups.
+function HeaderDivider() {
+  return <span aria-hidden style={{ width: 1, height: 20, background: color.border, flex: "none" }} />;
+}
+
+// The "More ▾" overflow menu: the non-primary nav pages, grouped by section. Mirrors the
+// SpawnControls dropdown pattern (position:relative + onMouseLeave-close, Panel/borderStrong/token
+// styling, zIndex). The button shows the active (phosphor) state when the current route is one of
+// its items, so a nested page still reads as "selected" from the collapsed header.
+const MORE_GROUPS: { key: NavGroup; label: string }[] = [
+  { key: "operate", label: "Operate" },
+  { key: "project", label: "Project" },
+  { key: "config", label: "Config" },
+  { key: "system", label: "System" },
+];
+
+function MoreMenu() {
+  const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
+  const location = useLocation();
+  const items = NAV_PAGES.filter((p) => !p.primary);
+  const isActive = items.some((p) => p.to === location.pathname);
+
+  return (
+    <div style={{ position: "relative", display: "inline-flex" }} onMouseLeave={() => setOpen(false)}>
+      <button onClick={() => setOpen((o) => !o)} className={`loom-navtab${isActive ? " is-active" : ""}`}
+        style={{ background: "transparent", border: "none", borderBottom: `2px solid ${isActive ? color.phosphor : "transparent"}`, cursor: "pointer" }}>
+        More ▾
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 6, zIndex: 30, minWidth: 200,
+          background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, overflow: "hidden",
+          display: "flex", flexDirection: "column", padding: "4px 0", boxShadow: "0 6px 20px rgba(0,0,0,0.45)" }}>
+          {MORE_GROUPS.map((g) => {
+            const groupItems = items.filter((p) => p.group === g.key);
+            if (groupItems.length === 0) return null;
+            return (
+              <div key={g.key}>
+                <div style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted, padding: "6px 12px 2px" }}>{g.label}</div>
+                {groupItems.map((p) => {
+                  const active = location.pathname === p.to;
+                  return (
+                    <button key={p.to} className="loom-btn loom-btn-ghost"
+                      onClick={() => { setOpen(false); navigate(p.to); }}
+                      style={{ display: "inline-flex", alignItems: "center", textAlign: "left", background: "transparent", border: "none",
+                        color: active ? color.phosphor : color.text, fontFamily: font.mono, fontSize: 12, padding: "6px 12px", cursor: "pointer" }}>
+                      {p.label}{p.scoped && <ScopeDot />}
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -131,15 +200,20 @@ export default function App() {
       <div style={{ minHeight: "100vh" }}>
         <CommandPalette />
         <ToastContainer />
-        <header style={{ display: "flex", alignItems: "center", gap: 24, padding: "10px 20px", borderBottom: `1px solid ${color.border}` }}>
+        <header style={{ display: "flex", alignItems: "center", gap: 16, padding: "10px 20px", borderBottom: `1px solid ${color.border}` }}>
           <Logo />
-          <nav style={{ display: "flex", gap: 18 }}>
-            {NAV_PAGES.map((p) => (
-              <NavTab key={p.to} to={p.to} end={p.end}>{p.nav ?? p.label}</NavTab>
+          <HeaderDivider />
+          <ActiveProjectControl />
+          <HeaderDivider />
+          <nav style={{ display: "flex", gap: 18, alignItems: "center" }}>
+            {NAV_PAGES.filter((p) => p.primary).map((p) => (
+              <NavTab key={p.to} to={p.to} end={p.end}>
+                {p.nav ?? p.label}{p.scoped && <ScopeDot />}
+              </NavTab>
             ))}
+            <MoreMenu />
           </nav>
           <span style={{ flex: 1 }} />
-          <ActiveProjectControl />
           <Bell />
           <GlobalStatus />
         </header>
