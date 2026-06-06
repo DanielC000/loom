@@ -64,6 +64,8 @@ export function TerminalPane({ sessionId, resizable = false }: { sessionId: stri
     // so both the frame handler and the ResizeObserver can recompute the fontSize against it.
     let cols = 0;
     let rows = 0;
+    // Pending one-shot repaint timer (Claude attach), cleared on unmount so it can't fire late.
+    let repaintTimer: ReturnType<typeof setTimeout> | undefined;
 
     /**
      * Claude mode: scale fontSize so the pinned cols×rows grid just fills the container without
@@ -124,6 +126,17 @@ export function TerminalPane({ sessionId, resizable = false }: { sessionId: stri
             rows = msg.rows;
             term.resize(cols, rows);
             applyFontSize();
+            // Force a clean repaint on attach: Claude runs main-screen (no alt-screen), so the daemon's
+            // bounded ring replay can start mid-stream on a long session — xterm shows an incoherent
+            // screen until the session next emits. A Ctrl-L (here via the `repaint` control) makes Claude
+            // redraw the full TUI immediately. Sent AFTER the pinned-grid resize lands (a short debounce
+            // lets the resize settle and the ring replay finish) so it can't race the grid. Safe to fire
+            // anytime: ALT_SCREEN_FULL_REPAINT makes Ctrl-L a full repaint, the same mitigation already
+            // used during streaming — so a busy/mid-turn session redraws cleanly rather than garbling.
+            clearTimeout(repaintTimer);
+            repaintTimer = setTimeout(() => {
+              if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "repaint" }));
+            }, 80);
           }
         }
         // (sessionId/exit/dead control frames handled by parent state in the full UI)
@@ -142,6 +155,7 @@ export function TerminalPane({ sessionId, resizable = false }: { sessionId: stri
     return () => {
       onData.dispose();
       ro.disconnect();
+      clearTimeout(repaintTimer);
       // Don't act on a socket the pane abandoned mid-handshake. Closing one that's still CONNECTING
       // logs "WebSocket is closed before the connection is established" — it fires on Terminals/Workspace
       // re-render churn (effect cleanup before the open completes). Detach handlers so no late frame
