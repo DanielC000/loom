@@ -255,7 +255,7 @@ function NewTask({ onCreate }: { onCreate: (title: string) => void }) {
   return (
     <div style={{ marginTop: 10, display: "flex", gap: 6 }}>
       <Input placeholder="new task title" value={title} onChange={(e) => setTitle(e.target.value)} style={{ minWidth: 280 }} />
-      <Button variant="primary" disabled={!title} onClick={() => { onCreate(title); setTitle(""); }}>Add to Backlog</Button>
+      <Button variant="primary" disabled={!title} onClick={() => { onCreate(title); setTitle(""); }}>Add to Inbox</Button>
     </div>
   );
 }
