@@ -5,7 +5,7 @@ import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole 
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention } from "../lib/attention";
-import { bySessionActivity } from "../lib/sessions";
+import { bySessionActivity, byCreatedStable } from "../lib/sessions";
 import Board from "./Board";
 import { TerminalPane } from "../components/Terminal";
 import { TranscriptPane } from "../components/TranscriptPane";
@@ -44,7 +44,9 @@ export default function Overview() {
 
   // Project-filtered session set — every section below scopes off this.
   const all = (sessions.data ?? []).filter((s) => s.projectId === projectId);
-  const managers = all.filter((s) => s.role === "manager").sort(bySessionActivity);
+  // Managers hold a STABLE slot (createdAt asc, tiebreak id) so the cockpit never reshuffles on the
+  // 3s poll when a manager flips busy↔idle — matching the Terminal view (see lib/sessions.ts).
+  const managers = all.filter((s) => s.role === "manager").sort(byCreatedStable);
   const workers = all.filter((s) => s.role === "worker");
   const roll = fleetRollup(all);
   const wc = worstContext(all);
@@ -309,7 +311,7 @@ function FleetAccordion({ managers, workers, looseWorkers }: {
       {managers.map((m) => (
         <div key={m.id} style={{ marginBottom: 8 }}>
           <FleetCockpitRow s={m} star open={openId === m.id} onToggle={() => toggle(m.id)} actions={actionsFor(m)} />
-          {workers.filter((w) => w.parentSessionId === m.id).sort(bySessionActivity).map((w) => (
+          {workers.filter((w) => w.parentSessionId === m.id).sort(byCreatedStable).map((w) => (
             <div key={w.id} style={{ paddingLeft: 16 }}>
               <FleetCockpitRow s={w} open={openId === w.id} onToggle={() => toggle(w.id)} actions={actionsFor(w)} />
             </div>

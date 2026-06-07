@@ -27,6 +27,19 @@ export function bySessionActivity(a: SessionOrder, b: SessionOrder): number {
   return a.createdAt.localeCompare(b.createdAt); // stable spawn-order tiebreak
 }
 
+/** The minimal shape the stable comparator needs — Session and SessionListItem both satisfy it. */
+export type SessionStableOrder = Pick<Session, "createdAt" | "id">;
+
+/**
+ * STABLE spawn-order comparator — createdAt ASC, tiebreak id. Unlike bySessionActivity, this key
+ * never depends on liveness or lastActivity, so a row keeps its slot whether it's busy or idle and
+ * a polling list (Overview, Terminals) never reshuffles between polls. Use this for any tier that
+ * must hold position through busy↔idle flips.
+ */
+export function byCreatedStable(a: SessionStableOrder, b: SessionStableOrder): number {
+  return a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
+}
+
 /**
  * Most-recent activity timestamp (epoch ms) across a group's members — for ranking GROUPS (a
  * project lane, a manager's subtree) by their freshest member, so the group you're driving floats

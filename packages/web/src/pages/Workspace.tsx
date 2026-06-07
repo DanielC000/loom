@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Agent, Project, Session, SessionRole } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { bySessionActivity } from "../lib/sessions";
+import { bySessionActivity, byCreatedStable } from "../lib/sessions";
 import { TerminalPane } from "../components/Terminal";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { Composer } from "../components/Composer";
@@ -195,10 +195,12 @@ export default function Workspace() {
   const topLevel: Session[] = agentSessions.filter(
     (s) => !(s.role === "worker" && s.parentSessionId && managerIds.has(s.parentSessionId)),
   );
-  // Within each tier, the shared activity comparator (live-first → most-recent → spawn-order). Role
-  // rank stays the PRIMARY top-level key so the orchestrator isn't lost among plain/orphan sessions;
-  // activity orders within a role. Workers sort by activity under their manager (hierarchy intact).
-  for (const ws of workersByManager.values()) ws.sort(bySessionActivity);
+  // Top level: role rank stays the PRIMARY key so the orchestrator isn't lost among plain/orphan
+  // sessions; the shared activity comparator (live-first → most-recent → spawn-order) orders within a
+  // role. Nested workers, by contrast, use the STABLE spawn-order key (byCreatedStable — createdAt
+  // asc, tiebreak id) so a worker holds its slot under its manager through busy↔idle flips and the
+  // rail never reshuffles on a poll — matching the Overview/Terminal manager→worker nesting.
+  for (const ws of workersByManager.values()) ws.sort(byCreatedStable);
   const orderedTop = topLevel.sort((a, b) => roleRank(a.role) - roleRank(b.role) || bySessionActivity(a, b));
   // Collapsed by default (to keep the box small); a group auto-expands while one of its workers is selected.
   const [expandedManagers, setExpandedManagers] = useState<Set<string>>(new Set());
