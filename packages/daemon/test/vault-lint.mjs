@@ -116,8 +116,12 @@ try {
   check("writeSessionSettings(vaultPath): PostToolUse matcher = Write|Edit", Array.isArray(ptu) && ptu[0].matcher === "Write|Edit");
   check("writeSessionSettings(vaultPath): command points at vault-lint.mjs + the vault path",
     ptu[0].hooks[0].command.includes("vault-lint.mjs") && ptu[0].hooks[0].command.includes(VAULT));
+  check("writeSessionSettings(vaultPath): includeCoAuthoredBy === false (suppress Claude commit trailer)",
+    withVault.includeCoAuthoredBy === false);
   const noVault = JSON.parse(fs.readFileSync(writeSessionSettings("vl-off", perm), "utf8"));
   check("writeSessionSettings(no vaultPath / docLint off): NO PostToolUse entry", noVault.hooks.PostToolUse === undefined);
+  check("writeSessionSettings(no vaultPath): includeCoAuthoredBy === false (suppress Claude commit trailer)",
+    noVault.includeCoAuthoredBy === false);
 } finally {
   for (const d of [VAULT, OUTSIDE]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ } }
   for (const s of ["vl-on", "vl-off"]) { try { fs.rmSync(path.join(SETTINGS_DIR, `${s}.json`), { force: true }); } catch { /* ignore */ } }
