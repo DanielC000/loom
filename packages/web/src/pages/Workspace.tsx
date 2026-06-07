@@ -175,19 +175,26 @@ export default function Workspace() {
   // Manager first, then platform, then workers — so the orchestrator isn't lost among its workers.
   const roleRank = (r?: string | null) => (r === "manager" ? 0 : r === "platform" ? 1 : r === "worker" ? 2 : 3);
   // Fold each manager's workers into a collapsible group under it, so a manager with many workers
-  // doesn't blow out the Sessions box. A worker is grouped only when its spawning manager is also in
-  // this agent's list; orphan workers (no/unknown parent) stay top-level. Workers sort by spawn time.
-  const allSessions = sessions.data ?? [];
-  const sessionIds = new Set(allSessions.map((s) => s.id));
+  // doesn't blow out the Sessions box. Workers live under SEPARATE worker-agents (Dev/Bugfix/Docs), so
+  // they're absent from this agent-scoped list — nest them from the GLOBAL feed by parentSessionId, the
+  // way Overview.tsx/MissionControl.tsx already read parentage. (SessionListItem extends Session, so the
+  // global rows render through the same SessionRow.) Old workers spawned under the Orchestrator agent
+  // itself appear in BOTH feeds — they nest exactly once and are dropped from the top level (dedupe).
+  const agentSessions = sessions.data ?? [];
+  // Managers in THIS agent's list anchor the nested groups. Selecting a worker-agent (no managers in
+  // its list) leaves managerIds empty → nothing nests → its workers stay top-level (view unchanged).
+  const managerIds = new Set(agentSessions.filter((s) => s.role === "manager").map((s) => s.id));
   const workersByManager = new Map<string, Session[]>();
-  const topLevel: Session[] = [];
-  for (const s of allSessions) {
-    if (s.role === "worker" && s.parentSessionId && sessionIds.has(s.parentSessionId)) {
-      (workersByManager.get(s.parentSessionId) ?? workersByManager.set(s.parentSessionId, []).get(s.parentSessionId)!).push(s);
-    } else {
-      topLevel.push(s);
+  for (const w of globalSessions.data ?? []) {
+    if (w.role === "worker" && w.parentSessionId && managerIds.has(w.parentSessionId)) {
+      (workersByManager.get(w.parentSessionId) ?? workersByManager.set(w.parentSessionId, []).get(w.parentSessionId)!).push(w);
     }
   }
+  // Top level = this agent's own sessions, minus any same-agent workers that now nest under a manager in
+  // this list (they're also in the global feed above — exclude here so each shows exactly once, nested).
+  const topLevel: Session[] = agentSessions.filter(
+    (s) => !(s.role === "worker" && s.parentSessionId && managerIds.has(s.parentSessionId)),
+  );
   // Within each tier, the shared activity comparator (live-first → most-recent → spawn-order). Role
   // rank stays the PRIMARY top-level key so the orchestrator isn't lost among plain/orphan sessions;
   // activity orders within a role. Workers sort by activity under their manager (hierarchy intact).
@@ -199,7 +206,8 @@ export default function Workspace() {
     setExpandedManagers((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
   const renderRow = (s: Session) => {
-    // A manager with live-list workers confirms before archiving the whole group (cascade).
+    // A manager with nested (cross-agent) workers confirms before archiving the whole group. The count
+    // matches the server's parentSessionId-based archive cascade, so the confirm reflects what it archives.
     const workerCount = s.role === "manager" ? (workersByManager.get(s.id)?.length ?? 0) : 0;
     const onArchive = () => {
       if (workerCount > 0 && !window.confirm(`Archive this manager and its ${workerCount} worker${workerCount === 1 ? "" : "s"}? They'll move to the Archive tab.`)) return;
