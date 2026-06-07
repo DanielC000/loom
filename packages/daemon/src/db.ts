@@ -1376,6 +1376,16 @@ export class Db {
       "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, updated_at=@updatedAt WHERE id=@id",
     ).run(next);
   }
+  /** PERMANENTLY delete a task card. Idempotent on a missing id (DELETE … WHERE matches nothing). HUMAN-only
+   * (no MCP path) — an agent can only move a card to done; the REST route enforces the live-session guard. */
+  deleteTask(id: string): void {
+    this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+  }
+  /** Count of sessions still in processState 'live' bound to a task — the task-delete guard ("don't delete a
+   * card out from under a running worker"), mirroring countLiveSessionsForAgent/InProject. */
+  countLiveSessionsForTask(id: string): number {
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE task_id = ? AND process_state = 'live'").get(id) as { c: number }).c;
+  }
 
   // --- schedules (phase-2 Pillar B) ---
   insertSchedule(s: Schedule): void {

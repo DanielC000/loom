@@ -49,6 +49,13 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
     mutationFn: ({ id, patch }: { id: string; patch: { title?: string; body?: string; priority?: TaskPriority } }) => api.updateTask(id, patch),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["board", projectId] }),
   });
+  // PERMANENTLY delete a task card from the drawer (HUMAN-only REST; no MCP path). On success close the
+  // drawer + refetch the board. On the server's live-session guard 400, delErr throws the reason — leave
+  // the drawer open and surface `del.error` to the user instead of silently closing.
+  const del = useMutation({
+    mutationFn: (id: string) => api.deleteTask(id),
+    onSuccess: () => { setOpenTaskId(null); qc.invalidateQueries({ queryKey: ["board", projectId] }); },
+  });
 
   const onDragEnd = (e: DragEndEvent) => {
     if (e.over && e.active.id !== e.over.id) move.mutate({ id: String(e.active.id), columnKey: String(e.over.id) });
@@ -76,7 +83,9 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
       )}
       {openTask && (
         <TaskDrawer key={openTask.id} task={openTask} onClose={() => setOpenTaskId(null)}
-          onSave={(patch) => edit.mutate({ id: openTask.id, patch })} saving={edit.isPending} />
+          onSave={(patch) => edit.mutate({ id: openTask.id, patch })} saving={edit.isPending}
+          onDelete={() => del.mutate(openTask.id)} deleting={del.isPending}
+          deleteError={del.error ? (del.error as Error).message : null} />
       )}
     </div>
   );
@@ -162,11 +171,14 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
 // Slide-over detail drawer: view + edit a task's title and description (the `body` field that the
 // MCP task tools read/write but the card never showed). Backdrop or Esc closes; keyed by task id so
 // switching cards resets the fields. Save patches the shared task store, then the board refetches.
-function TaskDrawer({ task, onClose, onSave, saving }:
-  { task: Task; onClose: () => void; onSave: (patch: { title?: string; body?: string; priority?: TaskPriority }) => void; saving: boolean }) {
+function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteError }:
+  { task: Task; onClose: () => void; onSave: (patch: { title?: string; body?: string; priority?: TaskPriority }) => void; saving: boolean;
+    onDelete: () => void; deleting: boolean; deleteError: string | null }) {
   const [title, setTitle] = useState(task.title);
   const [body, setBody] = useState(task.body ?? "");
   const [priority, setPriority] = useState<TaskPriority>(prio(task));
+  // Two-step delete: a first click arms the confirm so the destructive action can't fire on a single misclick.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const dirty = title !== task.title || body !== (task.body ?? "") || priority !== prio(task);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -218,7 +230,21 @@ function TaskDrawer({ task, onClose, onSave, saving }:
           {dirty
             ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); }}>Reset</Button>
             : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
+          {/* Destructive delete, pushed to the right and visually separated from Save. Two-step confirm. */}
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
+            {confirmingDelete ? (
+              <>
+                <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>Delete?</span>
+                <Button variant="danger" disabled={deleting} onClick={onDelete}>{deleting ? "Deleting…" : "Confirm"}</Button>
+                <Button disabled={deleting} onClick={() => setConfirmingDelete(false)}>Cancel</Button>
+              </>
+            ) : (
+              <Button variant="danger" onClick={() => setConfirmingDelete(true)}>Delete</Button>
+            )}
+          </div>
         </div>
+        {/* The server's live-session guard (or any failure) surfaces here rather than silently closing. */}
+        {deleteError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{deleteError}</span>}
       </div>
     </div>
   );
