@@ -12,7 +12,7 @@ Sources were cloned and read at the content level (not READMEs/landing pages):
 | **Emil Kowalski** (`emilkowalski/skill`) | `skills/emil-design-eng/SKILL.md` in full (680 lines), repo file tree, `README.md`, `.gitignore` | shallow clone |
 | **taste-skill** (`Leonxlnx/taste-skill`) | flagship `skills/taste-skill/SKILL.md` (1207 lines), `taste-skill-v1`, the aesthetic variants (minimalist/brutalist/soft), `research/laziness/**`, `README.md`, `CHANGELOG.md`, `LICENSE` | shallow clone, v2 |
 
-> **One-line verdict:** Three sources, three altitudes. **Impeccable** is the rigorous, license-clean *domain reference + deterministic linter* (the backbone). **Emil** is the deep, opinionated *motion/interaction craft layer* (the best animation guidance, but unlicensed → reword). **taste-skill** is the *anti-default / aesthetic-variance framework* (the "don't ship the AI default" instinct + the dials idea, MIT-clean but bloated and stack-prescriptive). Loom's skill should be **Impeccable's rigor + Emil's motion depth (reworded) + taste-skill's anti-default discipline and a *light* dials concept**, stack-agnostic, single SKILL.md + a small `references/` subdir.
+> **One-line verdict:** Three sources, three altitudes. **Impeccable** is the rigorous, license-clean *domain reference + deterministic linter* (the backbone). **Emil** is the deep, opinionated *motion/interaction craft layer* (the best animation guidance; MIT-clean, reusable with attribution). **taste-skill** is the *anti-default / aesthetic-variance framework* (the "don't ship the AI default" instinct + the dials idea, MIT-clean but bloated and stack-prescriptive). Loom's skill should be **Impeccable's rigor + Emil's motion depth + taste-skill's anti-default discipline and a *light* dials concept**, stack-agnostic, single SKILL.md + a small `references/` subdir.
 
 ---
 
@@ -97,7 +97,7 @@ This consensus core is the **spine** of Loom's skill — it is exactly the conte
 
 | # | Conflict | Positions | **Winner + rationale** |
 |---|---|---|---|
-| C1 | **Easing curve values** | Impeccable: `ease-out-quart (0.25,1,0.5,1)` / `quint (0.22,1,0.36,1)` / `expo (0.16,1,0.3,1)`. Emil: `(0.23,1,0.32,1)`, `(0.77,0,0.175,1)`, drawer `(0.32,0.72,0,1)`. | **Keep both as a named palette, reworded.** They don't contradict — both reject CSS defaults and bounce. Loom should ship a small named-curve set (decelerate / smooth / drawer) citing the *idea* (custom decelerating curves), with values reworded to avoid copying Emil verbatim (license). |
+| C1 | **Easing curve values** | Impeccable: `ease-out-quart (0.25,1,0.5,1)` / `quint (0.22,1,0.36,1)` / `expo (0.16,1,0.3,1)`. Emil: `(0.23,1,0.32,1)`, `(0.77,0,0.175,1)`, drawer `(0.32,0.72,0,1)`. | **Keep both as a named palette.** They don't contradict — both reject CSS defaults and bounce. Loom should ship a small named-curve set (decelerate / smooth / drawer) drawn from both (both are reusable — Impeccable Apache-2.0, Emil MIT — with attribution). |
 | C2 | **Spring vs duration animation** | Emil: springs are first-class (interruptible, natural). Impeccable: duration-ladder centric, springs barely mentioned. taste: `type:"spring", stiffness:100, damping:20`. | **Emil wins** for the *interruptibility* argument (springs keep velocity; CSS transitions retarget; keyframes restart) — it's the deepest, most correct treatment. Carry the principle, framework-agnostic. |
 | C3 | **Stagger delay** | Impeccable: 50ms/item, cap 500ms. Emil: 30–80ms/item. | **Merge:** "30–80ms per item, cap total ~500ms." Same idea, take the union. |
 | C4 | **`DESIGN_VARIANCE` baseline 8 (high asymmetry by default)** | taste: default 8/6/4 → aggressively asymmetric. Impeccable/Emil: restraint, hierarchy, "distill," "quieter." | **Impeccable/Emil restraint wins as the *default*.** taste's high-variance default optimizes for Awwwards landing pages and will actively harm product UI/dashboards (Loom's own use case). Adopt the *dials concept* but with a **restraint-biased default**, not 8. |
@@ -113,7 +113,7 @@ This consensus core is the **spine** of Loom's skill — it is exactly the conte
 
 Rated across four lenses — **Value** (how much it improves output), **Redundancy** (is it already covered elsewhere), **License** (can we reuse), **Fit-for-Loom** (stack-agnostic, product-UI-relevant). Verdict column is the authoring instruction.
 
-> License shorthand: **Imp** = Apache-2.0 (reusable w/ attribution) · **taste** = MIT (reusable w/ attribution) · **Emil** = *no license → reword, never copy verbatim.*
+> License shorthand: **Imp** = Apache-2.0 (reusable w/ attribution) · **taste** = MIT (reusable w/ attribution) · **Emil** = MIT (reusable w/ attribution).
 
 | Element | Source | Value | Redundancy | License | Fit | **Verdict** |
 |---|---|---|---|---|---|---|
@@ -130,16 +130,16 @@ Rated across four lenses — **Value** (how much it improves output), **Redundan
 | UX writing: verb+object buttons, error formula, empty states, tone-adapts | Imp | High | unique | reuse | High | **KEEP** |
 | Deterministic anti-pattern registry (~30 rules) | Imp | **Very High** | unique | reuse | High | **KEEP** as the consensus don'ts list (§4); *port as a real lint gate is a separate backlog ticket f17791b0* |
 | STYLE.md anti-AI-tell prose denylist + uncatchable patterns | Imp | High | overlaps taste copy rules | reuse | High | **KEEP** (merge with taste copy bans) |
-| Motion duration ladder (100/300/500, exit 75%, 80ms threshold) | Imp | High | overlaps Emil | reuse | High | **KEEP** (Imp is license-clean; reconcile with Emil's per-element table) |
-| Named easing palette (decelerate/smooth/drawer) | Imp + Emil | High | both | Imp reuse / Emil reword | High | **KEEP** (Imp values reusable; present Emil's as reworded guidance) |
-| **Animation Decision Framework** (animate-at-all? frequency table; never animate keyboard actions) | Emil | **Very High** | unique | **reword** | High | **ADAPT** — best single idea Emil has; re-express in Loom's words |
-| Springs + interruptibility (velocity retained; transitions>keyframes) | Emil | High | unique | **reword** | High | **ADAPT** |
-| `scale(0)`→`scale(0.95)+opacity`; origin-aware popovers; blur-mask crossfade; `@starting-style` | Emil | High | unique | **reword** | High | **ADAPT** (techniques are facts; rewrite the prose/code) |
-| Perceived-performance (fast spinner, instant subsequent tooltips, asymmetric timing) | Emil | High | partial w/ Imp | **reword** | High | **ADAPT** |
-| Performance gotchas (Framer `x/y` not HW-accel; CSS-vars thrash children; CSS>JS under load; WAAPI) | Emil | Med-High | unique | **reword** | Med (framework-specific) | **ADAPT** — keep the principle, generalize the framework refs |
-| Gesture/drag mechanics (velocity 0.11, damping, pointer capture, multitouch) | Emil | Med | unique | **reword** | Med (app-specific) | **ADAPT** → move to a `references/motion.md` (not core) |
-| Sonner "loved components" principles (DX-first, defaults>options, cohesion) | Emil | Med | overlaps philosophy | **reword** | Med | **ADAPT** (compress to 2–3 lines of philosophy) |
-| `Before/After/Why` review table format | Emil | Med | unique | **reword** (format is not protectable; rephrase prose) | High | **ADAPT** as the "fix/review" output mode |
+| Motion duration ladder (100/300/500, exit 75%, 80ms threshold) | Imp | High | overlaps Emil | reuse | High | **KEEP** (reconcile with Emil's per-element table) |
+| Named easing palette (decelerate/smooth/drawer) | Imp + Emil | High | both | reuse (Imp Apache-2.0 / Emil MIT, attribute) | High | **KEEP** (both sets reusable; ship one named-curve set drawn from both) |
+| **Animation Decision Framework** (animate-at-all? frequency table; never animate keyboard actions) | Emil | **Very High** | unique | reuse (MIT, attribute) | High | **ADAPT** — best single idea Emil has; re-express in Loom's voice |
+| Springs + interruptibility (velocity retained; transitions>keyframes) | Emil | High | unique | reuse (MIT, attribute) | High | **ADAPT** |
+| `scale(0)`→`scale(0.95)+opacity`; origin-aware popovers; blur-mask crossfade; `@starting-style` | Emil | High | unique | reuse (MIT, attribute) | High | **ADAPT** (carry the techniques) |
+| Perceived-performance (fast spinner, instant subsequent tooltips, asymmetric timing) | Emil | High | partial w/ Imp | reuse (MIT, attribute) | High | **ADAPT** |
+| Performance gotchas (Framer `x/y` not HW-accel; CSS-vars thrash children; CSS>JS under load; WAAPI) | Emil | Med-High | unique | reuse (MIT, attribute) | Med (framework-specific) | **ADAPT** — keep the principle, generalize the framework refs |
+| Gesture/drag mechanics (velocity 0.11, damping, pointer capture, multitouch) | Emil | Med | unique | reuse (MIT, attribute) | Med (app-specific) | **ADAPT** → move to a `references/motion.md` (not core) |
+| Sonner "loved components" principles (DX-first, defaults>options, cohesion) | Emil | Med | overlaps philosophy | reuse (MIT, attribute) | Med | **ADAPT** (compress to 2–3 lines of philosophy) |
+| `Before/After/Why` review table format | Emil | Med | unique | reuse (MIT, attribute) | High | **ADAPT** as the "fix/review" output mode |
 | **The three dials concept** (variance/motion/density) | taste | High | unique | reuse (MIT) | Med | **ADAPT** — adopt the *idea* with restraint-biased defaults + a simpler 3-level (low/med/high) scale; drop the 1–10 numerology |
 | Brief inference ("read the room", one-line Design Read, one clarifying question) | taste | High | unique | reuse | High | **ADAPT** — excellent; keep, trimmed |
 | Anti-Default Discipline list | taste | High | overlaps Imp slop rules | reuse | High | **KEEP/merge** into §4 |
@@ -214,15 +214,15 @@ This is the cross-source-corroborated **don't** list, anchored on Impeccable's m
 
 ---
 
-## 5. License findings per source (verbatim-vs-reword call)
+## 5. License findings per source (reuse / attribution call)
 
 | Source | License | Status | **Call for Loom** |
 |---|---|---|---|
 | **Impeccable** | **Apache License 2.0** (`LICENSE` is the full standard text). `NOTICE.md` declares it *builds on Anthropic's `frontend-design` skill* (Apache-2.0, © 2025 Anthropic PBC) and that `typography.md` incorporates additions from **ehmo's `typecraft-guide-skill`** ("merged in at the author's request"; NOTICE lists its license as "see upstream repo"). | **Verbatim-reusable** with attribution. | **REUSE OK.** Apache-2.0 permits use/modify/redistribute provided we (a) retain the license text, (b) preserve the `NOTICE` attributions (Anthropic + ehmo + Paul Bakaus), and (c) state changes. **Action:** add an attribution/provenance note to Loom's skill (or a `NOTICE`) crediting Impeccable (Apache-2.0), Anthropic's frontend-design skill, and ehmo's typecraft additions. Verify ehmo's upstream repo license before lifting the *specific* typography sentences verbatim; if unclear, reword those (the facts/values are not protectable). |
-| **Emil Kowalski** | **NO LICENSE.** The cloned repo (`emilkowalski/skill`) contains only `.gitignore`, a 52-byte `README.md` (just a link to emilkowal.ski/skill), and `skills/emil-design-eng/SKILL.md`. No `LICENSE`/`COPYING` file anywhere. | **All-rights-reserved by default.** Distribution via `npx skills add` signals intent to *share*, but absence of a license grants **no reuse rights** legally. | **DO NOT COPY VERBATIM.** ⚠️ This is the one genuine license caution. **Action:** carry Emil's *ideas, techniques, and factual values* (which are not copyrightable — easing math, durations, the "never animate from scale(0)" technique, the decision framework) but **re-express all prose and code in Loom's own words**; do not paste his sentences, tables, or code blocks. Credit him as inspiration in the provenance note (courtesy, not obligation). If the owner wants to be extra-safe, prefer Impeccable's license-clean equivalents wherever they overlap (durations, easing, reduced-motion) and use Emil only for the unique ideas (decision framework, springs/interruptibility, blur-mask). |
+| **Emil Kowalski** | **MIT License** (per owner verification — the MIT grant is stated at the distribution source, i.e. emilkowal.ski/skill and/or the package pulled by `npx skills add emilkowalski/skill`, *not* in the GitHub repo clone, which carries no `LICENSE` file). | **Verbatim-reusable** with attribution. | **REUSE OK.** Same tier as taste-skill — MIT permits use/modify/redistribute provided the copyright + permission notice is retained for substantial portions. **Action:** carry Emil's ideas, techniques, values, and (where useful) prose/code; include an **MIT attribution line for Emil Kowalski** in Loom's `NOTICE`/provenance. (Authoring in Loom's own voice is still recommended on quality grounds — see net posture — but is no longer a license requirement.) |
 | **taste-skill** | **MIT License**, © 2026 Leonxlnx (`LICENSE` is standard MIT). | **Verbatim-reusable** with attribution. | **REUSE OK.** MIT requires only that the copyright + permission notice be retained in copies/substantial portions. **Action:** if we lift substantial chunks (e.g. the dials framing or denylists), include an MIT attribution line for Leonxlnx in Loom's provenance note. Since we're mostly adapting *ideas* (dials concept, brief-inference) rather than copying text wholesale, a courtesy credit suffices; add the MIT notice if any block is reproduced near-verbatim. (README aside: "Taste Skill has no official token/coin/crypto" — irrelevant to us.) |
 
-**Net license posture for the authored skill:** Loom's `web-design` skill is **safe to ship** as original prose that (1) freely reuses Impeccable (Apache-2.0) and taste-skill (MIT) with an attribution/NOTICE block, and (2) treats Emil's content as **reword-only**. The skill should be written in Loom's own voice throughout regardless (better quality + sidesteps all ambiguity), with a short `## Provenance` / `NOTICE` crediting: Impeccable (Apache-2.0, Paul Bakaus) + its upstreams (Anthropic frontend-design, ehmo typecraft), taste-skill (MIT, Leonxlnx), and Emil Kowalski (inspiration).
+**Net license posture for the authored skill:** Loom's `web-design` skill is **safe to ship** as original prose that freely reuses **all three** sources — Impeccable (Apache-2.0), taste-skill (MIT), and Emil Kowalski (MIT) — with an attribution/NOTICE block. Writing in Loom's own voice throughout is still recommended as a **quality/consistency preference** (a single coherent voice + sidesteps any near-verbatim-attribution bookkeeping), not as a legal requirement for any source. Include a short `## Provenance` / `NOTICE` crediting: Impeccable (Apache-2.0, Paul Bakaus) + its upstreams (Anthropic frontend-design, ehmo typecraft), taste-skill (MIT, Leonxlnx), and Emil Kowalski (MIT).
 
 ---
 
@@ -243,7 +243,7 @@ web-design/
     interaction.md         # 8 states, focus, forms, undo>confirm, dropdown-clip bug
     ux-writing.md          # button labels, error/empty formulas, denylist
     anti-patterns.md       # the consensus don'ts (§4) — the lint-able list, kept in one place
-  NOTICE                   # attributions (Impeccable/Apache-2.0 + Anthropic + ehmo; taste/MIT; Emil/inspiration)
+  NOTICE                   # attributions (Impeccable/Apache-2.0 + Anthropic + ehmo; taste/MIT; Emil/MIT)
 ```
 
 Keep `SKILL.md` short enough to always load; push exhaustive rules + code into `references/` loaded on demand (taste-skill's own research shows lazy-loaded skills cut context ~35%).
@@ -258,7 +258,7 @@ Keep `SKILL.md` short enough to always load; push exhaustive rules + code into `
 6. **The consensus core (the spine)** — compact, corroborated rules with pointers into references: type scale, OKLCH color + 60-30-10, 4pt spacing + hierarchy, the 8 interactive states, the motion duration ladder + custom easing + "motion must be motivated," WCAG AA, copy = verb+object/no-buzzwords/no-em-dash.
 7. **The "don'ts" (the deterministic list, §4)** — the single highest-value carry; lives inline (short) and in full in `references/anti-patterns.md`. Frame as "if you can tell an AI made it, it failed."
 8. **If a real design system fits, use it (taste principle, stack-agnostic)** — prefer an existing/official system over hand-rolled CSS; one system per project; don't recreate its tokens. (No prescribed package list in core; optional appendix.)
-9. **Output modes** — (a) *build/enhance*: apply the rules; (b) *review/fix*: emit a `Before / After / Why` table (Emil's format, reworded); (c) *optional* full critique (compressed Nielsen + cognitive-load + 5 persona lenses) if the owner wants a `critique` mode.
+9. **Output modes** — (a) *build/enhance*: apply the rules; (b) *review/fix*: emit a `Before / After / Why` table (Emil's format); (c) *optional* full critique (compressed Nielsen + cognitive-load + 5 persona lenses) if the owner wants a `critique` mode.
 10. **Pre-ship checklist** — a *short* (~12-item) distillation of the don'ts + a11y essentials (not taste's 60). 
 11. **Provenance / NOTICE pointer.**
 
@@ -280,5 +280,4 @@ Keep `SKILL.md` short enough to always load; push exhaustive rules + code into `
 ## Appendix: blockers / caveats
 
 - **No blockers.** All three sources were reachable and deep-read at the content level.
-- **One license caveat (resolved with a clear call):** Emil Kowalski's skill ships **without any license file** → all-rights-reserved → **reword, never copy verbatim** (§5). This is a recommendation, not a blocker — the *ideas/values* are freely usable; only his specific prose/code must not be copied.
 - **One provenance to verify at authoring time:** Impeccable's `NOTICE` lists ehmo's `typecraft-guide-skill` license as "see upstream repo." Impeccable-as-a-whole is Apache-2.0, so reusing via Impeccable is fine, but if the 2/2 author lifts ehmo's *specific* typography sentences verbatim, confirm ehmo's upstream license first; otherwise reword (the numeric values aren't protectable).
