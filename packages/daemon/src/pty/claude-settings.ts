@@ -36,6 +36,7 @@ export function writeSessionSettings(sessionId: string, permission: PermissionPo
       allow: permission.allow,
       deny: permission.deny,
     },
+    includeCoAuthoredBy: false,
   };
   const file = path.join(SETTINGS_DIR, `${sessionId}.json`);
   const tmp = `${file}.tmp`;
