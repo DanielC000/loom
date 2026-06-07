@@ -183,6 +183,9 @@ export const api = {
     get<{ columns: KanbanColumn[]; tasks: Task[] }>(`/api/projects/${projectId}/board`),
   updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority">>) =>
     post<{ ok: boolean }>(`/api/tasks/${id}`, patch),
+  // PERMANENTLY delete a task card (drawer Delete button). HUMAN/loopback REST only — no MCP path. Uses
+  // delErr so the server's live-session guard 400 ({ error }) surfaces verbatim to the user.
+  deleteTask: (id: string) => delErr<{ ok: boolean }>(`/api/tasks/${id}`),
   transcript: (sessionId: string) => get<TranscriptTurn[]>(`/api/sessions/${sessionId}/transcript`),
 
   // --- Agent Runs (R4b Runs UI; HUMAN/loopback REST, project-scoped, no auth — mirrors the other

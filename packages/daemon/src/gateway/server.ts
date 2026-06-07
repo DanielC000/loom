@@ -906,6 +906,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true };
   });
 
+  // PERMANENTLY delete a task card — a DESTRUCTIVE/irreversible HUMAN action (drawer Delete button).
+  // Trust boundary: there is intentionally NO MCP path to this (an agent can only move a card to done);
+  // only the loopback human REST surface deletes. GUARD: refuse while a LIVE session is bound to the task
+  // ("don't delete a card out from under a running worker"), mirroring the project/agent live > 0 guards
+  // above. Idempotent on a missing id (no 404), like the other DELETE routes.
+  app.delete("/api/tasks/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const live = deps.db.countLiveSessionsForTask(id);
+    if (live > 0) return reply.code(400).send({ error: `cannot delete a task with a live session bound to it — stop the worker first (${live} still live)` });
+    deps.db.deleteTask(id);
+    return { ok: true };
+  });
+
   app.post("/api/agents/:id/sessions", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const { role } = (req.body as { role?: string }) ?? {};
