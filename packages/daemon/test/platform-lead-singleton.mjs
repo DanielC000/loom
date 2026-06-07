@@ -1,19 +1,25 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Platform Lead SINGLETON (P1 bug fix) — startPlatformLead must be RESUME-OR-CREATE, not the old
-// unconditional create-only (which minted a fresh session row on every "open the Lead" / re-open and
-// accumulated duplicate — even duplicate LIVE — Lead sessions). DETERMINISTIC + CLAUDE-FREE +
-// NETWORK-FREE, hermetic like platform-mgmt-surface.mjs: a REAL Db + SessionService driven against a
-// FAKE pty (createPty/stop seam). A real temp git repo backs the spawn cwd; the only thing faked is
-// the claude pty. A real (stub) transcript file is written under the sandboxed HOME so the exited Lead
-// is genuinely resumable (engineTranscriptExists passes).
+// Platform Lead SINGLETON = "never two LIVE Leads" (NOT "one row ever"). startPlatformLead reuses an
+// already-LIVE Lead (so a manual Spawn can never mint a SECOND live Lead) but otherwise CREATES A FRESH
+// session — a manual Spawn always gets a new session. The old RESUME-OR-CREATE behavior (silently
+// resuming the latest EXITED Lead on Spawn) was the owner-reported bug; on-demand resume is now an
+// explicit human action (the Lead/Auditor History "Resume" button), and restart-resume is handled
+// independently by resumeFleetOnBoot (resume-by-id), so this test does not exercise it.
+// DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic like platform-mgmt-surface.mjs: a REAL Db +
+// SessionService driven against a FAKE pty (createPty/stop seam). A real temp git repo backs the spawn
+// cwd; the only thing faked is the claude pty. A real (stub) transcript file is written under the
+// sandboxed HOME so an exited Lead would be genuinely resumable (engineTranscriptExists passes) — which
+// makes (2) a sharp test: the exited Lead is resumable yet must NOT be resumed by a manual Spawn.
 //
 // Proves the DoD:
-//   (1) existing LIVE Lead       → startPlatformLead returns the SAME id, creates NO new row.
-//   (2) existing EXITED-RESUMABLE Lead → it is RESUMED (back to live), SAME id, NO new row.
-//   (3) NONE                     → exactly ONE platform session is created; repeated calls are
-//                                  idempotent (return that same id, still no new row).
+//   (1) existing LIVE Lead       → startPlatformLead returns the SAME id, creates NO new row, no spawn
+//                                  (the load-bearing "never two LIVE Leads" guard).
+//   (2) existing EXITED-RESUMABLE Lead → startPlatformLead CREATES A NEW row (different id) + spawns a
+//                                  FRESH session; the exited Lead is NOT resumed (stays exited).
+//   (3) NONE                     → exactly ONE platform session is created; a re-open while LIVE reuses
+//                                  it (same id, no new row); a re-open after STOP creates a NEW row.
 //   (4) SCOPE GUARDRAIL          → startAuditor stays create-only (each call mints a fresh row) —
-//                                  the singleton is the Lead's alone.
+//                                  unchanged by this task.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-lead-singleton.mjs
 import fs from "node:fs";
@@ -114,9 +120,12 @@ try {
   check("(1b) live-precedence → NO resume/new spawn (the exited one was NOT resumed)", host.spawned.length === spawnedBeforePrec);
   check("(1b) live-precedence → the exited row stays exited (not resumed)", db.getSession(recentExited)?.processState === "exited");
 
-  // ============================ (2) existing EXITED-RESUMABLE Lead → resume, no new row ===============
+  // ============== (2) existing EXITED-RESUMABLE Lead → manual Spawn CREATES A NEW row (not a resume) ==
+  // The owner-reported bug: a manual Spawn used to RESUME the latest exited Lead. New contract: even when
+  // the exited Lead is genuinely resumable, a manual Spawn must mint a FRESH session and leave the exited
+  // one exited (on-demand resume is the explicit History "Resume" button instead).
   const exitedSeed = "exited-lead-seed";
-  writeTranscript(repo, "eng-exited"); // make it genuinely resumable
+  writeTranscript(repo, "eng-exited"); // genuinely resumable — so this is a sharp "resumable yet NOT resumed" test
   db.insertSession({
     id: exitedSeed, projectId: "pHome", agentId: "agentExited", engineSessionId: "eng-exited", title: null,
     cwd: repo, processState: "exited", resumability: "unknown", busy: false,
@@ -124,26 +133,28 @@ try {
   });
   const spawnedBefore = host.spawned.length;
   const r2 = svc.startPlatformLead("agentExited");
-  check("(2) exited-resumable Lead → returns the SAME id (no new row)", r2.id === exitedSeed);
-  check("(2) exited-resumable Lead → brought back to live", r2.processState === "live" && db.getSession(exitedSeed)?.processState === "live");
-  check("(2) exited-resumable Lead → still exactly ONE platform row", platformRows("agentExited").length === 1);
-  check("(2) exited-resumable Lead → RESUMED via the pty (one resume spawn, with resumeId)",
-    host.spawned.length === spawnedBefore + 1 && host.spawned.at(-1).resumeId === "eng-exited" && host.spawned.at(-1).role === "platform");
+  check("(2) exited Lead → manual Spawn returns a NEW id (fresh session, not the exited one)", r2.id !== exitedSeed);
+  check("(2) exited Lead → the new session is live", r2.processState === "live" && db.getSession(r2.id)?.processState === "live");
+  check("(2) exited Lead → the exited one is NOT resumed (stays exited)", db.getSession(exitedSeed)?.processState === "exited");
+  check("(2) exited Lead → now exactly TWO platform rows (the exited one + the fresh one)", platformRows("agentExited").length === 2);
+  check("(2) exited Lead → FRESH spawn (no resumeId — a brand-new platform session)",
+    host.spawned.length === spawnedBefore + 1 && host.spawned.at(-1).resumeId === undefined && host.spawned.at(-1).role === "platform");
 
-  // ============================ (3) NONE → exactly one created; idempotent =============================
+  // ===================== (3) NONE → exactly one created; live re-open reuses, stop+re-open is fresh =====
   check("(3-pre) no platform row for the fresh agent", platformRows("agentNone").length === 0);
   const c1 = svc.startPlatformLead("agentNone");
   check("(3) none → exactly ONE platform row created", platformRows("agentNone").length === 1 && c1.processState === "live");
-  // Make the freshly-created Lead resumable, then re-open: idempotent — same id, still one row.
+  // Make the freshly-created Lead resumable, then re-open while LIVE: reuse path — same id, still one row.
   db.setEngineSessionId(c1.id, "eng-fresh");
   writeTranscript(repo, "eng-fresh");
-  const c2 = svc.startPlatformLead("agentNone"); // still live → reuse path
-  check("(3) idempotent re-open (live) → SAME id, still ONE row", c2.id === c1.id && platformRows("agentNone").length === 1);
-  // Now exit it and re-open: resume path → still the same single row.
+  const c2 = svc.startPlatformLead("agentNone"); // still live → reuse path (never two live)
+  check("(3) re-open while live → SAME id, still ONE row (reuse, no new row)", c2.id === c1.id && platformRows("agentNone").length === 1);
+  // Now stop it and re-open: new contract → a manual Spawn mints a FRESH row (does NOT resume the exited one).
   db.setProcessState(c1.id, "exited");
   const c3 = svc.startPlatformLead("agentNone");
-  check("(3) idempotent re-open after stop (resume) → SAME id, still ONE row",
-    c3.id === c1.id && platformRows("agentNone").length === 1 && db.getSession(c1.id)?.processState === "live");
+  check("(3) re-open after stop → NEW id (fresh session, not a resume)", c3.id !== c1.id);
+  check("(3) re-open after stop → now TWO platform rows; the exited one stays exited",
+    platformRows("agentNone").length === 2 && db.getSession(c1.id)?.processState === "exited" && db.getSession(c3.id)?.processState === "live");
 
   // ============================ (4) SCOPE GUARDRAIL — Auditor stays create-only =======================
   const a1 = svc.startAuditor("agentAud");
@@ -158,6 +169,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — startPlatformLead is a singleton: live→reuse, exited-resumable→resume, none→create-one, idempotent; the Auditor stays create-only."
+  ? "\n✅ ALL PASS — startPlatformLead: live→reuse (never two LIVE Leads), exited→fresh new row (manual Spawn never resumes), none→create-one; the Auditor stays create-only."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

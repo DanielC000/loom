@@ -264,38 +264,32 @@ export class SessionService {
     const project = this.db.getProject(agent.projectId);
     if (!project) throw new Error("project not found");
 
-    // SINGLETON (P1 bug fix): the Platform Lead is a standing singleton, so this is RESUME-OR-CREATE,
-    // not the old unconditional create — which minted a fresh row on EVERY "open the Lead" and every
-    // re-open after a stop, accumulating duplicate Lead sessions (and, mid-go-live, duplicate LIVE
-    // Leads). Reuse the agent's latest NON-archived platform session: live → return it as-is (its pty
-    // outlived the viewer — closing a ws never kills it — so there is nothing to re-spawn); exited but
-    // resumable → resume() it (the EXISTING resume primitive does the transcript/reconcile check and
-    // carries the platform role + MCP surface back), with NO new row. ONLY when none exists, or the
-    // latest is unresumable (dead transcript / recycled / never captured an engine id), do we fall
-    // through and INSERT a fresh one — we PREFER attach/resume over a hard refuse so a wedged Lead can
-    // never lock the human out of opening the Lead.
+    // SINGLETON GUARANTEE = "never two LIVE Leads" (NOT "one row ever"). A manual Spawn always gets a
+    // FRESH session; the only thing we refuse is minting a SECOND live Lead while one is already running.
+    // (Earlier this was RESUME-OR-CREATE — it silently resumed the latest EXITED Lead on a manual Spawn,
+    // which the owner reported as "Spawn resumes the old session instead of starting a new one". On-demand
+    // resume is now an explicit human action: the Lead/Auditor History "Resume" button → resumeSession.)
+    //
+    // So: if a platform session is already LIVE, reuse it as-is (its pty outlived the viewer — closing a
+    // ws never kills it — so there is nothing to re-spawn, and we must not spawn a duplicate). This is the
+    // load-bearing live-precedence guard (the P1 0e40dde fix). Otherwise (none live) FALL THROUGH and
+    // INSERT+spawn a brand-new Lead — never resume an exited one here.
+    //
+    // LIVE-PRECEDENCE (load-bearing): listSessions is ordered by last_activity DESC, so a recently-STOPPED
+    // Lead (frozen last_activity) can sort AHEAD of an idle-but-LIVE Lead. We therefore scan for ANY live
+    // platform session rather than just inspecting platforms[0] (there should be ≤1; if legacy
+    // accumulation left >1, the most-recently-active live one wins).
+    //
+    // Restart-resume is INDEPENDENT of this path: index.ts → resumeFleetOnBoot resumes captured sessions
+    // by id, so a daemon_restart still brings the Lead back. Changing this function does not affect it.
     //
     // Scope: this is the HUMAN platform route only (gateway POST /api/agents/:id/sessions {role:
     // "platform"}); no agent/MCP path reaches here, so "platform sessions are human-created only"
     // stands. The Auditor (startAuditor) is deliberately LEFT create-only — each scheduled fire spawns
     // a fresh ephemeral read-and-file audit session, where a singleton would be wrong.
-    // LIVE-PRECEDENCE (load-bearing): listSessions is ordered by last_activity DESC, so a recently-
-    // STOPPED Lead (frozen last_activity) can sort AHEAD of an idle-but-LIVE Lead. Picking "the latest"
-    // and only then checking liveness would resume() the exited one alongside the still-live one — the
-    // very duplicate-live-Lead bug this fixes. So: reuse ANY live platform session FIRST (there should
-    // be ≤1; if legacy accumulation left >1, the most-recently-active live one wins). Only when none is
-    // live do we consider resuming the newest exited one; only when that's unresumable do we create.
     const platforms = this.db.listSessions(agentId).filter((s) => s.role === "platform");
     const live = platforms.find((s) => s.processState === "live");
-    if (live) return live; // already attached — reuse, no new row, no spawn
-    const latestExited = platforms[0]; // newest by last_activity (none is live at this point)
-    if (latestExited) {
-      try {
-        return this.resume(latestExited.id); // exited but resumable → reconcile + resume, no new row
-      } catch {
-        // unresumable (dead transcript / recycled / no engine id) → fall through and create a fresh one.
-      }
-    }
+    if (live) return live; // already attached — reuse, no new row, no spawn (never two LIVE Leads)
 
     const config = resolveConfig(project.config);
     // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
