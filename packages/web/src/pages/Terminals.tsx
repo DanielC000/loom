@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, ShellTerminal, Task } from "@loom/shared";
 import { api } from "../lib/api";
+import { byCreatedStable } from "../lib/sessions";
 import { TerminalPane } from "../components/Terminal";
 import { SessionWakes } from "../components/SessionWakes";
 import { SessionQueue } from "../components/SessionQueue";
@@ -51,12 +52,11 @@ export default function Terminals() {
   });
   const tasksById = new Map<string, Task>();
   for (const q of taskQueries) for (const t of q.data ?? []) tasksById.set(t.id, t);
-  // Tile order: a STABLE key — createdAt ascending, tiebreak by id. A session keeps its slot whether
-  // it's busy or idle, so the grid never reshuffles on a poll (the old activity sort made rows jump).
-  const byCreated = (a: SessionListItem, b: SessionListItem) =>
-    a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
+  // Tile order: the STABLE shared key (lib/sessions.ts byCreatedStable) — createdAt ascending,
+  // tiebreak by id. A session keeps its slot whether it's busy or idle, so the grid never reshuffles
+  // on a poll (the old activity sort made rows jump). Shared with Overview so the views can't drift.
   const shown = (filter ? live.filter((s) => s.projectName === filter) : live)
-    .slice().sort(byCreated);
+    .slice().sort(byCreatedStable);
   // Manager-centric layout: one ROW per manager — the manager tile leftmost, then ITS workers to
   // the right ordered oldest→newest (createdAt asc). Workers attach to their manager via
   // parentSessionId. Two catch-all rows trail the manager rows so nothing is dropped: orphan workers
@@ -79,14 +79,14 @@ export default function Terminals() {
         else orphans.push(s); // parent stopped/recycled or not a live manager — don't drop it
       } else standalone.push(s); // no role / platform lead — its own trailing row
     }
-    const byAge = (a: SessionListItem, b: SessionListItem) => a.createdAt.localeCompare(b.createdAt);
     // `managers` is already in stable createdAt/id order (from `shown`), so the rows are too — no
-    // re-sort, and a row holds its slot regardless of activity.
+    // re-sort, and a row holds its slot regardless of activity. Nested workers + the catch-all rows
+    // use the same shared stable key (byCreatedStable) so nothing reshuffles on a poll.
     const managerRows: SessionRow[] = managers
-      .map((m) => ({ key: m.id, kind: "manager" as const, list: [m, ...(workersByParent.get(m.id) ?? []).slice().sort(byAge)] }));
+      .map((m) => ({ key: m.id, kind: "manager" as const, list: [m, ...(workersByParent.get(m.id) ?? []).slice().sort(byCreatedStable)] }));
     const trailing: SessionRow[] = [];
-    if (orphans.length) trailing.push({ key: "__orphans", kind: "orphans", list: orphans.slice().sort(byAge) });
-    if (standalone.length) trailing.push({ key: "__standalone", kind: "standalone", list: standalone.slice().sort(byCreated) });
+    if (orphans.length) trailing.push({ key: "__orphans", kind: "orphans", list: orphans.slice().sort(byCreatedStable) });
+    if (standalone.length) trailing.push({ key: "__standalone", kind: "standalone", list: standalone.slice().sort(byCreatedStable) });
     return [...managerRows, ...trailing];
   }, [shown]);
 
