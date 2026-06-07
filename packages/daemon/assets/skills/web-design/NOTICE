@@ -1,0 +1,63 @@
+Loom `web-design` skill — provenance & attribution
+===================================================
+
+This skill is original prose written in Loom's own voice. It distills guidance from three public
+design skills, all license-reusable with attribution. No source is reproduced wholesale; the design
+facts and numeric values it carries are not themselves copyrightable. Credit and license terms below.
+
+
+1. Impeccable — https://github.com/pbakaus/impeccable
+   License: Apache License 2.0
+   Copyright: Paul Bakaus and contributors
+   Used: the domain reference + deterministic anti-pattern catalogue — typography, color (OKLCH /
+   60-30-10 / dangerous combos), spacing & layout, the eight interactive states, the motion duration
+   ladder, and the consensus "don'ts" list.
+
+   Per Impeccable's own NOTICE, it builds on prior work that is carried through here transitively:
+     - Anthropic's `frontend-design` skill — Apache License 2.0, © 2025 Anthropic PBC.
+     - ehmo's `typecraft-guide-skill` — typography additions merged into Impeccable at the author's
+       request. Loom's typography guidance is reworded in Loom's own voice (the numeric values are not
+       protectable); no ehmo prose is reproduced verbatim.
+
+   Apache-2.0 changes statement: this skill reuses, reorganizes, condenses, generalizes (made
+   stack-agnostic), and rewrites the above material; it is not the original work and is not endorsed
+   by its authors.
+
+
+2. taste-skill — https://github.com/Leonxlnx/taste-skill
+   License: MIT License
+   Copyright: © 2026 Leonxlnx
+   Used: the anti-default discipline (avoid the generated look), the brief-inference / "read the room"
+   step, and the intent-dials concept. Loom adapts the dials to three named levels with a
+   restraint-biased default (it does not copy taste-skill's 1–10 numerology, its stack prescriptions,
+   or its aesthetic-variant skills).
+
+
+3. Emil Kowalski — design-engineering skill — https://emilkowal.ski/skill
+   License: MIT License (per owner verification; the MIT grant is stated at the distribution source)
+   Copyright: © Emil Kowalski
+   Used: the motion/interaction craft layer — the Animation Decision Framework (animate-at-all?
+   frequency, never animate keyboard actions), custom easing curves, spring interruptibility,
+   component motion techniques (scale-from-0.95, origin-aware popovers, blur-masked crossfades),
+   perceived-performance, and the `Before / After / Why` review format.
+
+
+MIT permission notice (applies to the taste-skill and Emil Kowalski material above):
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+  associated documentation files (the "Software"), to deal in the Software without restriction,
+  including without limitation the rights to use, copy, modify, merge, publish, distribute,
+  sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all copies or substantial
+  portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+  NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+  OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+The full Apache License 2.0 text governing the Impeccable material is at
+https://www.apache.org/licenses/LICENSE-2.0
