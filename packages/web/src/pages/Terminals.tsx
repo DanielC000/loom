@@ -7,6 +7,7 @@ import { TerminalPane } from "../components/Terminal";
 import { SessionWakes } from "../components/SessionWakes";
 import { SessionQueue } from "../components/SessionQueue";
 import { SessionTaskCard } from "../components/SessionTaskCard";
+import { TerminalTile } from "../components/TerminalTile";
 import { Panel, Button, Select, Input, StatusPill, SectionLabel } from "../components/ui";
 import { color, font } from "../theme";
 
@@ -93,42 +94,29 @@ export default function Terminals() {
   const renderTile = (s: SessionListItem) => {
     const task = s.taskId ? tasksById.get(s.taskId) : undefined;
     return (
-    <Panel key={s.id} style={{ height: 460, padding: 6, display: "flex", flexDirection: "column" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-        <TileTitle s={s} />
-        <div style={{ display: "flex", gap: 4 }}>
-          <ForkButton onFork={() => fork.mutate(s.id)} busy={s.busy} pending={fork.isPending} />
-          <StopButton onStop={() => stop.mutate(s.id)} stopping={stop.isPending} />
-          <Button style={{ padding: "0 6px" }} onClick={() => setMaximized(s.id)}>⤢</Button>
-        </div>
-      </div>
-      {task && <SessionTaskCard task={task} />}
-      <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
-      <SessionWakes sessionId={s.id} />
-      <SessionQueue sessionId={s.id} />
-    </Panel>
+      <TerminalTile key={s.id} s={s} height={460} showProject
+        onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
+        onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
+        onMaximize={() => setMaximized(s.id)}
+        taskCard={task && <SessionTaskCard task={task} />}
+        footer={<><SessionWakes sessionId={s.id} /><SessionQueue sessionId={s.id} /></>} />
     );
   };
 
   if (maximized) {
     const s = live.find((x) => x.id === maximized);
+    const task = s?.taskId ? tasksById.get(s.taskId) : undefined;
     return (
       <div>
         <Button onClick={() => setMaximized(null)}>← back to grid</Button>
         {s && (
-          <Panel style={{ height: "78vh", padding: 6, marginTop: 8, display: "flex", flexDirection: "column" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-              <TileTitle s={s} />
-              <div style={{ display: "flex", gap: 4 }}>
-                <ForkButton onFork={() => fork.mutate(s.id)} busy={s.busy} pending={fork.isPending} />
-                <StopButton onStop={() => stop.mutate(s.id)} stopping={stop.isPending} />
-              </div>
-            </div>
-            {s.taskId && tasksById.get(s.taskId) && <SessionTaskCard task={tasksById.get(s.taskId)!} />}
-            <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
-            <SessionWakes sessionId={s.id} />
-      <SessionQueue sessionId={s.id} />
-          </Panel>
+          <div style={{ marginTop: 8 }}>
+            <TerminalTile s={s} height="78vh" showProject
+              onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
+              onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
+              taskCard={task && <SessionTaskCard task={task} />}
+              footer={<><SessionWakes sessionId={s.id} /><SessionQueue sessionId={s.id} /></>} />
+          </div>
         )}
       </div>
     );
@@ -152,31 +140,6 @@ export default function Terminals() {
         </section>
       ))}
     </div>
-  );
-}
-
-function ForkButton({ onFork, busy, pending }: { onFork: () => void; busy: boolean; pending: boolean }) {
-  return (
-    <Button style={{ padding: "0 8px" }} disabled={busy || pending}
-      title={busy ? "Fork is available when the session is idle" : "Fork — branch this conversation into a new divergent session"}
-      onClick={(ev) => { ev.stopPropagation(); onFork(); }}>Fork</Button>
-  );
-}
-
-function StopButton({ onStop, stopping }: { onStop: () => void; stopping: boolean }) {
-  return (
-    <Button style={{ padding: "0 8px" }} disabled={stopping}
-      title="Stop this session — graceful Ctrl-C, clean and resumable"
-      onClick={(ev) => { ev.stopPropagation(); onStop(); }}>Stop</Button>
-  );
-}
-
-function TileTitle({ s }: { s: SessionListItem }) {
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
-      <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} />
-      <span>{s.projectName} · {s.agentName}{s.role ? ` · ${s.role}` : ""} · {s.id.slice(0, 8)}</span>
-    </span>
   );
 }
 

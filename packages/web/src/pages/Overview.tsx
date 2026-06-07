@@ -8,6 +8,7 @@ import { useAttention } from "../lib/attention";
 import { bySessionActivity, byCreatedStable } from "../lib/sessions";
 import Board from "./Board";
 import { TerminalPane } from "../components/Terminal";
+import { TerminalTile } from "../components/TerminalTile";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { Composer } from "../components/Composer";
 import { SessionWakes } from "../components/SessionWakes";
@@ -380,32 +381,54 @@ function SessionCockpit({ sessionId }: { sessionId: string }) {
   );
 }
 
-// The project's live-session terminals, tiled with a graceful-stop control. Mirrors Platform's
-// PlatformSessions — only the live set renders (dead/exited rows drop out).
+// The project's live-session terminals, tiled with Fork (idle-only) + ⤢ maximize + graceful Stop —
+// at parity with the dedicated Terminals page via the shared TerminalTile component (so the two can't
+// drift). Only the live set renders (dead/exited rows drop out). Maximize swaps the grid for a single
+// full-size terminal with a "← back to grid" button; project-scoped, so the tile title omits the
+// project name (showProject left off).
 function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
   const qc = useQueryClient();
+  const [maximized, setMaximized] = useState<string | null>(null);
   const stop = useMutation({
     mutationFn: (id: string) => api.stopSession(id, "graceful"),
+    onSuccess: (_r, id) => { if (maximized === id) setMaximized(null); qc.invalidateQueries({ queryKey: ["allSessions"] }); },
+  });
+  // Fork an idle session: branch its conversation into a fresh divergent session (appears as a new
+  // tile). Idle-only — the button is disabled while the source is busy.
+  const fork = useMutation({
+    mutationFn: (id: string) => api.forkSession(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
   });
-  const live = sessions.filter((s) => s.processState === "live").sort(bySessionActivity);
+  // STABLE spawn-order (createdAt asc, tiebreak id) shared with the Terminals page — a session keeps
+  // its slot whether busy or idle, so the grid never reshuffles on the 3s poll (the old activity sort
+  // made tiles jump).
+  const live = sessions.filter((s) => s.processState === "live").slice().sort(byCreatedStable);
   if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>No live sessions in this project. Spawn the manager above.</p>;
+
+  if (maximized) {
+    const s = live.find((x) => x.id === maximized);
+    return (
+      <div>
+        <Button onClick={() => setMaximized(null)}>← back to grid</Button>
+        {s && (
+          <div style={{ marginTop: 8 }}>
+            <TerminalTile s={s} height="78vh"
+              onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
+              onStop={() => stop.mutate(s.id)} stopPending={stop.isPending} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
   const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12 };
   return (
     <div style={grid}>
       {live.map((s) => (
-        <Panel key={s.id} style={{ height: 440, padding: 6, display: "flex", flexDirection: "column" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
-              <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} />
-              <span>{s.agentName}{s.role ? ` · ${s.role}` : ""} · {s.id.slice(0, 8)}</span>
-            </span>
-            <Button style={{ padding: "0 8px" }} disabled={stop.isPending}
-              title="Stop this session — graceful Ctrl-C, clean and resumable"
-              onClick={() => stop.mutate(s.id)}>Stop</Button>
-          </div>
-          <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
-        </Panel>
+        <TerminalTile key={s.id} s={s} height={440}
+          onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
+          onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
+          onMaximize={() => setMaximized(s.id)} />
       ))}
     </div>
   );
