@@ -10,7 +10,7 @@ import { color, font, tone, type Tone } from "../theme";
 // the reset endpoint also matches by name server-side (a renamed bundled profile is no longer
 // matchable, the documented limitation shared with the skill reset).
 const BUNDLED_PROFILE_NAMES = new Set([
-  "Orchestrator", "Planning & Triage", "Dev", "Bugfix", "QA Tester", "Content Strategy", "Platform-lead",
+  "Orchestrator", "Planning & Triage", "Dev", "Bugfix", "QA Tester", "Web Designer", "Content Strategy", "Platform-lead",
 ]);
 
 // A profile's role, as a coloured pill. null = a plain (non-orchestration) session — today's default.

@@ -135,6 +135,16 @@ check("(c) bundled roles correct (Orchestrator=manager, Dev/Bugfix=worker, Plann
 const orch = byName.get("Orchestrator");
 check("(c) bundled profile has a description blurb", typeof orch?.description === "string" && orch.description.length > 0);
 
+// The bundled browser-capable rigs (QA Tester + Web Designer) are workers that seed with
+// browserTesting=true; every OTHER bundled profile omits it (backstops to false) — the additive
+// opt-in invariant at the seed layer.
+check("(c) QA Tester + Web Designer are browser-capable workers (browserTesting=true)",
+  byName.get("QA Tester")?.role === "worker" && byName.get("QA Tester")?.browserTesting === true &&
+  byName.get("Web Designer")?.role === "worker" && byName.get("Web Designer")?.browserTesting === true);
+check("(c) only the two browser rigs opt in — all other bundled profiles are browserTesting=false",
+  BUNDLED_PROFILES.filter((b) => b.browserTesting === true).map((b) => b.name).sort().join(",") === "QA Tester,Web Designer" &&
+  [...byName.values()].filter((p) => p.browserTesting === true).length === 2);
+
 // A seeded profile round-trips its JSON columns (allowDelta [] / skills null) through toProfile.
 const dev = byName.get("Dev");
 check("(c) seeded profile round-trips JSON columns (allowDelta=[], skills=null)",
