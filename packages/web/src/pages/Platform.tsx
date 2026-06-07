@@ -327,7 +327,20 @@ function RunHistory({ reservedProjectId, sessions, role, emptyLabel, showFinding
 // Refetch only while live. The Lead (role:"platform") files no findings, so showFindings is false there.
 function RunRow({ run, schedules, tasks, showFindings, open, onToggle }:
   { run: SessionListItem; schedules: Schedule[]; tasks: Task[]; showFindings: boolean; open: boolean; onToggle: () => void }) {
+  const qc = useQueryClient();
   const live = !run.archivedAt && run.processState === "live";
+  // On-demand human resume of an EXITED run (distinct from a manual Spawn, which always mints a FRESH
+  // session, and from boot/restart resume, which is resume-by-id). resumability is only reliably "dead"
+  // after a failed resume — most exited rows are "unknown" — so we offer Resume on any exited-non-archived
+  // run and surface the server's error inline if it turns out to be unresumable.
+  const canResume = !run.archivedAt && run.processState !== "live";
+  const resumeM = useMutation({
+    mutationFn: () => api.resumeSession(run.id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["allSessions"] });
+      qc.invalidateQueries({ queryKey: ["allArchivedSessions"] });
+    },
+  });
   const events = useQuery({
     queryKey: ["orchestrationEvents", run.id],
     queryFn: () => api.orchestrationEvents(run.id),
@@ -368,8 +381,22 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle }:
         {run.ctxTurns != null && <Chip label="turns" value={run.ctxTurns} />}
         {showFindings && <Chip label="filed" value={findings.length} tone={findings.length ? "phosphor" : "muted"} />}
         <span style={{ flex: 1 }} />
+        {canResume && (
+          <Button variant="ghost" disabled={resumeM.isPending}
+            onClick={(e) => { e.stopPropagation(); resumeM.mutate(); }}
+            title="Resume this exited run (brings it back live)"
+            style={{ padding: "2px 8px", fontSize: 11, color: color.cyan, borderColor: color.border }}>
+            {resumeM.isPending ? "resuming…" : "Resume"}
+          </Button>
+        )}
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>last · {fmt(run.lastActivity)} · {run.id.slice(0, 8)}</span>
       </div>
+
+      {resumeM.isError && (
+        <div style={{ padding: "0 10px 8px 30px", color: color.red, fontFamily: font.mono, fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          resume failed: {resumeM.error instanceof Error ? resumeM.error.message : String(resumeM.error)}
+        </div>
+      )}
 
       {run.lastError && (
         <div style={{ padding: "0 10px 8px 30px", color: color.red, fontFamily: font.mono, fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
