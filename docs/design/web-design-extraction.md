@@ -282,5 +282,3 @@ Keep `SKILL.md` short enough to always load; push exhaustive rules + code into `
 - **No blockers.** All three sources were reachable and deep-read at the content level.
 - **One license caveat (resolved with a clear call):** Emil Kowalski's skill ships **without any license file** → all-rights-reserved → **reword, never copy verbatim** (§5). This is a recommendation, not a blocker — the *ideas/values* are freely usable; only his specific prose/code must not be copied.
 - **One provenance to verify at authoring time:** Impeccable's `NOTICE` lists ehmo's `typecraft-guide-skill` license as "see upstream repo." Impeccable-as-a-whole is Apache-2.0, so reusing via Impeccable is fine, but if the 2/2 author lifts ehmo's *specific* typography sentences verbatim, confirm ehmo's upstream license first; otherwise reword (the numeric values aren't protectable).
-</content>
-</invoke>
