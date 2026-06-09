@@ -27,6 +27,7 @@ import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline, rateLimitedUntil } from "./orchestration/usage-limit.js";
 import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent } from "./orchestration/restart.js";
 import { buildServer } from "./gateway/server.js";
+import { loomVersion } from "./version.js";
 
 async function main(): Promise<void> {
   ensureDirs();
@@ -176,7 +177,7 @@ async function main(): Promise<void> {
   const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, runMcp, control, usageStatus });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
-  console.log(`Loom daemon listening on http://127.0.0.1:${PORT}`);
+  console.log(`Loom daemon v${loomVersion()} listening on http://127.0.0.1:${PORT}`);
 
   // Pillar B: the cron trigger layer. Boots a manager (interactive pty, never headless) on each
   // due schedule's tick. OPT-IN (autonomy earned gate-by-gate): only start when enabled via the

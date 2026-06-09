@@ -236,6 +236,8 @@ export const api = {
   // merges (manager derived from the worker's parentSessionId server-side).
   mergeWorker: (sessionId: string) => post<{ merged: boolean; reason?: string }>(`/api/sessions/${sessionId}/merge`),
   orchestrationStatus: () => get<{ pausedScopes: string[] }>("/api/orchestration/status"),
+  // Releases v1 Part 3 — the daemon's `loom` package version, surfaced unobtrusively in the header.
+  version: () => get<{ version: string }>("/api/version"),
   // The user's REAL Claude plan-usage (account-wide rate-limit headroom) — one daemon-side cached
   // poll of the OAuth usage endpoint. Always 200; `available:false`+reason when the daemon can't fetch it.
   usageLimits: () => get<UsageLimitsStatus>("/api/usage/limits"),

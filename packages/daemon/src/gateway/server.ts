@@ -8,6 +8,7 @@ import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import { resolveWebDistDir } from "../paths.js";
+import { loomVersion } from "../version.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, engineTranscriptExists, deleteArchivedTranscript, deleteProjectArchives } from "../sessions/transcript.js";
 import type { Db } from "../db.js";
@@ -150,6 +151,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.post("/api/orchestration/kill", async () => ({ stopped: deps.sessions.killAllWorkers() }));
   app.get("/api/orchestration/status", async () => ({ pausedScopes: deps.control.pausedScopes() }));
+  // --- Daemon version (Releases v1, Part 3) — the user-facing `loom` package version, read at RUNTIME
+  // from the umbrella package.json (loomVersion() walks up to the `name:"loom"` package.json; NO hardcoded
+  // second copy that can drift). READ-ONLY on this existing REST surface — no trust-boundary change; the
+  // web footer fetches it. ⚠️ Part 2 must keep a `name:"loom"` package.json on the daemon's walk-up path
+  // (or set LOOM_VERSION) so this still resolves from the PACKAGED form, not just the monorepo. ---
+  app.get("/api/version", async () => ({ version: loomVersion() }));
   // --- God-eye read of the user's REAL Claude plan-usage (5h / 7d rate-limit windows). Served from a
   // single daemon-side cached poller (NOT fetched per-request; NOT an MCP tool; NOT a write surface).
   // Always 200: `available:false`+reason when the token is missing/expired or the upstream call failed. ---

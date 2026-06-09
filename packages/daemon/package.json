@@ -60,6 +60,7 @@
     "test:agent-runs-caps": "node test/agent-runs-caps.mjs",
     "test:agent-runs-spend": "node test/agent-runs-spend.mjs",
     "test:agent-runs-hardening": "node test/agent-runs-hardening.mjs",
+    "test:version": "node test/version.mjs",
     "test:daemon": "node scripts/test-daemon.mjs"
   },
   "dependencies": {
