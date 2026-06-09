@@ -34,6 +34,24 @@ export const AUTO_BACKUP_DIR = path.join(BACKUPS_DIR, "auto");
  */
 export const SKILLS_DIR = path.join(LOOM_HOME, "skills");
 
+/**
+ * Single-process mode (Releases v1): where the PREBUILT web viewport (Vite output) lives, so the daemon
+ * can serve the UI from its own loopback origin — no separate `pnpm web`. One resolver, with an env
+ * override so it works in the monorepo NOW and from a bundled npm package LATER (Part 2). Priority:
+ *   1. LOOM_WEB_DIST (explicit override — the bundled package points this at its shipped assets);
+ *   2. a copy bundled NEXT TO the built daemon (`<daemon>/dist/web`) — Part 2's default drop location;
+ *   3. the monorepo build output (`packages/web/dist`, resolved relative to this built file).
+ * Returns the first candidate that actually holds an `index.html`, else the monorepo path (so the
+ * gateway logs a sensible "missing dist" location and skips static — it never crashes a dist-less boot).
+ */
+export function resolveWebDistDir(): string {
+  const override = process.env.LOOM_WEB_DIST;
+  if (override) return path.resolve(override);
+  const bundled = path.join(__dirname, "web"); // dist/paths.js → dist/web (Part 2 bundles here)
+  const monorepo = path.join(__dirname, "..", "..", "web", "dist"); // dist/paths.js → packages/web/dist
+  return fs.existsSync(path.join(bundled, "index.html")) ? bundled : monorepo;
+}
+
 /** hook-relay.mjs ships as an asset alongside the built daemon. */
 export const RELAY_SCRIPT = path.join(__dirname, "..", "assets", "hook-relay.mjs");
 /** vault-lint.mjs (Pillar D PostToolUse hook) ships as an asset too. */

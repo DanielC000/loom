@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
+import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
+import { resolveWebDistDir } from "../paths.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, engineTranscriptExists, deleteArchivedTranscript, deleteProjectArchives } from "../sessions/transcript.js";
 import type { Db } from "../db.js";
@@ -46,9 +50,42 @@ export interface GatewayDeps {
   usageStatus: UsageStatusPoller;
 }
 
+/** The daemon's own non-UI route prefixes. An unmatched GET under any of these must NEVER fall back to
+ * the SPA index.html — an unknown `/api/*` stays a JSON 404 (so clients see the real error, not HTML),
+ * and `/ws` stays the websocket-upgrade route. Boundary-aware so a client route like `/apidocs` (were
+ * one to exist) is NOT misclassified as the `/api` surface. */
+const isReservedDaemonPath = (pathname: string): boolean =>
+  ["/api", "/ws", "/mcp", "/internal"].some((p) => pathname === p || pathname.startsWith(`${p}/`));
+
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   await app.register(websocket);
+
+  // --- Single-process mode (Releases v1, Part 1): serve the PREBUILT web viewport from the daemon's own
+  // loopback origin, so the whole app runs as ONE process on one port (the prerequisite for `npx loom`).
+  // ADDITIVE + dev-safe: in dev the vite server (:5317) still serves the UI and proxies /api + /ws here,
+  // so `pnpm web` is byte-for-byte unchanged — this only adds a second way to reach the UI. The web app
+  // calls RELATIVE /api + /ws, so serving it from this same origin needs NO web change. A MISSING dist is
+  // tolerated: log once + skip static; the API/WS daemon still boots (dev before a web build, or an
+  // API-only deployment). Resolver (LOOM_WEB_DIST override → bundled → monorepo) lives in paths.ts.
+  const webDist = resolveWebDistDir();
+  if (fs.existsSync(path.join(webDist, "index.html"))) {
+    await app.register(fastifyStatic, { root: webDist, index: ["index.html"] });
+    // SPA fallback: an unmatched GET that is NOT a reserved daemon path serves index.html, so the client
+    // router owns deep links (e.g. /board). @fastify/static's wildcard serves any real asset first and
+    // only routes a genuine miss here. The reserved-path guard is what keeps this from swallowing the
+    // /api JSON 404s or the /ws upgrade — those fall through to the normal JSON 404 below.
+    app.setNotFoundHandler((req, reply) => {
+      const pathname = req.url.split("?")[0] ?? req.url;
+      if (req.method === "GET" && !isReservedDaemonPath(pathname)) return reply.sendFile("index.html");
+      return reply.code(404).send({ error: "not found" });
+    });
+    // eslint-disable-next-line no-console
+    console.log(`[gateway] serving web viewport from ${webDist} (single-process mode)`);
+  } else {
+    // eslint-disable-next-line no-console
+    console.log(`[gateway] no built web viewport at ${webDist} — serving API/WS only (run a web build, or set LOOM_WEB_DIST, to enable single-process mode)`);
+  }
 
   // BOOT-BOUND git-write timeouts: resolve the daemon-global `platform.timeouts` ONCE at boot (this
   // fn runs once, from index.ts) and thread gitLocalMs/gitPushMs into every GitWriter the human REST
