@@ -5,6 +5,10 @@ dist/
 .loom/
 *.log
 
+# npm-package assembly output (scripts/build-npm-package.mjs) + the packed tarball
+dist-npm/
+*.tgz
+
 # spike has its own ignores; keep its source but not its artifacts
 spike/node_modules/
 spike/tmp/
