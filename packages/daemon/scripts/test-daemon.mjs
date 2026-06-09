@@ -23,7 +23,7 @@ const HERMETIC = [
   "profiles", "profiles-crud", "profile-spawn", "browser-testing-spawn", "platform-home", "platform-lead-singleton", "platform-mgmt-surface", "platform-elevated-surface", "audit-surface",
   "agent-runs-keys", "agent-runs-primitive", "agent-runs-rest", "agent-runs-idempotency", "agent-runs-caps", "agent-runs-spend", "agent-runs-hardening", "agent-runs-audit",
   "tasks-filter", "tasks-priority", "config-bounds", "kanban-defaults", "transcript-encode", "alert-webhook",
-  "session-archive", "all-archived-sessions", "periodic-snapshot", "mgmt-project-agent", "web-static-serve",
+  "session-archive", "all-archived-sessions", "periodic-snapshot", "mgmt-project-agent", "web-static-serve", "version",
   "claude-config", "trust-lock", "spawn-args",
   "context-watcher", "context-stats", "recycle-handoff", "wake", "worker-reported-state",
   "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull", "usage-status", "rate-limit-clear",

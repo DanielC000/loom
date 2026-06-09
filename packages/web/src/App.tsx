@@ -67,6 +67,19 @@ function ActiveProjectControl() {
   );
 }
 
+// The running daemon's Loom version (Releases v1 Part 3), fetched from GET /api/version and shown as a
+// quiet `v0.1.0` chip at the far right of the header. Unobtrusive: dim, monospace, never shifts layout —
+// renders nothing until the version resolves, so a slow/absent endpoint just leaves the spot empty.
+function VersionTag() {
+  const v = useQuery({ queryKey: ["version"], queryFn: api.version, staleTime: Infinity, refetchOnWindowFocus: false });
+  if (!v.data?.version) return null;
+  return (
+    <span title="Loom version" style={{ fontFamily: font.mono, fontSize: 11, letterSpacing: "0.04em", color: color.textMuted }}>
+      v{v.data.version}
+    </span>
+  );
+}
+
 // A subtle marker on nav items that respond to the active-project picker (see ActiveProjectControl).
 function ScopeDot() {
   return (
@@ -219,6 +232,7 @@ export default function App() {
           <span style={{ flex: 1 }} />
           <Bell />
           <GlobalStatus />
+          <VersionTag />
         </header>
         <main style={page}>
           <Routes>
