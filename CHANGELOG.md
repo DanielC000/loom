@@ -7,6 +7,16 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+- **`loom` npm package + CLI.** `bin/loom.mjs` boots the single-process daemon, waits for the gateway,
+  prints the local URL, and opens the browser — so `npx loom` / `npm i -g loom` runs the whole app.
+  Flags: `--port`, `--no-open`, `--version`, `--help`.
+- **`pnpm pack:npm`** (`scripts/build-npm-package.mjs`) assembles a self-contained, publishable
+  `loom-X.Y.Z.tgz`: the daemon dist (copied, not bundled), the prebuilt web at `dist/web`, the daemon
+  `assets/`, and the private `@loom/shared` bundled via `bundledDependencies`. Native deps stay real
+  `dependencies` so a plain `npm install` fetches their prebuilt binaries. Build + local-install +
+  owner-publish runbook in [`docs/releasing.md`](docs/releasing.md). Not yet published (owner-gated).
+
 ## [0.1.0] — 2026-06-09
 
 The first versioned Loom — sets the version backbone the install/update story builds on.
