@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Loom · a local-first cockpit for Claude Code</title>
+    <meta
+      name="description"
+      content="Loom is a local-first AI project workspace that weaves real interactive Claude Code sessions, Obsidian docs, and tasks into one fabric, with multi-agent orchestration where a lead manages workers."
+    />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <meta name="color-scheme" content="dark" />
+
+    <!-- Open Graph / social -->
+    <meta property="og:title" content="Loom · a local-first cockpit for Claude Code" />
+    <meta
+      property="og:description"
+      content="Drive real interactive Claude Code sessions, orchestrate a fleet of agents, and weave docs and tasks into one fabric, all on your own machine."
+    />
+    <meta property="og:type" content="website" />
+
+    <!-- Fonts: matches the cockpit's Space Grotesk (head) + JetBrains Mono (data) stacks.
+         Fallbacks keep the layout intact if the CDN is unreachable. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <!-- ── Header ─────────────────────────────────────────────────────────── -->
+    <header class="site-header">
+      <div class="wrap header-inner">
+        <a class="brand" href="#top" aria-label="Loom home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" width="22" height="22">
+              <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                <path d="M8 4 V13.2 M8 18.8 V20" />
+                <path d="M16 4 V5.2 M16 10.8 V20" />
+                <path d="M4 8 H5.2 M10.8 8 H20" />
+                <path d="M4 16 H13.2 M18.8 16 H20" />
+              </g>
+            </svg>
+          </span>
+          <span class="brand-word">loom</span>
+        </a>
+        <nav class="header-nav" aria-label="Primary">
+          <a href="#what">What it is</a>
+          <a href="#features">Features</a>
+          <a href="#how">How it works</a>
+          <a
+            class="btn btn-primary btn-sm"
+            href="https://github.com/DanielC000/loom"
+            >View on GitHub</a
+          >
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- ── Hero ─────────────────────────────────────────────────────────── -->
+      <section class="hero loom-grid" id="top">
+        <div class="wrap hero-inner">
+          <div class="hero-copy">
+            <p class="kicker">Local-first · runs on your machine</p>
+            <h1 class="hero-title">
+              A cockpit for
+              <span class="accent">real</span> Claude&nbsp;Code sessions.
+            </h1>
+            <p class="hero-lede">
+              Loom weaves real interactive Claude Code sessions, Obsidian docs,
+              and tasks into one fabric, then lets a lead agent orchestrate a
+              fleet of workers, all on your own machine.
+            </p>
+            <div class="hero-cta">
+              <a
+                class="btn btn-primary"
+                href="https://github.com/DanielC000/loom"
+              >
+                View on GitHub
+                <span class="btn-arrow" aria-hidden="true">→</span>
+              </a>
+              <a class="btn btn-ghost" href="#how">See how it works</a>
+            </div>
+            <ul class="hero-meta" aria-label="At a glance">
+              <li><span class="dot dot-phosphor"></span> Loopback-only daemon</li>
+              <li><span class="dot dot-cyan"></span> SQLite-backed, no cloud</li>
+              <li><span class="dot dot-amber"></span> Sessions outlive viewers</li>
+            </ul>
+          </div>
+
+          <!-- Mock cockpit panel — CSS-rendered, synthetic data only.
+               PLACEHOLDER: no live screenshots; this is an illustrative mock. -->
+          <div class="terminal" role="img"
+               aria-label="Illustrative mock of Loom's orchestration view: a lead agent managing three worker sessions on isolated branches.">
+            <div class="terminal-bar">
+              <span class="terminal-dot"></span>
+              <span class="terminal-title">loom · orchestration</span>
+              <span class="terminal-live"><span class="dot dot-phosphor"></span> live</span>
+            </div>
+            <div class="terminal-body" aria-hidden="true">
+              <div class="trow">
+                <span class="t-glyph">▌</span><span class="t-role">MANAGER</span>
+                <span class="pill pill-phosphor">live</span>
+                <span class="t-note">weaving 3 workers</span>
+              </div>
+              <div class="trow t-child">
+                <span class="t-branch">├ worker/landing-site</span>
+                <span class="pill pill-phosphor">review</span>
+                <span class="t-diff">+318 −0</span>
+              </div>
+              <div class="trow t-child">
+                <span class="t-branch">├ worker/api-gateway</span>
+                <span class="pill pill-amber">busy</span>
+                <span class="t-diff">+142 −18</span>
+              </div>
+              <div class="trow t-child">
+                <span class="t-branch">└ worker/vault-sync</span>
+                <span class="pill pill-muted">queued</span>
+                <span class="t-diff">idle</span>
+              </div>
+              <div class="trow t-log">
+                <span class="t-time">17:02</span>
+                <span class="t-cyan">merge</span> worker/landing-site → main
+                <span class="t-cursor">▏</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── What it is ───────────────────────────────────────────────────── -->
+      <section class="section" id="what" aria-labelledby="what-h">
+        <div class="wrap">
+          <p class="section-label">What it is</p>
+          <h2 class="section-title" id="what-h">
+            One fabric for the work, the agents, and the knowledge.
+          </h2>
+          <p class="prose">
+            Loom is a local-first AI project workspace. It drives the
+            <strong>real interactive <code>claude</code></strong>, the same
+            terminal session you'd run by hand rather than a headless one-shot,
+            and keeps it durable: sessions are owned by a daemon on your machine, so
+            closing the window never kills the work. Around those sessions it
+            binds your Obsidian vault and a task board into a single view, and
+            lets one lead agent decompose a goal, delegate to workers on
+            isolated branches, review their diffs, and merge.
+          </p>
+        </div>
+      </section>
+
+      <!-- ── Features ─────────────────────────────────────────────────────── -->
+      <section class="section section-features" id="features" aria-labelledby="features-h">
+        <div class="wrap">
+          <p class="section-label">Features</p>
+          <h2 class="section-title" id="features-h">Built like an instrument.</h2>
+          <ul class="features-grid">
+            <li class="card">
+              <span class="card-icon" aria-hidden="true">⌘</span>
+              <h3 class="card-title">Local-first by design</h3>
+              <p class="card-body">
+                Everything durable lives on your machine: a daemon bound to
+                loopback, an SQLite store, your git checkouts and vault. No cloud
+                service sits between you and your work.
+              </p>
+            </li>
+            <li class="card">
+              <span class="card-icon" aria-hidden="true">❯</span>
+              <h3 class="card-title">Real Claude Code sessions</h3>
+              <p class="card-body">
+                Loom drives the genuine interactive <code>claude</code> over a
+                PTY, never headless. Sessions are resumable and outlive any
+                viewer, so a closed tab or a reboot doesn't lose the thread.
+              </p>
+            </li>
+            <li class="card">
+              <span class="card-icon" aria-hidden="true">⛓</span>
+              <h3 class="card-title">Multi-agent orchestration</h3>
+              <p class="card-body">
+                A lead session plans, delegates to worker sessions on isolated
+                worktree branches, reviews each diff, and merges through a gate.
+                Workers report up; the lead holds the whole picture.
+              </p>
+            </li>
+            <li class="card">
+              <span class="card-icon" aria-hidden="true">▦</span>
+              <h3 class="card-title">The terminal cockpit</h3>
+              <p class="card-body">
+                A stateless web viewport attaches over WebSockets: Mission
+                Control, a task board, live terminals, runs and git, all in one
+                phosphor-on-dark instrument panel.
+              </p>
+            </li>
+            <li class="card">
+              <span class="card-icon" aria-hidden="true">✦</span>
+              <h3 class="card-title">Vault-backed knowledge</h3>
+              <p class="card-body">
+                Design notes, decisions, and session logs live in an Obsidian
+                vault woven alongside the code, and Loom auto-commits vault
+                writes so the knowledge layer stays versioned with the work.
+              </p>
+            </li>
+            <li class="card">
+              <span class="card-icon" aria-hidden="true">◧</span>
+              <h3 class="card-title">A task board agents can use</h3>
+              <p class="card-body">
+                Tasks are a first-class, project-scoped surface backed by an MCP
+                server, so agents read the board, create cards, and move work
+                through columns as part of the same loop you watch.
+              </p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ── How it works ─────────────────────────────────────────────────── -->
+      <section class="section section-how" id="how" aria-labelledby="how-h">
+        <div class="wrap">
+          <p class="section-label">How it works</p>
+          <h2 class="section-title" id="how-h">Plan, delegate, review, merge.</h2>
+          <ol class="steps">
+            <li class="step">
+              <span class="step-k" aria-hidden="true">01</span>
+              <h3 class="step-title">Run the daemon</h3>
+              <p class="step-body">
+                A single local daemon owns the durable state on
+                <code>127.0.0.1</code>: sessions, the PTY host, the gateway, git,
+                and the vault.
+              </p>
+            </li>
+            <li class="step">
+              <span class="step-k" aria-hidden="true">02</span>
+              <h3 class="step-title">Open the cockpit</h3>
+              <p class="step-body">
+                The web viewport attaches over WebSockets and detaches freely.
+                The session keeps running on the daemon whether or not you're
+                watching.
+              </p>
+            </li>
+            <li class="step">
+              <span class="step-k" aria-hidden="true">03</span>
+              <h3 class="step-title">Give a lead a goal</h3>
+              <p class="step-body">
+                The lead decomposes the goal into tasks and spawns workers, each
+                on its own worktree branch, each driving a real Claude Code
+                session.
+              </p>
+            </li>
+            <li class="step">
+              <span class="step-k" aria-hidden="true">04</span>
+              <h3 class="step-title">Review and weave it in</h3>
+              <p class="step-body">
+                Workers report up; the lead reviews each diff, merges what
+                passes, and the vault + board keep the decisions and progress
+                versioned alongside the code.
+              </p>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ── CTA strip ────────────────────────────────────────────────────── -->
+      <section class="section section-cta" aria-labelledby="cta-h">
+        <div class="wrap cta-inner">
+          <div>
+            <h2 class="section-title" id="cta-h">Read the source.</h2>
+            <p class="prose prose-tight">
+              Loom is an in-progress, local-first project. The code, the
+              architecture, and the design decisions live in the repository.
+            </p>
+          </div>
+          <a class="btn btn-primary" href="https://github.com/DanielC000/loom">
+            View on GitHub
+            <span class="btn-arrow" aria-hidden="true">→</span>
+          </a>
+        </div>
+      </section>
+    </main>
+
+    <!-- ── Footer ───────────────────────────────────────────────────────── -->
+    <footer class="site-footer">
+      <div class="wrap footer-inner">
+        <a class="brand" href="#top" aria-label="Loom home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" width="18" height="18">
+              <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                <path d="M8 4 V13.2 M8 18.8 V20" />
+                <path d="M16 4 V5.2 M16 10.8 V20" />
+                <path d="M4 8 H5.2 M10.8 8 H20" />
+                <path d="M4 16 H13.2 M18.8 16 H20" />
+              </g>
+            </svg>
+          </span>
+          <span class="brand-word">loom</span>
+        </a>
+        <p class="footer-note">
+          A local-first cockpit for Claude Code. Runs on your machine.
+        </p>
+        <a class="footer-link" href="https://github.com/DanielC000/loom"
+          >github.com/DanielC000/loom</a
+        >
+      </div>
+    </footer>
+  </body>
+</html>
