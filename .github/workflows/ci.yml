@@ -1,0 +1,39 @@
+name: CI
+
+# Build + hermetic daemon test gate on PRs and main pushes — the same gate the Release workflow runs
+# before publishing. Read-only: no publish, no release, no secrets.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.4 # match the repo's packageManager (package.json)
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Run daemon test suite (hermetic)
+        run: pnpm --filter @loom/daemon test:daemon
