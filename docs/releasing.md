@@ -8,8 +8,10 @@ is the **operational runbook**.
 > Status: Loom is **pre-1.0 and not yet published**. The flow below is the agreed process. The npm
 > package itself (`bin`, publishable `loom`) shipped in Releases v1 **Part 2** — `pnpm pack:npm`
 > produces a locally-installable `loom-X.Y.Z.tgz` (see *Building & locally installing the npm package*
-> below). The CI that automates the GitHub Release is **Part 4**. Until the first publish, steps run
-> locally (`pnpm pack:npm`, a git tag, a GitHub Release) — only `npm publish` waits on the owner's go.
+> below). The CI that automates the GitHub Release + npm publish from a pushed tag shipped in
+> **Part 4** (`.github/workflows/release.yml` — see *Automated release (CI)* below). Until the owner
+> performs the one-time setup (public repo, reserved name, license, `NPM_TOKEN`), nothing actually
+> publishes; the workflow is authored and waiting.
 
 ## Versioning scheme
 
@@ -28,33 +30,65 @@ is the **operational runbook**.
 
 ## Cutting a release
 
+Once the owner's one-time setup is done (see *Automated release (CI)* below), cutting a release is
+**land the changelog + version bump, then push the tag** — CI does the build, test, npm publish, and
+GitHub Release.
+
 1. **Land everything** for the release on `main` and confirm green: `pnpm build` + the hermetic
    daemon suite (`pnpm --filter @loom/daemon test:daemon`).
 2. **Update `CHANGELOG.md`.** Move the `Unreleased` items into a new `## [X.Y.Z] — YYYY-MM-DD`
-   section (keep an empty `Unreleased` on top). This section's text becomes the GitHub Release notes.
+   section (keep an empty `Unreleased` on top). This section's text becomes the GitHub Release notes
+   (the CI extracts it with `scripts/extract-changelog.mjs X.Y.Z`).
 3. **Bump the version** with npm so the tag and the root `package.json` move together:
    ```sh
    npm version <major|minor|patch>     # e.g. `npm version minor` → 0.1.0 → 0.2.0
    ```
    `npm version` edits the root `package.json` `version`, commits it, and creates an annotated
    **`vX.Y.Z` git tag** in one step. (Use `--no-git-tag-version` only if you need to stage the
-   CHANGELOG edit into the same commit, then tag manually with `git tag -a vX.Y.Z`.)
-4. **Push** the commit and the tag:
+   CHANGELOG edit into the same commit, then tag manually with `git tag -a vX.Y.Z`.) **The tag
+   version must match `package.json`** — the release workflow fails fast if they diverge.
+   - For a **prerelease**, tag `vX.Y.Z-beta.N` (the version carries the `-beta.N`): CI publishes it
+     to the **`beta`** npm dist-tag and marks the GitHub Release as a prerelease.
+4. **Push** the commit and the tag — this **triggers the release workflow**:
    ```sh
-   git push && git push --tags
+   git push && git push --tags         # pushing vX.Y.Z runs .github/workflows/release.yml
    ```
-5. **Build the artifact** to attach to the release:
-   ```sh
-   pnpm pack:npm                       # builds shared → daemon → web, assembles dist-npm/, npm pack
-   ```                                 # → loom-X.Y.Z.tgz at the repo root (the publishable tarball)
-6. **Create the GitHub Release** from the tag, with the CHANGELOG section as notes and the tarball
-   attached (the owner wants tagged releases "like other repos have"):
-   ```sh
-   # notes = that version's CHANGELOG section (extract it into a temp file, e.g. notes-X.Y.Z.md)
-   gh release create vX.Y.Z --title "vX.Y.Z" --notes-file notes-X.Y.Z.md loom-X.Y.Z.tgz
-   ```
-   Part 4 automates exactly this from the pushed tag in CI.
-7. **Publish to npm** — owner-only, irreversible, outward. See *Owner publish steps* below.
+   The workflow then (steps 5–7, automated): checks out → Node 22 + pnpm → `pnpm install` →
+   `pnpm build` → daemon test gate → `pnpm pack:npm` → **`npm publish`** (to `latest`, or `beta`
+   for a prerelease tag, with `--provenance`) → **creates the GitHub Release** with the CHANGELOG
+   section as notes and `loom-X.Y.Z.tgz` attached. Watch it under the repo's **Actions** tab.
+
+If you ever need to run any of these by hand (no CI, or a recovery), the manual equivalents are:
+
+- **Build the artifact:** `pnpm pack:npm` → `loom-X.Y.Z.tgz` at the repo root.
+- **Create the GitHub Release:** `gh release create vX.Y.Z --title "vX.Y.Z" \`
+  `--notes-file <(node scripts/extract-changelog.mjs X.Y.Z) loom-X.Y.Z.tgz`.
+- **Publish to npm:** owner-only, irreversible, outward — see *Owner publish steps* below.
+
+## Automated release (CI)
+
+`.github/workflows/release.yml` automates the publish + GitHub Release from a pushed `v*` tag (it
+also accepts a manual **workflow_dispatch** run, which releases the version currently in
+`package.json`). A companion `.github/workflows/ci.yml` runs the **build + daemon test gate** on
+every PR and `main` push (no publish, no secrets) — the same gate the release runs before shipping.
+
+**Owner one-time setup (the release workflow is inert until all are done):**
+
+1. **The public GitHub repo must exist.** Pushing tags + Actions + Releases all require the repo to
+   be published on GitHub (tied to the repo-publication work in the blocked lane). Until then the
+   workflow file simply rides along unused.
+2. **Reserve the npm name + add a license.** Same prerequisites as a manual publish (see *Owner
+   publish steps*): own the `loom` name (or set the published name in `scripts/build-npm-package.mjs`)
+   and add a `LICENSE` + `"license"` to the generated `package.json` — the workflow publishes
+   whatever `pnpm pack:npm` produces.
+3. **Add the `NPM_TOKEN` repo secret.** Create an npm **automation** (or publish) token on the
+   publishing account and add it under *Settings → Secrets and variables → Actions* as `NPM_TOKEN`.
+   The workflow reads it as `NODE_AUTH_TOKEN` for `npm publish`. (`GITHUB_TOKEN` is provided
+   automatically; the workflow grants it `contents: write` for the Release and `id-token: write` for
+   npm provenance — no extra secret needed.)
+
+**Cut a release:** push a `vX.Y.Z` tag (step 4 above). That's the whole trigger. Prerelease tags
+(`vX.Y.Z-beta.N`) go to the `beta` channel; normal tags go to `latest`.
 
 ## Building & locally installing the npm package
 
@@ -114,7 +148,8 @@ license/signing decisions below. **A worker/manager never runs it.** One-time + 
    ```
 5. **Signing / provenance (optional, recommended).** npm has no app-signing burden (see the research
    doc), but you can add **publish provenance** by running the publish from CI with
-   `npm publish --provenance` (Part 4). For pre-release betas use `--tag beta` (below).
+   `npm publish --provenance` — which the release workflow (`.github/workflows/release.yml`) already
+   does (it grants `id-token: write` for OIDC). For pre-release betas use `--tag beta` (below).
 
 ## Channels (npm dist-tags)
 
