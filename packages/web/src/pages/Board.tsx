@@ -180,22 +180,36 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
   // Two-step delete: a first click arms the confirm so the destructive action can't fire on a single misclick.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const dirty = title !== task.title || body !== (task.body ?? "") || priority !== prio(task);
+  // Guard the three close paths (backdrop / Esc / ✕) against silently discarding unsaved edits. When dirty,
+  // a close request arms an in-drawer "Discard unsaved changes?" confirm (mirroring the delete two-step)
+  // instead of closing; when clean it closes immediately, zero extra friction.
+  const [confirmingClose, setConfirmingClose] = useState(false);
+  const requestClose = () => { if (dirty) setConfirmingClose(true); else onClose(); };
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { if (dirty) setConfirmingClose(true); else onClose(); } };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [dirty, onClose]);
   const labelStyle = { fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim } as const;
   return (
-    <div onClick={onClose}
+    <div onClick={requestClose}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50, display: "flex", justifyContent: "flex-end" }}>
       <div onClick={(e) => e.stopPropagation()}
         style={{ width: 460, maxWidth: "90vw", height: "100%", background: color.panel, borderLeft: `1px solid ${color.borderStrong}`,
           padding: 16, display: "flex", flexDirection: "column", gap: 10, boxSizing: "border-box" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <SectionLabel style={{ margin: 0, flex: 1 }}>Task · {task.id.slice(0, 8)}</SectionLabel>
-          <Button onClick={onClose} title="Close (Esc)">✕</Button>
+          <Button onClick={requestClose} title="Close (Esc)">✕</Button>
         </div>
+        {/* Unsaved-edit guard: a close request while dirty arms this confirm instead of discarding. */}
+        {confirmingClose && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px", borderRadius: 4,
+            background: color.panel2, border: `1px solid ${color.amber}` }}>
+            <span style={{ flex: 1, color: color.amber, fontSize: 12, fontFamily: font.mono }}>Discard unsaved changes?</span>
+            <Button variant="danger" onClick={onClose}>Discard</Button>
+            <Button onClick={() => setConfirmingClose(false)}>Cancel</Button>
+          </div>
+        )}
         <span style={labelStyle}>Title</span>
         <Input value={title} onChange={(e) => setTitle(e.target.value)} />
         <span style={labelStyle}>Priority</span>
