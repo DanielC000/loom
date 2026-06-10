@@ -115,6 +115,47 @@ try {
   check("(iv) a slow/failing provisioner returns (best-effort, degrades to worker-installs-itself)", hangResolved);
   check(`(iv) the injected timeoutMs is threaded through to the provisioner`, Date.now() - t0 >= 200);
 
+  // (v) NON-PNPM DISPATCH (claude-free + offline via the ProvisionDeps seam): the broadened
+  //     provisionWorktreeDeps must fire the RIGHT installer off the lockfile marker — npm marker → npm,
+  //     yarn marker → yarn — and stay a no-op with no marker. We inject a recording provisioner so no real
+  //     npm/yarn ever runs (and none need be installed); it captures the `manager` 3rd arg the dispatch
+  //     passes. DETERMINISTIC precedence (pnpm > npm > yarn) is asserted by a dir carrying ALL THREE locks.
+  const markerDir = (name, files) => {
+    const d = path.join(repo, name);
+    fs.mkdirSync(d, { recursive: true });
+    for (const f of files) fs.writeFileSync(path.join(d, f), "");
+    return d;
+  };
+  const recordDispatch = async (dir) => {
+    const calls = [];
+    await provisionWorktreeDeps(dir, { provision: async (_wt, _ms, manager) => { calls.push(manager); return { ok: true }; } });
+    return calls;
+  };
+
+  check("(v) npm marker (package-lock.json) → npm installer fires",
+    JSON.stringify(await recordDispatch(markerDir("only-npm", ["package-lock.json"]))) === JSON.stringify(["npm"]));
+  check("(v) yarn marker (yarn.lock) → yarn installer fires",
+    JSON.stringify(await recordDispatch(markerDir("only-yarn", ["yarn.lock"]))) === JSON.stringify(["yarn"]));
+  check("(v) no recognized lockfile → no-op (provisioner never called)",
+    JSON.stringify(await recordDispatch(markerDir("only-readme", ["README.md"]))) === JSON.stringify([]));
+  check("(v) deterministic precedence: pnpm wins over npm+yarn when all three coexist",
+    JSON.stringify(await recordDispatch(markerDir("all-three", ["pnpm-lock.yaml", "package-lock.json", "yarn.lock"]))) === JSON.stringify(["pnpm"]));
+  check("(v) precedence: npm wins over yarn when both (no pnpm) coexist",
+    JSON.stringify(await recordDispatch(markerDir("npm-and-yarn", ["package-lock.json", "yarn.lock"]))) === JSON.stringify(["npm"]));
+
+  // (vi) NON-PNPM DEGRADE: an npm/yarn install that fails (returns {ok:false}) OR throws must be SWALLOWED,
+  //      never escaping provisionWorktreeDeps — best-effort, the worker installs on its own. Exercised on an
+  //      npm-marked dir so it goes through the real (non-pnpm) dispatch branch.
+  const npmDir = markerDir("degrade-npm", ["package-lock.json"]);
+  let npmFailResolved = false;
+  await provisionWorktreeDeps(npmDir, { provision: async () => ({ ok: false, reason: "npm ci exited 1" }) })
+    .then(() => { npmFailResolved = true; });
+  check("(vi) a failing npm/yarn provisioner DEGRADES (best-effort, createWorktree never aborts)", npmFailResolved);
+  let npmThrewResolved = false;
+  await provisionWorktreeDeps(npmDir, { provision: async () => { throw new Error("yarn boom"); } })
+    .then(() => { npmThrewResolved = true; });
+  check("(vi) a throwing npm/yarn provisioner is swallowed (never throws past createWorktree)", npmThrewResolved);
+
   // cleanup the first worktree.
   await removeWorktree(repo, worktreePath);
 } finally {
