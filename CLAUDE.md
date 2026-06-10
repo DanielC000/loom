@@ -63,6 +63,15 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
   keep the browser. HUMAN-set only (Profiles UI/REST) — never an agent MCP tool (same capability-gating
   posture as gateCommand/shell). The MCP launches Chromium lazily on first use; needs a one-time
   `npx playwright install chromium`. The bundled "QA Tester" profile is the browser-capable rig.
+- **Worktree dep-provisioning (`git/worktrees.ts`):** `createWorktree` best-effort-installs deps at
+  creation so a worker boots build-ready. It picks the package manager by lockfile marker IN the worktree
+  root — deterministic precedence pnpm (`pnpm-lock.yaml`) → npm (`package-lock.json`) → yarn (`yarn.lock`),
+  no marker → no-op — and runs the matching install ASYNC + bounded by `PROVISION_TIMEOUT_MS`, best-effort
+  (all failures swallowed; the worker installs on its own), HARDCODED commands (never agent input). Each
+  worktree gets its OWN node_modules; node_modules is NEVER shared/symlinked/junctioned across worktrees
+  (native modules + concurrent install-state would break — load-bearing). **A fresh worktree does NOT carry
+  gitignored files — notably `.env`/secrets are absent.** A worker that needs env vars must be told so in
+  its kickoff; provisioning deliberately does not copy or widen the secret surface.
 
 ## Conventions
 - Node 22 + TypeScript, ESM (`NodeNext`) in daemon/shared; `bundler` resolution in web.

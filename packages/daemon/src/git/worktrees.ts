@@ -83,12 +83,20 @@ function taskKey(taskId: string): string {
 const PROVISION_TIMEOUT_MS = 180_000;
 
 /**
+ * The JS package managers we provision for, in DETERMINISTIC precedence order when several lockfiles
+ * coexist in one worktree root (see {@link detectPackageManager}): pnpm → npm → yarn.
+ */
+type PackageManager = "pnpm" | "npm" | "yarn";
+
+/**
  * Injectable seam for {@link provisionWorktreeDeps}. A test can swap in a fake installer (to assert the
- * gate/bounding without running real pnpm) and/or shrink the timeout. Defaults to the real bounded
- * `pnpm install`.
+ * gate/bounding AND which package manager was detected, without running a real install) and/or shrink
+ * the timeout. Defaults to the real bounded installer for the detected manager. The fake receives the
+ * detected `manager` as a 3rd arg so a hermetic test can prove npm→npm / yarn→yarn dispatch off the
+ * lockfile marker alone (the real installer functions ignore the extra arg).
  */
 export interface ProvisionDeps {
-  provision?: (worktreePath: string, timeoutMs: number) => Promise<{ ok: boolean; reason?: string }>;
+  provision?: (worktreePath: string, timeoutMs: number, manager: PackageManager) => Promise<{ ok: boolean; reason?: string }>;
   timeoutMs?: number;
 }
 
@@ -130,38 +138,124 @@ function pnpmInstall(worktreePath: string, timeoutMs: number): Promise<{ ok: boo
 }
 
 /**
+ * Run ONE bounded, non-interactive install `command` in `worktreePath`, killing the child past
+ * `timeoutMs`. Shared by {@link npmInstall} and {@link yarnInstall}; structurally identical to
+ * {@link pnpmInstall} (which keeps its OWN copy so the pnpm path stays byte-identical). ASYNC spawn
+ * (NOT spawnSync) so the single-threaded daemon event loop never freezes mid-install; resolves a result
+ * object and NEVER rejects, so the caller's degrade-on-failure stays simple. `command` is ALWAYS a
+ * HARDCODED constant selected by lockfile marker — NEVER agent input — so `shell:true` (which only lets
+ * the OS resolve npm/yarn[.cmd] from PATH, mirroring pnpmInstall + the gate runner) carries no
+ * gateCommand-style trust-boundary concern. `CI=1` keeps the tool non-interactive (no prompts/notifiers
+ * that could hang the child).
+ */
+function runBoundedInstall(command: string, worktreePath: string, timeoutMs: number): Promise<{ ok: boolean; reason?: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(command, {
+      cwd: worktreePath,
+      shell: true,
+      stdio: "ignore",
+      env: { ...process.env, CI: "1" },
+    });
+    let settled = false;
+    const done = (r: { ok: boolean; reason?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      done({ ok: false, reason: `${command} exceeded ${timeoutMs}ms (killed)` });
+    }, timeoutMs);
+    child.on("error", (e) => done({ ok: false, reason: e.message }));
+    child.on("exit", (code) => done(code === 0 ? { ok: true } : { ok: false, reason: `${command} exited ${code ?? "null"}` }));
+  });
+}
+
+/**
+ * npm provisioning: `npm ci` (the exact-lock, fast, reproducible install — it wipes node_modules and
+ * installs strictly from package-lock.json), FALLING BACK to `npm install` when `npm ci` fails. `npm ci`
+ * hard-fails on ANY drift between package.json and the lockfile (or a missing lock), so a worktree without
+ * an exact lock match must still DEGRADE to a best-effort `npm install`, not hard-fail. The two runs SHARE
+ * the `timeoutMs` budget: if `npm ci` exhausts it (a timeout-kill), the fallback is SKIPPED rather than
+ * doubling the bound. Mirrors {@link pnpmInstall}'s best-effort + bounded posture; never rejects.
+ */
+async function npmInstall(worktreePath: string, timeoutMs: number): Promise<{ ok: boolean; reason?: string }> {
+  const startedAt = Date.now();
+  const ci = await runBoundedInstall("npm ci", worktreePath, timeoutMs);
+  if (ci.ok) return ci;
+  const remaining = timeoutMs - (Date.now() - startedAt);
+  if (remaining <= 0) return ci; // budget spent (likely a timeout-kill) → don't pile a 2nd install onto the bound
+  const fallback = await runBoundedInstall("npm install", worktreePath, remaining);
+  return fallback.ok ? fallback : { ok: false, reason: `npm ci failed (${ci.reason}); npm install fallback failed (${fallback.reason})` };
+}
+
+/**
+ * yarn provisioning: `yarn install --immutable` — Yarn Berry's "fail if the lockfile would change" mode,
+ * the parallel of pnpm's --frozen-lockfile. Classic Yarn (v1) doesn't understand --immutable and errors;
+ * that error is SWALLOWED upstream (best-effort) and the worker installs on its own, so we don't probe the
+ * yarn version on the spawn hot path. Mirrors {@link pnpmInstall}'s best-effort + bounded posture.
+ */
+function yarnInstall(worktreePath: string, timeoutMs: number): Promise<{ ok: boolean; reason?: string }> {
+  return runBoundedInstall("yarn install --immutable", worktreePath, timeoutMs);
+}
+
+/** Real bounded installer per detected package manager. The {@link ProvisionDeps.provision} seam overrides this. */
+const INSTALLERS: Record<PackageManager, (worktreePath: string, timeoutMs: number) => Promise<{ ok: boolean; reason?: string }>> = {
+  pnpm: pnpmInstall,
+  npm: npmInstall,
+  yarn: yarnInstall,
+};
+
+/**
+ * Which JS package manager owns this worktree, by LOCKFILE MARKER at the worktree root — the same
+ * marker-in-the-tree signal as the original pnpm-only gate, just broadened. DETERMINISTIC precedence when
+ * several coexist: pnpm (pnpm-lock.yaml) → npm (package-lock.json) → yarn (yarn.lock). Returns null when no
+ * recognized lockfile is present (the bare temp repos in tests, a non-JS repo) → provisioning is a no-op.
+ */
+function detectPackageManager(worktreePath: string): PackageManager | null {
+  if (fs.existsSync(path.join(worktreePath, "pnpm-lock.yaml"))) return "pnpm";
+  if (fs.existsSync(path.join(worktreePath, "package-lock.json"))) return "npm";
+  if (fs.existsSync(path.join(worktreePath, "yarn.lock"))) return "yarn";
+  return null;
+}
+
+/**
  * Make a freshly-created worktree BUILD-READY by populating node_modules at creation, so the spawned
  * worker doesn't pay a full `pnpm install` before it can build — and a worker whose install would
  * fail/time out is caught HERE (bounded) instead of wedging the worker mid-task. (node_modules is
  * gitignored, so `git worktree add` checks out the tree WITHOUT it.)
  *
- * SAFE-BY-CONSTRUCTION removal: a frozen `pnpm install` gives the worktree its OWN independent
- * node_modules — hardlinks into the shared content-addressable store plus an internal `.pnpm` virtual
- * store, all WITHIN the worktree. It is NOT a junction/symlink into the main checkout, so removeWorktree's
- * recursive `fs.rm` only ever deletes the worktree's own links and can NEVER recurse into the main
- * checkout's node_modules (the skill-store-nuke / junction-follow class of bug — see removeWorktree). The
- * companion test proves this. Do NOT "optimize" this to junction node_modules → main; that reintroduces
- * the landmine.
+ * SAFE-BY-CONSTRUCTION removal: every supported install (pnpm/npm/yarn) gives the worktree its OWN
+ * independent node_modules WITHIN the worktree — pnpm hardlinks into the shared content-addressable store
+ * plus an internal `.pnpm` virtual store; npm/yarn write a self-contained `./node_modules`. None is a
+ * junction/symlink into the main checkout, so removeWorktree's recursive `fs.rm` only ever deletes the
+ * worktree's own tree and can NEVER recurse into the main checkout's node_modules (the skill-store-nuke /
+ * junction-follow class of bug — see removeWorktree). The companion test proves this. NEVER
+ * share/symlink/junction node_modules across worktrees — native modules + concurrent install-state across
+ * parallel workers would break, and it reintroduces the landmine. This is load-bearing.
  *
- * BEST-EFFORT + BOUNDED: only acts on a pnpm workspace (a `pnpm-lock.yaml` at the worktree root is the
- * marker — a non-pnpm repo, incl. the bare temp repos in tests, is skipped silently). Any failure/timeout
+ * BEST-EFFORT + BOUNDED: acts only when a recognized JS lockfile marks the worktree root
+ * ({@link detectPackageManager} — pnpm-lock.yaml / package-lock.json / yarn.lock, in that deterministic
+ * precedence; a non-JS repo, incl. the bare temp repos in tests, is skipped silently). Any failure/timeout
  * is logged and SWALLOWED — the worker simply falls back to installing itself, exactly as before this
  * change. It MUST NEVER throw past createWorktree or wedge the spawn path.
  */
 export async function provisionWorktreeDeps(worktreePath: string, deps: ProvisionDeps = {}): Promise<void> {
-  if (!fs.existsSync(path.join(worktreePath, "pnpm-lock.yaml"))) return; // not a pnpm workspace → nothing to provision
+  const manager = detectPackageManager(worktreePath);
+  if (!manager) return; // no recognized JS lockfile → nothing to provision
   const timeoutMs = deps.timeoutMs ?? PROVISION_TIMEOUT_MS;
-  const run = deps.provision ?? pnpmInstall;
+  const run = deps.provision ?? INSTALLERS[manager];
   try {
-    const res = await run(worktreePath, timeoutMs);
+    const res = await run(worktreePath, timeoutMs, manager);
     if (!res.ok) {
       // eslint-disable-next-line no-console
-      console.warn(`[worktree] dep provisioning for ${worktreePath} did not complete (${res.reason}); the worker will install on its own.`);
+      console.warn(`[worktree] dep provisioning (${manager}) for ${worktreePath} did not complete (${res.reason}); the worker will install on its own.`);
     }
   } catch (e) {
     // A provisioner should never throw, but belt-and-suspenders: a throw here must NOT abort createWorktree.
     // eslint-disable-next-line no-console
-    console.warn(`[worktree] dep provisioning for ${worktreePath} threw (${(e as Error).message}); the worker will install on its own.`);
+    console.warn(`[worktree] dep provisioning (${manager}) for ${worktreePath} threw (${(e as Error).message}); the worker will install on its own.`);
   }
 }
 
