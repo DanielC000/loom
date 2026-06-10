@@ -11,7 +11,7 @@ import {
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, isBranchMerged, worktreeHasWork, detectStrandedWork } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork } from "../git/worktrees.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { readRunUsage, readRunUsageFromFile } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
@@ -1880,7 +1880,7 @@ export class SessionService {
   }
 
   /**
-   * Step 2: run the build/DoD gate, and ONLY if green merge the branch --no-ff, remove the
+   * Step 2: run the build/DoD gate, and ONLY if green merge the branch as ONE squash commit, remove the
    * worktree, and move the task to done. FAIL-CLOSED — a failed gate or a merge conflict leaves
    * the canonical repo UNTOUCHED and the worktree RETAINED (so the manager can re-task a fix).
    * Merge is daemon-executed; workers have no merge tool.
@@ -1907,8 +1907,8 @@ export class SessionService {
     const rejectNotify = (msg: string) => { try { this.pty.enqueueStdin(managerSessionId, msg); } catch { /* manager not live */ } };
 
     // BACKSTOP (BEFORE the gate/merge): refuse if the worker's commits are STRANDED on a self-created
-    // branch instead of its assigned `loom/<key>`. The assigned branch is then 0-ahead, so the merge
-    // below would be an empty `--no-ff` that silently DROPS the real work (incident: worker 712fd5aa,
+    // branch instead of its assigned `loom/<key>`. The assigned branch is then 0-ahead, so the squash
+    // merge below would stage NOTHING and silently DROP the real work (incident: worker 712fd5aa,
     // commit 1309552). Only an AFFIRMATIVE stranded signal refuses — a check error/timeout fails safe
     // to NOT stranded so a flaky check never blocks a legitimate merge. Leaves the repo/worktree
     // untouched so the manager can recover the commit.
@@ -1940,11 +1940,15 @@ export class SessionService {
       }
     }
 
-    const merge = await mergeBranch(project.repoPath, branch);
+    // Squash-merge as ONE clean commit. The subject comes from the task title (mergeBranch falls back to
+    // the branch name); the commit carries the deterministic `Loom-Worker-Branch` trailer used downstream.
+    const taskTitle = taskId ? this.db.getTask(taskId)?.title ?? undefined : undefined;
+    const merge = await mergeBranch(project.repoPath, branch, taskTitle);
     if (!merge.ok) {
-      evt("merge_rejected", { reason: "conflict" });
-      rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — merge conflict; canonical repo untouched, worktree retained. Re-task a rebase.`);
-      return { merged: false, reason: "merge conflict" };
+      const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
+      evt("merge_rejected", { reason: merge.conflict ? "conflict" : "merge_failed" });
+      rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — ${why}; canonical repo untouched, worktree retained. Re-task a rebase.`);
+      return { merged: false, reason: why };
     }
 
     // Green: the branch is on the canonical repo. The worker (which reported 'done' but is still
@@ -1980,13 +1984,15 @@ export class SessionService {
    * merge report an ERROR for an already-landed merge. So we swallow it (warn) and finish the
    * bookkeeping; the leaked dir is GC'd by boot-reconcile's Pass B on the next restart.
    *
-   * ORDER IS CRASH-CRITICAL. deleteBranch is the DESTRUCTIVE, RE-DETECTION-BLOCKING op — once the
-   * branch is gone, Pass A's isBranchMerged can never re-detect the merge — so it MUST run LAST,
-   * AFTER the durable terminal bookkeeping (updateTask done + merge_done). A crash anywhere before
-   * deleteBranch leaves the branch present-and-merged, which Pass A idempotently re-finalizes; a
-   * crash after it can only happen once merge_done is already durable. This closes the window where a
-   * crash between deleteBranch and merge_done lost the terminal event AND pruned the branch, leaving a
-   * merge_request dangling forever (the lingering-MERGE-REQUEST-alert root cause).
+   * ORDER IS CRASH-CRITICAL. deleteBranch is the DESTRUCTIVE op — so it MUST run LAST, AFTER the durable
+   * terminal bookkeeping (updateTask done + merge_done). Under SQUASH, Pass A keys on the persistent
+   * `Loom-Worker-Branch` trailer in main (not the branch ref), so deleting the branch does NOT blind
+   * re-detection; idempotency instead comes from Pass A's `task done AND worktree gone → skip` short-circuit
+   * plus deleteBranch being a no-op on an already-gone branch. A crash anywhere before deleteBranch leaves
+   * the branch present-and-squash-landed, which Pass A idempotently re-finalizes; a crash after it can only
+   * happen once merge_done is already durable. This closes the window where a crash between deleteBranch and
+   * merge_done lost the terminal event AND pruned the branch, leaving a merge_request dangling forever (the
+   * lingering-MERGE-REQUEST-alert root cause).
    */
   private async finalizeMerge(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
@@ -2014,17 +2020,21 @@ export class SessionService {
    * recoverStaleSessions has marked prior-run ptys exited (so nothing live holds a worktree).
    * Three surgical, idempotent passes:
    *
-   *  A. Finish orphaned merges. confirmWorkerMerge commits the `git merge` BEFORE its bookkeeping
+   *  A. Finish orphaned squash-merges. confirmWorkerMerge commits the squash merge BEFORE its bookkeeping
    *     (removeWorktree → updateTask done → merge_done → deleteBranch). If the process dies in
    *     between (e.g. the dev daemon runs from the repo it merged into, so the merge triggers a
    *     `tsx watch` restart), the merge is correct but the task stays in_progress and the
-   *     worktree/branch leak. For each worker whose branch is ALREADY merged into the canonical
-   *     branch but whose task isn't done and/or whose worktree still exists, we run the SAME
-   *     finalizeMerge. Idempotent: deleteBranch makes the branch vanish, so a re-run no longer
-   *     detects it as merged.
+   *     worktree/branch leak. Under SQUASH the worker branch is NOT in main's ancestry, so a landed
+   *     merge is detected DETERMINISTICALLY by the `Loom-Worker-Branch` trailer mergeBranch writes
+   *     (findLandedSquashCommit — whose re-task guard also rules out a branch re-cut onto a prior
+   *     squash). For each worker whose squash landed but whose task isn't done and/or whose worktree
+   *     still exists, we run the SAME finalizeMerge. Idempotent: once the task is done AND the worktree
+   *     is gone, a re-run short-circuits. NO trailer ⇒ a genuinely-live worker (its uncommitted work
+   *     has no trailer in main) ⇒ KEEP — the 2026-06-05 P0 data-loss safety, preserved under squash.
    *
-   *  A2. Resolve branch-gone dangling merges (lingering-MERGE-REQUEST-alert root cause). Pass A is
-   *     keyed on isBranchMerged, so it CANNOT see a merge whose branch was already pruned but whose
+   *  A2. Resolve branch-gone dangling merges (lingering-MERGE-REQUEST-alert root cause). Pass A's
+   *     trailer detection finalizes a landed squash even after its branch is pruned, but it CANNOT
+   *     reconstruct a PRE-squash-era orphan whose merge predates the trailer and whose
    *     `merge_done` was never recorded — exactly the residual shape (merge landed, branch gone, no
    *     terminal event) that finalizeMerge's crash-safe ordering now prevents going forward but that
    *     pre-existing orphans still carry. Detect it from the EVENT trail instead of git: a worker
@@ -2061,22 +2071,20 @@ export class SessionService {
       const project = this.db.getProject(s.projectId);
       if (!project) continue;
       try {
-        if (!(await isBranchMerged(project.repoPath, s.branch, "HEAD", { timeoutMs: this.gitOpMs }))) continue;
+        // SQUASH detection (the CRUX): the worker branch is NOT in main's ancestry, so the old
+        // isBranchMerged is always false and worktreeHasWork (branch-ahead) cannot tell a landed-squash
+        // orphan from a live worker. findLandedSquashCommit keys on the deterministic `Loom-Worker-Branch`
+        // trailer — POSITIVE proof the squash landed — and its re-task guard rejects a branch re-cut onto a
+        // PRIOR squash (a re-spawned live worker carrying a historical trailer + NEW work). NO trailer ⇒
+        // not landed ⇒ a genuinely-live worker (uncommitted work has no trailer in main) or nothing ⇒ KEEP
+        // (skip): the 2026-06-05 P0 data-loss safety, preserved. (Pass B then GCs only a provably-disposable
+        // dir via worktreeHasWork.) We deliberately do NOT re-apply the worktreeHasWork guard here — under
+        // squash a confirmed-landed branch is STILL ahead-of-base, so that guard would wrongly KEEP a real
+        // orphan; the trailer (with its re-task guard) is the correct, deterministic signal.
+        const landedSha = await findLandedSquashCommit(project.repoPath, s.branch, "HEAD", { timeoutMs: this.gitOpMs });
+        if (!landedSha) continue;
         const worktreePath = s.worktreePath ?? s.cwd;
         const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
-        // SAFE-TO-DISCARD guard (P0 data-loss fix, 2026-06-05): a 0-commit branch is trivially "merged"
-        // (its tip == HEAD), so a LIVE worker just marked `exited` at boot is MISDETECTED here as an
-        // orphaned merge — finalizeMerge would removeWorktree (losing uncommitted work) AND mark the task
-        // done AND delete the branch. If the worktree still holds REAL work, KEEP it instead. A genuine
-        // orphaned merge is clean AND 0-ahead → worktreeHasWork=false → finalizes normally (no
-        // merge-recovery regression; injected `.claude/` noise is ignored). Fails safe (error → keep).
-        if (worktreeOnDisk && await worktreeHasWork(project.repoPath, worktreePath, s.branch)) {
-          // eslint-disable-next-line no-console
-          console.warn(`[reconcile] kept worktree ${worktreePath} — holds unmerged/uncommitted work (Pass A)`);
-          handledWorktrees.add(worktreePath);
-          worktreesKept++;
-          continue;
-        }
         const taskDone = this.db.getTask(s.taskId)?.columnKey === "done";
         if (taskDone && !worktreeOnDisk) continue; // already fully reconciled — nothing to finish
         await this.finalizeMerge({
@@ -2092,9 +2100,10 @@ export class SessionService {
       }
     }
 
-    // A2. Resolve branch-gone dangling merges from the EVENT trail (Pass A is blind to them — the
-    // branch is gone, so isBranchMerged is false). A worker with a `merge_request` and no later
-    // terminal event, whose task is `done`, had its merge land but lost (or never recorded) merge_done
+    // A2. Resolve branch-gone dangling merges from the EVENT trail (the residual PRE-squash-era shape
+    // Pass A's trailer detection can't reconstruct — no trailer was ever written). A worker with a
+    // `merge_request` and no later terminal event, whose task is `done`, had its merge land but lost
+    // (or never recorded) merge_done
     // → a permanent stale MERGE REQUEST alert. Emit the missing terminal event. Purely additive: no
     // git/fs op, so it never touches a worktree dir or branch (honors the inert-orphan constraint) and
     // is trivially idempotent — once merge_done exists, the next boot sees a terminal event and skips.

@@ -49,9 +49,11 @@ async function setupMerged(p) {
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "worker change\n");
   execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
-  // The merge LANDED (this is what confirmWorkerMerge does first)... but the daemon died before the
-  // bookkeeping ran: branch + worktree still present, task still in_progress.
-  execSync(`git ${GIT_ID} merge --no-ff --no-edit ${branch}`, { cwd: p.repo });
+  // The SQUASH merge LANDED (this is what confirmWorkerMerge does first: `git merge --squash` + a plain
+  // commit carrying the deterministic Loom-Worker-Branch trailer)... but the daemon died before the
+  // bookkeeping ran: branch + worktree still present, task still in_progress. Under squash the branch is
+  // NOT in main's ancestry, so Pass A must detect this via the trailer, not `git branch --merged`.
+  execSync(`git ${GIT_ID} merge --squash ${branch} && git ${GIT_ID} commit -q -m "BR-TASK" -m "Loom-Worker-Branch: ${branch}"`, { cwd: p.repo });
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p);
 }
@@ -80,8 +82,10 @@ try {
   await setupMerged(M);
   await setupOrphan(O);
 
-  // Sanity: pre-conditions hold before the reconcile.
-  check("(pre) merged-scenario branch is an ancestor of HEAD (merge landed)", git(M.repo, `branch --merged HEAD`).includes(M.branch));
+  // Sanity: pre-conditions hold before the reconcile. Under squash the branch is NOT an ancestor of HEAD
+  // (no merge commit) — the landed squash is identified by the Loom-Worker-Branch trailer on main's HEAD.
+  check("(pre) merged-scenario branch is NOT an ancestor of HEAD (squash, not a merge commit)", !git(M.repo, `branch --merged HEAD`).includes(M.branch));
+  check("(pre) merged-scenario HEAD carries the Loom-Worker-Branch trailer", git(M.repo, "log -1 --format=%b").includes(`Loom-Worker-Branch: ${M.branch}`));
   check("(pre) merged-scenario task starts in_progress", db.getTask(M.taskId).columnKey === "in_progress");
   check("(pre) merged-scenario worktree present", fs.existsSync(M.worktreePath));
   check("(pre) orphan-scenario worktree present", fs.existsSync(O.worktreePath));

@@ -9,7 +9,7 @@ import { execSync } from "node:child_process";
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wt-home-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
-const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged } = await import("../dist/git/worktrees.js");
+const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged, findLandedSquashCommit } = await import("../dist/git/worktrees.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 
 let failures = 0;
@@ -24,10 +24,11 @@ const repo = path.join(os.tmpdir(), `loom-wt-repo-${Date.now()}`);
 const taskId = "abcd1234-ef56-7890";
 
 try {
-  // (a) a real repo with a commit on the default branch.
+  // (a) a real repo with a commit on the default branch. Configure a git identity so mergeBranch's PLAIN
+  //     `git commit` (the squash commit — no `-c` overrides by design) has an author, mirroring a real repo.
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# worktree test\n");
-  execSync(`git init -q && git add . && git -c user.email=wt@loom -c user.name=wt commit -q -m "init"`, { cwd: repo });
+  execSync(`git init -q && git config user.email wt@loom && git config user.name wt && git add . && git commit -q -m "init"`, { cwd: repo });
 
   // (b) createWorktree → dir exists, HEAD on the loom/<key> branch (key is hashed, not a raw slice).
   const { worktreePath, branch } = await createWorktree(repo, "projWT", taskId);
@@ -54,16 +55,33 @@ try {
   check("(e) git worktree list no longer lists it", !git(repo, "worktree list").includes(key));
   check("(e) removeWorktree did NOT delete the branch", git(repo, `branch --list ${branch}`).includes(branch));
 
-  // (f) H1.1 — a CLEAN merge deletes the branch: merge the worker's branch, remove the worktree,
-  //     deleteBranch → the loom/<key> branch is gone (re-spawn won't hit "already exists").
+  // (f) H1.1 — a CLEAN SQUASH merge lands ONE commit + deletes the branch: merge the worker's branch
+  //     (two worker commits), remove the worktree, deleteBranch → the loom/<key> branch is force-gone
+  //     (re-spawn won't hit "already exists"). The squash collapses N worker commits into ONE clean
+  //     commit on main carrying the deterministic Loom-Worker-Branch trailer — NOT a merge commit.
   const tF = "feature-aaaa-1111";
+  const headBeforeF = git(repo, "rev-parse HEAD");
   const { worktreePath: wtF, branch: brF } = await createWorktree(repo, "projWT", tF);
-  commitInto(wtF, "f.txt", "f\n", "f commit");
-  const merged = await mergeBranch(repo, brF);
-  check("(f) clean merge ok", merged.ok === true);
+  commitInto(wtF, "f.txt", "f\n", "f commit 1");
+  commitInto(wtF, "f2.txt", "f2\n", "f commit 2"); // two commits → must collapse to ONE on main
+  const merged = await mergeBranch(repo, brF, "Feature F task title");
+  check("(f) clean squash merge ok", merged.ok === true);
+  check("(f) mergeBranch returns the new squash-commit SHA", typeof merged.sha === "string" && merged.sha.length >= 7);
+  check("(f) exactly ONE new commit landed on main (the squash, not 2 worker commits)",
+    git(repo, `rev-list --count ${headBeforeF}..HEAD`) === "1");
+  check("(f) the landed commit is NOT a merge commit (single parent)",
+    git(repo, "rev-list --parents -n 1 HEAD").trim().split(/\s+/).length === 2);
+  check("(f) NO `Merge branch` commit was created",
+    git(repo, `log --format=%s ${headBeforeF}..HEAD`).includes("Merge branch") === false);
+  check("(f) subject is the clean task title", git(repo, "log -1 --format=%s") === "Feature F task title");
+  check("(f) body carries the deterministic Loom-Worker-Branch trailer",
+    git(repo, "log -1 --format=%b").includes(`Loom-Worker-Branch: ${brF}`));
+  check("(f) NO Co-Authored-By trailer (repo-config identity only)",
+    git(repo, "log -1 --format=%b").includes("Co-Authored-By") === false);
+  check("(f) both worker files landed on main", fs.existsSync(path.join(repo, "f.txt")) && fs.existsSync(path.join(repo, "f2.txt")));
   await removeWorktree(repo, wtF);
   await deleteBranch(repo, brF);
-  check("(f) merged branch is GONE after deleteBranch", git(repo, `branch --list ${brF}`) === "");
+  check("(f) merged branch is GONE after deleteBranch (force-deleted — not in main's ancestry)", git(repo, `branch --list ${brF}`) === "");
   check("(f) merged worktree removed", !fs.existsSync(wtF));
 
   // (g) H1.2 — a REJECTED merge retains the worktree+branch; re-spawning on the same task must NOT throw.
@@ -90,7 +108,7 @@ try {
   const B = await createWorktree(repo, "projWT", b);
   check("(i) id8-colliding tasks → distinct branches", A.branch !== B.branch);
   check("(i) id8-colliding tasks → distinct worktree dirs", A.worktreePath !== B.worktreePath);
-  // cleanup: these were never merged, so deleteBranch (-d) would safely refuse — just drop the worktrees.
+  // cleanup: these were never merged — just drop the worktrees (no deleteBranch; their branches are unused).
   await removeWorktree(repo, A.worktreePath);
   await removeWorktree(repo, B.worktreePath);
 
@@ -148,7 +166,7 @@ try {
     await isBranchMerged(repo, "any-branch", "HEAD", { gitFactory: (_p, ms) => { mergedDefMs = ms; return { raw: async () => "" }; } });
     check("(k1) default per-op block timeout is 15000ms", mergedDefMs === 15000);
 
-    // (k2) deleteBranch: a hung `git branch -d` is swallowed + bounded (best-effort), never a hang.
+    // (k2) deleteBranch: a hung `git branch -D` is swallowed + bounded (best-effort), never a hang.
     let delMs = -1;
     const t2 = Date.now();
     let delResolved = false;
@@ -182,6 +200,43 @@ try {
     check("(l) removeWorktree RETURNS despite a never-resolving fs.rm (stuck dir handle, not an infinite hang)", resolved);
     check(`(l) bounded by the timeout — returned in ${elapsed}ms (fs backstop capped at ${tinyMs}ms)`,
       elapsed >= tinyMs && elapsed < tinyMs * 8 + 1500);
+  }
+
+  // (m) findLandedSquashCommit — the deterministic trailer detector that REPLACES isBranchMerged under
+  //     squash (boot-reconcile Pass A) and the `Merge branch` grep (workerDiff stage 3). Proves: it finds
+  //     a genuine landed squash by trailer (branch present + branch gone), ignores an unrelated branch,
+  //     and — THE DATA-LOSS-SENSITIVE re-task guard — returns null when the branch was RE-CUT onto a PRIOR
+  //     squash (a re-spawned live worker carrying a historical trailer + new work), so Pass A KEEPS it.
+  {
+    // A genuine landed squash for task tM: worker commits, mergeBranch squashes onto main (branch retained,
+    // as in the daemon-died-after-squash orphan). The branch DIVERGES from the squash → detected as landed.
+    const tM = "squashland-dddd-4444";
+    const { worktreePath: wtM, branch: brM } = await createWorktree(repo, "projWT", tM);
+    commitInto(wtM, "m.txt", "m\n", "m commit");
+    const mM = await mergeBranch(repo, brM, "M task");
+    check("(m) squash landed ok", mM.ok === true && typeof mM.sha === "string");
+    const foundPresent = await findLandedSquashCommit(repo, brM);
+    check("(m) finds the squash by trailer while the branch is STILL present (the orphan shape)", foundPresent === mM.sha);
+    check("(m) does NOT match an unrelated branch", (await findLandedSquashCommit(repo, "loom/nonexistent")) === null);
+    // Branch gone (the fully-finalized / workerDiff stage-3 shape) → the trailer commit is still found.
+    await removeWorktree(repo, wtM);
+    await deleteBranch(repo, brM);
+    check("(m) branch is GONE", git(repo, `branch --list ${brM}`) === "");
+    check("(m) STILL finds the squash by trailer after the branch is deleted (trailer persists in main)",
+      (await findLandedSquashCommit(repo, brM)) === mM.sha);
+
+    // RE-TASK GUARD: re-spawn the SAME task (same key → same branch name). createWorktree re-cuts the
+    // empty branch onto CURRENT main (which now contains the prior squash as an ancestor). The worker does
+    // NEW work. The historical trailer is in main, but the trailer commit is an ANCESTOR of the re-cut
+    // branch → findLandedSquashCommit must return NULL so Pass A treats this as a LIVE worker, not a landed
+    // orphan (else the re-spawned worker's worktree would be deleted — data loss).
+    const { worktreePath: wtM2, branch: brM2 } = await createWorktree(repo, "projWT", tM);
+    check("(m) re-task reuses the SAME branch name", brM2 === brM);
+    commitInto(wtM2, "m-new.txt", "new live work\n", "m re-task commit");
+    check("(m) RE-TASK GUARD: a branch re-cut onto the prior squash is NOT a landed orphan → null (KEEP the live worker)",
+      (await findLandedSquashCommit(repo, brM2)) === null);
+    await removeWorktree(repo, wtM2);
+    await deleteBranch(repo, brM2);
   }
 } finally {
   fs.rmSync(repo, { recursive: true, force: true });
