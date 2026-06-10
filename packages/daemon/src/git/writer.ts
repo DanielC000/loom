@@ -90,6 +90,30 @@ function isNoUpstreamError(e: unknown): boolean {
   return msg.includes("no upstream") || msg.includes("no configured push destination");
 }
 
+/** A GitHub noreply commit identity — correct for github.com repos, unroutable anywhere else. */
+const GITHUB_NOREPLY_SUFFIX = "@users.noreply.github.com";
+
+/**
+ * Extract the bare host from an `origin` URL across the forms git emits — scheme URLs
+ * (`https://github.com/o/r.git`, `ssh://git@host:22/o/r`) and the scp-like shorthand
+ * (`git@github.com:o/r.git`). Returns the lowercased host, or null if it can't be parsed (→ no warning).
+ */
+function originHost(url: string): string | null {
+  const u = url.trim();
+  if (!u) return null;
+  // scp-like shorthand: [user@]host:path  (no scheme, a colon before the first slash)
+  const scp = /^(?:[^@/]+@)?([^:/]+):/.exec(u);
+  if (scp?.[1] && !/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) return scp[1].toLowerCase();
+  // scheme://[user@]host[:port]/path
+  const m = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?([^:/]+)/i.exec(u);
+  return m?.[1] ? m[1].toLowerCase() : null;
+}
+
+/** github.com or any subdomain of it (gist.github.com, …) — vs. any self-hosted forge. */
+function isGithubHost(host: string): boolean {
+  return host === "github.com" || host.endsWith(".github.com");
+}
+
 /**
  * Bounded, non-interactive git WRITE operations for the project repo. Each method returns a structured
  * {@link GitWriteResult} (never throws for an expected git failure) and is wrapped in {@link withTimeout}
@@ -174,8 +198,12 @@ export class GitWriter {
    * remote error. Non-interactive + bounded throughout: a push to an unreachable/auth-required remote
    * FAILS FAST (GIT_TERMINAL_PROMPT=0 + the timeout) rather than hanging the daemon — the set-upstream
    * retry runs under the same guards.
+   *
+   * On success we ALSO surface a non-blocking {@link identityWarning} (commit-identity vs. remote-host
+   * mismatch) so the human who just published sees if their email is wrong for this remote. It never
+   * blocks the push and a detection failure is silently swallowed — see {@link identityWarning}.
    */
-  async push(): Promise<GitWriteResult<{ branch: string }>> {
+  async push(): Promise<GitWriteResult<{ branch: string; warning?: string }>> {
     try {
       const git = this.git(this.pushMs);
       const branch = (await git.branchLocal()).current;
@@ -189,9 +217,40 @@ export class GitWriter {
           "git push -u origin",
         );
       }
-      return { ok: true, branch };
+      const warning = await this.identityWarning(git);
+      return warning ? { ok: true, branch, warning } : { ok: true, branch };
     } catch (e) {
       return { ok: false, error: gitError(e) };
+    }
+  }
+
+  /**
+   * Heuristic, NO hardcoded owner email: compare the remote HOST (`git remote get-url origin`) against
+   * the email on HEAD (the identity actually being published) and warn on a mismatch —
+   *  - self-hosted origin (non-GitHub) carrying a `@users.noreply.github.com` identity → the email is
+   *    unroutable on that forge; OR
+   *  - GitHub origin carrying a real (non-noreply) address → a leakable email is being published.
+   * FAIL-SAFE BY CONSTRUCTION: any detection error (no origin, no commits, parse miss) returns
+   * `undefined` — never a throw, never blocks the push. Bounded by the local-op timeout like every read here.
+   */
+  private async identityWarning(git: SimpleGit): Promise<string | undefined> {
+    try {
+      const originUrl = (await withTimeout(git.raw(["remote", "get-url", "origin"]), this.localMs, "git remote get-url")).trim();
+      const host = originHost(originUrl);
+      if (!host) return undefined;
+      const email = (await withTimeout(git.raw(["log", "-1", "--pretty=%ae"]), this.localMs, "git log identity")).trim().toLowerCase();
+      if (!email) return undefined;
+      const github = isGithubHost(host);
+      const noreply = email.endsWith(GITHUB_NOREPLY_SUFFIX);
+      if (!github && noreply) {
+        return `Commit identity ${email} is a GitHub noreply address, but origin (${host}) is self-hosted — this email is unroutable there. Consider a real identity for this remote.`;
+      }
+      if (github && !noreply) {
+        return `Commit identity ${email} is a real address being published to GitHub (${host}) — consider a @users.noreply.github.com identity to avoid leaking it.`;
+      }
+      return undefined;
+    } catch {
+      return undefined; // detection must NEVER block or fail the push
     }
   }
 }
