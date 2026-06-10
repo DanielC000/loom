@@ -169,10 +169,13 @@ scope, and never address the human. You make the call and `worker_message` it ba
    your session is browser-capable (a headless Playwright tool surface is provisioned and allowlisted),
    drive it to the running app and confirm the change actually renders and behaves before you call the
    task done; you are standing-authorized to do this, so never park UI work as "eyeball pending, needs a
-   human." Don't lean on claude-in-chrome for this — heavy cockpit/Overview pages freeze its CDP
-   renderer (mounting a live-session terminal is the trigger); if you must use it, eyeball only LIGHT,
-   non-terminal pages (`/settings`, `/skills`, `/platform`). Workers don't drive the browser — they
-   report UI work up and you, the manager, verify it.
+   human." Playwright is the agent default; claude-in-chrome is Lead-only / special-case (the real
+   authenticated browser) — heavy cockpit/Overview pages freeze its CDP renderer (mounting a live-session
+   terminal is the trigger), so if you must use it, eyeball only LIGHT, non-terminal pages (`/settings`,
+   `/skills`, `/platform`). Division of labor: browser-capable verification workers (QA / Web Designer —
+   sessions with the Playwright/`browserTesting` surface provisioned + allowlisted) **self-verify**
+   UI/visual work with Playwright before reporting done; non-browser workers (Dev / Bugfix / Docs) report
+   UI work **up** and you, the manager, verify it. Either way you still own the integrated end-to-end pass.
 
 ## Self-hosting — when your project IS Loom itself
 
