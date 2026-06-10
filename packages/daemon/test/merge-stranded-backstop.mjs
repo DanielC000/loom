@@ -56,7 +56,8 @@ function seed(p) {
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# msb\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  // Configure a git identity so the daemon's PLAIN squash `git commit` (no `-c` overrides) has an author.
+  execSync(`git init -q && git config user.email msb@loom && git config user.name msb && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
 }
 
 // STRANDED worker: create the worktree (on assigned `loom/<key>`), then have the worker cut its OWN
@@ -125,9 +126,13 @@ try {
   check("(normal) reviewWorkerMerge → NO warning", reviewN.warning === undefined);
   check("(normal) reviewWorkerMerge shows the real diff", reviewN.filesChanged === 1 && reviewN.patch.includes(N.file));
 
+  const headNBefore = git(N.repo, "rev-parse HEAD");
   const confirmN = await sessions.confirmWorkerMerge(N.mgrId, N.workerId);
   check("(normal) confirmWorkerMerge → merged:true", confirmN.merged === true);
   check("(normal) file landed on canonical repo", fs.existsSync(path.join(N.repo, N.file)));
+  check("(normal) exactly ONE non-merge commit landed (squash, no `Merge branch` noise)",
+    git(N.repo, `rev-list --count ${headNBefore}..HEAD`) === "1" &&
+    git(N.repo, "rev-list --parents -n 1 HEAD").trim().split(/\s+/).length === 2);
   check("(normal) assigned branch deleted after merge", git(N.repo, `branch --list ${N.branch}`) === "");
   check("(normal) task moved to done", db.getTask(N.taskId).columnKey === "done");
   check("(normal) merge_done recorded (exactly 1)", mergeDoneCount(N.mgrId) === 1);

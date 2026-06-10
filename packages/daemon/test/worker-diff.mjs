@@ -25,10 +25,11 @@ const commitInto = (dir, file, body, msg) => {
 const repo = path.join(os.tmpdir(), `loom-wd-repo-${Date.now()}`);
 
 try {
-  // a real repo with one commit (a tracked README we can later edit uncommitted).
+  // a real repo with one commit (a tracked README we can later edit uncommitted). Configure a git identity
+  // so mergeBranch's PLAIN squash `git commit` (no `-c` overrides by design) has an author.
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# v1\n");
-  execSync(`git init -q && git add . && git -c user.email=wd@loom -c user.name=wd commit -q -m "init"`, { cwd: repo });
+  execSync(`git init -q && git config user.email wd@loom && git config user.name wd && git add . && git commit -q -m "init"`, { cwd: repo });
 
   // ── CASE 1a — live worktree, work UNCOMMITTED only (the headline bug). diffBranch reads EMPTY;
   //    workerDiff must surface the uncommitted edit so a manager can supervise in-progress work.
@@ -42,7 +43,7 @@ try {
     check("(1a) flagged uncommitted", !!d && d.uncommitted === true);
     check("(1a) filesChanged counts the edited file", !!d && d.filesChanged === 1);
     await removeWorktree(repo, worktreePath);
-    await deleteBranch(repo, branch); // unmerged → -d refuses; harmless, dir already gone
+    await deleteBranch(repo, branch); // -D force-deletes the unmerged branch; harmless, dir already gone
   }
 
   // ── CASE 1b — live worktree with BOTH a commit and an uncommitted edit → diff spans both.
@@ -66,17 +67,18 @@ try {
     check("(2) committed branch diff still works with the worktree gone", !!d && d.patch.includes("feature.txt"));
     check("(2) NOT flagged uncommitted (no live worktree)", !!d && !d.uncommitted);
     check("(2) NOT flagged merged (branch still present)", !!d && !d.merged);
-    await deleteBranch(repo, branch); // -d refuses (unmerged) — leaves it; explicit force to clean up
-    execSync(`git branch -D ${branch}`, { cwd: repo });
+    await deleteBranch(repo, branch); // now force-deletes (-D) the unmerged branch → gone in one call
+    check("(2) deleteBranch force-removed the unmerged branch", execSync(`git branch --list ${branch}`, { cwd: repo }).toString().trim() === "");
   }
 
-  // ── CASE 3 — branch MERGED + deleted → reconstruct the landed diff from the merge commit
-  //    (was a 500 "ambiguous argument" → red "No diff" in the UI for every merged worker).
+  // ── CASE 3 — branch SQUASH-MERGED + deleted → reconstruct the landed diff from the squash commit,
+  //    located by the deterministic Loom-Worker-Branch trailer (was a 500 "ambiguous argument" → red
+  //    "No diff" in the UI for every merged worker; the old `Merge branch` grep finds nothing under squash).
   {
     const { worktreePath, branch } = await createWorktree(repo, "projWD", "merged-cccc-3333");
     commitInto(worktreePath, "landed.txt", "this work landed on main\n", "landed commit");
-    const merged = await mergeBranch(repo, branch); // --no-ff → "Merge branch 'loom/<key>'"
-    check("(3 setup) clean merge", merged.ok === true);
+    const merged = await mergeBranch(repo, branch, "Landed task"); // squash → one commit + trailer
+    check("(3 setup) clean squash merge", merged.ok === true && typeof merged.sha === "string");
     await removeWorktree(repo, worktreePath);
     await deleteBranch(repo, branch);
     check("(3 setup) branch is GONE", execSync(`git branch --list ${branch}`, { cwd: repo }).toString().trim() === "");

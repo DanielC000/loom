@@ -60,10 +60,13 @@ function seed(p) {
 async function setupWorker(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mfr\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  // Configure a git identity so the daemon's PLAIN squash `git commit` (no `-c` overrides) has an author.
+  execSync(`git init -q && git config user.email mfr@loom && git config user.name mfr && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "worker change\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file} part 1"`, { cwd: worktreePath });
+  fs.writeFileSync(path.join(worktreePath, `${p.file}.2`), "worker change 2\n"); // 2nd commit → must collapse to ONE
+  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file} part 2"`, { cwd: worktreePath });
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p);
 }
@@ -77,7 +80,7 @@ async function setupWorker(p) {
 async function setupBusyWorker(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mfr\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mfr@loom && git config user.name mfr && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "worker change\n");
   execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
@@ -100,9 +103,24 @@ try {
   await setupBusyWorker(X);
 
   // --- (1) HAPPY path: removal works normally. ---
+  const headHBefore = git(H.repo, "rev-parse HEAD"); // canonical HEAD before the squash merge
   const confirmH = await sessions.confirmWorkerMerge(H.mgrId, H.workerId);
   check("(happy) confirmWorkerMerge → merged:true", confirmH.merged === true);
   check("(happy) file landed on canonical repo", fs.existsSync(path.join(H.repo, H.file)));
+  check("(happy) BOTH worker commits' content landed (collapsed into the squash)",
+    fs.existsSync(path.join(H.repo, `${H.file}.2`)));
+  // ONE-COMMIT-PER-TASK: the worker's 2 commits collapse into exactly ONE non-merge commit on main,
+  // with the clean task-title subject + trailer, and NO `Merge branch` noise commit.
+  check("(happy) exactly ONE new commit on main (squash collapsed 2 worker commits)",
+    git(H.repo, `rev-list --count ${headHBefore}..HEAD`) === "1");
+  check("(happy) the landed commit is NOT a merge commit (single parent)",
+    git(H.repo, "rev-list --parents -n 1 HEAD").trim().split(/\s+/).length === 2);
+  check("(happy) NO `Merge branch` commit was created",
+    git(H.repo, `log --format=%s ${headHBefore}..HEAD`).includes("Merge branch") === false);
+  check("(happy) squash subject is the clean task title", git(H.repo, "log -1 --format=%s") === "MFR-TASK");
+  check("(happy) squash body carries the Loom-Worker-Branch trailer",
+    git(H.repo, "log -1 --format=%b").includes(`Loom-Worker-Branch: ${H.branch}`));
+  check("(happy) NO Co-Authored-By trailer", git(H.repo, "log -1 --format=%b").includes("Co-Authored-By") === false);
   check("(happy) worktree removed", !fs.existsSync(H.worktreePath));
   check("(happy) branch deleted", git(H.repo, `branch --list ${H.branch}`) === "");
   check("(happy) task moved to done", db.getTask(H.taskId).columnKey === "done");

@@ -1,18 +1,19 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// P0 DATA-LOSS guard test (2026-06-05). boot-reconcile must NEVER auto-delete a worktree that still
-// holds the worker's work. recoverStaleSessions marks EVERY prior-run session `exited` at boot, so a
-// LIVE worker (e.g. an unrelated manager's, dropped by a daemon_restart) is misdetected and was deleted
-// mid-task. TWO vectors, both now gated by worktreeHasWork():
-//   - Pass B: GC'd any exited+unprotected worktree (the branch-AHEAD case).
-//   - Pass A: a 0-commit branch's tip == HEAD, so isBranchMerged()=true → finalizeMerge removed the
-//     worktree AND marked the task done AND deleted the branch — the worst case, for the literal
-//     "completed-but-uncommitted" shape.
+// P0 DATA-LOSS guard test (2026-06-05), updated for SQUASH merges. boot-reconcile must NEVER auto-delete a
+// worktree that still holds the worker's work. recoverStaleSessions marks EVERY prior-run session `exited`
+// at boot, so a LIVE worker (e.g. an unrelated manager's, dropped by a daemon_restart) is misdetected and
+// was deleted mid-task. Under squash, Pass A keys on the deterministic Loom-Worker-Branch TRAILER (positive
+// proof the squash landed) instead of `git branch --merged`, which eliminates the old 0-commit-branch
+// misdetection outright: a genuinely-live worker has NO trailer in main → Pass A SKIPS it → the
+// worktreeHasWork() guard in Pass B is what keeps it. The two data-loss vectors are now:
+//   - Pass A: a landed squash is detected by the trailer ONLY; no trailer ⇒ never finalized (KEEP).
+//   - Pass B: GC's an exited+unprotected worktree ONLY when worktreeHasWork()=false (clean AND 0-ahead).
 // REAL git on temp repos, NO claude + NO live daemon — drives reconcileOrchestrationOnBoot() directly
 // against an isolated LOOM_HOME. Proves:
-//   (a) a 0-ahead worktree with an UNCOMMITTED change, session exited+UNPROTECTED → routed through
-//       Pass A → SURVIVES with contents intact, task untouched, branch retained.
-//   (b) a worktree with an UNMERGED COMMIT (branch ahead) → routed through Pass B → SURVIVES.
-//   (c) a clean, genuinely-merged worktree of an exited session → STILL finalized/GC'd (no regression).
+//   (a) a 0-ahead worktree with an UNCOMMITTED change, session exited+UNPROTECTED → NO trailer → Pass A
+//       skips it → Pass B KEEPS it (contents intact, task untouched, branch retained).
+//   (b) a worktree with an UNMERGED COMMIT (branch ahead) → no trailer → Pass A skips → Pass B KEEPS.
+//   (c) a genuinely SQUASH-MERGED worktree of an exited session → trailer present → STILL finalized/GC'd.
 //   (d) a merged worktree that ALSO has an untracked `.claude/skills/foo` file → STILL GC'd (proves the
 //       ignore-untracked-`.claude/` discriminator: injected noise must not block legitimate cleanup).
 //   (e) FAIL-SAFE: a bounded git error/timeout in the check → treated as has-work → KEEP (both the
@@ -84,7 +85,9 @@ async function setupMerged(p, withClaudeNoise) {
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "real merged work\n");
   execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
-  execSync(`git ${GIT_ID} merge --no-ff --no-edit ${branch}`, { cwd: p.repo }); // branch now reachable from HEAD
+  // SQUASH-land it (what confirmWorkerMerge does): one commit on main carrying the Loom-Worker-Branch
+  // trailer; the branch is NOT reachable from HEAD (no merge commit), so Pass A must detect via the trailer.
+  execSync(`git ${GIT_ID} merge --squash ${branch} && git ${GIT_ID} commit -q -m "BKW-TASK" -m "Loom-Worker-Branch: ${branch}"`, { cwd: p.repo });
   if (withClaudeNoise) {
     const skillDir = path.join(worktreePath, ".claude", "skills", "foo");
     fs.mkdirSync(skillDir, { recursive: true });
@@ -126,17 +129,21 @@ try {
   check("(e) parser: mixed .claude noise + real product → work", worktreeStatusHasWork("?? .claude/skills/foo\n?? src/new.txt\n") === true);
   check("(e) parser: empty status → NOT work", worktreeStatusHasWork("") === false);
 
-  // Sanity on the routing pre-conditions.
-  check("(a-pre) uncommitted branch reads as 'merged' (tip==HEAD) → would hit Pass A", git(A.repo, `branch --merged HEAD`).includes(A.branch));
-  check("(b-pre) unmerged-commit branch is NOT merged → would skip Pass A → Pass B", !git(B.repo, `branch --merged HEAD`).includes(B.branch));
-  check("(c-pre) merged branch is an ancestor of HEAD", git(C.repo, `branch --merged HEAD`).includes(C.branch));
-  check("(d-pre) merged-with-noise branch is an ancestor of HEAD", git(D.repo, `branch --merged HEAD`).includes(D.branch));
+  // Sanity on the routing pre-conditions (under SQUASH, Pass A keys on the Loom-Worker-Branch trailer,
+  // NOT `git branch --merged`). (a)/(b) never landed → NO trailer in main → Pass A skips → Pass B decides
+  // (and KEEPS, since both hold work). (c)/(d) squash-landed → trailer present → Pass A finalizes.
+  check("(a-pre) uncommitted (live) worker has NO landed-squash trailer in main → Pass A skips it (kept by Pass B)",
+    !git(A.repo, "log -1 --format=%b").includes("Loom-Worker-Branch"));
+  check("(b-pre) unmerged-commit worker has NO trailer in main → Pass A skips → Pass B keeps it",
+    !git(B.repo, "log -1 --format=%b").includes("Loom-Worker-Branch"));
+  check("(c-pre) merged HEAD carries the Loom-Worker-Branch trailer (squash landed)", git(C.repo, "log -1 --format=%b").includes(`Loom-Worker-Branch: ${C.branch}`));
+  check("(d-pre) merged-with-noise HEAD carries the trailer (squash landed)", git(D.repo, "log -1 --format=%b").includes(`Loom-Worker-Branch: ${D.branch}`));
 
   // --- THE RECONCILE (no protected set → every worker is exited+unprotected) ---
   const r = await sessions.reconcileOrchestrationOnBoot();
 
-  // (a) Pass A vector — the worktree SURVIVES with its uncommitted work, task + branch untouched.
-  check("(a) uncommitted worktree KEPT (Pass A no longer deletes a misdetected live worker)", fs.existsSync(A.worktreePath));
+  // (a) live worker — no trailer in main → Pass A skips → Pass B keeps it; uncommitted work + task + branch untouched.
+  check("(a) uncommitted worktree KEPT (no trailer → Pass A skips; Pass B keeps a live worker)", fs.existsSync(A.worktreePath));
   check("(a) uncommitted work CONTENTS intact (src/work.txt survives)", fs.existsSync(path.join(A.worktreePath, "src", A.file)));
   check("(a) uncommitted task NOT wrongly marked done", db.getTask(A.taskId).columnKey === "in_progress");
   check("(a) uncommitted branch NOT deleted", git(A.repo, `branch --list ${A.branch}`).includes(A.branch));
@@ -180,6 +187,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — boot-reconcile never auto-deletes a worktree holding work: an uncommitted-0-ahead worker survives Pass A, an unmerged-commit worker survives Pass B, the check fails safe (error/timeout → keep), and a genuinely-merged worktree is STILL GC'd even when it carries untracked daemon-injected .claude noise."
+  ? "\n✅ ALL PASS — under squash, boot-reconcile never auto-deletes a worktree holding work: a live worker has NO Loom-Worker-Branch trailer so Pass A skips it and Pass B keeps it (both the uncommitted-0-ahead and unmerged-commit shapes), the check fails safe (error/timeout → keep), and a genuinely SQUASH-merged worktree (trailer present) is STILL finalized/GC'd even when it carries untracked daemon-injected .claude noise."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

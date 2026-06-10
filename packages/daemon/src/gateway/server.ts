@@ -1035,8 +1035,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return reply.send(deps.pty.enqueueStdin(id, text));
   });
   // Human-initiated merge of a worker's branch (the Review panel / #18c). Runs the daemon's
-  // fail-closed build gate then merges --no-ff; manager is derived from the worker's parent so the
-  // existing ownership check holds. Returns { merged } or { merged:false, reason }.
+  // fail-closed build gate then squash-merges (one clean commit); manager is derived from the worker's
+  // parent so the existing ownership check holds. Returns { merged } or { merged:false, reason }.
   app.post("/api/sessions/:id/merge", async (req, reply) => {
     const { id } = req.params as { id: string };
     const worker = deps.db.getSession(id);

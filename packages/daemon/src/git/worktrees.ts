@@ -11,11 +11,11 @@ export interface WorktreeInfo {
 }
 
 /**
- * Per-git-op ceiling for the BOOT-RECONCILE git ops (removeWorktree / isBranchMerged / deleteBranch).
+ * Per-git-op ceiling for the BOOT-RECONCILE git ops (removeWorktree / findLandedSquashCommit / deleteBranch).
  * Generous for a real op (sub-second normally), but BOUNDED so a wedged child can't hang the caller.
  * This is the fix for the boot-outage: a git op on a busy/locked dir (e.g. a directory handle stuck by
  * an unrelated process) HANGS INDEFINITELY — it doesn't throw — and a try/catch only catches throws.
- * boot-reconcile runs these ops during daemon BOOT (Pass A: isBranchMerged → finalizeMerge's
+ * boot-reconcile runs these ops during daemon BOOT (Pass A: findLandedSquashCommit → finalizeMerge's
  * removeWorktree + deleteBranch; Pass B: removeWorktree), so one hung op blocked the whole daemon from
  * booting, for hours, on 2026-06-03. Every op in the reconcile path is now bounded by this.
  */
@@ -337,19 +337,23 @@ export async function createWorktree(
 }
 
 /**
- * Delete a worker's branch after a CLEAN merge (H1.1) — `git branch -d` (safe: refuses an unmerged
- * branch). Without this, re-spawning on the same task hit "a branch named 'loom/…' already exists".
- * Best-effort: the merge already succeeded, and createWorktree tolerates a leftover branch anyway, so
- * a delete hiccup is logged, not fatal. NOT called on a rejected merge or recycle (branch retained).
+ * Delete a worker's branch after a merge (H1.1) — `git branch -D` (FORCE). Under SQUASH the branch is NOT
+ * in main's ancestry (the squash lands the branch's *content* as a new commit, not the branch ref itself),
+ * so the safe `git branch -d` would REFUSE it as "not fully merged". Force-delete is correct here because
+ * deleteBranch is only ever reached AFTER a confirmed-successful squash commit (finalizeMerge from the
+ * interactive merge OR boot-reconcile Pass A); the rejected merge paths return early WITHOUT deleting, so a
+ * retained (rejected/recovery) branch keeps its work. Without this, re-spawning on the same task hit "a
+ * branch named 'loom/…' already exists". Best-effort: the merge already succeeded, and createWorktree
+ * tolerates a leftover branch anyway, so a delete hiccup is logged, not fatal.
  *
- * BOUNDED: called by finalizeMerge during boot-reconcile Pass A, so a hung `git branch -d` (busy ref
+ * BOUNDED: called by finalizeMerge during boot-reconcile Pass A, so a hung `git branch -D` (busy ref
  * lock) must not wedge boot. The op runs through the same block-timeout + {@link withTimeout} guard;
  * a timeout-throw is swallowed + warned exactly like any other delete failure.
  */
 export async function deleteBranch(repoPath: string, branch: string, deps: BoundedGitDeps = {}): Promise<void> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
-    await withTimeout(git.raw(["branch", "-d", branch]), timeoutMs, "git branch -d");
+    await withTimeout(git.raw(["branch", "-D", branch]), timeoutMs, "git branch -D");
   } catch (e) {
     // eslint-disable-next-line no-console
     console.warn(`[worktree] could not delete merged branch ${branch}: ${(e as Error).message}`);
@@ -543,8 +547,8 @@ export interface StrandedWork {
  * MERGE-GATE BACKSTOP (2026-06-10): catch a worker whose commits are STRANDED on a self-created branch
  * instead of its assigned `loom/<key>`. The bug it guards: when a worker commits to a branch it cut
  * itself, the assigned branch stays 0 commits ahead of canonical main, so reviewWorkerMerge reads an
- * empty diff and confirmWorkerMerge does an empty `--no-ff` merge — the real work is silently lost
- * (incident: worker `712fd5aa`, commit `1309552` stranded).
+ * empty diff and confirmWorkerMerge does an empty squash merge (nothing staged) — the real work is
+ * silently lost (incident: worker `712fd5aa`, commit `1309552` stranded).
  *
  * Logic: mainSha = canonical repo HEAD. If `rev-list --count mainSha..assignedBranch` > 0 the work is on
  * the assigned branch (the normal path) → NOT stranded. Otherwise read the WORKTREE's actually-checked-out
@@ -627,6 +631,54 @@ async function branchExists(repoPath: string, branch: string): Promise<boolean> 
 }
 
 /**
+ * Find the SQUASH-merge commit for `branch` reachable from `base` (default HEAD), identified by the
+ * deterministic `Loom-Worker-Branch: <branch>` trailer {@link mergeBranch} writes. Returns the commit SHA,
+ * or null if no such commit is in `base`'s history. This REPLACES the `Merge branch '<branch>'` grep
+ * (workerDiff stage 3) and `isBranchMerged` (boot-reconcile Pass A) under squash, where the worker branch
+ * is NOT in main's ancestry and there is NO merge commit to detect.
+ *
+ * RE-TASK GUARD (data-loss safety): the trailer lives in main's history FOREVER, so a branch RE-CUT onto a
+ * prior squash (the SAME task re-spawned — createWorktree reuses `loom/<key>`) carries a HISTORICAL trailer
+ * while holding NEW live work. To avoid treating such a live worker as a landed orphan (which would delete
+ * its worktree), when the branch ref STILL EXISTS we confirm the trailer commit is NOT an ancestor of the
+ * branch tip: a genuine orphaned squash-merge of the CURRENT branch DIVERGES from it (merge-base ≠ the
+ * squash), whereas a re-cut branch DESCENDS FROM the prior squash (merge-base == the squash). Ancestry is
+ * tested via merge-base equality — raw resolves it cleanly; we avoid `--is-ancestor`, whose exit-1 raw
+ * misreads (see {@link isBranchMerged}). Branch gone ⇒ the trailer commit IS the landed diff (workerDiff
+ * stage 3), returned directly.
+ *
+ * FAILS SAFE: every op is bounded by the same block-timeout + {@link withTimeout} guard as the other
+ * reconcile ops; ANY error/timeout returns null (treated as NOT-landed) — the SAFE default, since Pass A
+ * then KEEPS the worktree rather than finalizing on a bad signal. Injectable via {@link BoundedGitDeps}.
+ */
+export async function findLandedSquashCommit(
+  repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {},
+): Promise<string | null> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  try {
+    const sha = (await withTimeout(
+      git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H", "--max-count=1"]),
+      timeoutMs, "git log --grep trailer",
+    )).trim();
+    if (!sha) return null;
+    const branchPresent = (await withTimeout(
+      git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list",
+    )).trim() !== "";
+    if (branchPresent) {
+      // Re-task guard: if the trailer commit is an ANCESTOR of the branch tip, the branch was re-cut onto
+      // it (a re-spawned task carrying NEW live work) — NOT an orphaned squash-merge of the current branch.
+      const mergeBase = (await withTimeout(
+        git.raw(["merge-base", sha, branch]), timeoutMs, "git merge-base",
+      )).trim();
+      if (mergeBase === sha) return null;
+    }
+    return sha;
+  } catch {
+    return null; // fail safe: unknown signal → NOT landed → caller KEEPS the worktree
+  }
+}
+
+/**
  * The orchestration-view diff for a worker — "what has this worker changed?" — robust across the
  * worker's WHOLE lifecycle. {@link diffBranch} alone only sees COMMITTED branch refs in the canonical
  * repo, so it reads EMPTY for a live worker mid-task (its work is uncommitted, in the worktree) and
@@ -637,9 +689,10 @@ async function branchExists(repoPath: string, branch: string): Promise<boolean> 
  *     (merge-base with the canonical HEAD) to the WORKING TREE, so committed AND uncommitted
  *     in-progress edits both show — the live-supervision case the view exists for. (`uncommitted`.)
  *  2. branch ref present, worktree gone   → the committed 3-dot branch diff ({@link diffBranch}).
- *  3. branch merged + deleted             → reconstruct the landed diff from the `--no-ff` merge
- *     commit, whose 2nd parent IS the old branch tip: `<merge>^1...<merge>^2`. So a merged worker
- *     shows what it contributed instead of a 500. (`merged`.)
+ *  3. branch merged + deleted             → reconstruct the landed diff from the SQUASH commit, located
+ *     by the deterministic `Loom-Worker-Branch:` trailer ({@link findLandedSquashCommit}; under squash
+ *     there is no merge commit to grep for), diffed against its single parent. So a merged worker shows
+ *     what it contributed instead of a 500. (`merged`.)
  *
  * Returns null only when there is genuinely nothing to show (no branch + no worktree, or a merged
  * branch whose merge commit can't be located) — the caller renders that as an honest "no diff".
@@ -673,15 +726,14 @@ export async function workerDiff(
     try { return await diffBranch(repoPath, branch); } catch { /* fall through */ }
   }
 
-  // 3. Branch merged + deleted → reconstruct the landed diff from the --no-ff merge commit.
+  // 3. Branch merged + deleted → reconstruct the landed diff from the SQUASH commit, found by the
+  //    deterministic Loom-Worker-Branch trailer (under squash there is no merge commit to grep for).
   if (branch) {
     try {
-      const git = simpleGit(repoPath);
-      const merge = (await git.raw([
-        "log", "--all", "--merges", "--max-count=1", "--format=%H", `--grep=Merge branch '${branch}'`,
-      ])).trim();
-      if (merge) {
-        const range = `${merge}^1...${merge}^2`; // ^2 is the old branch tip; 3-dot = its changes
+      const sha = await findLandedSquashCommit(repoPath, branch);
+      if (sha) {
+        const git = simpleGit(repoPath);
+        const range = `${sha}^..${sha}`; // the squash commit's own changes (single parent)
         const summary = await git.diffSummary([range]);
         const patch = await git.diff([range]);
         return {
@@ -689,34 +741,69 @@ export async function workerDiff(
           deletions: summary.deletions, patch, merged: true,
         };
       }
-    } catch { /* merge commit unfindable → null below */ }
+    } catch { /* squash commit unfindable → null below */ }
   }
 
   return null;
 }
 
 /**
- * Merge a worker's branch back into the repo's current branch with `--no-ff` (always a merge
- * commit; --no-edit so it never opens an editor and hangs). FAIL-CLOSED.
+ * Merge a worker's branch into the repo's current branch as a SINGLE SQUASH COMMIT — `git merge --squash`
+ * stages the combined diff WITHOUT committing, then a plain `git commit` lands it as ONE commit, so each
+ * task = one clean commit on main (not a real-commit + a noise merge-commit). Returns the new squash
+ * commit's SHA. FAIL-CLOSED.
  *
- * NOTE: simple-git's `raw(["merge", …])` does NOT reliably reject on a merge conflict — it can
- * resolve while leaving the repo MID-MERGE (verified: `git merge` exits non-zero on conflict but
- * raw still resolves, leaving `UU` unmerged entries + MERGE_HEAD). So we do NOT trust raw's
- * resolve/reject; we detect a conflict EXPLICITLY via unmerged index entries and `git merge
- * --abort` on anything but a clean win, leaving the canonical repo untouched.
+ * The commit message is a clean subject (the task `title`, falling back to the branch name) plus a
+ * deterministic `Loom-Worker-Branch: <branch>` trailer — the SAME marker {@link workerDiff} stage 3 and
+ * boot-reconcile Pass A key on ({@link findLandedSquashCommit}) to reconstruct / finalize a squashed merge
+ * whose branch is NOT in main's ancestry (squash leaves no merge commit, so `git branch --merged` and a
+ * `Merge branch` grep both go blind). Identity is a PLAIN `git commit` — repo-config identity, NO
+ * `-c user.*` overrides and NO Co-Authored-By trailer (matches the project convention; the canonical repo
+ * is expected to have a git identity configured).
+ *
+ * CONFLICT handling differs from `--no-ff`: `git merge --squash` leaves NO MERGE_HEAD, so `git merge
+ * --abort` won't work. simple-git's `raw(["merge", …])` ALSO does NOT reliably reject on a conflict, so we
+ * detect one EXPLICITLY via unmerged index entries and clean up with `git reset --hard HEAD`, leaving the
+ * canonical repo UNTOUCHED. "Nothing staged after --squash" (the branch is already in main) is a clean
+ * NO-OP, not a crash.
  */
-export async function mergeBranch(repoPath: string, branch: string): Promise<{ ok: boolean; conflict?: boolean }> {
+export async function mergeBranch(
+  repoPath: string, branch: string, taskTitle?: string,
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; noop?: boolean; reason?: string }> {
   const git = simpleGit(repoPath);
   let rawError = false;
   try {
-    await git.raw(["merge", "--no-ff", "--no-edit", branch]);
+    await git.raw(["merge", "--squash", branch]);
   } catch {
-    rawError = true; // a conflict OR a real failure — either way, the explicit check below decides
+    rawError = true; // a conflict OR a real failure — the explicit checks below decide
   }
+  // Conflict? Unmerged index entries are the reliable signal. Under --squash there is no MERGE_HEAD, so
+  // `git reset --hard HEAD` (NOT `merge --abort`) restores the canonical repo to its pre-merge state.
   const conflicted = (await git.raw(["ls-files", "--unmerged"])).trim() !== "";
-  if (conflicted || rawError) {
-    try { await git.raw(["merge", "--abort"]); } catch { /* nothing in progress to abort */ }
+  if (conflicted) {
+    try { await git.raw(["reset", "--hard", "HEAD"]); } catch { /* nothing to reset */ }
     return { ok: false, conflict: true };
   }
-  return { ok: true };
+  // No conflict. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code handling is
+  // unreliable — see isBranchMerged.) Empty ⇒ the branch is already in main (clean no-op), or the merge
+  // errored for another reason (fail-closed: reset + refuse).
+  const staged = (await git.raw(["diff", "--cached", "--name-only"])).trim() !== "";
+  if (!staged) {
+    if (rawError) {
+      try { await git.raw(["reset", "--hard", "HEAD"]); } catch { /* nothing to reset */ }
+      return { ok: false, reason: "git merge --squash failed (nothing staged)" };
+    }
+    return { ok: true, noop: true }; // branch already in main → nothing to commit
+  }
+  // Land the staged diff as ONE plain commit (repo-config identity; clean subject + deterministic trailer).
+  const subject = (taskTitle && taskTitle.trim().split(/\r?\n/)[0]!.trim()) || branch;
+  const message = `${subject}\n\nLoom-Worker-Branch: ${branch}\n`;
+  try {
+    await git.raw(["commit", "-m", message]);
+  } catch (e) {
+    try { await git.raw(["reset", "--hard", "HEAD"]); } catch { /* leave nothing partial */ }
+    return { ok: false, reason: `squash commit failed: ${(e as Error).message}` };
+  }
+  const sha = (await git.raw(["rev-parse", "HEAD"])).trim();
+  return { ok: true, sha };
 }
