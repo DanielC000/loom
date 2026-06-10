@@ -434,6 +434,72 @@ export async function worktreeHasWork(
   return false;
 }
 
+export interface StrandedWork {
+  /** AFFIRMATIVE only: true ⇒ the worktree carries committed work that is NOT on the assigned branch. */
+  stranded: boolean;
+  /** the divergent (self-created) branch the worktree is actually on. */
+  branch?: string;
+  /** short SHA of that branch's tip — the commit that would be silently lost. */
+  commit?: string;
+  /** commits on the divergent branch but not on canonical main. */
+  ahead?: number;
+}
+
+/**
+ * MERGE-GATE BACKSTOP (2026-06-10): catch a worker whose commits are STRANDED on a self-created branch
+ * instead of its assigned `loom/<key>`. The bug it guards: when a worker commits to a branch it cut
+ * itself, the assigned branch stays 0 commits ahead of canonical main, so reviewWorkerMerge reads an
+ * empty diff and confirmWorkerMerge does an empty `--no-ff` merge — the real work is silently lost
+ * (incident: worker `712fd5aa`, commit `1309552` stranded).
+ *
+ * Logic: mainSha = canonical repo HEAD. If `rev-list --count mainSha..assignedBranch` > 0 the work is on
+ * the assigned branch (the normal path) → NOT stranded. Otherwise read the WORKTREE's actually-checked-out
+ * branch (`rev-parse --abbrev-ref HEAD`) and its `rev-list --count mainSha..HEAD`; if that count > 0 AND
+ * the worktree branch != the assigned branch, the worker's commits live on a divergent branch → STRANDED,
+ * returning the worktree branch, its short tip SHA, and the ahead-count for the warning/refusal.
+ *
+ * FAILS SAFE: every op is bounded by the same block-timeout + {@link withTimeout} guard as the other
+ * helpers, and ANY error/timeout/parse-failure returns `{stranded:false}`. Only an AFFIRMATIVE stranded
+ * signal ever warns or refuses — a check failure must NEVER block a legitimate merge. The git seam is
+ * injectable ({@link BoundedGitDeps}) so a test can prove both the detection and the fail-safe bound.
+ */
+export async function detectStrandedWork(
+  repoPath: string,
+  worktreePath: string,
+  assignedBranch: string,
+  deps: BoundedGitDeps = {},
+): Promise<StrandedWork> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  try {
+    const mainSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD")).trim();
+
+    // (1) Work on the ASSIGNED branch? Any commit reachable from it but not from canonical main ⇒ the
+    //     normal path — not stranded, regardless of what the worktree is checked out on.
+    const assignedAhead = parseInt(
+      (await withTimeout(git.raw(["rev-list", "--count", `${mainSha}..${assignedBranch}`]), timeoutMs, "git rev-list --count assigned")).trim(),
+      10,
+    );
+    if (Number.isFinite(assignedAhead) && assignedAhead > 0) return { stranded: false };
+
+    // (2) Assigned branch is empty (0 ahead). Inspect the WORKTREE's actual checked-out branch.
+    const wt = makeGit(worktreePath, timeoutMs);
+    const wtBranch = (await withTimeout(wt.raw(["rev-parse", "--abbrev-ref", "HEAD"]), timeoutMs, "git rev-parse --abbrev-ref HEAD")).trim();
+    if (!wtBranch || wtBranch === assignedBranch) return { stranded: false }; // same branch ⇒ no divergence
+
+    const wtAhead = parseInt(
+      (await withTimeout(wt.raw(["rev-list", "--count", `${mainSha}..HEAD`]), timeoutMs, "git rev-list --count worktree")).trim(),
+      10,
+    );
+    if (!Number.isFinite(wtAhead) || wtAhead <= 0) return { stranded: false }; // nothing committed anywhere ⇒ nothing to strand
+
+    const commit = (await withTimeout(wt.raw(["rev-parse", "--short", "HEAD"]), timeoutMs, "git rev-parse --short HEAD")).trim();
+    return { stranded: true, branch: wtBranch, commit, ahead: wtAhead };
+  } catch {
+    return { stranded: false }; // FAIL SAFE: a check error/timeout must never block a legitimate merge
+  }
+}
+
 /** A branch's changes since it diverged from base — the manager's pre-merge diff review (#16). */
 export async function diffBranch(
   repoPath: string, branch: string, base = "HEAD",

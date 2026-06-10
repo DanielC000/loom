@@ -11,7 +11,7 @@ import {
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, isBranchMerged, worktreeHasWork } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, isBranchMerged, worktreeHasWork, detectStrandedWork } from "../git/worktrees.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { readRunUsage, readRunUsageFromFile } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
@@ -1855,19 +1855,28 @@ export class SessionService {
    */
   async reviewWorkerMerge(
     managerSessionId: string, workerSessionId: string,
-  ): Promise<{ filesChanged: number; insertions: number; deletions: number; patch: string }> {
+  ): Promise<{ filesChanged: number; insertions: number; deletions: number; patch: string; warning?: string }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     if (!worker.branch) throw new Error("worker has no branch");
     const project = this.db.getProject(worker.projectId);
     if (!project) throw new Error("project not found");
     const diff = await diffBranch(project.repoPath, worker.branch);
+    // BACKSTOP: a worker that committed to a SELF-CREATED branch instead of its assigned `loom/<key>`
+    // leaves the assigned branch 0-ahead, so `diff` reads empty and the stranded commits would be
+    // silently lost. Surface a WARNING at review time so the manager sees the divergence (only an
+    // AFFIRMATIVE stranded signal warns; a check failure fails safe to NOT stranded). The diff fields
+    // are returned unchanged.
+    const stranded = await detectStrandedWork(project.repoPath, worker.worktreePath ?? worker.cwd, worker.branch, { timeoutMs: this.gitOpMs });
+    const warning = stranded.stranded
+      ? `STRANDED WORK: worker committed to '${stranded.branch}' (tip ${stranded.commit}, ${stranded.ahead} commit(s) ahead) instead of its assigned branch '${worker.branch}', which is empty. Confirming would merge nothing and LOSE that work. Re-point '${worker.branch}' to ${stranded.commit} (or cherry-pick it) before confirming.`
+      : undefined;
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "merge_request",
-      detail: { branch: worker.branch, filesChanged: diff.filesChanged },
+      detail: { branch: worker.branch, filesChanged: diff.filesChanged, ...(warning ? { stranded: stranded.branch } : {}) },
     });
-    return diff;
+    return warning ? { ...diff, warning } : diff;
   }
 
   /**
@@ -1896,6 +1905,19 @@ export class SessionService {
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId, taskId, kind, detail,
     });
     const rejectNotify = (msg: string) => { try { this.pty.enqueueStdin(managerSessionId, msg); } catch { /* manager not live */ } };
+
+    // BACKSTOP (BEFORE the gate/merge): refuse if the worker's commits are STRANDED on a self-created
+    // branch instead of its assigned `loom/<key>`. The assigned branch is then 0-ahead, so the merge
+    // below would be an empty `--no-ff` that silently DROPS the real work (incident: worker 712fd5aa,
+    // commit 1309552). Only an AFFIRMATIVE stranded signal refuses — a check error/timeout fails safe
+    // to NOT stranded so a flaky check never blocks a legitimate merge. Leaves the repo/worktree
+    // untouched so the manager can recover the commit.
+    const stranded = await detectStrandedWork(project.repoPath, worktreePath, branch, { timeoutMs: this.gitOpMs });
+    if (stranded.stranded) {
+      evt("merge_rejected", { reason: "stranded", strandedBranch: stranded.branch, strandedCommit: stranded.commit });
+      rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — STRANDED WORK: commits are on '${stranded.branch}' (tip ${stranded.commit}, ${stranded.ahead} ahead), not the assigned branch '${branch}' (empty). Refusing the empty merge so the work isn't lost; canonical repo untouched, worktree retained. Re-point '${branch}' to ${stranded.commit} (or cherry-pick it), then re-confirm.`);
+      return { merged: false, reason: `stranded work on '${stranded.branch}' (tip ${stranded.commit}); assigned branch '${branch}' is empty — re-point or cherry-pick before merging` };
+    }
 
     // Build/DoD gate (fail-closed): run the configured command in the WORKTREE; non-zero rejects.
     //
