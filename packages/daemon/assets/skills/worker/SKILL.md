@@ -34,11 +34,15 @@ gate command). This skill is the doctrine those plug into.
 ## Report protocol
 
 `worker_report` is your action tool — your only way to affect the tree. Use it to report:
-- **`done`** — stage + **commit** your verified work to your branch *first*, then report `done` with
-  the **commit SHA** plus a one-line summary of what you did + your key decisions / anything the
-  reviewer should check. Uncommitted work is invisible to your manager's merge gate — it sees
-  `filesChanged:0` and bounces the task back, wasting a round-trip. Don't merge — your manager reviews
-  the branch and merges through the gate.
+- **`done`** — stage + **commit** your verified work *first*, then report `done` with the **commit
+  SHA** plus a one-line summary of what you did + your key decisions / anything the reviewer should
+  check. Your worktree is **already checked out on your assigned branch** — commit straight to it.
+  Never `git checkout -b` or create a new branch: the merge gate keys off your assigned branch, so
+  commits on any other branch are invisible to your manager and **silently dropped** (a worker once
+  stranded and lost its work this way). Uncommitted work is just as invisible — the gate sees
+  `filesChanged:0` and bounces the task back, wasting a round-trip. So: commit to the assigned branch
+  and report the SHA before you report `done`. Don't merge — your manager reviews the branch and
+  merges through the gate.
 - **`blocked`** — with `needs`: the specific decision, access, or information you're waiting on.
 - **`progress`** — an optional checkpoint on a long task.
 
