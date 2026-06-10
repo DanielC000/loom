@@ -26,7 +26,10 @@ gate command). This skill is the doctrine those plug into.
    **never address the human**. Your manager makes the call and `worker_message`s you back down.
 4. **Verify before reporting.** Meet the DoD — run the project's gate (build / typecheck / repro / the
    check your task names) and confirm the behavior. Re-read your diff against the task's acceptance
-   check. Say what you actually ran.
+   check. Say what you actually ran. For UI/visual work: if your session is browser-capable
+   (Playwright/`browserTesting` provisioned + allowlisted — the QA / Web Designer rigs), **self-verify**
+   by driving Playwright to the running app and confirming the change renders and behaves before
+   reporting done; otherwise report the UI work **up** for your manager to verify.
 5. **Hold the line on honesty.** "Done" means done and verified — report what passed, what you skipped,
    and any known limitation rather than papering over it. Keep any docs you touch accurate: rewrite
    stale claims in place, no "UPDATE:" appends.
