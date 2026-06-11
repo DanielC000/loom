@@ -59,8 +59,12 @@ export const NAV_PAGES: NavPage[] = [
   // (identity + fleet + go-live + board + schedules + attention/activity + archive count, all rescoped
   // when you switch the active project). Composes the shared fleet widgets off existing endpoints.
   { label: "Overview", to: "/overview", element: <Overview />, group: "project", primary: true, scoped: true },
-  { label: "Board", to: "/board", element: <Board />, group: "project", primary: true, scoped: true },
+  // The Platform section — the reserved "Loom Platform" home (Lead/Auditor + findings board), a
+  // top-level surface SEPARATE from the project picker (the reserved project stays out of that list).
+  // Promoted to a primary tab next to Overview; deliberately stays `scoped` OFF (separate from the picker).
+  { label: "Platform", to: "/platform", element: <Platform />, group: "system", primary: true },
   { label: "Terminals", to: "/terminals", element: <Terminals />, group: "operate", primary: true },
+  { label: "Board", to: "/board", element: <Board />, group: "project", primary: true, scoped: true },
   { label: "Runs", to: "/runs", element: <Runs />, group: "operate", primary: true, scoped: true },
   // ── More ▾ · Operate ─────────────────────────────────────────────────────────
   { label: "Workspace", to: "/workspace", element: <Workspace />, group: "operate" },
@@ -75,8 +79,5 @@ export const NAV_PAGES: NavPage[] = [
   { label: "Schedules", to: "/schedules", element: <Schedules />, group: "config", scoped: true },
   // ── More ▾ · System ──────────────────────────────────────────────────────────
   { label: "Usage", to: "/usage", element: <Usage />, group: "system" },
-  // The Platform section — the reserved "Loom Platform" home (Lead/Auditor + findings board), a
-  // top-level surface SEPARATE from the project picker (the reserved project stays out of that list).
-  { label: "Platform", to: "/platform", element: <Platform />, group: "system" },
   { label: "Settings", to: "/settings", element: <Settings />, group: "system", scoped: true },
 ];
