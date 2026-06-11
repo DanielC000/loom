@@ -520,10 +520,13 @@ export class PtyHost {
     pty.onData((d) => {
       const buf = Buffer.from(d, "utf-8");
       live.lastOutputAt = Date.now(); // engine is producing → not stuck (feeds the BUSY_STALE_MS heal)
-      // The official-marketplace plugins surface a per-project "enable docker/sentry MCP?" prompt that
-      // blocks the unattended boot BEFORE SessionStart, and is NOT config-suppressible (validated). Scan
-      // early boot output and dismiss it once with Esc ("reject all") — Loom sessions get ONLY their
-      // injected --mcp-config servers, never the user's personal plugin MCP. Bounded rolling scan.
+      // A per-project "N new MCP servers found — enable?" prompt (e.g. docker/sentry, inherited from
+      // ~/.mcp.json up-tree) can block the unattended boot BEFORE SessionStart. The PRIMARY fix now
+      // pre-decides those servers in ~/.claude.json (ensureTrusted → disabledMcpjsonServers) so the
+      // prompt never appears. This Esc scan is the BELT-AND-SUSPENDERS fallback for anything not
+      // pre-decided (e.g. a plugin-provided server not in any .mcp.json): dismiss it once with Esc
+      // ("reject all"). NOTE: the single fire-and-forget Esc can intermittently drop on Windows ConPTY
+      // (card dacb8571) — that's why prevention, not this dismissal, is the real fix. Bounded rolling scan.
       if (!live.mcpPromptHandled) {
         live.bootScan = (live.bootScan + d).slice(-8192);
         const flat = collapseBoot(live.bootScan);
