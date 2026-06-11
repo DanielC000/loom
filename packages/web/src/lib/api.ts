@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
+import type { Project, Agent, AgentId, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
@@ -47,6 +47,18 @@ async function postErr<T>(url: string, body?: unknown): Promise<T> {
 }
 async function delErr<T>(url: string): Promise<T> {
   const r = await fetch(url, { method: "DELETE" });
+  if (!r.ok) {
+    let msg = `${url} -> ${r.status}`;
+    try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON */ }
+    throw new Error(msg);
+  }
+  return r.json() as Promise<T>;
+}
+
+// PUT that surfaces the server's JSON `{ error }` body as the thrown message — for the preset-prompts
+// edit surface, whose label/prompt validation 400s ({ error }) the inline editor shows verbatim.
+async function putErr<T>(url: string, body: unknown): Promise<T> {
+  const r = await fetch(url, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (!r.ok) {
     let msg = `${url} -> ${r.status}`;
     try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON */ }
@@ -288,4 +300,14 @@ export const api = {
   createSchedule: (b: { agentId: string; cron: string; enabled?: boolean; kind?: Schedule["kind"] }) => post<Schedule>("/api/schedules", b),
   updateSchedule: (id: string, patch: { cron?: string; enabled?: boolean }) => post<Schedule>(`/api/schedules/${encodeURIComponent(id)}`, patch),
   deleteSchedule: (id: string) => del<{ ok: boolean }>(`/api/schedules/${encodeURIComponent(id)}`),
+
+  // --- Preset Prompts (the GLOBAL "terminal action-buttons" store — one shared list, same on every
+  // terminal card). HUMAN/UI data managed inline in the terminal popover; there is intentionally NO MCP
+  // path. POST appends (→201); PUT is a partial patch (→200/404); DELETE is idempotent (→200). create/
+  // update surface the server's `{ error }` body verbatim (label/prompt bounds) via *Err for inline display. ---
+  presetPrompts: () => get<PresetPrompt[]>("/api/preset-prompts"),
+  createPresetPrompt: (b: { label: string; prompt: string }) => postErr<PresetPrompt>("/api/preset-prompts", b),
+  updatePresetPrompt: (id: string, patch: { label?: string; prompt?: string; position?: number }) =>
+    putErr<PresetPrompt>(`/api/preset-prompts/${id}`, patch),
+  deletePresetPrompt: (id: string) => del<{ ok: boolean }>(`/api/preset-prompts/${id}`),
 };

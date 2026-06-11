@@ -1,6 +1,7 @@
 import { type ReactNode } from "react";
 import type { SessionListItem } from "@loom/shared";
 import { TerminalPane } from "./Terminal";
+import { PresetPromptsButton } from "./PresetPrompts";
 import { Panel, Button, StatusPill } from "./ui";
 import { font, color } from "../theme";
 
@@ -56,6 +57,7 @@ export function TerminalTile({
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
         <TileTitle s={s} showProject={showProject} />
         <div style={{ display: "flex", gap: 4 }}>
+          <PresetPromptsButton sessionId={s.id} />
           <ForkButton onFork={onFork} busy={s.busy} pending={forkPending} />
           <StopButton onStop={onStop} stopping={stopPending} />
           {onMaximize && <Button style={{ padding: "0 6px" }} onClick={onMaximize}>⤢</Button>}
