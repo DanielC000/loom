@@ -349,7 +349,25 @@ export type OrchestrationEventKind =
   // Platform Auditor finding (loom-audit `audit_file_finding`, P5): a transcript-review finding filed as a
   // durable TASK on the reserved Platform board. `detail` carries the severity, title, and Platform task id.
   // The ONLY write the read-and-file-only Auditor can make (it has no git/vault/config/spawn capability).
-  | "audit_finding";
+  | "audit_finding"
+  // ── Crash-recovery watchdog (CrashRecoveryWatcher) ─────────────────────────────────────────────
+  // A resumable session's pty process died UNEXPECTEDLY while the daemon stayed healthy — i.e. NOT via
+  // pty.stop() (graceful/idle/user-stop/recycle/merge-stop) and NOT a whole-daemon restart/crash (those
+  // tear down the process, so no JS onExit runs → no event). Recorded at onExit time iff `intended===false`
+  // (= the pty's `stopping` flag was unset). This is the DURABLE trigger the watchdog acts on; filed with
+  // workerSessionId = the dead session (managerSessionId = its parent for a worker, else its own id).
+  | "session_died"
+  // A bounded crash-recovery auto-resume attempt. `detail` carries the 1-based attempt number + ok/error.
+  // The PERSISTED counter (count of these since the last `session_recovered`) is what bounds the loop —
+  // it survives a daemon restart (mirrors busy-worker's once-per-episode mark via the events table).
+  | "session_resume_attempt"
+  // A crash-recovered session has stayed stably LIVE long enough after a resume → the episode is closed and
+  // the attempt counter RESETS (the next death starts fresh). The high-water reset marker for the counter.
+  | "session_recovered"
+  // CRASH-LOOP SAFETY: after N (crashRecoveryMaxAttempts) re-deaths the watchdog STOPS auto-resuming and
+  // escalates LOUDLY instead of looping forever. Filed ONCE per episode; ALSO stamped on the session's
+  // lastError so Mission Control surfaces it role-agnostically (a dead manager has no parent to nudge).
+  | "session_recovery_abandoned";
 
 export interface OrchestrationEvent {
   id: string;

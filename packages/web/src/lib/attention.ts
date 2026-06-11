@@ -16,6 +16,14 @@ export function isRateLimited(s: SessionListItem): boolean {
 export function isStuckBusy(s: SessionListItem): boolean {
   return s.processState === "live" && s.busy && Date.now() - new Date(s.lastActivity).getTime() > STUCK_BUSY_MS;
 }
+// Crash-recovery give-up: the CrashRecoveryWatcher hit its auto-resume cap (crashRecoveryMaxAttempts) for a
+// session that kept re-dying, so it STOPPED resuming and stamped this crash-loop banner on lastError. A
+// role-agnostic, session-row signal (NOT an event) so it surfaces even for a dead MANAGER, which has no
+// live parent whose event stream the attention queue reads (parity with how RATE-LIMITED surfaces).
+const CRASH_LOOP_PREFIX = "[loom:crash-loop]";
+export function isCrashLooped(s: SessionListItem): boolean {
+  return s.processState === "exited" && !!s.lastError && s.lastError.startsWith(CRASH_LOOP_PREFIX);
+}
 
 export interface AttentionItem {
   key: string;
@@ -114,6 +122,12 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     items.push({
       key: `s-${s.id}`, tone: "amber", kind: "STUCK-BUSY", workerSessionId: s.id,
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — busy, no activity since ${new Date(s.lastActivity).toLocaleTimeString()} (heuristic)`,
+    });
+  }
+  for (const s of all.filter(isCrashLooped)) {
+    items.push({
+      key: `cl-${s.id}`, tone: "red", kind: "CRASH-LOOPED", workerSessionId: s.id,
+      text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — died repeatedly after auto-resume; auto-resume STOPPED. Inspect the log + resume manually.`,
     });
   }
   return { items, count: items.length };

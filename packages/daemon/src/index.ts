@@ -21,6 +21,7 @@ import { WakeService } from "./orchestration/wake.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
 import { IdleWatcher } from "./orchestration/idle-watcher.js";
 import { BusyWorkerWatcher } from "./orchestration/busy-worker-watcher.js";
+import { CrashRecoveryWatcher, recordUnexpectedExit } from "./orchestration/crash-recovery-watcher.js";
 import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestration/db-backup.js";
 import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
@@ -89,9 +90,14 @@ async function main(): Promise<void> {
       recordClaudeRateLimit(detail.resetsAtSeconds);
     },
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
-    onExit: (sessionId) => {
+    onExit: (sessionId, _code, info) => {
       db.setProcessState(sessionId, "exited");
       db.setBusy(sessionId, false);
+      // Crash-recovery trigger: record a durable `session_died` event IFF this was an UNEXPECTED death
+      // (`intended === false` — no pty.stop() was issued) of a resumable coordination/work session, so the
+      // CrashRecoveryWatcher can bounded-auto-resume it. An intended stop records nothing (untouched); a
+      // whole-daemon restart/crash never reaches here at all. Best-effort: never disturb the exit path.
+      try { recordUnexpectedExit(db, sessionId, info.intended); } catch { /* never disturb the exit path */ }
       // Auto-snapshot the engine transcript on exit, while the JSONL still exists — so an archived
       // session keeps a readable transcript even after Claude later prunes the original (a session
       // goes 'dead' BECAUSE its JSONL was deleted). Best-effort: snapshotTranscript never throws, and
@@ -257,6 +263,19 @@ async function main(): Promise<void> {
   busyWorkerWatcher.start();
   console.log(`[boot] busy-worker stuck watchdog on (tick ${idleWatchMs}ms)`);
 
+  // Crash-recovery watchdog — the complement of resumeFleetOnBoot (which owns daemon-RESTART recovery):
+  // bounded auto-resume of an ISOLATED session whose pty died UNEXPECTEDLY while the daemon stayed healthy
+  // (the `session_died` trigger recorded in onExit). Caps attempts per project (crashRecoveryMaxAttempts;
+  // 0 = off) via a persisted counter and ESCALATES on Mission Control after the cap instead of looping —
+  // crash-loop safety is the load-bearing property. Resume re-spawns through the same hardened path.
+  const crashRecoveryMs = watchers.crashRecoveryWatchMs;
+  const crashRecoveryWatcher = new CrashRecoveryWatcher({
+    db, control, pty, intervalMs: crashRecoveryMs,
+    resume: (id) => { sessions.resume(id); return true; },
+  });
+  crashRecoveryWatcher.start();
+  console.log(`[boot] crash-recovery watchdog on (tick ${crashRecoveryMs}ms)`);
+
   // Automatic DB-backup ticker — periodic online snapshots of loom.db into ~/.loom/backups/auto/,
   // rotated to the newest `keep`. Best-effort; never blocks/crashes. Disabled when backups are off or
   // the interval is 0. LOOM_BACKUP_INTERVAL_MS overrides the tick cadence for tests (otherwise minutes).
@@ -306,7 +325,7 @@ async function main(): Promise<void> {
       // without this a long-lived session loses its transcript when Claude later prunes the JSONL.
       // Best-effort + never-throws (snapshotAllLive swallows per-session failures); must not block exit.
       try { const n = sessions.snapshotAllLive(); if (n > 0) console.log(`[shutdown] snapshotted ${n} live transcript(s)`); } catch { /* never block the exit */ }
-      scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); dbBackupWatcher.stop(); process.exit(0);
+      scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); process.exit(0);
     });
   }
 }

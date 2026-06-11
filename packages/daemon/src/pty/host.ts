@@ -399,7 +399,14 @@ export interface PtyHostEvents {
    * pty is left ALIVE (a cap doesn't kill it). Wired to persist the park + record global awareness.
    */
   onRateLimited(sessionId: string, until: string, detail: { resetsAtSeconds?: number; message: string }): void;
-  onExit(sessionId: string, code: number | null): void;
+  /**
+   * The pty exited. `intended` distinguishes a DELIBERATE Loom termination (any pty.stop() — graceful/
+   * idle/user-stop/recycle/merge-stop/run-teardown, which set `live.stopping`) from an UNEXPECTED process
+   * death (the process died without a stop() — a crash / clean self-exit). It is the load-bearing
+   * discriminator the crash-recovery watchdog keys off (recorded at onExit time; a whole-daemon
+   * restart/crash never reaches here, so those are excluded for free). See PtyHost.stop / Live.stopping.
+   */
+  onExit(sessionId: string, code: number | null, info: { intended: boolean }): void;
 }
 
 /**
@@ -558,10 +565,12 @@ export class PtyHost {
       // EVERY exit path — a Stop-initiated stop, a crash, a clean session end — not just stopWorker.
       live.pending.length = 0;
       // eslint-disable-next-line no-console
-      console.log(`[pty] exit ${opts.sessionId} code=${exitCode}`);
+      console.log(`[pty] exit ${opts.sessionId} code=${exitCode} intended=${live.stopping}`);
       try { live.logStream.end(); } catch { /* ignore */ }
       this.broadcastControl(live, { type: "exit", code: exitCode });
-      this.events.onExit(opts.sessionId, exitCode);
+      // `intended` = a deliberate Loom stop() was issued (live.stopping). An UNEXPECTED death never went
+      // through stop(), so stopping stays false — the signal the crash-recovery watchdog keys off.
+      this.events.onExit(opts.sessionId, exitCode, { intended: live.stopping });
     });
 
     // A new session runs its startup-prompt turn immediately. Set busy optimistically so

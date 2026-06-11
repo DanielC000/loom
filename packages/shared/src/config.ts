@@ -139,6 +139,16 @@ export interface OrchestrationConfig {
    * project if your builds routinely run longer.
    */
   stuckWorkerMinutes: number;
+  /**
+   * Crash-recovery watchdog (CrashRecoveryWatcher): the bounded cap on AUTO-RESUME attempts for a
+   * resumable session whose pty died UNEXPECTEDLY while the daemon stayed healthy (a single pty death
+   * NOT caused by pty.stop and NOT a whole-daemon restart — see the `session_died` event). After this
+   * many re-deaths in one crash-loop episode the watchdog STOPS resuming and escalates loudly on Mission
+   * Control instead of looping (the load-bearing crash-loop-safety property). A stable, still-live resume
+   * resets the counter. Serves as BOTH the enable flag and the cap: 0 disables the watcher for the
+   * project; default 3. Sibling of `stuckWorkerMinutes` — both are per-project orchestration leashes.
+   */
+  crashRecoveryMaxAttempts: number;
 }
 
 /**
@@ -203,6 +213,12 @@ export interface WatcherConfig {
    * has no snapshot until it exits). Cheap — snapshotTranscript is mtime-guarded → a no-op when unchanged.
    */
   snapshotMs: number;
+  /**
+   * CrashRecoveryWatcher tick (LOOM_CRASH_RECOVERY_WATCH_INTERVAL_MS). Default 60000. Cadence at which
+   * the watchdog scans for resumable sessions that died unexpectedly (daemon healthy) and bounded-resumes
+   * them; per-project enable + cap lives in `orchestration.crashRecoveryMaxAttempts` (0 = off).
+   */
+  crashRecoveryWatchMs: number;
 }
 
 /**
@@ -325,7 +341,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, stuckWorkerMinutes: 20 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, stuckWorkerMinutes: 20, crashRecoveryMaxAttempts: 3 },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -333,7 +349,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   // + LOOM_* watcher env layer beneath. See RateLimitConfig/WatcherConfig/TimeoutConfig for unit docs.
   platform: {
     rateLimit: { defaultBackoffMs: 18000000, resetBufferMs: 10000, deadlineAfterResetMs: 1800000, deadlineNoResetMs: 21600000, recencyWindowMs: 21600000 },
-    watchers: { contextWatchMs: 60000, idleWatchMs: 60000, rateLimitWatchMs: 60000, usagePollMs: 60000, wakeMs: 60000, schedulerMs: 60000, reconcileMs: 10000, snapshotMs: 420000 },
+    watchers: { contextWatchMs: 60000, idleWatchMs: 60000, rateLimitWatchMs: 60000, usagePollMs: 60000, wakeMs: 60000, schedulerMs: 60000, reconcileMs: 10000, snapshotMs: 420000, crashRecoveryWatchMs: 60000 },
     timeouts: { gitOpMs: 15000, gitLocalMs: 15000, gitPushMs: 45000, provisionMs: 180000, busyStaleMs: 300000, runMs: 600000 },
   },
   docLint: true, // Pillar D vault-lint hook on by default
@@ -472,6 +488,7 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
       schedulerMs: po?.watchers?.schedulerMs ?? envWatcherIntervalMs("LOOM_SCHEDULER_INTERVAL_MS") ?? d.watchers.schedulerMs,
       reconcileMs: po?.watchers?.reconcileMs ?? envWatcherIntervalMs("LOOM_RECONCILE_INTERVAL_MS") ?? d.watchers.reconcileMs,
       snapshotMs: po?.watchers?.snapshotMs ?? envWatcherIntervalMs("LOOM_SNAPSHOT_INTERVAL_MS") ?? d.watchers.snapshotMs,
+      crashRecoveryWatchMs: po?.watchers?.crashRecoveryWatchMs ?? envWatcherIntervalMs("LOOM_CRASH_RECOVERY_WATCH_INTERVAL_MS") ?? d.watchers.crashRecoveryWatchMs,
     },
     timeouts: {
       gitOpMs: po?.timeouts?.gitOpMs ?? d.timeouts.gitOpMs,
@@ -540,6 +557,8 @@ export function resolveConfig(
       idleDefaultSnoozeMinutes: override.orchestration?.idleDefaultSnoozeMinutes ?? d.orchestration.idleDefaultSnoozeMinutes,
       // `??` (not `||`) so an explicit 0 (disables the watcher) survives the merge.
       stuckWorkerMinutes: override.orchestration?.stuckWorkerMinutes ?? d.orchestration.stuckWorkerMinutes,
+      // Crash-recovery auto-resume cap (0 disables the watcher). `??` so an explicit 0 survives.
+      crashRecoveryMaxAttempts: override.orchestration?.crashRecoveryMaxAttempts ?? d.orchestration.crashRecoveryMaxAttempts,
     },
     // Daemon-global (no per-project override): platform default, with the env applying to the cadence
     // at this layer. `??` (not `||`) so an explicit env 0 is preserved (0 disables the periodic ticker).

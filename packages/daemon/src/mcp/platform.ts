@@ -62,6 +62,10 @@ const orchestrationOverride = z.object({
   idleDefaultSnoozeMinutes: z.number().int().min(0).optional(),
   // Busy-worker stuck window (whole minutes; 0 disables the watcher). Same 0-floor rationale as above.
   stuckWorkerMinutes: z.number().int().min(0).optional(),
+  // Crash-recovery auto-resume cap (whole number; 0 disables the watcher, serves as enable + cap). A
+  // generous ceiling guards a fat-fingered value from authorizing an unbounded resume loop. 0-floor
+  // honored as a real value (disable), same rationale as the leashes above.
+  crashRecoveryMaxAttempts: z.number().int().min(0).max(100).optional(),
 }).strict();
 const projectConfigOverrideSchema = z.object({
   kanbanColumns: z.array(kanbanColumn).optional(),
@@ -145,6 +149,7 @@ const watchersOverride = z.object({
   schedulerMs: watcherMs,
   reconcileMs: watcherMs,
   snapshotMs: watcherMs,
+  crashRecoveryWatchMs: watcherMs,
 }).strict();
 const timeoutsOverride = z.object({
   gitOpMs: z.number().int().min(1000).max(120000).optional(),

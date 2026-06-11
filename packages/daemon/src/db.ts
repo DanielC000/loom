@@ -1224,6 +1224,16 @@ export class Db {
   setResumability(id: string, r: Resumability): void {
     this.db.prepare("UPDATE sessions SET resumability = ? WHERE id = ?").run(r, id);
   }
+  /**
+   * Set ONLY the human-readable lastError (without touching the rate-limit park, unlike
+   * setRateLimitedUntil). Used by the CrashRecoveryWatcher to stamp a crash-loop give-up so Mission
+   * Control surfaces it role-agnostically off the session row (a dead manager has no parent to nudge).
+   * Bumps last_activity so the UI reflects the change. Pass null to clear.
+   */
+  setLastError(id: string, lastError: string | null): void {
+    this.db.prepare("UPDATE sessions SET last_error = ?, last_activity = ? WHERE id = ?")
+      .run(lastError, new Date().toISOString(), id);
+  }
   /** Turn in-flight flag — driven hook-side (UserPromptSubmit rising, Stop/StopFailure falling). */
   setBusy(id: string, busy: boolean): void {
     this.db.prepare("UPDATE sessions SET busy = ?, last_activity = ? WHERE id = ?")
