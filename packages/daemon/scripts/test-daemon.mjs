@@ -28,7 +28,7 @@ const HERMETIC = [
   "context-watcher", "context-stats", "recycle-handoff", "wake", "worker-reported-state", "crash-recovery-watcher",
   "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull", "usage-status", "rate-limit-clear",
   "skills-inject", "skills-store-durability", "vault-lint", "vault-browser", "vault-writer", "git-writer", "git-identity-warning",
-  "worker-diff", "worktrees", "worktree-provision", "spawn-recut-stale-branch", "merge-finalize-resilient", "merge-stranded-backstop",
+  "worker-diff", "worktrees", "worktree-provision", "spawn-recut-stale-branch", "merge-finalize-resilient", "merge-stranded-backstop", "worker-report-precheck",
   "pty-busy-drain", "pty-resume-readiness", "pty-stop-queue", "resume-mode-cycles", "resume-mode-detect", "resume-mode-feedback", "shell-terminal",
   "db-backup",
 ];

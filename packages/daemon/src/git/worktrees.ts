@@ -461,17 +461,92 @@ export async function isBranchMerged(repoPath: string, branch: string, base = "H
  * (the merge-recovery regression). Exported so the guard's behavior is unit-testable in isolation.
  */
 export function worktreeStatusHasWork(porcelain: string): boolean {
+  return uncommittedWorkFiles(porcelain).length > 0;
+}
+
+/**
+ * The REAL-work paths in a `git status --porcelain` output — the list form of {@link worktreeStatusHasWork}
+ * (which is now just `length > 0`), so the two share one filter and can't drift. Same discriminator: an
+ * UNTRACKED (`??`) path under `.claude/` is daemon-injected noise and dropped; everything else — tracked
+ * modifications anywhere (incl. a tracked file under `.claude/`), staged/unstaged changes, untracked paths
+ * OUTSIDE `.claude/` — is the worker's product and kept. Exported so the worker_report(done) pre-check can
+ * NAME the uncommitted files in its refusal. Paths are de-quoted (git quotes paths with special chars).
+ */
+export function uncommittedWorkFiles(porcelain: string): string[] {
+  const files: string[] = [];
   for (const line of porcelain.split(/\r?\n/)) {
     if (line.trim() === "") continue;
     // porcelain v1 line: 2 status chars, a space, then the path. `??` = untracked.
-    if (line.slice(0, 2) === "??") {
-      let p = line.slice(3);
-      if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1); // git quotes paths with special chars
-      if (p.startsWith(".claude/")) continue; // daemon-injected untracked noise → not the worker's product
-    }
-    return true; // any tracked change, or any untracked path outside `.claude/`, is real work
+    let p = line.slice(3);
+    if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1); // git quotes paths with special chars
+    if (line.slice(0, 2) === "??" && p.startsWith(".claude/")) continue; // daemon-injected untracked noise
+    files.push(p);
   }
-  return false;
+  return files;
+}
+
+export interface DoneReportPrecheck {
+  /** the working tree has REAL uncommitted changes (ignoring daemon-injected `.claude/` noise) → REFUSE the done. */
+  uncommitted: boolean;
+  /** the offending paths (porcelain, `.claude/` noise filtered) — named in the refusal so the worker knows what to commit. */
+  files: string[];
+  /** clean working tree, but the assigned branch is 0 commits ahead of base — a legit no-op done, surfaced as a WARNING (never a refusal). */
+  zeroAhead: boolean;
+}
+
+/**
+ * worker_report(done) PRE-CHECK (board card 907b9f50): catch a worker that forgot to commit AT THE SOURCE,
+ * before its task is moved to review. The merge gate only ever sees COMMITTED work on the assigned branch,
+ * so a "done" with uncommitted work (or 0 commits) sails to review and bounces back a round-trip later —
+ * this surfaces it immediately, to the worker that can still fix it.
+ *
+ *   - DIRTY working tree (real uncommitted/untracked changes, `.claude/` noise ignored) → {uncommitted:true,
+ *     files} ⇒ the caller REFUSES the done and keeps the task in_progress so the worker commits + re-reports.
+ *   - CLEAN but the assigned `branch` is 0 commits ahead of `base` → {zeroAhead:true} ⇒ the caller WARNS only
+ *     (a genuine no-op task can legitimately report done — never a hard refusal).
+ *   - otherwise (clean + ahead, the normal path) → all-false ⇒ the done proceeds unchanged.
+ *
+ * FAILS SAFE: every git op is bounded by the same block-timeout + {@link withTimeout} guard as the other
+ * helpers, and ANY error/timeout/parse-failure degrades to {uncommitted:false, zeroAhead:false} (ALLOW) —
+ * a flaky git call must NEVER wedge a worker on a legitimate done (mirrors {@link detectStrandedWork}). This
+ * is INDEPENDENT of — and composes with — the divergent-branch stranded backstop at the merge gate. The git
+ * seam is injectable ({@link BoundedGitDeps}) so a test can prove the detection AND the fail-safe bound.
+ */
+export async function precheckWorkerDone(
+  repoPath: string,
+  worktreePath: string,
+  branch: string | null,
+  base = "HEAD",
+  deps: BoundedGitDeps = {},
+): Promise<DoneReportPrecheck> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+
+  // (1) Dirty working tree? Read porcelain status IN the worktree (its own index + working tree),
+  //     ignoring daemon-injected untracked `.claude/` noise (see uncommittedWorkFiles).
+  try {
+    const wt = makeGit(worktreePath, timeoutMs);
+    const porcelain = await withTimeout(wt.raw(["status", "--porcelain"]), timeoutMs, "git status --porcelain");
+    const files = uncommittedWorkFiles(porcelain);
+    if (files.length > 0) return { uncommitted: true, files, zeroAhead: false };
+  } catch {
+    return { uncommitted: false, files: [], zeroAhead: false }; // FAIL SAFE: never block a legitimate done
+  }
+
+  // (2) Clean working tree. Is the assigned branch 0 commits ahead of base? → WARN-only signal.
+  if (branch) {
+    try {
+      const ahead = parseInt(
+        (await withTimeout(git.raw(["rev-list", "--count", `${base}..${branch}`]), timeoutMs, "git rev-list --count")).trim(),
+        10,
+      );
+      if (Number.isFinite(ahead) && ahead === 0) return { uncommitted: false, files: [], zeroAhead: true };
+    } catch {
+      return { uncommitted: false, files: [], zeroAhead: false }; // FAIL SAFE
+    }
+  }
+
+  return { uncommitted: false, files: [], zeroAhead: false };
 }
 
 /**

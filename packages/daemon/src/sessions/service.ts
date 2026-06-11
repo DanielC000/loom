@@ -11,7 +11,7 @@ import {
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone } from "../git/worktrees.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { readRunUsage, readRunUsageFromFile } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
@@ -1373,14 +1373,51 @@ export class SessionService {
    * queues behind its running turn and drains on its next Stop. The caller IS the worker
    * (workerSessionId is derived server-side from the URL path), so there's no id to spoof.
    */
-  workerReport(
+  async workerReport(
     workerSessionId: string,
     report: { status: "done" | "blocked" | "progress"; summary: string; prUrl?: string; needs?: string },
-  ): { reported: boolean; delivered: boolean } {
+  ): Promise<{ reported: boolean; delivered: boolean; refused?: boolean; error?: string; uncommittedFiles?: string[]; warning?: string }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker) throw new Error("unknown worker session");
     const managerSessionId = worker.parentSessionId ?? null;
     const taskId = worker.taskId ?? null;
+
+    // DONE PRE-CHECK (board card 907b9f50): catch a worker that forgot to commit AT THE SOURCE, before
+    // its task is moved to review. The merge gate only ever sees COMMITTED work on the assigned branch,
+    // so a "done" with uncommitted work otherwise bounces back a wasted round-trip later. INDEPENDENT of
+    // — and composes with — the divergent-branch stranded backstop at the merge gate (reviewWorkerMerge /
+    // confirmWorkerMerge). FAILS SAFE: precheckWorkerDone degrades to ALLOW on any git error, so a flaky
+    // check can never wedge a legitimate done. Only the AFFIRMATIVE uncommitted signal refuses.
+    let warning: string | undefined;
+    if (report.status === "done") {
+      const project = this.db.getProject(worker.projectId);
+      const worktreePath = worker.worktreePath ?? worker.cwd;
+      if (project && worktreePath && worker.branch && fs.existsSync(worktreePath)) {
+        const precheck = await precheckWorkerDone(project.repoPath, worktreePath, worker.branch, "HEAD", { timeoutMs: this.gitOpMs });
+        if (precheck.uncommitted) {
+          // REFUSE: do NOT move the task — the worker stays in_progress to commit + re-report. Name the
+          // uncommitted files so the worker knows exactly what to commit.
+          const error =
+            `worker_report(done) REFUSED — your worktree has UNCOMMITTED changes (${precheck.files.length} path(s): ${precheck.files.join(", ")}). ` +
+            `The merge gate only sees COMMITTED work on your assigned branch '${worker.branch}', so reporting done now would lose this work. ` +
+            `Commit to your assigned branch first (do NOT 'git checkout -b' — commit straight to '${worker.branch}'), then re-report done. Your task stays in_progress.`;
+          this.db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(),
+            managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report_rejected",
+            detail: { reason: "uncommitted", files: precheck.files },
+          });
+          return { reported: false, refused: true, error, uncommittedFiles: precheck.files, delivered: false };
+        }
+        if (precheck.zeroAhead) {
+          // WARN only: a clean worktree on an assigned branch with 0 commits ahead of base. A genuine
+          // no-op task can legitimately report done, so this never refuses — it surfaces the warning in
+          // the result, the worker_report event, and the manager notification.
+          warning =
+            `your assigned branch '${worker.branch}' is 0 commits ahead of base — nothing to merge. ` +
+            `Allowing the done (a real no-op task can legitimately report done), but if you intended to produce changes you likely forgot to commit them.`;
+        }
+      }
+    }
 
     // Task move by status: done → review (ready for the manager's diff review), blocked →
     // waiting, progress → no move.
@@ -1392,7 +1429,7 @@ export class SessionService {
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report",
-      detail: { status: report.status, summary: report.summary, prUrl: report.prUrl, needs: report.needs },
+      detail: { status: report.status, summary: report.summary, prUrl: report.prUrl, needs: report.needs, ...(warning ? { warning } : {}) },
     });
 
     let delivered = false;
@@ -1400,9 +1437,10 @@ export class SessionService {
       let framed = `[loom:worker-report] worker ${workerSessionId} (task ${taskId ?? "none"}) — ${report.status}: ${report.summary}`;
       if (report.prUrl) framed += ` | PR: ${report.prUrl}`;
       if (report.needs) framed += ` | needs: ${report.needs}`;
+      if (warning) framed += ` | warning: ${warning}`;
       delivered = this.pty.enqueueStdin(managerSessionId, framed).delivered;
     }
-    return { reported: true, delivered };
+    return warning ? { reported: true, delivered, warning } : { reported: true, delivered };
   }
 
   /**

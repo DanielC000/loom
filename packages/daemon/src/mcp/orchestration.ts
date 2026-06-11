@@ -91,7 +91,7 @@ export class OrchestrationMcpRouter {
           },
         },
         async ({ status, summary, prUrl, needs }) =>
-          ok(sessions.workerReport(sessionId, { status, summary, prUrl, needs })),
+          ok(await sessions.workerReport(sessionId, { status, summary, prUrl, needs })),
       );
       return server;
     }
