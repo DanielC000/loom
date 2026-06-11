@@ -38,6 +38,18 @@ const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 /** Whitelist guard for the human REST task surfaces — rejects any value outside the p0–p3 enum. */
 const isTaskPriority = (v: unknown): v is Task["priority"] => v === "p0" || v === "p1" || v === "p2" || v === "p3";
 
+/** Bounds for the Preset Prompts REST surface (label = short button text; prompt = the text to send). */
+const PRESET_LABEL_MAX = 200;
+const PRESET_PROMPT_MAX = 10_000;
+/** Validate a preset string field: must be a non-blank string within its bound. Returns an error
+ *  message (for a 400) or null when valid. */
+const validatePresetField = (name: string, v: unknown, max: number): string | null => {
+  if (typeof v !== "string") return `${name} must be a string`;
+  if (v.trim().length === 0) return `${name} must not be empty`;
+  if (v.length > max) return `${name} must be at most ${max} characters`;
+  return null;
+};
+
 export interface GatewayDeps {
   db: Db;
   pty: PtyHost;
@@ -213,6 +225,45 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.delete("/api/schedules/:id", async (req) => {
     deps.db.deleteSchedule((req.params as { id: string }).id);
+    return { ok: true };
+  });
+
+  // --- Preset Prompts (the GLOBAL "terminal action-buttons" store): a daemon-wide list of label+prompt
+  // presets the web composer sends to a session on click, managed INLINE in the UI (full CRUD). Plain
+  // human/UI data — there is intentionally NO MCP path (an agent never reaches this) and NO trust-boundary
+  // concern (unlike gateCommand / the git+vault writers). Ordered by position; POST appends at the end. ---
+  app.get("/api/preset-prompts", async () => deps.db.listPresetPrompts());
+  app.post("/api/preset-prompts", async (req, reply) => {
+    const b = (req.body ?? {}) as { label?: unknown; prompt?: unknown };
+    const err = validatePresetField("label", b.label, PRESET_LABEL_MAX) ?? validatePresetField("prompt", b.prompt, PRESET_PROMPT_MAX);
+    if (err) return reply.code(400).send({ error: err });
+    const created = deps.db.createPresetPrompt({ label: (b.label as string).trim(), prompt: b.prompt as string });
+    return reply.code(201).send(created);
+  });
+  app.put("/api/preset-prompts/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getPresetPrompt(id)) return reply.code(404).send({ error: "preset prompt not found" });
+    const b = (req.body ?? {}) as { label?: unknown; prompt?: unknown; position?: unknown };
+    const patch: { label?: string; prompt?: string; position?: number } = {};
+    if (b.label !== undefined) {
+      const e = validatePresetField("label", b.label, PRESET_LABEL_MAX);
+      if (e) return reply.code(400).send({ error: e });
+      patch.label = (b.label as string).trim();
+    }
+    if (b.prompt !== undefined) {
+      const e = validatePresetField("prompt", b.prompt, PRESET_PROMPT_MAX);
+      if (e) return reply.code(400).send({ error: e });
+      patch.prompt = b.prompt as string;
+    }
+    if (b.position !== undefined) {
+      if (typeof b.position !== "number" || !Number.isFinite(b.position)) return reply.code(400).send({ error: "position must be a finite number" });
+      patch.position = b.position;
+    }
+    deps.db.updatePresetPrompt(id, patch);
+    return deps.db.getPresetPrompt(id);
+  });
+  app.delete("/api/preset-prompts/:id", async (req) => {
+    deps.db.deletePresetPrompt((req.params as { id: string }).id);
     return { ok: true };
   });
 

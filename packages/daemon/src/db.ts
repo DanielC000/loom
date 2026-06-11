@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { DB_PATH } from "./paths.js";
 
@@ -31,7 +32,7 @@ function assertNotProdDbInTest(file: string): void {
 import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake,
+  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PresetPrompt,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind,
 } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret } from "./keys/hash.js";
@@ -234,6 +235,21 @@ CREATE TABLE IF NOT EXISTS platform_config (
   override_json TEXT NOT NULL DEFAULT '{}',
   updated_at TEXT NOT NULL
 );
+-- Preset Prompts: the GLOBAL "terminal action-buttons" store (label + the prompt text to send). ONE
+-- daemon-wide list — no project/session scoping (deliberately no project_id). Plain human/UI data,
+-- managed over the loopback REST surface only (no MCP path). Brand-new table ⇒ CREATE TABLE IF NOT
+-- EXISTS is itself the additive migration (no ALTER), exactly like platform_config / api_keys: an
+-- existing DB simply gains an empty table on next boot. Ordered by position (a fresh one appends at
+-- the end = MAX(position)+1).
+CREATE TABLE IF NOT EXISTS preset_prompts (
+  id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_preset_prompts_position ON preset_prompts(position);
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, created_at);
@@ -658,6 +674,45 @@ export class Db {
       `INSERT INTO platform_config (id, override_json, updated_at) VALUES (1, @json, @updatedAt)
        ON CONFLICT(id) DO UPDATE SET override_json = @json, updated_at = @updatedAt`,
     ).run({ json: JSON.stringify(override ?? {}), updatedAt: new Date().toISOString() });
+  }
+
+  // --- preset prompts (GLOBAL "terminal action-buttons" store; human/UI REST only, no MCP path) ---
+  /** The whole global list, ordered by position (rowid breaks same-position ties → stable insertion order). */
+  listPresetPrompts(): PresetPrompt[] {
+    return (this.db.prepare("SELECT * FROM preset_prompts ORDER BY position, rowid").all() as Row[]).map(toPresetPrompt);
+  }
+  getPresetPrompt(id: string): PresetPrompt | undefined {
+    const r = this.db.prepare("SELECT * FROM preset_prompts WHERE id = ?").get(id) as Row | undefined;
+    return r ? toPresetPrompt(r) : undefined;
+  }
+  /** Create a preset, APPENDING it at the end (position = MAX(position)+1, or 0 on an empty list). Mints
+   *  the id + timestamps and returns the stored row (mirrors createApiKey's "db owns the new row" shape). */
+  createPresetPrompt(input: { label: string; prompt: string }): PresetPrompt {
+    const max = (this.db.prepare("SELECT MAX(position) AS m FROM preset_prompts").get() as { m: number | null }).m;
+    const now = new Date().toISOString();
+    const p: PresetPrompt = {
+      id: randomUUID(), label: input.label, prompt: input.prompt,
+      position: (max == null ? -1 : max) + 1, createdAt: now, updatedAt: now,
+    };
+    this.db.prepare(
+      `INSERT INTO preset_prompts (id,label,prompt,position,created_at,updated_at)
+       VALUES (@id,@label,@prompt,@position,@createdAt,@updatedAt)`,
+    ).run(p);
+    return p;
+  }
+  /** Partial edit (label / prompt / position) — provided fields are written, omitted are left as-is;
+   *  stamps updated_at whenever anything changes. No-op (no updated_at bump) when the patch is empty. */
+  updatePresetPrompt(id: string, patch: { label?: string; prompt?: string; position?: number }): void {
+    const cols: Record<string, unknown> = { label: patch.label, prompt: patch.prompt, position: patch.position };
+    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
+    if (names.length === 0) return;
+    const set = [...names.map((c) => `${c} = ?`), "updated_at = ?"].join(", ");
+    this.db.prepare(`UPDATE preset_prompts SET ${set} WHERE id = ?`)
+      .run(...names.map((c) => cols[c]), new Date().toISOString(), id);
+  }
+  /** Delete a preset. Idempotent on a missing id (DELETE … WHERE matches nothing). */
+  deletePresetPrompt(id: string): void {
+    this.db.prepare("DELETE FROM preset_prompts WHERE id = ?").run(id);
   }
 
   // --- agents ---
@@ -1588,6 +1643,14 @@ function toTask(r0: unknown): Task {
     id: r.id as string, projectId: r.project_id as string, title: r.title as string,
     body: r.body as string, columnKey: r.column_key as string, position: r.position as number,
     priority: (r.priority as Task["priority"]) ?? "p2",
+    createdAt: r.created_at as string, updatedAt: r.updated_at as string,
+  };
+}
+function toPresetPrompt(r0: unknown): PresetPrompt {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, label: r.label as string, prompt: r.prompt as string,
+    position: r.position as number,
     createdAt: r.created_at as string, updatedAt: r.updated_at as string,
   };
 }

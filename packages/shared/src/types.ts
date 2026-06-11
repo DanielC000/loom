@@ -405,6 +405,22 @@ export interface Task {
 }
 
 /**
+ * A global "preset prompt" — a programmable terminal action-button (a short `label` + the `prompt`
+ * text it sends to a session on click). GLOBAL / daemon-wide: a single shared list with NO project or
+ * session scoping. Human/UI-managed over the loopback REST surface (there is intentionally NO MCP path
+ * — an agent never reaches it; it is plain user UI data, not a trust-boundary capability). Ordered by
+ * `position`; a freshly-created preset appends at the end of the list.
+ */
+export interface PresetPrompt {
+  id: string;
+  label: string;   // short button text
+  prompt: string;  // the prompt text sent to the session on click
+  position: number; // ascending order (append = max+1)
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
  * A cron-triggered schedule (phase-2 Pillar B). On its minute boundary the daemon Scheduler
  * boots a manager session in `agentId` (the agent's startupPrompt is the kickoff), which then
  * runs the Pillar-A loop. `nextFireAt` is recomputed on create/update and after each fire.
