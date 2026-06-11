@@ -63,19 +63,40 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
 
   const openTask = board.data?.tasks.find((t) => t.id === openTaskId) ?? null;
 
+  // ── Client-side view filter (no server round-trip) ───────────────────────────
+  // Search matches title+body (case-insensitive substring); priority + column are multi-select
+  // (empty set = no constraint). All three AND together. Non-matching cards vanish from every
+  // column; the column header count and the "N of M shown" affordance reflect the filtered view.
+  const [search, setSearch] = useState("");
+  const [priFilter, setPriFilter] = useState<Set<TaskPriority>>(() => new Set());
+  const [colFilter, setColFilter] = useState<Set<string>>(() => new Set());
+  const togglePri = (p: TaskPriority) => setPriFilter((s) => { const n = new Set(s); n.delete(p) || n.add(p); return n; });
+  const toggleCol = (k: string) => setColFilter((s) => { const n = new Set(s); n.delete(k) || n.add(k); return n; });
+  const clearFilters = () => { setSearch(""); setPriFilter(new Set()); setColFilter(new Set()); };
+  const q = search.trim().toLowerCase();
+  const filterActive = q !== "" || priFilter.size > 0 || colFilter.size > 0;
+  const allTasks = board.data?.tasks ?? [];
+  const shownTasks = allTasks.filter((t) =>
+    (q === "" || `${t.title} ${t.body ?? ""}`.toLowerCase().includes(q)) &&
+    (priFilter.size === 0 || priFilter.has(prio(t))) &&
+    (colFilter.size === 0 || colFilter.has(t.columnKey)));
+
   return (
     <div>
       {!projectId && <p style={{ color: color.textMuted }}>No project selected.</p>}
       {projectId && board.data && (
         <>
           <NewTask onCreate={(t) => create.mutate(t)} />
+          <FilterBar search={search} onSearch={setSearch} columns={board.data.columns}
+            priFilter={priFilter} onTogglePri={togglePri} colFilter={colFilter} onToggleCol={toggleCol}
+            shown={shownTasks.length} total={allTasks.length} active={filterActive} onClear={clearFilters} />
           <DndContext onDragEnd={onDragEnd}>
-            <div style={{ display: "grid", gridTemplateColumns: `repeat(${board.data.columns.length}, 1fr)`, gap: 10, marginTop: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: `repeat(${board.data.columns.length}, 1fr)`, gap: 10, marginTop: 10 }}>
               {board.data.columns.map((col) => (
                 <Column key={col.key} col={col}
-                  tasks={board.data!.tasks.filter((t) => t.columnKey === col.key)
+                  tasks={shownTasks.filter((t) => t.columnKey === col.key)
                     .sort(isDoneColumn(col.key) ? byRecentlyDone : byPriorityThenPosition)}
-                  workers={workerByTask} onOpen={setOpenTaskId} />
+                  filterActive={filterActive} workers={workerByTask} onOpen={setOpenTaskId} />
               ))}
             </div>
           </DndContext>
@@ -107,8 +128,8 @@ function columnTone(key: string): Tone {
   return "muted";
 }
 
-function Column({ col, tasks, workers, onOpen }:
-  { col: KanbanColumn; tasks: Task[]; workers: Map<string, SessionListItem>; onOpen: (id: string) => void }) {
+function Column({ col, tasks, filterActive, workers, onOpen }:
+  { col: KanbanColumn; tasks: Task[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key });
   const t = columnTone(col.key);
   // Bounded, viewport-relative height so a long column scrolls internally instead of stretching the
@@ -122,6 +143,89 @@ function Column({ col, tasks, workers, onOpen }:
       <SectionLabel style={{ color: tone[t], margin: 0, padding: "12px 12px 8px" }}>{col.label} ({tasks.length})</SectionLabel>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
         {tasks.map((task) => <Card key={task.id} task={task} accent={tone[t]} worker={workers.get(task.id)} onOpen={() => onOpen(task.id)} />)}
+        {/* Filtered-empty state: the filter hid every card in this column. Reads as deliberate, not broken. */}
+        {tasks.length === 0 && filterActive && (
+          <div style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11, padding: "8px 2px" }}>no matches</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Filter bar ─────────────────────────────────────────────────────────────────
+// Tiny uppercase group label (Space Grotesk) preceding a row of toggle chips. aria-hidden — each
+// toggle carries its own descriptive aria-label, so the visual label would only be redundant noise
+// to a screen reader.
+const groupLabel = { fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+  letterSpacing: "0.1em", color: color.textMuted } as const;
+
+// A multi-select toggle chip. Off: outlined + dim. On: filled with its signal tone (the established
+// PriorityChip "pop" look). `muted` fills with the lighter text-dim grey instead of the near-invisible
+// muted grey so the dark on-fill label keeps AA contrast. Native <button> → Enter/Space + focus ring
+// (.loom-toggle in global.css) come for free; aria-pressed exposes the on/off state.
+function ToggleChip({ label, ariaLabel, t, active, onToggle }:
+  { label: string; ariaLabel: string; t: Tone; active: boolean; onToggle: () => void }) {
+  const fill = t === "muted" ? color.textDim : tone[t];
+  return (
+    <button type="button" aria-pressed={active} aria-label={ariaLabel} title={ariaLabel} onClick={onToggle}
+      className={`loom-toggle${active ? " is-active" : ""}`}
+      style={{
+        fontFamily: font.head, fontSize: 10, fontWeight: active ? 700 : 500, letterSpacing: "0.06em",
+        textTransform: "uppercase", padding: "3px 8px", borderRadius: 3, lineHeight: "14px",
+        color: active ? color.bg : color.textDim, background: active ? fill : "transparent",
+        border: `1px solid ${active ? fill : color.border}`,
+      }}>
+      {label}
+    </button>
+  );
+}
+
+function FilterBar({ search, onSearch, columns, priFilter, onTogglePri, colFilter, onToggleCol, shown, total, active, onClear }:
+  { search: string; onSearch: (v: string) => void; columns: KanbanColumn[];
+    priFilter: Set<TaskPriority>; onTogglePri: (p: TaskPriority) => void;
+    colFilter: Set<string>; onToggleCol: (k: string) => void;
+    shown: number; total: number; active: boolean; onClear: () => void }) {
+  return (
+    <div style={{ marginTop: 10, background: color.panel, border: `1px solid ${color.border}`, borderRadius: 4,
+      padding: "8px 10px", display: "flex", flexDirection: "column", gap: 8 }}>
+      {/* Row 1: search + live result count + clear-all */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ position: "relative", display: "flex", alignItems: "center", flex: "1 1 240px", maxWidth: 460 }}>
+          <span aria-hidden style={{ position: "absolute", left: 8, color: color.textMuted, fontSize: 13, pointerEvents: "none" }}>⌕</span>
+          <Input value={search} onChange={(e) => onSearch(e.target.value)}
+            aria-label="Search tasks by title or description" placeholder="search tasks…"
+            onKeyDown={(e) => { if (e.key === "Escape" && search) { e.stopPropagation(); onSearch(""); } }}
+            style={{ width: "100%", paddingLeft: 26, paddingRight: search ? 26 : 8 }} />
+          {search && (
+            <button type="button" aria-label="Clear search" title="Clear search" onClick={() => onSearch("")}
+              className="loom-toggle" style={{ position: "absolute", right: 6, background: "transparent", border: "none",
+                color: color.textMuted, cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 2, borderRadius: 3 }}>✕</button>
+          )}
+        </div>
+        <span aria-live="polite" style={{ fontFamily: font.mono, fontSize: 11, whiteSpace: "nowrap",
+          color: active ? color.phosphor : color.textMuted }}>
+          {shown} of {total} shown
+        </span>
+        {active && <Button variant="ghost" onClick={onClear} style={{ marginLeft: "auto" }}>Clear filters</Button>}
+      </div>
+      {/* Row 2: priority + column toggles */}
+      <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span aria-hidden style={groupLabel}>Priority</span>
+          {PRIORITIES.map((p) => (
+            <ToggleChip key={p} label={PRIORITY_META[p].short} ariaLabel={`Filter by ${PRIORITY_META[p].label} priority`}
+              t={PRIORITY_META[p].tone} active={priFilter.has(p)} onToggle={() => onTogglePri(p)} />
+          ))}
+        </div>
+        {columns.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <span aria-hidden style={groupLabel}>Column</span>
+            {columns.map((c) => (
+              <ToggleChip key={c.key} label={c.label} ariaLabel={`Filter by ${c.label} column`}
+                t={columnTone(c.key)} active={colFilter.has(c.key)} onToggle={() => onToggleCol(c.key)} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

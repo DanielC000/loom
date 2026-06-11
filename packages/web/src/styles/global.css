@@ -120,6 +120,29 @@ body {
   outline: none;
 }
 
+/* Toggle chip (board filters): outlined when off, filled when on. Hover lifts an off chip's
+   border/label; on chips already read as active so they don't shift on hover. */
+.loom-toggle {
+  cursor: pointer;
+  transition:
+    background 80ms linear,
+    border-color 80ms linear,
+    color 80ms linear;
+}
+.loom-toggle:not(.is-active):hover {
+  border-color: var(--loom-text-dim);
+  color: var(--loom-text);
+}
+
+/* Keyboard focus ring — shown only for keyboard nav (:focus-visible), so mouse clicks stay clean
+   while Tab users get a clear phosphor ring on every interactive control. */
+.loom-toggle:focus-visible,
+.loom-btn:focus-visible,
+.loom-field:focus-visible {
+  outline: 2px solid var(--loom-phosphor);
+  outline-offset: 2px;
+}
+
 /* NavTab: uppercase mono, phosphor underline when active. */
 .loom-navtab {
   font-family: var(--loom-font-mono);
@@ -140,4 +163,13 @@ body {
 .loom-navtab.is-active {
   color: var(--loom-text);
   border-bottom-color: var(--loom-phosphor);
+}
+
+/* Honor reduced-motion: drop the cosmetic hover/active transitions. */
+@media (prefers-reduced-motion: reduce) {
+  .loom-btn,
+  .loom-navtab,
+  .loom-toggle {
+    transition: none;
+  }
 }
