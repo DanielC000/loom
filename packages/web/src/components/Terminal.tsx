@@ -36,6 +36,19 @@ export function TerminalPane({ sessionId, resizable = false }: { sessionId: stri
     if (fit) term.loadAddon(fit);
     term.open(el);
 
+    // Scroll-hijack gate: a terminal must consume wheel scroll ONLY when it's "clicked in".
+    // xterm focus lives on its hidden textarea (focused on click, blurred when you click away), so
+    // mirror that onto a wrapper class. Terminal.css keys .xterm-viewport's overflow off it: scroll
+    // when .term-focused, hidden otherwise — so an unfocused terminal lets the wheel bubble to the
+    // page, while a focused one scrolls its own scrollback. Listeners (not xterm's onFocus/onBlur,
+    // which @xterm/xterm doesn't expose) attach to the textarea, which exists after term.open().
+    const onFocus = () => el.classList.add("term-focused");
+    const onBlur = () => el.classList.remove("term-focused");
+    const textarea = term.textarea;
+    textarea?.addEventListener("focus", onFocus);
+    textarea?.addEventListener("blur", onBlur);
+    if (textarea && document.activeElement === textarea) onFocus(); // already focused at mount
+
     // Clipboard: xterm sends raw control bytes for Ctrl+V/Ctrl+C by default (so Ctrl+V emits 0x16
     // instead of pasting). Wire real clipboard behavior the way Windows Terminal / VS Code do:
     //  • Ctrl/Cmd+V → paste (term.paste handles bracketed-paste mode for Claude's TUI)
@@ -155,6 +168,8 @@ export function TerminalPane({ sessionId, resizable = false }: { sessionId: stri
     return () => {
       onData.dispose();
       ro.disconnect();
+      textarea?.removeEventListener("focus", onFocus);
+      textarea?.removeEventListener("blur", onBlur);
       clearTimeout(repaintTimer);
       // Don't act on a socket the pane abandoned mid-handshake. Closing one that's still CONNECTING
       // logs "WebSocket is closed before the connection is established" — it fires on Terminals/Workspace
