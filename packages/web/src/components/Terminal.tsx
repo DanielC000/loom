@@ -38,16 +38,29 @@ export function TerminalPane({ sessionId, resizable = false }: { sessionId: stri
 
     // Scroll-hijack gate: a terminal must consume wheel scroll ONLY when it's "clicked in".
     // xterm focus lives on its hidden textarea (focused on click, blurred when you click away), so
-    // mirror that onto a wrapper class. Terminal.css keys .xterm-viewport's overflow off it: scroll
-    // when .term-focused, hidden otherwise — so an unfocused terminal lets the wheel bubble to the
-    // page, while a focused one scrolls its own scrollback. Listeners (not xterm's onFocus/onBlur,
-    // which @xterm/xterm doesn't expose) attach to the textarea, which exists after term.open().
-    const onFocus = () => el.classList.add("term-focused");
-    const onBlur = () => el.classList.remove("term-focused");
+    // mirror that onto the viewport's overflow: scroll when focused, hidden otherwise — an unfocused
+    // terminal lets the wheel bubble to the page, a focused one scrolls its own scrollback.
+    //
+    // We gate the viewport's overflow IMPERATIVELY via an inline style rather than a CSS class. A
+    // stylesheet rule can't win here: @xterm/xterm's own xterm.css ships
+    // `.xterm .xterm-viewport { overflow-y: scroll }` (specificity 0,2,0), which out-specifies any
+    // plain `.xterm-viewport` gate we'd write (0,1,0) — so the viewport stayed `scroll` in every
+    // state and the hijack was never actually fixed. An inline style beats every stylesheet rule, so
+    // the toggle is robust regardless of specificity. xterm can (re)create the viewport on open/
+    // resize, so we re-query the CURRENT `.xterm-viewport` each time instead of caching it.
+    // Listeners (not xterm's onFocus/onBlur, which @xterm/xterm doesn't expose) attach to the
+    // textarea, which exists after term.open().
+    const setViewportScroll = (focused: boolean) => {
+      const viewport = el.querySelector<HTMLElement>(".xterm-viewport");
+      if (viewport) viewport.style.overflowY = focused ? "scroll" : "hidden";
+    };
+    const onFocus = () => { el.classList.add("term-focused"); setViewportScroll(true); };
+    const onBlur = () => { el.classList.remove("term-focused"); setViewportScroll(false); };
     const textarea = term.textarea;
     textarea?.addEventListener("focus", onFocus);
     textarea?.addEventListener("blur", onBlur);
     if (textarea && document.activeElement === textarea) onFocus(); // already focused at mount
+    else setViewportScroll(false); // default to hidden (non-scrolling) at mount
 
     // Clipboard: xterm sends raw control bytes for Ctrl+V/Ctrl+C by default (so Ctrl+V emits 0x16
     // instead of pasting). Wire real clipboard behavior the way Windows Terminal / VS Code do:

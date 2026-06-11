@@ -9,15 +9,8 @@
 }
 
 /* Scroll-hijack fix: the .xterm-viewport is a native scroll container, so merely HOVERING a
-   terminal would let the wheel scroll its scrollback instead of the page. Gate it on focus —
-   when the terminal is NOT "clicked in", make the viewport non-scrollable (overflow-y: hidden)
-   so the wheel bubbles up to the page. Focusing the terminal (click → its textarea gains focus)
-   adds .term-focused on the wrapper, restoring overflow-y: scroll and in-terminal scrollback.
-   Keyboard scroll (Shift+PageUp) still works while focused; programmatic scrollTop is unaffected
-   when hidden, and the scrollbar is hidden either way so there's no layout shift on toggle. */
-.xterm-viewport {
-  overflow-y: hidden;
-}
-.term-focused .xterm-viewport {
-  overflow-y: scroll;
-}
+   terminal would otherwise let the wheel scroll its scrollback instead of the page. The overflow
+   is gated on focus — scroll when "clicked in", hidden otherwise — but that toggle is NOT done
+   here: xterm.css ships `.xterm .xterm-viewport { overflow-y: scroll }` (specificity 0,2,0) which
+   would override any plain `.xterm-viewport` rule we wrote, so the gate is applied as an INLINE
+   style from Terminal.tsx's focus/blur handlers (inline beats every stylesheet rule). See there. */
