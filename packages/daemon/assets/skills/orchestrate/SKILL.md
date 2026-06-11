@@ -100,7 +100,8 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   isn't finished — so don't idle: identify the highest-value next step toward the standing goal and do
   it. *Converged/terminal* means that planned work is genuinely complete and nothing worthwhile remains
   to build or harden — only then write a status to your living resume doc, report `done`, and stop.
-  Never poll the human for more work.
+  Never poll the human for more work. Either verdict is only valid against a board you *just* re-read:
+  before you park or report `done`, do a fresh `tasks_list` + inbox drain (see *Idle reporting*).
 
 ## Idle reporting — say when you park, don't absorb nudges
 
@@ -117,6 +118,13 @@ you intentionally park, via the `idle_report` MCP tool — don't wait to be nudg
   human attention alert.
 - **`done`** — the planned work has genuinely converged (not merely drained-for-now — see the autonomy
   rules). Pass `detail`; this alerts the human to reclaim. It does **not** auto-close the session.
+
+**Re-read before you park.** Before ANY `idle_report('done')`/`idle_report('waiting')` — or any park,
+`recycle_me`, or stop — do a FRESH `tasks_list` and drain your inbox (`inbox_pull`); never conclude the
+queue is "drained" from an earlier read or from memory. New actionable cards land continuously — owner
+`inbox` drops, Platform dispatches, folded-in escalations, worker-discovered follow-ups — so "drained"
+is only ever a statement about a board you *just* re-read. If that fresh read shows any non-`blocked`
+actionable card, pick it up and `idle_report('working')` instead of parking.
 
 When you resume from a parked or blocked state, `idle_report('working')`: it re-arms normal watching
 **and** clears any `blocked_human`/`done`/asleep alert you raised (a `working` or `waiting` report
