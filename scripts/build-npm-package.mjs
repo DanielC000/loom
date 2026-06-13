@@ -98,10 +98,13 @@ fs.writeFileSync(
   ) + "\n",
 );
 
-log("copy bin/ + README.md");
+log("copy bin/ + README.md + LICENSE");
 fs.cpSync(path.join(repoRoot, "bin"), path.join(stage, "bin"), { recursive: true });
 if (fs.existsSync(path.join(repoRoot, "README.md"))) {
   fs.copyFileSync(path.join(repoRoot, "README.md"), path.join(stage, "README.md"));
+}
+if (fs.existsSync(path.join(repoRoot, "LICENSE"))) {
+  fs.copyFileSync(path.join(repoRoot, "LICENSE"), path.join(stage, "LICENSE"));
 }
 
 // 5. Generate the published package.json. @loom/shared is bundled (concrete "0.0.0" matching the
@@ -114,10 +117,11 @@ const pkg = {
   name: "loom",
   version: rootPkg.version,
   description: rootPkg.description,
+  license: rootPkg.license ?? "MIT",
   type: "module",
   bin: { loom: "bin/loom.mjs" },
   engines: { node: ">=22" },
-  files: ["bin", "dist", "assets", "README.md"],
+  files: ["bin", "dist", "assets", "README.md", "LICENSE"],
   dependencies: { ...deps, "@loom/shared": "0.0.0" },
   bundledDependencies: ["@loom/shared"],
 };

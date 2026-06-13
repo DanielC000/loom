@@ -77,10 +77,10 @@ every PR and `main` push (no publish, no secrets) — the same gate the release 
 1. **The public GitHub repo must exist.** Pushing tags + Actions + Releases all require the repo to
    be published on GitHub (tied to the repo-publication work in the blocked lane). Until then the
    workflow file simply rides along unused.
-2. **Reserve the npm name + add a license.** Same prerequisites as a manual publish (see *Owner
-   publish steps*): own the `loom` name (or set the published name in `scripts/build-npm-package.mjs`)
-   and add a `LICENSE` + `"license"` to the generated `package.json` — the workflow publishes
-   whatever `pnpm pack:npm` produces.
+2. **Reserve the npm name.** Same prerequisite as a manual publish (see *Owner publish steps*): own
+   the `loom` name (or set the published name in `scripts/build-npm-package.mjs`). The license is
+   already wired — the repo ships an MIT `LICENSE` and `pnpm pack:npm` bundles it + sets
+   `"license": "MIT"` on the generated `package.json`.
 3. **Add the `NPM_TOKEN` repo secret.** Create an npm **automation** (or publish) token on the
    publishing account and add it under *Settings → Secrets and variables → Actions* as `NPM_TOKEN`.
    The workflow reads it as `NODE_AUTH_TOKEN` for `npm publish`. (`GITHUB_TOKEN` is provided
@@ -136,9 +136,9 @@ license/signing decisions below. **A worker/manager never runs it.** One-time + 
 1. **Reserve the name.** Confirm `loom` is available/owned on npm (`npm view loom`); claim it while
    logged in if free. If taken, pick the published name and set it in `scripts/build-npm-package.mjs`
    (the generated `package.json` `name`) before the first publish.
-2. **Pick a license.** The generated `package.json` ships **no `license` field** (deliberate — it's an
-   owner/legal call). Add the chosen license (`LICENSE` file + `"license"` in the script's generated
-   `package.json`) before publishing a public package.
+2. **License.** Loom is **MIT**-licensed. The repo ships a `LICENSE` file and `pnpm pack:npm` copies
+   it into the tarball and sets `"license": "MIT"` on the generated `package.json`, so this is already
+   wired — no per-publish action needed.
 3. **`npm login`** as the publishing account.
 4. **Build fresh + publish** (always re-run `pnpm pack:npm` immediately before, so the tarball matches
    the tag):
