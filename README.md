@@ -14,7 +14,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/images/hero.png" alt="Loom's orchestration view: a lead agent weaving three worker sessions on isolated branches, with live terminals, a task board, and git diffs in one phosphor-on-dark cockpit." width="100%" />
+  <img src="docs/images/hero.png" alt="Loom's Mission Control: a lead agent and three worker sessions on isolated git branches with live context meters, an attention queue with a merge awaiting review, and a real-time activity feed — one phosphor-on-dark cockpit." width="100%" />
 </p>
 
 Loom is a local-first AI project workspace that drives the **real interactive `claude`** — the same
@@ -94,7 +94,7 @@ The monorepo (pnpm + Turbo) is three packages:
 <p align="center">
   <img src="docs/images/screenshot-board.png" alt="Loom's per-project task board: a kanban of cards that both you and the agents read and move through columns." width="100%" />
   <br />
-  <em>Mission Control and the per-project task board — agents and you share one board.</em>
+  <em>The per-project task board — a kanban you and the agents share, with live worker status and branch on each card.</em>
 </p>
 
 <p align="center">
