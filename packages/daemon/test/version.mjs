@@ -67,10 +67,36 @@ try {
   check(`(c) LOOM_VERSION override is honored at runtime (got "${(child.stdout || "").trim()}")`, (child.stdout || "").trim() === SENTINEL);
 }
 
+// (d) PACKAGED-FORM walk-up: when the NEAREST package.json up-tree is the published `loomctl` package
+// (name "loomctl"), resolution returns ITS version — NOT the "0.0.0" fallback. This is the npm package
+// shape, where the generated package.json is named "loomctl" (the `loom` npm name is taken) and sits
+// above the bundled daemon. Regression guard for the loomctl rename: a walk-up that only matched
+// "loom" would miss this and report "0.0.0". Done in an isolated temp staging dir (NOT under the repo,
+// whose root package.json is named "loom") and WITHOUT LOOM_VERSION so the override can't mask it.
+{
+  const PKG_VERSION = "7.7.7-loomctl-packaged";
+  const stageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "loom-pkgform-"));
+  fs.writeFileSync(path.join(stageRoot, "package.json"), JSON.stringify({ name: "loomctl", version: PKG_VERSION }) + "\n");
+  const stageDist = path.join(stageRoot, "dist");
+  fs.mkdirSync(stageDist, { recursive: true });
+  fs.copyFileSync(DIST_VERSION, path.join(stageDist, "version.js")); // version.js has only node built-in imports — runs standalone
+  const stagedVersion = pathToFileURL(path.join(stageDist, "version.js")).href;
+  const env = { ...process.env };
+  delete env.LOOM_VERSION; // exercise the package.json walk-up, not the override
+  const child = spawnSync(process.execPath, [
+    "--input-type=module",
+    "-e",
+    `import { loomVersion } from ${JSON.stringify(stagedVersion)}; process.stdout.write(loomVersion());`,
+  ], { env, encoding: "utf8" });
+  check("(d) packaged-form child resolved without error", child.status === 0);
+  check(`(d) walk-up resolves the published "loomctl" package version, not "0.0.0" (got "${(child.stdout || "").trim()}")`, (child.stdout || "").trim() === PKG_VERSION);
+  for (let i = 0; i < 5; i++) { try { fs.rmSync(stageRoot, { recursive: true, force: true }); break; } catch { /* retry */ } }
+}
+
 // cleanup (retry for the WAL handle on Windows)
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GET /api/version returns the umbrella `loom` package version, stays in sync with package.json (not a hardcoded literal), and resolves the version at runtime."
+  ? "\n✅ ALL PASS — GET /api/version returns the umbrella package version, stays in sync with package.json (not a hardcoded literal), resolves at runtime, and the walk-up handles BOTH the monorepo (`loom`) and packaged-npm (`loomctl`) forms."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

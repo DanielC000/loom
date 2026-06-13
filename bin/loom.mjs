@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The public `loom` CLI. Boots the single-process daemon (which serves the prebuilt web viewport from
 // its own loopback origin — Releases v1 Part 1), waits for the gateway to answer, prints the local URL,
-// and opens the browser. So `npx loom` / `npm i -g loom && loom` runs the whole app.
+// and opens the browser. So `npx loomctl` / `npm i -g loomctl && loom` runs the whole app.
 //
 // This file is shipped at <pkg>/bin/loom.mjs and the daemon at <pkg>/dist/index.js — the assembled npm
 // package layout (see scripts/build-npm-package.mjs). It is NOT meant to run from the monorepo source

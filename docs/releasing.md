@@ -6,12 +6,12 @@ deferred desktop/single-binary phases) lives in
 is the **operational runbook**.
 
 > Status: Loom is **pre-1.0 and not yet published**. The flow below is the agreed process. The npm
-> package itself (`bin`, publishable `loom`) shipped in Releases v1 **Part 2** — `pnpm pack:npm`
-> produces a locally-installable `loom-X.Y.Z.tgz` (see *Building & locally installing the npm package*
+> package itself (`bin`, publishable as `loomctl`) shipped in Releases v1 **Part 2** — `pnpm pack:npm`
+> produces a locally-installable `loomctl-X.Y.Z.tgz` (see *Building & locally installing the npm package*
 > below). The CI that automates the GitHub Release + npm publish from a pushed tag shipped in
 > **Part 4** (`.github/workflows/release.yml` — see *Automated release (CI)* below). Until the owner
-> performs the one-time setup (public repo, reserved name, license, `NPM_TOKEN`), nothing actually
-> publishes; the workflow is authored and waiting.
+> performs the one-time setup (public repo, the reserved `loomctl` name, license, `NPM_TOKEN`),
+> nothing actually publishes; the workflow is authored and waiting.
 
 ## Versioning scheme
 
@@ -56,13 +56,13 @@ GitHub Release.
    The workflow then (steps 5–7, automated): checks out → Node 22 + pnpm → `pnpm install` →
    `pnpm build` → daemon test gate → `pnpm pack:npm` → **`npm publish`** (to `latest`, or `beta`
    for a prerelease tag, with `--provenance`) → **creates the GitHub Release** with the CHANGELOG
-   section as notes and `loom-X.Y.Z.tgz` attached. Watch it under the repo's **Actions** tab.
+   section as notes and `loomctl-X.Y.Z.tgz` attached. Watch it under the repo's **Actions** tab.
 
 If you ever need to run any of these by hand (no CI, or a recovery), the manual equivalents are:
 
-- **Build the artifact:** `pnpm pack:npm` → `loom-X.Y.Z.tgz` at the repo root.
+- **Build the artifact:** `pnpm pack:npm` → `loomctl-X.Y.Z.tgz` at the repo root.
 - **Create the GitHub Release:** `gh release create vX.Y.Z --title "vX.Y.Z" \`
-  `--notes-file <(node scripts/extract-changelog.mjs X.Y.Z) loom-X.Y.Z.tgz`.
+  `--notes-file <(node scripts/extract-changelog.mjs X.Y.Z) loomctl-X.Y.Z.tgz`.
 - **Publish to npm:** owner-only, irreversible, outward — see *Owner publish steps* below.
 
 ## Automated release (CI)
@@ -78,7 +78,8 @@ every PR and `main` push (no publish, no secrets) — the same gate the release 
    be published on GitHub (tied to the repo-publication work in the blocked lane). Until then the
    workflow file simply rides along unused.
 2. **Reserve the npm name.** Same prerequisite as a manual publish (see *Owner publish steps*): own
-   the `loom` name (or set the published name in `scripts/build-npm-package.mjs`). The license is
+   the `loomctl` name on npm (the published name set in `scripts/build-npm-package.mjs`; the `loom`
+   name itself is taken). The license is
    already wired — the repo ships an MIT `LICENSE` and `pnpm pack:npm` bundles it + sets
    `"license": "MIT"` on the generated `package.json`.
 3. **Add the `NPM_TOKEN` repo secret.** Create an npm **automation** (or publish) token on the
@@ -92,12 +93,12 @@ every PR and `main` push (no publish, no secrets) — the same gate the release 
 
 ## Building & locally installing the npm package
 
-The publishable `loom` package is **assembled**, not the dev root packed directly — the published
+The publishable `loomctl` package is **assembled**, not the dev root packed directly — the published
 shape differs from the monorepo (clean deps, a generated `package.json`, the private `@loom/*` built
 output bundled in). One command does it:
 
 ```sh
-pnpm pack:npm        # → loom-X.Y.Z.tgz at the repo root
+pnpm pack:npm        # → loomctl-X.Y.Z.tgz at the repo root
 ```
 
 `scripts/build-npm-package.mjs` builds the workspace, then assembles `dist-npm/` and runs `npm pack`:
@@ -109,7 +110,7 @@ pnpm pack:npm        # → loom-X.Y.Z.tgz at the repo root
 | `assets/` | `packages/daemon/assets` | the daemon reads `hook-relay.mjs` / `vault-lint.mjs` / bundled skills LIVE from here |
 | `node_modules/@loom/shared/` | `packages/shared/dist` | `@loom/shared` is private (not on npm) → shipped as a **`bundledDependency`** |
 | `bin/loom.mjs` | repo `bin/` | the `loom` command: boots the daemon, waits for `/api/version`, opens the browser |
-| `package.json` | generated; `version` = root `package.json` | `name:"loom"` above the daemon satisfies Part 3's `loomVersion()` walk-up — `GET /api/version` returns the real version |
+| `package.json` | generated; `name:"loomctl"`, `version` = root `package.json` | a `name:"loom"` (monorepo) OR `name:"loomctl"` (packaged) package.json above the daemon satisfies Part 3's `loomVersion()` walk-up — `GET /api/version` returns the real version |
 
 Native deps (`better-sqlite3`, `node-pty`) and the runtime-resolved `@playwright/mcp` stay **real
 `dependencies`**, so a plain `npm install` fetches their prebuilt binaries. **pnpm is a contributor
@@ -119,9 +120,9 @@ tool only** — end users need just Node 22+.
 
 ```sh
 mkdir /tmp/loom-test && cd /tmp/loom-test && npm init -y
-npm install /path/to/loom-X.Y.Z.tgz
+npm install /path/to/loomctl-X.Y.Z.tgz
 # isolate state so the smoke test never touches the real ~/.loom or a running :4317 daemon:
-LOOM_HOME=$PWD/.home npx loom --no-open --port 4399
+LOOM_HOME=$PWD/.home npx loomctl --no-open --port 4399
 curl -s http://127.0.0.1:4399/api/version     # → {"version":"X.Y.Z"}  (the real installed version)
 ```
 
@@ -130,12 +131,12 @@ curl -s http://127.0.0.1:4399/api/version     # → {"version":"X.Y.Z"}  (the re
 
 ## Owner publish steps (the irreversible, outward part)
 
-`npm publish` is gated on the owner — it needs npm credentials, the `loom` name, and the
+`npm publish` is gated on the owner — it needs npm credentials, the `loomctl` name, and the
 license/signing decisions below. **A worker/manager never runs it.** One-time + per-release:
 
-1. **Reserve the name.** Confirm `loom` is available/owned on npm (`npm view loom`); claim it while
-   logged in if free. If taken, pick the published name and set it in `scripts/build-npm-package.mjs`
-   (the generated `package.json` `name`) before the first publish.
+1. **Reserve the name.** The published name is `loomctl` (the `loom` name is already taken on npm);
+   it is set in `scripts/build-npm-package.mjs` (the generated `package.json` `name`). Confirm it is
+   available/owned (`npm view loomctl`) and claim it while logged in if free, before the first publish.
 2. **License.** Loom is **MIT**-licensed. The repo ships a `LICENSE` file and `pnpm pack:npm` copies
    it into the tarball and sets `"license": "MIT"` on the generated `package.json`, so this is already
    wired — no per-publish action needed.
@@ -144,7 +145,7 @@ license/signing decisions below. **A worker/manager never runs it.** One-time + 
    the tag):
    ```sh
    pnpm pack:npm
-   npm publish loom-X.Y.Z.tgz --access public        # → the `latest` dist-tag (stable channel)
+   npm publish loomctl-X.Y.Z.tgz --access public     # → the `latest` dist-tag (stable channel)
    ```
 5. **Signing / provenance (optional, recommended).** npm has no app-signing burden (see the research
    doc), but you can add **publish provenance** by running the publish from CI with
@@ -157,17 +158,17 @@ Following the OpenClaw model in the research doc:
 
 - **stable** → the `latest` dist-tag. End users install/update with:
   ```sh
-  npm i -g loom@latest
+  npm i -g loomctl@latest
   ```
 - **beta** → a `beta` dist-tag for pre-releases (`X.Y.Z-beta.N`), published with
-  `npm publish --tag beta` and installed via `npm i -g loom@beta`. A beta publish must **not** move
+  `npm publish --tag beta` and installed via `npm i -g loomctl@beta`. A beta publish must **not** move
   `latest`.
 - Promote a vetted beta to stable by re-tagging instead of re-publishing:
-  `npm dist-tag add loom@X.Y.Z latest`.
+  `npm dist-tag add loomctl@X.Y.Z latest`.
 
 ## Updating an installed Loom
 
-- **CLI:** `npm i -g loom@latest` (or `loom@X.Y.Z` to pin / `loom@beta` for the beta channel).
+- **CLI:** `npm i -g loomctl@latest` (or `loomctl@X.Y.Z` to pin / `loomctl@beta` for the beta channel).
 - A daemon run under the **supervisor** (`pnpm daemon:stable`) adopts new code by exiting with the
   restart sentinel (exit `75`); outside the supervisor, restart `loom` after the install. A
   dep-adding upgrade needs the install to land **before** the restart (see `CLAUDE.md`).

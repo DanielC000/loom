@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Assembles the publishable `loom` npm package into ./dist-npm and (by default) runs `npm pack` to
-// produce loom-<version>.tgz at the repo root. See docs/releasing.md › "Building the npm package".
+// Assembles the publishable `loomctl` npm package into ./dist-npm and (by default) runs `npm pack` to
+// produce loomctl-<version>.tgz at the repo root. See docs/releasing.md › "Building the npm package".
 //
 // Why a staging dir instead of packing the repo root:
 //   - The published shape differs from the dev root (clean deps, no workspace: specs, a generated
@@ -15,7 +15,7 @@
 // Resulting layout (matches Part 1's resolveWebDistDir() and Part 3's loomVersion() walk-up with NO
 // env overrides):
 //   dist-npm/
-//     package.json            name "loom", version = root version (single source of truth)
+//     package.json            name "loomctl", version = root version (single source of truth)
 //     bin/loom.mjs            the CLI bin
 //     dist/                   = packages/daemon/dist  (daemon entry at dist/index.js)
 //     dist/web/               = packages/web/dist     (resolveWebDistDir → <daemon-dist>/web)
@@ -114,7 +114,7 @@ if (fs.existsSync(path.join(repoRoot, "LICENSE"))) {
 const deps = { ...daemonPkg.dependencies };
 delete deps["@loom/shared"];
 const pkg = {
-  name: "loom",
+  name: "loomctl",
   version: rootPkg.version,
   description: rootPkg.description,
   license: rootPkg.license ?? "MIT",
@@ -126,7 +126,7 @@ const pkg = {
   bundledDependencies: ["@loom/shared"],
 };
 fs.writeFileSync(path.join(stage, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
-log(`wrote staging package.json (loom@${pkg.version})`);
+log(`wrote staging package.json (loomctl@${pkg.version})`);
 
 // 6. npm pack → tarball at the repo root (unless --no-pack).
 if (noPack) {
@@ -134,5 +134,5 @@ if (noPack) {
 } else {
   log("npm pack …");
   run("npm", ["pack", "--pack-destination", repoRoot], { cwd: stage });
-  log(`done → ${path.join(repoRoot, `loom-${pkg.version}.tgz`)}`);
+  log(`done → ${path.join(repoRoot, `loomctl-${pkg.version}.tgz`)}`);
 }

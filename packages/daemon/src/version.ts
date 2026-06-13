@@ -5,18 +5,20 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * The SINGLE source of truth for the user-facing Loom version = the published `loom` package's
- * `version` (the umbrella root package.json — internal `@loom/*` packages stay private `0.0.0`).
- * Read at RUNTIME so there is never a second hardcoded copy that can drift from package.json.
+ * The SINGLE source of truth for the user-facing Loom version = the umbrella package's `version`
+ * (the root package.json, name `loom`; published on npm as `loomctl` since the `loom` name is taken —
+ * internal `@loom/*` packages stay private `0.0.0`). Read at RUNTIME so there is never a second
+ * hardcoded copy that can drift from package.json.
  *
  * Resolution — chosen so it works in BOTH forms with no code change (⚠️ Part 2 must preserve this,
  * since the packaged npm form moves where this file lives):
  *   0. `LOOM_VERSION` env — explicit override (highest priority), the escape hatch for any packaging
- *      shape that can't place a `name:"loom"` package.json on the walk-up path.
- *   1. Walk UP from THIS built file looking for the FIRST package.json whose `name === "loom"`, and
- *      return its `version`. This resolves:
+ *      shape that can't place a `name:"loom"`/`"loomctl"` package.json on the walk-up path.
+ *   1. Walk UP from THIS built file looking for the FIRST package.json whose `name` is the umbrella
+ *      package — `"loom"` (monorepo root) OR `"loomctl"` (the published npm name) — and return its
+ *      `version`. This resolves:
  *        - monorepo: dist/version.js → … → repo-root package.json (name "loom", the real version);
- *        - packaged npm form: the published `loom` package's own root package.json sits ABOVE the
+ *        - packaged npm form: the published `loomctl` package's own root package.json sits ABOVE the
  *          bundled daemon, so the same upward walk finds it.
  *   2. Fallback `"0.0.0"` if nothing is found (a dev/dist edge case — never crashes the boot).
  */
@@ -30,7 +32,10 @@ function readLoomVersion(): string {
     try {
       if (fs.existsSync(pkgPath)) {
         const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { name?: string; version?: string };
-        if (pkg.name === "loom" && typeof pkg.version === "string") return pkg.version;
+        // Accept BOTH the monorepo umbrella name ("loom", the root package.json) AND the published
+        // npm name ("loomctl" — the `loom` name was taken). In the packaged form the GENERATED
+        // package.json (named "loomctl") sits above the bundled daemon and is what this walk-up finds.
+        if ((pkg.name === "loom" || pkg.name === "loomctl") && typeof pkg.version === "string") return pkg.version;
       }
     } catch { /* skip an unreadable/malformed package.json and keep walking up */ }
     const parent = path.dirname(dir);

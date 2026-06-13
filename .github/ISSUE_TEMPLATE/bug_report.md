@@ -27,7 +27,7 @@ What you expected to happen instead.
 - Loom version (`loom --version` or the header chip):
 - OS + version:
 - Node version (`node --version`):
-- Install method (built from source / `npm i -g loom` / tarball):
+- Install method (built from source / `npm i -g loomctl` / tarball):
 
 ## Logs / context
 
