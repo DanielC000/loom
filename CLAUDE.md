@@ -14,7 +14,6 @@ tasks into one fabric. Clean-slate successor to Jinn.
   the Fastify HTTP/WS gateway (`gateway/`), the project-scoped task MCP server (`mcp/`),
   read-only git (`git/`), and the vault auto-committer (`vault/`).
 - `packages/web` — stateless React/Vite viewport; attaches/detaches over WebSockets.
-- `spike/` — throwaway de-risking spike (all assumptions validated 2026-05-26). Reference only.
 
 ## Run
 ```sh

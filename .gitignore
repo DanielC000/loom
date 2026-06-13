@@ -9,9 +9,5 @@ dist/
 dist-npm/
 *.tgz
 
-# spike has its own ignores; keep its source but not its artifacts
-spike/node_modules/
-spike/tmp/
-spike/logs/
-spike/sandbox/
-spike/package-lock.json
+# Playwright-MCP artifact dir that appears at the repo root
+.playwright-mcp/

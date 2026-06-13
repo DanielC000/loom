@@ -14,5 +14,9 @@ pnpm daemon   # http://127.0.0.1:4317
 pnpm web      # http://127.0.0.1:5317
 ```
 
+## Layout
+- `packages/shared` — the shared contract: types, config resolution, and the ws/REST protocol.
+- `packages/daemon` — owns everything durable: SQLite, the PTY host, the HTTP/WS gateway, the task MCP server, git, and the vault auto-committer.
+- `packages/web` — stateless React/Vite viewport that attaches/detaches over WebSockets.
+
 See `CLAUDE.md` for architecture, the validated spawn recipe, and load-bearing invariants.
-The `spike/` folder is the throwaway de-risking prototype (kept for reference).
