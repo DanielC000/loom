@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" role="img" aria-label="Loom mark">
+  <title>Loom</title>
+  <!-- Plain-weave glyph: 2 warp + 2 weft threads, interlaced over/under. Brand mark.
+       Phosphor green on transparent — square / favicon-safe. Source of truth:
+       packages/web/src/components/Logo.tsx (LogoMark). -->
+  <g stroke="#2ee66e" stroke-width="2.4" stroke-linecap="round">
+    <path d="M8 4 V13.2 M8 18.8 V20"/>
+    <path d="M16 4 V5.2 M16 10.8 V20"/>
+    <path d="M4 8 H5.2 M10.8 8 H20"/>
+    <path d="M4 16 H13.2 M18.8 16 H20"/>
+  </g>
+</svg>
