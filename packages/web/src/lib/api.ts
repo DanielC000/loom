@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt } from "@loom/shared";
+import type { Project, Agent, AgentId, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
@@ -310,4 +310,14 @@ export const api = {
   updatePresetPrompt: (id: string, patch: { label?: string; prompt?: string; position?: number }) =>
     putErr<PresetPrompt>(`/api/preset-prompts/${id}`, patch),
   deletePresetPrompt: (id: string) => del<{ ok: boolean }>(`/api/preset-prompts/${id}`),
+
+  // --- Preset-prompt SUGGESTIONS (the "Suggested from your usage" surface — pending candidates the
+  // Platform Auditor proposed, mirroring presetPrompts). list returns the PENDING rows (the server
+  // filters to status=pending), ordered by position. adopt mints a real PresetPrompt from the
+  // suggestion's label+prompt (201) and drops it off pending; dismiss drops it (200). Both surface the
+  // server's `{ error }` body via *Err — a 409 (already adopted/dismissed: stale list / double-click)
+  // carries a reason the UI shows verbatim before it refetches. There is NO MCP path (human/UI data). ---
+  presetPromptSuggestions: () => get<PresetPromptSuggestion[]>("/api/preset-prompt-suggestions"),
+  adoptPresetPromptSuggestion: (id: string) => postErr<PresetPrompt>(`/api/preset-prompt-suggestions/${id}/adopt`),
+  dismissPresetPromptSuggestion: (id: string) => postErr<{ ok: boolean }>(`/api/preset-prompt-suggestions/${id}/dismiss`),
 };

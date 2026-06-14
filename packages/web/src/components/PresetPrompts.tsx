@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { PresetPrompt } from "@loom/shared";
+import type { PresetPrompt, PresetPromptSuggestion } from "@loom/shared";
 import { api } from "../lib/api";
 import { Button, SectionLabel } from "./ui";
 import { color, font, radius } from "../theme";
@@ -13,6 +13,7 @@ import { useDismissable } from "../lib/useDismissable";
 // INLINE here (add / edit / delete via the /api/preset-prompts CRUD). Human/UI data only — no MCP path.
 
 const PRESETS_KEY = ["presetPrompts"] as const;
+const SUGGESTIONS_KEY = ["presetPromptSuggestions"] as const;
 
 export function PresetPromptsButton({ sessionId }: { sessionId: string }) {
   const [open, setOpen] = useState(false);
@@ -69,6 +70,89 @@ function PresetPopover({ sessionId, onClose }: { sessionId: string; onClose: () 
             onSend={() => { setSendErr(null); send.mutate(p); }} onEdit={() => setEditing(p.id)} />)}
 
       {editing === "new" && <PresetForm onDone={() => setEditing(null)} />}
+
+      <SuggestionsSection />
+    </div>
+  );
+}
+
+// "Suggested from your usage" — pending preset candidates the Platform Auditor proposed from recurring
+// prompts. Renders NOTHING unless there's at least one pending suggestion (no empty placeholder, no
+// divider) so it stays invisible until it has something to offer. Adopt mints a real preset (appears in
+// the list above immediately — we invalidate BOTH the shared presets query and this one); Dismiss just
+// drops it. A 409 (already adopted/dismissed elsewhere — stale list / double-click) refetches + shows a
+// quiet inline note instead of crashing. Buttons disable while their row's mutation is in flight.
+function SuggestionsSection() {
+  const suggestions = useQuery({ queryKey: SUGGESTIONS_KEY, queryFn: () => api.presetPromptSuggestions() });
+  const list = [...(suggestions.data ?? [])].sort((a, b) => a.position - b.position);
+  if (list.length === 0) return null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4, paddingTop: 8,
+      borderTop: `1px solid ${color.border}` }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span aria-hidden style={{ width: 6, height: 6, borderRadius: "50%", background: color.cyan, flex: "0 0 auto" }} />
+        <SectionLabel style={{ margin: 0 }}>Suggested from your usage</SectionLabel>
+      </div>
+      {list.map((s) => <SuggestionRow key={s.id} suggestion={s} />)}
+    </div>
+  );
+}
+
+function SuggestionRow({ suggestion }: { suggestion: PresetPromptSuggestion }) {
+  const qc = useQueryClient();
+  const [err, setErr] = useState<string | null>(null);
+
+  // On a 409 the row is stale (adopted/dismissed elsewhere) — refetch so it drops off the list, and show
+  // the server's reason quietly. Other errors keep the row and surface the message.
+  const onError = (e: unknown) => {
+    setErr(e instanceof Error ? e.message : "Something went wrong.");
+    qc.invalidateQueries({ queryKey: SUGGESTIONS_KEY });
+  };
+
+  // meta.inlineError opts out of main.tsx's global blocking alert — we render our own quiet inline
+  // message instead (the 409 path must NOT pop a modal that wedges the flow).
+  const adopt = useMutation({
+    mutationFn: () => api.adoptPresetPromptSuggestion(suggestion.id),
+    onSuccess: () => {
+      // The new preset appears in the list above; this suggestion leaves pending. Refresh both.
+      qc.invalidateQueries({ queryKey: PRESETS_KEY });
+      qc.invalidateQueries({ queryKey: SUGGESTIONS_KEY });
+    },
+    onError,
+    meta: { inlineError: true },
+  });
+  const dismiss = useMutation({
+    mutationFn: () => api.dismissPresetPromptSuggestion(suggestion.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: SUGGESTIONS_KEY }),
+    onError,
+    meta: { inlineError: true },
+  });
+  const busy = adopt.isPending || dismiss.isPending;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 5, border: `1px solid ${color.border}`,
+      borderRadius: radius.sm, padding: 8, background: color.panel2 }}>
+      <span style={{ fontFamily: font.mono, fontSize: 12, fontWeight: 600, color: color.text }}>
+        {suggestion.label}
+      </span>
+      <span title={suggestion.prompt}
+        style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, lineHeight: 1.4,
+          display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+        {suggestion.prompt}
+      </span>
+      {suggestion.rationale && (
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.cyan, lineHeight: 1.4 }}>
+          {suggestion.rationale}
+        </span>
+      )}
+      {err && <Muted tone="red">{err}</Muted>}
+      <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+        <Button variant="ghost" style={{ padding: "2px 10px" }} disabled={busy}
+          onClick={() => { setErr(null); dismiss.mutate(); }}>Dismiss</Button>
+        <Button variant="primary" style={{ padding: "2px 10px" }} disabled={busy}
+          onClick={() => { setErr(null); adopt.mutate(); }}>Adopt</Button>
+      </div>
     </div>
   );
 }
