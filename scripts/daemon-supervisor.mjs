@@ -27,9 +27,11 @@ function sh(command, cwd, extraEnv) {
 }
 
 for (;;) {
-  // Build shared + daemon (turbo ^build handles the shared dependency). FULL TURBO no-ops when nothing
-  // changed, so the tool-triggered restart (which already built) relaunches fast.
-  const buildCode = sh("pnpm exec turbo build --filter=@loom/daemon", repoRoot);
+  // Build shared + daemon + web (turbo ^build handles the shared dependency). Web is included because
+  // the daemon serves the UI statically from packages/web/dist — a fresh boot must build it too, or the
+  // served bundle goes stale. FULL TURBO no-ops when nothing changed, so the tool-triggered restart
+  // (which already built) relaunches fast.
+  const buildCode = sh("pnpm exec turbo build --filter=@loom/daemon --filter=@loom/web", repoRoot);
   if (buildCode !== 0) {
     console.error(`[supervisor] daemon build failed (exit ${buildCode}) — NOT starting a broken daemon.`);
     process.exit(buildCode);

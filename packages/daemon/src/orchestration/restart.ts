@@ -158,7 +158,10 @@ export function buildDaemon(): Promise<{ code: number; tail: string }> {
     // `--force` bypasses turbo's cache so a deploy ALWAYS does a real compile. Without it, a content-
     // keyed cache HIT replays a prior build's logs (we saw it replay a *worker worktree's* build) and
     // restores a possibly-stale `dist` — the "ships old code / incomplete dist" half of 51522f05.
-    const args = [turboBin(), "build", "--filter=@loom/daemon", "--force"];
+    // Build BOTH @loom/daemon AND @loom/web: the daemon serves the web bundle statically from
+    // packages/web/dist, so a deploy that only rebuilt the daemon left the SERVED UI stale (a merged
+    // web change never went live). The second filter rebuilds web in the same pass.
+    const args = [turboBin(), "build", "--filter=@loom/daemon", "--filter=@loom/web", "--force"];
     const cmdStr = `${process.execPath} ${args.join(" ")}`;
     let out = "";
     const cap = (b: Buffer) => { out += b.toString(); if (out.length > 8000) out = out.slice(-8000); };
