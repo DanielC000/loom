@@ -170,7 +170,8 @@ function PresetRow({ preset, onSend, sending, onEdit }: {
       <button type="button" onClick={onSend} disabled={sending || del.isPending} title={preset.prompt}
         className="loom-btn loom-btn-default"
         style={{ flex: 1, minWidth: 0, textAlign: "left", color: color.text, fontFamily: font.mono,
-          fontSize: 12, padding: "5px 8px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          fontSize: 12, padding: "5px 8px", border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {preset.label}
       </button>
       <IconButton label={`Edit ${preset.label}`} onClick={onEdit} disabled={del.isPending}>✎</IconButton>
@@ -194,6 +195,9 @@ function PresetForm({ preset, onDone }: { preset?: PresetPrompt; onDone: () => v
       : api.createPresetPrompt({ label: label.trim(), prompt }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: PRESETS_KEY }); onDone(); },
     onError: (e) => setErr(e instanceof Error ? e.message : "Couldn't save the preset."),
+    // We render the error inline via <Muted tone="red"> below — opt out of main.tsx's global
+    // blocking alert so a save validation error shows once (inline), not twice (inline + modal).
+    meta: { inlineError: true },
   });
   const canSave = label.trim().length > 0 && prompt.trim().length > 0 && !save.isPending;
 
@@ -250,7 +254,7 @@ function IconButton({ label, onClick, disabled, danger, children }: {
   return (
     <button type="button" aria-label={label} title={label} onClick={onClick} disabled={disabled}
       className={`loom-btn loom-btn-${danger ? "danger" : "ghost"}`}
-      style={{ padding: "0 7px", fontFamily: font.mono, fontSize: 13, lineHeight: 1,
+      style={{ padding: "0 7px", fontFamily: font.mono, fontSize: 13, lineHeight: 1, borderRadius: radius.base,
         color: danger ? color.red : color.textDim }}>
       {children}
     </button>

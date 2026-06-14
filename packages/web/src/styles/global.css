@@ -91,7 +91,15 @@ body {
 /* ── Component-kit interaction states (see components/ui) ─────────────────────── */
 
 /* Button: primary fills on hover; danger tints; default brightens its border. */
+/* Safe base so a RAW `loom-btn` (set color but no background) matches the Button component
+   instead of falling back to the UA's light button chrome — there is no `color-scheme: dark`,
+   so an unstyled <button> renders a light grey bevel that buries light text. Transparent
+   background + transparent border neutralizes both; the Button component and any caller that
+   sets its own background/border/color inline still wins (inline > class). */
 .loom-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: inherit;
   transition:
     background 80ms linear,
     border-color 80ms linear,
