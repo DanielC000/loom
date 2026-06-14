@@ -32,16 +32,35 @@ const trusted = (cfgPath, key) => {
 const root = path.join(os.tmpdir(), `loom-trust-lock-test-${Date.now()}`);
 fs.mkdirSync(root, { recursive: true });
 
-const realJson = path.join(os.homedir(), ".claude.json");
-const realBefore = fs.existsSync(realJson) ? fs.readFileSync(realJson) : null;
+// Hermetic from the user's REAL home for the whole test. ensureTrusted (and
+// discoverProjectMcpServerNames) resolve paths via os.homedir(), which on every platform honors
+// $USERPROFILE (Windows) / $HOME (POSIX) at call time. Point both at an isolated, empty fake-home so:
+//   (1) the "never touched the real config" guard below probes an ISOLATED file that no external
+//       process writes. The real ~/.claude.json is continuously rewritten by any live `claude` — and
+//       this is a self-hosting repo, so the daemon's manager + sibling workers ARE live `claude`
+//       processes during the suite. That ambient rewrite is what made the byte-compare flake "only
+//       under the full suite" (a longer/loaded run widens the window for an ambient write to land).
+//   (2) discoverProjectMcpServerNames is deterministic — no ambient ~/.mcp.json — so what section (a)
+//       exercises no longer silently depends on the dev machine's home contents.
+// The guard keeps its protective value: a regression that wrote to $HOME instead of the isolated
+// CLAUDE_CONFIG_DIR would land in fake-home and still trip the byte-compare.
+const fakeHome = path.join(root, "fake-home");
+fs.mkdirSync(fakeHome, { recursive: true });
 
 const savedCfg = process.env.CLAUDE_CONFIG_DIR;
 const savedLockMs = process.env.LOOM_TRUST_LOCK_MS;
+const savedHome = process.env.HOME;
+const savedUserProfile = process.env.USERPROFILE;
+process.env.HOME = fakeHome;
+process.env.USERPROFILE = fakeHome;
 const restoreEnv = () => {
-  for (const [k, v] of [["CLAUDE_CONFIG_DIR", savedCfg], ["LOOM_TRUST_LOCK_MS", savedLockMs]]) {
+  for (const [k, v] of [["CLAUDE_CONFIG_DIR", savedCfg], ["LOOM_TRUST_LOCK_MS", savedLockMs], ["HOME", savedHome], ["USERPROFILE", savedUserProfile]]) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
 };
+
+const realJson = path.join(os.homedir(), ".claude.json");
+const realBefore = fs.existsSync(realJson) ? fs.readFileSync(realJson) : null;
 
 const run = (configDir, dir, startAt, env) =>
   new Promise((resolve) => {

@@ -24,7 +24,23 @@ export function writeJsonAtomic(filePath: string, value: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.${process.pid}.${randomUUID()}.loom.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
-  fs.renameSync(tmp, filePath);
+  // On Windows, rename onto an EXISTING target can transiently throw EPERM/EACCES/EBUSY when another
+  // process holds a handle on it — exactly the lock-free fast-path readers of .claude.json during
+  // concurrent spawns (ensureTrusted's fast-path readCfg runs OUTSIDE the trust lock by design), or an
+  // AV/indexer mid-scan. POSIX rename(2) has no such issue. The handle is released in milliseconds, so
+  // retry with a short bounded backoff; rethrow once it persists (a genuine permission error still
+  // surfaces), cleaning up the temp file so a terminal failure leaves nothing behind.
+  for (let attempt = 0; ; attempt++) {
+    try { fs.renameSync(tmp, filePath); return; }
+    catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? "";
+      if (attempt >= 12 || !(code === "EPERM" || code === "EACCES" || code === "EBUSY")) {
+        try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort cleanup */ }
+        throw err;
+      }
+      sleepSync(Math.min(50, 2 ** attempt)); // 1,2,4,8,16,32,50,50,… ms — worst case well under 1s
+    }
+  }
 }
 
 type ClaudeCfg = { projects?: Record<string, Record<string, unknown>> };
