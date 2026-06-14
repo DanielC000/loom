@@ -27,14 +27,24 @@ function sh(command, cwd, extraEnv) {
 }
 
 for (;;) {
-  // Build shared + daemon + web (turbo ^build handles the shared dependency). Web is included because
-  // the daemon serves the UI statically from packages/web/dist — a fresh boot must build it too, or the
-  // served bundle goes stale. FULL TURBO no-ops when nothing changed, so the tool-triggered restart
-  // (which already built) relaunches fast.
-  const buildCode = sh("pnpm exec turbo build --filter=@loom/daemon --filter=@loom/web", repoRoot);
+  // Build in two steps so a failure has the right blast radius. FULL TURBO no-ops when nothing
+  // changed, so the tool-triggered restart (which already built) relaunches fast.
+  //
+  // 1) shared + daemon (turbo ^build handles the shared dependency) — FATAL on failure: never start
+  //    a broken daemon.
+  const buildCode = sh("pnpm exec turbo build --filter=@loom/daemon", repoRoot);
   if (buildCode !== 0) {
     console.error(`[supervisor] daemon build failed (exit ${buildCode}) — NOT starting a broken daemon.`);
     process.exit(buildCode);
+  }
+  // 2) web — the daemon serves the UI statically from packages/web/dist, so a fresh boot rebuilds it
+  //    to avoid serving a stale bundle. But a web build failure is NON-FATAL: the gateway boots fine on
+  //    a missing/stale dist (server.ts logs + skips static), so a BAD web build must not block the WHOLE
+  //    daemon boot (all-project orchestration). Log loudly and boot on the previous dist. Turbo/vite
+  //    does not wipe dist on a failed build, so the prior good bundle survives.
+  const webBuildCode = sh("pnpm exec turbo build --filter=@loom/web", repoRoot);
+  if (webBuildCode !== 0) {
+    console.error("[supervisor] WARNING: web build failed — booting with the previous packages/web/dist (UI may be stale)");
   }
   // LOOM_SUPERVISED tells the daemon a supervisor is present, so `daemon_restart` is allowed (without
   // it the manager would kill the daemon with nothing to bring it back).
