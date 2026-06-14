@@ -41,6 +41,7 @@ const isTaskPriority = (v: unknown): v is Task["priority"] => v === "p0" || v ==
 /** Bounds for the Preset Prompts REST surface (label = short button text; prompt = the text to send). */
 const PRESET_LABEL_MAX = 200;
 const PRESET_PROMPT_MAX = 10_000;
+const PRESET_RATIONALE_MAX = 2_000;
 /** Validate a preset string field: must be a non-blank string within its bound. Returns an error
  *  message (for a 400) or null when valid. */
 const validatePresetField = (name: string, v: unknown, max: number): string | null => {
@@ -264,6 +265,44 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.delete("/api/preset-prompts/:id", async (req) => {
     deps.db.deletePresetPrompt((req.params as { id: string }).id);
+    return { ok: true };
+  });
+
+  // --- Preset Prompt SUGGESTIONS (the "Suggested from your usage" store): candidate presets proposed by
+  // the Platform Auditor (via the role-gated preset_suggestion_suggest MCP tool) or the human/UI, awaiting
+  // an in-app Adopt/Dismiss. GET lists PENDING only. POST is a DEDUPE-GUARDED upsert (here for
+  // completeness/testability — the real producer is the Auditor's narrow MCP tool); a prompt already
+  // present as a preset OR any-status suggestion is a no-op ({deduped:true}). Adopt mints a real preset
+  // from the suggestion; dismiss marks it dismissed (404 on a missing id). Like preset-prompts: plain
+  // human/UI data, ordered by position. ---
+  app.get("/api/preset-prompt-suggestions", async () => deps.db.listPresetPromptSuggestions());
+  app.post("/api/preset-prompt-suggestions", async (req, reply) => {
+    const b = (req.body ?? {}) as { label?: unknown; prompt?: unknown; rationale?: unknown };
+    const err = validatePresetField("label", b.label, PRESET_LABEL_MAX) ?? validatePresetField("prompt", b.prompt, PRESET_PROMPT_MAX);
+    if (err) return reply.code(400).send({ error: err });
+    if (b.rationale !== undefined && b.rationale !== null) {
+      if (typeof b.rationale !== "string") return reply.code(400).send({ error: "rationale must be a string" });
+      if (b.rationale.length > PRESET_RATIONALE_MAX) return reply.code(400).send({ error: `rationale must be at most ${PRESET_RATIONALE_MAX} characters` });
+    }
+    const rationale = typeof b.rationale === "string" ? b.rationale.trim() : null;
+    const res = deps.db.suggestPresetPrompt({ label: (b.label as string).trim(), prompt: b.prompt as string, rationale });
+    if (res.deduped) return reply.code(200).send({ deduped: true, reason: res.reason });
+    return reply.code(201).send(res.suggestion);
+  });
+  app.post("/api/preset-prompt-suggestions/:id/adopt", async (req, reply) => {
+    // missing id → 404; an already-adopted/dismissed id throws → 409 Conflict (stale list / double-click).
+    let created;
+    try { created = deps.db.adoptPresetPromptSuggestion((req.params as { id: string }).id); }
+    catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
+    if (!created) return reply.code(404).send({ error: "preset prompt suggestion not found" });
+    return reply.code(201).send(created);
+  });
+  app.post("/api/preset-prompt-suggestions/:id/dismiss", async (req, reply) => {
+    // missing id → 404; an already-adopted/dismissed id throws → 409 Conflict (stale list / double-click).
+    let ok;
+    try { ok = deps.db.dismissPresetPromptSuggestion((req.params as { id: string }).id); }
+    catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
+    if (!ok) return reply.code(404).send({ error: "preset prompt suggestion not found" });
     return { ok: true };
   });
 

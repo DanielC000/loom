@@ -443,6 +443,27 @@ export interface PresetPrompt {
 }
 
 /**
+ * A SUGGESTED preset prompt — the "Suggested from your usage" feature. The Platform Auditor (and the
+ * human/UI for completeness) proposes a candidate preset (`label` + `prompt`, plus a `rationale` for
+ * WHY it was suggested, surfaced in the UI). GLOBAL / daemon-wide, mirroring `PresetPrompt`: a single
+ * shared list, NO project/session scoping. Lifecycle: `pending` → `adopted` | `dismissed`. Adopting
+ * mints a real `PresetPrompt` from the suggestion's label+prompt; adopted/dismissed rows are KEPT to
+ * back the dedupe ("no re-nag"). The write path is dedupe-guarded so a hostile transcript can't spam:
+ * a suggestion whose normalized (trimmed) prompt already matches an existing preset OR any existing
+ * suggestion (in any status) is a no-op.
+ */
+export interface PresetPromptSuggestion {
+  id: string;
+  label: string;   // short button text (the adopted preset's label)
+  prompt: string;  // the prompt text the adopted preset would send
+  rationale: string | null; // WHY it was suggested (for the UI); nullable
+  status: "pending" | "adopted" | "dismissed";
+  position: number; // ascending order (append = max+1)
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
  * A cron-triggered schedule (phase-2 Pillar B). On its minute boundary the daemon Scheduler
  * boots a manager session in `agentId` (the agent's startupPrompt is the kickoff), which then
  * runs the Pillar-A loop. `nextFireAt` is recomputed on create/update and after each fire.

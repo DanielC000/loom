@@ -146,10 +146,11 @@ try {
   await client.connect(clientT);
   const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
 
-  // Surface: EXACTLY the three read+file tools — and NONE of the elevated/structural ones.
+  // Surface: EXACTLY the read tools + the TWO inert daemon-local writes (audit_file_finding +
+  // preset_suggestion_suggest) — and NONE of the elevated/structural ones.
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-  check(`(b) audit surface is EXACTLY [audit_file_finding, list_sessions, transcript_read] (got: ${tools.join(",")})`,
-    JSON.stringify(tools) === JSON.stringify(["audit_file_finding", "list_sessions", "transcript_read"]));
+  check(`(b) audit surface is EXACTLY [audit_file_finding, list_sessions, preset_suggestion_suggest, transcript_read] (got: ${tools.join(",")})`,
+    JSON.stringify(tools) === JSON.stringify(["audit_file_finding", "list_sessions", "preset_suggestion_suggest", "transcript_read"]));
   const forbidden = ["git_push", "git_commit", "vault_write", "project_configure", "session_spawn", "session_message", "session_stop", "worker_spawn"];
   check("(b) audit surface has NONE of the elevated/structural tools (no git/vault/config/spawn/message)",
     forbidden.every((t) => !tools.includes(t)));

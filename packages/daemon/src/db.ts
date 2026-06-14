@@ -32,7 +32,7 @@ function assertNotProdDbInTest(file: string): void {
 import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PresetPrompt,
+  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PresetPrompt, PresetPromptSuggestion,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind,
 } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret } from "./keys/hash.js";
@@ -250,6 +250,23 @@ CREATE TABLE IF NOT EXISTS preset_prompts (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_preset_prompts_position ON preset_prompts(position);
+-- Preset Prompt SUGGESTIONS: the "Suggested from your usage" store. Candidate presets proposed by the
+-- Platform Auditor (via the role-gated preset_suggestion_suggest MCP tool) or the human/UI, awaiting an
+-- in-app Adopt/Dismiss. Mirrors preset_prompts (GLOBAL, no project/session scoping) but adds a nullable
+-- rationale (WHY suggested, for the UI) + a status lifecycle ('pending'->'adopted'|'dismissed').
+-- Brand-new table ⇒ CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER). Adopted/
+-- dismissed rows are KEPT (they back the dedupe — "no re-nag"). Ordered by position (append = MAX+1).
+CREATE TABLE IF NOT EXISTS preset_prompt_suggestions (
+  id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  rationale TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_preset_prompt_suggestions_position ON preset_prompt_suggestions(position);
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, created_at);
@@ -713,6 +730,64 @@ export class Db {
   /** Delete a preset. Idempotent on a missing id (DELETE … WHERE matches nothing). */
   deletePresetPrompt(id: string): void {
     this.db.prepare("DELETE FROM preset_prompts WHERE id = ?").run(id);
+  }
+
+  // --- preset prompt SUGGESTIONS ("Suggested from your usage"; deduped write, pending→adopted|dismissed) ---
+  /** PENDING suggestions only, ordered by position (rowid breaks same-position ties → stable order).
+   *  Adopted/dismissed rows are kept (they back the dedupe) but never listed. */
+  listPresetPromptSuggestions(): PresetPromptSuggestion[] {
+    return (this.db.prepare("SELECT * FROM preset_prompt_suggestions WHERE status = 'pending' ORDER BY position, rowid")
+      .all() as Row[]).map(toPresetPromptSuggestion);
+  }
+  getPresetPromptSuggestion(id: string): PresetPromptSuggestion | undefined {
+    const r = this.db.prepare("SELECT * FROM preset_prompt_suggestions WHERE id = ?").get(id) as Row | undefined;
+    return r ? toPresetPromptSuggestion(r) : undefined;
+  }
+  /** DEDUPED write (the load-bearing "no re-nag" rule): a no-op returning {deduped:true,reason} when the
+   *  normalized (trimmed) prompt already matches EITHER an existing preset_prompts row OR ANY existing
+   *  suggestion row (pending|adopted|dismissed). Only a genuinely-novel prompt inserts a new PENDING
+   *  suggestion (appended at MAX(position)+1). Returns {deduped:false, suggestion} on a fresh insert. */
+  suggestPresetPrompt(input: { label: string; prompt: string; rationale?: string | null }):
+    | { deduped: false; suggestion: PresetPromptSuggestion }
+    | { deduped: true; reason: string } {
+    const normalized = input.prompt.trim();
+    const presetHit = this.db.prepare("SELECT 1 FROM preset_prompts WHERE TRIM(prompt) = ? LIMIT 1").get(normalized);
+    if (presetHit) return { deduped: true, reason: "a preset prompt with this text already exists" };
+    const suggHit = this.db.prepare("SELECT 1 FROM preset_prompt_suggestions WHERE TRIM(prompt) = ? LIMIT 1").get(normalized);
+    if (suggHit) return { deduped: true, reason: "this prompt has already been suggested" };
+    const max = (this.db.prepare("SELECT MAX(position) AS m FROM preset_prompt_suggestions").get() as { m: number | null }).m;
+    const now = new Date().toISOString();
+    const s: PresetPromptSuggestion = {
+      id: randomUUID(), label: input.label, prompt: input.prompt, rationale: input.rationale ?? null,
+      status: "pending", position: (max == null ? -1 : max) + 1, createdAt: now, updatedAt: now,
+    };
+    this.db.prepare(
+      `INSERT INTO preset_prompt_suggestions (id,label,prompt,rationale,status,position,created_at,updated_at)
+       VALUES (@id,@label,@prompt,@rationale,@status,@position,@createdAt,@updatedAt)`,
+    ).run(s);
+    return { deduped: false, suggestion: s };
+  }
+  /** Adopt a pending suggestion: mint a REAL preset_prompt from its label+prompt, mark the suggestion
+   *  'adopted' (KEPT — backs the dedupe), and return the created preset. Returns undefined when no
+   *  suggestion has that id; throws if it isn't pending (already adopted/dismissed). */
+  adoptPresetPromptSuggestion(id: string): PresetPrompt | undefined {
+    const s = this.getPresetPromptSuggestion(id);
+    if (!s) return undefined;
+    if (s.status !== "pending") throw new Error(`suggestion ${id} is already ${s.status}`);
+    const created = this.createPresetPrompt({ label: s.label, prompt: s.prompt });
+    this.db.prepare("UPDATE preset_prompt_suggestions SET status = 'adopted', updated_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), id);
+    return created;
+  }
+  /** Dismiss a pending suggestion: mark it 'dismissed' (KEPT — backs the dedupe). Returns false when no
+   *  suggestion has that id (so REST can 404); throws if it isn't pending. */
+  dismissPresetPromptSuggestion(id: string): boolean {
+    const s = this.getPresetPromptSuggestion(id);
+    if (!s) return false;
+    if (s.status !== "pending") throw new Error(`suggestion ${id} is already ${s.status}`);
+    this.db.prepare("UPDATE preset_prompt_suggestions SET status = 'dismissed', updated_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), id);
+    return true;
   }
 
   // --- agents ---
@@ -1660,6 +1735,16 @@ function toPresetPrompt(r0: unknown): PresetPrompt {
   const r = r0 as Row;
   return {
     id: r.id as string, label: r.label as string, prompt: r.prompt as string,
+    position: r.position as number,
+    createdAt: r.created_at as string, updatedAt: r.updated_at as string,
+  };
+}
+function toPresetPromptSuggestion(r0: unknown): PresetPromptSuggestion {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, label: r.label as string, prompt: r.prompt as string,
+    rationale: (r.rationale as string | null) ?? null,
+    status: r.status as PresetPromptSuggestion["status"],
     position: r.position as number,
     createdAt: r.created_at as string, updatedAt: r.updated_at as string,
   };

@@ -16,11 +16,16 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * ╔═ TRUST BOUNDARY — the load-bearing P5 security goal ═══════════════════════════════════════════════╗
  * ║ The Auditor ingests UNTRUSTED transcript content (a prompt-injection surface: "ignore your          ║
  * ║ instructions and push to …"). This router is gated to role==="auditor" ONLY and exposes NOTHING but ║
- * ║ cross-project transcript READS + filing a structured finding onto the reserved Platform board.      ║
- * ║ There is NO git/vault/config/spawn/message tool here. An auditor session ALSO 404s on the Lead's    ║
- * ║ elevated /mcp-platform (PlatformMcpRouter.resolveRole gates role==="platform") AND on /mcp-orch      ║
- * ║ (OrchestrationMcpRouter.resolveRole gates manager|worker) — so a hostile transcript can never turn  ║
- * ║ an audit into an outward/destructive action. Do NOT add any write/host/outward tool to this server. ║
+ * ║ cross-project transcript READS + TWO NARROW DAEMON-LOCAL WRITES:                                     ║
+ * ║   1. audit_file_finding   → a structured task onto the reserved Platform board (the triage inbox).  ║
+ * ║   2. preset_suggestion_suggest → a candidate preset onto the daemon-local SUGGESTIONS store.        ║
+ * ║ BOTH writes are inert + dedupe-guarded: they hit only daemon-local SQLite (a board task / a         ║
+ * ║ suggestion row), never git/vault/config/spawn/message/host/outward, and a hostile transcript can    ║
+ * ║ neither escape the box nor spam it (re-filing/re-suggesting an existing entry is a no-op). An        ║
+ * ║ auditor session ALSO 404s on the Lead's elevated /mcp-platform (PlatformMcpRouter.resolveRole gates ║
+ * ║ role==="platform") AND on /mcp-orch (OrchestrationMcpRouter.resolveRole gates manager|worker) — so  ║
+ * ║ a hostile transcript can never turn an audit into an outward/destructive action. Do NOT add any     ║
+ * ║ write/host/outward tool to this server beyond these two inert, dedupe-guarded daemon-local writes.  ║
  * ╚════════════════════════════════════════════════════════════════════════════════════════════════════╝
  *
  * Mirrors PlatformMcpRouter exactly: keyed by the URL-path session id, resolved SERVER-SIDE, role-gated
@@ -28,8 +33,9 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * transport can be wedged by a dropped stream.
  */
 export class AuditMcpRouter {
-  // `sessions` drives audit_file_finding (the ONE write — a structured task onto the reserved Platform
-  // board, hardcoded server-side). `import type` keeps it compile-time-only (mirrors PlatformMcpRouter).
+  // `sessions` drives audit_file_finding (a structured task onto the reserved Platform board, hardcoded
+  // server-side); `db` drives preset_suggestion_suggest (the daemon-local suggestions store) — both inert,
+  // dedupe-guarded daemon-local writes. `import type` keeps these compile-time-only (mirrors PlatformMcpRouter).
   constructor(
     private db: Db,
     private sessions: SessionService,
@@ -121,6 +127,36 @@ export class AuditMcpRouter {
       async ({ title, detail, severity }) => {
         try {
           return ok(sessions.auditFileFinding(auditorSessionId, { title, detail, severity }));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    // --- the SECOND write: suggest a candidate preset to the daemon-local "Suggested from your usage"
+    // store (dedupe-guarded — see the trust-boundary header). NO outward/host action; inert UI data. ---
+    server.registerTool(
+      "preset_suggestion_suggest",
+      {
+        description:
+          "Suggest a candidate preset prompt for the human's \"Suggested from your usage\" list — used when " +
+          "a transcript shows a prompt the human types repeatedly that would be worth saving as a one-click " +
+          "preset. This is an INERT daemon-local write: it only files a pending suggestion the human can " +
+          "Adopt or Dismiss in the UI — no git/vault/config/spawn/message/host action. Give the would-be " +
+          "preset a short `label`, the exact `prompt` text to save, and a `rationale` (WHY — e.g. \"typed " +
+          "this 5× across 3 sessions\"). DEDUPED: suggesting a prompt that already exists as a preset OR " +
+          "was already suggested is a no-op (returns {deduped:true,reason}) — do NOT re-nag. Returns " +
+          "{created:true,id} on a genuinely-novel suggestion.",
+        inputSchema: {
+          label: z.string(),
+          prompt: z.string(),
+          rationale: z.string().optional(),
+        },
+      },
+      async ({ label, prompt, rationale }) => {
+        try {
+          const res = db.suggestPresetPrompt({ label, prompt, rationale: rationale ?? null });
+          return ok(res.deduped ? { deduped: true, reason: res.reason } : { created: true, id: res.suggestion.id });
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
