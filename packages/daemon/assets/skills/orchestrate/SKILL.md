@@ -184,9 +184,13 @@ scope, and never address the human. You make the call and `worker_message` it ba
    sessions with the Playwright/`browserTesting` surface provisioned + allowlisted) **self-verify**
    UI/visual work with Playwright before reporting done; non-browser workers (Dev / Bugfix / Docs) report
    UI work **up** and you, the manager, verify it. Either way you still own the integrated end-to-end pass.
-   One self-hosting trap: a worker's Playwright self-verify runs against `vite dev`, so it can PASS while
-   the *deployed* bundle is stale — your post-deploy integrated pass must hit the **served** url (the
-   daemon), not just trust the worker's dev-server self-verify.
+   One self-hosting trap has two faces: (1) a worker's Playwright self-verify runs against `vite dev`, so
+   it can PASS while the *deployed* bundle is stale — your post-deploy integrated pass must hit the
+   **served** url (the daemon), not just trust the worker's dev-server self-verify; and (2) when more than
+   one dev server runs, vite rebinds off :5317 (or can't bind it), so a worker that assumes :5317 may
+   verify another checkout's STALE server and report a false pass — workers must read the dev server's
+   actual bound URL from vite's startup line, never assume the default. Hold both when you review a
+   browser-capable worker's "verified live."
 
 ## Self-hosting — when your project IS Loom itself
 

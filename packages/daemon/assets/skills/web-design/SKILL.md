@@ -120,7 +120,10 @@ native CSS and be honest that there's no official package for it.
 **Looking at the rules is not the same as looking at the result.** If this session has browser
 testing available (the Loom "Web Designer" / QA-capable profile spawns with a Playwright MCP), use it:
 
-1. Render the page or component in the browser.
+1. Render the page or component in the browser — at the dev server's **actual bound URL**. Read the
+   port from vite's startup line (`Local: http://…:PORT`); never assume the default :5317. If :5317 is
+   already held (the owner's main-checkout dev server or the live daemon), vite binds another port or
+   fails, so eyeballing the default would render the wrong, *stale* server.
 2. **Screenshot it and actually look** — squint test, hierarchy, spacing rhythm, contrast, the eight
    states, dark mode, a narrow (mobile) viewport.
 3. Compare what you see against the fundamentals and the don't-list.

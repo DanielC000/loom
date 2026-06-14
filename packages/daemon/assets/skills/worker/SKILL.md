@@ -33,7 +33,11 @@ gate command). This skill is the doctrine those plug into.
    check. Say what you actually ran. For UI/visual work: if your session is browser-capable
    (Playwright/`browserTesting` provisioned + allowlisted — the QA / Web Designer rigs), **self-verify**
    by driving Playwright to the running app and confirming the change renders and behaves before
-   reporting done; otherwise report the UI work **up** for your manager to verify.
+   reporting done; otherwise report the UI work **up** for your manager to verify. When you self-verify,
+   point Playwright at the dev server's **actual bound URL** — read the port from vite's startup line
+   (`Local: http://…:PORT`); never assume the default :5317. If that port is already held (the owner's
+   main-checkout dev server or the live daemon), vite binds a different one or fails — verifying the
+   default would silently drive the wrong, *stale* server and report a false pass.
 5. **Hold the line on honesty.** "Done" means done and verified — report what passed, what you skipped,
    and any known limitation rather than papering over it. Keep any docs you touch accurate: rewrite
    stale claims in place, no "UPDATE:" appends.
