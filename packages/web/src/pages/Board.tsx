@@ -29,7 +29,10 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   const active = useActiveProject();
   const projectId = propProjectId ?? active.projectId;
   const [openTaskId, setOpenTaskId] = useState<string | null>(null); // task whose detail drawer is open
-  const board = useQuery({ queryKey: ["board", projectId], queryFn: () => api.board(projectId), enabled: !!projectId, placeholderData: keepPreviousData });
+  // Poll so the board reflects task changes made by ANOTHER process (the orchestrator via MCP), not
+  // just this client's own mutations — otherwise external card moves only appear on a manual refresh.
+  // keepPreviousData (above) makes the 4s refetch flicker-free. Matches the Platform board's polling.
+  const board = useQuery({ queryKey: ["board", projectId], queryFn: () => api.board(projectId), enabled: !!projectId, refetchInterval: 4000, placeholderData: keepPreviousData });
   // Link the board to the orchestration spine: a worker carries its task id, so cards can show the
   // live worker's status + branch for the task they represent.
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
