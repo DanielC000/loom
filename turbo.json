@@ -1,5 +1,11 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  // Key EVERY task's cache on install-state: a change to the root lockfile (a dep add/bump) invalidates
+  // all build caches, so a stale FULL TURBO replay can never serve a build that predates the dependency
+  // change. turbo already tracks the lockfile implicitly; declaring it makes the dep→rebuild contract
+  // explicit and version-independent. (The daemon-deploy build additionally `--force`s — see
+  // packages/daemon/src/orchestration/restart.ts › deployBuildSteps — so its cache is fully defeated.)
+  "globalDependencies": ["pnpm-lock.yaml"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],

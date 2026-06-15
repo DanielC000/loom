@@ -141,46 +141,112 @@ function repoRoot(): string {
 }
 
 /**
- * Rebuild the daemon (shared + daemon via turbo) WHILE the current daemon is still running its
- * in-memory code, so a broken build aborts the restart and leaves the manager alive to fix it —
- * rather than exiting into a daemon that won't come back up. Resolves the exit code + a tail of
- * output for the failure message. Never throws (a spawn error resolves as a non-zero code).
+ * Bound the deploy-time `pnpm install` so a hung registry fetch can't wedge the restart while the
+ * daemon waits on the build (mirrors PROVISION_TIMEOUT_MS in git/worktrees.ts). The build itself is
+ * left UNBOUNDED — a real tsc compile can legitimately run long and has no interactive-hang vector.
  */
-export function buildDaemon(): Promise<{ code: number; tail: string }> {
+const DEPLOY_INSTALL_TIMEOUT_MS = 180_000;
+
+/**
+ * One ordered step of a deploy build. `shell` selects the spawn form: shell:true runs `command` through
+ * the OS shell (PATH-resolves `pnpm`, exactly like the worktree provisioner + the merge-gate runner);
+ * shell:false execs `command` with `args` directly — NO shell, NO PATH reliance — the 51522f05-proof
+ * turbo invocation. Exported (with {@link deployBuildSteps}) so a hermetic test can assert the exact
+ * commands + flags WITHOUT spawning anything.
+ */
+export interface BuildStep {
+  label: "install" | "build";
+  command: string;
+  args: string[];
+  shell: boolean;
+  /** Kill the child past this many ms; 0 = unbounded. */
+  timeoutMs: number;
+}
+
+/**
+ * The exact, ordered steps a daemon deploy runs — as DATA, so a regression test can prove the gate's
+ * integrity without running a real build. STEP 1 installs (closes face B), STEP 2 force-builds (closes
+ * face A). Both faces let a BROKEN/STALE main pass the deploy gate green; see each step's note.
+ */
+export function deployBuildSteps(root: string): BuildStep[] {
+  return [
+    // STEP 1 — INSTALL (closes face B: a merged dep-add that was never linked). daemon_restart used to
+    // jump straight to the build, so a merge that ADDED a dependency (package.json + pnpm-lock.yaml)
+    // compiled against a node_modules that still lacked it → the deploy build couldn't resolve the new
+    // import and failed (the "daemon_restart never installs" gap — buildDaemon's repoRoot is the MAIN
+    // checkout, whose node_modules is otherwise only ever installed by hand / the supervisor's cold boot).
+    // `--frozen-lockfile` makes the deploy REPRODUCIBLE + FAIL-CLOSED: it installs exactly the committed
+    // lockfile and ABORTS (rather than silently mutating the tree) if package.json drifted from the
+    // lockfile — surfacing a half-committed dep-add instead of masking it. A near no-op when already in
+    // sync, so a normal code-only deploy pays only a quick verify. CI=1 keeps pnpm non-interactive.
+    { label: "install", command: "pnpm install --frozen-lockfile --prefer-offline", args: [], shell: true, timeoutMs: DEPLOY_INSTALL_TIMEOUT_MS },
+    // STEP 2 — BUILD (closes face A: a stale FULL TURBO cache replaying a green build over broken/stale
+    // source). Invoke turbo via ABSOLUTE node + ABSOLUTE turbo JS, NO shell — the 51522f05 fix (the old
+    // `pnpm exec turbo …` form failed inside the daemon's spawned-process env with EMPTY captured output).
+    // `--force` is a DIRECT turbo argument here (`node <turbo> build … --force`), which is what actually
+    // bypasses turbo's content-keyed cache so a deploy ALWAYS does a real compile. ⚠️ Do NOT "simplify"
+    // this to `pnpm --filter @loom/web build --force`: there `--force` is forwarded to the package's build
+    // SCRIPT (vite), NOT to turbo, so the cache is NOT defeated and a stale build replays green (the
+    // aad5fff3 footgun). Build BOTH @loom/daemon AND @loom/web — the daemon serves packages/web/dist
+    // statically, so a deploy that only rebuilt the daemon left the SERVED UI stale.
+    { label: "build", command: process.execPath, args: [turboBin(), "build", "--filter=@loom/daemon", "--filter=@loom/web", "--force"], shell: false, timeoutMs: 0 },
+  ];
+}
+
+/** Real, bounded, never-throws runner for one {@link BuildStep}. Resolves {code, out}; a spawn error or
+ * timeout-kill resolves as a non-zero code (never rejects), so buildDaemon's loop stays simple. */
+function runBuildStep(step: BuildStep, cwd: string): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
-    const root = repoRoot();
-    // Invoke turbo via ABSOLUTE node + ABSOLUTE turbo JS, NO shell. The old form
-    // `spawn("pnpm exec turbo …", { shell:true })` relied on `pnpm`/`cmd`/`PATH` resolving inside the
-    // daemon's spawned-process env — which failed reproducibly there with EMPTY captured output while
-    // the same command was green in a shell (ticket 51522f05). process.execPath + turboBin() always
-    // resolve, regardless of the daemon's PATH.
-    //
-    // `--force` bypasses turbo's cache so a deploy ALWAYS does a real compile. Without it, a content-
-    // keyed cache HIT replays a prior build's logs (we saw it replay a *worker worktree's* build) and
-    // restores a possibly-stale `dist` — the "ships old code / incomplete dist" half of 51522f05.
-    // Build BOTH @loom/daemon AND @loom/web: the daemon serves the web bundle statically from
-    // packages/web/dist, so a deploy that only rebuilt the daemon left the SERVED UI stale (a merged
-    // web change never went live). The second filter rebuilds web in the same pass.
-    const args = [turboBin(), "build", "--filter=@loom/daemon", "--filter=@loom/web", "--force"];
-    const cmdStr = `${process.execPath} ${args.join(" ")}`;
     let out = "";
     const cap = (b: Buffer) => { out += b.toString(); if (out.length > 8000) out = out.slice(-8000); };
-    const child = spawn(process.execPath, args, { cwd: root });
+    const child = step.shell
+      ? spawn(step.command, { cwd, shell: true, env: { ...process.env, CI: "1" } })
+      : spawn(step.command, step.args, { cwd });
+    let settled = false;
+    const done = (r: { code: number; out: string }) => { if (settled) return; settled = true; if (timer) clearTimeout(timer); resolve(r); };
+    const timer = step.timeoutMs > 0
+      ? setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* already gone */ } done({ code: 1, out: `${out}\n(${step.label} exceeded ${step.timeoutMs}ms — killed)` }); }, step.timeoutMs)
+      : undefined;
     child.stdout?.on("data", cap);
     child.stderr?.on("data", cap);
-    // NEVER resolve with an empty failure tail — the old `out.trim().slice(-1500)` could be "" when the
-    // spawn env produced no output, leaving the manager an UNDEBUGGABLE "build failed: <empty>"
-    // (exactly what 51522f05 hit). Always include the command, cwd, exit code/signal, and a marker when
-    // no output was captured, so the real cause (e.g. a tsc error, or a concurrent edit) is visible.
-    child.on("error", (e) =>
-      resolve({ code: 1, tail: `daemon build could not start: ${e.message}\ncmd: ${cmdStr}\ncwd: ${root}\n${out}`.trim() }));
-    child.on("close", (code, signal) => {
-      if ((code ?? 1) === 0) { resolve({ code: 0, tail: out.trim().slice(-1500) }); return; }
-      const captured = out.trim() ? out.trim().slice(-2500) : `(no build output captured)`;
-      resolve({
-        code: code ?? 1,
-        tail: `daemon build FAILED (code=${code ?? "null"} signal=${signal ?? "none"})\ncmd: ${cmdStr}\ncwd: ${root}\n${captured}`,
-      });
-    });
+    child.on("error", (e) => done({ code: 1, out: `${out}\n${step.label} could not start: ${e.message}` }));
+    child.on("close", (code) => done({ code: code ?? 1, out }));
   });
+}
+
+/** Injectable seam for {@link buildDaemon} — a test swaps in a fake runner to record the steps + force
+ * results (prove install→build order, the --force/--frozen-lockfile flags, and install-fail short-circuit)
+ * without a real spawn. Defaults to {@link runBuildStep}. */
+export interface BuildDeps {
+  runStep?: (step: BuildStep, cwd: string) => Promise<{ code: number; out: string }>;
+}
+
+/**
+ * Rebuild the daemon for a deploy (the `daemon_restart` tool) WHILE the current daemon still runs its
+ * in-memory code, so a broken/incomplete deploy aborts the restart and leaves the manager alive to fix
+ * it — rather than exiting into a daemon that won't come back up. Runs {@link deployBuildSteps} IN ORDER
+ * and SHORT-CIRCUITS on the first non-zero step (a failed install never reaches the build). Resolves the
+ * exit code + a tail of output for the failure message; never throws (a spawn error → a non-zero code).
+ */
+export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail: string }> {
+  const root = repoRoot();
+  const run = deps.runStep ?? runBuildStep;
+  return (async () => {
+    let lastOut = "";
+    for (const step of deployBuildSteps(root)) {
+      const r = await run(step, root);
+      lastOut = r.out;
+      if (r.code === 0) continue;
+      // NEVER resolve with an empty failure tail — an empty spawn-env output would otherwise leave the
+      // manager an UNDEBUGGABLE "build failed: <empty>" (exactly what 51522f05 hit). Always include the
+      // command, cwd, exit code, and a marker when no output was captured.
+      const captured = r.out.trim() ? r.out.trim().slice(-2500) : `(no ${step.label} output captured)`;
+      const cmdStr = step.shell ? step.command : `${step.command} ${step.args.join(" ")}`;
+      const hint = step.label === "install"
+        ? "\nA merged package.json/lockfile change is likely out of sync — commit the updated pnpm-lock.yaml (or run `pnpm install` on main), then retry."
+        : "";
+      return { code: r.code, tail: `daemon ${step.label} FAILED (code=${r.code})\ncmd: ${cmdStr}\ncwd: ${root}${hint}\n${captured}`.trim() };
+    }
+    return { code: 0, tail: lastOut.trim().slice(-1500) };
+  })();
 }

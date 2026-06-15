@@ -46,10 +46,24 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
   aborts the restart and leaves the daemon up), then exits `75`; the supervisor relaunches and boot
   re-resumes the manager + its live workers (via `~/.loom/restart-intent.json`) with a "code is live"
   note. Outside the supervisor the tool refuses (nothing would relaunch the daemon).
+- **Deploy-build gate integrity** (`restart.ts` › `deployBuildSteps`/`buildDaemon`): the deploy rebuild
+  is two ordered, fail-closed steps so a stale cache or a missing install can't verify a broken main
+  green. (1) `pnpm install --frozen-lockfile` FIRST — a merged dep-add (package.json + lockfile) gets
+  linked before the build, instead of failing to resolve the new import (`daemon_restart` never used to
+  install). (2) `turbo build … --force` SECOND — `--force` is the **real** cache-defeating invocation
+  ONLY when passed directly to turbo (`node <turbo> build … --force`); `pnpm <pkg> build --force`
+  forwards `--force` to the build *script* (vite), NOT turbo, so the cache is **not** defeated and a
+  stale FULL TURBO replay ships green (the aad5fff3 footgun). A failed install short-circuits the build.
+  (turbo.json also keys all build caches on `pnpm-lock.yaml`, so a dep change busts the cache repo-wide.)
 - **Caveat:** `assets/**` (hook-relay, vault-lint, bundled skills) is read live from the package dir,
   so asset merges take effect on the next spawn without a restart. For full isolation, run the stable
   daemon from a separate checkout (shares `~/.loom` state; override `LOOM_HOME`/`LOOM_PORT` for two
   daemons side by side).
+- **Caveat (supervisor code is NOT `daemon_restart`-deployable):** `daemon_restart` only rebuilds +
+  relaunches the daemon *process*; the **supervisor** (`scripts/daemon-supervisor.mjs`) and anything it
+  loads are NOT re-read across exit `75` (the same running supervisor execs the new `dist/`). A merge that
+  edits the supervisor needs a **human Ctrl-C + re-run of `pnpm daemon:stable`** to go live — a manager
+  must flag that human action in its done-report (mirrors the unsupervised `restarting:false` refusal).
 
 ## Load-bearing invariants (validated in the spike — do not regress)
 - **Drive the REAL interactive `claude` via node-pty.** Never `claude -p`/headless.
