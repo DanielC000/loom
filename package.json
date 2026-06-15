@@ -1,7 +1,7 @@
 {
   "name": "loom",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local-first AI project workspace — weaves Claude Code sessions, Obsidian docs, and tasks into one fabric.",
   "license": "MIT",
   "packageManager": "pnpm@10.6.4",
