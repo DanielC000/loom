@@ -5,8 +5,8 @@ title: "[bug] "
 labels: bug
 ---
 
-> ⚠️ **Security issue?** Don't file it here — see [SECURITY.md](../../SECURITY.md) and email the
-> maintainer privately instead.
+> ⚠️ **Security issue?** Don't file it here — report it privately via GitHub's
+> [private vulnerability reporting](../../security/advisories/new) (see [SECURITY.md](../../SECURITY.md)).
 
 ## What happened
 

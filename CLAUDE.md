@@ -1,7 +1,7 @@
 # Loom
 
 Local-first AI project workspace that weaves real Claude Code sessions, Obsidian docs, and
-tasks into one fabric. Clean-slate successor to Jinn.
+tasks into one fabric. Clean-slate successor to its predecessor.
 
 **Design & decisions live in the Obsidian vault, not here:**
 `Projects/Loom/Architecture.md` (full vision + architecture) and

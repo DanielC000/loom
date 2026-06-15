@@ -5,7 +5,7 @@ const cache = new Map<string, string>();
 
 /**
  * Resolve an executable to an ABSOLUTE path. Critical on Windows: node-pty's agent
- * does NOT search %PATH%, so we must hand it a fully-qualified path. (Ported from Jinn.)
+ * does NOT search %PATH%, so we must hand it a fully-qualified path. (Ported from the predecessor.)
  */
 export function resolveExecutable(name: string): string {
   if (!name) return name;

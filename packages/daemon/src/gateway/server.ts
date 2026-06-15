@@ -76,7 +76,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   await app.register(websocket);
 
   // --- Single-process mode (Releases v1, Part 1): serve the PREBUILT web viewport from the daemon's own
-  // loopback origin, so the whole app runs as ONE process on one port (the prerequisite for `npx loom`).
+  // loopback origin, so the whole app runs as ONE process on one port (the prerequisite for `npx loomctl`).
   // ADDITIVE + dev-safe: in dev the vite server (:5317) still serves the UI and proxies /api + /ws here,
   // so `pnpm web` is byte-for-byte unchanged — this only adds a second way to reach the UI. The web app
   // calls RELATIVE /api + /ws, so serving it from this same origin needs NO web change. A MISSING dist is

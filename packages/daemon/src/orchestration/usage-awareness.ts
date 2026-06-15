@@ -3,7 +3,7 @@ import path from "node:path";
 import { LOOM_HOME } from "../paths.js";
 
 /**
- * GLOBAL Claude usage awareness (phase-2 §19c, ported from Jinn's shared/usageAwareness.ts).
+ * GLOBAL Claude usage awareness (phase-2 §19c, ported from the predecessor's shared/usageAwareness.ts).
  *
  * A tiny persisted record of the last rate-limit hit (+ its reset, when known). It makes the
  * WHOLE queue limit-aware, not just the one session that hit the cap: the Scheduler consults

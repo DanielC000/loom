@@ -5,13 +5,13 @@ deferred desktop/single-binary phases) lives in
 [`docs/spikes/releases-distribution-research.md`](spikes/releases-distribution-research.md); this doc
 is the **operational runbook**.
 
-> Status: Loom is **pre-1.0 and not yet published**. The flow below is the agreed process. The npm
-> package itself (`bin`, publishable as `loomctl`) shipped in Releases v1 **Part 2** — `pnpm pack:npm`
-> produces a locally-installable `loomctl-X.Y.Z.tgz` (see *Building & locally installing the npm package*
-> below). The CI that automates the GitHub Release + npm publish from a pushed tag shipped in
-> **Part 4** (`.github/workflows/release.yml` — see *Automated release (CI)* below). Until the owner
-> performs the one-time setup (public repo, the reserved `loomctl` name, license, `NPM_TOKEN`),
-> nothing actually publishes; the workflow is authored and waiting.
+> Status: Loom is **pre-1.0**; the npm package is **published as
+> [`loomctl`](https://www.npmjs.com/package/loomctl)** (`npm i -g loomctl`, `npx loomctl`). The flow
+> below is the operating runbook. The npm package itself (`bin`, published as `loomctl`) shipped in
+> Releases v1 **Part 2** — `pnpm pack:npm` produces a locally-installable `loomctl-X.Y.Z.tgz` (see
+> *Building & locally installing the npm package* below). The CI that automates the GitHub Release +
+> npm publish from a pushed tag shipped in **Part 4** (`.github/workflows/release.yml` — see
+> *Automated release (CI)* below).
 
 ## Versioning scheme
 

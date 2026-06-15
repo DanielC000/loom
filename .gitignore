@@ -11,3 +11,6 @@ dist-npm/
 
 # Playwright-MCP artifact dir that appears at the repo root
 .playwright-mcp/
+
+# Local spike scratch dir (was only in .git/info/exclude → unprotected on a fresh clone)
+spike/

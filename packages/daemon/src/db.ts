@@ -1380,7 +1380,7 @@ export class Db {
   }
   /**
    * §19c-b: arm the give-up deadline for a recovery episode. COALESCE keeps an already-set
-   * deadline, so the FIRST cap sets it and re-caps preserve it (Jinn's episode-bounded deadline) —
+   * deadline, so the FIRST cap sets it and re-caps preserve it (the predecessor's episode-bounded deadline) —
    * the loop is bounded from the first hit, not reset on every retry.
    */
   armRateLimitDeadline(id: string, deadline: string): void {

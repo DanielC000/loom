@@ -20,16 +20,16 @@ const TEST_DIR = path.join(__dirname, "..", "test");
 const HERMETIC = [
   "prod-guard",               // the guard itself
   "orch-model", "dead-id", "boot-reconcile", "boot-reconcile-keep-work", "merge-done-crash-recovery", "restart-intent", "restart-fleet", "build-gate-integrity",
-  "profiles", "profiles-crud", "profile-spawn", "browser-testing-spawn", "platform-dev-flag", "platform-home", "platform-lead-singleton", "platform-mgmt-surface", "platform-elevated-surface", "audit-surface",
+  "profiles", "profiles-crud", "profile-spawn", "browser-testing-spawn", "platform-dev-flag", "platform-home", "platform-home-rest", "platform-lead-singleton", "platform-mgmt-surface", "platform-elevated-surface", "platform-config", "platform-messaging", "audit-surface",
   "agent-runs-keys", "agent-runs-primitive", "agent-runs-rest", "agent-runs-idempotency", "agent-runs-caps", "agent-runs-spend", "agent-runs-hardening", "agent-runs-audit",
-  "tasks-filter", "tasks-priority", "preset-prompts", "preset-prompt-suggestions", "config-bounds", "kanban-defaults", "transcript-encode", "alert-webhook",
-  "session-archive", "all-archived-sessions", "periodic-snapshot", "mgmt-project-agent", "web-static-serve", "version",
+  "tasks-filter", "tasks-priority", "task-delete", "preset-prompts", "preset-prompt-suggestions", "config-bounds", "config-rewire", "kanban-defaults", "transcript-encode", "alert-webhook",
+  "session-archive", "session-list-summary", "all-archived-sessions", "periodic-snapshot", "shutdown-snapshot", "mgmt-project-agent", "web-static-serve", "version",
   "claude-config", "trust-lock", "spawn-args",
-  "context-watcher", "context-stats", "recycle-handoff", "wake", "worker-reported-state", "crash-recovery-watcher",
+  "context-watcher", "context-stats", "recycle-handoff", "wake", "worker-reported-state", "crash-recovery-watcher", "busy-worker-watcher",
   "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull", "usage-status", "rate-limit-clear",
-  "skills-inject", "skills-store-durability", "vault-lint", "vault-browser", "vault-writer", "git-writer", "git-identity-warning",
-  "worker-diff", "worktrees", "worktree-provision", "spawn-recut-stale-branch", "merge-finalize-resilient", "merge-stranded-backstop", "worker-report-precheck",
-  "pty-busy-drain", "pty-resume-readiness", "pty-stop-queue", "resume-mode-cycles", "resume-mode-detect", "resume-mode-feedback", "shell-terminal",
+  "skills-inject", "skills-store-durability", "skills-publish-drift", "vault-lint", "vault-browser", "vault-writer", "git-writer", "git-identity-warning",
+  "worker-diff", "worktrees", "worktree-provision", "spawn-recut-stale-branch", "merge-finalize-resilient", "merge-review-diffstat", "merge-stranded-backstop", "worker-report-precheck", "worker-report-orphan-wake", "worker-spawn-agent-gate",
+  "pty-busy-drain", "pty-resume-readiness", "pty-stop-queue", "graceful-stop", "resume-mode-cycles", "resume-mode-detect", "resume-mode-feedback", "shell-terminal",
   "db-backup",
 ];
 

@@ -1372,7 +1372,7 @@ export class SessionService {
   /**
    * A worker reports to its manager (phase-2 §A3, the worker→manager direction). Moves the
    * worker's task by status, records the event, and notifies the manager via the busy-gated
-   * queue — exactly Jinn's role:notification semantics: if the manager is mid-turn the report
+   * queue — exactly the predecessor's role:notification semantics: if the manager is mid-turn the report
    * queues behind its running turn and drains on its next Stop. The caller IS the worker
    * (workerSessionId is derived server-side from the URL path), so there's no id to spoof.
    */

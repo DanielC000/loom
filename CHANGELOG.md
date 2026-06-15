@@ -58,4 +58,4 @@ The first versioned Loom — sets the version backbone the install/update story 
 - **Release process** — this `CHANGELOG.md` and [`docs/releasing.md`](docs/releasing.md) (version
   scheme, `npm version` → git tag → GitHub Release → `npm publish` + stable/beta channels).
 - **Single-process viewport** — the daemon serves the prebuilt web UI from its own loopback origin,
-  the prerequisite for an `npx loom` package.
+  the prerequisite for an `npx loomctl` package.

@@ -63,9 +63,9 @@ Open `http://127.0.0.1:5317` and you're in the cockpit.
 
 The packaged path — a single `npx loomctl` that boots the daemon, waits for the gateway, and opens the
 browser — is the **intended install** for end users (Node 22+, no pnpm needed); `npm i -g loomctl`
-installs the `loom` command globally. Loom is pre-1.0 and **not yet published to npm**; until it is,
-build from source as above. See
-[`docs/releasing.md`](docs/releasing.md) for the packaging and release flow.
+installs the `loom` command globally. Loom is pre-1.0 and published to npm as
+[`loomctl`](https://www.npmjs.com/package/loomctl); the from-source flow above stays the contributor
+path. See [`docs/releasing.md`](docs/releasing.md) for the packaging and release flow.
 
 ## How it works
 

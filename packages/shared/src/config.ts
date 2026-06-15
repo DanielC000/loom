@@ -108,8 +108,7 @@ export interface OrchestrationConfig {
    */
   recycleAtContextRatio: number;
   /**
-   * Asleep-at-the-Wheel idle-manager watchdog (FOUNDATION ONLY — nothing reads this yet; the
-   * IdleWatcher ticker is a later task). Minutes a LIVE manager may sit idle (busy=false, no live
+   * Asleep-at-the-Wheel idle-manager watchdog. Minutes a LIVE manager may sit idle (busy=false, no live
    * workers, not snoozed/suppressed) before the watcher nudges it once. Default 45; 0 disables the
    * watcher entirely. Env LOOM_IDLE_NUDGE_MINUTES sets the platform default here (a per-project
    * override still wins). Sibling of recycleAtContextRatio.
@@ -118,14 +117,13 @@ export interface OrchestrationConfig {
   /**
    * Idle watchdog escalation cap: after this many CONSECUTIVE unanswered idle nudges (no idle_report
    * and no new orchestration activity) the watcher backs off and escalates to the human (policy →
-   * suppressed) instead of nudging into the void. Default 2. (Foundation only — unread for now.)
+   * suppressed) instead of nudging into the void. Default 2.
    */
   maxUnansweredNudges: number;
   /**
    * Idle watchdog snooze fallback: minutes to snooze when a manager reports `waiting` WITHOUT an
-   * explicit `minutes`. Default 30. (Foundation only — unread for now.) NOTE: the design note
-   * specifies this key but gives no number; 30 chosen as a conservative re-check interval — the
-   * manager can always pass explicit `minutes` for a longer wait. Confirm/adjust when wiring.
+   * explicit `minutes`. Default 30: a conservative re-check interval — the manager can always pass
+   * explicit `minutes` for a longer wait. Read by `service.ts` when a manager reports `waiting`.
    */
   idleDefaultSnoozeMinutes: number;
   /**

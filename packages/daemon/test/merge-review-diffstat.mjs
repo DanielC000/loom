@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // worker_merge step-1 payload-shape test (card bb1264cc). REAL git on a temp repo (worker-diff.mjs
 // style), fully in-process — NO daemon, NO claude. Proves the diffBranch change that backs the gate's
 // step-1 default: a BOUNDED diffstat (per-file ± + totals) is returned WITHOUT the unbounded patch, so a

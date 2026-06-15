@@ -1,7 +1,7 @@
 /**
- * Usage-limit DETECTION + park-time math (phase-2 §19c, ported from Jinn's shared/rateLimit.ts).
+ * Usage-limit DETECTION + park-time math (phase-2 §19c, ported from the predecessor's shared/rateLimit.ts).
  *
- * Primary signal: the `StopFailure` hook with `error === "rate_limit"` — Jinn's interactive
+ * Primary signal: the `StopFailure` hook with `error === "rate_limit"` — the predecessor's interactive
  * engine (`rateLimitFromStopFailure`) keys off exactly this, and it's the SAME StopFailure Loom
  * already relays to clear `busy` (spike S1). NOT output-scraping. `billing_error` and other named
  * errors are explicitly NOT rate limits (they must not park). RATE_LIMIT_ERROR_RE is a BACKSTOP
@@ -15,31 +15,31 @@
  */
 import type { RateLimitConfig } from "@loom/shared";
 
-/** Backstop pattern (Jinn's), matched against StopFailure error text if `error` isn't exactly "rate_limit". */
+/** Backstop pattern (the predecessor's), matched against StopFailure error text if `error` isn't exactly "rate_limit". */
 export const RATE_LIMIT_ERROR_RE =
   /rate.?limit|too many requests|429|overloaded|usage.*limit|exceeded.*limit|out of extra usage/i;
 
 /**
- * Park window when the StopFailure carries NO reset time — the common case (Jinn left
+ * Park window when the StopFailure carries NO reset time — the common case (the predecessor left
  * `error_details` unparsed and used a default backoff). 5h = the Claude Max rolling usage-cap
  * window, so "don't resume / don't fire into the account" until roughly the cap could clear.
  * (Awareness's recency heuristic in usage-awareness.ts uses 6h independently — see its note.)
  */
 export const DEFAULT_RATE_LIMIT_BACKOFF_MS = 5 * 60 * 60_000;
 
-/** Resume a beat AFTER the reset boundary, not a few ms before it (Jinn's computeNextRetryDelayMs buffer). */
+/** Resume a beat AFTER the reset boundary, not a few ms before it (the predecessor's computeNextRetryDelayMs buffer). */
 const RESET_BUFFER_MS = 10_000;
 
-/** Give-up grace past a KNOWN reset (Jinn's computeRateLimitDeadlineMs default for reset-known). */
+/** Give-up grace past a KNOWN reset (the predecessor's computeRateLimitDeadlineMs default for reset-known). */
 const DEADLINE_AFTER_RESET_MS = 30 * 60_000;
-/** Give-up horizon when NO reset is known (Jinn's reset-absent deadline). */
+/** Give-up horizon when NO reset is known (the predecessor's reset-absent deadline). */
 const DEADLINE_NO_RESET_MS = 6 * 60 * 60_000;
 
 /** The subset of a relayed hook payload this detector reads. */
 export interface UsageLimitHook {
   hook_event_name?: string;
   error?: string;
-  /** Unconfirmed format (Jinn left it unparsed); we best-effort read a reset from it — see below. */
+  /** Unconfirmed format (the predecessor left it unparsed); we best-effort read a reset from it — see below. */
   error_details?: unknown;
   /** A future claude MAY carry the reset as a top-level unix-seconds field; honored if present. */
   resetsAt?: number;
@@ -96,7 +96,7 @@ export function rateLimitedUntil(
 
 /**
  * The ISO give-up deadline for a recovery episode (§19c-b): reset+30min when known, else now+6h —
- * Jinn's `computeRateLimitDeadlineMs`. Computed ONCE at the first cap and kept across re-caps, so a
+ * the predecessor's `computeRateLimitDeadlineMs`. Computed ONCE at the first cap and kept across re-caps, so a
  * never-clearing cap is eventually abandoned rather than retried forever.
  */
 export function rateLimitDeadline(

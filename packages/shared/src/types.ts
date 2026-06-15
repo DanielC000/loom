@@ -144,7 +144,7 @@ export interface ApiKey {
   rotatedAt: string | null;
 }
 
-// --- Session FSM (explicit; replaces Jinn's loose status enum) ---
+// --- Session FSM (explicit; replaces the predecessor's loose status enum) ---
 export type ProcessState = "none" | "starting" | "live" | "exited";
 export type Resumability = "unknown" | "resumable" | "dead";
 

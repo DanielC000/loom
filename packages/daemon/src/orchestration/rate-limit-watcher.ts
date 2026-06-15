@@ -21,7 +21,7 @@ export interface RateLimitWatcherDeps {
  * unconditionally, separate from the opt-in cron Scheduler.
  *
  * Each tick walks the LIVE sessions in an active rate-limit episode (deadline armed) and drives the
- * state machine — a tick-based port of Jinn's in-process wait→retry→still-limited→deadline loop:
+ * state machine — a tick-based port of the predecessor's in-process wait→retry→still-limited→deadline loop:
  *   - parked & the reset has passed  → RESUME: clear the park (keep the deadline — episode continues),
  *       relax global awareness, re-submit the held turn (re-arms busy; the pending queue drains).
  *   - parked & past the deadline     → BAIL: abandon auto-resume, mark errored (lastError), clear.

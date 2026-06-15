@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Hermetic guard for the Skills drift indicator + Publish-to-repo sync (store ↔ bundled asset).
 // Covers: (1) drift compare is line-ending/whitespace tolerant — a CRLF store vs LF asset that are
 // otherwise identical reads diverged:false; a real edit reads diverged:true. (2) publishSkillToBundled

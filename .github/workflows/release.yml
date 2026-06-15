@@ -7,7 +7,7 @@ name: Release
 #
 # Owner one-time prerequisites (see docs/releasing.md › "Owner publish steps"):
 #   - the public GitHub repo exists,
-#   - the npm `loom` name is reserved + a LICENSE chosen and added to the generated package.json,
+#   - the npm `loomctl` name is reserved + a LICENSE chosen and added to the generated package.json,
 #   - an `NPM_TOKEN` repo secret (an npm automation/publish token) is set.
 on:
   push:
@@ -70,7 +70,7 @@ jobs:
             PRERELEASE=false
             NPM_TAG=latest
           fi
-          TARBALL="loom-${PKG_VERSION}.tgz"
+          TARBALL="loomctl-${PKG_VERSION}.tgz"
           {
             echo "version=$PKG_VERSION"
             echo "tag=$TAG"
