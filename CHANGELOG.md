@@ -7,10 +7,11 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
-## [0.2.0] — 2026-06-15
+## [0.2.0] — 2026-06-16
 
 The first publicly published Loom: the installable npm package goes live, joined by voice input,
-preset prompts, board search, and a round of reliability hardening since `0.1.0`.
+preset prompts, composer queue management, per-profile model selection, board search, and a round of
+reliability + stability hardening since `0.1.0`.
 
 ### Added
 - **`loomctl` npm package + `loom` CLI.** `bin/loom.mjs` boots the single-process daemon, waits for the
@@ -28,6 +29,11 @@ preset prompts, board search, and a round of reliability hardening since `0.1.0`
 - **Preset Prompts.** A global, editable store of reusable prompts, surfaced as a popover under each
   terminal's action buttons — one click sends a saved prompt to the session.
 - **Board search + filter bar** on the task board.
+- **Composer queued-message management.** Messages you queue while a session is busy are shown under
+  every terminal and are now editable, reorderable, and deletable; messages queued programmatically
+  (e.g. an agent's report to its manager) appear read-only so they can't be altered out from under it.
+- **Per-profile model.** A Profile can pin a model that is applied at spawn (`--model`); leaving it
+  blank uses the engine default, unchanged.
 
 ### Changed
 - **Worker merges are now a single squashed commit** per task (one clean commit per branch).
@@ -35,6 +41,8 @@ preset prompts, board search, and a round of reliability hardening since `0.1.0`
   by the worktree's lockfile marker).
 - The optional dev-only **Platform layer is gated behind `LOOM_DEV`** and excluded from the published
   package — core orchestration (lead + workers) always ships.
+- **Live-terminal grids order managers first** (the orchestrator sits leftmost, its workers to the
+  right), then newest-first within each group.
 
 ### Fixed
 - **Reliability:** a crash-recovery watchdog bounded-auto-resumes a session whose process died while
@@ -42,7 +50,10 @@ preset prompts, board search, and a round of reliability hardening since `0.1.0`
   prompt; boot reconciliation no longer leaks orphaned worktree directories; `worker_report(done)` now
   refuses on uncommitted changes so completed work can't be silently dropped.
 - **UI:** terminal scroll behavior; unreadable preset/button text on the default light background; a
-  composer/terminal layout regression when toggling Voice.
+  composer/terminal layout regression when toggling Voice; the task board now auto-refreshes on
+  changes made by another process (no manual reload).
+- **Stability:** a transient `~/.claude/projects` file-watcher error (e.g. a short-lived temp run
+  directory vanishing mid-stat on Windows) no longer crashes the daemon.
 
 ## [0.1.0] — 2026-06-09
 
