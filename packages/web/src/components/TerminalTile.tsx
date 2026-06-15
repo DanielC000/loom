@@ -1,6 +1,7 @@
 import { type ReactNode } from "react";
 import type { SessionListItem } from "@loom/shared";
 import { TerminalPane } from "./Terminal";
+import { Composer } from "./Composer";
 import { PresetPromptsButton } from "./PresetPrompts";
 import { Panel, Button, StatusPill } from "./ui";
 import { font, color } from "../theme";
@@ -66,6 +67,7 @@ export function TerminalTile({
       {taskCard}
       <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
       {footer}
+      <Composer sessionId={s.id} />
     </Panel>
   );
 }

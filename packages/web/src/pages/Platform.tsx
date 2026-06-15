@@ -4,6 +4,7 @@ import type { Agent, SessionListItem, SessionRole, Schedule, Task } from "@loom/
 import { api } from "../lib/api";
 import Board from "./Board";
 import { TerminalPane } from "../components/Terminal";
+import { Composer } from "../components/Composer";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { Panel, Button, Input, SectionLabel, StatusPill, Badge, Chip } from "../components/ui";
 import { color, font } from "../theme";
@@ -192,6 +193,7 @@ function PlatformSessions({ sessions }: { sessions: SessionListItem[] }) {
               onClick={() => stop.mutate(s.id)}>Stop</Button>
           </div>
           <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
+          <Composer sessionId={s.id} />
         </Panel>
       ))}
     </div>
