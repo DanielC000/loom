@@ -41,6 +41,37 @@ const mcpServers = { "loom-tasks": { type: "http", url: `http://127.0.0.1:${proc
   check("--mcp-config value precedes the `--` separator", cfg !== -1 && args.indexOf("--") > cfg + 1);
 }
 
+// --- Profile-pinned model (Phase-3) -------------------------------------------------------------
+// A model set → `--model <id>` is emitted as a real flag (precedes `--`), right after --permission-mode.
+{
+  const args = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", model: "claude-opus-4-8" });
+  const m = args.indexOf("--model");
+  const sep = args.indexOf("--");
+  check("model set: `--model` is present", m !== -1);
+  check("model set: `--model` is immediately followed by the id", args[m + 1] === "claude-opus-4-8");
+  check("model set: `--model` precedes the `--` separator (it's a real flag)", m < sep);
+  check("model set: `--model` follows `--permission-mode`", m > args.indexOf("--permission-mode"));
+  check("model set: the prompt is still the LAST arg behind `--`", args[args.length - 2] === "--" && args[args.length - 1] === "build it");
+}
+// Model NULL / OMITTED → byte-identical to today: NO `--model` anywhere. Asserted against the existing
+// no-model argv so a regression that always-emits `--model` is caught.
+{
+  const base = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it" });
+  const withUndef = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", model: undefined });
+  const withEmpty = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", model: "" });
+  check("model omitted: no `--model` in argv", !base.includes("--model"));
+  check("model undefined: argv is byte-identical to the no-model argv", JSON.stringify(withUndef) === JSON.stringify(base));
+  check("model empty-string: treated as engine default — no `--model`, byte-identical", JSON.stringify(withEmpty) === JSON.stringify(base));
+}
+// Resume path with a model would be a contradiction (resume inherits the transcript's model), but assert
+// the flag still threads cleanly if ever passed: --resume leads, --model is present, no positional prompt.
+{
+  const args = buildSpawnArgs({ resumeId: "engine-123", settingsPath: "S", mode: "acceptEdits", mcpServers, model: "claude-sonnet-4-6" });
+  check("resume + model: --resume still leads", args[0] === "--resume" && args[1] === "engine-123");
+  check("resume + model: --model <id> present", args[args.indexOf("--model") + 1] === "claude-sonnet-4-6");
+  check("resume + model: no `--` separator (no prompt)", !args.includes("--"));
+}
+
 // Fork: with resumeId, --fork-session follows --resume <id>, then --session-id pre-assigns the fork's id.
 {
   const args = buildSpawnArgs({ resumeId: "engine-123", fork: true, forkSessionId: "new-456", settingsPath: "S", mode: "acceptEdits", mcpServers });
@@ -54,6 +85,6 @@ const mcpServers = { "loom-tasks": { type: "http", url: `http://127.0.0.1:${proc
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — buildSpawnArgs puts the prompt last behind a `--` separator (dashed prompts stay positional), flags lead, resume omits the separator, --fork-session follows --resume."
+  ? "\n✅ ALL PASS — buildSpawnArgs puts the prompt last behind a `--` separator (dashed prompts stay positional), flags lead, resume omits the separator, --fork-session follows --resume, and --model is emitted iff a profile pins one (null/empty ⇒ byte-identical, no --model)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

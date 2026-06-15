@@ -56,7 +56,14 @@ db.insertProfile({
   id: "profMgr", name: "Orchestrator", role: "manager",
   description: "rig blurb (UI only; never injected)", allowDelta: [PROFILE_ALLOW], skills: null, model: null, icon: "🧭",
 });
+// A profile that PINS a model (Phase-3 model wiring) — drives `--model` at spawn via opts.model.
+const PINNED_MODEL = "claude-opus-4-8";
+db.insertProfile({
+  id: "profModel", name: "Modelled", role: null,
+  description: "pins a model", allowDelta: [], skills: null, model: PINNED_MODEL, icon: null,
+});
 db.insertAgent({ id: "agentMgr", projectId: "pP", name: "Managed", startupPrompt: "AGENT_MGR_PROMPT", position: 0, profileId: "profMgr" });
+db.insertAgent({ id: "agentModel", projectId: "pP", name: "Modelled", startupPrompt: "AGENT_MODEL_PROMPT", position: 3, profileId: "profModel" });
 db.insertAgent({ id: "agentPlain", projectId: "pP", name: "Plain", startupPrompt: "AGENT_PLAIN_PROMPT", position: 1, profileId: null });
 // A profile-agent with NO per-agent prompt (the NOT NULL DEFAULT '' real-DB case) → an EMPTY injected
 // prompt at spawn: the profile carries no prompt, so there is no fallback (a blank prompt = inert).
@@ -111,6 +118,14 @@ try {
   check("(a) profile allowDelta is layered onto the config allow", oA?.permission.allow.includes(PROFILE_ALLOW));
   check("(a) the base config allow is preserved alongside the delta", oA?.permission.allow.includes("mcp__loom-tasks"));
   check("(a) session is live", db.getSession(sA.id).processState === "live");
+  // model-null profile → opts.model undefined (no --model; byte-identical). Regression-guards the default.
+  check("(a) a model-NULL profile threads opts.model === undefined (no --model emitted)", oA?.model === undefined);
+
+  // ===================== (a'') model-PINNED profile → opts.model is the pinned id (Phase-3) =====================
+  const sM = svc.startNew("agentModel");
+  const oM = optsFor(sM.id);
+  check("(a'') model-pinned profile threads opts.model === the pinned id (drives --model at spawn)", oM?.model === PINNED_MODEL);
+  check("(a'') model-pinned profile still injects the agent's OWN prompt", oM?.startupPrompt === "AGENT_MODEL_PROMPT");
 
   // (a') a profile-agent with a BLANK per-agent prompt injects NO prompt — the profile carries none,
   // so there is no fallback (the merge branch was removed). It still gets the profile's role + allow.
@@ -130,6 +145,7 @@ try {
   check("(b) NO allow delta — permission.allow equals the config allow exactly",
     JSON.stringify(oB?.permission.allow) === JSON.stringify(baseAllow));
   check("(b) profile's allowDelta is NOT present on a profile-less spawn", !oB?.permission.allow.includes(PROFILE_ALLOW));
+  check("(b) NO model on a profile-less spawn — opts.model undefined (no --model, byte-identical)", oB?.model === undefined);
   check("(b) session is live", db.getSession(sB.id).processState === "live");
 
   // ===================== (c) worker_spawn still produces a worker (explicit role wins) =====================

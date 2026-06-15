@@ -66,7 +66,7 @@ export default function Profiles() {
       <Panel style={{ alignSelf: "start" }}>
         <SectionLabel>Profiles</SectionLabel>
         <p style={{ color: color.textMuted, fontSize: 11, margin: "0 0 10px", fontFamily: font.mono, lineHeight: 1.5 }}>
-          Reusable, cross-project rig — role, permission deltas, icon (model + skills soon), plus a
+          Reusable, cross-project rig — role, model, permission deltas, icon (skills soon), plus a
           description blurb. An agent runs under one to drive how its sessions spawn; the injected
           prompt comes from the agent. Human-managed only; edits apply on the next spawn.
         </p>
@@ -109,6 +109,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
   const [description, setDescription] = useState(profile.description);
   const [allowText, setAllowText] = useState(profile.allowDelta.join("\n"));
   const [icon, setIcon] = useState(profile.icon ?? "");
+  const [model, setModel] = useState(profile.model ?? "");
   const [browserTesting, setBrowserTesting] = useState(profile.browserTesting ?? false);
   const [confirmDel, setConfirmDel] = useState(false);
   const [confirmRevert, setConfirmRevert] = useState(false);
@@ -120,6 +121,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
     description !== profile.description ||
     JSON.stringify(allowDelta) !== JSON.stringify(profile.allowDelta) ||
     (icon || null) !== profile.icon ||
+    (model.trim() || null) !== profile.model ||
     browserTesting !== (profile.browserTesting ?? false);
 
   const fieldLabel = { fontFamily: font.head as string, fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: color.textDim };
@@ -128,7 +130,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
     background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
   };
 
-  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setBrowserTesting(profile.browserTesting ?? false); };
+  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
@@ -192,23 +194,24 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
         </span>
       </label>
 
-      {/* model + skills are part of the Profile model but their spawn-wiring lands in a later phase. */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, opacity: 0.55 }}>
+      {/* Model is wired at spawn (emits `--model <id>`; blank = engine default). Skills delivery is still
+          a follow-up — the field stays disabled so a human can't set a subset that isn't yet honored. */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={fieldLabel}>Model</span>
-          <Input disabled value={profile.model ?? ""} placeholder="engine default" />
+          <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="engine default (e.g. claude-opus-4-8)" />
         </label>
-        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, opacity: 0.55 }}>
           <span style={fieldLabel}>Skills</span>
           <Input disabled value={profile.skills ? profile.skills.join(", ") : ""} placeholder="all" />
         </label>
       </div>
-      <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, marginTop: -6 }}>model + skills are not yet applied at spawn (wiring lands in a later phase).</span>
+      <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, marginTop: -6 }}>Model is applied at spawn (blank = engine default). Skills-subset delivery is not yet wired (a follow-up) — all skills are delivered for now.</span>
 
       <span style={{ flex: 1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || !name.trim() || saving}
-          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, browserTesting })}>
+          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting })}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {dirty

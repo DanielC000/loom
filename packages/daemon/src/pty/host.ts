@@ -369,6 +369,13 @@ export interface SpawnOpts {
   /** Role decides the extra MCP surface at spawn: manager/worker → loom-orchestration, platform →
    *  loom-platform (each with its allowlist); plain sessions get only loom-tasks. */
   role?: SessionRole;
+  /**
+   * Profile-pinned model id (resolved from the session's Profile, e.g. "claude-opus-4-8"). When set,
+   * emit `--model <id>` into the spawn recipe. Undefined/absent ⇒ NO `--model` — byte-identical to
+   * today (the engine default). Threaded ONLY by the fresh-start paths; a `--resume`/`--fork-session`
+   * spawn omits it and inherits the conversation's model from the engine transcript.
+   */
+  model?: string;
   /** When set (docLint on), wires the vault-lint PostToolUse hook scoped to this vault (Pillar D). */
   vaultPath?: string;
   /**
@@ -424,6 +431,8 @@ export function buildSpawnArgs(o: {
   mode: string;
   mcpServers: Record<string, unknown>;
   startupPrompt?: string;
+  /** Profile-pinned model id → `--model <id>`. Undefined/empty ⇒ NO `--model` (byte-identical to today). */
+  model?: string;
 }): string[] {
   const args: string[] = [];
   if (o.resumeId) args.push("--resume", o.resumeId);
@@ -438,6 +447,10 @@ export function buildSpawnArgs(o: {
   }
   args.push("--settings", o.settingsPath);
   args.push("--permission-mode", o.mode);
+  // Profile-pinned model: a real flag (precedes `--`). Emitted ONLY when set, so a profile-less /
+  // model-null / resume / fork spawn is byte-identical (no `--model`) and inherits the engine default
+  // (or, on resume, the conversation's own model from the transcript).
+  if (o.model) args.push("--model", o.model);
   args.push("--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: o.mcpServers }));
   if (o.startupPrompt) args.push("--", o.startupPrompt);
   return args;
@@ -744,7 +757,7 @@ export class PtyHost {
     // §6 scoping: route by session id in the URL path; daemon derives the project server-side. The
     // mcpServers map (loom-tasks + role surface + opt-in Playwright) is assembled by the testable seam.
     const mcpServers = buildMcpServers({ sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting });
-    const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt });
+    const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt, model: opts.model });
 
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {

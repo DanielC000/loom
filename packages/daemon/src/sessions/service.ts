@@ -122,8 +122,16 @@ export class SessionService {
    * REST/scheduler → manager/platform — ALWAYS wins; the profile supplies role ONLY when the caller
    * didn't specify one (the plain "+New" path) AND the agent has a profile.
    *
-   * DEFERRED to a later phase (NOT wired here): the profile's `model` (no `--model` emitted) and its
-   * `skills` subset (all skills still delivered). This wires ONLY role + startupPrompt + allow.
+   * Phase-3 model wiring: the profile's `model` (when non-null) is now threaded through to the spawn
+   * recipe as a `--model <id>` arg. When null/absent it is byte-identical to today (no `--model`). This
+   * applies to the FRESH-start paths only (startNew/startManager/startPlatformLead/startAuditor) — a
+   * `--resume`/`--fork-session` spawn deliberately omits `--model` and inherits the conversation's model
+   * from the engine transcript, keeping every resume/fork byte-identical.
+   *
+   * STILL DEFERRED (NOT wired here): the profile's `skills` subset (all skills are still delivered to
+   * every session). Wiring the subset is materially larger — `injectSkills` runs on EVERY spawn incl.
+   * the resume/fork/boot-resume paths that don't resolve a profile, plus a shared-cwd manifest concern —
+   * so it is a tracked follow-up. This wires role + startupPrompt + allow + model.
    *
    * `forcePlain` (P3 spawn override): BYPASS the profile entirely so role + allow resolve via
    * resolveProfile's backstop — i.e. spawn as if the agent had no profile (a vanilla "+New": role null,
@@ -133,7 +141,7 @@ export class SessionService {
    */
   private resolveAgentSpawn(
     agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false,
-  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean } {
+  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; model: string | undefined } {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
     const profile = (forcePlain || !agent.profileId) ? undefined : this.db.getProfile(agent.profileId);
@@ -152,6 +160,9 @@ export class SessionService {
       permission,
       // Opt-in browser capability from the resolved profile (backstop false under forcePlain / no profile).
       browserTesting: resolved.browserTesting,
+      // Profile-pinned model → `--model` at spawn; null/absent ⇒ undefined ⇒ no `--model` (byte-identical).
+      // `|| undefined` so an empty-string model is treated as "engine default", same coercion as the prompt.
+      model: resolved.model || undefined,
     };
   }
 
@@ -169,7 +180,7 @@ export class SessionService {
     // prompt is always the agent's own). No caller role here (plain "+New"), so the profile's role
     // applies when present. No profile ⇒ role undefined, the config permission unchanged — today's session.
     // forcePlain (P3) pins role to undefined even on a profile agent (see resolveAgentSpawn).
-    const { role, startupPrompt, permission, browserTesting } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false);
+    const { role, startupPrompt, permission, browserTesting, model } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false);
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -202,6 +213,7 @@ export class SessionService {
       startupPrompt,
       role,
       browserTesting,
+      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
     });
     return { ...session, processState: "live" };
   }
@@ -219,7 +231,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'manager' role from the caller (scheduler/REST) ALWAYS wins; the profile (if any) only
     // layers its prompt + allowDelta. No profile ⇒ byte-identical to today's manager spawn.
-    const { role, startupPrompt, permission, browserTesting } = this.resolveAgentSpawn(agent, config, "manager");
+    const { role, startupPrompt, permission, browserTesting, model } = this.resolveAgentSpawn(agent, config, "manager");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -251,6 +263,7 @@ export class SessionService {
       startupPrompt,
       role,
       browserTesting,
+      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
     });
     return { ...session, processState: "live" };
   }
@@ -297,7 +310,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. No profile ⇒ byte-identical to today's platform-lead spawn.
-    const { role, startupPrompt, permission, browserTesting } = this.resolveAgentSpawn(agent, config, "platform");
+    const { role, startupPrompt, permission, browserTesting, model } = this.resolveAgentSpawn(agent, config, "platform");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -329,6 +342,7 @@ export class SessionService {
       startupPrompt,
       role,
       browserTesting,
+      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
     });
     return { ...session, processState: "live" };
   }
@@ -352,7 +366,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'auditor' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the restricted loom-audit surface.
-    const { role, startupPrompt, permission, browserTesting } = this.resolveAgentSpawn(agent, config, "auditor");
+    const { role, startupPrompt, permission, browserTesting, model } = this.resolveAgentSpawn(agent, config, "auditor");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -384,6 +398,7 @@ export class SessionService {
       startupPrompt,
       role,
       browserTesting,
+      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
     });
     return { ...session, processState: "live" };
   }
