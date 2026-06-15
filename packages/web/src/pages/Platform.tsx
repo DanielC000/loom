@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 import Board from "./Board";
 import { TerminalPane } from "../components/Terminal";
 import { Composer } from "../components/Composer";
+import { PresetPromptsButton } from "../components/PresetPrompts";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { Panel, Button, Input, SectionLabel, StatusPill, Badge, Chip } from "../components/ui";
 import { color, font } from "../theme";
@@ -188,9 +189,14 @@ function PlatformSessions({ sessions }: { sessions: SessionListItem[] }) {
               <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} />
               <span>{s.agentName}{s.role ? ` · ${s.role}` : ""} · {s.id.slice(0, 8)}</span>
             </span>
-            <Button style={{ padding: "0 8px" }} disabled={stop.isPending}
-              title="Stop this session — graceful Ctrl-C, clean and resumable"
-              onClick={() => stop.mutate(s.id)}>Stop</Button>
+            <div style={{ display: "flex", gap: 4 }}>
+              <PresetPromptsButton sessionId={s.id} />
+              {/* No Fork on platform sessions — forking would mint a second Lead/Auditor and break
+                  the singleton invariant (the reason this tile is hand-rolled, not TerminalTile). */}
+              <Button style={{ padding: "0 8px" }} disabled={stop.isPending}
+                title="Stop this session — graceful Ctrl-C, clean and resumable"
+                onClick={() => stop.mutate(s.id)}>Stop</Button>
+            </div>
           </div>
           <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
           <Composer sessionId={s.id} />

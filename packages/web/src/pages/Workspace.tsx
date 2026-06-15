@@ -7,6 +7,7 @@ import { bySessionActivity, byCreatedStable } from "../lib/sessions";
 import { TerminalPane } from "../components/Terminal";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { Composer } from "../components/Composer";
+import { PresetPromptsButton } from "../components/PresetPrompts";
 import { SessionWakes } from "../components/SessionWakes";
 import { SessionQueue } from "../components/SessionQueue";
 import { SessionActions } from "../components/SessionActions";
@@ -327,12 +328,13 @@ export default function Workspace() {
       <Panel style={{ height: "72vh", padding: 6, display: "flex", flexDirection: "column" }}>
         {sessionId ? (
           <>
-            <div style={{ marginBottom: 6, display: "flex", gap: 6 }}>
+            <div style={{ marginBottom: 6, display: "flex", gap: 6, alignItems: "center" }}>
               {(["terminal", "transcript"] as const).map((t) => (
                 <Button key={t} variant={rightTab === t ? "primary" : "default"} onClick={() => setRightTab(t)}>
                   {t === "terminal" ? "Terminal" : "Transcript"}
                 </Button>
               ))}
+              <div style={{ marginLeft: "auto" }}><PresetPromptsButton sessionId={sessionId} /></div>
             </div>
             <div style={{ flex: 1, minHeight: 0 }}>
               {rightTab === "terminal"
