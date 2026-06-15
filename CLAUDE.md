@@ -27,7 +27,9 @@ pnpm web            # viewport on http://127.0.0.1:5317 (proxies /api + /ws to t
 + Platform Lead/Auditor agents, the Platform-lead/Platform-audit profiles, and the platform-lead/
 platform-audit skills — is gated behind `LOOM_DEV=1` (default OFF) and does **not** ship to regular
 `loomctl` users (the npm build omits the two platform skills from `assets/skills/`). It stays in the repo
-and loads only in dev: boot the daemon with `LOOM_DEV=1` (e.g. `LOOM_DEV=1 pnpm daemon`) to seed it. The
+and loads only in dev: boot the daemon with `LOOM_DEV=1` (e.g. `LOOM_DEV=1 pnpm daemon`) to seed it.
+**`pnpm daemon:stable` (the self-hosting entry point) defaults `LOOM_DEV=1` on** — override with
+`LOOM_DEV=0 pnpm daemon:stable` to test the non-dev path. The
 flag is read in ONE helper (`paths.ts` › `isLoomDev`, same shape as `LOOM_SCHEDULER_ENABLED`); CORE
 orchestration (Orchestrator/Dev/Bugfix/QA/Web Designer + their skills) always seeds, flag or not.
 

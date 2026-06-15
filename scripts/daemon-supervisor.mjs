@@ -48,7 +48,10 @@ for (;;) {
   }
   // LOOM_SUPERVISED tells the daemon a supervisor is present, so `daemon_restart` is allowed (without
   // it the manager would kill the daemon with nothing to bring it back).
-  const runCode = sh("node dist/index.js", daemonDir, { LOOM_SUPERVISED: "1" });
+  // LOOM_DEV defaults ON here: `daemon:stable` is the SELF-HOSTING / dogfooding entry point (regular
+  // loomctl users run the packaged bin/loom.mjs, never this), so the dev-only Platform layer should seed.
+  // Defaulted (not hardcoded) so an explicit `LOOM_DEV=0 pnpm daemon:stable` can still test the non-dev path.
+  const runCode = sh("node dist/index.js", daemonDir, { LOOM_SUPERVISED: "1", LOOM_DEV: process.env.LOOM_DEV ?? "1" });
   if (runCode === RESTART_EXIT_CODE) {
     console.log("[supervisor] daemon requested restart — rebuilding and relaunching…");
     continue;
