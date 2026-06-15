@@ -1187,6 +1187,19 @@ export class Db {
     return this.db.prepare("SELECT * FROM sessions WHERE agent_id = ? AND archived_at IS NULL ORDER BY last_activity DESC")
       .all(agentId).map(toSession);
   }
+  /**
+   * LIVE sessions for an agent (archived excluded), preserving listSessions' last_activity-DESC order.
+   * This is the canonical "is there a live singleton?" query — every singleton/liveness decision (the
+   * Platform Lead's live-precedence guard, the /api/platform/home live-session info) MUST go through a
+   * LIVE filter, NOT a plain .find() over listSessions: that list is ordered by last_activity DESC, so a
+   * recently-STOPPED row sorts AHEAD of an idle-but-LIVE one and a bare .find() would pick the dead one
+   * (this exact recency-over-liveness trap re-introduced the duplicate-live-Lead bug — see 0e40dde).
+   * Filtering to processState === "live" FIRST makes liveness win; among multiple live rows (legacy
+   * accumulation that shouldn't happen) the most-recently-active still leads.
+   */
+  liveSessions(agentId: string): Session[] {
+    return this.listSessions(agentId).filter((s) => s.processState === "live");
+  }
   getSession(id: string): Session | undefined {
     const r = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as Row | undefined;
     return r ? toSession(r) : undefined;

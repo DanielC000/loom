@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
@@ -84,7 +84,13 @@ export const api = {
   // Platform Manager P6 — discover the reserved "Loom Platform" home (hidden from the ordinary picker)
   // + its seeded agents (the Lead + Auditor), for the dedicated Platform section. READ-ONLY discovery;
   // spawn/stop/schedule reuse the existing startSession / stopSession / createSchedule routes below.
-  platformHome: () => get<{ project: Project; agents: Agent[] }>("/api/platform/home"),
+  // liveSessions: each platform agent's currently-LIVE sessions (live-over-recency — see server.ts), so a
+  // spawn decision can see an existing live Lead/Auditor before minting a second. role is the singleton key.
+  platformHome: () => get<{
+    project: Project;
+    agents: Agent[];
+    liveSessions: { id: string; agentId: string; role: SessionRole | null; processState: string; busy: boolean; createdAt: string; lastActivity: string }[];
+  }>("/api/platform/home"),
   createProject: (b: { name: string; repoPath: string; vaultPath: string }) =>
     post<Project>("/api/projects", b),
   // --- HUMAN-only project/agent management (rename / archive / restore / PERMANENT delete + agent

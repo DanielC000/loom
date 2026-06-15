@@ -326,7 +326,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/api/platform/home", async (_req, reply) => {
     const project = deps.db.listAllProjects().find((p) => p.reserved);
     if (!project) return reply.code(404).send({ error: "no reserved Loom Platform project" });
-    return { project, agents: deps.db.listAgents(project.id) };
+    const agents = deps.db.listAgents(project.id);
+    // LIVE-SESSION INFO (duplicate-singleton guard): surface each platform agent's currently-LIVE
+    // sessions so a spawn decision sees an existing live Lead/Auditor before minting a SECOND (a manager
+    // once spawned a duplicate Lead because this endpoint omitted liveness). Sourced from db.liveSessions
+    // — the canonical live-over-recency query — so a recently-STOPPED Lead can NEVER mask an idle-but-LIVE
+    // one. Each entry is a light summary (no transcript/cwd/branch); `role` is the singleton key
+    // ("platform" = Lead, "auditor" = Auditor) and `agentId` lets a consumer roll up per-agent counts.
+    const liveSessions = agents.flatMap((a) =>
+      deps.db.liveSessions(a.id).map((s) => ({
+        id: s.id, agentId: s.agentId, role: s.role,
+        processState: s.processState, busy: s.busy,
+        createdAt: s.createdAt, lastActivity: s.lastActivity,
+      })),
+    );
+    return { project, agents, liveSessions };
   });
 
   // --- Loom-managed skills (the UI-editable skill store; delivered to sessions project-local) ---

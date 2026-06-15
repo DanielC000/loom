@@ -289,8 +289,9 @@ export class SessionService {
     // "platform"}); no agent/MCP path reaches here, so "platform sessions are human-created only"
     // stands. The Auditor (startAuditor) is deliberately LEFT create-only — each scheduled fire spawns
     // a fresh ephemeral read-and-file audit session, where a singleton would be wrong.
-    const platforms = this.db.listSessions(agentId).filter((s) => s.role === "platform");
-    const live = platforms.find((s) => s.processState === "live");
+    // db.liveSessions is the canonical live-over-recency query (filters to LIVE before any .find, so a
+    // recently-STOPPED Lead can't sort ahead of an idle-but-LIVE one — see its note + 0e40dde).
+    const live = this.db.liveSessions(agentId).find((s) => s.role === "platform");
     if (live) return live; // already attached — reuse, no new row, no spawn (never two LIVE Leads)
 
     const config = resolveConfig(project.config);

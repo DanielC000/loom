@@ -6,7 +6,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the two seeded agents (Platform Lead + Platform Auditor) are returned;
 //   (2) the SAME reserved project is still EXCLUDED from GET /api/projects (the ordinary picker) — P6
 //       must not regress the P1 picker exclusion;
-//   (3) with NO reserved project seeded → 404 (the endpoint never invents a home).
+//   (3) with NO reserved project seeded → 404 (the endpoint never invents a home);
+//   (4) liveSessions surfaces each platform agent's LIVE sessions, preferring LIVE over RECENCY — a
+//       recently-STOPPED Lead never masks an idle-but-LIVE one (the duplicate-singleton-spawn guard).
 // Run: 1) build (turbo builds shared first), 2) node test/platform-home-rest.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -68,6 +70,48 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
   }
 }
 
+// ===== (4) liveSessions surfaces LIVE over RECENCY (the duplicate-singleton guard) =====
+// A recently-STOPPED Lead must NEVER mask an idle-but-LIVE one: db.listSessions is last_activity DESC,
+// so the stopped row (newer last_activity) sorts AHEAD of the live row — yet only the LIVE one may show
+// in liveSessions. Also proves a live Auditor surfaces and per-role counts are derivable.
+{
+  const db = new Db(path.join(TMP, "loom-live.db"));
+  seedDefaultProfiles(db);
+  seedPlatformHome(db);
+  const agents = db.listAgents(db.listAllProjects().find((p) => p.reserved).id);
+  const leadId = agents.find((a) => a.name === "Platform Lead").id;
+  const auditorId = agents.find((a) => a.name === "Platform Auditor").id;
+  const homeId = db.listAllProjects().find((p) => p.reserved).id;
+  const mk = (id, agentId, role, processState, lastActivity) => db.insertSession({
+    id, projectId: homeId, agentId, engineSessionId: `eng-${id}`, title: null, cwd: TMP,
+    processState, resumability: "unknown", busy: false, createdAt: "2026-06-15T00:00:00.000Z",
+    lastActivity, lastError: null, role, parentSessionId: null,
+  });
+  // LIVE Lead is the OLDER row; the STOPPED Lead is MORE-RECENTLY-active (the recency trap).
+  mk("lead-live", leadId, "platform", "live", "2026-06-15T10:00:00.000Z");
+  mk("lead-stopped", leadId, "platform", "exited", "2026-06-15T12:00:00.000Z");
+  mk("aud-live", auditorId, "auditor", "live", "2026-06-15T11:00:00.000Z");
+
+  const app = await buildApp(db);
+  try {
+    const body = (await app.inject({ method: "GET", url: "/api/platform/home" })).json();
+    const live = body.liveSessions ?? [];
+    const ids = live.map((s) => s.id);
+    check("(4) liveSessions is present (array)", Array.isArray(body.liveSessions));
+    check("(4) the idle-but-LIVE Lead IS surfaced", ids.includes("lead-live"));
+    check("(4) the recently-STOPPED Lead is NOT surfaced (live wins over recency)", !ids.includes("lead-stopped"));
+    check("(4) the live Auditor IS surfaced", ids.includes("aud-live"));
+    check("(4) every surfaced session is LIVE", live.every((s) => s.processState === "live"));
+    check("(4) exactly one live Lead (role 'platform')", live.filter((s) => s.role === "platform").length === 1);
+    check("(4) exactly one live Auditor (role 'auditor')", live.filter((s) => s.role === "auditor").length === 1);
+    check("(4) each live entry carries its agentId for per-agent rollup",
+      live.every((s) => s.agentId === leadId || s.agentId === auditorId));
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
 // ===================== (3) no reserved project → 404 =====================
 {
   const db = new Db(path.join(TMP, "loom-empty.db")); // fresh DB, NO seedPlatformHome
@@ -86,6 +130,6 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GET /api/platform/home returns the reserved 'Loom Platform' home + its Lead/Auditor agents, the ordinary picker still hides the reserved project (no P1 regression), and the endpoint 404s rather than inventing a home when none is seeded."
+  ? "\n✅ ALL PASS — GET /api/platform/home returns the reserved 'Loom Platform' home + its Lead/Auditor agents, the ordinary picker still hides the reserved project (no P1 regression), the endpoint 404s rather than inventing a home when none is seeded, and liveSessions surfaces LIVE sessions over recency (a stopped Lead can't mask a live one — the duplicate-singleton guard)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
