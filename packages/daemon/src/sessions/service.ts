@@ -22,6 +22,7 @@ import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit } from "../orchestration/usage-awareness.js";
 import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
+import { recordUndeliveredReport } from "../orchestration/crash-recovery-watcher.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 
@@ -1440,6 +1441,20 @@ export class SessionService {
       if (report.needs) framed += ` | needs: ${report.needs}`;
       if (warning) framed += ` | warning: ${warning}`;
       delivered = this.pty.enqueueStdin(managerSessionId, framed).delivered;
+      // STRAND BACKSTOP (incident 22a44352): if the report reached NOBODY because the parent manager has
+      // EXITED (it idle-reaped after dispatching its last worker), the completed branch would sit unmerged
+      // with no live or boot-time consumer. Record the durable `worker_report_undelivered` wake trigger so
+      // the crash-recovery watchdog bounded-auto-resumes the manager to run review→gate→merge. A LIVE-but-
+      // busy manager (delivered:false but the message is queued in its FIFO) is NOT orphaned — its queue
+      // drains on the next turn — so gate strictly on the manager row being `exited`. Best-effort + never
+      // throws: the report itself is already durably recorded above regardless.
+      if (!delivered) {
+        const mgr = this.db.getSession(managerSessionId);
+        if (mgr && mgr.processState === "exited") {
+          try { recordUndeliveredReport(this.db, mgr, { reportingWorkerId: workerSessionId, taskId }); }
+          catch { /* never let the wake-trigger record disturb the report path */ }
+        }
+      }
     }
     return warning ? { reported: true, delivered, warning } : { reported: true, delivered };
   }

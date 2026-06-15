@@ -371,7 +371,17 @@ export type OrchestrationEventKind =
   // CRASH-LOOP SAFETY: after N (crashRecoveryMaxAttempts) re-deaths the watchdog STOPS auto-resuming and
   // escalates LOUDLY instead of looping forever. Filed ONCE per episode; ALSO stamped on the session's
   // lastError so Mission Control surfaces it role-agnostically (a dead manager has no parent to nudge).
-  | "session_recovery_abandoned";
+  | "session_recovery_abandoned"
+  // STRAND BACKSTOP (incident 22a44352): a worker called worker_report while its parent manager had already
+  // EXITED (idle-reaped after dispatching its last worker), so the framed report reached NOBODY
+  // (`delivered:false`) and the completed branch sat unmerged. This is the durable wake trigger — the SECOND
+  // trigger the CrashRecoveryWatcher acts on, keyed on `delivered:false` rather than process-death: it
+  // bounded-auto-resumes the exited manager (same attempt-cap/escalation machinery as `session_died`) so it
+  // consumes the report and runs review→gate→merge. Filed under the MANAGER (workerSessionId = its id, so
+  // listEventsForWorker retrieves it; managerSessionId = its parent or its own id); `detail` carries the
+  // reporting worker + task. Recorded by recordUndeliveredReport ONLY when the manager is exited (a
+  // live-but-busy manager's queue drains on its next turn — not a strand) and not usage-limit parked.
+  | "worker_report_undelivered";
 
 export interface OrchestrationEvent {
   id: string;

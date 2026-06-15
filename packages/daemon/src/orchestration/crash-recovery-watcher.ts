@@ -51,6 +51,55 @@ const lastOfKind = (events: OrchestrationEvent[], kind: OrchestrationEvent["kind
 };
 
 /**
+ * The recovery TRIGGERS the watchdog acts on. Two, both filed under the session-to-resume's id (so
+ * listEventsForWorker retrieves them) and both reset by a `session_recovered` marker:
+ *   • `session_died`              — an UNEXPECTED pty death while the daemon stayed healthy (the original).
+ *   • `worker_report_undelivered` — a worker reported to a since-EXITED parent manager (the strand backstop,
+ *      incident 22a44352): keyed on `delivered:false` rather than process-death. Only ever a manager.
+ * The whole bound (attempt cap + escalation + stability reset) is shared — only the trigger differs.
+ */
+const RECOVERY_TRIGGER_KINDS: ReadonlySet<OrchestrationEvent["kind"]> =
+  new Set<OrchestrationEvent["kind"]>(["session_died", "worker_report_undelivered"]);
+
+const lastTriggerOf = (events: OrchestrationEvent[]): OrchestrationEvent | undefined => {
+  for (let i = events.length - 1; i >= 0; i--) if (RECOVERY_TRIGGER_KINDS.has(events[i]!.kind)) return events[i];
+  return undefined;
+};
+
+/**
+ * Strand backstop (incident 22a44352): record the DURABLE `worker_report_undelivered` wake trigger when a
+ * worker's report reached NOBODY because its parent manager had already exited. Called from
+ * SessionService.workerReport ONLY after the framed notify came back `delivered:false` AND the manager row
+ * is `exited` (a live-but-busy manager's queue drains on its next turn — not a strand; that case never gets
+ * here). The watchdog then bounded-auto-resumes the manager via the SAME machinery as a `session_died`.
+ *
+ * Guards (mirroring recordUnexpectedExit) so we never record a useless trigger: the manager must be a
+ * recoverable, resumable role with a captured engine id, not superseded by a recycle successor, and NOT
+ * usage-limit parked (a parked manager is owned by the rate-limit watcher — waking it early would fight the
+ * usage hold; when its park elapses it resumes and sees the now-in-`review` task anyway). Pure DB + never
+ * throws (the caller's report path must not be disturbed). Returns whether it recorded a trigger.
+ */
+export function recordUndeliveredReport(
+  db: Db,
+  manager: { id: string; role?: SessionRole | null; engineSessionId?: string | null; resumability?: string; parentSessionId?: string | null; taskId?: string | null; rateLimitedUntil?: string | null },
+  ctx: { reportingWorkerId: string; taskId?: string | null },
+): boolean {
+  if (!manager.role || !RECOVERABLE_ROLES.includes(manager.role)) return false; // not a recoverable role
+  if (!manager.engineSessionId || manager.resumability === "dead") return false; // never resumable
+  if (db.hasSuccessor(manager.id)) return false;                                 // recycled — successor owns it
+  if (manager.rateLimitedUntil && manager.rateLimitedUntil > new Date().toISOString()) return false; // parked
+  db.appendEvent({
+    id: randomUUID(), ts: new Date().toISOString(),
+    managerSessionId: manager.parentSessionId ?? manager.id, // a manager files under itself (no parent)
+    workerSessionId: manager.id,                             // SUBJECT = the manager to resume
+    taskId: ctx.taskId ?? null,
+    kind: "worker_report_undelivered",
+    detail: { role: manager.role, reportingWorker: ctx.reportingWorkerId, taskId: ctx.taskId ?? null },
+  });
+  return true;
+}
+
+/**
  * onExit hook (called from index.ts onExit, AFTER the row is marked `exited`): record the DURABLE
  * `session_died` trigger IFF the death was UNEXPECTED (`intended === false`) and the session is a
  * recoverable, resumable coordination/work session. An INTENDED stop (graceful / idle / user-stop /
@@ -83,9 +132,15 @@ export function recordUnexpectedExit(db: Db, sessionId: string, intended: boolea
 /**
  * Crash-recovery watchdog. The complement of resumeFleetOnBoot: where THAT auto-resumes the whole fleet on
  * a daemon RESTART, THIS auto-recovers an ISOLATED session whose pty died UNEXPECTEDLY while the daemon
- * stayed HEALTHY — the gap that left a manager dead ~2.5h until a human noticed. The trigger is the durable
- * `session_died` event (recorded by recordUnexpectedExit ONLY for an unexpected death of a resumable
- * coordination/work session — see there for why intended stops + whole-daemon restarts are excluded).
+ * stayed HEALTHY — the gap that left a manager dead ~2.5h until a human noticed. It acts on EITHER of two
+ * durable triggers (see RECOVERY_TRIGGER_KINDS), sharing one bound:
+ *   • `session_died`              — an unexpected pty death (recordUnexpectedExit; intended stops + whole-
+ *      daemon restarts are excluded — see there).
+ *   • `worker_report_undelivered` — STRAND BACKSTOP (incident 22a44352): a worker reported `done` to a
+ *      since-EXITED parent manager so the report reached nobody (`delivered:false`) and its branch sat
+ *      unmerged. recordUndeliveredReport files it; the watchdog resumes the manager so it merges the work.
+ *      This is the "keyed on delivered:false rather than process-death" recovery: a CLEANLY idle-exited
+ *      manager has no `session_died`, so only this trigger can re-wake it.
  *
  * BOUNDED + CRASH-LOOP SAFE (the load-bearing property). Auto-resume is capped at `crashRecoveryMaxAttempts`
  * (per project; 0 = off) via a PERSISTED counter — the count of `session_resume_attempt` events since the
@@ -98,9 +153,10 @@ export function recordUnexpectedExit(db: Db, sessionId: string, intended: boolea
  * stable, still-live resume (live for `stabilityMs` since the last attempt) records `session_recovered`,
  * resetting the counter so a later, unrelated crash starts fresh.
  *
- * Never hard-kills anything; only resumes + surfaces. Skips silently when: the session never died
- * unexpectedly (no `session_died`); the project disabled it (`crashRecoveryMaxAttempts === 0`); the session
- * was recycled/superseded; it or its manager is human-paused; or it isn't a resumable, recoverable role.
+ * Never hard-kills anything; only resumes + surfaces. Skips silently when: the session has no live recovery
+ * trigger (neither `session_died` nor an unconsumed `worker_report_undelivered`); the project disabled it
+ * (`crashRecoveryMaxAttempts === 0`); the session was recycled/superseded; it or its manager is human-paused;
+ * or it isn't a resumable, recoverable role.
  */
 export class CrashRecoveryWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -137,12 +193,12 @@ export class CrashRecoveryWatcher {
       if (control.isPaused(s.id) || (s.parentSessionId && control.isPaused(s.parentSessionId))) continue;
 
       const events = db.listEventsForWorker(s.id);                       // chronological (ts, rowid)
-      const lastDeath = lastOfKind(events, "session_died");
-      if (!lastDeath) continue;                                          // never died unexpectedly → not our concern
+      const lastTrigger = lastTriggerOf(events);                         // session_died OR worker_report_undelivered
+      if (!lastTrigger) continue;                                        // never died / never orphaned → not our concern
 
       const lastRecovered = lastOfKind(events, "session_recovered");
-      // RESOLVED: a recovery recorded at/after the latest death closed the episode (counter already reset).
-      if (lastRecovered && lastRecovered.ts >= lastDeath.ts) continue;
+      // RESOLVED: a recovery recorded at/after the latest trigger closed the episode (counter already reset).
+      if (lastRecovered && lastRecovered.ts >= lastTrigger.ts) continue;
 
       // Counter = resume attempts since the last reset marker (episodeStart). "" sorts before any ISO ts.
       const episodeStart = lastRecovered?.ts ?? "";
@@ -154,7 +210,7 @@ export class CrashRecoveryWatcher {
         // episode RECOVERED (reset the counter)? Reference the latest of {last attempt, the death} — this
         // also re-arms after an EXTERNAL resume (resumeFleetOnBoot / a human) that left no attempt event.
         const lastAttempt = attemptEvents[attemptEvents.length - 1];
-        const refMs = Date.parse(lastAttempt ? lastAttempt.ts : lastDeath.ts);
+        const refMs = Date.parse(lastAttempt ? lastAttempt.ts : lastTrigger.ts);
         if (nowMs - refMs >= this.stabilityMs) {
           fileEvent(s, "session_recovered", { afterAttempts: attempts });
           db.setLastError(s.id, null); // clear any crash-loop banner now that it's healthy again
@@ -213,10 +269,17 @@ export class CrashRecoveryWatcher {
       // resumeFleetOnBoot's per-role continuation nudges. Ready-gated (host.ts queues it until the resumed
       // TUI boots, then drains). Best-effort — the resume itself is the recovery; the nudge just re-engages it.
       if (started && pty) {
+        // Tailor the manager nudge to the trigger: a `worker_report_undelivered` wake means a worker's
+        // report reached nobody while this manager was stopped — point it straight at the review/merge it
+        // missed (the task is already in `review`), not the generic "died unexpectedly" recovery copy.
         const note = s.role === "worker"
           ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — your worktree WIP is ` +
             `intact. Continue your assigned task from where you left off. If you had already finished, call ` +
             `worker_report (done/blocked) so your manager isn't left waiting.`
+          : lastTrigger.kind === "worker_report_undelivered"
+          ? `[loom:auto-recovered] Loom resumed you because a worker reported while you were stopped — its report ` +
+            `reached nobody and its branch is waiting. Call worker_list: one or more workers are awaiting your ` +
+            `review (the task is already in 'review'). Run the review→gate→merge loop on it, then continue orchestrating.`
           : `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — your worktrees are ` +
             `intact. Re-check your workers' state (some may need attention) and continue orchestrating from where ` +
             `you left off.`;
