@@ -20,6 +20,11 @@ export type VaultWriteOutcome =
  * ancestor rejects an in-vault symlink/junction whose real target is outside the vault.
  */
 function resolveInVault(vaultPath: string, relPath: string): string | null {
+  // Defense-in-depth: reject any backslash in the relative path on EVERY platform. On POSIX `\` is a
+  // legitimate filename char (so `..\..` reads as a single segment, not traversal), but a `\` in a
+  // vault-relative path is never legitimate and becomes a path separator — i.e. traversal — the moment
+  // the vault is synced to Windows. Rejecting it everywhere keeps the guard uniform and the file safe.
+  if (relPath.includes("\\")) return null;
   const root = path.resolve(vaultPath);
   const target = path.resolve(root, relPath);
   // Reject writing the root itself, and any path that is not strictly within root (lexical guard).

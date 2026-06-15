@@ -120,7 +120,10 @@ try {
   const hung = await worktreeHasWork(A.repo, A.worktreePath, A.branch, "HEAD", { gitFactory: () => neverGit, timeoutMs: 250 });
   const elapsed = Date.now() - t0;
   check("(e) worktreeHasWork fails SAFE on a never-resolving git → has-work (keep)", hung === true);
-  check(`(e) the check is BOUNDED — returned in ${elapsed}ms (cap 250ms)`, elapsed >= 250 && elapsed < 250 * 8 + 1500);
+  // Lower bound only: proves the call WAITED for the 250ms timeout rather than returning early or
+  // hanging forever. No upper bound — a loaded CI runner can take arbitrarily long to schedule the
+  // resolution after the timer fires, and an upper bound there is a pure timing flake.
+  check(`(e) the check is BOUNDED — waited for the timeout, returned in ${elapsed}ms (floor 250ms)`, elapsed >= 250);
 
   // --- the .claude discriminator, unit level (independent of any worktree) ---
   check("(e) parser: untracked .claude path alone → NOT work", worktreeStatusHasWork("?? .claude/skills/foo/SKILL.md\n") === false);

@@ -8,7 +8,7 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
   <a href="https://github.com/DanielC000/loom/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/DanielC000/loom/actions/workflows/ci.yml/badge.svg" /></a>
   <a href="https://github.com/DanielC000/loom/releases"><img alt="Release" src="https://img.shields.io/github/v/release/DanielC000/loom?sort=semver" /></a>
-  <img alt="Node >=22" src="https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg" />
+  <img alt="Node 22+" src="https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg" />
 </p>
 
 </div>

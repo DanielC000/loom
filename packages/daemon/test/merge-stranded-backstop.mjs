@@ -122,7 +122,7 @@ try {
   const detN = await detectStrandedWork(N.repo, N.worktreePath, N.branch);
   check("(normal) detectStrandedWork → stranded:false (work is on the assigned branch)", detN.stranded === false);
 
-  const reviewN = await sessions.reviewWorkerMerge(N.mgrId, N.workerId);
+  const reviewN = await sessions.reviewWorkerMerge(N.mgrId, N.workerId, { includePatch: true });
   check("(normal) reviewWorkerMerge → NO warning", reviewN.warning === undefined);
   check("(normal) reviewWorkerMerge shows the real diff", reviewN.filesChanged === 1 && reviewN.patch.includes(N.file));
 
