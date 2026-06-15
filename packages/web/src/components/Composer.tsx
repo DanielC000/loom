@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { Button, StatusPill } from "./ui";
+import { Button, Select, StatusPill } from "./ui";
 import { color, font } from "../theme";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
+import { useVoiceLang, voiceLangOptions } from "../lib/useVoiceLang";
 
 // Reliable "send a turn" box: posts through the daemon's busy-gated enqueue (auto-Enter, queues
 // if a turn is in flight) so a human send and the programmatic worker_report enqueue can't collide.
@@ -23,9 +24,14 @@ export function Composer({ sessionId }: { sessionId: string }) {
   });
   const submit = () => { if (text.trim()) send.mutate(text); };
 
+  // GLOBAL voice-input language (shared across every mounted composer, persisted; default =
+  // navigator.language). Threaded into the recognizer below; it applies on the NEXT start().
+  const [voiceLang, setVoiceLang] = useVoiceLang();
+
   // Voice input → APPEND each finalized transcript chunk to the box (never clobber typed text, never
   // auto-send). The user reviews and sends via the SAME path above. The hook is click-driven only.
   const speech = useSpeechRecognition({
+    lang: voiceLang,
     onFinalTranscript: (chunk) => {
       const piece = chunk.trim();
       if (!piece) return;
@@ -45,9 +51,20 @@ export function Composer({ sessionId }: { sessionId: string }) {
           rows={2}
           style={{ flex: 1, resize: "vertical", boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: "6px 8px", fontFamily: font.mono, fontSize: 13 }}
         />
-        <div style={{ display: "flex", flexDirection: "column", gap: 4, justifyContent: "flex-end", width: 130 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, justifyContent: "flex-end", width: 176 }}>
           {status && <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>{status}</span>}
-          {speech.supported && <MicButton speech={speech} />}
+          {speech.supported && (
+            // Voice + language picker share ONE row so adding the selector doesn't grow the column's
+            // height (the terminal pane is flex:1 — extra height here would resize/rescale the xterm).
+            <div style={{ display: "flex", gap: 4, alignItems: "stretch" }}>
+              <MicButton speech={speech} />
+              <VoiceLangSelect
+                lang={voiceLang}
+                setLang={setVoiceLang}
+                disabled={speech.status === "listening" || speech.status === "requesting"}
+              />
+            </div>
+          )}
           <Button variant="primary" disabled={!text.trim() || send.isPending} onClick={submit}>Send turn</Button>
         </div>
       </div>
@@ -82,6 +99,29 @@ function MicButton({ speech }: { speech: SpeechRecognitionApi }) {
       />
       {listening ? "Stop" : requesting ? "starting…" : "Voice"}
     </Button>
+  );
+}
+
+// Compact BCP-47 language picker for voice dictation, sitting beside the Voice button. Disabled while
+// a recording is live — the choice applies on the NEXT start() (the hook reads `lang` at start, never
+// hot-swapping mid-recording). The persisted `lang` is always injected as an option if it isn't one
+// of the curated tags, so the controlled <select> always has a matching value.
+function VoiceLangSelect({ lang, setLang, disabled }: { lang: string; setLang: (l: string) => void; disabled: boolean }) {
+  const options = voiceLangOptions();
+  const all = options.some((o) => o.tag === lang) ? options : [{ tag: lang, label: lang }, ...options];
+  return (
+    <Select
+      aria-label="Voice recognition language"
+      title={disabled ? "Language applies to the next recording" : "Voice recognition language"}
+      value={lang}
+      disabled={disabled}
+      onChange={(e) => setLang(e.target.value)}
+      style={{ flex: 1, minWidth: 0, fontSize: 11, padding: "2px 4px" }}
+    >
+      {all.map((o) => (
+        <option key={o.tag} value={o.tag}>{o.label}</option>
+      ))}
+    </Select>
   );
 }
 
