@@ -32,5 +32,14 @@ export function watchClaudeProjects(db: Db, onChange?: (marked: number) => void)
   };
   return chokidar
     .watch(CLAUDE_PROJECTS, { ignoreInitial: true, depth: 2 })
-    .on("unlink", (f) => { if (f.endsWith(".jsonl")) schedule(); });
+    .on("unlink", (f) => { if (f.endsWith(".jsonl")) schedule(); })
+    // A watched project dir can vanish mid-stat — e.g. a short-lived temp run cwd (loom-mgmt-cwd-*)
+    // whose transcript is cleaned up — which on Windows surfaces as EPERM/ENOENT/EBUSY. chokidar emits
+    // these on the 'error' event; with NO listener that unhandled event would CRASH the whole daemon
+    // (it took the daemon down on 2026-06-16). Swallow it (log only): the watcher keeps running and the
+    // next debounced sweep self-heals. NEVER rethrow here — a transient FS race must not kill the daemon.
+    .on("error", (err) => {
+      const e = err as NodeJS.ErrnoException;
+      console.warn(`[liveness] claude-projects watcher error (ignored, watcher continues): ${e?.code ?? ""} ${e?.message ?? String(err)}`);
+    });
 }
