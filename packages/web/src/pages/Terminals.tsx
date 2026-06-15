@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, ShellTerminal, Task } from "@loom/shared";
 import { api } from "../lib/api";
-import { byCreatedStable } from "../lib/sessions";
+import { byCreatedStable, byManagerThenCreated } from "../lib/sessions";
 import { TerminalPane } from "../components/Terminal";
 import { SessionWakes } from "../components/SessionWakes";
 import { SessionQueue } from "../components/SessionQueue";
@@ -53,11 +53,12 @@ export default function Terminals() {
   });
   const tasksById = new Map<string, Task>();
   for (const q of taskQueries) for (const t of q.data ?? []) tasksById.set(t.id, t);
-  // Tile order: the STABLE shared key (lib/sessions.ts byCreatedStable) — createdAt DESC (newest
-  // first), tiebreak by id. A session keeps its slot whether it's busy or idle, so the grid never
-  // reshuffles on a poll (the old activity sort made rows jump). Shared with Overview so the views can't drift.
+  // Tile order: the STABLE shared key (lib/sessions.ts byManagerThenCreated) — managers first, then
+  // createdAt DESC (newest first), tiebreak by id within each bucket. A session keeps its slot whether
+  // it's busy or idle, so the grid never reshuffles on a poll (the old activity sort made rows jump).
+  // Shared with Overview so the two flat live-grids can't drift.
   const shown = (filter ? live.filter((s) => s.projectName === filter) : live)
-    .slice().sort(byCreatedStable);
+    .slice().sort(byManagerThenCreated);
   // Manager-centric layout: one ROW per manager — the manager tile leftmost, then ITS workers to
   // the right ordered newest→oldest (createdAt DESC). Workers attach to their manager via
   // parentSessionId. Two catch-all rows trail the manager rows so nothing is dropped: orphan workers

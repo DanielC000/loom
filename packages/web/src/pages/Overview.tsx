@@ -5,7 +5,7 @@ import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole 
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention } from "../lib/attention";
-import { bySessionActivity, byCreatedStable } from "../lib/sessions";
+import { bySessionActivity, byCreatedStable, byManagerThenCreated } from "../lib/sessions";
 import Board from "./Board";
 import { TerminalPane } from "../components/Terminal";
 import { TerminalTile } from "../components/TerminalTile";
@@ -399,10 +399,10 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
     mutationFn: (id: string) => api.forkSession(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
   });
-  // STABLE newest-first order (createdAt DESC, tiebreak id) shared with the Terminals page — a session
-  // keeps its slot whether busy or idle, so the grid never reshuffles on the 3s poll (the old activity
-  // sort made tiles jump). createdAt is immutable, so DESC is just as stable; newest tiles sit on top.
-  const live = sessions.filter((s) => s.processState === "live").slice().sort(byCreatedStable);
+  // Manager-first STABLE order (managers first/left, then createdAt DESC within each bucket) shared with
+  // the Terminals page — the orchestrator pins to the front and its workers follow to the right, and a
+  // session keeps its slot whether busy or idle so the grid never reshuffles on the 3s poll.
+  const live = sessions.filter((s) => s.processState === "live").slice().sort(byManagerThenCreated);
   if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>No live sessions in this project. Spawn the manager above.</p>;
 
   if (maximized) {

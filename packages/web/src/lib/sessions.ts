@@ -1,4 +1,4 @@
-import type { Session, ProcessState } from "@loom/shared";
+import type { Session, ProcessState, SessionRole } from "@loom/shared";
 
 // The ONE shared session ordering, applied at every session-list tier (Workspace, Terminals,
 // Mission Control, Orchestration) so a session's place in a list is consistent everywhere.
@@ -39,6 +39,29 @@ export type SessionStableOrder = Pick<Session, "createdAt" | "id">;
  */
 export function byCreatedStable(a: SessionStableOrder, b: SessionStableOrder): number {
   return b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id);
+}
+
+/** The minimal shape the manager-first comparator needs — role on top of the stable-order fields. */
+export type SessionRoleOrder = SessionStableOrder & Pick<Session, "role">;
+
+// Manager bucket — managers rank 0 (first/left), everyone else 1. null/undefined role (plain or
+// orphaned sessions) is NOT a manager, so it sinks below the manager(s) in the same group.
+function managerRank(role: SessionRole | null | undefined): number {
+  return role === "manager" ? 0 : 1;
+}
+
+/**
+ * Manager-first STABLE comparator for any FLAT grid that mixes a manager with its workers — the
+ * Overview `ProjectTerminals` grid and the Terminals-page live grid. Managers sort BEFORE workers
+ * (so the orchestrator sits first/left and its workers follow to the right), then byCreatedStable
+ * WITHIN each bucket (createdAt DESC, id tiebreak → newest-first, immutable key, no reshuffle on the
+ * 3s poll). Use this ONLY where a flat grid must read manager→workers left-to-right; grouped tiers
+ * (the fleet accordion, the Terminals manager rows) keep their own nesting and don't need it.
+ */
+export function byManagerThenCreated(a: SessionRoleOrder, b: SessionRoleOrder): number {
+  const byManager = managerRank(a.role) - managerRank(b.role);
+  if (byManager !== 0) return byManager;
+  return byCreatedStable(a, b);
 }
 
 /**
