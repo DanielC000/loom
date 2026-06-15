@@ -53,17 +53,17 @@ export default function Terminals() {
   });
   const tasksById = new Map<string, Task>();
   for (const q of taskQueries) for (const t of q.data ?? []) tasksById.set(t.id, t);
-  // Tile order: the STABLE shared key (lib/sessions.ts byCreatedStable) — createdAt ascending,
-  // tiebreak by id. A session keeps its slot whether it's busy or idle, so the grid never reshuffles
-  // on a poll (the old activity sort made rows jump). Shared with Overview so the views can't drift.
+  // Tile order: the STABLE shared key (lib/sessions.ts byCreatedStable) — createdAt DESC (newest
+  // first), tiebreak by id. A session keeps its slot whether it's busy or idle, so the grid never
+  // reshuffles on a poll (the old activity sort made rows jump). Shared with Overview so the views can't drift.
   const shown = (filter ? live.filter((s) => s.projectName === filter) : live)
     .slice().sort(byCreatedStable);
   // Manager-centric layout: one ROW per manager — the manager tile leftmost, then ITS workers to
-  // the right ordered oldest→newest (createdAt asc). Workers attach to their manager via
+  // the right ordered newest→oldest (createdAt DESC). Workers attach to their manager via
   // parentSessionId. Two catch-all rows trail the manager rows so nothing is dropped: orphan workers
   // (parent absent from the live set — a recycled/stopped manager) and standalone sessions (no role /
   // no parent — plain human sessions, platform leads — which must never anchor a manager row).
-  // Manager rows are ordered by a STABLE key (manager createdAt asc, tiebreak id, via `shown`) so a
+  // Manager rows are ordered by a STABLE key (manager createdAt DESC, tiebreak id, via `shown`) so a
   // row never jumps when its manager/workers flip busy↔idle. Computed from `shown` (already in that
   // stable order), so the same layout holds inside a project filter.
   const rows = useMemo<SessionRow[]>(() => {

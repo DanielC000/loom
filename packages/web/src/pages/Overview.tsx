@@ -45,8 +45,8 @@ export default function Overview() {
 
   // Project-filtered session set — every section below scopes off this.
   const all = (sessions.data ?? []).filter((s) => s.projectId === projectId);
-  // Managers hold a STABLE slot (createdAt asc, tiebreak id) so the cockpit never reshuffles on the
-  // 3s poll when a manager flips busy↔idle — matching the Terminal view (see lib/sessions.ts).
+  // Managers hold a STABLE slot (createdAt DESC, tiebreak id — newest first) so the cockpit never
+  // reshuffles on the 3s poll when a manager flips busy↔idle — matching the Terminal view (see lib/sessions.ts).
   const managers = all.filter((s) => s.role === "manager").sort(byCreatedStable);
   const workers = all.filter((s) => s.role === "worker");
   const roll = fleetRollup(all);
@@ -399,9 +399,9 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
     mutationFn: (id: string) => api.forkSession(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
   });
-  // STABLE spawn-order (createdAt asc, tiebreak id) shared with the Terminals page — a session keeps
-  // its slot whether busy or idle, so the grid never reshuffles on the 3s poll (the old activity sort
-  // made tiles jump).
+  // STABLE newest-first order (createdAt DESC, tiebreak id) shared with the Terminals page — a session
+  // keeps its slot whether busy or idle, so the grid never reshuffles on the 3s poll (the old activity
+  // sort made tiles jump). createdAt is immutable, so DESC is just as stable; newest tiles sit on top.
   const live = sessions.filter((s) => s.processState === "live").slice().sort(byCreatedStable);
   if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>No live sessions in this project. Spawn the manager above.</p>;
 

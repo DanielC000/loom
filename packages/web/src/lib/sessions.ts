@@ -31,13 +31,14 @@ export function bySessionActivity(a: SessionOrder, b: SessionOrder): number {
 export type SessionStableOrder = Pick<Session, "createdAt" | "id">;
 
 /**
- * STABLE spawn-order comparator — createdAt ASC, tiebreak id. Unlike bySessionActivity, this key
+ * STABLE newest-first comparator — createdAt DESC, tiebreak id. Unlike bySessionActivity, this key
  * never depends on liveness or lastActivity, so a row keeps its slot whether it's busy or idle and
- * a polling list (Overview, Terminals) never reshuffles between polls. Use this for any tier that
- * must hold position through busy↔idle flips.
+ * a polling list (Overview, Terminals) never reshuffles between polls. Because createdAt is immutable,
+ * DESC is still a STABLE order — newest sessions simply sit at the TOP instead of the bottom, and no
+ * row reshuffles between polls. Use this for any tier that must hold position through busy↔idle flips.
  */
 export function byCreatedStable(a: SessionStableOrder, b: SessionStableOrder): number {
-  return a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
+  return b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id);
 }
 
 /**

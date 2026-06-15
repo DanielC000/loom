@@ -197,8 +197,8 @@ export default function Workspace() {
   );
   // Top level: role rank stays the PRIMARY key so the orchestrator isn't lost among plain/orphan
   // sessions; the shared activity comparator (live-first → most-recent → spawn-order) orders within a
-  // role. Nested workers, by contrast, use the STABLE spawn-order key (byCreatedStable — createdAt
-  // asc, tiebreak id) so a worker holds its slot under its manager through busy↔idle flips and the
+  // role. Nested workers, by contrast, use the STABLE newest-first key (byCreatedStable — createdAt
+  // DESC, tiebreak id) so a worker holds its slot under its manager through busy↔idle flips and the
   // rail never reshuffles on a poll — matching the Overview/Terminal manager→worker nesting.
   for (const ws of workersByManager.values()) ws.sort(byCreatedStable);
   const orderedTop = topLevel.sort((a, b) => roleRank(a.role) - roleRank(b.role) || bySessionActivity(a, b));
