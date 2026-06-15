@@ -20,7 +20,7 @@ const TEST_DIR = path.join(__dirname, "..", "test");
 const HERMETIC = [
   "prod-guard",               // the guard itself
   "orch-model", "dead-id", "boot-reconcile", "boot-reconcile-keep-work", "merge-done-crash-recovery", "restart-intent", "restart-fleet",
-  "profiles", "profiles-crud", "profile-spawn", "browser-testing-spawn", "platform-home", "platform-lead-singleton", "platform-mgmt-surface", "platform-elevated-surface", "audit-surface",
+  "profiles", "profiles-crud", "profile-spawn", "browser-testing-spawn", "platform-dev-flag", "platform-home", "platform-lead-singleton", "platform-mgmt-surface", "platform-elevated-surface", "audit-surface",
   "agent-runs-keys", "agent-runs-primitive", "agent-runs-rest", "agent-runs-idempotency", "agent-runs-caps", "agent-runs-spend", "agent-runs-hardening", "agent-runs-audit",
   "tasks-filter", "tasks-priority", "preset-prompts", "preset-prompt-suggestions", "config-bounds", "kanban-defaults", "transcript-encode", "alert-webhook",
   "session-archive", "all-archived-sessions", "periodic-snapshot", "mgmt-project-agent", "web-static-serve", "version",

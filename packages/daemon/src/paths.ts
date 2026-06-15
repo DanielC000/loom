@@ -59,6 +59,18 @@ export const VAULT_LINT_SCRIPT = path.join(__dirname, "..", "assets", "vault-lin
 
 export const PORT = Number(process.env.LOOM_PORT || 4317);
 
+/**
+ * Dev-only feature gate (`LOOM_DEV=1`, default OFF). The "Platform layer" — the reserved "Loom Platform"
+ * project + its Platform Lead / Platform Auditor agents, the Platform-lead / Platform-audit profiles, and
+ * the platform-lead / platform-audit skills — is gated behind this flag so it does NOT ship to regular
+ * `loomctl` users, while staying in the repo (loadable in dev mode). This is the SINGLE env read for the
+ * gate; the seeders call it. Read at CALL time (like index.ts's `LOOM_SCHEDULER_ENABLED` boot read) so a
+ * single process can toggle the flag — the hermetic test exercises both default-off and dev-on in one run.
+ */
+export function isLoomDev(): boolean {
+  return process.env.LOOM_DEV === "1";
+}
+
 export function ensureDirs(): void {
   for (const d of [LOOM_HOME, SETTINGS_DIR, LOGS_DIR, WORKTREES_DIR, RUNS_DIR, SKILLS_DIR]) fs.mkdirSync(d, { recursive: true });
 }

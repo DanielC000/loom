@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Profile } from "@loom/shared";
+import { isLoomDev } from "../paths.js";
 import type { Db } from "../db.js";
 
 /**
@@ -118,14 +119,30 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
 ];
 
 /**
+ * A bundled profile belongs to the dev-only Platform layer (Platform-lead / Platform-audit) iff its role
+ * is one of the two platform-exclusive roles. Those two profiles seed only under LOOM_DEV; every other
+ * bundled profile is CORE product and always seeds. Keyed by role (not name) so a future bundled platform
+ * profile is gated automatically without touching this gate.
+ */
+function isPlatformProfile(p: Omit<Profile, "id">): boolean {
+  return p.role === "platform" || p.role === "auditor";
+}
+
+/**
  * Seed the bundled profiles into the platform-level `profiles` table ONLY IF ABSENT (matched by
  * name), mirroring seedGlobalSkills' seed-if-absent contract: a user's future edits survive reboots,
  * and re-running is idempotent (no duplicates). Returns the names actually seeded this call.
+ *
+ * DEV-ONLY GATE: the two Platform-layer profiles (Platform-lead / Platform-audit) seed only when LOOM_DEV
+ * is set (see paths.ts › isLoomDev); the CORE profiles (Orchestrator/Dev/Bugfix/QA/Web Designer/…) always
+ * seed for every `loomctl` user.
  */
 export function seedDefaultProfiles(db: Db): string[] {
+  const devMode = isLoomDev();
   const existing = new Set(db.listProfiles().map((p) => p.name));
   const seeded: string[] = [];
   for (const p of BUNDLED_PROFILES) {
+    if (!devMode && isPlatformProfile(p)) continue; // dev-only Platform layer — omit for loomctl users
     if (existing.has(p.name)) continue; // preserve user edits / avoid duplicates
     db.insertProfile({ id: randomUUID(), ...p });
     seeded.push(p.name);

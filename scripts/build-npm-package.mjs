@@ -25,6 +25,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { curateSkillDirs, DEV_ONLY_SKILLS } from "./curate-release-skills.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -76,6 +77,18 @@ log("copy web dist → dist/web/  (resolveWebDistDir → <daemon-dist>/web)");
 fs.cpSync(webDist, path.join(stage, "dist", "web"), { recursive: true });
 log("copy daemon assets → assets/  (hook-relay, vault-lint, bundled skills)");
 fs.cpSync(daemonAssets, path.join(stage, "assets"), { recursive: true });
+// Curate the staged skills: the DEV-ONLY Platform-layer skills (platform-lead / platform-audit) are
+// gated behind LOOM_DEV and must NOT ship to regular `loomctl` users; the core orchestration skills
+// always ship. Prune the dev-only dirs from the staged copy (curation decided by the shared pure helper
+// in curate-release-skills.mjs, so the build + the daemon dev-flag test stay in lockstep).
+const stagedSkills = path.join(stage, "assets", "skills");
+if (fs.existsSync(stagedSkills)) {
+  const all = fs.readdirSync(stagedSkills, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  const kept = new Set(curateSkillDirs(all));
+  const omitted = all.filter((n) => !kept.has(n));
+  for (const name of omitted) fs.rmSync(path.join(stagedSkills, name), { recursive: true, force: true });
+  log(omitted.length ? `curate skills → omitted dev-only: ${omitted.join(", ")}` : `curate skills → no dev-only skills present (omit set: ${DEV_ONLY_SKILLS.join(", ")})`);
+}
 
 log("bundle @loom/shared → node_modules/@loom/shared/");
 const sharedPkgDir = path.join(stage, "node_modules", "@loom", "shared");

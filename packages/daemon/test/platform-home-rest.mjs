@@ -16,6 +16,7 @@ import { requireHermeticEnv } from "./_guard.mjs";
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-platform-home-rest-"));
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45318";
+process.env.LOOM_DEV = "1"; // the Platform layer is dev-gated; this test seeds + reaches the home, so enable it
 const sandboxHome = path.join(TMP, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE

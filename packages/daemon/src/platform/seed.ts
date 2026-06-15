@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Agent, Project } from "@loom/shared";
-import { LOOM_HOME } from "../paths.js";
+import { LOOM_HOME, isLoomDev } from "../paths.js";
 import type { Db } from "../db.js";
 
 /**
@@ -83,8 +83,14 @@ const PLATFORM_AGENTS: PlatformAgentSpec[] = [
  * profile, looked up by name from the already-seeded profiles (seedDefaultProfiles runs first at boot);
  * if a profile is somehow missing the agent is still seeded with profileId null (resolveProfile's plain
  * backstop) so the seed never throws. Returns a short summary of what was seeded ([] when it no-ops).
+ *
+ * DEV-ONLY: the whole Platform layer is gated behind LOOM_DEV (see paths.ts › isLoomDev). Without the
+ * flag — the default for every `loomctl` user — this no-ops entirely (the reserved project + its agents
+ * never seed). The CORE orchestration product (Orchestrator/Dev/Bugfix/QA/Web Designer + their skills)
+ * is unaffected and always seeds.
  */
 export function seedPlatformHome(db: Db): string[] {
+  if (!isLoomDev()) return []; // dev-only Platform layer — never seeds for regular loomctl users
   if (db.hasReservedProject()) return []; // already seeded — never clobber user edits
 
   const now = new Date().toISOString();

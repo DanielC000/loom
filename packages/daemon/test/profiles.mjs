@@ -16,6 +16,7 @@ import Database from "better-sqlite3";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-profiles-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+process.env.LOOM_DEV = "1"; // the two platform profiles are dev-gated; this test asserts the FULL bundled set seeds
 const DB_FILE = path.join(process.env.LOOM_HOME, "loom.db");
 
 let failures = 0;

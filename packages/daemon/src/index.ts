@@ -43,13 +43,15 @@ async function main(): Promise<void> {
   if (backupCfg.enabled) await takeBackup({ reason: "boot", keep: backupCfg.keep });
   const db = new Db();
   // Seed Loom's bundled Profiles (platform-level rig) into the profiles table, seed-if-absent
-  // like the skills seed — additive, idempotent, preserves user edits. Phase-1 read path only.
+  // like the skills seed — additive, idempotent, preserves user edits. The two Platform-layer profiles
+  // (Platform-lead/Platform-audit) seed only under LOOM_DEV; the core profiles always seed.
   const seededProfiles = seedDefaultProfiles(db);
   if (seededProfiles.length) console.log(`[boot] seeded default profile(s): ${seededProfiles.join(", ")}`);
   // Platform Manager P1: seed the reserved "Loom Platform" home + its Platform Lead / Platform Auditor
   // agents, seed-if-absent (idempotent; runs AFTER seedDefaultProfiles so the bundled platform profiles
   // exist to assign). Hidden from the project picker (db.listProjects), still Mission-Control visible.
   // The Lead is NOT spawned here (human REST action) and the Auditor is NOT scheduled here (P5).
+  // DEV-ONLY: the whole Platform layer is gated behind LOOM_DEV — this no-ops for regular loomctl users.
   const seededPlatform = seedPlatformHome(db);
   if (seededPlatform.length) console.log(`[boot] seeded platform home: ${seededPlatform.join(", ")}`);
   // Resolve the daemon-global platform tuning ONCE at boot (SQLite singleton override ?? LOOM_* env ??

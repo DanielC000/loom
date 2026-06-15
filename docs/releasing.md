@@ -107,7 +107,7 @@ pnpm pack:npm        # → loomctl-X.Y.Z.tgz at the repo root
 |---|---|---|
 | `dist/` | `packages/daemon/dist` (copied as-is, **not** bundled) | daemon entry `dist/index.js`; copying preserves each module's `import.meta.url` so the daemon's relative asset lookups still resolve |
 | `dist/web/` | `packages/web/dist` | Part 1's `resolveWebDistDir()` resolves `<daemon-dist>/web` |
-| `assets/` | `packages/daemon/assets` | the daemon reads `hook-relay.mjs` / `vault-lint.mjs` / bundled skills LIVE from here |
+| `assets/` | `packages/daemon/assets` (**skills curated**) | the daemon reads `hook-relay.mjs` / `vault-lint.mjs` / bundled skills LIVE from here. The build **omits the dev-only Platform-layer skills** (`platform-lead`, `platform-audit`) from the staged `assets/skills/` — see *The dev-only Platform layer* below |
 | `node_modules/@loom/shared/` | `packages/shared/dist` | `@loom/shared` is private (not on npm) → shipped as a **`bundledDependency`** |
 | `bin/loom.mjs` | repo `bin/` | the `loom` command: boots the daemon, waits for `/api/version`, opens the browser |
 | `package.json` | generated; `name:"loomctl"`, `version` = root `package.json` | a `name:"loom"` (monorepo) OR `name:"loomctl"` (packaged) package.json above the daemon satisfies Part 3's `loomVersion()` walk-up — `GET /api/version` returns the real version |
@@ -115,6 +115,24 @@ pnpm pack:npm        # → loomctl-X.Y.Z.tgz at the repo root
 Native deps (`better-sqlite3`, `node-pty`) and the runtime-resolved `@playwright/mcp` stay **real
 `dependencies`**, so a plain `npm install` fetches their prebuilt binaries. **pnpm is a contributor
 tool only** — end users need just Node 22+.
+
+### The dev-only Platform layer
+
+Loom's **Platform layer** — the reserved "Loom Platform" project + the Platform Lead/Auditor agents, the
+`Platform-lead`/`Platform-audit` profiles, and the `platform-lead`/`platform-audit` skills — is **dev-only**
+(owner decision, 2026-06-15). It stays in the repo (loadable in dev with `LOOM_DEV=1`) but does **not**
+ship to regular `loomctl` users:
+
+- **Runtime seeding** is gated behind `LOOM_DEV` (one helper, `packages/daemon/src/paths.ts` › `isLoomDev`,
+  read like `LOOM_SCHEDULER_ENABLED`): without the flag, the seeders skip the reserved project, the
+  platform agents, and the two platform profiles. CORE orchestration always seeds.
+- **The published bundle** drops the two platform skill dirs. `scripts/build-npm-package.mjs` curates the
+  staged `assets/skills/` via the pure `curateSkillDirs()` helper in `scripts/curate-release-skills.mjs`
+  (the same helper the daemon's `platform-dev-flag` test asserts against, so the build and the test never
+  drift). The core orchestration skills (`orchestrate`/`worker`/`pickup`/…) always ship.
+
+To add or remove a dev-only skill from the published package, edit `DEV_ONLY_SKILLS` in
+`scripts/curate-release-skills.mjs` — that one list drives both the build curation and the test.
 
 **Smoke-test the tarball in a clean dir** (the install path an end user takes — never the repo):
 
