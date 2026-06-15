@@ -173,11 +173,30 @@ body {
   border-bottom-color: var(--loom-phosphor);
 }
 
-/* Honor reduced-motion: drop the cosmetic hover/active transitions. */
+/* Mic recording indicator (Composer voice input): a gentle pulse while the recognizer is live. */
+@keyframes loom-mic-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.3;
+    transform: scale(0.6);
+  }
+}
+.loom-mic-pulse {
+  animation: loom-mic-pulse 1s ease-in-out infinite;
+}
+
+/* Honor reduced-motion: drop the cosmetic hover/active transitions + the mic pulse. */
 @media (prefers-reduced-motion: reduce) {
   .loom-btn,
   .loom-navtab,
   .loom-toggle {
     transition: none;
+  }
+  .loom-mic-pulse {
+    animation: none;
   }
 }
