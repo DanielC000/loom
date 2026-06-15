@@ -192,6 +192,23 @@ scope, and never address the human. You make the call and `worker_message` it ba
    actual bound URL from vite's startup line, never assume the default. Hold both when you review a
    browser-capable worker's "verified live."
 
+   **Run-shaped features need a REAL-agent smoke run — hermetic gates alone are insufficient.** When a
+   feature's *runtime IS an agent turn* — agent runs, dispatch, tool-IO, anything where a live model
+   call drives the behavior — a passing hermetic/unit gate proves the wiring, NOT that it works live:
+   the schema the agent actually sees, how a real model phrases its output, and the timeout/teardown
+   path only exercise under a real turn. So make **≥1 real-agent smoke run a hard DoD** for such a
+   feature before you call it done; require the worker to run it and report the live trace, or run the
+   integrated pass yourself. (This is the lesson of the `submit_result` miss: every hermetic test was
+   green while a real agent looped 7× because its result was a stringified JSON the schema rejected.)
+   Bake that exact failure into your hermetic-test guidance too: a run/tool-IO feature's tests must
+   cover the **stringified-result case** — an agent passing a JSON-encoded *string* where an object is
+   expected — not just the already-well-formed payload, since that's the shape real models actually emit.
+
+   **Multi-requirement design note → explicit gate checklist.** When a task derives from a design note
+   that carries several distinct requirements, enumerate those requirements as an explicit checklist in
+   the task's DoD and verify the merge against *each* line — don't collapse a multi-point note into one
+   vague "done." A requirement that isn't a checkbox is a requirement that silently slips.
+
 ## Self-hosting — when your project IS Loom itself
 
 If you orchestrate **Loom with Loom**, merged daemon-`src` code is **not running** until the daemon is
@@ -202,9 +219,14 @@ build does **not** restart and returns the error (fix it, then retry), so you ne
 down on broken code. On a green build the daemon restarts (your pty + your live workers' ptys drop)
 and you are **automatically resumed** with a note once it's back (your live workers too) — then verify
 the now-live behavior. Caveats: changes under `packages/daemon/assets/**` (skills, hooks) are read
-**live** and need no restart; and if `daemon_restart` returns `restarting:false` because the daemon
-isn't supervised, flag that the human must restart for your code to go live. Use this only when a
-change actually needs to be *running* to verify — not after every daemon merge.
+**live** and need no restart; if `daemon_restart` returns `restarting:false` because the daemon
+isn't supervised, flag that the human must restart for your code to go live; and edits to the
+**supervisor itself** (`scripts/daemon-supervisor.mjs`, or any code the supervisor process loads — as
+opposed to the daemon it spawns) are **NOT `daemon_restart`-deployable** — `daemon_restart` only
+relaunches the daemon under the *existing* supervisor, so a supervisor-code change needs a human
+**Ctrl-C + re-run** of `pnpm daemon:stable`; surface that as an explicit human action in your
+done-report. Use this only when a change actually needs to be *running* to verify — not after every
+daemon merge.
 
 **A low-urgency deploy that should wait for the fleet to go quiet is a park, not a poll.** Don't re-run
 `worker_list` in a wake loop watching for quiet — note the held restart in your resume doc,
@@ -216,6 +238,14 @@ don't trust the auto-resume to have actually put your workers back to work: run 
 each live worker's transcript. A worker resumed but left **idle mid-task** (a generic "Continue" just
 draws "No response requested") needs a **specific** `worker_message` re-nudge naming where it left off
 to revive it — a generic nudge won't.
+
+**A project that has its own running instance you can't redeploy: consolidate the deploy ask.** When
+the project you orchestrate is *not* Loom itself but still runs a live instance off `main` (a service,
+an app, a daemon) that you have **no** affordance to redeploy, don't try to mint one and don't nag the
+owner per-merge. Track which merged changes are "live-pending" and surface them as **ONE consolidated,
+explicit owner action at SESSION-END** — a single "these merged changes need a redeploy of <instance>
+to go live" line in your done-report — rather than a redeploy reminder after each merge. (Loom-with-Loom
+is the exception: there you *do* hold the `daemon_restart` affordance — see Self-hosting above.)
 
 ## How you operate
 
