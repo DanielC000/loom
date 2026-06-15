@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { Ajv } from "ajv";
@@ -2178,6 +2179,21 @@ export class SessionService {
       const project = this.db.getProject(s.projectId);
       if (!project) continue;
       handledWorktrees.add(worktreePath); // recycle chains share a worktree → decide once
+      // DEAD LEFTOVER: a dir with NO `.git` linkage file is the residue of an already-completed
+      // removeWorktree whose Windows fs delete partially failed (node_modules handle-lock) — git dropped
+      // the admin entry + the `.git` linkage file, but the directory survived on disk. It has NO
+      // recoverable git linkage, so worktreeHasWork's `git status` throws "not a git repository" → the
+      // fail-safe `catch { return true }` KEEPS it → the dir leaks (~270M each) and is re-logged "holds
+      // unmerged work" every boot forever. The `.git` PRESENCE check is a pure fs stat (NOT a git op), so
+      // it can't itself throw/hang: a dir WITHOUT `.git` is a dead leftover we GC here; a dir WITH a valid
+      // `.git` falls through to the EXACT fail-safe path below (the 2026-06-05 P0 data-loss guard for real
+      // worktrees stays byte-intact). Scope: only the no-`.git` case — NOT the rarer "`.git` exists but
+      // gitdir pruned" variant.
+      if (!fs.existsSync(path.join(worktreePath, ".git"))) {
+        try { await removeWorktree(project.repoPath, worktreePath, { timeoutMs: this.gitOpMs }); } catch { /* best-effort */ }
+        worktreesPruned++;
+        continue;
+      }
       if (await worktreeHasWork(project.repoPath, worktreePath, s.branch ?? null)) {
         // eslint-disable-next-line no-console
         console.warn(`[reconcile] kept worktree ${worktreePath} — holds unmerged/uncommitted work (Pass B)`);

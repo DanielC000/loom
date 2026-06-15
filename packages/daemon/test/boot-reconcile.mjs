@@ -19,10 +19,18 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { createWorktree } = await import("../dist/git/worktrees.js");
+const { createWorktree, deleteBranch } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+
+// Warn capture: reconcile + deleteBranch warn via console.warn. We record every warn so we can prove a
+// DEAD-LEFTOVER prune (no-`.git` dir) emits NO "kept worktree …" line for it, and deleteBranch on a
+// missing branch emits NO warn. The original console.warn is preserved so genuine output still shows.
+const warns = [];
+const realWarn = console.warn;
+console.warn = (...a) => { warns.push(a.join(" ")); realWarn(...a); };
+const warnsMatching = (needle) => warns.filter((w) => w.includes(needle));
 const GIT_ID = "-c user.email=br@loom -c user.name=br";
 const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 const now = new Date().toISOString();
@@ -74,13 +82,33 @@ async function setupOrphan(p) {
   seed(p);
 }
 
+// --- Scenario 3: a DEAD LEFTOVER — an exited worker's worktree DIR that survived on disk but has NO
+//     `.git` linkage file (git dropped the admin entry + `.git` during a partially-failed removeWorktree
+//     on Windows; the dir leaked). `git status` in it throws "not a git repository", so pre-fix Pass B's
+//     fail-safe KEPT it forever (~270M leak + a misleading "holds unmerged work" log every boot). The fix:
+//     the no-`.git` discriminator GCs it as a dead leftover — pruned (not kept), NO warn. ---
+async function setupDeadLeftover(p) {
+  fs.mkdirSync(p.repo, { recursive: true });
+  fs.writeFileSync(path.join(p.repo, "README.md"), "# br dead leftover\n");
+  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
+  // Simulate the live failure: the prior removeWorktree dropped git's admin entry + the `.git` linkage
+  // file, but the directory survived on disk. `.git` in a worktree is a FILE (gitdir pointer); rm it.
+  fs.rmSync(path.join(worktreePath, ".git"), { recursive: true, force: true });
+  execSync(`git ${GIT_ID} worktree prune`, { cwd: p.repo }); // drop the now-dangling admin entry, as git would
+  p.worktreePath = worktreePath; p.branch = branch;
+  seed(p);
+}
+
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const M = { projId: `br-m-proj-${sfx}`, agentId: `br-m-top-${sfx}`, taskId: `br-m-task-${sfx}`, mgrId: `br-m-mgr-${sfx}`, workerId: `br-m-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-br-merged-${sfx}`), file: "merged.txt" };
 const O = { projId: `br-o-proj-${sfx}`, agentId: `br-o-top-${sfx}`, taskId: `br-o-task-${sfx}`, mgrId: `br-o-mgr-${sfx}`, workerId: `br-o-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-br-orphan-${sfx}`), file: "orphan.txt" };
+const D = { projId: `br-d-proj-${sfx}`, agentId: `br-d-top-${sfx}`, taskId: `br-d-task-${sfx}`, mgrId: `br-d-mgr-${sfx}`, workerId: `br-d-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-br-dead-${sfx}`), file: "dead.txt" };
 
 try {
   await setupMerged(M);
   await setupOrphan(O);
+  await setupDeadLeftover(D);
 
   // Sanity: pre-conditions hold before the reconcile. Under squash the branch is NOT an ancestor of HEAD
   // (no merge commit) — the landed squash is identified by the Loom-Worker-Branch trailer on main's HEAD.
@@ -89,12 +117,20 @@ try {
   check("(pre) merged-scenario task starts in_progress", db.getTask(M.taskId).columnKey === "in_progress");
   check("(pre) merged-scenario worktree present", fs.existsSync(M.worktreePath));
   check("(pre) orphan-scenario worktree present", fs.existsSync(O.worktreePath));
+  check("(pre) dead-leftover worktree present on disk", fs.existsSync(D.worktreePath));
+  check("(pre) dead-leftover dir has NO .git linkage (the leak's root cause)", !fs.existsSync(path.join(D.worktreePath, ".git")));
 
   // --- FIRST reconcile ---
   const r1 = await sessions.reconcileOrchestrationOnBoot();
   check("(1) reconcile finished exactly 1 orphaned merge", r1.mergesFinished === 1);
-  check("(1) reconcile pruned 0 worktrees (the only orphan holds unmerged work → kept)", r1.worktreesPruned === 0);
+  check("(1) reconcile pruned exactly 1 worktree (the dead leftover with no .git → GC'd)", r1.worktreesPruned === 1);
   check("(1) reconcile KEPT exactly 1 worktree holding unmerged work (P0 data-loss guard)", r1.worktreesKept === 1);
+
+  // Scenario 3 GC'd: the no-`.git` dead leftover is REMOVED and counted PRUNED (not kept), with NO
+  // "holds unmerged work" warn for it (the misleading boot noise the fix kills).
+  check("(3) dead-leftover dir REMOVED from disk (GC'd, not leaked)", !fs.existsSync(D.worktreePath));
+  check("(3) dead-leftover emitted NO 'kept worktree' warn (no misleading boot noise)", warnsMatching(D.worktreePath).length === 0);
+  check("(3) dead-leftover task untouched (GC touches only the dir, not the task)", db.getTask(D.taskId).columnKey === "in_progress");
 
   // Scenario 1 finished: worktree gone, branch deleted, task done, merge_done appended.
   check("(1) merged-scenario task moved to done", db.getTask(M.taskId).columnKey === "done");
@@ -116,9 +152,26 @@ try {
   check("(no-op) second run STILL keeps the work-holding worktree (idempotent)", r2.worktreesKept === 1 && fs.existsSync(O.worktreePath));
   check("(no-op) merged-scenario still done", db.getTask(M.taskId).columnKey === "done");
   check("(no-op) merged-scenario merge_done NOT duplicated (still exactly 1)", mergeDoneCount(M.mgrId) === 1);
+
+  // --- deleteBranch idempotency: a missing branch is the DESIRED end state → resolve WITHOUT throw and
+  //     WITHOUT a warn. Inject a git whose `git branch -D` rejects with git's real not-found message. ---
+  const NF_BRANCH = `loom/never-existed-${sfx}`;
+  const notFoundGit = { raw: async () => { throw new Error(`error: branch '${NF_BRANCH}' not found.`); } };
+  const warnsBefore = warns.length;
+  let threw = false;
+  try { await deleteBranch(D.repo, NF_BRANCH, { gitFactory: () => notFoundGit }); } catch { threw = true; }
+  check("(4) deleteBranch on a missing branch resolves WITHOUT throwing", !threw);
+  check("(4) deleteBranch on a missing branch emitted NO warn (idempotent)", warns.length === warnsBefore);
+
+  // Negative control: a GENUINE failure (e.g. busy ref lock) STILL warns — proves we didn't over-swallow.
+  const failGit = { raw: async () => { throw new Error("fatal: Unable to create '.git/refs/…': File exists"); } };
+  const warnsBeforeFail = warns.length;
+  await deleteBranch(D.repo, `loom/locked-${sfx}`, { gitFactory: () => failGit });
+  check("(4) deleteBranch on a GENUINE failure STILL warns (not over-swallowed)", warns.length === warnsBeforeFail + 1);
 } finally {
+  console.warn = realWarn;
   db.close();
-  for (const p of [M, O]) {
+  for (const p of [M, O, D]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     fs.rmSync(p.repo, { recursive: true, force: true });
   }
@@ -126,6 +179,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — boot reconcile finishes interrupted merges idempotently (worktree gone, branch deleted, task done, one merge_done) and, per the P0 data-loss guard, KEEPS an orphaned worktree that still holds unmerged/uncommitted work (contents + branch + task intact) instead of deleting it."
+  ? "\n✅ ALL PASS — boot reconcile finishes interrupted merges idempotently (worktree gone, branch deleted, task done, one merge_done); per the P0 data-loss guard KEEPS an orphaned worktree that still holds unmerged/uncommitted work (contents + branch + task intact); GCs a DEAD LEFTOVER (no-`.git` dir → pruned, not kept, no warn); and deleteBranch treats a missing branch as the idempotent end state (no throw, no warn) while still warning on genuine failures."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -355,8 +355,13 @@ export async function deleteBranch(repoPath: string, branch: string, deps: Bound
   try {
     await withTimeout(git.raw(["branch", "-D", branch]), timeoutMs, "git branch -D");
   } catch (e) {
+    const msg = (e as Error).message;
+    // `branch '…' not found` is the DESIRED idempotent end state (the branch is already gone — e.g. a
+    // re-run after a prior delete, or a never-created branch) — treat as success, no warn. Keep warning
+    // on genuine failures (busy ref lock, timeout, etc.).
+    if (/not found/i.test(msg)) return;
     // eslint-disable-next-line no-console
-    console.warn(`[worktree] could not delete merged branch ${branch}: ${(e as Error).message}`);
+    console.warn(`[worktree] could not delete merged branch ${branch}: ${msg}`);
   }
 }
 
