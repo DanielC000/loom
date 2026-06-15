@@ -679,14 +679,35 @@ export async function detectStrandedWork(
 }
 
 /** A branch's changes since it diverged from base — the manager's pre-merge diff review (#16). */
+/** One row of a diffstat — a changed file with its insertion/deletion counts (0/0 for binary). */
+export interface DiffstatFile {
+  file: string;
+  insertions: number;
+  deletions: number;
+  binary: boolean;
+}
+
 export async function diffBranch(
   repoPath: string, branch: string, base = "HEAD",
-): Promise<{ filesChanged: number; insertions: number; deletions: number; patch: string }> {
+  opts: { includePatch?: boolean } = {},
+): Promise<{ filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[]; patch: string }> {
+  // The full unified `patch` is UNBOUNDED — on a large change it overflows an MCP display limit, blinding a
+  // manager exactly when the diff is biggest/riskiest. So the patch is OPT-IN: callers that only need a
+  // bounded summary pass includePatch:false and skip the expensive `git diff` entirely. Defaults to true so
+  // existing callers (the orchestration view's workerDiff) stay byte-identical. The `files` diffstat — built
+  // from the summary git already computes — is always returned and is the bounded review surface.
+  const includePatch = opts.includePatch ?? true;
   const git = simpleGit(repoPath);
   const range = `${base}...${branch}`; // 3-dot: changes on `branch` since the merge-base with `base`
   const summary = await git.diffSummary([range]);
-  const patch = await git.diff([range]);
-  return { filesChanged: summary.files.length, insertions: summary.insertions, deletions: summary.deletions, patch };
+  const files: DiffstatFile[] = summary.files.map((f) => ({
+    file: f.file,
+    insertions: "insertions" in f ? f.insertions : 0, // binary files carry before/after, not ins/del
+    deletions: "deletions" in f ? f.deletions : 0,
+    binary: f.binary,
+  }));
+  const patch = includePatch ? await git.diff([range]) : "";
+  return { filesChanged: summary.files.length, insertions: summary.insertions, deletions: summary.deletions, files, patch };
 }
 
 export interface WorkerDiff {

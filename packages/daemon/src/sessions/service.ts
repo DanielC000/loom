@@ -12,7 +12,7 @@ import {
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, type DiffstatFile } from "../git/worktrees.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { readRunUsage, readRunUsageFromFile } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
@@ -1909,14 +1909,17 @@ export class SessionService {
    * happens — this is the review the manager cannot skip (there is no worker-side merge tool).
    */
   async reviewWorkerMerge(
-    managerSessionId: string, workerSessionId: string,
-  ): Promise<{ filesChanged: number; insertions: number; deletions: number; patch: string; warning?: string }> {
+    managerSessionId: string, workerSessionId: string, opts: { includePatch?: boolean } = {},
+  ): Promise<{ filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[]; patch?: string; note?: string; warning?: string }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     if (!worker.branch) throw new Error("worker has no branch");
     const project = this.db.getProject(worker.projectId);
     if (!project) throw new Error("project not found");
-    const diff = await diffBranch(project.repoPath, worker.branch);
+    // DEFAULT: a bounded diffstat (per-file ± + totals) so step-1 can't overflow the display on a big diff.
+    // The full unified patch is opt-in (includePatch) — see the worker_merge tool's `fullDiff` flag.
+    const includePatch = opts.includePatch === true;
+    const diff = await diffBranch(project.repoPath, worker.branch, "HEAD", { includePatch });
     // BACKSTOP: a worker that committed to a SELF-CREATED branch instead of its assigned `loom/<key>`
     // leaves the assigned branch 0-ahead, so `diff` reads empty and the stranded commits would be
     // silently lost. Surface a WARNING at review time so the manager sees the divergence (only an
@@ -1931,7 +1934,18 @@ export class SessionService {
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "merge_request",
       detail: { branch: worker.branch, filesChanged: diff.filesChanged, ...(warning ? { stranded: stranded.branch } : {}) },
     });
-    return warning ? { ...diff, warning } : diff;
+    // Bounded by default: diffstat (files + totals) only. The full patch is included ONLY when requested;
+    // otherwise a `note` tells the manager how to pull it.
+    return {
+      filesChanged: diff.filesChanged,
+      insertions: diff.insertions,
+      deletions: diff.deletions,
+      files: diff.files,
+      ...(includePatch
+        ? { patch: diff.patch }
+        : { note: "Diffstat only — re-call worker_merge with fullDiff:true for the full unified patch." }),
+      ...(warning ? { warning } : {}),
+    };
   }
 
   /**

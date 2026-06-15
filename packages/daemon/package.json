@@ -45,6 +45,7 @@
     "test:vault": "node test/vault-browser.mjs",
     "test:recycle-handoff": "node test/recycle-handoff.mjs",
     "test:worker-diff": "node test/worker-diff.mjs",
+    "test:merge-review-diffstat": "node test/merge-review-diffstat.mjs",
     "test:git-writer": "node test/git-writer.mjs",
     "test:shell": "node test/shell-terminal.mjs",
     "test:config-bounds": "node test/config-bounds.mjs",

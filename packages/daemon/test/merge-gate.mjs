@@ -103,8 +103,14 @@ const c = await seedConflict(C);
 try {
   // --- PASS path: gate green → merged, worktree removed, task done ---
   const MA = await connect(A.mgrId);
+  // DEFAULT step-1 payload is a BOUNDED diffstat — files listed with per-file ±, NO full patch (so a big
+  // diff can't overflow the display). The full patch is opt-in via fullDiff:true.
   const diff = parse(await MA.callTool({ name: "worker_merge", arguments: { workerSessionId: A.workerId } }));
-  check("PASS: worker_merge diff lists the committed file (no merge yet)", diff.filesChanged >= 1 && diff.patch.includes(A.file));
+  check("PASS: worker_merge DEFAULT returns a diffstat listing the committed file", diff.filesChanged >= 1 && Array.isArray(diff.files) && diff.files.some((f) => f.file.includes(A.file)));
+  check("PASS: worker_merge DEFAULT omits the full patch (bounded payload)", diff.patch === undefined && typeof diff.note === "string");
+  const full = parse(await MA.callTool({ name: "worker_merge", arguments: { workerSessionId: A.workerId, fullDiff: true } }));
+  check("PASS: worker_merge fullDiff:true returns the full patch", typeof full.patch === "string" && full.patch.includes(A.file));
+  check("PASS: fullDiff payload still carries the diffstat", full.filesChanged >= 1 && full.files.some((f) => f.file.includes(A.file)));
   check("PASS: canonical repo NOT yet changed by the review step", !fs.existsSync(path.join(A.repo, A.file)));
   const confirmA = parse(await MA.callTool({ name: "worker_merge_confirm", arguments: { workerSessionId: A.workerId } }));
   check("PASS: worker_merge_confirm → merged:true", confirmA.merged === true);

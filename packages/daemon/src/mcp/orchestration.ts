@@ -267,12 +267,18 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_merge",
       {
-        description: "STEP 1 of the merge gate: review a worker's branch diff (files changed + patch). No merge happens. You must review before confirming — there is no worker-side merge.",
-        inputSchema: { workerSessionId: z.string() },
+        description:
+          "STEP 1 of the merge gate: review a worker's branch diff. By DEFAULT returns a bounded DIFFSTAT — " +
+          "the list of changed files with per-file +/- and the insertion/deletion totals — so it will NOT " +
+          "overflow the display on a large change (where the full patch is biggest/riskiest). Pass " +
+          "fullDiff:true to ALSO get the full unified patch for line-level review (the full patch is " +
+          "unbounded and may itself overflow on a very large change — review the diffstat first, then pull " +
+          "the patch). No merge happens; you must review before confirming (there is no worker-side merge).",
+        inputSchema: { workerSessionId: z.string(), fullDiff: z.boolean().optional() },
       },
-      async ({ workerSessionId }) => {
+      async ({ workerSessionId, fullDiff }) => {
         try {
-          return ok(await sessions.reviewWorkerMerge(managerSessionId, workerSessionId));
+          return ok(await sessions.reviewWorkerMerge(managerSessionId, workerSessionId, { includePatch: fullDiff === true }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
