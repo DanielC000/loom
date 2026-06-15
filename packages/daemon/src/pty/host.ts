@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { randomUUID } from "node:crypto";
 import { spawn, type IPty } from "node-pty";
 import type { PermissionPolicy, PtyGeometry, SessionRole } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
@@ -310,6 +311,21 @@ interface Subscriber {
   onControl: (e: TerminalControl) => void;
 }
 
+/**
+ * One entry in a session's busy-gated inbound FIFO. The `id` is a stable, server-minted handle (set
+ * at enqueue) so the human-facing UI can delete / edit / reorder a SPECIFIC queued entry: the FIFO
+ * head drains autonomously between the UI's poll and a click, so addressing by array index would hit
+ * the wrong (shifted) entry — an id op instead targets exactly one message and is a safe no-op once
+ * that message has drained. Internal to the host; the queue is in-memory and dies with the pty.
+ *
+ * `source` records who enqueued it: 'human' (only the REST composer, POST /input) or 'system'
+ * (everything programmatic — worker reports, idle/context/busy nudges, resume notes, escalations).
+ * It is the trust boundary the human-facing mutators enforce: delete/edit/reorder may only touch a
+ * 'human' entry, so an agent's queued report can never be rewritten or reordered out from under it.
+ */
+export type QueueSource = "human" | "system";
+export type QueuedMessage = { id: string; text: string; source: QueueSource };
+
 interface Live {
   pty: IPty;
   pid: number;
@@ -336,7 +352,7 @@ interface Live {
   busySince: number | null;  // epoch ms when busy rose — for stuck-busy self-heal (BUSY_STALE_MS)
   lastOutputAt: number; // epoch ms of the last pty output — "is the engine actually producing?"
   lastHumanKeyAt: number | null; // epoch ms of the last human composer keystroke (collision guard)
-  pending: string[];    // FIFO of messages held while busy / while the human types — drained on Stop + reconcile
+  pending: QueuedMessage[]; // FIFO of messages held while busy / while the human types — drained on Stop + reconcile. Each carries a stable id so the UI can delete/edit/reorder a specific entry safely (an id op is a no-op once that entry has drained).
   stopping: boolean;    // a Stop is in flight — SUPPRESS drain/submit so a queued turn can't re-arm busy past it
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
   startupModeCycles: number; // Shift+Tab presses to inject once, after SessionStart, to reach the target mode
@@ -886,8 +902,12 @@ export class PtyHost {
    *     message (the observed manager/worker collision) — so we wait until the box is free.
    * Also self-heals a STUCK-busy session first, so a report can't strand behind a phantom 'busy'.
    * Returns whether it went out now, or its 1-based queue position.
+   *
+   * `source` defaults to 'system' so EVERY existing programmatic caller (worker reports, idle/context/
+   * busy nudges, resume notes, escalations) stays 'system' unchanged; only the REST composer passes
+   * 'human'. A held entry's source is what the human-facing mutators gate on (see QueuedMessage).
    */
-  enqueueStdin(sessionId: string, text: string): { delivered: boolean; position?: number } {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system"): { delivered: boolean; position?: number } {
     const live = this.live.get(sessionId);
     if (!live?.alive) return { delivered: false };
     this.healIfStuck(live, sessionId);
@@ -911,13 +931,27 @@ export class PtyHost {
       }
       return { delivered: true };
     }
-    live.pending.push(text);
+    live.pending.push({ id: randomUUID(), text, source });
     return { delivered: false, position: live.pending.length };
   }
 
-  /** A copy of a session's queued (not-yet-delivered) messages — for the UI queue display. */
+  /**
+   * A copy of a session's queued message TEXTS in FIFO order — the back-compat string view. This is
+   * the contract service.ts relies on (restart snapshot, recycle carry) and any caller that only needs
+   * the text; it is deliberately unchanged by the id-bearing data model. The UI uses getPendingEntries()
+   * to get the stable ids it needs to address a specific entry.
+   */
   getPending(sessionId: string): string[] {
-    return [...(this.live.get(sessionId)?.pending ?? [])];
+    return (this.live.get(sessionId)?.pending ?? []).map((m) => m.text);
+  }
+
+  /**
+   * A copy of a session's queued entries (id + text) in FIFO order — for the human-facing UI, which
+   * needs the stable id to delete/edit/reorder a SPECIFIC entry (see QueuedMessage). Returns [] for an
+   * unknown session. Entries are shallow-copied so a caller can't mutate the live FIFO through them.
+   */
+  getPendingEntries(sessionId: string): QueuedMessage[] {
+    return (this.live.get(sessionId)?.pending ?? []).map((m) => ({ ...m }));
   }
 
   /**
@@ -938,7 +972,81 @@ export class PtyHost {
   consumePending(sessionId: string): string[] {
     const live = this.live.get(sessionId);
     if (!live?.alive) return []; // dead/unknown session: nothing to consume (don't hand back a stale queue)
-    return live.pending.splice(0); // returns the removed messages (a copy) AND empties the queue in place
+    return live.pending.splice(0).map((m) => m.text); // empty the queue in place AND return the removed texts (string contract)
+  }
+
+  /**
+   * The three human-facing queue mutators (delete / edit / reorder a queued entry). All are addressed
+   * by the stable QueuedMessage.id and are SYNCHRONOUS BY CONSTRUCTION — they only touch the
+   * `live.pending` array (no `await`, no submit(), never a pty write), exactly like consumePending. So
+   * they never enter deliverHook's lower-busy→drain window, the M1/M2 busy-gate invariants are
+   * untouched, and they are safe to call at ANY time (busy, idle, or mid turn-finalize): editing or
+   * removing a HELD message can't corrupt the running turn because nothing is written to the engine.
+   * An op whose id is no longer present (the entry already drained, or a stale client id) is a graceful
+   * no-op returning false — the whole reason ids exist (an index would silently hit the wrong, shifted
+   * entry). The auto-drain (drainPending/reconcile) safety net is unaffected.
+   *
+   * SOURCE GATE: a mutator may only touch a 'human' entry. An op aimed at a 'system' entry (a worker
+   * report / nudge) is REFUSED — it returns false WITH `refused:true` (the REST layer maps that to a
+   * 403) and leaves the entry untouched, so an agent's queued report can never be deleted, rewritten,
+   * or reordered out from under it. (A missing id stays a plain false with no `refused` — it's not a
+   * boundary violation, just a lost race with the drain.)
+   */
+  deleteQueued(sessionId: string, id: string): { deleted: boolean; refused?: boolean } {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) return { deleted: false };
+    const i = live.pending.findIndex((m) => m.id === id);
+    if (i < 0) return { deleted: false }; // already drained / unknown id — safe no-op
+    if (live.pending[i]!.source !== "human") return { deleted: false, refused: true }; // system entry — read-only
+    live.pending.splice(i, 1);
+    return { deleted: true };
+  }
+
+  editQueued(sessionId: string, id: string, text: string): { edited: boolean; refused?: boolean } {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) return { edited: false };
+    const m = live.pending.find((m) => m.id === id);
+    if (!m) return { edited: false }; // already drained / unknown id — safe no-op
+    if (m.source !== "human") return { edited: false, refused: true }; // system entry — read-only
+    m.text = text; // identity (id) and FIFO position preserved; only the body changes
+    return { edited: true };
+  }
+
+  /**
+   * Reorder the held FIFO. Only HUMAN entries may move: `orderedIds` is the human entries' desired
+   * order, and the permutation is applied IN PLACE within the slots human entries currently occupy —
+   * every 'system' entry keeps its absolute FIFO position, so a human reorder can never reposition (or
+   * jump ahead of) a worker report. Reconciled against the CURRENT queue: ids not present are skipped
+   * (drained/unknown), and any human entry NOT named (e.g. one enqueued after the client's snapshot) is
+   * preserved and appended after the named ones in its existing relative order — so a reorder can never
+   * silently drop a message. REFUSED (reordered:false, refused:true) if any named id targets a 'system'
+   * entry — the UI never sends one, so this is a guard against a hand-rolled request. Returns
+   * reordered:false (no refused) only for a dead/unknown session.
+   */
+  reorderQueued(sessionId: string, orderedIds: string[]): { reordered: boolean; refused?: boolean } {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) return { reordered: false };
+    const byId = new Map(live.pending.map((m) => [m.id, m] as const));
+    // Boundary guard: a named id that resolves to a system entry is a trust-boundary violation — refuse
+    // the whole op rather than silently dropping that id (which would let a caller probe the queue).
+    for (const id of orderedIds) {
+      const m = byId.get(id);
+      if (m && m.source !== "human") return { reordered: false, refused: true };
+    }
+    // Desired order of the HUMAN entries: named-first (present, human, deduped), then any un-named human
+    // entries in their existing relative order.
+    const seen = new Set<string>();
+    const humanSeq: QueuedMessage[] = [];
+    for (const id of orderedIds) {
+      const m = byId.get(id);
+      if (m && m.source === "human" && !seen.has(id)) { humanSeq.push(m); seen.add(id); }
+    }
+    for (const m of live.pending) if (m.source === "human" && !seen.has(m.id)) { humanSeq.push(m); seen.add(m.id); }
+    // Rebuild in place: system entries hold their slot; each human slot takes the next from humanSeq.
+    let hi = 0;
+    const next = live.pending.map((m) => (m.source === "human" ? humanSeq[hi++]! : m));
+    live.pending.splice(0, live.pending.length, ...next);
+    return { reordered: true };
   }
 
   /** True while the human has uncommitted composer text (recent keystroke, no submit/clear since). */
@@ -965,7 +1073,7 @@ export class PtyHost {
     // stop() also clears the queue, so this is belt-and-suspenders for a late enqueue during the stop.
     if (live.stopping) return;
     if (this.humanActivelyTyping(live)) return; // don't land on the human's half-typed text
-    this.submit(sessionId, live.pending.shift()!);
+    this.submit(sessionId, live.pending.shift()!.text);
   }
 
   /**

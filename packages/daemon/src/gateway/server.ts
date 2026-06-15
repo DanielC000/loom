@@ -1096,9 +1096,43 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/api/sessions/:id/wakes", async (req) =>
     deps.db.listWakesForSession((req.params as { id: string }).id));
   // A session's queued (not-yet-delivered) inbound messages — worker reports / turns held while the
-  // session is busy or the human is mid-compose. Read-only; they drain automatically. Shown in the UI.
+  // session is busy or the human is mid-compose. They drain automatically; the human can also
+  // delete/edit/reorder them via the mutators below. Each entry carries a stable id so a mutation
+  // targets a specific message (not a drifting array index). Shown in the UI.
   app.get("/api/sessions/:id/queue", async (req) =>
-    ({ pending: deps.pty.getPending((req.params as { id: string }).id) }));
+    ({ pending: deps.pty.getPendingEntries((req.params as { id: string }).id) }));
+  // Human-facing queue mutators (delete/edit/reorder a HELD entry). HUMAN/REST ONLY — like
+  // /input, /stop and /merge these are a trust boundary and are NOT exposed as agent MCP tools; an
+  // agent can never reorder or rewrite another session's pending turns. All three are id-addressed and
+  // delegate to the synchronous PtyHost mutators (no pty write), so they're safe at any time and a
+  // stale/already-drained id is a graceful no-op (false), never a 500. 404 only for an unknown session;
+  // 403 (`refused`) when the op targets a 'system' entry (a worker report / nudge) — those are read-only.
+  app.delete("/api/sessions/:id/queue/:entryId", async (req, reply) => {
+    const { id, entryId } = req.params as { id: string; entryId: string };
+    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+    const r = deps.pty.deleteQueued(id, entryId);
+    if (r.refused) return reply.code(403).send({ error: "entry is not human-owned", ...r });
+    return reply.send(r);
+  });
+  app.patch("/api/sessions/:id/queue/:entryId", async (req, reply) => {
+    const { id, entryId } = req.params as { id: string; entryId: string };
+    const { text } = (req.body as { text?: string }) ?? {};
+    if (typeof text !== "string" || !text.trim()) return reply.code(400).send({ error: "text required" });
+    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+    const r = deps.pty.editQueued(id, entryId, text);
+    if (r.refused) return reply.code(403).send({ error: "entry is not human-owned", ...r });
+    return reply.send(r);
+  });
+  app.patch("/api/sessions/:id/queue", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { orderedIds } = (req.body as { orderedIds?: unknown }) ?? {};
+    if (!Array.isArray(orderedIds) || orderedIds.some((x) => typeof x !== "string"))
+      return reply.code(400).send({ error: "orderedIds (string[]) required" });
+    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+    const r = deps.pty.reorderQueued(id, orderedIds as string[]);
+    if (r.refused) return reply.code(403).send({ error: "entry is not human-owned", ...r });
+    return reply.send(r);
+  });
   // Cancel one of a session's pending wakes (scoped: the wake must belong to that session).
   app.delete("/api/sessions/:id/wakes/:wakeId", async (req, reply) => {
     const { id, wakeId } = req.params as { id: string; wakeId: string };
@@ -1136,7 +1170,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { id } = req.params as { id: string };
     const { text } = (req.body as { text?: string }) ?? {};
     if (typeof text !== "string" || !text.trim()) return reply.code(400).send({ error: "text required" });
-    return reply.send(deps.pty.enqueueStdin(id, text));
+    // 'human' source: ONLY this composer path tags its entries human; every programmatic enqueue
+    // (worker reports, nudges, resume notes) defaults to 'system'. That tag is what gates the mutators.
+    return reply.send(deps.pty.enqueueStdin(id, text, "human"));
   });
   // Human-initiated merge of a worker's branch (the Review panel / #18c). Runs the daemon's
   // fail-closed build gate then squash-merges (one clean commit); manager is derived from the worker's

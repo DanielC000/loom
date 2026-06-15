@@ -5,7 +5,6 @@ import { api } from "../lib/api";
 import { byCreatedStable, byManagerThenCreated } from "../lib/sessions";
 import { TerminalPane } from "../components/Terminal";
 import { SessionWakes } from "../components/SessionWakes";
-import { SessionQueue } from "../components/SessionQueue";
 import { SessionTaskCard } from "../components/SessionTaskCard";
 import { TerminalTile } from "../components/TerminalTile";
 import { Panel, Button, Select, Input, StatusPill, SectionLabel } from "../components/ui";
@@ -100,7 +99,7 @@ export default function Terminals() {
         onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
         onMaximize={() => setMaximized(s.id)}
         taskCard={task && <SessionTaskCard task={task} />}
-        footer={<><SessionWakes sessionId={s.id} /><SessionQueue sessionId={s.id} /></>} />
+        footer={<SessionWakes sessionId={s.id} />} />
     );
   };
 
@@ -116,7 +115,7 @@ export default function Terminals() {
               onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
               onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
               taskCard={task && <SessionTaskCard task={task} />}
-              footer={<><SessionWakes sessionId={s.id} /><SessionQueue sessionId={s.id} /></>} />
+              footer={<SessionWakes sessionId={s.id} />} />
           </div>
         )}
       </div>

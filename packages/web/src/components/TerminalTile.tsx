@@ -2,6 +2,7 @@ import { type ReactNode } from "react";
 import type { SessionListItem } from "@loom/shared";
 import { TerminalPane } from "./Terminal";
 import { Composer } from "./Composer";
+import { SessionQueue } from "./SessionQueue";
 import { PresetPromptsButton } from "./PresetPrompts";
 import { Panel, Button, StatusPill } from "./ui";
 import { font, color } from "../theme";
@@ -11,8 +12,11 @@ import { font, color } from "../theme";
 // (same rationale as the byCreatedStable comparator extraction). Header controls: Fork (idle-only),
 // maximize ⤢ (only when `onMaximize` is given — omitted in the single full-size view), Stop.
 // `showProject` toggles the project name in the title (Terminals lists all projects; Overview is
-// project-scoped). The `taskCard` (above the terminal) and `footer` (below it — wakes/queue) slots
-// let each surface add its own extras without forking the tile.
+// project-scoped). The `taskCard` (above the terminal) and `footer` (below it — e.g. wakes) slots
+// let each surface add its own extras without forking the tile. The QUEUED-messages panel lives
+// INSIDE the tile (next to the Composer), not in the footer, so EVERY surface that renders a tile —
+// the Terminals page AND the Overview grid — shows the human-adjustable queue (it used to ride the
+// footer prop, so the Overview grid, which passes no footer, silently dropped it).
 
 export function ForkButton({ onFork, busy, pending }: { onFork: () => void; busy: boolean; pending: boolean }) {
   return (
@@ -70,6 +74,7 @@ export function TerminalTile({
           the terminal can NEVER paint over the composer below. xterm scrolls via its own .xterm-viewport. */}
       <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}><TerminalPane sessionId={s.id} /></div>
       {footer}
+      <SessionQueue sessionId={s.id} />
       <Composer sessionId={s.id} />
     </Panel>
   );

@@ -1,6 +1,10 @@
 import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion } from "@loom/shared";
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
+// One queued (not-yet-delivered) message. `id` is server-minted and stable, so the UI can
+// delete/edit/reorder a specific entry even as the FIFO head drains between polls. `source` is who
+// enqueued it: 'human' (the composer — adjustable) vs 'system' (worker reports / nudges — read-only).
+export interface QueuedMessage { id: string; text: string; source: "human" | "system"; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
 
 async function get<T>(url: string): Promise<T> {
@@ -244,7 +248,15 @@ export const api = {
   cancelWake: (sessionId: string, wakeId: string) =>
     del<{ cancelled: boolean }>(`/api/sessions/${sessionId}/wakes/${wakeId}`),
   // Queued inbound messages held for a session (worker reports / turns waiting for it to free up).
-  sessionQueue: (sessionId: string) => get<{ pending: string[] }>(`/api/sessions/${sessionId}/queue`),
+  // Entries carry a stable id so the UI can address a specific one for delete/edit/reorder.
+  sessionQueue: (sessionId: string) => get<{ pending: QueuedMessage[] }>(`/api/sessions/${sessionId}/queue`),
+  // Mutate the held queue (human-only; id-addressed). A stale id (already drained) is a graceful no-op.
+  deleteQueued: (sessionId: string, entryId: string) =>
+    del<{ deleted: boolean }>(`/api/sessions/${sessionId}/queue/${entryId}`),
+  editQueued: (sessionId: string, entryId: string, text: string) =>
+    patch<{ edited: boolean }>(`/api/sessions/${sessionId}/queue/${entryId}`, { text }),
+  reorderQueued: (sessionId: string, orderedIds: string[]) =>
+    patch<{ reordered: boolean }>(`/api/sessions/${sessionId}/queue`, { orderedIds }),
 
   // --- phase-2 orchestration (#18b view) ---
   orchestrationEvents: (managerId: string) =>
