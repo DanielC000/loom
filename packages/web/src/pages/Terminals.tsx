@@ -94,7 +94,7 @@ export default function Terminals() {
   const renderTile = (s: SessionListItem) => {
     const task = s.taskId ? tasksById.get(s.taskId) : undefined;
     return (
-      <TerminalTile key={s.id} s={s} height={460} showProject
+      <TerminalTile key={s.id} s={s} height={540} showProject
         onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
         onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
         onMaximize={() => setMaximized(s.id)}
@@ -111,7 +111,7 @@ export default function Terminals() {
         <Button onClick={() => setMaximized(null)}>← back to grid</Button>
         {s && (
           <div style={{ marginTop: 8 }}>
-            <TerminalTile s={s} height="78vh" showProject
+            <TerminalTile s={s} height="84vh" showProject
               onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
               onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
               taskCard={task && <SessionTaskCard task={task} />}

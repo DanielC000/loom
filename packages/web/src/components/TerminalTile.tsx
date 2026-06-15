@@ -65,7 +65,10 @@ export function TerminalTile({
         </div>
       </div>
       {taskCard}
-      <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
+      {/* overflow:hidden clips xterm's canvas to the pane box — when a Composer state change (e.g.
+          toggling Voice) resizes the pane, the font rescale can momentarily overflow; this guarantees
+          the terminal can NEVER paint over the composer below. xterm scrolls via its own .xterm-viewport. */}
+      <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}><TerminalPane sessionId={s.id} /></div>
       {footer}
       <Composer sessionId={s.id} />
     </Panel>

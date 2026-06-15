@@ -412,7 +412,7 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
         <Button onClick={() => setMaximized(null)}>← back to grid</Button>
         {s && (
           <div style={{ marginTop: 8 }}>
-            <TerminalTile s={s} height="78vh"
+            <TerminalTile s={s} height="84vh"
               onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
               onStop={() => stop.mutate(s.id)} stopPending={stop.isPending} />
           </div>
@@ -425,7 +425,7 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
   return (
     <div style={grid}>
       {live.map((s) => (
-        <TerminalTile key={s.id} s={s} height={440}
+        <TerminalTile key={s.id} s={s} height={520}
           onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
           onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
           onMaximize={() => setMaximized(s.id)} />

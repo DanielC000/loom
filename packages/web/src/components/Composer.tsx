@@ -86,7 +86,10 @@ function MicButton({ speech }: { speech: SpeechRecognitionApi }) {
 }
 
 // One muted line beneath the box: live recognition state on the left + the standing privacy note on
-// the right. minHeight reserves the row so showing/clearing it never shifts the composer layout.
+// the right. minHeight reserves the row at its TALLEST state (the `listening` rec StatusPill renders
+// at fontSize 11 → ~16.5px, taller than the idle fontSize-10 note) so toggling Voice never changes
+// the composer's footprint. A constant footprint matters because the terminal pane is flex:1: any
+// height change here resizes the pane → Terminal.tsx's ResizeObserver rescales the xterm font.
 function VoiceStatusLine({ speech }: { speech: SpeechRecognitionApi }) {
   const { status, interim, error, secure } = speech;
   let node: React.ReactNode = null;
@@ -109,7 +112,7 @@ function VoiceStatusLine({ speech }: { speech: SpeechRecognitionApi }) {
     node = <span style={{ color: color.red }}>{error ?? "voice error"} — click Voice to retry</span>;
   }
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 4, fontFamily: font.mono, fontSize: 10, minHeight: 13 }}>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 4, fontFamily: font.mono, fontSize: 10, minHeight: 18 }}>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{node}</span>
       <span style={{ color: color.textMuted, whiteSpace: "nowrap" }}>uses browser speech recognition</span>
     </div>

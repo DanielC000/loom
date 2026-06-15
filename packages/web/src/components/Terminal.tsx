@@ -197,5 +197,7 @@ export function TerminalPane({ sessionId, resizable = false }: { sessionId: stri
     };
   }, [sessionId, resizable]);
 
-  return <div ref={ref} style={{ height: "100%", width: "100%" }} />;
+  // overflow:hidden so the xterm canvas is clipped to this box — a font rescale (applyFontSize, fired
+  // on container resize) can briefly overshoot the cell math; this stops the canvas painting outside.
+  return <div ref={ref} style={{ height: "100%", width: "100%", overflow: "hidden" }} />;
 }
