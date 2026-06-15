@@ -44,6 +44,11 @@ gate command). This skill is the doctrine those plug into.
 
 ## Report protocol
 
+Your action/report tools live under the `mcp__loom-orchestration__` namespace — `worker_report`,
+`my_context`, `worker_recycle` (you receive `worker_message`); board reads are
+`mcp__loom-tasks__tasks_get` / `tasks_list`. Load them in ONE ToolSearch:
+`select:mcp__loom-orchestration__worker_report,mcp__loom-orchestration__my_context,mcp__loom-tasks__tasks_get`.
+
 `worker_report` is your action tool — your only way to affect the tree. Use it to report:
 - **`done`** — stage + **commit** your verified work *first*, then report `done` with the **commit
   SHA** plus a one-line summary of what you did + your key decisions / anything the reviewer should
