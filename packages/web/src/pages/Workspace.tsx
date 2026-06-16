@@ -15,7 +15,7 @@ import { SpawnControls } from "../components/SpawnControls";
 import { Panel, Button, Input, Select, SectionLabel, StatusPill } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
 
-const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", run: "muted" };
+const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", run: "muted" };
 
 // Starter agents seeded on project creation (editable afterward via the preset editor). Generic
 // role scaffolds — the canonical, project-specific prompts get filled in per project.

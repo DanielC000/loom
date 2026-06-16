@@ -6,7 +6,8 @@ import type { Db } from "../db.js";
 /**
  * Loom's bundled Profiles — the reusable, platform-level "rig" (role + model + allow-delta +
  * skill-subset + icon) an agent runs under. Orchestrator=manager, Dev/Bugfix=worker, Planning &
- * Triage / Content Strategy = plain (role null), plus the two platform rigs: Platform-lead
+ * Triage / Content Strategy = plain (role null), Setup Assistant=setup (the ungated onboarding rig),
+ * plus the two platform rigs: Platform-lead
  * (role=platform — the full human-equivalent operator) and Platform-audit (role=auditor — the
  * lower-privilege, read-and-file-only scheduled transcript reviewer; P5). Cross-project, so NO project
  * FK. Keyed by NAME for the seed-if-absent idempotent seed (UUID id assigned on first seed); "reset to
@@ -86,6 +87,18 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
     skills: null,
     model: null,
     icon: null,
+  },
+  {
+    // CORE product, UNGATED: role "setup" is NOT a platform-exclusive role, so isPlatformProfile()
+    // returns false and this seeds for every loomctl user regardless of LOOM_DEV (like the workers above).
+    name: "Setup Assistant",
+    role: "setup",
+    description:
+      "Guided onboarding rig: walks a human through standing up a new project end-to-end — binding a repo, defining topics/agents, and seeding the first board work — so the orchestration queue starts with well-formed tasks.",
+    allowDelta: [],
+    skills: null,
+    model: null,
+    icon: "🧭",
   },
   {
     name: "Platform-lead",

@@ -11,7 +11,9 @@ import type { Profile } from "@loom/shared";
 const profileSchema = z
   .object({
     name: z.string().min(1),
-    role: z.enum(["manager", "worker", "platform"]).nullable().optional(),
+    // NB: "auditor" is deliberately NOT mintable here — it's caller-set via startAuditor (the security
+    // boundary), so a profile must never confer it. "setup" IS a valid profile role (the Setup Assistant rig).
+    role: z.enum(["manager", "worker", "platform", "setup"]).nullable().optional(),
     description: z.string().optional(),
     allowDelta: z.array(z.string()).optional(),
     skills: z.array(z.string()).nullable().optional(),

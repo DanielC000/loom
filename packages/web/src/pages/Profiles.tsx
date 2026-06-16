@@ -10,11 +10,11 @@ import { color, font, tone, type Tone } from "../theme";
 // the reset endpoint also matches by name server-side (a renamed bundled profile is no longer
 // matchable, the documented limitation shared with the skill reset).
 const BUNDLED_PROFILE_NAMES = new Set([
-  "Orchestrator", "Planning & Triage", "Dev", "Bugfix", "QA Tester", "Web Designer", "Content Strategy", "Platform-lead",
+  "Orchestrator", "Planning & Triage", "Dev", "Bugfix", "QA Tester", "Web Designer", "Content Strategy", "Setup Assistant", "Platform-lead",
 ]);
 
 // A profile's role, as a coloured pill. null = a plain (non-orchestration) session — today's default.
-const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", run: "muted" };
+const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", run: "muted" };
 function RoleBadge({ role }: { role: SessionRole | null }) {
   return <Badge tone={role ? roleTone[role] : "muted"}>{role ?? "plain"}</Badge>;
 }

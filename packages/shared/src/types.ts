@@ -161,6 +161,9 @@ export type Resumability = "unknown" | "resumable" | "dead";
  *   NATURALLY 404s on the Lead's elevated `/mcp-platform` (resolveRole gates on role==="platform") AND
  *   on `/mcp-orch` (gates on manager|worker). No agent/MCP path may mint one — only `startAuditor`
  *   (human REST) and the human-configured Scheduler spawn it.
+ * - setup: a Setup Assistant session — the guided onboarding rig that helps a human stand up a project
+ *   (see `[[Setup Assistant Design]]`). A first-class role so it can carry its own rig/skills; the
+ *   bundled "Setup Assistant" profile sets it and it ships UNGATED (core product, not the dev Platform layer).
  * - run: an EPHEMERAL Agent-Run session (Agent Runs R2) — a curated endpoint agent invoked on one input
  *   to return a structured answer, then torn down. It SUBTRACTS the worker machinery (NO worktree /
  *   branch / merge gate), runs in a disposable read-only snapshot of the project's HEAD, and gets ONLY
@@ -169,7 +172,7 @@ export type Resumability = "unknown" | "resumable" | "dead";
  *   a daemon restart mid-run fails the run clean). Started ONLY by the internal run-starter — no
  *   human/agent session-spawn route mints one (the public keyed trigger is R3). See `[[Agent Runs]]`.
  */
-export type SessionRole = "manager" | "worker" | "platform" | "auditor" | "run";
+export type SessionRole = "manager" | "worker" | "platform" | "auditor" | "setup" | "run";
 
 // --- Agent Runs (R2): the AgentRun primitive ------------------------------------------------------
 /**

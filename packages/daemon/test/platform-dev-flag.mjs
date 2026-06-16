@@ -40,7 +40,7 @@ const { seedPlatformHome, PLATFORM_PROJECT_NAME } = await import("../dist/platfo
 const { isLoomDev } = await import("../dist/paths.js");
 const { curateSkillDirs, DEV_ONLY_SKILLS } = await import("../../../scripts/curate-release-skills.mjs");
 
-const CORE_PROFILES = ["Orchestrator", "Planning & Triage", "Dev", "Bugfix", "QA Tester", "Web Designer", "Content Strategy"];
+const CORE_PROFILES = ["Orchestrator", "Planning & Triage", "Dev", "Bugfix", "QA Tester", "Web Designer", "Content Strategy", "Setup Assistant"];
 const PLATFORM_PROFILES = ["Platform-lead", "Platform-audit"];
 
 try {
