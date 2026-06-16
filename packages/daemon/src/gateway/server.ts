@@ -8,7 +8,8 @@ import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import { resolveWebDistDir } from "../paths.js";
-import { loomVersion } from "../version.js";
+import { loomVersion, isPackagedInstall } from "../version.js";
+import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, engineTranscriptExists, deleteArchivedTranscript, deleteProjectArchives } from "../sessions/transcript.js";
 import type { Db } from "../db.js";
@@ -71,6 +72,14 @@ export interface GatewayDeps {
    * SIGINT/SIGTERM handlers use — Windows has no real SIGTERM, so the CLI can't signal a detached
    * daemon into the graceful path; this endpoint is how it reaches it cross-platform. */
   requestShutdown: () => void;
+  /** Epic 2c-2 — the daemon's current npm "update available" status (read-only), served by
+   *  GET /api/update-status. Optional so existing partial-stub tests still build a server; a missing
+   *  accessor degrades to a safe `packaged:false` default (banner hidden). */
+  updateStatus?: () => UpdateStatus;
+  /** Epic 2c-2 — begin the self-update (spawn the detached `loom update` stop→install→start cycle). Wired
+   *  by index.ts; reached ONLY via the loopback, packaged-gated POST /internal/update (never an MCP tool —
+   *  same trust boundary as requestShutdown / the vault+git writers). Optional for the same reason as above. */
+  beginSelfUpdate?: () => void;
 }
 
 /** The daemon's own non-UI route prefixes. An unmatched GET under any of these must NEVER fall back to
@@ -189,6 +198,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // web footer fetches it. ⚠️ Part 2 must keep a `name:"loom"` package.json on the daemon's walk-up path
   // (or set LOOM_VERSION) so this still resolves from the PACKAGED form, not just the monorepo. ---
   app.get("/api/version", async () => ({ version: loomVersion() }));
+  // --- Update availability (Epic 2c-2, UI half) — READ-ONLY: the daemon's last npm-registry check on the
+  // persisted release channel. The web reads this and shows an unobtrusive "Update available" banner ONLY
+  // when `updateAvailable` (which requires `packaged:true` — a from-source daemon always reports
+  // packaged:false, so the banner never shows on dev). No trust-boundary change; the actual update is the
+  // separate loopback POST /internal/update below. A missing accessor (partial-stub test) → a safe default. ---
+  app.get("/api/update-status", async (): Promise<UpdateStatus> =>
+    deps.updateStatus
+      ? deps.updateStatus()
+      : { packaged: false, channel: "stable", installed: loomVersion(), latest: null, updateAvailable: false, checkedAt: null },
+  );
   // --- God-eye read of the user's REAL Claude plan-usage (5h / 7d rate-limit windows). Served from a
   // single daemon-side cached poller (NOT fetched per-request; NOT an MCP tool; NOT a write surface).
   // Always 200: `available:false`+reason when the token is missing/expired or the upstream call failed. ---
@@ -346,6 +365,24 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
     setTimeout(() => deps.requestShutdown(), 50);
     return reply.code(202).send({ ok: true, stopping: true });
+  });
+
+  // --- Self-update control hook (Epic 2c-2, UI half) — the "Update & restart" button's target. Trust
+  // posture mirrors /internal/shutdown EXACTLY: loopback-gated (the explicit !LOOPBACK → 403), NOT an
+  // agent MCP tool, unreachable by any agent session (same boundary as gateCommand / the vault+git
+  // writers). PACKAGED-ONLY (load-bearing): the npm reinstall is valid only for an npm-global `loomctl`
+  // install — npm-installing over a checkout would be wrong — so a from-source daemon REFUSES with 409 and
+  // a clear message (and its banner never shows anyway: GET /api/update-status reports packaged:false). On
+  // a packaged install we ack 202 and defer the spawn one tick so the response flushes first; the detached
+  // `loom update` (E2c-1) then runs stop→install→start. (A packaged end-user daemon runs NO supervisor, so
+  // the exit-75 restart sentinel never applies here — the stop→install→start cycle is the restart path.) ---
+  app.post("/internal/update", async (req, reply) => {
+    if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
+    if (!isPackagedInstall()) {
+      return reply.code(409).send({ error: "update is only available for a packaged (npm-installed) Loom; this is a from-source daemon — update it with git." });
+    }
+    setTimeout(() => deps.beginSelfUpdate?.(), 50);
+    return reply.code(202).send({ ok: true, updating: true });
   });
 
   // --- REST: read ---

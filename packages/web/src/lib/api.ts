@@ -6,6 +6,16 @@ export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 // enqueued it: 'human' (the composer — adjustable) vs 'system' (worker reports / nudges — read-only).
 export interface QueuedMessage { id: string; text: string; source: "human" | "system"; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
+// Epic 2c-2 — the daemon's npm "update available" status (GET /api/update-status). The banner shows ONLY
+// when `packaged && updateAvailable`; a from-source daemon reports packaged:false → no banner ever.
+export interface UpdateStatus {
+  packaged: boolean;
+  channel: "stable" | "beta";
+  installed: string;
+  latest: string | null;
+  updateAvailable: boolean;
+  checkedAt: string | null;
+}
 
 async function get<T>(url: string): Promise<T> {
   const r = await fetch(url);
@@ -279,6 +289,12 @@ export const api = {
   orchestrationStatus: () => get<{ pausedScopes: string[] }>("/api/orchestration/status"),
   // Releases v1 Part 3 — the daemon's `loom` package version, surfaced unobtrusively in the header.
   version: () => get<{ version: string }>("/api/version"),
+  // Epic 2c-2 — the daemon's npm "update available" status (read-only, polled into the banner).
+  updateStatus: () => get<UpdateStatus>("/api/update-status"),
+  // Epic 2c-2 — trigger the self-update (stop→install→start). Loopback-only + packaged-only on the daemon
+  // (a source daemon 409s); NOT an agent MCP tool — same trust boundary as /internal/shutdown. The daemon
+  // acks then restarts, so this connection drops mid-flight — the caller treats that as "update started".
+  triggerUpdate: () => postErr<{ ok: boolean; updating?: boolean }>("/internal/update"),
   // The user's REAL Claude plan-usage (account-wide rate-limit headroom) — one daemon-side cached
   // poll of the OAuth usage endpoint. Always 200; `available:false`+reason when the daemon can't fetch it.
   usageLimits: () => get<UsageLimitsStatus>("/api/usage/limits"),

@@ -1,5 +1,8 @@
+import path from "node:path";
+import fs from "node:fs";
+import { spawn } from "node:child_process";
 import { resolveConfig } from "@loom/shared";
-import { ensureDirs, PORT } from "./paths.js";
+import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR } from "./paths.js";
 import { Db } from "./db.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
@@ -31,7 +34,8 @@ import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline, rateLimitedUntil } from "./orchestration/usage-limit.js";
 import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent } from "./orchestration/restart.js";
 import { buildServer } from "./gateway/server.js";
-import { loomVersion } from "./version.js";
+import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
+import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 
 async function main(): Promise<void> {
   ensureDirs();
@@ -202,7 +206,41 @@ async function main(): Promise<void> {
   // populated by then. The buildServer thunk delegates to it.
   let gracefulShutdown: ((reason: string) => void) | null = null;
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, setupMcp, runMcp, control, usageStatus, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown") });
+  // Epic 2c-2 (UI half) — periodic npm-registry "update available" check + the self-update trigger.
+  // The watcher polls dist-tags for `loomctl` on the persisted channel (PACKAGED installs only; a
+  // from-source daemon reports packaged:false and never hits the network); the gateway serves its cached
+  // status read-only via GET /api/update-status. beginSelfUpdate is the loopback POST /internal/update
+  // target: it spawns the DETACHED `loom update` (E2c-1) which runs the end-user stop→install→start cycle.
+  const updateCheck = new UpdateCheckWatcher({
+    loomHome: LOOM_HOME,
+    intervalMs: Number(process.env.LOOM_UPDATE_CHECK_INTERVAL_MS) || undefined,
+  });
+  // Spawn the detached updater. Packaged-gated by the route, double-checked here (a sensitive op): resolve
+  // the CLI bin via the umbrella package walk-up (works in the packaged form), spawn it fully detached with
+  // its own log file under LOGS_DIR, and unref so this daemon can exit cleanly when `loom update` stops it.
+  // A bare `loom update` reuses the persisted channel (E2c-1), so no channel arg is needed.
+  const beginSelfUpdate = (): void => {
+    if (!isPackagedInstall()) { console.warn("[self-update] refused: not a packaged install"); return; }
+    const root = umbrellaRootDir();
+    if (!root) { console.warn("[self-update] refused: could not resolve the loomctl package root"); return; }
+    const bin = path.join(root, "bin", "loom.mjs");
+    const channel = readUpdateChannel(LOOM_HOME);
+    try {
+      fs.mkdirSync(LOGS_DIR, { recursive: true });
+      const logFd = fs.openSync(path.join(LOGS_DIR, "self-update.log"), "a");
+      const child = spawn(process.execPath, [bin, "update"], {
+        detached: true,
+        stdio: ["ignore", logFd, logFd],
+        env: { ...process.env },
+      });
+      child.unref();
+      console.log(`[self-update] spawned 'loom update' (channel ${channel}, pid ${child.pid}) — daemon will stop, reinstall, restart`);
+    } catch (err) {
+      console.error(`[self-update] failed to spawn the updater: ${(err as Error).message}`);
+    }
+  };
+
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, setupMcp, runMcp, control, usageStatus, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"), updateStatus: () => updateCheck.current(), beginSelfUpdate });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon v${loomVersion()} listening on http://127.0.0.1:${PORT}`);
@@ -237,6 +275,11 @@ async function main(): Promise<void> {
   // credentials file). Read-only god-eye data for Mission Control; failures degrade to unavailable.
   usageStatus.start();
   console.log("[boot] plan-usage poller on (GET /api/usage/limits)");
+
+  // Update-availability watcher — periodic, best-effort npm dist-tags check (packaged installs only;
+  // a source daemon short-circuits with no network). Read-only via GET /api/update-status.
+  updateCheck.start();
+  console.log(`[boot] update-check watcher on (packaged=${isPackagedInstall()}, GET /api/update-status)`);
 
   // The self-scheduled wake-up ticker (always on; reconciles past-due wakes fire-once on start()).
   wakes.start();
@@ -362,7 +405,7 @@ async function main(): Promise<void> {
     // without this a long-lived session loses its transcript when Claude later prunes the JSONL.
     // Best-effort + never-throws (snapshotAllLive swallows per-session failures); must not block exit.
     try { const n = sessions.snapshotAllLive(); if (n > 0) console.log(`[shutdown] snapshotted ${n} live transcript(s)`); } catch { /* never block the exit */ }
-    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop();
+    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop();
     console.log(`[shutdown] graceful stop (${reason})`);
     process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
   };

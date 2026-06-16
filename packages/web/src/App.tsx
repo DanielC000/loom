@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import ReviewPanel from "./pages/ReviewPanel";
 import { NAV_PAGES, type NavGroup } from "./nav";
 import { NavTab, Badge, Select, Button } from "./components/ui";
@@ -77,6 +77,63 @@ function VersionTag() {
     <span title="Loom version" style={{ fontFamily: font.mono, fontSize: 11, letterSpacing: "0.04em", color: color.textMuted }}>
       v{v.data.version}
     </span>
+  );
+}
+
+// Epic 2c-2 — the "Update available" banner. Unobtrusive slim bar UNDER the header, shown ONLY when the
+// daemon reports a packaged install that is behind its channel's npm dist-tag (a from-source daemon reports
+// packaged:false → this never renders). "Update & restart" POSTs the loopback /internal/update; the daemon
+// then stops→installs→starts, so the connection drops mid-flight — we treat the request settling (or its
+// expected network error on restart) as "update started" and show a reconnect notice. Human-dismissable
+// per target version (a newer release re-shows it), so it never nags after the user defers.
+function UpdateBanner() {
+  const q = useQuery({ queryKey: ["updateStatus"], queryFn: api.updateStatus, refetchInterval: 5 * 60_000, refetchOnWindowFocus: true });
+  const [started, setStarted] = useState(false);
+  const latest = q.data?.latest ?? "";
+  const dismissKey = `loom.updateDismissed.${latest}`;
+  const [dismissed, setDismissed] = useState(false);
+  // Re-read the per-version dismissal whenever the offered version changes (a new release clears it).
+  useEffect(() => { setDismissed(latest ? localStorage.getItem(`loom.updateDismissed.${latest}`) === "1" : false); }, [latest]);
+
+  const mut = useMutation({
+    mutationFn: api.triggerUpdate,
+    // A 202 ack (the daemon defers the spawn 50ms, so the response flushes first) means the update is
+    // underway → show the reconnect notice. A genuine failure (e.g. 409 on a source daemon, or a 5xx)
+    // rejects → leave the banner up and surface the error rather than a false "restarting" message.
+    onSuccess: () => setStarted(true),
+  });
+
+  if (!q.data?.packaged || !q.data.updateAvailable || dismissed) return null;
+  const dismiss = () => { localStorage.setItem(dismissKey, "1"); setDismissed(true); };
+
+  return (
+    <div role="status" style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 20px",
+      background: "rgba(232,168,68,0.08)", borderBottom: `1px solid ${color.amber}`, fontFamily: font.mono, fontSize: 12.5 }}>
+      <Dot tone="amber" glow />
+      {started ? (
+        <span style={{ color: color.amber }}>
+          Updating to v{q.data.latest} — the daemon is restarting. This page will reconnect shortly; reload if it doesn’t.
+        </span>
+      ) : (
+        <>
+          <span style={{ color: color.text }}>
+            A new Loom release is available — <span style={{ color: color.textDim }}>v{q.data.installed}</span>{" "}
+            <span aria-hidden>→</span> <span style={{ color: color.amber }}>v{q.data.latest}</span>{" "}
+            <span style={{ color: color.textMuted }}>({q.data.channel})</span>
+          </span>
+          <span style={{ flex: 1 }} />
+          {mut.isError && !started && (
+            <span title={(mut.error as Error)?.message} style={{ color: color.red, fontSize: 11 }}>update failed — see daemon log</span>
+          )}
+          <Button variant="primary" disabled={mut.isPending} onClick={() => mut.mutate()}
+            style={{ padding: "4px 12px", fontSize: 12 }}>
+            {mut.isPending ? "Starting…" : "Update & restart"}
+          </Button>
+          <button onClick={dismiss} title="dismiss until the next release"
+            style={{ background: "transparent", border: "none", color: color.textMuted, cursor: "pointer", fontFamily: font.mono, fontSize: 15, lineHeight: 1, padding: "0 2px" }}>×</button>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -277,6 +334,7 @@ export default function App() {
           <GlobalStatus />
           <VersionTag />
         </header>
+        <UpdateBanner />
         <main style={page}>
           <Routes>
             {NAV_PAGES.map((p) => (
