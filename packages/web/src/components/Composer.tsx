@@ -5,19 +5,34 @@ import { Button, Select, StatusPill } from "./ui";
 import { color, font } from "../theme";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
 import { useVoiceLang, voiceLangOptions } from "../lib/useVoiceLang";
+import { getDraft, setDraft, clearDraft } from "../lib/composerDrafts";
 
 // Reliable "send a turn" box: posts through the daemon's busy-gated enqueue (auto-Enter, queues
 // if a turn is in flight) so a human send and the programmatic worker_report enqueue can't collide.
 // This is the single coordinated input path — distinct from the raw xterm keystroke channel.
 export function Composer({ sessionId }: { sessionId: string }) {
-  const [text, setText] = useState("");
+  // Lazy initializer reads the per-session draft store so the text SURVIVES this component being
+  // remounted (the maximize/minimize layout swap unmounts + remounts the tile). writeText keeps the
+  // store in sync with local state on every edit; a successful send clears both (see onSuccess).
+  const [text, setText] = useState(() => getDraft(sessionId));
   const [status, setStatus] = useState<string | null>(null);
+
+  // Mirror every text change into the per-session draft store. Accepts a value or an updater (voice
+  // append uses the functional form). The store write is idempotent, so a StrictMode double-invoke
+  // is harmless.
+  const writeText = (next: string | ((prev: string) => string)) => {
+    setText((prev) => {
+      const value = typeof next === "function" ? next(prev) : next;
+      setDraft(sessionId, value);
+      return value;
+    });
+  };
 
   const send = useMutation({
     mutationFn: (t: string) => api.sendInput(sessionId, t),
     onSuccess: (r) => {
-      if (r.delivered) { setStatus("sent"); setText(""); }
-      else if (r.position) { setStatus(`queued #${r.position} — sends when the turn ends`); setText(""); }
+      if (r.delivered) { setStatus("sent"); setText(""); clearDraft(sessionId); }
+      else if (r.position) { setStatus(`queued #${r.position} — sends when the turn ends`); setText(""); clearDraft(sessionId); }
       else setStatus("session not live");
     },
     onError: () => setStatus("failed"),
@@ -35,7 +50,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
     onFinalTranscript: (chunk) => {
       const piece = chunk.trim();
       if (!piece) return;
-      setText((prev) => (prev ? `${prev.replace(/\s+$/, "")} ${piece}` : piece));
+      writeText((prev) => (prev ? `${prev.replace(/\s+$/, "")} ${piece}` : piece));
       setStatus(null);
     },
   });
@@ -45,7 +60,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
       <div style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
         <textarea
           value={text}
-          onChange={(e) => { setText(e.target.value); setStatus(null); }}
+          onChange={(e) => { writeText(e.target.value); setStatus(null); }}
           onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } }}
           placeholder="Send a turn to this session…  (Ctrl/Cmd+Enter)"
           rows={2}
