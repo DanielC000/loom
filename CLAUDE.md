@@ -33,6 +33,29 @@ and loads only in dev: boot the daemon with `LOOM_DEV=1` (e.g. `LOOM_DEV=1 pnpm 
 flag is read in ONE helper (`paths.ts` › `isLoomDev`, same shape as `LOOM_SCHEDULER_ENABLED`); CORE
 orchestration (Orchestrator/Dev/Bugfix/QA/Web Designer + their skills) always seeds, flag or not.
 
+**Setup Assistant (ships to ALL users — the ungated, lower-priv cousin of the dev Platform layer):** a
+standing, user-facing onboarding agent on a new `setup` SessionRole, served by a curated **fail-closed**
+`loom-setup` MCP router (`/mcp-setup/:sessionId`, role-gated, 11 tools). It acts on the user's behalf —
+`project_create`/`configure`/`update` via the **AGENT validator** (rejects `gateCommand`/`alertWebhook`),
+`agent_create`, `profile_create`/`update`/`assign`, the `list_all_*` reads, and `session_spawn`
+`manager|plain` only — with **no** writers/escalation/auditor/archive surface and no self-elevation. It
+follows the CORE-seed pattern (NOT `LOOM_DEV`-gated): a reserved "Getting Started" home + Setup Assistant
+agent + the `setup-assistant` skill, spawned human-REST / first-run-boot only (`startSetup` singleton;
+first-run auto-launch via an `app_meta` one-time marker, exactly-once). The `setup` `profile_create` rejects
+`platform`/`auditor` roles (least-privilege). Design: `Projects/Loom/Setup Assistant Design.md` in the vault.
+
+## Distribution (the shipped `loomctl`, released as 0.3.0)
+End users install globally — `npm i -g loomctl` (command stays `loom`) — and the `loom` bin is a management
+CLI: `loom start/stop/status/restart/open` (`--detach`, PID file under `LOOM_HOME`) + graceful loopback
+`POST /internal/shutdown`; cross-OS autostart via `loom service install/uninstall/status` (systemd `--user`
+/ launchd / Task Scheduler); and `loom update [--channel stable|beta]` (channel persisted) backed by a
+packaged-only loopback `POST /internal/update` + a UI "update available" banner. **The end-user daemon runs
+NO supervisor** — `daemon-supervisor.mjs` is dev/self-host-only and not in the npm `files` set; the OS
+service manager owns keep-alive (it runs `loom start --no-open` foreground). `/internal/shutdown` and
+`/internal/update` are **loopback-only, human-only, NOT agent MCP tools** (same trust posture as the
+vault/git writers below). loomctl@0.3.0 is published via npm **trusted publishing** (OIDC, no `NPM_TOKEN`,
+auto-provenance — see `docs/releasing.md`).
+
 **Self-hosting (orchestrating Loom WITH Loom):** use `pnpm daemon:stable`, not `pnpm daemon`.
 The dev daemon runs under `tsx watch`, so any worker merge that lands a change under
 `packages/daemon/src/**` (or `shared/dist`) restarts it mid-orchestration and kills the live

@@ -46,6 +46,10 @@ self-hosts: Loom is built using Loom.
   phosphor-on-dark instrument panel.
 - **🌐 Opt-in per-worker browser testing.** A worker profile can be granted its own isolated headless
   Playwright browser, so QA-style sessions can drive a running app and verify UI before reporting back.
+- **🚀 Guided onboarding.** A built-in **Setup Assistant** greets you on first run and stays one click away
+  ("Set up Loom"). It helps you create and configure your projects, agents, and profiles, pick your skills
+  and workflow, and can set them up on your behalf — confirming the big moves first, on a deliberately
+  narrow, safe tool surface.
 
 ## Quick start
 
@@ -66,7 +70,12 @@ loom status           # is it running? — prints version, URL and PID (exit non
 loom stop             # stop it gracefully and clean up
 loom restart          # stop, then start (honors --detach/--port/--no-open)
 loom open             # open the browser to a running daemon
+loom update           # update to the latest release (npm i -g loomctl@…), then restart
 ```
+
+`loom update` upgrades the global install and restarts the daemon; `loom update --channel beta` switches
+to (and remembers) the beta track. When a newer release is available the cockpit also shows an
+"update available" banner you can act on from the UI.
 
 To have Loom **autostart in the background on login**, register it with your OS service manager:
 
