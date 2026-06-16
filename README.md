@@ -49,8 +49,32 @@ self-hosts: Loom is built using Loom.
 
 ## Quick start
 
-You need **Node 22+** and a working `claude` CLI on your machine. From a clone of the repo (pnpm is the
-contributor toolchain):
+You need **Node 22+** and a working `claude` CLI on your machine. Install Loom globally from npm
+(published as [`loomctl`](https://www.npmjs.com/package/loomctl)) — that gives you the `loom` command:
+
+```sh
+npm i -g loomctl
+loom            # boots the daemon (loopback only) and opens the cockpit in your browser
+```
+
+`loom` with no arguments starts the daemon in the foreground and opens your browser; press Ctrl-C to
+stop. To manage a background daemon, use the subcommands:
+
+```sh
+loom start --detach   # run the daemon in the background (writes a PID file under ~/.loom)
+loom status           # is it running? — prints version, URL and PID (exit non-zero if stopped)
+loom stop             # stop it gracefully and clean up
+loom restart          # stop, then start (honors --detach/--port/--no-open)
+loom open             # open the browser to a running daemon
+```
+
+Common flags: `-p, --port <n>` (default `4317`, or `LOOM_PORT`), `--no-open`, `-d, --detach`,
+`-v, --version`, `-h, --help`. Prefer not to install? Run it once with **no install** via
+`npx loomctl` (same flags and subcommands, e.g. `npx loomctl status`).
+
+### From source (contributors)
+
+pnpm is the contributor toolchain. From a clone of the repo:
 
 ```sh
 pnpm install
@@ -59,13 +83,8 @@ pnpm daemon         # the daemon on http://127.0.0.1:4317 (loopback only)
 pnpm web            # the viewport on http://127.0.0.1:5317
 ```
 
-Open `http://127.0.0.1:5317` and you're in the cockpit.
-
-The packaged path — a single `npx loomctl` that boots the daemon, waits for the gateway, and opens the
-browser — is the **intended install** for end users (Node 22+, no pnpm needed); `npm i -g loomctl`
-installs the `loom` command globally. Loom is pre-1.0 and published to npm as
-[`loomctl`](https://www.npmjs.com/package/loomctl); the from-source flow above stays the contributor
-path. See [`docs/releasing.md`](docs/releasing.md) for the packaging and release flow.
+Open `http://127.0.0.1:5317` and you're in the cockpit. See
+[`docs/releasing.md`](docs/releasing.md) for the packaging and release flow.
 
 ## How it works
 

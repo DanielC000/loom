@@ -182,7 +182,13 @@ async function main(): Promise<void> {
   // (LOOM_USAGE_POLL_INTERVAL_MS env read + floor-clamped inside resolveConfig; default 60s).
   const usageStatus = new UsageStatusPoller({ intervalMs: watchers.usagePollMs });
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, runMcp, control, usageStatus });
+  // The graceful-shutdown path, shared by the SIGINT/SIGTERM handlers and the loopback
+  // POST /internal/shutdown control hook (`loom stop`). Assigned BELOW, after the watchers it closes
+  // over exist; the endpoint only fires at request time (long after boot), so this ref is always
+  // populated by then. The buildServer thunk delegates to it.
+  let gracefulShutdown: ((reason: string) => void) | null = null;
+
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, runMcp, control, usageStatus, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown") });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon v${loomVersion()} listening on http://127.0.0.1:${PORT}`);
@@ -320,15 +326,20 @@ async function main(): Promise<void> {
     );
   }
 
+  // The one graceful-teardown path — invoked by a SIGINT/SIGTERM signal AND by the loopback
+  // POST /internal/shutdown control hook (the cross-platform `loom stop`, since Windows has no SIGTERM).
+  gracefulShutdown = (reason: string) => {
+    // Crash/shutdown transcript backstop: snapshot every LIVE session's engine transcript BEFORE we
+    // exit. The pty onExit hook (the per-session snapshot trigger) never fires on a signal-kill, so
+    // without this a long-lived session loses its transcript when Claude later prunes the JSONL.
+    // Best-effort + never-throws (snapshotAllLive swallows per-session failures); must not block exit.
+    try { const n = sessions.snapshotAllLive(); if (n > 0) console.log(`[shutdown] snapshotted ${n} live transcript(s)`); } catch { /* never block the exit */ }
+    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop();
+    console.log(`[shutdown] graceful stop (${reason})`);
+    process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
+  };
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => {
-      // Crash/shutdown transcript backstop: snapshot every LIVE session's engine transcript BEFORE we
-      // exit. The pty onExit hook (the per-session snapshot trigger) never fires on a signal-kill, so
-      // without this a long-lived session loses its transcript when Claude later prunes the JSONL.
-      // Best-effort + never-throws (snapshotAllLive swallows per-session failures); must not block exit.
-      try { const n = sessions.snapshotAllLive(); if (n > 0) console.log(`[shutdown] snapshotted ${n} live transcript(s)`); } catch { /* never block the exit */ }
-      scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); process.exit(0);
-    });
+    process.on(sig, () => gracefulShutdown!(sig));
   }
 }
 

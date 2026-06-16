@@ -56,6 +56,7 @@
     "test:session-archive": "node test/session-archive.mjs",
     "test:mgmt-project-agent": "node test/mgmt-project-agent.mjs",
     "test:shutdown-snapshot": "node test/shutdown-snapshot.mjs",
+    "test:shutdown-endpoint": "node test/shutdown-endpoint.mjs",
     "test:db-backup": "node test/db-backup.mjs",
     "test:prod-guard": "node test/prod-guard.mjs",
     "test:agent-runs-rest": "node test/agent-runs-rest.mjs",
@@ -63,6 +64,7 @@
     "test:agent-runs-spend": "node test/agent-runs-spend.mjs",
     "test:agent-runs-hardening": "node test/agent-runs-hardening.mjs",
     "test:version": "node test/version.mjs",
+    "test:cli-args": "node test/cli-args.mjs",
     "test:daemon": "node scripts/test-daemon.mjs"
   },
   "dependencies": {

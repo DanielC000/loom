@@ -96,9 +96,11 @@ try {
     return false;
   })();
   check("(3) built daemon arms a setInterval that calls snapshotAllLive", periodicWired);
-  // The SIGINT/SIGTERM handler must clear the periodic timer (alongside the existing reconcile timer) —
-  // assert the shutdown region clears TWO intervals so no snapshot ticker dangles past shutdown.
-  const sigIdx = indexJs.indexOf('"SIGINT"');
+  // The graceful-shutdown path must clear the periodic timer (alongside the existing reconcile timer) so
+  // no snapshot ticker dangles past shutdown. The teardown now lives in the SHARED gracefulShutdown()
+  // (invoked by the SIGINT/SIGTERM handler AND the POST /internal/shutdown control hook) — anchor there
+  // and assert it clears TWO intervals.
+  const sigIdx = indexJs.indexOf("gracefulShutdown = (");
   const region = sigIdx >= 0 ? indexJs.slice(sigIdx, sigIdx + 1400) : "";
   check("(3) shutdown clears the periodic snapshot timer (≥2 clearInterval calls)",
     (region.match(/clearInterval\(/g) || []).length >= 2);

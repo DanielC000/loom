@@ -93,15 +93,21 @@ try {
   db2.close();
   db.close();
 
-  // ════════ (5) wiring: the built SIGINT/SIGTERM handler invokes snapshotAllLive ════════
+  // ════════ (5) wiring: the built graceful-shutdown path invokes snapshotAllLive before exit ════════
   const indexJs = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js"), "utf8");
-  // Isolate the signal-handler region (the `for (const sig of [...SIGINT...SIGTERM...]` loop body) and
-  // assert it calls snapshotAllLive BEFORE process.exit(0) — the shutdown backstop must run on a kill.
-  const sigIdx = indexJs.indexOf('"SIGINT"');
-  const region = sigIdx >= 0 ? indexJs.slice(sigIdx, sigIdx + 1200) : "";
+  // The teardown lives in a SHARED gracefulShutdown() invoked BOTH by the SIGINT/SIGTERM handler AND by
+  // the loopback POST /internal/shutdown control hook (the cross-platform `loom stop`). Anchor on that
+  // function's definition and assert it calls snapshotAllLive BEFORE process.exit(0) — the shutdown
+  // backstop must run on every graceful stop (signal OR endpoint).
+  const gsIdx = indexJs.indexOf("gracefulShutdown = (");
+  const region = gsIdx >= 0 ? indexJs.slice(gsIdx, gsIdx + 1200) : "";
   check("(5) built daemon references snapshotAllLive", /snapshotAllLive\s*\(/.test(indexJs));
-  check("(5) the SIGINT/SIGTERM handler invokes snapshotAllLive before exit",
+  check("(5) the graceful-shutdown path invokes snapshotAllLive before exit",
     /snapshotAllLive\s*\(/.test(region) && region.indexOf("snapshotAllLive") < region.indexOf("process.exit(0)"));
+  // And the SIGINT/SIGTERM handler must delegate to that shared path (so a signal-kill still snapshots).
+  const sigIdx = indexJs.indexOf('"SIGINT"');
+  const sigRegion = sigIdx >= 0 ? indexJs.slice(sigIdx, sigIdx + 400) : "";
+  check("(5) the SIGINT/SIGTERM handler delegates to gracefulShutdown", /gracefulShutdown\s*\(/.test(sigRegion));
 } finally {
   try { fs.rmSync(path.join(claudeDir, `${engineA}.jsonl`), { force: true }); } catch { /* ignore */ }
   try { fs.rmSync(path.join(claudeDir, `${engineB}.jsonl`), { force: true }); } catch { /* ignore */ }
@@ -109,6 +115,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — snapshotAllLive snapshots every live+engine+JSONL session, skips exited/no-engine/dead, is idempotent, never throws, and the SIGINT/SIGTERM handler invokes it before exit."
+  ? "\n✅ ALL PASS — snapshotAllLive snapshots every live+engine+JSONL session, skips exited/no-engine/dead, is idempotent, never throws, and the shared graceful-shutdown path snapshots before exit (delegated to by both the SIGINT/SIGTERM handler and POST /internal/shutdown)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

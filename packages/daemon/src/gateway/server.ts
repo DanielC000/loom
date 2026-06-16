@@ -62,6 +62,11 @@ export interface GatewayDeps {
   runMcp: RunMcpRouter;
   control: OrchestrationControl;
   usageStatus: UsageStatusPoller;
+  /** Loopback control hook for `loom stop`: trigger the daemon's GRACEFUL shutdown (snapshot live
+   * transcripts + clean watcher teardown, then exit 0). Wired by index.ts to the SAME path the
+   * SIGINT/SIGTERM handlers use — Windows has no real SIGTERM, so the CLI can't signal a detached
+   * daemon into the graceful path; this endpoint is how it reaches it cross-platform. */
+  requestShutdown: () => void;
 }
 
 /** The daemon's own non-UI route prefixes. An unmatched GET under any of these must NEVER fall back to
@@ -312,6 +317,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const body = req.body as { sessionId?: string; hook?: Record<string, unknown> };
     if (body?.sessionId && body.hook) deps.pty.deliverHook(body.sessionId, body.hook);
     return reply.send({ ok: true });
+  });
+
+  // --- Graceful shutdown control hook (loopback only) — the cross-platform stop path for `loom stop`.
+  // Windows detached processes have NO real SIGTERM, so the management CLI can't signal a backgrounded
+  // daemon into its graceful teardown; it POSTs here instead. This triggers the SAME path the
+  // SIGINT/SIGTERM handlers run (snapshot live transcripts → stop every watcher → exit 0). Exits 0
+  // (clean stop), NOT 75 (75 is the supervisor's RESTART sentinel — a stop must never relaunch).
+  // Trust posture mirrors /internal/hook EXACTLY: loopback-gated, NOT an agent MCP tool, unreachable by
+  // any agent session (same boundary as the gate/vault/git writers). We ack 202 first and defer the exit
+  // one tick so the response flushes before the process dies (the CLI reads the ack, then polls the port
+  // until it stops answering).
+  app.post("/internal/shutdown", async (req, reply) => {
+    if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
+    setTimeout(() => deps.requestShutdown(), 50);
+    return reply.code(202).send({ ok: true, stopping: true });
   });
 
   // --- REST: read ---
