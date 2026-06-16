@@ -5,10 +5,16 @@ name: Release
 # run fails fast. A prerelease tag (e.g. vX.Y.Z-beta.N) publishes to the matching npm dist-tag
 # (beta) and marks the GitHub Release as a prerelease; a normal tag publishes to `latest`.
 #
+# Publishing uses npm TRUSTED PUBLISHING (OIDC) — NO long-lived NPM_TOKEN secret. The job mints a
+# short-lived credential via GitHub's OIDC (`id-token: write`) and npm exchanges it; provenance is
+# generated automatically. Requires npm CLI >= 11.5.1 (Node 22 ships npm 10.x, so we upgrade npm below)
+# and Node >= 22.14.0. See https://docs.npmjs.com/trusted-publishers.
 # Owner one-time prerequisites (see docs/releasing.md › "Owner publish steps"):
 #   - the public GitHub repo exists,
 #   - the npm `loomctl` name is reserved + a LICENSE chosen and added to the generated package.json,
-#   - an `NPM_TOKEN` repo secret (an npm automation/publish token) is set.
+#   - a TRUSTED PUBLISHER is configured on npmjs.com for the `loomctl` package: GitHub Actions →
+#     organization/user `DanielC000`, repository `loom`, workflow filename `release.yml`, allowed
+#     action `npm publish` (no environment). This replaces the old NPM_TOKEN secret.
 on:
   push:
     tags:
@@ -32,11 +38,14 @@ jobs:
           version: 10.6.4 # match the repo's packageManager (package.json)
 
       - name: Setup Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: "22"
-          cache: pnpm
-          registry-url: "https://registry.npmjs.org" # writes an .npmrc that reads NODE_AUTH_TOKEN
+          node-version: "22" # resolves to the latest 22.x (>= 22.14.0, required for OIDC trusted publishing)
+          registry-url: "https://registry.npmjs.org" # scope npm to the public registry (OIDC auth, no token)
+          # No package-manager cache: never cache in a release build (publish only what was just built+tested).
+
+      - name: Upgrade npm for OIDC trusted publishing (needs npm >= 11.5.1; Node 22 ships npm 10.x)
+        run: npm install -g npm@latest && npm --version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -86,10 +95,8 @@ jobs:
       - name: Verify tarball exists
         run: test -f "${{ steps.meta.outputs.tarball }}"
 
-      - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish "${{ steps.meta.outputs.tarball }}" --provenance --access public --tag "${{ steps.meta.outputs.npm_tag }}"
+      - name: Publish to npm (OIDC trusted publishing — no token; provenance is automatic)
+        run: npm publish "${{ steps.meta.outputs.tarball }}" --access public --tag "${{ steps.meta.outputs.npm_tag }}"
 
       - name: Extract changelog notes
         run: node scripts/extract-changelog.mjs "${{ steps.meta.outputs.version }}" > RELEASE_NOTES.md

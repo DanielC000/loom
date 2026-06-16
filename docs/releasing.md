@@ -82,11 +82,15 @@ every PR and `main` push (no publish, no secrets) — the same gate the release 
    name itself is taken). The license is
    already wired — the repo ships an MIT `LICENSE` and `pnpm pack:npm` bundles it + sets
    `"license": "MIT"` on the generated `package.json`.
-3. **Add the `NPM_TOKEN` repo secret.** Create an npm **automation** (or publish) token on the
-   publishing account and add it under *Settings → Secrets and variables → Actions* as `NPM_TOKEN`.
-   The workflow reads it as `NODE_AUTH_TOKEN` for `npm publish`. (`GITHUB_TOKEN` is provided
-   automatically; the workflow grants it `contents: write` for the Release and `id-token: write` for
-   npm provenance — no extra secret needed.)
+3. **Configure a Trusted Publisher on npmjs.com (no token).** Publishing uses npm **trusted publishing
+   (OIDC)** — there is **no `NPM_TOKEN` secret**. On the `loomctl` package's npmjs.com page →
+   *Settings → Trusted Publisher → GitHub Actions*, set: **Organization or user** `DanielC000`,
+   **Repository** `loom`, **Workflow filename** `release.yml`, **Environment** (leave blank), **Allowed
+   action** `npm publish`. The workflow mints a short-lived OIDC credential at publish time (it grants
+   `id-token: write`) and upgrades npm to ≥ 11.5.1 (Node 22 ships npm 10.x); npm generates provenance
+   automatically. Requires npm ≥ 11.5.1 + Node ≥ 22.14.0 (handled by the workflow). See
+   <https://docs.npmjs.com/trusted-publishers>. (`GITHUB_TOKEN` is provided automatically; the workflow
+   grants it `contents: write` for the GitHub Release.)
 
 **Cut a release:** push a `vX.Y.Z` tag (step 4 above). That's the whole trigger. Prerelease tags
 (`vX.Y.Z-beta.N`) go to the `beta` channel; normal tags go to `latest`.
