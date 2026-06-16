@@ -414,6 +414,76 @@ export class SessionService {
     return { ...session, processState: "live" };
   }
 
+  /**
+   * Start a NEW SETUP-ASSISTANT session in an agent (Setup Assistant E1-5). Mirrors startPlatformLead
+   * EXACTLY — incl. its liveness-not-recency SINGLETON guard — but passes callerRole "setup" so the
+   * session is LOCKED to the curated, ungated loom-setup MCP surface (E1-3). Because an EXPLICIT caller
+   * role ALWAYS wins in resolveAgentSpawn, the session role is "setup" regardless of the agent's profile
+   * role — the gate is keyed off the SESSION role, never the profile role.
+   *
+   * SINGLETON GUARANTEE = "never two LIVE setup sessions" (NOT "one row ever"), identical to the Lead.
+   * If a setup session is already LIVE, reuse it as-is (its pty outlived the viewer) — never mint a 2nd.
+   * Otherwise FALL THROUGH and INSERT+spawn a brand-new setup session (never resume an exited one here).
+   * Uses db.liveSessions (the canonical live-over-recency query — filters to LIVE before any .find, so a
+   * recently-STOPPED setup session can't sort ahead of an idle-but-LIVE one; see its note + 0e40dde).
+   *
+   * HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"setup"}) — no agent/MCP path mints one
+   * (session_spawn on the setup surface itself REFUSES role "setup", so a setup session can't self-clone).
+   * The Setup Assistant agent lives in the reserved "Getting Started" home (E1-4).
+   */
+  startSetup(agentId: string): Session {
+    const agent = this.db.getAgent(agentId);
+    if (!agent) throw new Error("agent not found");
+    const project = this.db.getProject(agent.projectId);
+    if (!project) throw new Error("project not found");
+
+    // Live-precedence singleton: reuse an already-LIVE setup session (never two LIVE), else fall through
+    // and INSERT+spawn a fresh one. Identical to startPlatformLead's guard (the P1 0e40dde fix).
+    const live = this.db.liveSessions(agentId).find((s) => s.role === "setup");
+    if (live) return live; // already attached — reuse, no new row, no spawn (never two LIVE setup sessions)
+
+    const config = resolveConfig(project.config);
+    // Explicit 'setup' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
+    // allowDelta. The locked role — NOT the profile role — drives the curated loom-setup surface.
+    const { role, startupPrompt, permission, browserTesting, model, skills } = this.resolveAgentSpawn(agent, config, "setup");
+
+    const now = new Date().toISOString();
+    const session: Session = {
+      id: randomUUID(),
+      projectId: project.id,
+      agentId,
+      engineSessionId: null,
+      title: null,
+      cwd: project.repoPath,
+      processState: "starting",
+      resumability: "unknown",
+      busy: false,
+      createdAt: now,
+      lastActivity: now,
+      lastError: null,
+      role,
+      browserTesting,
+      skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
+    };
+    this.db.insertSession(session);
+    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
+    this.db.setProcessState(session.id, "live");
+    this.pty.spawn({
+      sessionId: session.id,
+      cwd: session.cwd,
+      permission,
+      geometry: config.pty,
+      sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      startupPrompt,
+      role,
+      browserTesting,
+      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+    });
+    return { ...session, processState: "live" };
+  }
+
   /** Resume an existing session — NO prompt injection. */
   resume(sessionId: string, opts: { allowSuperseded?: boolean } = {}): Session {
     const session = this.db.getSession(sessionId);

@@ -1111,6 +1111,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // P5: spawn the read-and-file-only Platform Auditor. HUMAN-REST only (like startPlatformLead) — the
     // session role is locked to "auditor" via callerRole, regardless of the agent's profile role.
     if (role === "auditor") return deps.sessions.startAuditor(id);
+    // Setup Assistant E1-5: spawn the SINGLETON, ungated Setup Assistant on the curated loom-setup MCP
+    // surface. HUMAN-REST only (like startPlatformLead/startAuditor) — the session role is locked to
+    // "setup" via callerRole regardless of the agent's profile role; a live setup session is reused.
+    if (role === "setup") return deps.sessions.startSetup(id);
     // P3 force-plain override (web "Spawn → force plain"): a VANILLA session even in an agent with a
     // manager/platform profile — bypasses the profile entirely (role null, agent's own prompt, no allow
     // delta). Absent/undefined role = auto (the profile's role applies — P2 default).
