@@ -66,6 +66,7 @@
     "test:agent-runs-hardening": "node test/agent-runs-hardening.mjs",
     "test:version": "node test/version.mjs",
     "test:cli-args": "node test/cli-args.mjs",
+    "test:cli-service": "node test/cli-service.mjs",
     "test:daemon": "node scripts/test-daemon.mjs"
   },
   "dependencies": {

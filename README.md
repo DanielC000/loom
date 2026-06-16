@@ -68,6 +68,20 @@ loom restart          # stop, then start (honors --detach/--port/--no-open)
 loom open             # open the browser to a running daemon
 ```
 
+To have Loom **autostart in the background on login**, register it with your OS service manager:
+
+```sh
+loom service install     # register autostart (systemd --user / launchd / Task Scheduler)
+loom service status      # is it registered? + is the daemon running?
+loom service uninstall   # remove the autostart registration
+```
+
+`install` runs `loom start --no-open` under the OS service manager, which owns keep-alive/restart —
+a systemd `--user` unit on Linux, a launchd LaunchAgent on macOS, and a per-user Task Scheduler logon
+task on Windows (no admin required). It is idempotent (re-installing replaces cleanly) and honors
+`--port`. So far only the Windows path has been verified end-to-end on real hardware; the macOS and
+Linux artifacts are generated to spec and structurally tested but still need a live check on a Mac/Linux host.
+
 Common flags: `-p, --port <n>` (default `4317`, or `LOOM_PORT`), `--no-open`, `-d, --detach`,
 `-v, --version`, `-h, --help`. Prefer not to install? Run it once with **no install** via
 `npx loomctl` (same flags and subcommands, e.g. `npx loomctl status`).

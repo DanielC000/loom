@@ -23,7 +23,8 @@ import { spawn, spawnSync } from "node:child_process";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkgRoot = path.resolve(here, ".."); // the installed `loom` package root (holds the umbrella package.json)
 const DEFAULT_PORT = 4317;
-const SUBCOMMANDS = new Set(["start", "stop", "status", "restart", "open"]);
+const SUBCOMMANDS = new Set(["start", "stop", "status", "restart", "open", "service"]);
+const SERVICE_ACTIONS = new Set(["install", "uninstall", "status"]);
 
 function readVersion() {
   try {
@@ -47,6 +48,9 @@ Commands:
   status           Show whether the daemon is running, plus version, URL and PID.
   restart          Stop, then start (honors --detach/--port/--no-open).
   open             Open your browser to a running daemon.
+  service <action> Register Loom to autostart in the background on login.
+                   Actions: install | uninstall | status. Uses the OS service
+                   manager (systemd --user / launchd / Task Scheduler).
 
 Options:
   -p, --port <n>   Port to listen on (default ${DEFAULT_PORT}; or env LOOM_PORT)
@@ -63,12 +67,21 @@ State (PID file) lives under LOOM_HOME (default ~/.loom).
 // Returns { command, port, open, detach, help, version, error, exitCode }. command is null for the
 // backward-compatible bare invocation. port is undefined when not supplied (resolved at use-site).
 export function parseArgs(argv) {
-  const out = { command: null, port: undefined, open: true, detach: false, help: false, version: false, error: null, exitCode: 0 };
+  const out = { command: null, serviceAction: null, port: undefined, open: true, detach: false, help: false, version: false, error: null, exitCode: 0 };
   let i = 0;
   // A leading non-flag token is the subcommand; an unknown one is an error (mirrors the old unknown-arg
   // behavior). A leading flag (e.g. `loom --version`) keeps command = null (bare).
   if (argv.length && !argv[0].startsWith("-")) {
-    if (SUBCOMMANDS.has(argv[0])) { out.command = argv[0]; i = 1; }
+    if (SUBCOMMANDS.has(argv[0])) {
+      out.command = argv[0]; i = 1;
+      // `service` takes a sub-action (install | uninstall | status) as its next non-flag token.
+      if (out.command === "service") {
+        if (argv[i] && !argv[i].startsWith("-")) {
+          if (SERVICE_ACTIONS.has(argv[i])) { out.serviceAction = argv[i]; i++; }
+          else { out.error = `unknown service action '${argv[i]}' (expected install | uninstall | status)`; out.exitCode = 2; return out; }
+        } else { out.error = "service requires an action (install | uninstall | status)"; out.exitCode = 2; return out; }
+      }
+    }
     else { out.error = `unknown command '${argv[0]}' (try 'loom --help')`; out.exitCode = 2; return out; }
   }
   for (; i < argv.length; i++) {
@@ -353,6 +366,23 @@ async function openCmd({ port }) {
   return 0;
 }
 
+// --- service: register/unregister/inspect OS autostart (delegates to ./service.mjs) ----------------
+// The registered service runs `loom start --no-open` in the FOREGROUND under the OS service manager
+// (systemd --user / launchd / Task Scheduler) — END USERS get no supervisor, the OS owns keep-alive.
+async function serviceCmd({ action, port }) {
+  const { runService } = await import(pathToFileURL(path.join(here, "service.mjs")).href);
+  return runService({
+    action,
+    platform: process.platform,
+    node: process.execPath,           // the absolute node that will run the daemon at login
+    loomBin: fileURLToPath(import.meta.url), // this CLI's absolute path (bin/loom.mjs)
+    workingDir: pkgRoot,              // run from the installed package root (where dist/ lives)
+    port,
+    loomHome: loomHome(),
+    isRunning: fetchVersion,          // cross-check "running?" against the live daemon
+  });
+}
+
 // --- dispatch --------------------------------------------------------------------------------------
 async function run(argv = process.argv.slice(2)) {
   const parsed = parseArgs(argv);
@@ -364,6 +394,11 @@ async function run(argv = process.argv.slice(2)) {
     case "stop": process.exit(await stop());
     case "status": process.exit(await status({ port: parsed.port }));
     case "open": process.exit(await openCmd({ port: parsed.port }));
+    case "service": {
+      // status cross-checks a running daemon; install bakes a concrete port into the unit/plist/task.
+      const port = resolvePort(parsed.port);
+      process.exit(await serviceCmd({ action: parsed.serviceAction, port }));
+    }
     case "restart": {
       await stop();
       const port = resolvePort(parsed.port);
