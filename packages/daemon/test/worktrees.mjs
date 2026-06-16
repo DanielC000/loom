@@ -14,6 +14,13 @@ const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+// Slack for the bounded-op LOWER-bound timing assertions (j/k1/k2/l). Durations are measured with the
+// MONOTONIC performance.now() (not Date.now()), so a wall-clock NTP/virtualization backward step can't
+// make elapsed read under the timeout; this slack additionally absorbs libuv's sub-ms early timer fire
+// (a setTimeout(N) can fire a hair before a fresh clock sample). It does NOT weaken the proof — the floor
+// still decisively distinguishes "waited ~the timeout" from an instant (~0ms) early return. (A
+// Date.now()-measured floor flaked the v0.3.0 release CI: it read 249ms on the loaded runner.)
+const TIMER_SLACK_MS = 50;
 const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 const commitInto = (dir, file, body, msg) => {
   fs.writeFileSync(path.join(dir, file), body);
@@ -124,13 +131,13 @@ try {
     const fakeFactory = (_repo, blockMs) => { seenTimeout = blockMs; return neverGit; };
     const ghostPath = path.join(process.env.LOOM_HOME, `ghost-${Date.now()}`); // not on disk → fs.rm no-ops
     const tinyMs = 250;
-    const t0 = Date.now();
+    const t0 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
     let resolved = false;
     await removeWorktree(repo, ghostPath, { gitFactory: fakeFactory, timeoutMs: tinyMs }).then(() => { resolved = true; });
-    const elapsed = Date.now() - t0;
+    const elapsed = performance.now() - t0;
     check("(j) removeWorktree RETURNS despite a never-resolving git op (not an infinite hang)", resolved);
-    check(`(j) bounded by the timeout — returned in ${elapsed}ms (both ops capped at ${tinyMs}ms)`,
-      elapsed >= tinyMs && elapsed < tinyMs * 8 + 1500);
+    check(`(j) bounded by the timeout — returned in ${Math.round(elapsed)}ms (both ops capped at ${tinyMs}ms)`,
+      elapsed >= tinyMs - TIMER_SLACK_MS && elapsed < tinyMs * 8 + 1500);
     check(`(j) block timeout is passed through to the git factory (got ${seenTimeout}ms)`, seenTimeout === tinyMs);
 
     // (j2) the DEFAULT (no timeoutMs) path uses a 15s per-op block timeout — generous for a real
@@ -155,12 +162,12 @@ try {
     // (k1) isBranchMerged: a hung `git branch --merged` returns the SAFE default false (→ Pass A SKIPS
     //      the session), bounded — never a hang.
     let mergedMs = -1;
-    const t1 = Date.now();
+    const t1 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
     const merged = await isBranchMerged(repo, "any-branch", "HEAD",
       { gitFactory: (_p, ms) => { mergedMs = ms; return neverGit; }, timeoutMs: tinyMs });
-    const e1 = Date.now() - t1;
+    const e1 = performance.now() - t1;
     check("(k1) isBranchMerged RETURNS despite a never-resolving git op (not an infinite hang)", merged === false);
-    check(`(k1) bounded — returned false in ${e1}ms (cap ${tinyMs}ms)`, e1 >= tinyMs && e1 < tinyMs * 5 + 1500);
+    check(`(k1) bounded — returned false in ${Math.round(e1)}ms (cap ${tinyMs}ms)`, e1 >= tinyMs - TIMER_SLACK_MS && e1 < tinyMs * 5 + 1500);
     check(`(k1) block timeout passed through to the git factory (got ${mergedMs}ms)`, mergedMs === tinyMs);
     let mergedDefMs = -1;
     await isBranchMerged(repo, "any-branch", "HEAD", { gitFactory: (_p, ms) => { mergedDefMs = ms; return { raw: async () => "" }; } });
@@ -168,13 +175,13 @@ try {
 
     // (k2) deleteBranch: a hung `git branch -D` is swallowed + bounded (best-effort), never a hang.
     let delMs = -1;
-    const t2 = Date.now();
+    const t2 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
     let delResolved = false;
     await deleteBranch(repo, "loom/nonexistent",
       { gitFactory: (_p, ms) => { delMs = ms; return neverGit; }, timeoutMs: tinyMs }).then(() => { delResolved = true; });
-    const e2 = Date.now() - t2;
+    const e2 = performance.now() - t2;
     check("(k2) deleteBranch RETURNS despite a never-resolving git op (swallowed, not a hang)", delResolved);
-    check(`(k2) bounded — returned in ${e2}ms (cap ${tinyMs}ms)`, e2 >= tinyMs && e2 < tinyMs * 5 + 1500);
+    check(`(k2) bounded — returned in ${Math.round(e2)}ms (cap ${tinyMs}ms)`, e2 >= tinyMs - TIMER_SLACK_MS && e2 < tinyMs * 5 + 1500);
     check(`(k2) block timeout passed through to the git factory (got ${delMs}ms)`, delMs === tinyMs);
     let delDefMs = -1;
     await deleteBranch(repo, "loom/nonexistent", { gitFactory: (_p, ms) => { delDefMs = ms; return { raw: async () => "" }; } });
@@ -192,14 +199,15 @@ try {
     const stubFastGit = (_p, _ms) => ({ raw: async () => "" }); // git ops succeed fast → only the fs.rm hangs
     const neverRm = () => new Promise(() => {}); // a stuck dir handle: this remove never settles
     const tinyMs = 250;
-    const t0 = Date.now();
+    const stuckPath = path.join(process.env.LOOM_HOME, `stuck-${Date.now()}`); // Date.now() here = unique path, not a duration
+    const t0 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
     let resolved = false;
-    await removeWorktree(repo, path.join(process.env.LOOM_HOME, `stuck-${Date.now()}`),
+    await removeWorktree(repo, stuckPath,
       { gitFactory: stubFastGit, rm: neverRm, timeoutMs: tinyMs }).then(() => { resolved = true; });
-    const elapsed = Date.now() - t0;
+    const elapsed = performance.now() - t0;
     check("(l) removeWorktree RETURNS despite a never-resolving fs.rm (stuck dir handle, not an infinite hang)", resolved);
-    check(`(l) bounded by the timeout — returned in ${elapsed}ms (fs backstop capped at ${tinyMs}ms)`,
-      elapsed >= tinyMs && elapsed < tinyMs * 8 + 1500);
+    check(`(l) bounded by the timeout — returned in ${Math.round(elapsed)}ms (fs backstop capped at ${tinyMs}ms)`,
+      elapsed >= tinyMs - TIMER_SLACK_MS && elapsed < tinyMs * 8 + 1500);
   }
 
   // (m) findLandedSquashCommit — the deterministic trailer detector that REPLACES isBranchMerged under

@@ -34,6 +34,13 @@ const { createWorktree, worktreeHasWork, worktreeStatusHasWork } = await import(
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+// Slack for the bounded-op LOWER-bound timing assertion below. Durations are measured with the
+// MONOTONIC performance.now() (not Date.now()), so a wall-clock NTP/virtualization backward step can't
+// make elapsed read under the timeout; this slack additionally absorbs libuv's sub-ms early timer fire
+// (a setTimeout(250) can fire a hair before a fresh clock sample). It does NOT weaken the proof — the
+// floor still decisively distinguishes "waited ~the timeout" from an instant (~0ms) early return. (A
+// Date.now()-measured floor here flaked the v0.3.0 release CI: it read 122ms/249ms on the loaded runner.)
+const TIMER_SLACK_MS = 50;
 const GIT_ID = "-c user.email=bkw@loom -c user.name=bkw";
 const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 const now = new Date().toISOString();
@@ -116,14 +123,14 @@ try {
   check("(e) worktreeHasWork fails SAFE on a throwing git → has-work (keep)",
     (await worktreeHasWork(A.repo, A.worktreePath, A.branch, "HEAD", { gitFactory: () => throwGit })) === true);
   const neverGit = { raw: () => new Promise(() => {}) }; // hung child: never settles
-  const t0 = Date.now();
+  const t0 = performance.now(); // MONOTONIC: immune to wall-clock (Date.now) backward steps under load/virtualization
   const hung = await worktreeHasWork(A.repo, A.worktreePath, A.branch, "HEAD", { gitFactory: () => neverGit, timeoutMs: 250 });
-  const elapsed = Date.now() - t0;
+  const elapsed = performance.now() - t0;
   check("(e) worktreeHasWork fails SAFE on a never-resolving git → has-work (keep)", hung === true);
-  // Lower bound only: proves the call WAITED for the 250ms timeout rather than returning early or
-  // hanging forever. No upper bound — a loaded CI runner can take arbitrarily long to schedule the
-  // resolution after the timer fires, and an upper bound there is a pure timing flake.
-  check(`(e) the check is BOUNDED — waited for the timeout, returned in ${elapsed}ms (floor 250ms)`, elapsed >= 250);
+  // Lower bound (with TIMER_SLACK_MS slack) only: proves the call WAITED for the 250ms timeout rather
+  // than returning early or hanging forever. No upper bound — a loaded CI runner can take arbitrarily
+  // long to schedule the resolution after the timer fires, and an upper bound there is a pure timing flake.
+  check(`(e) the check is BOUNDED — waited for the timeout, returned in ${Math.round(elapsed)}ms (floor ${250 - TIMER_SLACK_MS}ms)`, elapsed >= 250 - TIMER_SLACK_MS);
 
   // --- the .claude discriminator, unit level (independent of any worktree) ---
   check("(e) parser: untracked .claude path alone → NOT work", worktreeStatusHasWork("?? .claude/skills/foo/SKILL.md\n") === false);
