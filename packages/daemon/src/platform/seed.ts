@@ -93,7 +93,10 @@ const PLATFORM_AGENTS: PlatformAgentSpec[] = [
  */
 export function seedPlatformHome(db: Db): string[] {
   if (!isLoomDev()) return []; // dev-only Platform layer — never seeds for regular loomctl users
-  if (db.hasReservedProject()) return []; // already seeded — never clobber user edits
+  // NAME-SCOPED idempotency: gate on THIS home's name, not "any reserved project" — the ungated
+  // "Getting Started" setup home (seedSetupHome) is also a reserved project, so a name-agnostic check
+  // would let either home silently suppress the other's seed. Behavior unchanged when this is the only home.
+  if (db.hasReservedProjectNamed(PLATFORM_PROJECT_NAME)) return []; // already seeded — never clobber user edits
 
   const now = new Date().toISOString();
   const project: Project = {

@@ -601,9 +601,24 @@ export class Db {
     return this.db.prepare("SELECT * FROM projects WHERE archived_at IS NOT NULL AND reserved = 0 ORDER BY archived_at DESC")
       .all().map(toProject);
   }
-  /** True iff a reserved/system project already exists — the idempotency gate for seedPlatformHome. */
+  /** True iff ANY reserved/system project exists (name-agnostic). Prefer the NAME-SCOPED checks below as
+   * the per-home idempotency gate now that more than one reserved home can coexist (see below). */
   hasReservedProject(): boolean {
     return !!this.db.prepare("SELECT 1 FROM projects WHERE reserved = 1 LIMIT 1").get();
+  }
+  /**
+   * The reserved/system project with this exact name, if present. The NAME-SCOPED idempotency anchor:
+   * once Loom seeds more than one reserved home (the dev-only "Loom Platform" AND the ungated
+   * "Getting Started"), a bare "does ANY reserved project exist" check is ambiguous — seeding either home
+   * would SILENTLY skip whenever the OTHER already existed. Each seeder keys off ITS OWN name instead.
+   */
+  getReservedProjectByName(name: string): Project | undefined {
+    const r = this.db.prepare("SELECT * FROM projects WHERE reserved = 1 AND name = ?").get(name) as Row | undefined;
+    return r ? toProject(r) : undefined;
+  }
+  /** True iff a reserved/system project with this exact name exists — the per-home idempotency gate. */
+  hasReservedProjectNamed(name: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM projects WHERE reserved = 1 AND name = ? LIMIT 1").get(name);
   }
   getProject(id: string): Project | undefined {
     const r = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Row | undefined;

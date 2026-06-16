@@ -6,6 +6,7 @@ import { snapshotTranscript } from "./sessions/transcript.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles } from "./profiles/seed.js";
 import { seedPlatformHome } from "./platform/seed.js";
+import { seedSetupHome } from "./setup/seed.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
 import { TaskMcpRouter } from "./mcp/server.js";
@@ -47,6 +48,12 @@ async function main(): Promise<void> {
   // (Platform-lead/Platform-audit) seed only under LOOM_DEV; the core profiles always seed.
   const seededProfiles = seedDefaultProfiles(db);
   if (seededProfiles.length) console.log(`[boot] seeded default profile(s): ${seededProfiles.join(", ")}`);
+  // Setup Assistant E1: seed the reserved "Getting Started" onboarding home + its Setup Assistant agent,
+  // seed-if-absent by name (idempotent; runs AFTER seedDefaultProfiles so the bundled Setup Assistant
+  // profile exists to assign). UNGATED — unlike the platform home below, this ships to EVERY loomctl user
+  // (no LOOM_DEV gate). Hidden from the project picker; surfaced via the always-available Setup page.
+  const seededSetup = seedSetupHome(db);
+  if (seededSetup.length) console.log(`[boot] seeded setup home: ${seededSetup.join(", ")}`);
   // Platform Manager P1: seed the reserved "Loom Platform" home + its Platform Lead / Platform Auditor
   // agents, seed-if-absent (idempotent; runs AFTER seedDefaultProfiles so the bundled platform profiles
   // exist to assign). Hidden from the project picker (db.listProjects), still Mission-Control visible.
