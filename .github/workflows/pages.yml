@@ -1,0 +1,53 @@
+name: Pages
+
+# Publish the hand-authored static landing page in `site/` (index.html + styles.css + favicon.svg —
+# self-contained, relative asset paths, NO build, lives OUTSIDE the pnpm workspace) to GitHub Pages.
+# No build step: the artifact is `site/` uploaded verbatim. This workflow never touches packages/ or
+# the daemon/web build, so it is independent of the CI/Release gates.
+#
+# OWNER one-time go-live steps (an agent CANNOT do these — they require repo admin + a push):
+#   1. Settings → Pages → Build and deployment → Source = "GitHub Actions" (one-time enable).
+#   2. Push `main` to origin (this workflow is paths-filtered, so it runs when `site/**` or this file
+#      changes on main; or trigger it manually via the Actions tab → "Pages" → "Run workflow").
+# After the first successful run the page is live at: https://danielc000.github.io/loom/
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Least privilege for a Pages deploy: read the repo, mint the OIDC token deploy-pages needs, publish.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One in-flight deploy at a time; let an in-progress publish finish rather than cancelling it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
