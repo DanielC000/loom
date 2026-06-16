@@ -9,6 +9,8 @@
 //   loom status           report running/stopped + version + URL + PID (exit non-zero if not running)
 //   loom restart          stop, then start (honors --detach/--port/--no-open)
 //   loom open             open the browser to a running daemon
+//   loom update [--channel stable|beta]
+//                         upgrade in place (npm i -g loomctl@<dist-tag>) + restart the daemon
 //
 // This file is shipped at <pkg>/bin/loom.mjs and the daemon at <pkg>/dist/index.js — the assembled npm
 // package layout (see scripts/build-npm-package.mjs). It is NOT meant to run from the monorepo source
@@ -19,11 +21,12 @@ import os from "node:os";
 import fs from "node:fs";
 import http from "node:http";
 import { spawn, spawnSync } from "node:child_process";
+import { CHANNELS, isValidChannel, installSpecFor, readChannel, writeChannel } from "./update-config.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkgRoot = path.resolve(here, ".."); // the installed `loom` package root (holds the umbrella package.json)
 const DEFAULT_PORT = 4317;
-const SUBCOMMANDS = new Set(["start", "stop", "status", "restart", "open", "service"]);
+const SUBCOMMANDS = new Set(["start", "stop", "status", "restart", "open", "service", "update"]);
 const SERVICE_ACTIONS = new Set(["install", "uninstall", "status"]);
 
 function readVersion() {
@@ -51,23 +54,31 @@ Commands:
   service <action> Register Loom to autostart in the background on login.
                    Actions: install | uninstall | status. Uses the OS service
                    manager (systemd --user / launchd / Task Scheduler).
+  update           Upgrade Loom in place (npm i -g loomctl@<dist-tag>) and
+                   restart the running daemon. --channel switches + remembers
+                   the release channel (stable → npm 'latest', beta → 'beta';
+                   default stable). End users run no supervisor, so the update
+                   is a stop → reinstall → start cycle.
 
 Options:
   -p, --port <n>   Port to listen on (default ${DEFAULT_PORT}; or env LOOM_PORT)
   -d, --detach     (start/restart) Run the daemon in the background and return
       --no-open    Do not open the browser automatically
+      --channel <c> (update) Release channel: stable | beta. Switches and
+                   persists the channel; a bare 'loom update' reuses the last.
   -v, --version    Print the loom version and exit
   -h, --help       Show this help and exit
 
-State (PID file) lives under LOOM_HOME (default ~/.loom).
+State (PID file + update-config.json) lives under LOOM_HOME (default ~/.loom).
 `);
 }
 
 // --- arg parsing (pure + exported, so it can be unit-tested without running the CLI) ---------------
-// Returns { command, port, open, detach, help, version, error, exitCode }. command is null for the
-// backward-compatible bare invocation. port is undefined when not supplied (resolved at use-site).
+// Returns { command, port, open, detach, channel, help, version, error, exitCode }. command is null for
+// the backward-compatible bare invocation. port is undefined when not supplied (resolved at use-site);
+// channel is null when --channel was not supplied (the `update` handler then reuses the persisted one).
 export function parseArgs(argv) {
-  const out = { command: null, serviceAction: null, port: undefined, open: true, detach: false, help: false, version: false, error: null, exitCode: 0 };
+  const out = { command: null, serviceAction: null, port: undefined, open: true, detach: false, channel: null, help: false, version: false, error: null, exitCode: 0 };
   let i = 0;
   // A leading non-flag token is the subcommand; an unknown one is an error (mirrors the old unknown-arg
   // behavior). A leading flag (e.g. `loom --version`) keeps command = null (bare).
@@ -92,10 +103,16 @@ export function parseArgs(argv) {
     else if (a === "--detach" || a === "-d") out.detach = true;
     else if (a === "--port" || a === "-p") out.port = Number(argv[++i]);
     else if (a.startsWith("--port=")) out.port = Number(a.slice("--port=".length));
+    else if (a === "--channel") out.channel = argv[++i];
+    else if (a.startsWith("--channel=")) out.channel = a.slice("--channel=".length);
     else { out.error = `unknown argument '${a}' (try 'loom --help')`; out.exitCode = 2; return out; }
   }
   if (out.port !== undefined && !isValidPort(out.port)) {
-    out.error = `invalid port '${out.port}' (expected 1-65535)`; out.exitCode = 2;
+    out.error = `invalid port '${out.port}' (expected 1-65535)`; out.exitCode = 2; return out;
+  }
+  // A supplied --channel must be a known channel (a bare 'loom update' leaves it null → use persisted).
+  if (out.channel !== null && !isValidChannel(out.channel)) {
+    out.error = `invalid channel '${out.channel ?? ""}' (expected ${CHANNELS.join(" | ")})`; out.exitCode = 2; return out;
   }
   return out;
 }
@@ -383,6 +400,59 @@ async function serviceCmd({ action, port }) {
   });
 }
 
+// --- update: upgrade in place via npm, then a clean restart ----------------------------------------
+// END USERS run NO supervisor (the exit-75 restart sentinel is supervisor-only — see CLAUDE.md), so an
+// update can't be a self-restart; it's a deliberate stop → reinstall → start cycle driven from here:
+//   (1) resolve + persist the channel (--channel switches+persists; bare reuses the last, default
+//       stable) and derive the npm install spec (stable → loomctl@latest, beta → loomctl@beta);
+//   (2) gracefully STOP the running daemon FIRST — so npm can replace files the daemon holds open
+//       (Windows locks a running process's modules) and the fresh boot picks up the new code;
+//   (3) `npm i -g <spec>` to upgrade the global package in place;
+//   (4) START the daemon back up (detached) if one had been running, now on the new code.
+// (Self-hosting note from CLAUDE.md: a dep-adding upgrade needs the install to land before the start —
+// step 3 precedes step 4, so that holds here.)
+async function update({ channel, port: explicitPort }) {
+  const home = loomHome();
+  const chan = channel ? writeChannel(home, channel) : readChannel(home);
+  const spec = installSpecFor(chan);
+
+  const rec = readPidFile();
+  const port = explicitPort ?? rec?.port ?? (process.env.LOOM_PORT ? Number(process.env.LOOM_PORT) : DEFAULT_PORT);
+  const wasRunning = !!(await fetchVersion(port));
+
+  console.log(`loom: updating on the '${chan}' channel → npm i -g ${spec}`);
+
+  // (2) stop first (graceful, reusing the stop ladder) so files are unlocked for the reinstall.
+  if (wasRunning) {
+    console.log("loom: stopping the running daemon …");
+    const rc = await stop();
+    if (rc !== 0) { console.error("loom: could not stop the daemon — aborting update (nothing was reinstalled)."); return rc; }
+  } else {
+    console.log("loom: no daemon is running — installing the update only.");
+  }
+
+  // (3) reinstall the global package in place. npm respects the active npm prefix, so a staged/throwaway
+  //     prefix is upgraded rather than the dev global. Spawn through the SHELL: on Windows `npm` is
+  //     `npm.cmd`, and Node 22 refuses to spawnSync a .cmd directly (EINVAL — a CVE mitigation), so
+  //     shell:true is required there; it also resolves bare `npm` on POSIX. The args are hardcoded safe
+  //     tokens (`spec` is `loomctl@<dist-tag>` with the channel validated to stable|beta), so there is
+  //     no shell-injection surface.
+  const r = spawnSync("npm", ["i", "-g", spec], { stdio: "inherit", shell: true });
+  if (r.error || r.status !== 0) {
+    const why = r.error ? r.error.message : `exit ${r.status}`;
+    console.error(`loom: npm install failed (${why}). The daemon was NOT restarted — start it with 'loom start'.`);
+    return 1;
+  }
+
+  // (4) bring the (now-updated) daemon back up if it had been running.
+  if (wasRunning) {
+    console.log("loom: starting the updated daemon …");
+    return await startDetached({ port, open: false });
+  }
+  console.log(`loom: updated to the latest '${chan}' release. Start the daemon with 'loom start'.`);
+  return 0;
+}
+
 // --- dispatch --------------------------------------------------------------------------------------
 async function run(argv = process.argv.slice(2)) {
   const parsed = parseArgs(argv);
@@ -394,6 +464,7 @@ async function run(argv = process.argv.slice(2)) {
     case "stop": process.exit(await stop());
     case "status": process.exit(await status({ port: parsed.port }));
     case "open": process.exit(await openCmd({ port: parsed.port }));
+    case "update": process.exit(await update({ channel: parsed.channel, port: parsed.port }));
     case "service": {
       // status cross-checks a running daemon; install bakes a concrete port into the unit/plist/task.
       const port = resolvePort(parsed.port);
