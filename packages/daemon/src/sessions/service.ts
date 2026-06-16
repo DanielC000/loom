@@ -25,6 +25,7 @@ import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport } from "../orchestration/crash-recovery-watcher.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
+import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 
 /** Floor (1s) for any threaded git-op timeout — a sub-second misconfig must never make every git op
  *  fail-fast (mirrors GitWriter's GIT_TIMEOUT_FLOOR_MS). Applied where the resolved value is threaded. */
@@ -1375,7 +1376,10 @@ export class SessionService {
     const caller = this.db.getSession(managerSessionId);
     if (!caller || caller.role !== "manager") throw new Error("platform_escalate is a manager-only surface");
     // HARDCODED target: the reserved Platform home — never an arbitrary projectId from the manager.
-    const home = this.db.listAllProjects().find((p) => p.reserved);
+    // NAME-SCOPED: resolve by PLATFORM_PROJECT_NAME, not a bare `.find(reserved)` — a second reserved home
+    // (the ungated "Getting Started" setup home) now coexists, so "the one reserved project" is ambiguous
+    // and would mis-file the escalation into the wrong home.
+    const home = this.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
     if (!home) throw new Error("no reserved Loom Platform project exists — cannot escalate");
 
     const origin = this.db.getProject(caller.projectId);
@@ -1441,7 +1445,9 @@ export class SessionService {
     const caller = this.db.getSession(auditorSessionId);
     if (!caller || caller.role !== "auditor") throw new Error("audit_file_finding is an auditor-only surface");
     // HARDCODED target: the reserved Platform home — never an arbitrary projectId from the Auditor.
-    const home = this.db.listAllProjects().find((p) => p.reserved);
+    // NAME-SCOPED: resolve by PLATFORM_PROJECT_NAME, not a bare `.find(reserved)` — the ungated setup home
+    // ("Getting Started") is also reserved now, so the name-agnostic lookup would mis-file the finding.
+    const home = this.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
     if (!home) throw new Error("no reserved Loom Platform project exists — cannot file finding");
 
     const severity = (input.severity ?? "").trim() || "unspecified";

@@ -13,6 +13,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       worker surfaces; it creates a structured task on the RESERVED Platform board (NOT the caller's
 //       project), capturing origin project+session, title, detail, severity; returns the task id; and
 //       refuses gracefully when no reserved project exists.
+//   (b2) REGRESSION — with a SECOND reserved home ("Getting Started") also present, platform_escalate
+//       still name-targets the "Loom Platform" home, NOT the setup home (which sorts first by name).
 //   (c) a non-manager (worker) cannot call platform_escalate (not on its surface; the service guard rejects).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-messaging.mjs
@@ -165,6 +167,29 @@ try {
     esc.delivered === true && !!escNudge && escNudge.text.startsWith("[loom:escalation]") && escNudge.text.includes(esc.taskId));
 
   await mgrClient.close();
+
+  // ===== (b2) REGRESSION — a 2nd reserved home must NOT mis-target platform_escalate =====
+  // E1-4 added the ungated "Getting Started" setup home — a SECOND reserved project. The old name-agnostic
+  // `listAllProjects().find(p => p.reserved)` is now ambiguous: "Getting Started" sorts BEFORE "Loom
+  // Platform" (listAllProjects is ORDER BY name), so the bare .find would target the SETUP home. The
+  // name-scoped fix (getReservedProjectByName(PLATFORM_PROJECT_NAME)) must still file onto "Loom Platform".
+  db.insertProject({ id: "pSetup", name: "Getting Started", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: true });
+  check("(b2) two reserved homes now coexist, and 'Getting Started' sorts ahead of 'Loom Platform'",
+    db.listAllProjects().filter((p) => p.reserved).length === 2 &&
+    db.listAllProjects().find((p) => p.reserved).name === "Getting Started"); // the bare-.find trap
+  const setupTasksBefore = db.listTasks("pSetup").length;
+  const esc2 = await (async () => {
+    const c = await connect(orch.buildServer("MGR", "manager"));
+    const r = parse(await c.callTool({ name: "platform_escalate", arguments: { title: "second escalation", detail: "after the setup home exists", severity: "low" } }));
+    await c.close();
+    return r;
+  })();
+  check("(b2) platform_escalate STILL targets the 'Loom Platform' home (pHome) — never the setup home",
+    esc2.projectId === "pHome" && !esc2.error);
+  check("(b2) the task landed on pHome, and the setup home got NOTHING",
+    db.getTask(esc2.taskId)?.projectId === "pHome" && db.listTasks("pSetup").length === setupTasksBefore);
+  // Drop the setup home again so the later "no reserved project" refusal test (archive pHome) still holds.
+  db.archiveProject("pSetup");
 
   // ===================== (c) a non-manager (worker) cannot call platform_escalate =====================
   const wkrClient = await connect(orch.buildServer("W", "worker"));

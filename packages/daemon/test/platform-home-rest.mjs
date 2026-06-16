@@ -6,9 +6,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the two seeded agents (Platform Lead + Platform Auditor) are returned;
 //   (2) the SAME reserved project is still EXCLUDED from GET /api/projects (the ordinary picker) — P6
 //       must not regress the P1 picker exclusion;
-//   (3) with NO reserved project seeded → 404 (the endpoint never invents a home);
+//   (3) with NO reserved project seeded → 404 (the endpoint never invents a home) — for BOTH routes;
 //   (4) liveSessions surfaces each platform agent's LIVE sessions, preferring LIVE over RECENCY — a
-//       recently-STOPPED Lead never masks an idle-but-LIVE one (the duplicate-singleton-spawn guard).
+//       recently-STOPPED Lead never masks an idle-but-LIVE one (the duplicate-singleton-spawn guard);
+//   (5) THE REGRESSION FIX — with BOTH reserved homes seeded ("Getting Started" + "Loom Platform"),
+//       /api/platform/home returns "Loom Platform" (NEVER "Getting Started") and the new /api/setup/home
+//       returns "Getting Started" + its Setup Assistant agent — the name-scoped lookups never cross.
 // Run: 1) build (turbo builds shared first), 2) node test/platform-home-rest.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -29,6 +32,7 @@ const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
 const { seedPlatformHome, PLATFORM_PROJECT_NAME } = await import("../dist/platform/seed.js");
+const { seedSetupHome, SETUP_PROJECT_NAME } = await import("../dist/setup/seed.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -112,14 +116,71 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
   }
 }
 
-// ===================== (3) no reserved project → 404 =====================
+// ===== (5) BOTH reserved homes seeded → each discovery route returns its OWN named home =====
+// The regression this card fixes: a 2nd reserved home ("Getting Started") made the bare `.find(reserved)`
+// in /api/platform/home ambiguous. "Getting Started" sorts BEFORE "Loom Platform" (listAllProjects is
+// ORDER BY name), so the old name-agnostic lookup returned Getting Started — the live bug. The name-scoped
+// fix must return Loom Platform for /api/platform/home and Getting Started for /api/setup/home — never
+// crossed. The setup home is UNGATED so it seeds regardless of LOOM_DEV (here LOOM_DEV=1, both present).
 {
-  const db = new Db(path.join(TMP, "loom-empty.db")); // fresh DB, NO seedPlatformHome
+  const db = new Db(path.join(TMP, "loom-both.db"));
+  seedDefaultProfiles(db);
+  seedSetupHome(db);      // the ungated "Getting Started" home + its Setup Assistant agent
+  seedPlatformHome(db);   // the dev-gated "Loom Platform" home + its Lead/Auditor agents
+  check("(5) both reserved homes seeded (exactly two reserved projects)",
+    db.listAllProjects().filter((p) => p.reserved).length === 2);
+
+  const app = await buildApp(db);
+  try {
+    // Platform home: must be "Loom Platform", NEVER "Getting Started".
+    const plat = (await app.inject({ method: "GET", url: "/api/platform/home" }));
+    check("(5) GET /api/platform/home → 200 with BOTH homes seeded", plat.statusCode === 200);
+    const platBody = plat.json();
+    check("(5) /api/platform/home returns the 'Loom Platform' home (NOT 'Getting Started')",
+      platBody.project?.reserved === true && platBody.project?.name === PLATFORM_PROJECT_NAME &&
+      platBody.project?.name !== SETUP_PROJECT_NAME);
+    const platNames = (platBody.agents ?? []).map((a) => a.name);
+    check("(5) /api/platform/home returns the Lead + Auditor (not the Setup Assistant)",
+      platNames.includes("Platform Lead") && platNames.includes("Platform Auditor") && !platNames.includes("Setup Assistant"));
+
+    // Setup home: must be "Getting Started" + the Setup Assistant agent, NEVER "Loom Platform".
+    const setup = (await app.inject({ method: "GET", url: "/api/setup/home" }));
+    check("(5) GET /api/setup/home → 200 with BOTH homes seeded", setup.statusCode === 200);
+    const setupBody = setup.json();
+    check("(5) /api/setup/home returns the 'Getting Started' home (NOT 'Loom Platform')",
+      setupBody.project?.reserved === true && setupBody.project?.name === SETUP_PROJECT_NAME &&
+      setupBody.project?.name !== PLATFORM_PROJECT_NAME);
+    const setupNames = (setupBody.agents ?? []).map((a) => a.name);
+    check("(5) /api/setup/home returns the Setup Assistant agent (not the Lead/Auditor)",
+      setupNames.includes("Setup Assistant") && !setupNames.includes("Platform Lead") && !setupNames.includes("Platform Auditor"));
+    check("(5) each returned setup agent is bound to the setup home",
+      (setupBody.agents ?? []).every((a) => a.projectId === setupBody.project.id));
+    check("(5) liveSessions is present on /api/setup/home (array, empty here)", Array.isArray(setupBody.liveSessions));
+
+    // The two homes are distinct projects — the routes never cross-return.
+    check("(5) the two discovery routes return DISTINCT projects",
+      platBody.project.id !== setupBody.project.id);
+
+    // The picker still hides BOTH reserved homes.
+    const picker = (await app.inject({ method: "GET", url: "/api/projects" })).json();
+    check("(5) GET /api/projects (picker) hides BOTH reserved homes", !picker.some((p) => p.reserved));
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
+// ===================== (3) no reserved project → 404 (both routes) =====================
+{
+  const db = new Db(path.join(TMP, "loom-empty.db")); // fresh DB, NO seeds at all
   const app = await buildApp(db);
   try {
     const r = await app.inject({ method: "GET", url: "/api/platform/home" });
     check("(3) GET /api/platform/home with no reserved home → 404", r.statusCode === 404);
     check("(3) 404 body carries a reason", typeof r.json().error === "string");
+    const s = await app.inject({ method: "GET", url: "/api/setup/home" });
+    check("(3) GET /api/setup/home with no setup home → 404", s.statusCode === 404);
+    check("(3) setup 404 body carries a reason", typeof s.json().error === "string");
   } finally {
     try { await app.close(); } catch { /* ignore */ }
     db.close();
@@ -130,6 +191,6 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GET /api/platform/home returns the reserved 'Loom Platform' home + its Lead/Auditor agents, the ordinary picker still hides the reserved project (no P1 regression), the endpoint 404s rather than inventing a home when none is seeded, and liveSessions surfaces LIVE sessions over recency (a stopped Lead can't mask a live one — the duplicate-singleton guard)."
+  ? "\n✅ ALL PASS — GET /api/platform/home returns the reserved 'Loom Platform' home + its Lead/Auditor agents, the ordinary picker still hides the reserved project (no P1 regression), both discovery routes 404 rather than inventing a home when none is seeded, liveSessions surfaces LIVE sessions over recency (a stopped Lead can't mask a live one — the duplicate-singleton guard), and with BOTH reserved homes seeded the name-scoped lookups never cross: /api/platform/home → 'Loom Platform', /api/setup/home → 'Getting Started' + its Setup Assistant agent."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

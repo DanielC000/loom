@@ -33,6 +33,8 @@ import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/write
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate } from "../skills/store.js";
 import { validateProfile } from "../profiles/validate.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
+import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
+import { SETUP_PROJECT_NAME } from "../setup/seed.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -356,7 +358,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // spawn/stop/schedule controls reuse the EXISTING agent-session, stop, and schedule REST routes.
   // 404 only if no reserved home exists (impossible after boot-seed). ---
   app.get("/api/platform/home", async (_req, reply) => {
-    const project = deps.db.listAllProjects().find((p) => p.reserved);
+    // NAME-SCOPED: resolve the Platform home by PLATFORM_PROJECT_NAME, NOT a bare `.find(reserved)`. A
+    // second reserved home (the ungated "Getting Started" setup home) now coexists, so "the one reserved
+    // project" is ambiguous and could return Getting Started instead of Loom Platform (the live regression
+    // this fixes). The setup home has its own discovery route below (GET /api/setup/home).
+    const project = deps.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
     if (!project) return reply.code(404).send({ error: "no reserved Loom Platform project" });
     const agents = deps.db.listAgents(project.id);
     // LIVE-SESSION INFO (duplicate-singleton guard): surface each platform agent's currently-LIVE
@@ -365,6 +371,28 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // — the canonical live-over-recency query — so a recently-STOPPED Lead can NEVER mask an idle-but-LIVE
     // one. Each entry is a light summary (no transcript/cwd/branch); `role` is the singleton key
     // ("platform" = Lead, "auditor" = Auditor) and `agentId` lets a consumer roll up per-agent counts.
+    const liveSessions = agents.flatMap((a) =>
+      deps.db.liveSessions(a.id).map((s) => ({
+        id: s.id, agentId: s.agentId, role: s.role,
+        processState: s.processState, busy: s.busy,
+        createdAt: s.createdAt, lastActivity: s.lastActivity,
+      })),
+    );
+    return { project, agents, liveSessions };
+  });
+
+  // --- Setup home discovery (Setup Assistant E1-7): the reserved "Getting Started" project + its Setup
+  // Assistant agent(s), surfaced to the dedicated Setup page. MIRRORS /api/platform/home but NAME-SCOPED
+  // to the SETUP home (getReservedProjectByName(SETUP_PROJECT_NAME)) — Getting Started must NEVER be
+  // returned by a Platform-home lookup, nor vice-versa. Unlike the platform home this is UNGATED (the
+  // setup home seeds for every loomctl user, no LOOM_DEV). READ-ONLY: the human attach/stop controls reuse
+  // the EXISTING agent-session + stop REST routes; the Setup page fetches this to find + attach the Setup
+  // Assistant session (liveSessions lets it reuse an already-live one instead of minting a duplicate).
+  // 404 only if no setup home exists (impossible after boot-seed). ---
+  app.get("/api/setup/home", async (_req, reply) => {
+    const project = deps.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+    if (!project) return reply.code(404).send({ error: "no reserved Getting Started project" });
+    const agents = deps.db.listAgents(project.id);
     const liveSessions = agents.flatMap((a) =>
       deps.db.liveSessions(a.id).map((s) => ({
         id: s.id, agentId: s.agentId, role: s.role,

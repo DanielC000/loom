@@ -607,13 +607,17 @@ export class Db {
     return !!this.db.prepare("SELECT 1 FROM projects WHERE reserved = 1 LIMIT 1").get();
   }
   /**
-   * The reserved/system project with this exact name, if present. The NAME-SCOPED idempotency anchor:
+   * The LIVE reserved/system project with this exact name, if present. The NAME-SCOPED home resolver:
    * once Loom seeds more than one reserved home (the dev-only "Loom Platform" AND the ungated
-   * "Getting Started"), a bare "does ANY reserved project exist" check is ambiguous — seeding either home
-   * would SILENTLY skip whenever the OTHER already existed. Each seeder keys off ITS OWN name instead.
+   * "Getting Started"), a bare `listAllProjects().find(p => p.reserved)` is ambiguous — it returns
+   * whichever reserved home sorts first by name, mis-targeting home lookups. Reader sites (the
+   * /api/platform/home + /api/setup/home discovery routes, platformEscalate, auditFileFinding) resolve by
+   * THIS, keyed to the home's own name. EXCLUDES archived (archived_at IS NULL) — mirroring the
+   * listAllProjects()-based lookups it replaces, so an (impossible-in-prod) archived reserved home is
+   * never returned/targeted. For the seed idempotency gate use hasReservedProjectNamed (archive-agnostic).
    */
   getReservedProjectByName(name: string): Project | undefined {
-    const r = this.db.prepare("SELECT * FROM projects WHERE reserved = 1 AND name = ?").get(name) as Row | undefined;
+    const r = this.db.prepare("SELECT * FROM projects WHERE reserved = 1 AND name = ? AND archived_at IS NULL").get(name) as Row | undefined;
     return r ? toProject(r) : undefined;
   }
   /** True iff a reserved/system project with this exact name exists — the per-home idempotency gate. */

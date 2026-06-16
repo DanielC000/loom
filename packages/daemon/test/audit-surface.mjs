@@ -187,6 +187,21 @@ try {
   // The finding records an audit_finding event (audit trail).
   check("(b) audit_file_finding: an audit_finding event was recorded", db.listEvents("AUD").some((e) => e.kind === "audit_finding"));
 
+  // (b2) REGRESSION — a 2nd reserved home ("Getting Started", the ungated setup home) now coexists. The
+  // old name-agnostic `.find(reserved)` is ambiguous and "Getting Started" sorts BEFORE "Loom Platform"
+  // (listAllProjects is ORDER BY name), so the bare lookup would mis-file findings into the setup home.
+  // The name-scoped fix (getReservedProjectByName(PLATFORM_PROJECT_NAME)) must still target Loom Platform.
+  db.insertProject({ id: "pSetup", name: "Getting Started", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: true });
+  check("(b2) two reserved homes coexist; 'Getting Started' sorts ahead of 'Loom Platform' (the bare-.find trap)",
+    db.listAllProjects().filter((p) => p.reserved).length === 2 &&
+    db.listAllProjects().find((p) => p.reserved).name === "Getting Started");
+  const setupTasksBefore = db.listTasks("pSetup").length;
+  const fin2 = await call("audit_file_finding", { title: "second finding", detail: "after the setup home exists", severity: "low" });
+  check("(b2) audit_file_finding STILL targets the 'Loom Platform' home (pHome) — never the setup home",
+    fin2.projectId === "pHome" && !fin2.error);
+  check("(b2) the finding landed on pHome, and the setup home got NOTHING",
+    db.getTask(fin2.taskId)?.projectId === "pHome" && db.listTasks("pSetup").length === setupTasksBefore);
+
   await client.close();
 
   // ============ (c) session_spawn (platform tool) REFUSES role:"auditor" ============
