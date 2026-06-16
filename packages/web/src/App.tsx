@@ -3,7 +3,7 @@ import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import ReviewPanel from "./pages/ReviewPanel";
 import { NAV_PAGES, type NavGroup } from "./nav";
-import { NavTab, Badge, Select } from "./components/ui";
+import { NavTab, Badge, Select, Button } from "./components/ui";
 import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
 import { api } from "./lib/api";
@@ -210,11 +210,54 @@ function Toast({ item, onDismiss, onOpen }: { item: AttentionItem; onDismiss: ()
   );
 }
 
+// Setup Assistant E1-7 — first-run welcome. On a FRESH install (no ordinary projects) the daemon has
+// already auto-launched the setup session; the web additionally presents a one-time welcome that routes
+// the user into the live setup terminal (the "Set up Loom" page). Gated purely on the ordinary project
+// list being EMPTY (api.projects excludes the reserved Getting Started + Platform homes), so it vanishes
+// the moment a real project exists — and stays gone. Also human-dismissable (× / "Maybe later"), persisted
+// so it doesn't nag on every reload of a still-empty install; the "Set up Loom" nav entry remains the way in.
+const WELCOME_DISMISSED_KEY = "loom.setupWelcomeDismissed";
+
+function FirstRunWelcome() {
+  const navigate = useNavigate();
+  const projectsQ = useQuery({ queryKey: ["projects"], queryFn: api.projects });
+  const [dismissed, setDismissed] = useState<boolean>(() => localStorage.getItem(WELCOME_DISMISSED_KEY) === "1");
+  const dismiss = () => { localStorage.setItem(WELCOME_DISMISSED_KEY, "1"); setDismissed(true); };
+  const ref = useDismissable<HTMLDivElement>(!dismissed, dismiss);
+
+  // Only once projects have actually loaded + resolved EMPTY (no flash on a populated install). The
+  // context's `projects` is already archived-filtered + reserved-excluded — read it via the same cache.
+  const ordinary = (projectsQ.data ?? []).filter((p) => !p.archivedAt);
+  if (!projectsQ.isSuccess || ordinary.length > 0 || dismissed) return null;
+
+  const goSetup = () => { navigate("/setup"); dismiss(); };
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center",
+      background: "rgba(0,0,0,0.55)", backdropFilter: "blur(2px)" }}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-label="Welcome to Loom"
+        style={{ width: 460, maxWidth: "92vw", background: color.panel, border: `1px solid ${color.borderStrong}`,
+          borderRadius: radius.base, padding: "26px 26px 22px", boxShadow: "0 12px 48px rgba(0,0,0,0.6)",
+          borderTop: `3px solid ${color.phosphor}` }}>
+        <div style={{ fontFamily: font.head, fontSize: 20, color: color.text, letterSpacing: "0.01em" }}>Welcome to Loom</div>
+        <p style={{ color: color.textDim, fontFamily: font.mono, fontSize: 13, lineHeight: 1.6, margin: "12px 0 22px" }}>
+          Let’s get you set up. The Setup Assistant — a friendly onboarding helper — is already running and ready to
+          create your first project, agents and profiles, and act on your behalf. Open it to tell it what you want to build.
+        </p>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <Button variant="primary" onClick={goSetup} style={{ padding: "6px 14px", fontSize: 13 }}>Set up Loom →</Button>
+          <Button variant="ghost" onClick={dismiss} style={{ padding: "6px 12px", fontSize: 13, color: color.textMuted }}>Maybe later</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <ActiveProjectProvider>
       <div style={{ minHeight: "100vh" }}>
         <CommandPalette />
+        <FirstRunWelcome />
         <ToastContainer />
         <header style={{ display: "flex", alignItems: "center", gap: 16, padding: "10px 20px", borderBottom: `1px solid ${color.border}` }}>
           <Logo />

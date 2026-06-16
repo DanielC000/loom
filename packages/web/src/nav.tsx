@@ -14,6 +14,7 @@ import Profiles from "./pages/Profiles";
 import Schedules from "./pages/Schedules";
 import Usage from "./pages/Usage";
 import Platform from "./pages/Platform";
+import Setup from "./pages/Setup";
 import Settings from "./pages/Settings";
 
 // The four header sections. Primary pages render as tabs; everything else is grouped under
@@ -63,6 +64,10 @@ export const NAV_PAGES: NavPage[] = [
   // top-level surface SEPARATE from the project picker (the reserved project stays out of that list).
   // Promoted to a primary tab next to Overview; deliberately stays `scoped` OFF (separate from the picker).
   { label: "Platform", to: "/platform", element: <Platform />, group: "system", primary: true },
+  // The Setup section — the reserved "Getting Started" home's Setup Assistant (Start/Resume + live
+  // terminal). Always-available top-level surface like Platform, SEPARATE from the project picker (the
+  // reserved home stays out of that list). Unscoped (it has no per-project meaning); the only way in.
+  { label: "Set up Loom", nav: "Set up", to: "/setup", element: <Setup />, group: "system", primary: true },
   { label: "Terminals", to: "/terminals", element: <Terminals />, group: "operate", primary: true },
   { label: "Board", to: "/board", element: <Board />, group: "project", primary: true, scoped: true },
   { label: "Runs", to: "/runs", element: <Runs />, group: "operate", primary: true, scoped: true },

@@ -95,6 +95,16 @@ export const api = {
     agents: Agent[];
     liveSessions: { id: string; agentId: string; role: SessionRole | null; processState: string; busy: boolean; createdAt: string; lastActivity: string }[];
   }>("/api/platform/home"),
+  // Setup Assistant E1-7 — discover the reserved "Getting Started" home (hidden from the ordinary
+  // picker, like the Platform home) + its Setup Assistant agent(s), for the dedicated Setup page.
+  // MIRRORS platformHome but NAME-SCOPED server-side to the SETUP home. READ-ONLY discovery; spawn =
+  // startSession(role "setup") below. liveSessions surfaces an already-live setup session so the page
+  // attaches/reuses it instead of minting a second (startSetup is a server-side singleton regardless).
+  setupHome: () => get<{
+    project: Project;
+    agents: Agent[];
+    liveSessions: { id: string; agentId: string; role: SessionRole | null; processState: string; busy: boolean; createdAt: string; lastActivity: string }[];
+  }>("/api/setup/home"),
   createProject: (b: { name: string; repoPath: string; vaultPath: string }) =>
     post<Project>("/api/projects", b),
   // --- HUMAN-only project/agent management (rename / archive / restore / PERMANENT delete + agent
@@ -148,8 +158,9 @@ export const api = {
   sessions: (agentId: string) => get<Session[]>(`/api/agents/${agentId}/sessions`),
   // role omitted/undefined = auto (the agent's profile role applies, server-side); "manager"/"platform"
   // = explicit role; "auditor" = the read-and-file-only Platform Auditor (P5; locked role server-side);
+  // "setup" = the ungated, user-facing Setup Assistant (singleton, reused server-side — startSetup);
   // "plain" = force-plain (ignore the profile's role → a role-null session).
-  startSession: (agentId: string, role?: "manager" | "platform" | "auditor" | "plain") =>
+  startSession: (agentId: string, role?: "manager" | "platform" | "auditor" | "setup" | "plain") =>
     post<Session>(`/api/agents/${agentId}/sessions`, role ? { role } : undefined),
   resumeSession: (id: string) => post<Session>(`/api/sessions/${id}/resume`),
   forkSession: (id: string) => post<Session>(`/api/sessions/${id}/fork`),
