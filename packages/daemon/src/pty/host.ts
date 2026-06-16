@@ -51,13 +51,6 @@ const BRACKET_PASTE_END = "\x1b[201~";
  */
 const BUSY_STALE_MS = 5 * 60_000;
 
-/**
- * After a human keystroke in the composer, hold any programmatic turn this long before delivering —
- * so a worker report can't be concatenated onto the human's half-typed text (the collision that
- * mangled both messages). The queued report drains once the human submits/clears or this lapses.
- */
-const HUMAN_TYPING_GRACE_MS = 6_000;
-
 /** Shift+Tab (CSI Z / back-tab) — Claude's TUI cycles the permission mode on this key. */
 const SHIFT_TAB = "\x1b[Z";
 /** Down arrow (CSI B) — moves the selection in Claude's TUI menus. */
@@ -67,6 +60,50 @@ const ESC_KEY = "\x1b";
 /** Strip CSI sequences so the boot-output scan matches the MCP prompt's words across TUI styling. */
 const ANSI_CSI = new RegExp(ESC_KEY + "\\[[0-9;?]*[ -/]*[@-~]", "g");
 const collapseBoot = (s: string): string => s.replace(ANSI_CSI, "").replace(/\s+/g, "");
+
+/**
+ * Recompute the human's RAW-terminal composer draft length from ONE input chunk, given the prior
+ * length. PURE + exported for the hermetic test. "Composer-dirty" is simply `len > 0`; while dirty,
+ * a programmatic turn is HELD (never delivered onto the half-typed text) — see deferForHumanDraft.
+ * We track LENGTH, not a bool, only so a human who BACKSPACES the whole line back to empty also
+ * releases the hold (a bare bool couldn't tell that from a still-dirty box).
+ *
+ * Classification of the chunk:
+ *  - Box-FREEING (the human submitted/interrupted/dismissed/killed the line) → 0:
+ *    contains Enter (\r/\n), Ctrl-C (\x03), or kill-line (Ctrl-U \x15); OR is a LONE Esc (\x1b).
+ *  - Otherwise walk the chunk: backspace/DEL (\x7f/\b) decrements (floored at 0); printable chars
+ *    (>= 0x20) increment; an escape sequence (arrow keys / navigation / a BRACKETED PASTE's markers)
+ *    is skipped to its final byte so its parameter bytes aren't miscounted as printable — its
+ *    embedded text (e.g. a paste body) still counts. Other C0 controls (Tab, etc.) are ignored.
+ *
+ * Best-effort BY DESIGN — it can't perfectly mirror Claude's Ink editor (e.g. cursor-mid-line edits),
+ * but it only ever errs toward HOLDING a delivery, never toward clobbering the human's text.
+ */
+export function nextComposerLen(prevLen: number, data: string): number {
+  if (data === ESC_KEY) return 0;                 // a lone Esc dismisses/clears the box
+  if (/[\r\n\x03\x15]/.test(data)) return 0;      // Enter / Ctrl-C / kill-line → box freed
+  let len = prevLen;
+  for (let i = 0; i < data.length; i++) {
+    const c = data.charCodeAt(i);
+    if (c === 0x1b) {
+      // Escape/CSI/SS3 sequence (arrow keys, Home/End, bracketed-paste \x1b[200~ markers, …). Skip to
+      // the sequence's final byte so its param bytes (e.g. the "200" in \x1b[200~) aren't counted; the
+      // paste BODY between the markers is counted by the normal printable path on later iterations.
+      const next = data[i + 1];
+      if (next === "[" || next === "O") {
+        i += 2;
+        while (i < data.length && !/[A-Za-z~]/.test(data[i]!)) i++;
+      } else {
+        i += 1; // a lone/unknown ESC inside a larger chunk — skip just the ESC byte
+      }
+      continue;
+    }
+    if (c === 0x7f || c === 0x08) { len = Math.max(0, len - 1); continue; } // backspace / DEL
+    if (c >= 0x20) len++;                          // printable → one more draft char
+    // other C0 controls (Tab, etc.) — ignore for length
+  }
+  return len;
+}
 
 /**
  * Detect Claude Code's "resume from summary / as-is" gate, which appears BEFORE SessionStart when
@@ -358,7 +395,10 @@ interface Live {
                         // queues instead of racing the still-booting composer (the 2026-06-03 restart bug).
   busySince: number | null;  // epoch ms when busy rose — for stuck-busy self-heal (BUSY_STALE_MS)
   lastOutputAt: number; // epoch ms of the last pty output — "is the engine actually producing?"
-  lastHumanKeyAt: number | null; // epoch ms of the last human composer keystroke (collision guard)
+  composerLen: number;  // best-effort length of the human's UNCOMMITTED raw-terminal draft. >0 ("composer-dirty")
+                        // HOLDS programmatic delivery so a queued turn can never land ON the human's half-typed
+                        // text; reset to 0 by a box-freeing key (Enter/Ctrl-C/Esc/kill-line) or backspace-to-empty.
+                        // The PRECISE collision signal (supersedes the old keystroke time-grace). Tracked in writeStdin.
   pending: QueuedMessage[]; // FIFO of messages held while busy / while the human types — drained on Stop + reconcile. Each carries a stable id so the UI can delete/edit/reorder a specific entry safely (an id op is a no-op once that entry has drained).
   stopping: boolean;    // a Stop is in flight — SUPPRESS drain/submit so a queued turn can't re-arm busy past it
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
@@ -541,7 +581,7 @@ export class PtyHost {
       ready: false, // flipped on the first SessionStart (after mode-cycles) — see Live.ready / markReady
       busySince: null,
       lastOutputAt: Date.now(),
-      lastHumanKeyAt: null,
+      composerLen: 0,
       pending: [],
       stopping: false,
       // The startup-prompt turn runs from a CLI arg (not submit()), so seed lastPrompt with it —
@@ -665,7 +705,7 @@ export class PtyHost {
       // The Claude-only state below is inert for a shell (nothing reads it once kind:"shell" gates the
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
       busy: false, ready: true, busySince: null,
-      lastOutputAt: Date.now(), lastHumanKeyAt: null,
+      lastOutputAt: Date.now(), composerLen: 0,
       pending: [], stopping: false, lastPrompt: null,
       startupModeCycles: 0, startupCyclesDone: true,
       mcpPromptHandled: true, bootScan: "",
@@ -911,11 +951,12 @@ export class PtyHost {
 
   /**
    * Queue text for submission as a turn. Submits IMMEDIATELY only when the session is idle AND the
-   * human isn't mid-compose; otherwise HOLDS it FIFO and `drainPending` (on the next Stop, or the
-   * reconcile tick) delivers it. Two reasons not to write now:
+   * human's raw composer is clean; otherwise HOLDS it FIFO and `drainPending` (on the next Stop, the
+   * box-free transition, or the reconcile tick) delivers it. Two reasons not to write now:
    *   - busy: a mid-turn write corrupts the running turn (the original reason for the queue);
-   *   - human typing: writing onto half-typed composer text concatenates the two into one garbled
-   *     message (the observed manager/worker collision) — so we wait until the box is free.
+   *   - composer-dirty: writing onto the human's half-typed raw-terminal text concatenates the two
+   *     into one garbled message (the observed manager/worker collision) — so we HOLD until the human
+   *     frees their box (Enter/Ctrl-C/Esc/kill-line, or backspaces it empty). See deferForHumanDraft.
    * Also self-heals a STUCK-busy session first, so a report can't strand behind a phantom 'busy'.
    * Returns whether it went out now, or its 1-based queue position.
    *
@@ -930,7 +971,7 @@ export class PtyHost {
     // `ready` gate: a freshly (re)spawned pty is not ready until SessionStart. Submitting before then
     // writes into a still-booting TUI — the Enter is swallowed and the text strands in the composer
     // (the 2026-06-03 restart bug). Hold it FIFO; markReady drains it once the engine is up.
-    if (live.ready && !live.busy && !live.stopping && !this.humanActivelyTyping(live)) {
+    if (live.ready && !live.busy && !live.stopping && !this.deferForHumanDraft(live)) {
       // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
       // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
       // synchronous code this is unreachable — enqueueStdin runs as its own event-loop task, never
@@ -1065,9 +1106,17 @@ export class PtyHost {
     return { reordered: true };
   }
 
-  /** True while the human has uncommitted composer text (recent keystroke, no submit/clear since). */
-  private humanActivelyTyping(live: Live): boolean {
-    return live.lastHumanKeyAt != null && Date.now() - live.lastHumanKeyAt < HUMAN_TYPING_GRACE_MS;
+  /**
+   * True while a programmatic turn must be HELD rather than delivered, because the human has an
+   * uncommitted RAW-terminal draft that delivery would land on top of (the concatenation bug). The
+   * signal is composer-dirty (`composerLen > 0`) — precise: it holds for exactly as long as a draft
+   * exists and releases the instant the box is freed/emptied (writeStdin drains on that transition).
+   * It SUPERSEDES the old keystroke time-grace, which couldn't tell a held-then-backspaced-empty box
+   * from a still-dirty one. Conservative by construction: it only ever causes us to WAIT, never to
+   * touch the human's bytes.
+   */
+  private deferForHumanDraft(live: Live): boolean {
+    return live.composerLen > 0;
   }
 
   /** Clear a phantom 'busy' (busy with no engine output for BUSY_STALE_MS) so its queue can drain. */
@@ -1088,7 +1137,7 @@ export class PtyHost {
     // each Ctrl-C just interrupts the freshly-drained turn, so it takes N escalating clicks to land).
     // stop() also clears the queue, so this is belt-and-suspenders for a late enqueue during the stop.
     if (live.stopping) return;
-    if (this.humanActivelyTyping(live)) return; // don't land on the human's half-typed text
+    if (this.deferForHumanDraft(live)) return; // HOLD while the human's raw composer is dirty — never land on half-typed text
     this.submit(sessionId, live.pending.shift()!.text);
   }
 
@@ -1310,12 +1359,21 @@ export class PtyHost {
 
   writeStdin(sessionId: string, data: string): void {
     const live = this.live.get(sessionId);
-    if (live) {
-      // Track the human's composer state so a programmatic turn doesn't land on half-typed text.
-      // Enter / Ctrl-C / Esc submit or clear the box (free it); anything else means they're composing.
-      live.lastHumanKeyAt = /[\r\x03\x1b]/.test(data) ? null : Date.now();
-    }
+    // Write the human's bytes to the pty FIRST — they must stay AHEAD of any held programmatic turn in
+    // the pty's FIFO input stream. A box-freeing key (e.g. Enter) is a tiny chunk written synchronously
+    // here, so the subsequent drain below submits its paste strictly behind that Enter → claude processes
+    // the human's line first, then the held turn lands on the now-empty composer (no concatenation).
     this.writeChunked(sessionId, data);
+    if (live) {
+      // Track the human's UNCOMMITTED raw-terminal draft (composer-dirty) so a programmatic turn never
+      // lands on half-typed text. We NEVER touch the human's bytes — we only HOLD delivery while dirty.
+      const wasDirty = live.composerLen > 0;
+      live.composerLen = nextComposerLen(live.composerLen, data);
+      // Box-free transition (submitted / cleared / backspaced-to-empty): drain the held queue PROMPTLY
+      // — don't wait for the reconcile tick — so a held programmatic turn delivers right after the
+      // human frees their box. drainPending is fully guarded (no-op if busy/stopping/empty/not-ready).
+      if (wasDirty && live.composerLen === 0) this.drainPending(sessionId);
+    }
   }
 
   /**
