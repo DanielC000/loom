@@ -159,6 +159,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- opt-in browser-automation, pinned at spawn from the session's Profile (mirrors role): a
   -- per-session Playwright MCP is injected iff 1. Carried across every respawn (resume/fork/recycle).
   browser_testing INTEGER NOT NULL DEFAULT 0,
+  -- profile-resolved skill subset pinned at fresh spawn (JSON array of skill names); NULL = deliver all
+  -- skills (today's behavior). Carried verbatim across every respawn (resume/fork/recycle) like role.
+  skills TEXT,
   parent_session_id TEXT,
   task_id TEXT,
   worktree_path TEXT,
@@ -286,6 +289,9 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   // opt-in browser-automation (pinned at spawn from the Profile; carried across respawns). NOT NULL +
   // constant DEFAULT is legal on ALTER TABLE ADD COLUMN, so legacy rows backfill to 0 (off).
   browser_testing: "INTEGER NOT NULL DEFAULT 0",
+  // profile-resolved skill subset pinned at spawn (JSON array). Nullable; legacy rows backfill to NULL
+  // = deliver all skills (today's behavior — the regression-guarded default).
+  skills: "TEXT",
   parent_session_id: "TEXT",
   task_id: "TEXT",
   worktree_path: "TEXT",
@@ -1272,12 +1278,12 @@ export class Db {
       `INSERT INTO sessions (
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
-         role,browser_testing,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
+         role,browser_testing,skills,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
          ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
-         @role,@browserTesting,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
+         @role,@browserTesting,@skills,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
          @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline)`,
     ).run({
       ...s,
@@ -1286,6 +1292,9 @@ export class Db {
       // so plain phase-1 session literals insert unchanged.
       role: s.role ?? null,
       browserTesting: s.browserTesting ? 1 : 0, // off (0) on every plain session literal
+      // skill subset → JSON text; null/absent ⇒ NULL = deliver all (today's behavior). An empty array is
+      // also stored as NULL ("no subset ⇒ all") so the read side never has to special-case [].
+      skills: s.skills && s.skills.length ? JSON.stringify(s.skills) : null,
 
       parentSessionId: s.parentSessionId ?? null,
       taskId: s.taskId ?? null,
@@ -1709,6 +1718,9 @@ function toSession(r0: unknown): Session {
     // phase-2 orchestration (null/0 on plain phase-1 rows)
     role: (r.role as SessionRole) ?? null,
     browserTesting: (r.browser_testing as number) === 1,
+    // pinned skill subset; NULL ⇒ null = deliver all. Defensive parse: a malformed value degrades to
+    // null (deliver all), never throws toSession.
+    skills: r.skills == null ? null : (() => { try { return JSON.parse(r.skills as string) as string[]; } catch { return null; } })(),
     parentSessionId: (r.parent_session_id as string) ?? null,
     taskId: (r.task_id as string) ?? null,
     worktreePath: (r.worktree_path as string) ?? null,

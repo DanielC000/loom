@@ -27,7 +27,7 @@ try {
   // (a) Injection is a COPY, not a junction: deleting the session's .claude/skills must NOT touch the store.
   fs.mkdirSync(path.join(skillsDir, "loom-a"), { recursive: true });
   fs.writeFileSync(path.join(skillsDir, "loom-a", "SKILL.md"), "---\nname: loom-a\ndescription: A\n---\nA");
-  injectSkills(cwd);
+  injectSkills(cwd, "sess-durability", null); // null subset ⇒ deliver all (this test doesn't exercise subsets)
 
   const injected = path.join(cwd, ".claude", "skills", "loom-a");
   check("injected skill is a real SKILL.md file", fs.existsSync(path.join(injected, "SKILL.md")));

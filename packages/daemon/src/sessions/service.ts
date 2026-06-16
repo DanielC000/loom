@@ -128,10 +128,10 @@ export class SessionService {
    * `--resume`/`--fork-session` spawn deliberately omits `--model` and inherits the conversation's model
    * from the engine transcript, keeping every resume/fork byte-identical.
    *
-   * STILL DEFERRED (NOT wired here): the profile's `skills` subset (all skills are still delivered to
-   * every session). Wiring the subset is materially larger — `injectSkills` runs on EVERY spawn incl.
-   * the resume/fork/boot-resume paths that don't resolve a profile, plus a shared-cwd manifest concern —
-   * so it is a tracked follow-up. This wires role + startupPrompt + allow + model.
+   * Phase-3 skills wiring: the profile's `skills` subset is resolved here and PINNED on the session row
+   * at fresh spawn (like browserTesting), then read from the row on resume/fork/recycle/boot — NEVER
+   * re-resolved (the profile may have changed). injectSkills delivers only the pinned subset; null/empty
+   * ⇒ all skills (byte-identical to today). An empty subset is normalized to null at the pin sites.
    *
    * `forcePlain` (P3 spawn override): BYPASS the profile entirely so role + allow resolve via
    * resolveProfile's backstop — i.e. spawn as if the agent had no profile (a vanilla "+New": role null,
@@ -141,7 +141,7 @@ export class SessionService {
    */
   private resolveAgentSpawn(
     agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false,
-  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; model: string | undefined } {
+  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; model: string | undefined; skills: string[] | null } {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
     const profile = (forcePlain || !agent.profileId) ? undefined : this.db.getProfile(agent.profileId);
@@ -163,6 +163,9 @@ export class SessionService {
       // Profile-pinned model → `--model` at spawn; null/absent ⇒ undefined ⇒ no `--model` (byte-identical).
       // `|| undefined` so an empty-string model is treated as "engine default", same coercion as the prompt.
       model: resolved.model || undefined,
+      // Profile-pinned skill subset → pinned on the session row + delivered by injectSkills. Normalize an
+      // empty array to null ("no subset ⇒ deliver all", today's behavior); backstop null under forcePlain.
+      skills: resolved.skills && resolved.skills.length ? resolved.skills : null,
     };
   }
 
@@ -180,7 +183,7 @@ export class SessionService {
     // prompt is always the agent's own). No caller role here (plain "+New"), so the profile's role
     // applies when present. No profile ⇒ role undefined, the config permission unchanged — today's session.
     // forcePlain (P3) pins role to undefined even on a profile agent (see resolveAgentSpawn).
-    const { role, startupPrompt, permission, browserTesting, model } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false);
+    const { role, startupPrompt, permission, browserTesting, model, skills } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false);
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -198,6 +201,7 @@ export class SessionService {
       lastError: null,
       role, // phase-2: profile-conferred role (undefined ⇒ today's plain, role-null session)
       browserTesting, // profile-conferred browser opt-in (false ⇒ today's plain spawn)
+      skills, // profile-conferred skill subset, pinned (null ⇒ deliver all — today's behavior)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty, so onExit ('exited') from a fast-failing spawn always
@@ -214,6 +218,7 @@ export class SessionService {
       role,
       browserTesting,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
     });
     return { ...session, processState: "live" };
   }
@@ -231,7 +236,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'manager' role from the caller (scheduler/REST) ALWAYS wins; the profile (if any) only
     // layers its prompt + allowDelta. No profile ⇒ byte-identical to today's manager spawn.
-    const { role, startupPrompt, permission, browserTesting, model } = this.resolveAgentSpawn(agent, config, "manager");
+    const { role, startupPrompt, permission, browserTesting, model, skills } = this.resolveAgentSpawn(agent, config, "manager");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -249,6 +254,7 @@ export class SessionService {
       lastError: null,
       role,
       browserTesting,
+      skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -264,6 +270,7 @@ export class SessionService {
       role,
       browserTesting,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
     });
     return { ...session, processState: "live" };
   }
@@ -310,7 +317,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. No profile ⇒ byte-identical to today's platform-lead spawn.
-    const { role, startupPrompt, permission, browserTesting, model } = this.resolveAgentSpawn(agent, config, "platform");
+    const { role, startupPrompt, permission, browserTesting, model, skills } = this.resolveAgentSpawn(agent, config, "platform");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -328,6 +335,7 @@ export class SessionService {
       lastError: null,
       role,
       browserTesting,
+      skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -343,6 +351,7 @@ export class SessionService {
       role,
       browserTesting,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
     });
     return { ...session, processState: "live" };
   }
@@ -366,7 +375,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'auditor' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the restricted loom-audit surface.
-    const { role, startupPrompt, permission, browserTesting, model } = this.resolveAgentSpawn(agent, config, "auditor");
+    const { role, startupPrompt, permission, browserTesting, model, skills } = this.resolveAgentSpawn(agent, config, "auditor");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -384,6 +393,7 @@ export class SessionService {
       lastError: null,
       role,
       browserTesting,
+      skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -399,6 +409,7 @@ export class SessionService {
       role,
       browserTesting,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
     });
     return { ...session, processState: "live" };
   }
@@ -464,6 +475,9 @@ export class SessionService {
       // Carry the browser capability across resume too (pinned on the row at spawn): a resumed
       // browser-worker must keep its per-session Playwright MCP, exactly as role is re-passed.
       browserTesting: session.browserTesting ?? false,
+      // Carry the pinned skill subset across resume from the ROW (never re-resolve the profile) so the
+      // resumed session sees the SAME skills it spawned with. null ⇒ all (today's behavior). (Landmine 1.)
+      skills: session.skills ?? null,
     });
     // A freshly-resumed session has no turn in flight (resume injects no prompt) — clear any stale
     // busy=true carried in the DB across the restart. Without this the session shows/acts "busy"
@@ -718,6 +732,7 @@ export class SessionService {
       lastError: null,
       role: src.role ?? undefined, // a forked manager stays a manager (keeps its MCP surface)
       browserTesting: src.browserTesting ?? false, // a fork inherits the source's browser capability
+      skills: src.skills ?? null, // a fork inherits the source's pinned skill subset (null ⇒ all)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
@@ -734,6 +749,7 @@ export class SessionService {
       forkSessionId: forkEngineId,   // ...into this pre-assigned id (--session-id).
       role: src.role ?? undefined,
       browserTesting: src.browserTesting ?? false,
+      skills: src.skills ?? null, // carry the pinned subset onto the fork's pty (matches the fork row)
     });
     return { ...session, processState: "live" };
   }
@@ -1141,10 +1157,13 @@ export class SessionService {
     if (profileRole === "manager" || profileRole === "platform" || profileRole === "auditor" || profileRole === "run") {
       throw new Error(`cannot spawn a worker under the '${workerAgent.name}' agent (a ${profileRole}-role profile); pick a worker agent (Dev/Bugfix/QA/Docs)`);
     }
-    // Resolve THAT agent's profile for its browser-automation opt-in — a manager spawns a QA worker by
-    // pointing it at a browserTesting profile (e.g. the bundled "QA Tester"). Explicit role is "worker";
-    // we read ONLY browserTesting (permission stays config.permission, byte-identical to today).
-    const browserTesting = this.resolveAgentSpawn(workerAgent, config, "worker").browserTesting;
+    // Resolve THAT agent's profile for its browser-automation opt-in + skill subset — a manager spawns a
+    // QA worker by pointing it at a browserTesting profile (e.g. the bundled "QA Tester"). Explicit role is
+    // "worker"; we read browserTesting + skills (permission stays config.permission, byte-identical to
+    // today). A worker runs in its OWN worktree (separate cwd), so its subset is delivered EXACTLY.
+    const workerSpawn = this.resolveAgentSpawn(workerAgent, config, "worker");
+    const browserTesting = workerSpawn.browserTesting;
+    const skills = workerSpawn.skills;
 
     // Safety rails (§17a) — refuse NEW work before any side effect (worktree/pty). In-flight
     // workers are untouched. Pause is global-or-this-manager; the cap counts LIVE children only.
@@ -1175,6 +1194,7 @@ export class SessionService {
       lastError: null,
       role: "worker",
       browserTesting, // QA worker (profile opt-in) ⇒ per-session Playwright MCP; else false (plain)
+      skills, // profile-pinned skill subset for the worker (null ⇒ all); pinned so resume/recycle honor it
       parentSessionId: managerSessionId,
       taskId: opts.taskId,
       worktreePath,
@@ -1193,6 +1213,7 @@ export class SessionService {
       startupPrompt: opts.kickoffPrompt,
       role: "worker", // gives the worker the orchestration surface (worker_report only)
       browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
+      skills, // deliver only the worker profile's skill subset (null ⇒ all)
     });
     this.db.updateTask(opts.taskId, { columnKey: "in_progress" });
     this.db.appendEvent({
@@ -1569,6 +1590,7 @@ export class SessionService {
       lastError: null,
       role: "worker",
       browserTesting: old.browserTesting ?? false, // a recycled QA worker keeps its browser capability
+      skills: old.skills ?? null, // a recycled worker keeps its pinned skill subset (null ⇒ all)
       parentSessionId: managerSessionId,
       taskId,
       worktreePath,
@@ -1594,6 +1616,7 @@ export class SessionService {
       startupPrompt: framed,
       role: "worker",
       browserTesting: old.browserTesting ?? false,
+      skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
     });
     // Hand the carried queue + scheduled wakes to the successor: re-point the old worker's wakes (so a
     // due wake can't resurrect the retired worker) and re-enqueue the held messages (busy-gated; they
@@ -1652,6 +1675,7 @@ export class SessionService {
       lastError: null,
       role: "manager",
       browserTesting: old.browserTesting ?? false, // carry the capability forward (managers rarely set it)
+      skills: old.skills ?? null, // carry the pinned skill subset forward (null ⇒ all)
       gen: newGen,
       recycledFrom: old.id,
     };
@@ -1668,6 +1692,7 @@ export class SessionService {
       startupPrompt,
       role: "manager", // successor keeps the orchestration surface
       browserTesting: old.browserTesting ?? false,
+      skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
     });
 
     // Re-parent live workers onto the successor BEFORE closing the old manager, so they're never

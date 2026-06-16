@@ -66,7 +66,7 @@ export default function Profiles() {
       <Panel style={{ alignSelf: "start" }}>
         <SectionLabel>Profiles</SectionLabel>
         <p style={{ color: color.textMuted, fontSize: 11, margin: "0 0 10px", fontFamily: font.mono, lineHeight: 1.5 }}>
-          Reusable, cross-project rig — role, model, permission deltas, icon (skills soon), plus a
+          Reusable, cross-project rig — role, model, permission deltas, skill subset, icon, plus a
           description blurb. An agent runs under one to drive how its sessions spawn; the injected
           prompt comes from the agent. Human-managed only; edits apply on the next spawn.
         </p>
@@ -111,8 +111,16 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
   const [icon, setIcon] = useState(profile.icon ?? "");
   const [model, setModel] = useState(profile.model ?? "");
   const [browserTesting, setBrowserTesting] = useState(profile.browserTesting ?? false);
+  // Skill subset (empty = deliver ALL, the default — null and [] are equivalent, matching the daemon).
+  const [skills, setSkills] = useState<string[]>(profile.skills ?? []);
   const [confirmDel, setConfirmDel] = useState(false);
   const [confirmRevert, setConfirmRevert] = useState(false);
+
+  // The store's skill names — the menu of what a subset can pick from (same list the Skills page edits).
+  const skillList = useQuery({ queryKey: ["skills"], queryFn: api.skills });
+  const available = (skillList.data ?? []).map((s) => s.name);
+  const toggleSkill = (n: string) => setSkills((cur) => (cur.includes(n) ? cur.filter((s) => s !== n) : [...cur, n]));
+  const sortedJson = (xs: string[]) => JSON.stringify([...xs].sort());
 
   const allowDelta = allowText.split("\n").map((s) => s.trim()).filter(Boolean);
   const dirty =
@@ -122,7 +130,8 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
     JSON.stringify(allowDelta) !== JSON.stringify(profile.allowDelta) ||
     (icon || null) !== profile.icon ||
     (model.trim() || null) !== profile.model ||
-    browserTesting !== (profile.browserTesting ?? false);
+    browserTesting !== (profile.browserTesting ?? false) ||
+    sortedJson(skills) !== sortedJson(profile.skills ?? []);
 
   const fieldLabel = { fontFamily: font.head as string, fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: color.textDim };
   const ta = {
@@ -130,7 +139,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
     background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
   };
 
-  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); };
+  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setSkills(profile.skills ?? []); };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
@@ -194,24 +203,44 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
         </span>
       </label>
 
-      {/* Model is wired at spawn (emits `--model <id>`; blank = engine default). Skills delivery is still
-          a follow-up — the field stays disabled so a human can't set a subset that isn't yet honored. */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <span style={fieldLabel}>Model</span>
-          <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="engine default (e.g. claude-opus-4-8)" />
-        </label>
-        <label style={{ display: "flex", flexDirection: "column", gap: 4, opacity: 0.55 }}>
-          <span style={fieldLabel}>Skills</span>
-          <Input disabled value={profile.skills ? profile.skills.join(", ") : ""} placeholder="all" />
-        </label>
+      {/* Model emits `--model <id>` at spawn (blank = engine default). Skills is a SUBSET filter: pick the
+          skills a session under this rig may see; pick NONE to deliver ALL (the default). Pinned on the
+          session row at spawn so resume/fork/recycle honor the same subset. */}
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Model</span>
+        <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="engine default (e.g. claude-opus-4-8)" />
+      </label>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <span style={fieldLabel}>Skills <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>· {skills.length === 0 ? "none selected → ALL skills delivered (default)" : `${skills.length} selected → only these delivered`}</span></span>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {available.map((n) => {
+            const on = skills.includes(n);
+            return (
+              <button key={n} type="button" onClick={() => toggleSkill(n)}
+                style={{ cursor: "pointer", fontFamily: font.mono, fontSize: 12, padding: "3px 9px", borderRadius: 12,
+                  border: `1px solid ${on ? color.phosphor : color.border}`, background: on ? color.panel2 : "transparent",
+                  color: on ? color.phosphor : color.textMuted }}>
+                {on ? "✓ " : ""}{n}
+              </button>
+            );
+          })}
+          {available.length === 0 && <span style={{ color: color.textMuted, fontSize: 12, fontFamily: font.mono }}>No skills in the store yet.</span>}
+        </div>
+        {skills.length > 0 && <button type="button" onClick={() => setSkills([])} style={{ alignSelf: "flex-start", cursor: "pointer", fontFamily: font.mono, fontSize: 11, padding: "2px 8px", borderRadius: 10, border: `1px solid ${color.border}`, background: "transparent", color: color.textMuted }}>clear → deliver all</button>}
+        {/* A subset name no longer in the store (e.g. a deleted skill) — surfaced so it can be cleared. */}
+        {skills.filter((n) => !available.includes(n)).length > 0 && (
+          <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>
+            not in store (will be ignored at spawn): {skills.filter((n) => !available.includes(n)).join(", ")}
+          </span>
+        )}
       </div>
-      <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, marginTop: -6 }}>Model is applied at spawn (blank = engine default). Skills-subset delivery is not yet wired (a follow-up) — all skills are delivered for now.</span>
+      <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, marginTop: -6 }}>Model + skills apply on the next spawn. Skills delivery is per-session — sessions sharing a repo see the union of their subsets, never each other stripped.</span>
 
       <span style={{ flex: 1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || !name.trim() || saving}
-          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting })}>
+          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, skills: skills.length ? skills : null })}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {dirty

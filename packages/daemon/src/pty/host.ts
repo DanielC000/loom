@@ -401,6 +401,13 @@ export interface SpawnOpts {
    */
   browserTesting?: boolean;
   /**
+   * Profile-resolved skill-name SUBSET pinned on the session row (mirrors browserTesting): injectSkills
+   * delivers ONLY these skills. null/empty/absent ⇒ ALL store skills (byte-identical to today). Threaded
+   * on EVERY spawn path (fresh/resume/fork/recycle/boot) — read from the row, never re-resolved — so the
+   * subset survives a respawn. Keyed per session so a concurrent session sharing the cwd is never stripped.
+   */
+  skills?: string[] | null;
+  /**
    * RESUME ONLY (card f05e4897). The permission mode the resumed session must land in — the mode a
    * FRESH spawn of this config reaches (default `auto`). When set, host.ts feedback-cycles the footer
    * to it after SessionStart (bounded + graceful), instead of the FRESH path's blind `startupModeCycles`
@@ -741,7 +748,7 @@ export class PtyHost {
     ensureTrusted(opts.cwd); // pre-accept the workspace-trust dialog so warmup never blocks
     // Mirror Loom's managed skills into <cwd>/.claude/skills (project-local; shadow personal). Never
     // let a skills hiccup block a spawn — a session must boot even if skill delivery fails.
-    try { injectSkills(opts.cwd); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
+    try { injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
     // Both managers AND workers get the orchestration MCP — but a role-gated surface: managers
     // get the full coordination tools, workers get only worker_report (resolved server-side). A
     // platform-lead instead gets the loom-platform MCP (project/agent creation, Pillar C). acceptEdits

@@ -314,6 +314,15 @@ export interface Session {
    */
   browserTesting?: boolean;
   /**
+   * Profile-resolved skill-name SUBSET to deliver to this session, PINNED here at fresh spawn (mirrors
+   * `role`/`browserTesting`): `injectSkills` mirrors ONLY these skills into the session's `.claude/skills`.
+   * `null`/absent ⇒ deliver ALL store skills (today's behavior — the regression-guarded default). Pinned
+   * (not re-resolved) so EVERY respawn path (resume / fork / recycle / boot) honors the same subset — a
+   * profile re-resolution at resume time would be wrong (the profile may have changed). An empty array is
+   * normalized to null at the pin sites (no profile subset ⇒ all).
+   */
+  skills?: string[] | null;
+  /**
    * Per-project session Archive: the ISO instant a session was archived (a UI tidy action that moves
    * a dead/exited session out of the Workspace rail). null = not archived (every live/normal session).
    * Archived sessions are EXCLUDED from the rail/god-eye lists and surface only in the Archive tab.
