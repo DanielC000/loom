@@ -5,10 +5,10 @@
 .DESCRIPTION
   Run as a one-liner:
 
-      irm https://loom.example/install.ps1 | iex
+      irm https://raw.githubusercontent.com/DanielC000/loom/main/install.ps1 | iex
 
-  HOSTING the script on a trusted HTTPS domain is an OWNER action (see the README "One-line install"
-  section). Until that domain exists, this file is a repo artifact - run it from a local checkout:
+  Piping a script to a shell runs unreviewed code; if you'd rather inspect first (or verify its
+  SHA-256 checksum), run it from a local checkout instead:
 
       pwsh -ExecutionPolicy Bypass -File .\install.ps1            # interactive
       pwsh -ExecutionPolicy Bypass -File .\install.ps1 -Service   # also register autostart

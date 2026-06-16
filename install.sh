@@ -1,10 +1,10 @@
 #!/bin/sh
 # Loom one-line installer — macOS / Linux / WSL.
 #
-#   curl -fsSL https://loom.example/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/DanielC000/loom/main/install.sh | sh
 #
-# HOSTING the script on a trusted HTTPS domain is an OWNER action (see the README "One-line install"
-# section). Until that domain exists, this file is a repo artifact — run it from a local checkout:
+# Piping a script to a shell runs unreviewed code; if you'd rather inspect first (or verify its
+# SHA-256 checksum), run it from a local checkout instead:
 #
 #   sh install.sh                 # interactive (prompts before registering autostart)
 #   sh install.sh --service       # also register autostart, non-interactively

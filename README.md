@@ -104,10 +104,10 @@ autostart, and launch Loom — all idempotent (safe to re-run; `npm i -g` upgrad
 
 ```sh
 # macOS / Linux / WSL
-curl -fsSL https://loom.example/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/DanielC000/loom/main/install.sh | sh
 
 # Windows (PowerShell)
-irm https://loom.example/install.ps1 | iex
+irm https://raw.githubusercontent.com/DanielC000/loom/main/install.ps1 | iex
 ```
 
 Because `curl … | sh` and `irm … | iex` have no interactive prompt, drive optional steps with flags
@@ -120,11 +120,11 @@ Because `curl … | sh` and `irm … | iex` have no interactive prompt, drive op
 | Install a specific source  | `--source <spec>` / `LOOM_INSTALL_SOURCE` | `-Source <spec>` / `$env:LOOM_INSTALL_SOURCE` |
 | Port                       | `--port <n>` / `LOOM_PORT`            | `-Port <n>` / `$env:LOOM_PORT`              |
 
-> **⚠ Hosting the scripts is an OWNER action — not yet done.** The `loom.example` URLs above are
-> placeholders. Until the scripts are published on a trusted **HTTPS** domain, they are repo artifacts:
+> **⚠ Piping a script straight to a shell runs unreviewed code.** The one-liners above fetch the
+> installers from this repo over **HTTPS** (raw GitHub) and execute them. If you'd rather inspect first,
 > clone the repo and run them by local path (`sh install.sh` / `pwsh -ExecutionPolicy Bypass -File
-> install.ps1`). When hosting them, serve over HTTPS and publish a **SHA-256 checksum** of each script
-> next to it so users can verify the download before piping it to a shell.
+> install.ps1`), or download the script, verify its **SHA-256 checksum**, then run it. (A vanity/Pages
+> URL may front these raw links later; the raw-GitHub URLs above resolve today.)
 
 ### From source (contributors)
 
