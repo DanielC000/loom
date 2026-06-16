@@ -238,6 +238,16 @@ CREATE TABLE IF NOT EXISTS platform_config (
   override_json TEXT NOT NULL DEFAULT '{}',
   updated_at TEXT NOT NULL
 );
+-- Setup Assistant E1-6: a tiny daemon-GLOBAL key/value store for one-time boot markers (today: the
+-- first-run setup auto-launch flag). NOT per-project — daemon-wide, like platform_config. Brand-new
+-- table ⇒ this CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER), exactly like
+-- platform_config / preset_prompts: it runs every boot (exec(SCHEMA)) so an existing DB simply gains an
+-- empty table on next boot. Plain daemon-internal state — no MCP path, no human REST surface.
+CREATE TABLE IF NOT EXISTS app_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 -- Preset Prompts: the GLOBAL "terminal action-buttons" store (label + the prompt text to send). ONE
 -- daemon-wide list — no project/session scoping (deliberately no project_id). Plain human/UI data,
 -- managed over the loopback REST surface only (no MCP path). Brand-new table ⇒ CREATE TABLE IF NOT
@@ -716,6 +726,20 @@ export class Db {
       `INSERT INTO platform_config (id, override_json, updated_at) VALUES (1, @json, @updatedAt)
        ON CONFLICT(id) DO UPDATE SET override_json = @json, updated_at = @updatedAt`,
     ).run({ json: JSON.stringify(override ?? {}), updatedAt: new Date().toISOString() });
+  }
+
+  // --- app_meta (daemon-GLOBAL key/value; one-time boot markers like the first-run setup auto-launch) ---
+  /** Read a daemon-global meta value by key. Returns undefined when the key is unset (fresh install). */
+  getMeta(key: string): string | undefined {
+    const r = this.db.prepare("SELECT value FROM app_meta WHERE key = ?").get(key) as Row | undefined;
+    return r ? (r.value as string) : undefined;
+  }
+  /** Upsert a daemon-global meta value (stamps updated_at). Used for fire-exactly-once boot markers. */
+  setMeta(key: string, value: string): void {
+    this.db.prepare(
+      `INSERT INTO app_meta (key, value, updated_at) VALUES (@key, @value, @updatedAt)
+       ON CONFLICT(key) DO UPDATE SET value = @value, updated_at = @updatedAt`,
+    ).run({ key, value, updatedAt: new Date().toISOString() });
   }
 
   // --- preset prompts (GLOBAL "terminal action-buttons" store; human/UI REST only, no MCP path) ---

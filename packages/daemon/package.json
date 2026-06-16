@@ -53,6 +53,7 @@
     "test:platform-config": "node test/platform-config.mjs",
     "test:audit-surface": "node test/audit-surface.mjs",
     "test:setup-surface": "node test/setup-surface.mjs",
+    "test:setup-first-run": "node test/setup-first-run.mjs",
     "test:alert-webhook": "node test/alert-webhook.mjs",
     "test:tasks-filter": "node test/tasks-filter.mjs",
     "test:session-archive": "node test/session-archive.mjs",

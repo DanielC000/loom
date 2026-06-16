@@ -7,6 +7,7 @@ import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles } from "./profiles/seed.js";
 import { seedPlatformHome } from "./platform/seed.js";
 import { seedSetupHome } from "./setup/seed.js";
+import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
 import { TaskMcpRouter } from "./mcp/server.js";
@@ -337,6 +338,20 @@ async function main(): Promise<void> {
       (failed.length ? `, ${failed.length} unresumable (skipped)` : "") +
       ` (requester ${restartIntent.managerSessionId.slice(0, 8)})`,
     );
+  }
+
+  // Setup Assistant E1-6: FIRST-RUN auto-launch. On a brand-new/empty install (no ordinary projects + the
+  // one-time app_meta marker unset) greet the user by auto-spawning the Setup Assistant ONCE; the marker
+  // is stamped at launch so it never re-fires — not after a daemon_restart, not after the user later
+  // deletes all their projects. Runs AFTER the server is listening (the spawned setup pty needs the MCP
+  // endpoints up, exactly like the restart-intent resume above) and AFTER that resume (a restart is never
+  // a fresh install — the marker is already set / ordinary projects exist — so this naturally no-ops then).
+  // Best-effort: a fault here must never gate boot.
+  try {
+    const firstRun = maybeAutoLaunchSetup(db, sessions);
+    if (firstRun.launched) console.log(`[boot] first-run: auto-launched Setup Assistant (session ${firstRun.sessionId.slice(0, 8)})`);
+  } catch (err) {
+    console.warn(`[boot] first-run setup auto-launch failed (continuing boot): ${(err as Error).message}`);
   }
 
   // The one graceful-teardown path — invoked by a SIGINT/SIGTERM signal AND by the loopback

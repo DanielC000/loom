@@ -36,8 +36,8 @@ const SETUP_HOME_PATH = LOOM_HOME;
 /** The bundled profile the Setup Assistant agent runs under (seeded ungated by seedDefaultProfiles). */
 const SETUP_PROFILE_NAME = "Setup Assistant";
 
-/** The seeded agent's display name. */
-const SETUP_AGENT_NAME = "Setup Assistant";
+/** The seeded agent's display name (also the name-scoped anchor the first-run auto-launch resolves by). */
+export const SETUP_AGENT_NAME = "Setup Assistant";
 
 /** The default startup prompt shipped for the Setup Assistant agent (user-editable after seed). */
 const SETUP_ASSISTANT_PROMPT = `Load your **/setup-assistant** doctrine skill first — it is your operating manual (your friendly onboarding identity, the curated loom-setup tool surface, the confirm-first posture, and what you are NOT). This prompt adds only the specifics on top of it.
