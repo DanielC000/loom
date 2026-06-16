@@ -1,0 +1,32 @@
+{
+    "version": "0.2.0",
+    "description": "Local-first AI project workspace — weaves Claude Code sessions, Obsidian docs, and tasks into one fabric.",
+    "homepage": "https://github.com/DanielC000/loom",
+    "license": "MIT",
+    "depends": "nodejs-lts",
+    "url": "https://registry.npmjs.org/loomctl/-/loomctl-0.2.0.tgz",
+    "hash": "sha256:REPLACE_WITH_SHA256_OF_PUBLISHED_ARTIFACT",
+    "extract_dir": "package",
+    "installer": {
+        "script": [
+            "Push-Location \"$dir\"",
+            "& npm install --omit=dev --no-audit --no-fund --no-package-lock --loglevel=error",
+            "Pop-Location",
+            "# Shim: `loom` -> node bin\\loom.mjs (Scoop shims the .cmd as `loom`).",
+            "Set-Content -LiteralPath \"$dir\\loom.cmd\" -Encoding Ascii -Value '@node \"%~dp0bin\\loom.mjs\" %*'"
+        ]
+    },
+    "uninstaller": {
+        "script": [
+            "if (Test-Path \"$dir\\loom.cmd\") { Remove-Item -Force \"$dir\\loom.cmd\" }"
+        ]
+    },
+    "bin": "loom.cmd",
+    "checkver": {
+        "url": "https://registry.npmjs.org/loomctl/latest",
+        "jsonpath": "$.version"
+    },
+    "autoupdate": {
+        "url": "https://registry.npmjs.org/loomctl/-/loomctl-$version.tgz"
+    }
+}

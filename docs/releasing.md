@@ -184,6 +184,14 @@ Following the OpenClaw model in the research doc:
 - Promote a vetted beta to stable by re-tagging instead of re-publishing:
   `npm dist-tag add loomctl@X.Y.Z latest`.
 
+## Package-manager wrappers (Homebrew / Scoop / winget)
+
+Phase-2 convenience wrappers around the published npm package. The version-templated manifests live in
+[`packaging/`](../packaging/) (generated from the root version by `pnpm manifests` — `scripts/generate-manifests.mjs`,
+same single source of truth as `pack:npm`). Creating the tap/bucket repos and submitting to the
+registries are **owner actions** — the full submission runbook (hashes, tap/bucket setup, PR steps) is in
+[`docs/packaging-submission.md`](packaging-submission.md).
+
 ## Updating an installed Loom
 
 - **CLI:** `npm i -g loomctl@latest` (or `loomctl@X.Y.Z` to pin / `loomctl@beta` for the beta channel).

@@ -14,7 +14,8 @@
     "daemon": "pnpm --filter @loom/daemon dev",
     "daemon:stable": "node scripts/daemon-supervisor.mjs",
     "web": "pnpm --filter @loom/web dev",
-    "pack:npm": "node scripts/build-npm-package.mjs"
+    "pack:npm": "node scripts/build-npm-package.mjs",
+    "manifests": "node scripts/generate-manifests.mjs"
   },
   "devDependencies": {
     "turbo": "^2.4.0",
