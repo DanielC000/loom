@@ -13,6 +13,7 @@ import { TaskMcpRouter } from "./mcp/server.js";
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
 import { PlatformMcpRouter } from "./mcp/platform.js";
 import { AuditMcpRouter } from "./mcp/audit.js";
+import { SetupMcpRouter } from "./mcp/setup.js";
 import { RunMcpRouter } from "./mcp/run.js";
 import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
@@ -120,7 +121,7 @@ async function main(): Promise<void> {
       // its handles are released). Runs the SAME teardown whether the run completed via submit_result or
       // the session died first (→ failed). Best-effort: a throw here must not disturb the exit path.
       try { if (exited?.role === "run") sessions.onRunSessionExit(sessionId); } catch { /* never disturb the exit path */ }
-      mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); runMcp.dispose(sessionId);
+      mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); setupMcp.dispose(sessionId); runMcp.dispose(sessionId);
     },
   }, { busyStaleMs: timeouts.busyStaleMs }); // BOOT-BOUND: stuck-busy self-heal threshold from resolved platform config
 
@@ -179,6 +180,11 @@ async function main(): Promise<void> {
   // (transcript reads + session list) AND SessionService (audit_file_finding → reserved Platform board).
   // Deliberately gets NO git-write timeouts: it has no git/vault/config/spawn tools, by design.
   const auditMcp = new AuditMcpRouter(db, sessions);
+  // Setup MCP (Setup Assistant E1-3) — the ungated, user-facing onboarding assistant's CURATED,
+  // fail-closed surface (project/agent/profile create+configure + manager|plain spawn). Needs the
+  // registry (structural/profile/read ops) AND SessionService (session_spawn). Deliberately gets NO
+  // git-write timeouts: it has no git/vault/config-elevation/schedule/message tool, by design.
+  const setupMcp = new SetupMcpRouter(db, sessions);
   // Run MCP (Agent Runs R2) — the ephemeral run's restricted submit_result surface. Needs the registry
   // (resolve session→run) AND SessionService (validate + record + teardown). Gets NO git/vault timeouts.
   const runMcp = new RunMcpRouter(db, sessions);
@@ -195,7 +201,7 @@ async function main(): Promise<void> {
   // populated by then. The buildServer thunk delegates to it.
   let gracefulShutdown: ((reason: string) => void) | null = null;
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, runMcp, control, usageStatus, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown") });
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, setupMcp, runMcp, control, usageStatus, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown") });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon v${loomVersion()} listening on http://127.0.0.1:${PORT}`);

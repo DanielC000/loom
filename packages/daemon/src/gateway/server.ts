@@ -19,6 +19,7 @@ import type { TaskMcpRouter } from "../mcp/server.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
 import type { AuditMcpRouter } from "../mcp/audit.js";
+import type { SetupMcpRouter } from "../mcp/setup.js";
 import type { RunMcpRouter } from "../mcp/run.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride } from "../mcp/platform.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
@@ -59,6 +60,7 @@ export interface GatewayDeps {
   orchMcp: OrchestrationMcpRouter;
   platformMcp: PlatformMcpRouter;
   auditMcp: AuditMcpRouter;
+  setupMcp: SetupMcpRouter;
   runMcp: RunMcpRouter;
   control: OrchestrationControl;
   usageStatus: UsageStatusPoller;
@@ -143,6 +145,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { sessionId } = req.params as { sessionId: string };
     reply.hijack();
     await deps.auditMcp.handle(req.raw, reply.raw, sessionId, req.body);
+  });
+
+  // --- Setup-Assistant MCP (role-gated to 'setup'; the ungated, user-facing onboarding assistant's
+  // CURATED fail-closed surface — E1-3). A distinct route + router so a 'setup' session reaches ONLY its
+  // curated tools: it 404s on /mcp-platform, /mcp-orch, /mcp-audit (their resolveRole gate other roles),
+  // and no agent/MCP path can mint a 'setup' session, so a non-setup session can never reach here. ---
+  app.all("/mcp-setup/:sessionId", async (req, reply) => {
+    const { sessionId } = req.params as { sessionId: string };
+    reply.hijack();
+    await deps.setupMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
 
   // --- Agent-Run MCP (role-gated to 'run'; the ephemeral run's ONLY tool is submit_result — R2). A
