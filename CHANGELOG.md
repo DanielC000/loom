@@ -7,6 +7,47 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-16
+
+End-user onboarding and the full Phase-2 distribution layer: a friendly Setup Assistant that gets a
+new user from an empty install to a working setup, and a real management CLI + cross-OS autostart +
+`loom update` + one-line installers + package-manager manifests.
+
+### Added
+- **Setup Assistant — guided onboarding.** A standing, user-facing assistant (auto-launched on a fresh
+  install, always reachable from the new **Set up Loom** page) that creates and configures your first
+  projects, agents and profiles and picks default skills — acting on your behalf, confirming big or
+  irreversible actions first. It runs on a new `setup` session role over a curated, fail-closed
+  `loom-setup` MCP surface (project/agent/profile create+configure, manager/plain session spawn only) —
+  no elevated or outward capability (no git/vault writers, no `gateCommand`, no cross-project messaging).
+  Ships ungated to every user as the lower-privilege cousin of the dev-only Platform Lead. Seeds a
+  reserved "Getting Started" home; the daemon auto-launches the assistant once on a brand-new install.
+- **Management CLI.** `loom` gains subcommands: `start` (with `--detach`), `stop`, `status`, `restart`,
+  `open`, alongside the bare `loom` (start + open browser). `stop`/`restart` use a graceful loopback
+  shutdown hook so a backgrounded daemon snapshots live transcripts before exiting (cross-platform —
+  Windows has no SIGTERM). State (PID file) lives under `LOOM_HOME`.
+- **Cross-OS autostart.** `loom service install | uninstall | status` registers Loom to start on
+  login/boot — a systemd `--user` unit (Linux), a launchd LaunchAgent (macOS), or a Task Scheduler
+  logon task (Windows).
+- **`loom update` + release channels.** `loom update [--channel stable|beta]` upgrades in place
+  (`npm i -g loomctl@<dist-tag>`) and restarts; the channel is persisted under `LOOM_HOME`. Plus an
+  unobtrusive in-app **"update available"** banner with an "Update & restart" button (a human-only,
+  loopback, packaged-install-only control — never an agent surface).
+- **One-line install scripts.** `install.sh` (`curl … | sh`, macOS/Linux/WSL) and `install.ps1`
+  (`irm … | iex`, Windows): detect Node 22+, install `loomctl`, optionally register autostart, and
+  launch. Plus Homebrew / Scoop / winget manifests + a submission runbook (`docs/packaging-submission.md`).
+- **Prominent global-install docs.** The README now leads with `npm i -g loomctl` → `loom`.
+
+### Fixed
+- **Reserved-project home resolution.** Introducing the second reserved home (the Setup "Getting
+  Started" project) is now name-scoped everywhere, so `/api/platform/home`, manager escalations, and
+  auditor findings always resolve the correct home instead of "whichever reserved project sorts first."
+
+### Security
+- **Least-privilege profiles.** The setup surface can no longer mint `platform`/`auditor` profiles, and
+  a default session spawn no longer lets a profile silently confer an elevated role — those roles come
+  only from their explicit human spawn paths.
+
 ## [0.2.0] — 2026-06-16
 
 The first publicly published Loom: the installable npm package goes live, joined by voice input,
