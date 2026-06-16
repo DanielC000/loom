@@ -3,6 +3,7 @@ import type { SessionListItem } from "@loom/shared";
 import { TerminalPane } from "./Terminal";
 import { Composer } from "./Composer";
 import { SessionQueue } from "./SessionQueue";
+import { SessionWakes } from "./SessionWakes";
 import { PresetPromptsButton } from "./PresetPrompts";
 import { Panel, Button, StatusPill } from "./ui";
 import { font, color } from "../theme";
@@ -12,11 +13,12 @@ import { font, color } from "../theme";
 // (same rationale as the byCreatedStable comparator extraction). Header controls: Fork (idle-only),
 // maximize ⤢ (only when `onMaximize` is given — omitted in the single full-size view), Stop.
 // `showProject` toggles the project name in the title (Terminals lists all projects; Overview is
-// project-scoped). The `taskCard` (above the terminal) and `footer` (below it — e.g. wakes) slots
-// let each surface add its own extras without forking the tile. The QUEUED-messages panel lives
-// INSIDE the tile (next to the Composer), not in the footer, so EVERY surface that renders a tile —
-// the Terminals page AND the Overview grid — shows the human-adjustable queue (it used to ride the
-// footer prop, so the Overview grid, which passes no footer, silently dropped it).
+// project-scoped). The `taskCard` slot (above the terminal) lets each surface add its own extras
+// without forking the tile. ALL the per-session chrome below the terminal — SessionWakes, the
+// QUEUED-messages panel (SessionQueue) and the Composer — lives INSIDE the tile, so EVERY surface
+// that renders a tile (the Terminals page AND the Overview grid) shows the identical set and a page
+// can't drift. (Wakes + the queue both used to ride a per-page `footer` prop; the Overview grid,
+// which passed no footer, silently dropped them — the regression this consolidation prevents.)
 
 export function ForkButton({ onFork, busy, pending }: { onFork: () => void; busy: boolean; pending: boolean }) {
   return (
@@ -44,7 +46,7 @@ export function TileTitle({ s, showProject }: { s: SessionListItem; showProject?
 }
 
 export function TerminalTile({
-  s, height, showProject, onFork, forkPending, onStop, stopPending, onMaximize, taskCard, footer,
+  s, height, showProject, onFork, forkPending, onStop, stopPending, onMaximize, taskCard,
 }: {
   s: SessionListItem;
   height: number | string;
@@ -55,7 +57,6 @@ export function TerminalTile({
   stopPending: boolean;
   onMaximize?: () => void;   // omit → no ⤢ (the already-maximized single view)
   taskCard?: ReactNode;      // slot rendered above the terminal
-  footer?: ReactNode;        // slot rendered below the terminal (wakes/queue)
 }) {
   return (
     <Panel style={{ height, padding: 6, display: "flex", flexDirection: "column" }}>
@@ -73,7 +74,7 @@ export function TerminalTile({
           toggling Voice) resizes the pane, the font rescale can momentarily overflow; this guarantees
           the terminal can NEVER paint over the composer below. xterm scrolls via its own .xterm-viewport. */}
       <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}><TerminalPane sessionId={s.id} /></div>
-      {footer}
+      <SessionWakes sessionId={s.id} />
       <SessionQueue sessionId={s.id} />
       <Composer sessionId={s.id} />
     </Panel>

@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "build": "node test/terminal-chrome.mjs && tsc -p tsconfig.json --noEmit && vite build",
+    "test:terminal-chrome": "node test/terminal-chrome.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "preview": "vite preview"
   },
