@@ -131,6 +131,12 @@ const pkg = {
   version: rootPkg.version,
   description: rootPkg.description,
   license: rootPkg.license ?? "MIT",
+  // REQUIRED for npm provenance (trusted publishing): the registry verifies the published
+  // package.json's repository.url matches the source repo in the OIDC provenance bundle, else the
+  // publish fails E422. Must resolve to github.com/DanielC000/loom.
+  repository: { type: "git", url: "git+https://github.com/DanielC000/loom.git" },
+  homepage: "https://github.com/DanielC000/loom#readme",
+  bugs: { url: "https://github.com/DanielC000/loom/issues" },
   type: "module",
   bin: { loom: "bin/loom.mjs" },
   engines: { node: ">=22" },
