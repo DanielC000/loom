@@ -94,7 +94,7 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
     name: "Setup Assistant",
     role: "setup",
     description:
-      "Guided onboarding rig: walks a human through standing up a new project end-to-end — binding a repo, defining topics/agents, and seeding the first board work — so the orchestration queue starts with well-formed tasks.",
+      "Guided onboarding rig: walks a human through standing up a new project end-to-end — binding a repo, defining agents, and seeding the first board work — so the orchestration queue starts with well-formed tasks.",
     allowDelta: [],
     skills: null,
     model: null,

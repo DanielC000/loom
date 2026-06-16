@@ -31,6 +31,18 @@ import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
  *  fail-fast (mirrors GitWriter's GIT_TIMEOUT_FLOOR_MS). Applied where the resolved value is threaded. */
 const GIT_TIMEOUT_FLOOR_MS = 1_000;
 
+/**
+ * Least-privilege hardening: the ONLY session roles a Profile may confer on a default "+New" spawn.
+ * The elevated/locked roles — "platform" (loom-platform surface), "auditor" (loom-audit), "setup"
+ * (loom-setup) and "run" (internal-only Agent Runs) — must come EXCLUSIVELY from their explicit human
+ * spawn paths (startPlatformLead/startAuditor/startSetup) or internal starters, which pass an explicit
+ * caller role. A profile role outside this set is dropped to a plain (role-null) spawn in
+ * resolveAgentSpawn, so a "normal-looking" agent carrying an elevated profile + a role-omitted REST
+ * spawn can never silently elevate. (Note: validateProfile already forbids "auditor"/"run" on a
+ * profile; this is the spawn-side backstop and also covers the still-mintable "platform"/"setup".)
+ */
+const PROFILE_SPAWNABLE_ROLES: ReadonlySet<SessionRole> = new Set<SessionRole>(["manager", "worker"]);
+
 /** Agent Runs R2: defer a completed run's graceful-stop this long so the `submit_result` {ok:true} tool
  *  response flushes to the agent BEFORE its turn is interrupted (mirrors requestDaemonRestart's
  *  respond-then-teardown 300ms). The run row is already terminal by the time this fires. */
@@ -152,10 +164,16 @@ export class SessionService {
     const permission = resolved.allow.length
       ? { ...config.permission, allow: [...config.permission.allow, ...resolved.allow] }
       : config.permission;
+    // LEAST-PRIVILEGE backstop: a profile may confer ONLY manager|worker (or no role). An elevated/locked
+    // profile role (platform/auditor/setup/run) is dropped to undefined here, so a role-omitted "+New"
+    // spawn yields a plain session, never a silent elevation. An EXPLICIT caller role is untouched and
+    // still wins below (`??`), so startPlatformLead/startAuditor/startManager are byte-identical; a
+    // manager/worker/null profile role is also unchanged (the common path).
+    const profileRole = resolved.role && !PROFILE_SPAWNABLE_ROLES.has(resolved.role) ? undefined : resolved.role;
     return {
-      // An explicit caller role still wins; then the profile's role (null under forcePlain), then
+      // An explicit caller role still wins; then the (clamped) profile role (null under forcePlain), then
       // undefined (today's plain). The force-plain path passes no explicitRole, so it resolves null.
-      role: explicitRole ?? resolved.role ?? undefined,
+      role: explicitRole ?? profileRole ?? undefined,
       // Same `|| undefined` empties-to-undefined coercion today's start paths use on the agent prompt.
       startupPrompt: resolved.startupPrompt || undefined,
       permission,

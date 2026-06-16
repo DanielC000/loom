@@ -62,6 +62,18 @@ db.insertProfile({
   id: "profModel", name: "Modelled", role: null,
   description: "pins a model", allowDelta: [], skills: null, model: PINNED_MODEL, icon: null,
 });
+// Least-privilege hardening: profiles carrying an ELEVATED/locked role. A default (role-omitted)
+// startNew must NOT honor these (they may come ONLY from startPlatformLead/startAuditor/startSetup).
+// We insert them via the raw db (validateProfile forbids auditor/run, but a mis-seeded/edited row or
+// the still-mintable "platform" can carry one — the spawn-side clamp is the backstop regardless).
+db.insertProfile({ id: "profPlatform", name: "PlatRig", role: "platform", description: "", allowDelta: [], skills: null, model: null, icon: null });
+db.insertProfile({ id: "profAuditor", name: "AuditRig", role: "auditor", description: "", allowDelta: [], skills: null, model: null, icon: null });
+db.insertProfile({ id: "profSetup", name: "SetupRig", role: "setup", description: "", allowDelta: [], skills: null, model: null, icon: null });
+db.insertProfile({ id: "profWorker", name: "WorkerRig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
+db.insertAgent({ id: "agentPlatform", projectId: "pP", name: "PlatProfiled", startupPrompt: "AGENT_PLAT_PROMPT", position: 4, profileId: "profPlatform" });
+db.insertAgent({ id: "agentAuditor", projectId: "pP", name: "AuditProfiled", startupPrompt: "AGENT_AUD_PROMPT", position: 5, profileId: "profAuditor" });
+db.insertAgent({ id: "agentSetup", projectId: "pP", name: "SetupProfiled", startupPrompt: "AGENT_SETUP_PROMPT", position: 6, profileId: "profSetup" });
+db.insertAgent({ id: "agentWorker", projectId: "pP", name: "WorkerProfiled", startupPrompt: "AGENT_WORKER_PROMPT", position: 7, profileId: "profWorker" });
 db.insertAgent({ id: "agentMgr", projectId: "pP", name: "Managed", startupPrompt: "AGENT_MGR_PROMPT", position: 0, profileId: "profMgr" });
 db.insertAgent({ id: "agentModel", projectId: "pP", name: "Modelled", startupPrompt: "AGENT_MODEL_PROMPT", position: 3, profileId: "profModel" });
 db.insertAgent({ id: "agentPlain", projectId: "pP", name: "Plain", startupPrompt: "AGENT_PLAIN_PROMPT", position: 1, profileId: null });
@@ -147,6 +159,32 @@ try {
   check("(b) profile's allowDelta is NOT present on a profile-less spawn", !oB?.permission.allow.includes(PROFILE_ALLOW));
   check("(b) NO model on a profile-less spawn — opts.model undefined (no --model, byte-identical)", oB?.model === undefined);
   check("(b) session is live", db.getSession(sB.id).processState === "live");
+
+  // ===================== (b') LEAST-PRIVILEGE: an ELEVATED-role profile must NOT silently elevate a default spawn =====================
+  // A role-omitted startNew (the "+New" default branch reachable via POST /api/agents/:id/sessions)
+  // resolves the profile role. A platform/auditor/setup profile MUST be clamped to a plain (role-null)
+  // session — those locked roles come ONLY from startPlatformLead/startAuditor/startSetup. This is the
+  // hardening backstop for the footgun: a "normal-looking" agent carrying an elevated profile.
+  for (const [agentId, label] of [["agentPlatform", "platform"], ["agentAuditor", "auditor"], ["agentSetup", "setup"]]) {
+    const s = svc.startNew(agentId);
+    const o = optsFor(s.id);
+    check(`(b') ${label}-profile default spawn: session.role is NOT '${label}' (downgraded to plain)`, s.role !== label && db.getSession(s.id).role !== label);
+    check(`(b') ${label}-profile default spawn: DB role is null (plain)`, db.getSession(s.id).role === null);
+    check(`(b') ${label}-profile default spawn: opts.role undefined (plain MCP surface, no elevation)`, o?.role === undefined);
+  }
+  // REGRESSION GUARD: a worker-role profile default spawn is UNCHANGED (worker is profile-spawnable).
+  const sWp = svc.startNew("agentWorker");
+  const oWp = optsFor(sWp.id);
+  check("(b') worker-profile default spawn: role=worker preserved EXACTLY (no regression)", sWp.role === "worker" && db.getSession(sWp.id).role === "worker" && oWp?.role === "worker");
+
+  // (b'') the EXPLICIT human paths still work — an explicit caller role wins over the clamp, so the
+  // elevated session IS produced when minted via its dedicated starter (even on an elevated-profile agent).
+  const pl = svc.startPlatformLead("agentPlatform");
+  check("(b'') startPlatformLead still yields a platform session", pl.role === "platform" && db.getSession(pl.id).role === "platform" && optsFor(pl.id)?.role === "platform");
+  const aud = svc.startAuditor("agentAuditor");
+  check("(b'') startAuditor still yields an auditor session", aud.role === "auditor" && db.getSession(aud.id).role === "auditor" && optsFor(aud.id)?.role === "auditor");
+  const setupS = svc.startSetup("agentSetup");
+  check("(b'') startSetup still yields a setup session", setupS.role === "setup" && db.getSession(setupS.id).role === "setup" && optsFor(setupS.id)?.role === "setup");
 
   // ===================== (c) worker_spawn still produces a worker (explicit role wins) =====================
   // agentId is now REQUIRED (no silent ?? manager.agentId fallback) — nominate the plain worker agent.

@@ -15,6 +15,21 @@ import { projectSessionList } from "./sessionView.js";
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
 /**
+ * Least-privilege guard for the UNGATED setup surface: a profile minted/edited here may carry ONLY
+ * role manager|worker|setup|null — NEVER an elevated "platform" (or "auditor"). The shared
+ * validateProfile stays deliberately broader (it still allows "platform" for the human REST + Platform
+ * Lead surfaces, and already forbids "auditor"); this narrow check runs on the ALREADY-validated role
+ * so the ungated Setup Assistant can never mint an elevated-role rig that a later default spawn could
+ * silently elevate. Returns an error string when the role is forbidden, else null.
+ */
+const SETUP_ALLOWED_PROFILE_ROLES = new Set<string>(["manager", "worker", "setup"]);
+function setupRoleError(role: string | null | undefined): string | null {
+  if (role == null) return null; // null/undefined ⇒ a plain role-null profile, allowed
+  if (SETUP_ALLOWED_PROFILE_ROLES.has(role)) return null;
+  return `the setup surface cannot create or edit a profile with role "${role}" — only manager, worker, setup, or no role are allowed (an elevated platform/auditor rig is human-only).`;
+}
+
+/**
  * Setup MCP server (Setup Assistant E1-3) — the user-facing onboarding assistant's CURATED,
  * FAIL-CLOSED surface (`loom-setup`, served at /mcp-setup/:sessionId, role-gated to "setup").
  *
@@ -176,12 +191,14 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_create",
       {
-        description: "Create a Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting). Validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
+        description: "Create a Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting). role may be manager|worker|setup or omitted ONLY — an elevated \"platform\"/\"auditor\" role is rejected here (human-only). Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
         inputSchema: { profile: z.object({}).passthrough() },
       },
       async ({ profile }) => {
         const v = validateProfile(profile);
         if (!v.ok) return ok({ error: `invalid profile: ${v.error}` });
+        const roleErr = setupRoleError(v.value.role);
+        if (roleErr) return ok({ error: roleErr });
         const created: Profile = { id: randomUUID(), ...v.value };
         db.insertProfile(created);
         return ok(created);
@@ -191,7 +208,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker|setup or null ONLY — a patch that yields an elevated \"platform\"/\"auditor\" role is rejected (human-only). 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
         inputSchema: { profileId: z.string(), patch: z.object({}).passthrough() },
       },
       async ({ profileId, patch }) => {
@@ -202,6 +219,10 @@ export class SetupMcpRouter {
         const { id: _eid, ...base } = existing;
         const v = validateProfile({ ...base, ...patchNoId });
         if (!v.ok) return ok({ error: `invalid profile: ${v.error}` });
+        // Guard the RESOLVED role (after the merge) — a patch must not be able to elevate a rig to
+        // platform/auditor via the ungated setup surface, even if the base profile already held it.
+        const roleErr = setupRoleError(v.value.role);
+        if (roleErr) return ok({ error: roleErr });
         db.updateProfile(profileId, v.value);
         return ok(db.getProfile(profileId));
       },

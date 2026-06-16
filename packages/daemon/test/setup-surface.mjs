@@ -190,6 +190,36 @@ try {
   const badAssign = await call("profile_assign", { agentId: "nope", profileId: prof.id });
   check("(c) profile_assign: an unknown agent is rejected", typeof badAssign.error === "string");
 
+  // ============ (e) LEAST-PRIVILEGE: the ungated setup surface may NOT mint/edit an elevated-role rig ============
+  // profile_create accepts manager|worker|setup|null, but REJECTS the elevated "platform"/"auditor" roles
+  // (a default human spawn could otherwise silently elevate an agent carrying such a rig). The narrow
+  // guard runs ON TOP of validateProfile (which is NOT loosened — it still allows "platform" for the
+  // human REST + Platform Lead surfaces). nProfBefore proves a rejected create persists nothing.
+  const nProfBefore = db.listProfiles().length;
+  const platProf = await call("profile_create", { profile: { name: "PlatRig", role: "platform" } });
+  check("(e) profile_create REJECTS role 'platform' (elevated, human-only)", typeof platProf.error === "string" && !platProf.id);
+  const audProf = await call("profile_create", { profile: { name: "AuditRig", role: "auditor" } });
+  check("(e) profile_create REJECTS role 'auditor' (elevated, human-only)", typeof audProf.error === "string" && !audProf.id);
+  check("(e) the rejected profile_create(s) persisted NOTHING", db.listProfiles().length === nProfBefore);
+  // The allowed roles all succeed (manager|worker|setup|null) — the assistant's core job is unbroken.
+  const okMgr = await call("profile_create", { profile: { name: "MgrRig", role: "manager" } });
+  const okWrk = await call("profile_create", { profile: { name: "WrkRig", role: "worker" } });
+  const okSet = await call("profile_create", { profile: { name: "SetRig", role: "setup" } });
+  const okNul = await call("profile_create", { profile: { name: "NulRig" } }); // role omitted ⇒ null
+  check("(e) profile_create ACCEPTS role 'manager'", okMgr.role === "manager" && !okMgr.error);
+  check("(e) profile_create ACCEPTS role 'worker'", okWrk.role === "worker" && !okWrk.error);
+  check("(e) profile_create ACCEPTS role 'setup'", okSet.role === "setup" && !okSet.error);
+  check("(e) profile_create ACCEPTS a role-null rig", okNul.role === null && !okNul.error);
+  // profile_update must not be able to ELEVATE an existing rig to platform/auditor via the patch.
+  const upElev = await call("profile_update", { profileId: okWrk.id, patch: { role: "platform" } });
+  check("(e) profile_update REJECTS a patch that elevates role to 'platform'", typeof upElev.error === "string");
+  check("(e) profile_update: the rejected elevate left the stored role UNCHANGED (still worker)", db.getProfile(okWrk.id)?.role === "worker");
+  const upElevA = await call("profile_update", { profileId: okWrk.id, patch: { role: "auditor" } });
+  check("(e) profile_update REJECTS a patch that elevates role to 'auditor'", typeof upElevA.error === "string" && db.getProfile(okWrk.id)?.role === "worker");
+  // A non-role patch on the same rig still works (the guard only blocks the elevated role).
+  const upOk = await call("profile_update", { profileId: okWrk.id, patch: { icon: "🔧" } });
+  check("(e) profile_update still applies a non-role patch (icon)", upOk.icon === "🔧" && upOk.role === "worker" && !upOk.error);
+
   // reads.
   const projs = await call("list_all_projects", {});
   check("(c) list_all_projects: includes the created project", projs.some((p) => p.id === created.id));
