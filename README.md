@@ -86,6 +86,37 @@ Common flags: `-p, --port <n>` (default `4317`, or `LOOM_PORT`), `--no-open`, `-
 `-v, --version`, `-h, --help`. Prefer not to install? Run it once with **no install** via
 `npx loomctl` (same flags and subcommands, e.g. `npx loomctl status`).
 
+### One-line install
+
+For a hands-off setup, the repo ships two installer scripts ([`install.sh`](install.sh) for
+macOS/Linux/WSL, [`install.ps1`](install.ps1) for Windows). They check for Node 22+ (and print a guide
+if it's missing — they do **not** download Node for you), run `npm i -g loomctl`, optionally register
+autostart, and launch Loom — all idempotent (safe to re-run; `npm i -g` upgrades in place):
+
+```sh
+# macOS / Linux / WSL
+curl -fsSL https://loom.example/install.sh | sh
+
+# Windows (PowerShell)
+irm https://loom.example/install.ps1 | iex
+```
+
+Because `curl … | sh` and `irm … | iex` have no interactive prompt, drive optional steps with flags
+(local-file runs) or env vars (piped runs):
+
+| Behaviour                  | sh flag / env                         | PowerShell flag / env                       |
+| -------------------------- | ------------------------------------- | ------------------------------------------- |
+| Register autostart         | `--service` / `LOOM_INSTALL_SERVICE=1`| `-Service` / `$env:LOOM_INSTALL_SERVICE='1'`|
+| Don't launch the daemon    | `--no-start` / `LOOM_INSTALL_START=0` | `-NoStart` / `$env:LOOM_INSTALL_START='0'`  |
+| Install a specific source  | `--source <spec>` / `LOOM_INSTALL_SOURCE` | `-Source <spec>` / `$env:LOOM_INSTALL_SOURCE` |
+| Port                       | `--port <n>` / `LOOM_PORT`            | `-Port <n>` / `$env:LOOM_PORT`              |
+
+> **⚠ Hosting the scripts is an OWNER action — not yet done.** The `loom.example` URLs above are
+> placeholders. Until the scripts are published on a trusted **HTTPS** domain, they are repo artifacts:
+> clone the repo and run them by local path (`sh install.sh` / `pwsh -ExecutionPolicy Bypass -File
+> install.ps1`). When hosting them, serve over HTTPS and publish a **SHA-256 checksum** of each script
+> next to it so users can verify the download before piping it to a shell.
+
 ### From source (contributors)
 
 pnpm is the contributor toolchain. From a clone of the repo:
