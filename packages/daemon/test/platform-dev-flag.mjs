@@ -92,6 +92,11 @@ try {
   check("(3) staged release EXCLUDES both platform skills", DEV_ONLY_SKILLS.every((n) => !kept.includes(n)));
   check("(3) staged release KEEPS the core orchestration skills",
     ["orchestrate", "worker", "pickup", "doc-hygiene", "web-design"].every((n) => kept.includes(n)));
+  // The user-facing Setup Assistant SHIPS to all users (ungated, core-seed): it is NOT a dev-only
+  // platform skill, so it must survive curation. Guard against it ever being added to DEV_ONLY_SKILLS.
+  check("(3) Setup Assistant skill exists in the bundled assets", allSkillDirs.includes("setup-assistant"));
+  check("(3) Setup Assistant is NOT dev-only (ships to all users)", !DEV_ONLY_SKILLS.includes("setup-assistant"));
+  check("(3) staged release KEEPS the Setup Assistant skill", kept.includes("setup-assistant"));
   check("(3) curation drops EXACTLY the two platform skills (kept = all − dev-only)",
     kept.length === allSkillDirs.length - DEV_ONLY_SKILLS.length);
 } finally {
