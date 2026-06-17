@@ -64,17 +64,17 @@ export function TerminalPane({ sessionId, resizable = false }: { sessionId: stri
 
     // Clipboard: xterm sends raw control bytes for Ctrl+V/Ctrl+C by default (so Ctrl+V emits 0x16
     // instead of pasting). Wire real clipboard behavior the way Windows Terminal / VS Code do:
-    //  • Ctrl/Cmd+V → paste (term.paste handles bracketed-paste mode for Claude's TUI)
+    //  • Ctrl/Cmd+V → swallow the raw 0x16 and let xterm's OWN native paste handler do the paste
+    //    (exactly once; it honors bracketed-paste mode for Claude's TUI). Returning false skips
+    //    xterm's keystroke WITHOUT preventDefault, so the browser still fires its native paste —
+    //    we must NOT also paste manually here or it pastes TWICE (the double-paste bug).
     //  • Ctrl/Cmd+C → SMART: copies when there's a selection (and clears it); with nothing
     //    selected it falls through as the SIGINT/interrupt byte. So you get copy AND interrupt.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
       const mod = e.ctrlKey || e.metaKey;
       const key = e.key.toLowerCase();
-      if (mod && key === "v") {
-        navigator.clipboard?.readText().then((t) => { if (t) term.paste(t); }).catch(() => {});
-        return false; // swallow so the raw 0x16 isn't sent to the pty
-      }
+      if (mod && key === "v") return false; // swallow the raw 0x16; xterm's native paste does the actual paste (once)
       if (mod && key === "c") {
         if (term.hasSelection()) {
           navigator.clipboard?.writeText(term.getSelection()).catch(() => {});
