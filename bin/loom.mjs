@@ -488,8 +488,23 @@ async function run(argv = process.argv.slice(2)) {
   }
 }
 
-// Run only when invoked directly (not when imported by a test for parseArgs).
-const invokedDirectly = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
-if (invokedDirectly) {
+// True only when this module IS the program's entry point — i.e. argv1 and this module's URL resolve
+// to the SAME file. Realpath-normalize BOTH sides so a symlinked global dir (fnm's fnm_multishells
+// junction, nvm/volta/pnpm-global) still matches: there Node realpaths import.meta.url to the package's
+// true location, but the shim leaves process.argv[1] as the symlinked path — the raw href compare then
+// mismatches and the CLI silently no-ops on EVERY command (the 0.4.0 fnm bug). Fall back to the plain
+// href compare when realpath throws (e.g. argv1 doesn't exist on disk). Stays false when the file is
+// merely imported (a test's argv1 is the test file, whose realpath won't equal loom.mjs's).
+export function isDirectInvocation(argv1, metaUrl) {
+  if (!argv1) return false;
+  try {
+    return fs.realpathSync(argv1) === fs.realpathSync(fileURLToPath(metaUrl));
+  } catch {
+    return pathToFileURL(argv1).href === metaUrl; // fallback (e.g. argv1 doesn't exist)
+  }
+}
+
+// Run only when invoked directly (not when imported by a test for parseArgs/isDirectInvocation).
+if (isDirectInvocation(process.argv[1], import.meta.url)) {
   run().catch((err) => { console.error("loom:", err?.message ?? err); process.exit(1); });
 }

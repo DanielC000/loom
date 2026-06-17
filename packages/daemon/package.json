@@ -68,6 +68,7 @@
     "test:agent-runs-hardening": "node test/agent-runs-hardening.mjs",
     "test:version": "node test/version.mjs",
     "test:cli-args": "node test/cli-args.mjs",
+    "test:cli-direct-invocation": "node test/cli-direct-invocation.mjs",
     "test:cli-service": "node test/cli-service.mjs",
     "test:cli-channel": "node test/cli-channel.mjs",
     "test:daemon": "node scripts/test-daemon.mjs"
