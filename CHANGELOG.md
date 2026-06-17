@@ -7,6 +7,17 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-06-17
+
+### Fixed
+- **`loom` did nothing under fnm / nvm / volta (any symlinked global install).** Every command
+  (`loom`, `loom start`, `loom status`, …) exited silently with no output when Loom was installed under
+  a Node version manager that symlinks the global package directory. The CLI's entry-point check
+  compared the launcher's path against the module's own URL; those diverge when the global dir is a
+  symlink (Node resolves the real path while the launcher passes the symlinked one — plus Windows
+  path-casing differences), so the CLI body never ran. The check now realpath-normalizes both sides.
+  Update with `npm i -g loomctl@latest`.
+
 ## [0.4.0] — 2026-06-17
 
 Onboarding gains in-chat skill editing, the install instructions become accurate, and a round of
