@@ -48,7 +48,16 @@ check("nextComposerLen: arrow key PRESERVES an existing draft (3→3)", nextComp
 check("nextComposerLen: SS3 arrow (ESC O A) preserves draft", nextComposerLen(2, "\x1bOA") === 2);
 // A bracketed paste's BODY counts; the \x1b[200~ / \x1b[201~ markers' param bytes do not.
 check("nextComposerLen: bracketed-paste body counts, markers don't (0→5)", nextComposerLen(0, "\x1b[200~hello\x1b[201~") === 5);
-// A chunk that contains Enter anywhere is freeing (the human submitted).
+// A MULTI-LINE paste body: the embedded \r/\n is draft CONTENT (counted), NOT a box-free — else a
+// queued turn would drain onto the pasted text. "ab\ncd" inside the markers → 5 (a,b,\n,c,d).
+check("nextComposerLen: multi-line paste body — embedded \\n counts, NOT freeing (0→5)", nextComposerLen(0, "\x1b[200~ab\ncd\x1b[201~") === 5);
+check("nextComposerLen: multi-line paste with \\r\\n counts each (0→6)", nextComposerLen(0, "\x1b[200~ab\r\ncd\x1b[201~") === 6);
+check("nextComposerLen: multi-line paste onto an EXISTING draft accumulates (2→7)", nextComposerLen(2, "\x1b[200~ab\ncd\x1b[201~") === 7);
+// A bare Enter AFTER a multi-line paste lands (separate chunk) still frees the box.
+check("nextComposerLen: bare Enter after a paste still frees → 0", nextComposerLen(5, "\r") === 0);
+// A bare Enter OUTSIDE any paste span (within a larger chunk) still frees the box.
+check("nextComposerLen: bare \\n following a closed paste frees → 0", nextComposerLen(0, "\x1b[200~ab\x1b[201~\n") === 0);
+// A chunk that contains a BARE Enter anywhere is freeing (the human submitted).
 check("nextComposerLen: 'abc\\r' is freeing → 0", nextComposerLen(0, "abc\r") === 0);
 
 // ===================== PART B — the live state machine =====================
@@ -145,6 +154,22 @@ try {
     host.stop(SID, "hard");
   }
 
+  // --- a MULTI-LINE raw paste must HOLD: its embedded newline is draft content, not a box-free ---
+  {
+    const SID = "sess-mlpaste";
+    const fake = freshSession(SID);
+    const written = () => fake.writes.join("");
+    host.writeStdin(SID, "\x1b[200~line one\nline two\x1b[201~"); // multi-line bracketed paste → composer dirty
+    const r = host.enqueueStdin(SID, REPORT);                     // a worker report arrives over the pasted draft
+    check("(mlpaste) multi-line paste leaves composer DIRTY → programmatic turn HELD", r.delivered === false && r.position === 1);
+    check("(mlpaste) the held REPORT is NOT written onto the pasted draft", !written().includes(REPORT));
+    host.reconcile();
+    check("(mlpaste) reconcile does NOT drain onto the multi-line paste", !written().includes(REPORT) && host.getPending(SID).length === 1);
+    host.writeStdin(SID, "\r");                                   // human presses Enter → submits the paste
+    check("(mlpaste) a real Enter after the paste releases the hold → REPORT delivered", written().includes(REPORT) && host.getPending(SID).length === 0);
+    host.stop(SID, "hard");
+  }
+
   // --- a navigation key (arrow) must NOT release the hold (it's editing, not freeing) ---
   {
     const SID = "sess-arrow";
@@ -158,7 +183,7 @@ try {
     host.stop(SID, "hard");
   }
 } finally {
-  for (const id of ["sess-clean", "sess-held", "sess-backspace", "sess-esc", "sess-arrow"]) { try { host.stop(id, "hard"); } catch { /* ignore */ } }
+  for (const id of ["sess-clean", "sess-held", "sess-backspace", "sess-esc", "sess-mlpaste", "sess-arrow"]) { try { host.stop(id, "hard"); } catch { /* ignore */ } }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 

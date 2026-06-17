@@ -69,26 +69,36 @@ const collapseBoot = (s: string): string => s.replace(ANSI_CSI, "").replace(/\s+
  * releases the hold (a bare bool couldn't tell that from a still-dirty box).
  *
  * Classification of the chunk:
- *  - Box-FREEING (the human submitted/interrupted/dismissed/killed the line) → 0:
- *    contains Enter (\r/\n), Ctrl-C (\x03), or kill-line (Ctrl-U \x15); OR is a LONE Esc (\x1b).
- *  - Otherwise walk the chunk: backspace/DEL (\x7f/\b) decrements (floored at 0); printable chars
- *    (>= 0x20) increment; an escape sequence (arrow keys / navigation / a BRACKETED PASTE's markers)
- *    is skipped to its final byte so its parameter bytes aren't miscounted as printable — its
- *    embedded text (e.g. a paste body) still counts. Other C0 controls (Tab, etc.) are ignored.
+ *  - A LONE Esc (\x1b) dismisses/clears the box → 0.
+ *  - Otherwise walk the chunk in a single pass, tracking whether we're INSIDE a `\x1b[200~ … \x1b[201~`
+ *    bracketed-paste span:
+ *      - A BARE box-FREEING control encountered OUTSIDE a paste span — Enter (\r/\n), Ctrl-C (\x03),
+ *        or kill-line (Ctrl-U \x15) — means the human submitted/interrupted/killed the line → 0.
+ *        (We can't whole-chunk short-circuit on these: a MULTI-LINE paste body carries \r/\n that is
+ *        draft CONTENT, not a free — that would wrongly zero a held paste and let a queued turn drain
+ *        onto it.) Inside a span, \r/\n is counted as one draft char.
+ *      - backspace/DEL (\x7f/\b) decrements (floored at 0).
+ *      - printable chars (>= 0x20) increment.
+ *      - an escape sequence (arrow keys / navigation / the bracketed-paste markers) is skipped to its
+ *        final byte so its parameter bytes aren't miscounted as printable; the \x1b[200~ / \x1b[201~
+ *        markers toggle the paste flag. Other C0 controls (Tab, etc.) are ignored.
  *
  * Best-effort BY DESIGN — it can't perfectly mirror Claude's Ink editor (e.g. cursor-mid-line edits),
  * but it only ever errs toward HOLDING a delivery, never toward clobbering the human's text.
  */
 export function nextComposerLen(prevLen: number, data: string): number {
   if (data === ESC_KEY) return 0;                 // a lone Esc dismisses/clears the box
-  if (/[\r\n\x03\x15]/.test(data)) return 0;      // Enter / Ctrl-C / kill-line → box freed
   let len = prevLen;
+  let inPaste = false;                            // inside a \x1b[200~ … \x1b[201~ bracketed-paste span
   for (let i = 0; i < data.length; i++) {
     const c = data.charCodeAt(i);
     if (c === 0x1b) {
-      // Escape/CSI/SS3 sequence (arrow keys, Home/End, bracketed-paste \x1b[200~ markers, …). Skip to
-      // the sequence's final byte so its param bytes (e.g. the "200" in \x1b[200~) aren't counted; the
-      // paste BODY between the markers is counted by the normal printable path on later iterations.
+      // Escape/CSI/SS3 sequence (arrow keys, Home/End, bracketed-paste \x1b[200~ markers, …). The paste
+      // markers toggle inPaste; any other sequence is skipped to its final byte so its param bytes
+      // (e.g. the "200" in \x1b[200~) aren't counted. The paste BODY between the markers is counted by
+      // the normal printable/newline path on later iterations.
+      if (data.startsWith(BRACKET_PASTE_START, i)) { inPaste = true; i += BRACKET_PASTE_START.length - 1; continue; }
+      if (data.startsWith(BRACKET_PASTE_END, i)) { inPaste = false; i += BRACKET_PASTE_END.length - 1; continue; }
       const next = data[i + 1];
       if (next === "[" || next === "O") {
         i += 2;
@@ -99,6 +109,14 @@ export function nextComposerLen(prevLen: number, data: string): number {
       continue;
     }
     if (c === 0x7f || c === 0x08) { len = Math.max(0, len - 1); continue; } // backspace / DEL
+    if (c === 0x0d || c === 0x0a || c === 0x03 || c === 0x15) {
+      // Enter (\r/\n) / Ctrl-C / kill-line. OUTSIDE a paste these FREE the box (real submit/interrupt/
+      // clear). INSIDE a bracketed paste a newline is pasted draft content, so count \r/\n toward length
+      // and ignore the (vanishingly rare) other controls.
+      if (!inPaste) return 0;
+      if (c === 0x0d || c === 0x0a) len++;
+      continue;
+    }
     if (c >= 0x20) len++;                          // printable → one more draft char
     // other C0 controls (Tab, etc.) — ignore for length
   }
