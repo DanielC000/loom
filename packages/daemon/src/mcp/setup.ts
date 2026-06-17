@@ -10,6 +10,7 @@ import { isGitRepo } from "../git/reader.js";
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentProjectConfigOverride } from "./platform.js";
 import { projectSessionList } from "./sessionView.js";
+import { listSkills, readSkill, writeSkill, isValidSkillName, isBundledSkill } from "../skills/store.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -44,6 +45,7 @@ function setupRoleError(role: string | null | undefined): string | null {
  * ║   structure — project_create / project_configure / project_update / agent_create                      ║
  * ║   rigs       — profile_create / profile_update / profile_assign                                       ║
  * ║   lifecycle  — session_spawn (manager|plain ONLY — never platform/auditor/worker/setup)               ║
+ * ║   skills     — skill_list (read) / skill_write (USER skills ONLY, confirm-first — never bundled/dev)   ║
  * ║                                                                                                       ║
  * ║ EVERY config-setting path (create/configure/update) routes through validateAgentProjectConfigOverride ║
  * ║ — the AGENT validator — so orchestration.gateCommand (host-RCE via spawnSync at the merge gate) and   ║
@@ -55,7 +57,9 @@ function setupRoleError(role: string | null | undefined): string | null {
  * ║   gateCommand/alertWebhook (excluded via the agent validator above);                                  ║
  * ║   session_message (cross-project, above-the-tree); session_stop;                                      ║
  * ║   schedule_create/schedule_update (esp. the auditor kind); project_archive (teardown);                ║
- * ║   platform_escalate, preset-suggestion, audit_file_finding (those live on other surfaces).            ║
+ * ║   platform_escalate, preset-suggestion, audit_file_finding (those live on other surfaces);            ║
+ * ║   skill reset/publish-to-bundled (publishSkillToBundled writes the shipped ASSET — human-only REST,    ║
+ * ║   like the vault/git writers); skill_write here is bounded to USER skills and cannot reach the asset.  ║
  * ║                                                                                                       ║
  * ║ A "setup" session ALSO 404s on the Lead's /mcp-platform (PlatformMcpRouter.resolveRole gates          ║
  * ║ "platform"), on /mcp-orch (OrchestrationMcpRouter gates manager|worker) and on /mcp-audit             ║
@@ -305,6 +309,65 @@ export class SetupMcpRouter {
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
+      },
+    );
+
+    // === skills (the user's skill store — USER skills ONLY; never the bundled/dev set) ===
+    // The assistant can read + write the user's ~/.loom/skills store directly in-chat (v1 only pointed
+    // the user at the Skills UI). BOUNDED STRICTLY to USER skills: skill_write REJECTS any bundled/shipped
+    // skill name (isBundledSkill) so it can never modify the bundled/dev skill set — the human Skills UI
+    // owns reset/publish of those (publishSkillToBundled, the only path to the asset, is NOT reachable
+    // here). writeSkill only ever writes the store (never ASSET_SKILLS), and isValidSkillName is the
+    // anti-traversal guard (kebab slug == dir name). CONFIRM-FIRST: skill_write requires an explicit
+    // confirm:true, and the setup-assistant doctrine instructs the agent to show the user the skill +
+    // get confirmation before calling it (the surface carries no outward capability, so this is the only
+    // genuinely-mutating-the-user's-config tool here).
+    server.registerTool(
+      "skill_list",
+      {
+        description:
+          "List the skills in the user's skill store. Each entry has name, description, bundled (a Loom-shipped skill — read-only on this surface) and editable (= !bundled). USER (editable) skills ALSO include their full SKILL.md `content` so you can edit them in place; a bundled skill's content is omitted here (edit those via the Skills UI). Read-only.",
+        inputSchema: {},
+      },
+      async () => {
+        const skills = listSkills().map((s) => {
+          const editable = !s.bundled;
+          return { ...s, editable, ...(editable ? { content: readSkill(s.name)?.content ?? "" } : {}) };
+        });
+        return ok({ skills });
+      },
+    );
+
+    server.registerTool(
+      "skill_write",
+      {
+        description:
+          "Create or update a skill in the USER skill store (~/.loom/skills). The editable unit is the skill's SKILL.md (frontmatter name/description + body); the full `content` you pass REPLACES it. name must be a kebab slug (a-z, 0-9, -, ≤64 chars). Edits apply to new sessions on next spawn.\n" +
+          "BOUNDED TO USER SKILLS: this REJECTS any name that is a Loom-bundled/shipped skill (e.g. worker, orchestrate, setup-assistant, the platform-* dev skills) — it can NEVER modify the bundled/dev skill set. Use the Skills UI to edit a bundled skill.\n" +
+          "CONFIRM-FIRST (load-bearing): NEVER call this without first showing the user the skill name + content and getting their explicit confirmation. Pass confirm:true to attest you have done so; a missing/false confirm is rejected and nothing is written.",
+        inputSchema: {
+          name: z.string(),
+          content: z.string(),
+          confirm: z.boolean().optional(),
+        },
+      },
+      async ({ name, content, confirm }) => {
+        // CONFIRM-FIRST gate: refuse unless the agent attests it confirmed with the user. The real
+        // enforcement is the setup-assistant doctrine (show + confirm before calling); this tool-level
+        // attestation makes the requirement legible and fails closed if the agent skips it.
+        if (confirm !== true) {
+          return ok({ error: "skill_write requires confirm:true — first show the user the skill name + full content and get their explicit confirmation, then retry with confirm:true." });
+        }
+        if (!isValidSkillName(name)) {
+          return ok({ error: "invalid skill name (kebab-case: a-z, 0-9, -, ≤64 chars)" });
+        }
+        // BOUND (load-bearing): USER skills ONLY. A bundled/shipped name is rejected so this surface can
+        // never create a divergent store copy of — or otherwise touch — the bundled/dev skill set.
+        if (isBundledSkill(name)) {
+          return ok({ error: `"${name}" is a bundled Loom skill — skill_write is bounded to USER skills and cannot modify the bundled/dev skill set. Edit a bundled skill via the Skills UI.` });
+        }
+        if (!writeSkill(name, content)) return ok({ error: "invalid skill name" });
+        return ok({ ok: true, name, bundled: false, skill: listSkills().find((s) => s.name === name) ?? null });
       },
     );
 

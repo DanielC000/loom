@@ -19,6 +19,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (d) THE VALIDATOR REJECTIONS — project_create/configure/update REJECT orchestration.gateCommand
 //       (host-RCE) and alertWebhook (exfil) by construction (agent validator); session_spawn REFUSES
 //       platform/auditor/worker/setup (no self-elevation) and creates nothing.
+//   (f) SKILLS — skill_list reads the user's store; skill_write is confirm-first (rejects without
+//       confirm:true) and BOUNDED to the USER store (rejects any bundled skill name + path traversal,
+//       leaving the shipped asset byte-unchanged), with a write→list round-trip + in-place update.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/setup-surface.mjs
 import fs from "node:fs";
@@ -37,6 +40,16 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+
+// --- Hermetic bundled-asset set for the skill_write USER-store bound (store.ts reads LOOM_ASSET_SKILLS at
+// load; SKILLS_DIR is LOOM_HOME/skills). A controlled asset dir with ONE bundled skill ("core-doctrine")
+// so the bound test is deterministic and never depends on / mutates the real repo asset set. ---
+const assetSkillsDir = path.join(tmpHome, "asset-skills");
+fs.mkdirSync(path.join(assetSkillsDir, "core-doctrine"), { recursive: true });
+const BUNDLED_MD = "---\nname: core-doctrine\ndescription: a shipped Loom skill\n---\n\n# core-doctrine\n\nBundled body — must never be touched by skill_write.\n";
+fs.writeFileSync(path.join(assetSkillsDir, "core-doctrine", "SKILL.md"), BUNDLED_MD);
+process.env.LOOM_ASSET_SKILLS = assetSkillsDir; // BEFORE importing dist — store.ts computes ASSET_SKILLS at load
+const storeSkillMd = (name) => path.join(tmpHome, "skills", name, "SKILL.md");
 
 import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
@@ -136,6 +149,7 @@ try {
     "agent_create", "list_all_agents", "list_all_projects", "list_all_sessions",
     "profile_assign", "profile_create", "profile_update",
     "project_configure", "project_create", "project_update", "session_spawn",
+    "skill_list", "skill_write",
   ];
   check(`(b) setup surface is EXACTLY the curated subset (got: ${tools.join(",")})`,
     JSON.stringify(tools) === JSON.stringify(expected));
@@ -265,6 +279,45 @@ try {
   }
   check("(d) the refused spawns created NO session", db.listAllSessions().length === nRefuse);
 
+  // ============ (f) SKILLS — skill_list (read) + skill_write (USER store ONLY, confirm-first) ============
+  // The store (LOOM_HOME/skills) starts empty; the only bundled skill is the fixture "core-doctrine".
+  const skills0 = await call("skill_list", {});
+  check("(f) skill_list: returns a skills array (store starts empty)", Array.isArray(skills0.skills) && skills0.skills.length === 0);
+
+  // CONFIRM-FIRST: a write WITHOUT confirm:true is rejected and writes NOTHING.
+  const noConfirm = await call("skill_write", { name: "my-skill", content: "x" });
+  check("(f) skill_write: rejected without confirm:true", typeof noConfirm.error === "string" && /confirm/i.test(noConfirm.error) && !noConfirm.ok);
+  const confirmFalse = await call("skill_write", { name: "my-skill", content: "x", confirm: false });
+  check("(f) skill_write: rejected with confirm:false", typeof confirmFalse.error === "string" && !confirmFalse.ok);
+  check("(f) skill_write: the unconfirmed writes created NO store file", !fs.existsSync(storeSkillMd("my-skill")));
+
+  // ROUND-TRIP: a confirmed write to a USER name succeeds and skill_list reflects it (with content + editable).
+  const MY_MD = "---\nname: my-skill\ndescription: my onboarding helper\n---\n\n# my-skill\n\nDo the user's thing.\n";
+  const wrote = await call("skill_write", { name: "my-skill", content: MY_MD, confirm: true });
+  check("(f) skill_write: a confirmed USER-store write succeeds", wrote.ok === true && wrote.name === "my-skill" && wrote.bundled === false && !wrote.error);
+  check("(f) skill_write: the store SKILL.md was written", fs.existsSync(storeSkillMd("my-skill")) && fs.readFileSync(storeSkillMd("my-skill"), "utf8") === MY_MD);
+  const skills1 = await call("skill_list", {});
+  const mine = skills1.skills.find((s) => s.name === "my-skill");
+  check("(f) skill_list: reflects the new user skill (editable, with content + description)",
+    !!mine && mine.editable === true && mine.bundled === false && mine.content === MY_MD && mine.description === "my onboarding helper");
+
+  // UPDATE in place (same name) → content replaced.
+  const MY_MD2 = MY_MD.replace("Do the user's thing.", "Do the user's UPDATED thing.");
+  const wrote2 = await call("skill_write", { name: "my-skill", content: MY_MD2, confirm: true });
+  check("(f) skill_write: an update to the same user skill succeeds", wrote2.ok === true && !wrote2.error);
+  check("(f) skill_write: the update replaced the store content", fs.readFileSync(storeSkillMd("my-skill"), "utf8") === MY_MD2);
+
+  // THE BOUND (load-bearing): skill_write CANNOT touch a bundled/dev skill — even confirmed.
+  const bundledBefore = fs.readFileSync(path.join(assetSkillsDir, "core-doctrine", "SKILL.md"), "utf8");
+  const hackBundled = await call("skill_write", { name: "core-doctrine", content: "HACKED", confirm: true });
+  check("(f) skill_write: REJECTS a bundled skill name (bound to USER store)", typeof hackBundled.error === "string" && /bundled/i.test(hackBundled.error) && !hackBundled.ok);
+  check("(f) skill_write: the rejected bundled write created NO divergent store copy", !fs.existsSync(storeSkillMd("core-doctrine")));
+  check("(f) skill_write: the shipped bundled ASSET is byte-unchanged",
+    fs.readFileSync(path.join(assetSkillsDir, "core-doctrine", "SKILL.md"), "utf8") === bundledBefore && bundledBefore === BUNDLED_MD);
+  // Path-traversal: an invalid name (slug guard) is rejected, even confirmed.
+  const traversal = await call("skill_write", { name: "../evil", content: "x", confirm: true });
+  check("(f) skill_write: REJECTS a path-traversal / invalid name", typeof traversal.error === "string" && !traversal.ok);
+
   await client.close();
 } finally {
   db.close();
@@ -274,6 +327,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Setup Assistant surface is the curated, fail-closed subset (project/agent/profile create+configure + manager|plain spawn + reads), a setup session 404s on /mcp-platform, /mcp-orch AND /mcp-audit, a non-setup session can never reach /mcp-setup, every config path rejects gateCommand/alertWebhook, and session_spawn refuses platform/auditor/worker/setup — claude-free, network-free."
+  ? "\n✅ ALL PASS — the Setup Assistant surface is the curated, fail-closed subset (project/agent/profile create+configure + manager|plain spawn + reads + skill_list/skill_write), a setup session 404s on /mcp-platform, /mcp-orch AND /mcp-audit, a non-setup session can never reach /mcp-setup, every config path rejects gateCommand/alertWebhook, session_spawn refuses platform/auditor/worker/setup, and skill_write is confirm-first + bounded to the USER store (never the bundled/dev set) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

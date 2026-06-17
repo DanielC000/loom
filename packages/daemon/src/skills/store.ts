@@ -35,6 +35,17 @@ function bundledNames(): Set<string> {
   } catch { return new Set(); }
 }
 
+/**
+ * True when `name` is a Loom-bundled/shipped skill (a dir in the asset set) — i.e. NOT a user-created
+ * skill. LOAD-BEARING for the ungated `loom-setup` surface: `skill_write` there is bounded STRICTLY to
+ * the USER skill store, so it rejects any bundled name (it must never touch the bundled/dev skill set —
+ * the human Skills UI owns reset/publish of those). Computed live from ASSET_SKILLS so it reflects
+ * exactly the skills shipped to this install (dev sees platform-* too; end users do not).
+ */
+export function isBundledSkill(name: string): boolean {
+  return bundledNames().has(name);
+}
+
 const assetMd = (name: string): string => path.join(ASSET_SKILLS, name, "SKILL.md");
 
 // LOAD-BEARING: store SKILL.md is written CRLF on Windows; the asset may be CRLF or LF. Normalize both
