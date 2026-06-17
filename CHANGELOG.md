@@ -7,6 +7,14 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-06-17
+
+### Fixed
+- **Pasting into a terminal duplicated the text.** Ctrl/Cmd+V directly in a session's terminal pane
+  pasted the clipboard contents twice. The terminal both pasted manually *and* let the browser's
+  native paste run; it now lets the native paste happen exactly once (still swallowing the raw control
+  byte and still honoring bracketed-paste mode for the agent's TUI).
+
 ## [0.4.1] — 2026-06-17
 
 ### Fixed
