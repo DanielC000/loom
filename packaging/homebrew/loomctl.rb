@@ -6,7 +6,7 @@ require "language/node"
 class Loomctl < Formula
   desc "Local-first AI project workspace for Claude Code, Obsidian, and tasks"
   homepage "https://github.com/DanielC000/loom"
-  url "https://registry.npmjs.org/loomctl/-/loomctl-0.3.0.tgz"
+  url "https://registry.npmjs.org/loomctl/-/loomctl-0.4.0.tgz"
   sha256 "REPLACE_WITH_SHA256_OF_PUBLISHED_ARTIFACT"
   license "MIT"
 

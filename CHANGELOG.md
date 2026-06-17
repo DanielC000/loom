@@ -7,6 +7,31 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-17
+
+Onboarding gains in-chat skill editing, the install instructions become accurate, and a round of
+input/terminal reliability fixes lands.
+
+### Added
+- **In-chat skill editing for the Setup Assistant.** The assistant can now read and edit your skills
+  directly in the conversation — new `skill_list` / `skill_write` tools on the curated `loom-setup`
+  surface — instead of sending you to the Skills UI. Writes are bounded strictly to *your* skill store
+  (it can never modify Loom's bundled skills) and are **confirm-first**: it shows you the skill name and
+  full content and gets your go-ahead before writing.
+- **Hosted landing page.** A GitHub Pages workflow publishes the `site/` landing page.
+
+### Fixed
+- **Accurate one-line install.** The README and `install.sh` / `install.ps1` pointed at a placeholder
+  `loom.example` domain that didn't resolve. They now use the real raw-GitHub script URLs, so
+  `curl … | sh` and `irm … | iex` work exactly as written.
+- **Composer draft survives maximize/minimize.** Typing a message into a session's composer and then
+  maximizing or minimizing that terminal no longer discards your unsent draft — it's preserved per
+  session across the layout change.
+- **No garbled turns when typing in the raw terminal.** A message delivered to a session (e.g. an
+  automated status report) is no longer appended onto text you've half-typed directly in the terminal
+  pane. Delivery now waits until you submit or clear your line — including multi-line pastes — and never
+  alters your text.
+
 ## [0.3.0] — 2026-06-16
 
 End-user onboarding and the full Phase-2 distribution layer: a friendly Setup Assistant that gets a
