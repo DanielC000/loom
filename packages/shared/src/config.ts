@@ -180,7 +180,7 @@ export interface OrchestrationConfig {
    * before the BusyWorkerWatcher surfaces it to the OWNING MANAGER as an attention signal (a
    * `worker_stuck` event + a busy-gated nudge the manager can act on — re-nudge or recycle; never a
    * hard kill). Sibling of `idleNudgeMinutes`, but for stuck workers rather than idle managers.
-   * Default 20; 0 disables the watcher entirely. Conservative by design so a legitimately long single
+   * Default 30; 0 disables the watcher entirely. Conservative by design so a legitimately long single
    * tool call (a big build / test run, which is one turn) clears before the window — raise it per
    * project if your builds routinely run longer.
    */
@@ -387,7 +387,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, stuckWorkerMinutes: 20, crashRecoveryMaxAttempts: 3 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, stuckWorkerMinutes: 30, crashRecoveryMaxAttempts: 3 },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
