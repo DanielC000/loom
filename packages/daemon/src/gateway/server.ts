@@ -35,6 +35,7 @@ import { listVaultTree, readVaultFile } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate } from "../skills/store.js";
 import { validateProfile } from "../profiles/validate.js";
+import { validateAgentPatch } from "../agents/validate.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
@@ -858,20 +859,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/agents/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getAgent(id)) return reply.code(404).send({ error: "agent not found" });
-    const b = (req.body ?? {}) as { name?: string; startupPrompt?: string; profileId?: string | null; endpoint?: unknown; ioSchema?: unknown };
-    // Assigning a profile: a non-null profileId must reference a real profile (null CLEARS — the agent
-    // falls back to the plain backstop). Pass the whole patch through; updateAgent writes only the
-    // provided keys (`profileId: null` clears, an absent key leaves the assignment as-is).
-    if (b.profileId != null && !deps.db.getProfile(b.profileId)) return reply.code(404).send({ error: "profile not found" });
-    if (b.endpoint !== undefined && typeof b.endpoint !== "boolean") return reply.code(400).send({ error: "endpoint must be a boolean" });
-    // Build the patch so only PRESENT keys reach updateAgent ("ioSchema" in patch is the clear signal).
-    const patch: { name?: string; startupPrompt?: string; profileId?: string | null; endpoint?: boolean; ioSchema?: unknown | null } = {};
-    if ("name" in b) patch.name = b.name;
-    if ("startupPrompt" in b) patch.startupPrompt = b.startupPrompt;
-    if ("profileId" in b) patch.profileId = b.profileId;
-    if (b.endpoint !== undefined) patch.endpoint = b.endpoint as boolean;
-    if ("ioSchema" in b) patch.ioSchema = b.ioSchema ?? null;
-    deps.db.updateAgent(id, patch);
+    // PATCH validation + normalization is shared with the elevated loom-platform agent_update MCP tool
+    // (agents/validate.ts) so the two write paths can't diverge. allowEndpointFlags:true keeps the
+    // HUMAN-only endpoint/ioSchema (Agent Runs R1) writable here — the MCP path passes false.
+    const v = validateAgentPatch(req.body, (pid) => !!deps.db.getProfile(pid), { allowEndpointFlags: true });
+    if (!v.ok) return reply.code(v.kind === "notFound" ? 404 : 400).send({ error: v.error });
+    deps.db.updateAgent(id, v.patch);
     return deps.db.getAgent(id);
   });
 

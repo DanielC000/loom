@@ -12,6 +12,7 @@ import { GitWriter } from "../git/writer.js";
 import { writeVaultFile } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateProfile } from "../profiles/validate.js";
+import { validateAgentPatch } from "../agents/validate.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { skillListData, skillWriteData, skillWriteInputSchema } from "./skillTools.js";
 
@@ -297,6 +298,33 @@ export class PlatformMcpRouter {
         };
         db.insertAgent(agent);
         return ok(agent);
+      },
+    );
+
+    server.registerTool(
+      "agent_update",
+      {
+        description:
+          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. 404 if the agent id is unknown. Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId.",
+        inputSchema: {
+          agentId: z.string(),
+          name: z.string().optional(),
+          startupPrompt: z.string().optional(),
+          profileId: z.string().nullable().optional(),
+        },
+      },
+      async (rawArgs) => {
+        const { agentId } = rawArgs as { agentId: string };
+        if (!db.getAgent(agentId)) return ok({ error: "agent not found" });
+        // Drop agentId; the rest IS the PATCH. Use the raw args object so an explicit profileId:null is
+        // PRESENT (clears) while an omitted key stays absent (left as-is) — the same presence semantics
+        // the REST path relies on. allowEndpointFlags:false: endpoint/ioSchema aren't in the inputSchema,
+        // so they can't arrive — the flag is belt-and-suspenders against the human-only Agent Runs surface.
+        const { agentId: _aid, ...rawPatch } = rawArgs as Record<string, unknown>;
+        const v = validateAgentPatch(rawPatch, (pid) => !!db.getProfile(pid), { allowEndpointFlags: false });
+        if (!v.ok) return ok({ error: v.error });
+        db.updateAgent(agentId, v.patch);
+        return ok(db.getAgent(agentId));
       },
     );
 
