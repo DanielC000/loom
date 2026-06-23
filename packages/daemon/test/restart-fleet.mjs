@@ -245,6 +245,69 @@ try {
   check("(5b) resume() THROWS when cwd is missing (even with a live transcript)", !!threw && /worktree\/cwd missing/.test(String(threw?.message)));
   check("(5b) resume() marks the session resumability:dead", db.getSession(ghostResId)?.resumability === "dead");
   check("(5b) resume() spawned NO pty (no doomed --resume)", recPty.spawns.length === 0);
+
+  // ============================ (6) NUDGE COVERAGE — reviewer roles, run-exclusion, converged mgr ====
+  // P1 + folded #7. Standing reviewers (auditor/workspace-auditor/setup) resume with NO startup prompt,
+  // so without a continuation nudge they sit idle until a human types "continue" — each must get a
+  // generic [loom:daemon-restarted] nudge. A `run` (runs don't resume — see shared/types.ts SessionRole)
+  // gets NONE. And the #7 short-circuit: a manager/platform with 0 live workers in the resume set that
+  // last reported done/waiting gets the lightweight FYI, NOT the full "re-check your workers" re-orient.
+  const C = { proj: `rf-C-${sfx}`, agent: `rf-C-ag-${sfx}` };
+  mkProject(C.proj, "/tmp/rf-C"); mkAgent(C.agent, C.proj);
+  const cid = {
+    auditor: `rf-auditor-${sfx}`, wsAuditor: `rf-wsaud-${sfx}`, setup: `rf-setup-${sfx}`, run: `rf-run-${sfx}`,
+    reqMgr: `rf-reqMgr-${sfx}`, convMgr: `rf-convMgr-${sfx}`, activeMgr: `rf-activeMgr-${sfx}`, activeWkr: `rf-activeWkr-${sfx}`,
+  };
+  mkSession({ id: cid.auditor, projId: C.proj, agentId: C.agent, role: "auditor" });
+  mkSession({ id: cid.wsAuditor, projId: C.proj, agentId: C.agent, role: "workspace-auditor" });
+  mkSession({ id: cid.setup, projId: C.proj, agentId: C.agent, role: "setup" });
+  mkSession({ id: cid.run, projId: C.proj, agentId: C.agent, role: "run" });
+  // reqMgr: the requester, converged (0 workers + last reported DONE → policy "suppressed").
+  mkSession({ id: cid.reqMgr, projId: C.proj, agentId: C.agent, role: "manager" });
+  db.setIdleNudgePolicy(cid.reqMgr, "suppressed");
+  // convMgr: a NON-requesting converged manager (0 workers + last reported WAITING → policy "snoozed").
+  mkSession({ id: cid.convMgr, projId: C.proj, agentId: C.agent, role: "manager" });
+  db.setIdleNudgePolicy(cid.convMgr, "snoozed", future);
+  // activeMgr: a NON-requesting manager WITH a live worker → full re-check nudge (the control).
+  mkSession({ id: cid.activeMgr, projId: C.proj, agentId: C.agent, role: "manager" });
+  mkSession({ id: cid.activeWkr, projId: C.proj, agentId: C.agent, role: "worker", parentSessionId: cid.activeMgr });
+
+  const pty6 = new PtyStub();
+  const sessions6 = new SessionService(db, pty6, new OrchestrationControl());
+  const intent6 = {
+    reason: "deploy", managerSessionId: cid.reqMgr, requestedAt: now,
+    resume: [
+      { sessionId: cid.auditor, role: "auditor", parentSessionId: null },
+      { sessionId: cid.wsAuditor, role: "workspace-auditor", parentSessionId: null },
+      { sessionId: cid.setup, role: "setup", parentSessionId: null },
+      { sessionId: cid.run, role: "run", parentSessionId: null },
+      { sessionId: cid.reqMgr, role: "manager", parentSessionId: null },
+      { sessionId: cid.convMgr, role: "manager", parentSessionId: null },
+      { sessionId: cid.activeMgr, role: "manager", parentSessionId: null },
+      { sessionId: cid.activeWkr, role: "worker", parentSessionId: cid.activeMgr },
+    ],
+  };
+  sessions6.resumeFleetOnBoot(intent6, { resumeOne: () => true });
+  const n6 = (i) => pty6.getPending(i);
+
+  check("(6a) auditor gets a [loom:daemon-restarted] continue nudge",
+    n6(cid.auditor).length === 1 && n6(cid.auditor)[0].includes("[loom:daemon-restarted]") && /continue your work/i.test(n6(cid.auditor)[0]));
+  check("(6a) workspace-auditor gets the continue nudge",
+    n6(cid.wsAuditor).length === 1 && n6(cid.wsAuditor)[0].includes("[loom:daemon-restarted]") && /continue your work/i.test(n6(cid.wsAuditor)[0]));
+  check("(6a) setup gets the continue nudge",
+    n6(cid.setup).length === 1 && n6(cid.setup)[0].includes("[loom:daemon-restarted]") && /continue your work/i.test(n6(cid.setup)[0]));
+  check("(6b) a `run` session gets NO nudge (runs don't resume)", n6(cid.run).length === 0);
+  // (6c) converged managers: the lightweight FYI, NOT the full re-check nudge.
+  const reqMsg = n6(cid.reqMgr);
+  check("(6c) converged REQUESTER gets the lightweight FYI (code-live, no 're-check')",
+    reqMsg.length === 1 && reqMsg[0].includes("now LIVE") && /no action is needed/i.test(reqMsg[0]) && !/re-check/i.test(reqMsg[0]));
+  const convMsg = n6(cid.convMgr);
+  check("(6c) converged NON-requesting manager gets the lightweight FYI, not the re-check nudge",
+    convMsg.length === 1 && /no action is needed/i.test(convMsg[0]) && !/re-check/i.test(convMsg[0]));
+  // Control: an active manager (still has a live worker) gets the FULL re-check nudge — gate is precise.
+  const activeMsg = n6(cid.activeMgr);
+  check("(6c) an active manager (live worker) still gets the FULL re-check nudge",
+    activeMsg.length === 1 && /re-check your workers/i.test(activeMsg[0]) && !/no action is needed/i.test(activeMsg[0]));
 } finally {
   db.close();
   for (const repo of repoRoots) {
@@ -257,6 +320,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a daemon_restart captures the WHOLE live cross-project fleet, resumes every session (requester re-prompted, others nudged, plain/parked honored, dead skipped), protects every project's worktree, tolerates an old-format intent, and refuses a ghost resume whose worktree/cwd was removed (no doomed --resume spawn)."
+  ? "\n✅ ALL PASS — a daemon_restart captures the WHOLE live cross-project fleet, resumes every session (requester re-prompted, others nudged, standing reviewers [auditor/workspace-auditor/setup] nudged, `run` excluded, converged 0-worker managers get the lightweight FYI not the full re-check, plain/parked honored, dead skipped), protects every project's worktree, tolerates an old-format intent, and refuses a ghost resume whose worktree/cwd was removed (no doomed --resume spawn)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

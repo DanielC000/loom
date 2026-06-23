@@ -760,8 +760,13 @@ export class SessionService {
    * catch a resume's direct setBusy(false)):
    *   - the REQUESTING manager gets its "merged code is now live — continue/verify" re-prompt;
    *   - every other manager/platform gets a neutral "you were resumed, continue orchestrating" note;
+   *   - a CONVERGED manager/platform (0 live workers in the resume set + last reported done/waiting, per
+   *     #7) gets a lightweight "no action needed" FYI instead of the full re-check nudge — including the
+   *     requester when its own worker set is empty;
    *   - every worker gets the "your worktree WIP is intact, continue your task" nudge;
-   *   - a plain (role-null) session is resumed but not nudged (no orchestration loop to re-engage);
+   *   - a standing reviewer (auditor/workspace-auditor/setup) gets a generic "you were resumed — continue
+   *     your work" nudge (it too resumes with no startup prompt, so it would otherwise sit idle);
+   *   - a plain (role-null) or "run" session is resumed but not nudged (no orchestration loop to re-engage);
    *   - a PARKED (rate-limited) session is resumed live so the rate-limit watcher can recover it, but
    *     its nudge + pending replay are WITHHELD — we never push a held turn back into the cap (honors
    *     the park; a staggered resume via the watcher at reset). Its DB park state is left intact.
@@ -793,6 +798,19 @@ export class SessionService {
       const s = this.db.getSession(id);
       return !!s?.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > now.getTime();
     };
+    // #7 (converged-manager short-circuit): how many of THIS manager's live workers are in the resume
+    // set, and did it last self-report done/waiting? The idle_report disposition is persisted on the
+    // durable idle-nudge policy column (recordIdleReport): waiting → "snoozed", done/blocked_human →
+    // "suppressed", working → "watching" (also the un-reported default). So "last reported done/waiting"
+    // == policy is snoozed or suppressed — no new field needed. (idle_report is manager-only, so a
+    // platform target's policy is always "watching" and it correctly never short-circuits.)
+    const liveWorkerCount = (managerId: string): number =>
+      entries.filter((e) => e.role === "worker" && e.parentSessionId === managerId).length;
+    const lastReportedDoneOrWaiting = (id: string): boolean => {
+      const policy = this.db.getIdleNudgeState(id)?.policy;
+      return policy === "snoozed" || policy === "suppressed";
+    };
+    const isConverged = (id: string): boolean => liveWorkerCount(id) === 0 && lastReportedDoneOrWaiting(id);
 
     const reqWorkers = entries.filter((e) => e.role === "worker" && e.parentSessionId === reqId).map((e) => e.sessionId);
 
@@ -812,14 +830,34 @@ export class SessionService {
           `call worker_report (done/blocked) so your manager isn't left waiting.`,
         );
       } else if (e.role === "manager" || e.role === "platform") {
+        if (isConverged(e.sessionId)) {
+          // #7: a parked/converged manager (0 live workers in the restart set + last reported
+          // done/waiting) needs no re-orient cycle — a lightweight FYI, not the full re-check nudge.
+          this.pty.enqueueStdin(
+            e.sessionId,
+            `[loom:daemon-restarted] The daemon was restarted (reason: ${intent.reason}) and you were ` +
+            `resumed. You had no live workers and had last reported done/waiting, so no action is needed — ` +
+            `your state is intact.`,
+          );
+        } else {
+          this.pty.enqueueStdin(
+            e.sessionId,
+            `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you + ` +
+            `your live workers were resumed — your worktrees are intact. Resume orchestrating from where you ` +
+            `left off (re-check your workers' state; some may have just been resumed too).`,
+          );
+        }
+      } else if (e.role === "auditor" || e.role === "workspace-auditor" || e.role === "setup") {
+        // A scheduled/standing reviewer (Platform Auditor, Workspace Auditor, Setup Assistant) gets no
+        // startup prompt on resume, so without a nudge it sits idle until a human types "continue".
         this.pty.enqueueStdin(
           e.sessionId,
-          `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you + ` +
-          `your live workers were resumed — your worktrees are intact. Resume orchestrating from where you ` +
-          `left off (re-check your workers' state; some may have just been resumed too).`,
+          `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — continue your ` +
+          `work from where you left off.`,
         );
       }
-      // role null (plain session): resumed, but no orchestration loop to re-engage → no nudge.
+      // role null (plain session) or "run" (runs don't resume — see shared/types.ts SessionRole):
+      // resumed, but no orchestration loop to re-engage → no nudge.
     }
 
     // The requesting manager last: bring it back with its "your code is live, verify + continue" prompt.
@@ -830,13 +868,24 @@ export class SessionService {
       } else {
         replayPending(reqId);
         const reqWorkersResumed = reqWorkers.filter((id) => resumed.includes(id)).length;
-        this.pty.enqueueStdin(
-          reqId,
-          `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
-          `running daemon (reason: ${intent.reason}). ${reqWorkersResumed}/${reqWorkers.length} of your live ` +
-          `workers were resumed (the rest of the fleet across all projects was resumed too). You can now ` +
-          `end-to-end verify the live behavior. Continue.`,
-        );
+        if (reqWorkers.length === 0 && lastReportedDoneOrWaiting(reqId)) {
+          // #7: the requester converged before requesting the restart (no live workers + last reported
+          // done/waiting) — acknowledge the deploy without the full "re-check your workers" re-orient.
+          this.pty.enqueueStdin(
+            reqId,
+            `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
+            `running daemon (reason: ${intent.reason}). You had no live workers and had last reported ` +
+            `done/waiting, so no action is needed beyond confirming the live behavior if you wish.`,
+          );
+        } else {
+          this.pty.enqueueStdin(
+            reqId,
+            `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
+            `running daemon (reason: ${intent.reason}). ${reqWorkersResumed}/${reqWorkers.length} of your live ` +
+            `workers were resumed (the rest of the fleet across all projects was resumed too). You can now ` +
+            `end-to-end verify the live behavior. Continue.`,
+          );
+        }
       }
     } else {
       failed.push(reqId);
