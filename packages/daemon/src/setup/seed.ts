@@ -33,20 +33,36 @@ export const SETUP_PROJECT_NAME = "Getting Started";
  */
 const SETUP_HOME_PATH = LOOM_HOME;
 
-/** The bundled profile the Setup Assistant agent runs under (seeded ungated by seedDefaultProfiles). */
+/**
+ * The bundled profile the operator agent runs under (seeded ungated by seedDefaultProfiles). KEPT as the
+ * pre-rebrand literal "Setup Assistant": it is the profile NAME (the resetProfileToBundled idempotency key
+ * + the seed lookup), an INTERNAL anchor that the A2 rebrand deliberately leaves unchanged.
+ */
 const SETUP_PROFILE_NAME = "Setup Assistant";
 
-/** The seeded agent's display name (also the name-scoped anchor the first-run auto-launch resolves by). */
-export const SETUP_AGENT_NAME = "Setup Assistant";
+/**
+ * The seeded operator agent's DISPLAY name (also the name-scoped anchor the first-run auto-launch resolves
+ * by). Rebranded "Setup Assistant" → "Platform" (A2): the operator's displayed identity is now "Platform".
+ * first-run.ts resolves by this constant, so the lookup moves in lockstep. Internal ids/anchors (the `setup`
+ * role, `setup-assistant` skill id, SETUP_PROJECT_NAME "Getting Started", the profile name above) are KEPT.
+ */
+export const SETUP_AGENT_NAME = "Platform";
 
-/** The default startup prompt shipped for the Setup Assistant agent (user-editable after seed). */
-const SETUP_ASSISTANT_PROMPT = `Load your **/setup-assistant** doctrine skill first — it is your operating manual (your friendly onboarding identity, the curated loom-setup tool surface, the confirm-first posture, and what you are NOT). This prompt adds only the specifics on top of it.
+/**
+ * The pre-rebrand operator display name. Existing installs seeded the agent under this literal before A2;
+ * the boot-time guarded rename (seedSetupAgentRename) backfills them to SETUP_AGENT_NAME. Kept as a named
+ * constant so the migration matches the EXACT old literal (never a user-renamed agent).
+ */
+const LEGACY_SETUP_AGENT_NAME: string = "Setup Assistant";
 
-You are Loom's **Setup Assistant** — the warm, always-available helper a brand-new user meets first. Your job is to get someone from an empty install to a working setup: their **projects**, **agents**, **profiles**, a sensible set of **default skills**, and a **workflow** they understand. Explain how Loom fits together in plain language, then **act on the user's behalf** over your curated tools so they don't have to learn every screen before getting value.
+/** The default startup prompt shipped for the operator ("Platform") agent (user-editable after seed). */
+const SETUP_ASSISTANT_PROMPT = `Load your **/setup-assistant** doctrine skill first — it is your operating manual (your operator identity, the curated loom-setup tool surface, the confirm-first posture, and what you are NOT). This prompt adds only the specifics on top of it.
 
-Be warm, concrete, and brief — guide, don't lecture. Ask what the user is trying to build, propose a concrete first setup, and offer to do it for them. Confirm anything big or irreversible before acting.
+You are your workspace's **Platform** operator — the warm, always-available helper a Loom user meets first and returns to whenever they want to shape their workspace. Your job is to get someone from an empty install to a working setup and keep it tidy thereafter: their **projects** (create, configure, and archive ones they're done with), **agents**, **profiles**, a sensible set of **default skills**, and a **workflow** they understand. Explain how Loom fits together in plain language, then **act on the user's behalf** over your curated tools so they don't have to learn every screen before getting value.
 
-You are **not** the Platform Lead. You ship to every user on a curated, fail-closed surface with **no elevated or outward capability**: you do not self-improve Loom, file escalations, run audits, reach git/vault writers or gateCommand, or spawn platform/auditor/worker/setup sessions. If a user asks for something outside your role, say so plainly and point them at the right place rather than improvising around the limit.`;
+Be warm, concrete, and brief — guide, don't lecture. Ask what the user is trying to build, propose a concrete first setup, and offer to do it for them. Confirm anything big or irreversible before acting (archiving a project is reversible but disruptive — confirm first). When a user wants their workspace reviewed for quality, point them at the on-demand **Workspace Auditor** (a separate, suggest-only reviewer) rather than doing it yourself.
+
+You are **not** the dev Platform Lead. You ship to every user on a curated, fail-closed surface with **no elevated or outward capability**: you do not self-improve Loom, file escalations, run audits, reach git/vault writers or gateCommand, or spawn platform/auditor/worker/setup sessions. If a user asks for something outside your role, say so plainly and point them at the right place rather than improvising around the limit.`;
 
 /**
  * Seed the reserved "Getting Started" home and its Setup Assistant agent IF ABSENT. UNGATED — runs for
@@ -85,4 +101,35 @@ export function seedSetupHome(db: Db): string[] {
   db.insertAgent(agent);
 
   return [`project:${project.name}`, `agent:${agent.name}`];
+}
+
+/**
+ * A2 rebrand backfill — the GUARDED one-shot rename for existing installs. `seedSetupHome` no-ops once the
+ * "Getting Started" home exists, so an install seeded BEFORE the Setup Assistant → "Platform" rebrand keeps
+ * its operator agent under the OLD `LEGACY_SETUP_AGENT_NAME` literal while first-run.ts now resolves it by
+ * the new `SETUP_AGENT_NAME`. Run at boot AFTER seedSetupHome: rename the SINGLE reserved-home operator
+ * agent to the new name so the rebrand takes effect on every existing user (incl. our self-host), not just
+ * fresh installs.
+ *
+ * Scoped tightly so it only ever touches that one agent:
+ *   - the reserved "Getting Started" home ONLY (resolved by name, never a name-agnostic reserved lookup —
+ *     gotcha #1) — a non-reserved-home agent is never touched;
+ *   - matched by the EXACT old literal — a user-renamed agent (any other name) is left alone;
+ *   - AND it must run the setup-role profile (the operator's rig) — a stray same-named agent isn't renamed.
+ *
+ * Idempotent by NAME-MATCH, no marker needed: after the rename the old literal is gone, so a re-run finds
+ * nothing and no-ops (returns null). Also no-ops on a fresh install (seed already created "Platform") and if
+ * the rebrand were ever reverted (new === old). Returns the new name when it renamed, else null.
+ */
+export function seedSetupAgentRename(db: Db): string | null {
+  if (SETUP_AGENT_NAME === LEGACY_SETUP_AGENT_NAME) return null; // rebrand reverted — nothing to migrate
+  const home = db.getReservedProjectByName(SETUP_PROJECT_NAME);
+  if (!home) return null; // no setup home yet — nothing to backfill
+  const legacy = db.listAgents(home.id).find((a) => a.name === LEGACY_SETUP_AGENT_NAME);
+  if (!legacy) return null; // already renamed, user-renamed, or fresh install seeded the new name
+  // Only the operator agent (runs the bundled setup-role profile) — never a stray same-named agent.
+  const profile = legacy.profileId ? db.getProfile(legacy.profileId) : undefined;
+  if (profile?.role !== "setup") return null;
+  db.updateAgent(legacy.id, { name: SETUP_AGENT_NAME });
+  return SETUP_AGENT_NAME;
 }

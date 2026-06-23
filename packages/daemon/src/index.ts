@@ -9,7 +9,7 @@ import { snapshotTranscript } from "./sessions/transcript.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles } from "./profiles/seed.js";
 import { seedPlatformHome } from "./platform/seed.js";
-import { seedSetupHome } from "./setup/seed.js";
+import { seedSetupHome, seedSetupAgentRename } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
@@ -60,6 +60,13 @@ async function main(): Promise<void> {
   // (no LOOM_DEV gate). Hidden from the project picker; surfaced via the always-available Setup page.
   const seededSetup = seedSetupHome(db);
   if (seededSetup.length) console.log(`[boot] seeded setup home: ${seededSetup.join(", ")}`);
+  // A2 rebrand backfill: seedSetupHome no-ops once the home exists, so installs seeded BEFORE the
+  // Setup Assistant → "Platform" rebrand keep the old operator agent name while first-run now resolves the
+  // new one. Run the guarded one-shot rename AFTER the seed — it renames ONLY the single reserved-home
+  // operator agent (exact old literal + setup-role profile), idempotent by name-match, never a user-renamed
+  // or non-reserved agent. No-ops on fresh installs (the seed already created "Platform").
+  const renamedSetupAgent = seedSetupAgentRename(db);
+  if (renamedSetupAgent) console.log(`[boot] rebrand: renamed legacy setup agent → ${renamedSetupAgent}`);
   // Platform Manager P1: seed the reserved "Loom Platform" home + its Platform Lead / Platform Auditor
   // agents, seed-if-absent (idempotent; runs AFTER seedDefaultProfiles so the bundled platform profiles
   // exist to assign). Hidden from the project picker (db.listProjects), still Mission-Control visible.

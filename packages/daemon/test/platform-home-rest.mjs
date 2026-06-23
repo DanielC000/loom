@@ -32,7 +32,7 @@ const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
 const { seedPlatformHome, PLATFORM_PROJECT_NAME } = await import("../dist/platform/seed.js");
-const { seedSetupHome, SETUP_PROJECT_NAME } = await import("../dist/setup/seed.js");
+const { seedSetupHome, SETUP_PROJECT_NAME, SETUP_AGENT_NAME } = await import("../dist/setup/seed.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -143,7 +143,7 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
     check("(5) /api/platform/home returns the Lead + Auditor (not the Setup Assistant)",
       platNames.includes("Platform Lead") && platNames.includes("Platform Auditor") && !platNames.includes("Setup Assistant"));
 
-    // Setup home: must be "Getting Started" + the Setup Assistant agent, NEVER "Loom Platform".
+    // Setup home: must be "Getting Started" + the operator ("Platform") agent, NEVER "Loom Platform".
     const setup = (await app.inject({ method: "GET", url: "/api/setup/home" }));
     check("(5) GET /api/setup/home → 200 with BOTH homes seeded", setup.statusCode === 200);
     const setupBody = setup.json();
@@ -151,8 +151,8 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
       setupBody.project?.reserved === true && setupBody.project?.name === SETUP_PROJECT_NAME &&
       setupBody.project?.name !== PLATFORM_PROJECT_NAME);
     const setupNames = (setupBody.agents ?? []).map((a) => a.name);
-    check("(5) /api/setup/home returns the Setup Assistant agent (not the Lead/Auditor)",
-      setupNames.includes("Setup Assistant") && !setupNames.includes("Platform Lead") && !setupNames.includes("Platform Auditor"));
+    check("(5) /api/setup/home returns the operator ('Platform') agent (not the Lead/Auditor)",
+      setupNames.includes(SETUP_AGENT_NAME) && !setupNames.includes("Platform Lead") && !setupNames.includes("Platform Auditor"));
     check("(5) each returned setup agent is bound to the setup home",
       (setupBody.agents ?? []).every((a) => a.projectId === setupBody.project.id));
     check("(5) liveSessions is present on /api/setup/home (array, empty here)", Array.isArray(setupBody.liveSessions));

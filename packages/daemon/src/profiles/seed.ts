@@ -94,7 +94,7 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
     name: "Setup Assistant",
     role: "setup",
     description:
-      "Guided onboarding rig: walks a human through standing up a new project end-to-end — binding a repo, defining agents, and seeding the first board work — so the orchestration queue starts with well-formed tasks.",
+      "Platform operator rig: the user-facing workspace operator that helps a human stand up and maintain their setup — creating, configuring, and archiving projects, defining agents and profiles, and seeding the first board work — over a curated, fail-closed surface (no elevated or outward capability).",
     allowDelta: [],
     skills: null,
     model: null,

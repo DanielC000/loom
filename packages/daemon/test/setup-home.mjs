@@ -35,7 +35,8 @@ delete process.env.LOOM_DEV;           // ensure phase 1 sees the default-OFF st
 const { Db } = await import("../dist/db.js");
 const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
 const { seedPlatformHome, PLATFORM_PROJECT_NAME } = await import("../dist/platform/seed.js");
-const { seedSetupHome, SETUP_PROJECT_NAME } = await import("../dist/setup/seed.js");
+const { seedSetupHome, seedSetupAgentRename, SETUP_PROJECT_NAME, SETUP_AGENT_NAME } = await import("../dist/setup/seed.js");
+const now = new Date().toISOString();
 const { isLoomDev } = await import("../dist/paths.js");
 
 try {
@@ -44,8 +45,8 @@ try {
   const dbA = new Db(path.join(tmpHome, "default.db"));
   seedDefaultProfiles(dbA);
   const seededSetupA = seedSetupHome(dbA);
-  check("(1) seedSetupHome seeds the Getting Started home + Setup Assistant agent (ungated)",
-    seededSetupA.includes(`project:${SETUP_PROJECT_NAME}`) && seededSetupA.includes("agent:Setup Assistant"));
+  check("(1) seedSetupHome seeds the Getting Started home + Platform operator agent (ungated)",
+    seededSetupA.includes(`project:${SETUP_PROJECT_NAME}`) && seededSetupA.includes(`agent:${SETUP_AGENT_NAME}`));
   // The platform home must NOT seed in default mode (proves my change didn't accidentally ungate it).
   const seededPlatA = seedPlatformHome(dbA);
   check("(1) seedPlatformHome still no-ops by default (platform stays dev-gated)", seededPlatA.length === 0);
@@ -58,8 +59,8 @@ try {
   const agentsA = dbA.listAgents(setupProject.id);
   check("(1) exactly ONE agent seeded into the setup home", agentsA.length === 1);
   const assistant = agentsA[0];
-  check("(1) the agent is the Setup Assistant with a NON-empty default startupPrompt",
-    assistant?.name === "Setup Assistant" && typeof assistant.startupPrompt === "string" && assistant.startupPrompt.length > 200);
+  check("(1) the agent is the Platform operator with a NON-empty default startupPrompt",
+    assistant?.name === SETUP_AGENT_NAME && assistant?.name === "Platform" && typeof assistant.startupPrompt === "string" && assistant.startupPrompt.length > 200);
   check("(1) the agent prompt references its /setup-assistant doctrine skill", assistant.startupPrompt.includes("/setup-assistant"));
   const profById = new Map(dbA.listProfiles().map((p) => [p.id, p]));
   check("(1) the agent is bound to the bundled 'Setup Assistant' profile (role setup)",
@@ -97,7 +98,7 @@ try {
   check("(3) name-scoped hasReservedProjectNamed(platform) is FALSE before its seed",
     dbB.hasReservedProjectNamed(PLATFORM_PROJECT_NAME) === false);
   const platB = seedPlatformHome(dbB);
-  check("(2) setup home seeded its project + agent", setupB.includes(`project:${SETUP_PROJECT_NAME}`) && setupB.includes("agent:Setup Assistant"));
+  check("(2) setup home seeded its project + agent", setupB.includes(`project:${SETUP_PROJECT_NAME}`) && setupB.includes(`agent:${SETUP_AGENT_NAME}`));
   check("(2) platform home STILL seeds despite the setup home already existing (name-scoped gate)",
     platB.includes(`project:${PLATFORM_PROJECT_NAME}`) && platB.includes("agent:Platform Lead") && platB.includes("agent:Platform Auditor"));
 
@@ -131,14 +132,52 @@ try {
     dbC.hasReservedProjectNamed(SETUP_PROJECT_NAME) === false);
   const setupC = seedSetupHome(dbC);
   check("(3) setup home STILL seeds despite the platform home already existing (reverse order)",
-    setupC.includes(`project:${SETUP_PROJECT_NAME}`) && setupC.includes("agent:Setup Assistant"));
+    setupC.includes(`project:${SETUP_PROJECT_NAME}`) && setupC.includes(`agent:${SETUP_AGENT_NAME}`));
   check("(3) both reserved homes present after reverse-order seeding", dbC.listAllProjects().filter((p) => p.reserved).length === 2);
   dbC.close();
+
+  // ===================== (4) A2 guarded one-shot rename migration (existing installs) =====================
+  // seedSetupHome no-ops once the home exists, so installs seeded BEFORE the Setup Assistant → "Platform"
+  // rebrand keep the OLD operator name. seedSetupAgentRename backfills the single reserved-home operator
+  // agent on boot — and ONLY that one: never a user-renamed agent, never a non-reserved-home agent.
+  const dbD = new Db(path.join(tmpHome, "rename.db"));
+  seedDefaultProfiles(dbD);
+  seedSetupHome(dbD);
+  const homeD = dbD.getReservedProjectByName(SETUP_PROJECT_NAME);
+  const setupProfileId = dbD.listProfiles().find((p) => p.name === "Setup Assistant").id;
+  // Simulate a pre-rebrand install: rename the seeded operator agent back to the OLD literal.
+  const opD = dbD.listAgents(homeD.id)[0];
+  dbD.updateAgent(opD.id, { name: "Setup Assistant" });
+  // A user-renamed operator agent in the SAME home — must be left alone (only the exact old literal renames).
+  dbD.insertAgent({ id: "user-renamed", projectId: homeD.id, name: "My Helper", startupPrompt: "x", position: 1, profileId: setupProfileId, endpoint: false, ioSchema: null });
+  // A NON-reserved project with an agent that happens to be named "Setup Assistant" — must be left alone.
+  dbD.insertProject({ id: "ord-rn", name: "RealWork", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  dbD.insertAgent({ id: "ord-agent", projectId: "ord-rn", name: "Setup Assistant", startupPrompt: "x", position: 0, profileId: setupProfileId, endpoint: false, ioSchema: null });
+
+  const renamed = seedSetupAgentRename(dbD);
+  check("(4) migration renames the legacy 'Setup Assistant' operator agent → 'Platform'",
+    renamed === SETUP_AGENT_NAME && dbD.getAgent(opD.id)?.name === SETUP_AGENT_NAME);
+  check("(4) migration leaves a user-renamed agent ('My Helper') in the SAME home untouched",
+    dbD.getAgent("user-renamed")?.name === "My Helper");
+  check("(4) migration leaves a NON-reserved-home 'Setup Assistant' agent untouched",
+    dbD.getAgent("ord-agent")?.name === "Setup Assistant");
+  check("(4) migration is idempotent — a second run finds no legacy literal → no-op (null)",
+    seedSetupAgentRename(dbD) === null);
+  dbD.close();
+
+  // Fresh install: the seed already created "Platform", so the migration no-ops (nothing to backfill).
+  const dbE = new Db(path.join(tmpHome, "fresh-rename.db"));
+  seedDefaultProfiles(dbE);
+  seedSetupHome(dbE);
+  const homeE = dbE.getReservedProjectByName(SETUP_PROJECT_NAME);
+  check("(4) fresh install seeds operator as 'Platform' AND the migration no-ops on it",
+    dbE.listAgents(homeE.id)[0].name === SETUP_AGENT_NAME && seedSetupAgentRename(dbE) === null);
+  dbE.close();
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle on Windows) */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the ungated 'Getting Started' setup home + Setup Assistant agent seed for every user (no LOOM_DEV gate), idempotently across reboots, and COEXIST with the dev-only platform home: the name-scoped reserved-project gate lets each home seed regardless of the other, while platform-home seeding is unchanged (still 2 agents)."
+  ? "\n✅ ALL PASS — the ungated 'Getting Started' setup home + 'Platform' operator agent seed for every user (no LOOM_DEV gate), idempotently across reboots, COEXIST with the dev-only platform home (name-scoped gate; platform seeding unchanged at 2 agents), and the A2 guarded rename backfills a pre-rebrand 'Setup Assistant' operator → 'Platform' while leaving user-renamed + non-reserved-home agents untouched."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
