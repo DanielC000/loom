@@ -1255,6 +1255,15 @@ export class Db {
     const r = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as Row | undefined;
     return r ? toSession(r) : undefined;
   }
+  /**
+   * Sessions whose id STARTS WITH `prefix` — across all projects and incl. archived, like getSession
+   * (an archived row is still addressable by id-prefix). Powers transcript_read's id-prefix resolution:
+   * the caller treats exactly 1 match as a hit and >1 as ambiguous. Session ids are UUIDs (hex + hyphens,
+   * no `%`/`_`), so the prefix is a literal LIKE pattern with no wildcard-escaping needed.
+   */
+  findSessionsByIdPrefix(prefix: string): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE id LIKE ? ORDER BY id").all(`${prefix}%`) as Row[]).map(toSession);
+  }
   /** All sessions across all projects, enriched with project/agent names (global grid). */
   listAllSessions(): SessionListItem[] {
     const rows = this.db.prepare(

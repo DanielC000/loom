@@ -49,6 +49,7 @@ const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { Scheduler } = await import("../dist/orchestration/scheduler.js");
 const { engineTranscriptPath, archivedTranscriptPath } = await import("../dist/sessions/transcript.js");
+const { DEFAULT_SESSION_SUMMARY_CAP } = await import("../dist/mcp/sessionView.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
@@ -85,6 +86,14 @@ seedSession("LIVE1", null, { engineSessionId: "eng-live-1" });
 // An ARCHIVED session with a snapshot on disk (transcript_read archived path + scope:"archived").
 seedSession("ARCH1", null, { processState: "exited" });
 db.archiveSession("ARCH1"); // stamp archived_at (insertSession doesn't write it — prod archives this way)
+// A LONG-EXITED (finished, NOT archived) session — the row that overflowed the feed. Default state:"live"
+// must DROP it from list_sessions; state:"exited"/"all" opt it back in.
+seedSession("WEXIT", null, { processState: "exited" });
+// id-PREFIX resolution fixtures (transcript_read). One UUID-shaped id with an engine transcript so a
+// UNIQUE 8-char prefix resolves to its turns; two ids sharing an 8-char prefix so that prefix is AMBIGUOUS.
+seedSession("abcd1234-0000-4000-8000-000000000001", null, { engineSessionId: "eng-prefix-1" });
+seedSession("dupe5678-0000-4000-8000-000000000001", null);
+seedSession("dupe5678-0000-4000-8000-000000000002", null);
 
 // Write the LIVE transcript JSONL where readTranscript(cwd, engineId) looks (sandboxed ~/.claude/projects).
 const liveFile = engineTranscriptPath(repo, "eng-live-1");
@@ -99,6 +108,12 @@ fs.mkdirSync(path.dirname(archFile), { recursive: true });
 fs.writeFileSync(archFile, [
   JSON.stringify({ type: "user", message: { content: "vague skill instruction caused rework" } }),
   JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "archived turn" }] } }),
+].join("\n") + "\n");
+// The prefix-resolution session's engine transcript (so a unique 8-char prefix resolves to real turns).
+const prefixFile = engineTranscriptPath(repo, "eng-prefix-1");
+fs.mkdirSync(path.dirname(prefixFile), { recursive: true });
+fs.writeFileSync(prefixFile, [
+  JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "resolved via id-prefix" }] } }),
 ].join("\n") + "\n");
 
 // Fake pty: capture createPty (spawn) calls; no real claude.
@@ -175,6 +190,44 @@ try {
     Array.isArray(archTurns) && archTurns.length === 2 && /vague skill instruction/.test(archTurns[0].text));
   const noEng = await call("transcript_read", { projectId: "pOrd", sessionId: "M" });
   check("(b) transcript_read: a session with no engine transcript → [] (not an error)", Array.isArray(noEng) && noEng.length === 0);
+
+  // (b3) list_sessions DEFAULT is BOUNDED — capped + excludes long-exited (the overflow fix). ----------
+  // Default (scope "all", state "live") DROPS the long-exited-but-unarchived WEXIT, KEEPS live LIVE1 and
+  // KEEPS archived ARCH1 (archived rows are exempt from the state filter); state:"exited"/"all" opt WEXIT in.
+  const defState = await call("list_sessions", {});
+  check("(b3) list_sessions default: DROPS the long-exited (finished-but-unarchived) WEXIT",
+    !defState.some((s) => s.id === "WEXIT"));
+  check("(b3) list_sessions default: KEEPS live (LIVE1) and archived (ARCH1) — archived exempt from state filter",
+    defState.some((s) => s.id === "LIVE1") && defState.some((s) => s.id === "ARCH1"));
+  const exitedState = await call("list_sessions", { state: "exited" });
+  check("(b3) list_sessions state:\"exited\": opts the long-exited WEXIT back in",
+    exitedState.some((s) => s.id === "WEXIT"));
+  const allState = await call("list_sessions", { state: "all" });
+  check("(b3) list_sessions state:\"all\": includes BOTH WEXIT and LIVE1",
+    allState.some((s) => s.id === "WEXIT") && allState.some((s) => s.id === "LIVE1"));
+  // The cap: insert > DEFAULT_SESSION_SUMMARY_CAP live sessions, then a no-explicit-limit default read is
+  // bounded to the cap (a heavy `full:true` opts past it; an explicit limit pages further).
+  for (let i = 0; i < DEFAULT_SESSION_SUMMARY_CAP + 5; i++) seedSession(`BULK-${i}`, null);
+  const capped = await call("list_sessions", {});
+  check(`(b3) list_sessions default is CAPPED at ${DEFAULT_SESSION_SUMMARY_CAP} rows (got ${capped.length})`,
+    capped.length === DEFAULT_SESSION_SUMMARY_CAP);
+  const pagedPast = await call("list_sessions", { limit: DEFAULT_SESSION_SUMMARY_CAP + 50 });
+  check("(b3) an explicit limit pages PAST the default cap",
+    pagedPast.length > DEFAULT_SESSION_SUMMARY_CAP);
+
+  // (b4) transcript_read RESOLVES a unique id-prefix; a too-short/ambiguous prefix → DISTINCT error. -----
+  const byPrefix = await call("transcript_read", { projectId: "pOrd", sessionId: "abcd1234" });
+  check("(b4) transcript_read: a UNIQUE 8-char id-prefix resolves to the session's turns",
+    Array.isArray(byPrefix) && byPrefix.length === 1 && /resolved via id-prefix/.test(byPrefix[0].text));
+  const ambiguous = await call("transcript_read", { projectId: "pOrd", sessionId: "dupe5678" });
+  check("(b4) transcript_read: an AMBIGUOUS prefix → distinct error (NOT \"session not found\")",
+    typeof ambiguous.error === "string" && /full session UUID/.test(ambiguous.error) && ambiguous.error !== "session not found");
+  const tooShort = await call("transcript_read", { projectId: "pOrd", sessionId: "abc" });
+  check("(b4) transcript_read: a TOO-SHORT prefix → distinct error (NOT \"session not found\")",
+    typeof tooShort.error === "string" && /full session UUID/.test(tooShort.error) && tooShort.error !== "session not found");
+  const reallyMissing = await call("transcript_read", { projectId: "pOrd", sessionId: "ffffffff-dead-beef-0000-000000000000" });
+  check("(b4) transcript_read: a long, genuinely-unknown id → generic \"session not found\" (still distinct)",
+    reallyMissing.error === "session not found");
 
   // audit_file_finding → files a structured task on the RESERVED Platform board.
   const tasksBefore = db.listTasks("pHome").length;
