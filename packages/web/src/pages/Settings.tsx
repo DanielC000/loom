@@ -81,6 +81,7 @@ function ConfigEditor({ project }: { project: Project }) {
   const [maxManagers, setMaxManagers] = useState(numStr(ov.orchestration?.maxConcurrentManagers));
   const [recycle, setRecycle] = useState(numStr(ov.orchestration?.recycleAtContextRatio));
   const [idleNudge, setIdleNudge] = useState(numStr(ov.orchestration?.idleNudgeMinutes));
+  const [stuckWorker, setStuckWorker] = useState(numStr(ov.orchestration?.stuckWorkerMinutes));
   const [maxUnanswered, setMaxUnanswered] = useState(numStr(ov.orchestration?.maxUnansweredNudges));
   const [idleSnooze, setIdleSnooze] = useState(numStr(ov.orchestration?.idleDefaultSnoozeMinutes));
   const [scheduler, setScheduler] = useState(triStr(ov.orchestration?.schedulerEnabled));
@@ -118,6 +119,7 @@ function ConfigEditor({ project }: { project: Project }) {
     applyNum(orch, "maxConcurrentManagers", maxManagers);
     applyNum(orch, "recycleAtContextRatio", recycle);
     applyNum(orch, "idleNudgeMinutes", idleNudge);
+    applyNum(orch, "stuckWorkerMinutes", stuckWorker);
     applyNum(orch, "maxUnansweredNudges", maxUnanswered);
     applyNum(orch, "idleDefaultSnoozeMinutes", idleSnooze);
     if (scheduler !== "inherit") orch.schedulerEnabled = scheduler === "true"; else delete orch.schedulerEnabled;
@@ -188,6 +190,7 @@ function ConfigEditor({ project }: { project: Project }) {
           <NumField label="Max managers" value={maxManagers} set={setMaxManagers} effective={resolved.orchestration.maxConcurrentManagers} def={defaults.orchestration.maxConcurrentManagers} />
           <NumField label="Recycle @ ctx ratio" value={recycle} set={setRecycle} effective={resolved.orchestration.recycleAtContextRatio} def={defaults.orchestration.recycleAtContextRatio} />
           <NumField label="Idle nudge (min)" value={idleNudge} set={setIdleNudge} effective={resolved.orchestration.idleNudgeMinutes} def={defaults.orchestration.idleNudgeMinutes} />
+          <NumField label="Worker stuck (min)" value={stuckWorker} set={setStuckWorker} effective={resolved.orchestration.stuckWorkerMinutes} def={defaults.orchestration.stuckWorkerMinutes} note="0 disables the stuck-worker watchdog" />
           <NumField label="Max unanswered nudges" value={maxUnanswered} set={setMaxUnanswered} effective={resolved.orchestration.maxUnansweredNudges} def={defaults.orchestration.maxUnansweredNudges} />
           <NumField label="Idle snooze (min)" value={idleSnooze} set={setIdleSnooze} effective={resolved.orchestration.idleDefaultSnoozeMinutes} def={defaults.orchestration.idleDefaultSnoozeMinutes} />
         </div>
@@ -406,13 +409,14 @@ function effHint(v: unknown): string {
 
 // `effective` = the current resolved value (shown as the "effective:" hint); `def` = the platform
 // default (shown in the "inherit (…)" placeholder, i.e. what blanking the field reverts to).
-function NumField({ label, value, set, effective, def }:
-  { label: string; value: string; set: (v: string) => void; effective: number; def: number }) {
+function NumField({ label, value, set, effective, def, note }:
+  { label: string; value: string; set: (v: string) => void; effective: number; def: number; note?: string }) {
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={fieldLabel}>{label}</span>
       <Input value={value} onChange={(e) => set(e.target.value)} inputMode="decimal" placeholder={`inherit (${def})`} />
       <Hint>{effHint(effective)}</Hint>
+      {note && <Hint>{note}</Hint>}
     </label>
   );
 }
