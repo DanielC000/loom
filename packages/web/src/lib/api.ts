@@ -86,6 +86,33 @@ async function putErr<T>(url: string, body: unknown): Promise<T> {
   return r.json() as Promise<T>;
 }
 
+// One live worktree session blocking a repoPath rebind (the daemon's shared rebind guard). Surfaced
+// in the Settings UI so the user can name + stop them before retrying.
+export interface LiveWorktreeSession { sessionId: string; branch: string | null; worktreePath: string; }
+// An Error from a project PATCH that, on the live-worktree rebind refusal, also carries the named
+// liveSessions[] the daemon returned alongside `{ error }` — so the UI lists them, not just the message.
+export interface ProjectPatchError extends Error { liveSessions?: LiveWorktreeSession[]; }
+
+// PATCH /api/projects/:id (the human STRUCTURAL path — name / vaultPath / repoPath rebind). Surfaces the
+// server's `{ error }` body verbatim (non-repo / non-empty validation) AND attaches the live-worktree
+// refusal's `liveSessions[]` to the thrown Error so the rebind UI can list the sessions to stop.
+async function patchProject(url: string, body: unknown): Promise<Project> {
+  const r = await fetch(url, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) {
+    let msg = `${url} -> ${r.status}`;
+    let liveSessions: LiveWorktreeSession[] | undefined;
+    try {
+      const j = (await r.json()) as { error?: string; liveSessions?: LiveWorktreeSession[] };
+      if (j?.error) msg = j.error;
+      if (Array.isArray(j?.liveSessions)) liveSessions = j.liveSessions;
+    } catch { /* non-JSON body */ }
+    const e = new Error(msg) as ProjectPatchError;
+    if (liveSessions) e.liveSessions = liveSessions;
+    throw e;
+  }
+  return r.json() as Promise<Project>;
+}
+
 // PATCH that surfaces the server's JSON `{ error }` body as the thrown message — the config schema is
 // strict zod, so a rejected override comes back 400 with a readable reason the Settings UI shows verbatim.
 async function patch<T>(url: string, body: unknown): Promise<T> {
@@ -126,9 +153,11 @@ export const api = {
   // delete). DESTRUCTIVE, loopback-only — there is NO agent MCP path to any of these (same posture as
   // session archive/delete + gateCommand). All surface the server's `{ error }` body verbatim (via
   // *Err) so the reserved-home + live-session ("stop the fleet first") guards show inline. ---
-  // STRUCTURAL edit (name / vaultPath) — distinct from updateProjectConfig (the validated machine config).
-  updateProject: (id: string, body: { name?: string; vaultPath?: string }) =>
-    patch<Project>(`/api/projects/${id}`, body),
+  // STRUCTURAL edit (name / vaultPath / repoPath rebind) — distinct from updateProjectConfig (the
+  // validated machine config). A repoPath rebind goes through the daemon's shared guard (isGitRepo +
+  // live-worktree refusal); patchProject surfaces both the `{ error }` reason AND the named liveSessions[].
+  updateProject: (id: string, body: { name?: string; vaultPath?: string; repoPath?: string }) =>
+    patchProject(`/api/projects/${id}`, body),
   // Soft-archive (reversible "delete"). 400s on the reserved home or a live fleet (surfaced via delErr).
   archiveProject: (id: string) => delErr<{ ok: boolean }>(`/api/projects/${id}`),
   // Soft-archived projects (the "Archived" section) → restore / permanent-delete.

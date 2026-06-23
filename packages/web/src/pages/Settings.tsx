@@ -8,7 +8,7 @@ import {
   type PlatformConfig,
   type PlatformConfigOverride,
 } from "@loom/shared";
-import { api } from "../lib/api";
+import { api, type ProjectPatchError } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Panel, Button, Input, Select, SectionLabel } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
@@ -29,7 +29,12 @@ export default function Settings() {
       <div>
         <SectionLabel>Project Settings</SectionLabel>
         {project ? (
-          <ConfigEditor key={project.id} project={project} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {/* Repository binding — its OWN structural-PATCH save (the repoPath rebind guard),
+                independent of the project-config Save inside ConfigEditor below. */}
+            <RepoPathEditor key={`repo-${project.id}`} project={project} />
+            <ConfigEditor key={project.id} project={project} />
+          </div>
         ) : (
           <Panel>
             <p style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 13, margin: 0 }}>
@@ -60,6 +65,85 @@ const ta = {
 
 function parseLines(text: string): string[] {
   return text.split("\n").map((l) => l.trim()).filter(Boolean);
+}
+
+// Repository binding — the one place a project's `repoPath` changes after creation. Distinct from the
+// machine config (ConfigEditor below): it PATCHes the human STRUCTURAL path (api.updateProject), fronted
+// by the daemon's shared rebind guard — isGitRepo validation (a non-repo 400s) + a refusal while any live
+// worktree session exists (returns the named liveSessions[]). Rebinding repoints ALL of the project's git
+// operations, so the field carries a loud warning and both rejection paths surface INLINE (no alert): a
+// non-repo shows the reason, the live-worktree refusal shows the reason + lists the sessions to stop —
+// neither ever looks saved. Keyed by project id so a project switch re-seeds the field.
+function RepoPathEditor({ project }: { project: Project }) {
+  const qc = useQueryClient();
+  const [repoPath, setRepoPath] = useState(project.repoPath);
+  const trimmed = repoPath.trim();
+  // Dirty only when the (non-empty) entry differs from the bound path — an empty field can't save.
+  const dirty = trimmed !== "" && trimmed !== project.repoPath;
+
+  const save = useMutation({
+    mutationFn: () => api.updateProject(project.id, { repoPath: trimmed }),
+    // Surface the git-repo rejection + live-worktree refusal INLINE (below) — skip the global alert.
+    meta: { inlineError: true },
+    onSuccess: (updated) => {
+      // Patch the cached projects list so the header + this field re-read the persisted repoPath; the
+      // re-read makes `dirty` false (entry === bound path) → the row flips to "saved".
+      qc.setQueryData<Project[]>(["projects"], (prev) =>
+        prev ? prev.map((p) => (p.id === updated.id ? updated : p)) : prev,
+      );
+      qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+
+  // The live-worktree refusal carries the named sessions to stop (attached by api.patchProject).
+  const liveSessions = (save.error as ProjectPatchError | null)?.liveSessions;
+
+  return (
+    <Panel>
+      <SectionLabel>Repository Binding</SectionLabel>
+      <p style={{ color: color.amber, fontSize: 12, margin: "0 0 12px", fontFamily: font.mono, lineHeight: 1.5 }}>
+        ⚠ Rebinding repoints <strong>ALL</strong> of this project's git operations — worktrees, diffs,
+        merges, branches, log — to the new repository. Change it only when you mean to move the project to
+        a different checkout.
+      </p>
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Repository path</span>
+        <Input value={repoPath} onChange={(e) => setRepoPath(e.target.value)} spellCheck={false}
+          placeholder="/path/to/the/git/checkout" />
+        <Hint>must be an existing git repository · currently bound to <span style={{ color: color.textDim }}>{project.repoPath}</span></Hint>
+      </label>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12 }}>
+        <Button variant="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
+          {save.isPending ? "Saving…" : "Rebind"}
+        </Button>
+        {dirty
+          ? <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>unsaved changes</span>
+          : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
+        <span style={{ flex: 1 }} />
+        {save.isError && (
+          <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
+            {(save.error as Error).message}
+          </span>
+        )}
+      </div>
+
+      {/* Live-worktree refusal: list the sessions the user must stop first (the write did NOT land). */}
+      {liveSessions && liveSessions.length > 0 && (
+        <div style={{ marginTop: 10, padding: 10, background: color.panel2, border: `1px solid ${color.red}`, borderRadius: 6 }}>
+          <Hint>stop these live worktree session(s) first, then retry:</Hint>
+          <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: color.text, fontFamily: font.mono, fontSize: 12, lineHeight: 1.6 }}>
+            {liveSessions.map((s) => (
+              <li key={s.sessionId}>
+                <span style={{ color: color.text }}>{s.sessionId}</span>
+                {s.branch && <span style={{ color: color.textMuted }}> · {s.branch}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </Panel>
+  );
 }
 
 function ConfigEditor({ project }: { project: Project }) {
