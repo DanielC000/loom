@@ -56,6 +56,18 @@ try {
   check("(2) the seeded row has role 'setup' + a non-empty description blurb",
     seededRow?.role === "setup" && typeof seededRow?.description === "string" && seededRow.description.length > 0);
 
+  // --- (2b) the bundled Workspace Auditor rig (B4) also seeds UNGATED (role workspace-auditor is NOT a
+  //     platform-exclusive role → isPlatformProfile() is false → CORE-seeds for every loomctl user) -------
+  const bundledAuditor = BUNDLED_PROFILES.find((b) => b.name === "Workspace Auditor");
+  check("(2b) BUNDLED_PROFILES contains a 'Workspace Auditor' with role 'workspace-auditor'",
+    !!bundledAuditor && bundledAuditor.role === "workspace-auditor");
+  check("(2b) the bundled Workspace Auditor mirrors Platform-audit: skills null (doctrine via prompt) + has an icon",
+    bundledAuditor.skills === null && typeof bundledAuditor.icon === "string");
+  check("(2b) seed (LOOM_DEV unset) INCLUDES 'Workspace Auditor' (ungated CORE seed)", seeded.includes("Workspace Auditor"));
+  const auditorRow = byName.get("Workspace Auditor");
+  check("(2b) the seeded Workspace Auditor row has role 'workspace-auditor' + a non-empty description",
+    auditorRow?.role === "workspace-auditor" && typeof auditorRow?.description === "string" && auditorRow.description.length > 0);
+
   // --- (3) NO platform-gate regression: the two platform profiles still don't seed by default ----
   check("(3) Platform-lead is NOT seeded when LOOM_DEV is unset", !byName.has("Platform-lead"));
   check("(3) Platform-audit is NOT seeded when LOOM_DEV is unset", !byName.has("Platform-audit"));

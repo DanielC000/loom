@@ -9,7 +9,7 @@ import { snapshotTranscript } from "./sessions/transcript.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles } from "./profiles/seed.js";
 import { seedPlatformHome } from "./platform/seed.js";
-import { seedSetupHome, seedSetupAgentRename } from "./setup/seed.js";
+import { seedSetupHome, seedSetupAgentRename, seedSetupAuditorAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
@@ -68,6 +68,14 @@ async function main(): Promise<void> {
   // or non-reserved agent. No-ops on fresh installs (the seed already created "Platform").
   const renamedSetupAgent = seedSetupAgentRename(db);
   if (renamedSetupAgent) console.log(`[boot] rebrand: renamed legacy setup agent → ${renamedSetupAgent}`);
+  // End-User Platform tier B4: seed the bundled Workspace Auditor agent into the SAME reserved "Getting
+  // Started" home as the operator (one home, two agents). A SEPARATE boot-time backfill — NOT folded into
+  // seedSetupHome, which no-ops the whole seed once the home exists (gotcha #2) and so would never give an
+  // EXISTING install the auditor. seed-if-absent BY AGENT-NAME within the reserved home: backfills upgrades
+  // AND covers fresh installs (operator from seedSetupHome above + auditor here, same boot), idempotent,
+  // never clobbers a user-renamed agent. The operator still resolves by SETUP_AGENT_NAME (distinct name).
+  const seededAuditor = seedSetupAuditorAgent(db);
+  if (seededAuditor) console.log(`[boot] seeded workspace auditor agent: ${seededAuditor}`);
   // Platform Manager P1: seed the reserved "Loom Platform" home + its Platform Lead / Platform Auditor
   // agents, seed-if-absent (idempotent; runs AFTER seedDefaultProfiles so the bundled platform profiles
   // exist to assign). Hidden from the project picker (db.listProjects), still Mission-Control visible.

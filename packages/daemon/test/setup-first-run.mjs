@@ -45,7 +45,7 @@ const { PtyHost } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
-const { seedSetupHome } = await import("../dist/setup/seed.js");
+const { seedSetupHome, seedSetupAuditorAgent, SETUP_AGENT_NAME, SETUP_AUDITOR_AGENT_NAME } = await import("../dist/setup/seed.js");
 const { maybeAutoLaunchSetup, SETUP_FIRST_RUN_KEY } = await import("../dist/setup/first-run.js");
 
 const now = new Date().toISOString();
@@ -133,6 +133,27 @@ try {
   check("(6) agent-missing → marker NOT stamped (a later boot can still auto-launch once seeded)", dbBare.getMeta(SETUP_FIRST_RUN_KEY) === undefined);
   check("(6) agent-missing → no pty spawned", host.spawned.length === spawnedBefore6);
   dbBare.close();
+
+  // ===== (7) B4 — first-run resolves the OPERATOR with TWO agents in the home (auditor must not be mistaken
+  //        for the operator). The home now holds 'Platform' (operator) + 'Workspace Auditor'; maybeAutoLaunchSetup
+  //        resolves the operator by exact SETUP_AGENT_NAME, so it still launches the operator, not the auditor. =====
+  const dbTwo = new Db(path.join(tmpHome, "two-agents.db"));
+  seedDefaultProfiles(dbTwo);
+  seedSetupHome(dbTwo);
+  const seededAud = seedSetupAuditorAgent(dbTwo); // the 2nd agent in the same reserved home
+  const homeTwo = dbTwo.getReservedProjectByName("Getting Started");
+  check("(7-pre) the home holds BOTH the operator and the auditor agent",
+    seededAud === SETUP_AUDITOR_AGENT_NAME && dbTwo.listAgents(homeTwo.id).length === 2);
+  const hostTwo = new SeamHost(events);
+  const r7 = maybeAutoLaunchSetup(dbTwo, new SessionService(dbTwo, hostTwo, new OrchestrationControl()));
+  const launchedAgentId = r7.launched ? dbTwo.getSession(r7.sessionId)?.agentId : undefined;
+  const operatorTwo = dbTwo.listAgents(homeTwo.id).find((a) => a.name === SETUP_AGENT_NAME);
+  const auditorTwo = dbTwo.listAgents(homeTwo.id).find((a) => a.name === SETUP_AUDITOR_AGENT_NAME);
+  check("(7) two agents present → first-run STILL launches the OPERATOR ('Platform'), not the auditor",
+    r7.launched === true && launchedAgentId === operatorTwo.id && launchedAgentId !== auditorTwo.id);
+  check("(7) the auto-launched session is a 'setup' session (operator role, not the auditor)",
+    hostTwo.spawned.length === 1 && hostTwo.spawned.at(-1).role === "setup");
+  dbTwo.close();
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }

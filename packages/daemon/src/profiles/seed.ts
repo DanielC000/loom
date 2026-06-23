@@ -101,6 +101,26 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
     icon: "🧭",
   },
   {
+    // CORE product, UNGATED — the end-user Platform tier's SUGGEST-ONLY reviewer, the de-privileged
+    // user-workspace twin of Platform-audit. Role "workspace-auditor" is NOT a platform-exclusive role, so
+    // isPlatformProfile() returns false and this seeds for every loomctl user (like Setup Assistant). The
+    // role here is COSMETIC for routing — the session role is LOCKED to "workspace-auditor" by the future
+    // startWorkspaceAuditor (B5), never by this profile (a profile carrying it is dropped to plain — B1
+    // GUARD 3a). EXACT Platform-audit mirror: `skills: null` (deliver the standard set — the house pattern
+    // for bundled specialist rigs), the workspace-audit doctrine (B2) is carried by the seeded agent's
+    // `/workspace-audit` startup prompt, NOT a restricted skill list (skills are not the trust boundary —
+    // the role-locked loom-user-audit MCP surface is). The agent itself is seeded into the reserved
+    // "Getting Started" home by seedSetupAuditorAgent (setup/seed.ts), alongside the operator (B4).
+    name: "Workspace Auditor",
+    role: "workspace-auditor",
+    description:
+      "Workspace Auditor rig: the on-demand, read-mostly, SUGGEST-ONLY reviewer of the user's OWN workspace. Scans the user's recent session transcripts for vague/ambiguous instructions in their own agent prompts and skills, and recurring prompts worth saving as presets — filing improvement suggestions as board cards on the user's home and emitting preset suggestions, never auto-applying. De-privileged twin of the dev Platform-audit; it does NOT hunt Loom bugs.",
+    allowDelta: [],
+    skills: null,
+    model: null,
+    icon: "🔬",
+  },
+  {
     name: "Platform-lead",
     role: "platform",
     description:

@@ -35,7 +35,7 @@ delete process.env.LOOM_DEV;           // ensure phase 1 sees the default-OFF st
 const { Db } = await import("../dist/db.js");
 const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
 const { seedPlatformHome, PLATFORM_PROJECT_NAME } = await import("../dist/platform/seed.js");
-const { seedSetupHome, seedSetupAgentRename, SETUP_PROJECT_NAME, SETUP_AGENT_NAME } = await import("../dist/setup/seed.js");
+const { seedSetupHome, seedSetupAgentRename, seedSetupAuditorAgent, SETUP_PROJECT_NAME, SETUP_AGENT_NAME, SETUP_AUDITOR_AGENT_NAME } = await import("../dist/setup/seed.js");
 const now = new Date().toISOString();
 const { isLoomDev } = await import("../dist/paths.js");
 
@@ -173,11 +173,87 @@ try {
   check("(4) fresh install seeds operator as 'Platform' AND the migration no-ops on it",
     dbE.listAgents(homeE.id)[0].name === SETUP_AGENT_NAME && seedSetupAgentRename(dbE) === null);
   dbE.close();
+
+  // ===================== (5) B4 — the bundled Workspace Auditor agent (one home, TWO agents) =====================
+  // seedSetupAuditorAgent seeds a SECOND agent into the SAME reserved "Getting Started" home, seed-if-absent
+  // BY AGENT-NAME — a separate boot-time backfill (NOT folded into seedSetupHome, which no-ops once the home
+  // exists). It must: backfill EXISTING installs (home + operator already there → add the auditor), cover
+  // FRESH installs (operator + auditor on one boot), be idempotent (present → no-op), never clobber a
+  // user-renamed agent, and leave the OPERATOR resolvable by SETUP_AGENT_NAME with both agents present.
+
+  // (5a) FRESH install: seedSetupHome (operator only) THEN seedSetupAuditorAgent (auditor) on the same boot.
+  const dbF = new Db(path.join(tmpHome, "auditor-fresh.db"));
+  seedDefaultProfiles(dbF);
+  seedSetupHome(dbF);
+  const homeF = dbF.getReservedProjectByName(SETUP_PROJECT_NAME);
+  check("(5a) before the auditor seed the fresh home has ONLY the operator agent",
+    dbF.listAgents(homeF.id).length === 1 && dbF.listAgents(homeF.id)[0].name === SETUP_AGENT_NAME);
+  const seededAudF = seedSetupAuditorAgent(dbF);
+  check("(5a) seedSetupAuditorAgent seeds the 'Workspace Auditor' agent on a fresh install", seededAudF === SETUP_AUDITOR_AGENT_NAME);
+  const agentsF = dbF.listAgents(homeF.id);
+  check("(5a) the fresh home now holds BOTH agents — operator 'Platform' + 'Workspace Auditor'",
+    agentsF.length === 2 && agentsF.some((a) => a.name === SETUP_AGENT_NAME) && agentsF.some((a) => a.name === SETUP_AUDITOR_AGENT_NAME));
+  const profByIdF = new Map(dbF.listProfiles().map((p) => [p.id, p]));
+  const operatorF = agentsF.find((a) => a.name === SETUP_AGENT_NAME);
+  const auditorF = agentsF.find((a) => a.name === SETUP_AUDITOR_AGENT_NAME);
+  check("(5a) operator stays bound to the setup-role 'Setup Assistant' profile (unchanged by the 2nd agent)",
+    profByIdF.get(operatorF.profileId)?.name === "Setup Assistant" && profByIdF.get(operatorF.profileId)?.role === "setup");
+  check("(5a) auditor is bound to the bundled 'Workspace Auditor' profile (role workspace-auditor)",
+    profByIdF.get(auditorF.profileId)?.name === "Workspace Auditor" && profByIdF.get(auditorF.profileId)?.role === "workspace-auditor");
+  check("(5a) the auditor's default prompt loads its /workspace-audit doctrine skill + is non-empty",
+    typeof auditorF.startupPrompt === "string" && auditorF.startupPrompt.includes("/workspace-audit") && auditorF.startupPrompt.length > 200);
+  check("(5a) the operator stays FIRST in the home (auditor seeded after it, position-ordered)",
+    dbF.listAgents(homeF.id)[0].name === SETUP_AGENT_NAME);
+  // Idempotent: a second call no-ops, and a re-seed on a fresh DB handle (next boot) also no-ops.
+  check("(5a) second seedSetupAuditorAgent in the same process no-ops (returns null)", seedSetupAuditorAgent(dbF) === null);
+  check("(5a) still exactly TWO agents after the idempotent re-run", dbF.listAgents(homeF.id).length === 2);
+  dbF.close();
+  const dbF2 = new Db(path.join(tmpHome, "auditor-fresh.db")); // reopen = the NEXT boot
+  check("(5a) re-seed on a fresh DB handle (second boot) no-ops AND keeps exactly two agents",
+    seedSetupAuditorAgent(dbF2) === null && dbF2.listAgents(homeF.id).length === 2);
+  dbF2.close();
+
+  // (5b) EXISTING install (the gotcha #2 backfill): a home seeded BEFORE B4 has ONLY the operator. On the
+  // next boot seedSetupAuditorAgent backfills the auditor — even though seedSetupHome itself no-ops.
+  const dbG = new Db(path.join(tmpHome, "auditor-backfill.db"));
+  seedDefaultProfiles(dbG);
+  seedSetupHome(dbG); // simulates the pre-B4 install: home + operator only
+  const homeG = dbG.getReservedProjectByName(SETUP_PROJECT_NAME);
+  check("(5b) pre-B4 existing install has ONLY the operator (no auditor yet)",
+    dbG.listAgents(homeG.id).length === 1 && !dbG.listAgents(homeG.id).some((a) => a.name === SETUP_AUDITOR_AGENT_NAME));
+  check("(5b) seedSetupHome STILL no-ops on the existing home (the reason the auditor needs its own seeder)",
+    seedSetupHome(dbG).length === 0);
+  const backfilled = seedSetupAuditorAgent(dbG);
+  check("(5b) seedSetupAuditorAgent BACKFILLS the auditor onto the existing install", backfilled === SETUP_AUDITOR_AGENT_NAME);
+  check("(5b) the existing home now has BOTH agents", dbG.listAgents(homeG.id).length === 2 &&
+    dbG.listAgents(homeG.id).some((a) => a.name === SETUP_AUDITOR_AGENT_NAME));
+  check("(5b) re-running the backfill is idempotent (returns null, no duplicate)",
+    seedSetupAuditorAgent(dbG) === null && dbG.listAgents(homeG.id).filter((a) => a.name === SETUP_AUDITOR_AGENT_NAME).length === 1);
+
+  // (5c) NEVER clobbers a user EDIT to the seeded auditor: a user who edits the auditor's prompt keeps it.
+  const auditorG = dbG.listAgents(homeG.id).find((a) => a.name === SETUP_AUDITOR_AGENT_NAME);
+  dbG.updateAgent(auditorG.id, { startupPrompt: "USER EDITED" });
+  check("(5c) a re-seed never clobbers the user's edited auditor prompt (seed-if-absent by name)",
+    seedSetupAuditorAgent(dbG) === null && dbG.getAgent(auditorG.id)?.startupPrompt === "USER EDITED");
+
+  // (5d) the seeder is scoped to the RESERVED home by NAME (gotcha #1): a NON-reserved project with an
+  // agent named "Workspace Auditor" is irrelevant — the seeder only ever touches the reserved home.
+  dbG.insertProject({ id: "ord-aud", name: "RealWork2", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  dbG.insertAgent({ id: "ord-aud-agent", projectId: "ord-aud", name: SETUP_AUDITOR_AGENT_NAME, startupPrompt: "x", position: 0, profileId: null, endpoint: false, ioSchema: null });
+  check("(5d) a same-named agent in a NON-reserved project does not affect the reserved-home seeder (still no-op)",
+    seedSetupAuditorAgent(dbG) === null && dbG.listAgents(homeG.id).filter((a) => a.name === SETUP_AUDITOR_AGENT_NAME).length === 1);
+  dbG.close();
+
+  // (5e) no setup home at all → the auditor seeder no-ops (nothing to attach to; seedSetupHome runs first).
+  const dbH = new Db(path.join(tmpHome, "auditor-nohome.db"));
+  seedDefaultProfiles(dbH);
+  check("(5e) seedSetupAuditorAgent no-ops when the Getting Started home is absent", seedSetupAuditorAgent(dbH) === null);
+  dbH.close();
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle on Windows) */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the ungated 'Getting Started' setup home + 'Platform' operator agent seed for every user (no LOOM_DEV gate), idempotently across reboots, COEXIST with the dev-only platform home (name-scoped gate; platform seeding unchanged at 2 agents), and the A2 guarded rename backfills a pre-rebrand 'Setup Assistant' operator → 'Platform' while leaving user-renamed + non-reserved-home agents untouched."
+  ? "\n✅ ALL PASS — the ungated 'Getting Started' setup home + 'Platform' operator agent seed for every user (no LOOM_DEV gate), idempotently across reboots, COEXIST with the dev-only platform home (name-scoped gate; platform seeding unchanged at 2 agents); the A2 guarded rename backfills a pre-rebrand 'Setup Assistant' operator → 'Platform' while leaving user-renamed + non-reserved-home agents untouched; and the B4 seedSetupAuditorAgent backfill seeds a 2nd 'Workspace Auditor' agent into the SAME home (fresh + existing installs), idempotently, never clobbering a user edit and scoped to the reserved home by name."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
