@@ -48,7 +48,7 @@ const { AuditMcpRouter } = await import("../dist/mcp/audit.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { Scheduler } = await import("../dist/orchestration/scheduler.js");
-const { engineTranscriptPath, archivedTranscriptPath } = await import("../dist/sessions/transcript.js");
+const { engineTranscriptPath, archivedTranscriptPath, TOOL_RESULT_BODY_CAP } = await import("../dist/sessions/transcript.js");
 const { DEFAULT_SESSION_SUMMARY_CAP } = await import("../dist/mcp/sessionView.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -83,6 +83,9 @@ seedSession("W", "worker");
 seedSession("P", null);
 // A LIVE session with an engine transcript on disk (transcript_read live path).
 seedSession("LIVE1", null, { engineSessionId: "eng-live-1" });
+// A LIVE session whose transcript carries tool_result BODIES — the render-collapse fix: an auditor must
+// be able to read the actual structured return / error string, not a bare "↳ tool result" placeholder.
+seedSession("TR1", null, { engineSessionId: "eng-toolresult-1" });
 // An ARCHIVED session with a snapshot on disk (transcript_read archived path + scope:"archived").
 seedSession("ARCH1", null, { processState: "exited" });
 db.archiveSession("ARCH1"); // stamp archived_at (insertSession doesn't write it — prod archives this way)
@@ -108,6 +111,25 @@ fs.mkdirSync(path.dirname(archFile), { recursive: true });
 fs.writeFileSync(archFile, [
   JSON.stringify({ type: "user", message: { content: "vague skill instruction caused rework" } }),
   JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "archived turn" }] } }),
+].join("\n") + "\n");
+// The tool_result-body transcript: a small STRUCTURED return (string form), a small structured return
+// (array-of-blocks form, the other JSONL shape), an is_error result, and an OVERSIZED body to prove the cap.
+const bigBody = "X".repeat(TOOL_RESULT_BODY_CAP + 500);
+const trFile = engineTranscriptPath(repo, "eng-toolresult-1");
+fs.mkdirSync(path.dirname(trFile), { recursive: true });
+fs.writeFileSync(trFile, [
+  JSON.stringify({ type: "user", message: { content: [
+    { type: "tool_result", tool_use_id: "t1", content: '{"delivered":false,"errorCode":"E_TIMEOUT","exitStatus":1}' },
+  ] } }),
+  JSON.stringify({ type: "user", message: { content: [
+    { type: "tool_result", tool_use_id: "t2", content: [{ type: "text", text: '{"ok":true,"merged":2}' }] },
+  ] } }),
+  JSON.stringify({ type: "user", message: { content: [
+    { type: "tool_result", tool_use_id: "t3", is_error: true, content: "fatal: not a git repository" },
+  ] } }),
+  JSON.stringify({ type: "user", message: { content: [
+    { type: "tool_result", tool_use_id: "t4", content: bigBody },
+  ] } }),
 ].join("\n") + "\n");
 // The prefix-resolution session's engine transcript (so a unique 8-char prefix resolves to real turns).
 const prefixFile = engineTranscriptPath(repo, "eng-prefix-1");
@@ -190,6 +212,25 @@ try {
     Array.isArray(archTurns) && archTurns.length === 2 && /vague skill instruction/.test(archTurns[0].text));
   const noEng = await call("transcript_read", { projectId: "pOrd", sessionId: "M" });
   check("(b) transcript_read: a session with no engine transcript → [] (not an error)", Array.isArray(noEng) && noEng.length === 0);
+
+  // (b5) RENDER-COLLAPSE FIX — transcript_read surfaces tool_result BODIES (capped), not bare placeholders.
+  const trTurns = await call("transcript_read", { projectId: "pOrd", sessionId: "TR1" });
+  check("(b5) transcript_read: tool_result turns are present", Array.isArray(trTurns) && trTurns.length === 4);
+  const trText = (trTurns ?? []).map((t) => t.text).join("\n");
+  check("(b5) NOT a bare placeholder — no turn is the old 13-char \"↳ tool result\" stub",
+    (trTurns ?? []).every((t) => t.text.trim() !== "↳ tool result"));
+  check("(b5) small structured return (string form) comes through intact (delivered flag / error code / exit status)",
+    /"delivered":false/.test(trText) && /"errorCode":"E_TIMEOUT"/.test(trText) && /"exitStatus":1/.test(trText));
+  check("(b5) small structured return (array-of-blocks form) comes through intact",
+    /"ok":true,"merged":2/.test(trText));
+  check("(b5) an is_error tool_result is flagged AND its error string is preserved",
+    /↳ tool result \(error\)/.test(trText) && /fatal: not a git repository/.test(trText));
+  // The oversized body is truncated to the cap (it appears, but bounded — not the full +500 over-cap blob).
+  const bigTurn = (trTurns ?? []).find((t) => /X{100}/.test(t.text));
+  check("(b5) an OVERSIZED tool_result body is TRUNCATED to the cap (bounded, with a truncation marker)",
+    !!bigTurn && /truncated\]/.test(bigTurn.text) &&
+    (bigTurn.text.match(/X/g) || []).length === TOOL_RESULT_BODY_CAP &&
+    bigTurn.text.length < TOOL_RESULT_BODY_CAP + 200);
 
   // (b3) list_sessions DEFAULT is BOUNDED — capped + excludes long-exited (the overflow fix). ----------
   // Default (scope "all", state "live") DROPS the long-exited-but-unarchived WEXIT, KEEPS live LIVE1 and

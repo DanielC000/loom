@@ -49,6 +49,33 @@ export function engineTranscriptExists(cwd: string, engineSessionId: string): bo
   return resolveTranscriptFile(cwd, engineSessionId) !== null;
 }
 
+/**
+ * Per-tool-result body cap (chars) retained in a rendered turn. Tool results were previously collapsed
+ * to a bare "↳ tool result" placeholder, so an auditor reading a transcript could only see the agent's
+ * paraphrase — never the actual error string / structured return (delivered flags, error codes, exit
+ * statuses) needed to VERIFY a claim. We now keep the body, truncated to this cap: 2 KB comfortably fits
+ * the small structured returns that matter for verification while bounding a giant file-read/log dump.
+ */
+export const TOOL_RESULT_BODY_CAP = 2048;
+
+/** Pull the human-readable body out of a tool_result content block (string or array-of-blocks form). */
+function toolResultBody(c: Record<string, unknown>): string {
+  const content = c.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const p of content) {
+      if (typeof p === "string") parts.push(p);
+      else if (p && typeof p === "object") {
+        const b = p as Record<string, unknown>;
+        if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
+      }
+    }
+    return parts.join("\n");
+  }
+  return "";
+}
+
 function extractText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -56,7 +83,17 @@ function extractText(content: unknown): string {
   for (const c of content as Array<Record<string, unknown>>) {
     if (c.type === "text" && typeof c.text === "string") parts.push(c.text);
     else if (c.type === "tool_use") parts.push(`⚙ tool: ${String(c.name ?? "")}(${JSON.stringify(c.input ?? {}).slice(0, 200)})`);
-    else if (c.type === "tool_result") parts.push("↳ tool result");
+    else if (c.type === "tool_result") {
+      // Retain the body (truncated) instead of collapsing to a bare placeholder, so an auditor can
+      // verify error strings / structured returns rather than read only the agent's paraphrase.
+      const errFlag = c.is_error === true ? " (error)" : "";
+      const body = toolResultBody(c).trim();
+      if (!body) { parts.push(`↳ tool result${errFlag}`); continue; }
+      const shown = body.length > TOOL_RESULT_BODY_CAP
+        ? `${body.slice(0, TOOL_RESULT_BODY_CAP)}… [+${body.length - TOOL_RESULT_BODY_CAP} chars truncated]`
+        : body;
+      parts.push(`↳ tool result${errFlag}: ${shown}`);
+    }
   }
   return parts.join("\n");
 }
