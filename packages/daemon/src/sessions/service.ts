@@ -12,7 +12,7 @@ import {
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, type DiffstatFile } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { readRunUsage, readRunUsageFromFile } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
@@ -2258,10 +2258,19 @@ export class SessionService {
    * worktree, and move the task to done. FAIL-CLOSED — a failed gate or a merge conflict leaves
    * the canonical repo UNTOUCHED and the worktree RETAINED (so the manager can re-task a fix).
    * Merge is daemon-executed; workers have no merge tool.
+   *
+   * IDEMPOTENT (board card 2eddf573): the staged set is re-derived inside {@link mergeBranch} at confirm
+   * time (never trusted from the review-step snapshot), so a stale-index "nothing staged" on a valid
+   * +N-commit branch no longer happens — the merge lands on the FIRST call. When there is GENUINELY
+   * nothing to stage, the result is DISTINGUISHABLE via `emptyKind`:
+   *   - `ALREADY_MERGED`   — the branch already landed in main → treated as a successful idempotent
+   *                          completion: the worktree is retired and the task finished (`merged:true`).
+   *   - `STAGE_EMPTY_RETRY` — no diff to merge → fail-closed (`merged:false`), worktree RETAINED so the
+   *                          manager can investigate why the worker produced no change.
    */
   async confirmWorkerMerge(
     managerSessionId: string, workerSessionId: string,
-  ): Promise<{ merged: boolean; reason?: string }> {
+  ): Promise<{ merged: boolean; reason?: string; emptyKind?: MergeEmptyKind }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     if (!worker.branch) throw new Error("worker has no branch");
@@ -2323,6 +2332,26 @@ export class SessionService {
       evt("merge_rejected", { reason: merge.conflict ? "conflict" : "merge_failed" });
       rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — ${why}; canonical repo untouched, worktree retained. Re-task a rebase.`);
       return { merged: false, reason: why };
+    }
+    // GENUINE no-op (nothing staged): the staged set was re-derived from a clean index, so this is NOT a
+    // stale-state false negative — it is a true empty merge. Distinguish the two kinds for the manager:
+    if (merge.noop) {
+      if (merge.emptyKind === "STAGE_EMPTY_RETRY") {
+        // No diff to merge. Fail-closed: leave the worktree retained so the manager can see why the worker
+        // produced no change (and the task stays in review) rather than silently finishing an empty task.
+        evt("merge_rejected", { reason: "stage_empty" });
+        rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — STAGE_EMPTY_RETRY: the branch has no diff to merge; canonical repo + worktree untouched. The worker committed nothing that differs from main — re-task or close the task by hand.`);
+        return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", emptyKind: "STAGE_EMPTY_RETRY" };
+      }
+      // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the
+      // bookkeeping idempotently — retire the worktree + mark the task done — and report it distinguishably.
+      rejectNotify(`[loom:already-merged] worker ${workerSessionId} (task ${taskId ?? "none"}) — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.`);
+      this.pty.stop(workerSessionId, "hard");
+      for (let i = 0; i < 50 && this.pty.isAlive(workerSessionId); i++) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath });
+      return { merged: true, emptyKind: "ALREADY_MERGED" };
     }
 
     // Green: the branch is on the canonical repo. The worker (which reported 'done' but is still

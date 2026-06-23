@@ -919,13 +919,36 @@ export function toConventionalSubject(raw: string): string {
  * CONFLICT handling differs from `--no-ff`: `git merge --squash` leaves NO MERGE_HEAD, so `git merge
  * --abort` won't work. simple-git's `raw(["merge", …])` ALSO does NOT reliably reject on a conflict, so we
  * detect one EXPLICITLY via unmerged index entries and clean up with `git reset --hard HEAD`, leaving the
- * canonical repo UNTOUCHED. "Nothing staged after --squash" (the branch is already in main) is a clean
- * NO-OP, not a crash.
+ * canonical repo UNTOUCHED.
+ *
+ * IDEMPOTENT (board card 2eddf573). The staged set is RE-DERIVED here, at merge time, from a clean index —
+ * never trusted from a snapshot taken at the preceding review. A stale in-progress-merge residue (a
+ * leftover `MERGE_HEAD` / partial index from an aborted op) makes the FIRST `git merge --squash` abort
+ * ("You have not concluded your merge") and stage NOTHING, so the old code returned "nothing staged" on a
+ * perfectly valid +N-commit branch and only a byte-identical RETRY (after its own reset --hard) merged.
+ * We now CLEAR any affirmative residue up front, so the first call stages the real diff. And when the
+ * index is GENUINELY empty after a clean (non-error) squash, the result DISTINGUISHES why via `emptyKind`:
+ *   - `ALREADY_MERGED`   — the branch's work already landed in main (a prior squash carrying the
+ *                          deterministic `Loom-Worker-Branch` trailer is reachable from HEAD).
+ *   - `STAGE_EMPTY_RETRY` — no such landing: there is simply no diff to merge (an empty change).
+ * so the caller can tell "already done" from "real no-op". A real squash failure still fails closed.
  */
+export type MergeEmptyKind = "ALREADY_MERGED" | "STAGE_EMPTY_RETRY";
+
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; noop?: boolean; reason?: string }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind }> {
   const git = simpleGit(repoPath);
+  // Re-derive from a CLEAN index: clear any AFFIRMATIVE in-progress-merge residue (a stale MERGE_HEAD or
+  // unmerged entries from an aborted op) BEFORE the squash, so a leftover state can't make the first
+  // --squash stage nothing (the idempotency bug). Gated on a positive signal so a clean canonical repo is
+  // never touched; `rev-parse --verify MERGE_HEAD` exits non-zero (→ catch) when there is no in-progress merge.
+  try {
+    const inProgressMerge = (await git.raw(["rev-parse", "-q", "--verify", "MERGE_HEAD"])).trim() !== "";
+    const unmerged = (await git.raw(["ls-files", "--unmerged"])).trim() !== "";
+    if (inProgressMerge || unmerged) await git.raw(["reset", "--hard", "HEAD"]);
+  } catch { /* no MERGE_HEAD ⇒ no residue to clear */ }
+
   let rawError = false;
   try {
     await git.raw(["merge", "--squash", branch]);
@@ -940,15 +963,18 @@ export async function mergeBranch(
     return { ok: false, conflict: true };
   }
   // No conflict. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code handling is
-  // unreliable — see isBranchMerged.) Empty ⇒ the branch is already in main (clean no-op), or the merge
-  // errored for another reason (fail-closed: reset + refuse).
+  // unreliable — see isBranchMerged.) Empty after the residue-clear above is a GENUINE empty index.
   const staged = (await git.raw(["diff", "--cached", "--name-only"])).trim() !== "";
   if (!staged) {
+    // A rawError with nothing staged AFTER the clean retry is a real merge failure → fail closed.
     if (rawError) {
       try { await git.raw(["reset", "--hard", "HEAD"]); } catch { /* nothing to reset */ }
       return { ok: false, reason: "git merge --squash failed (nothing staged)" };
     }
-    return { ok: true, noop: true }; // branch already in main → nothing to commit
+    // Clean no-op: classify so the caller can distinguish "already merged" from "no diff to merge". The
+    // branch's commits are "already in main" iff a prior squash carrying its trailer is reachable from HEAD.
+    const landed = await findLandedSquashCommit(repoPath, branch);
+    return { ok: true, noop: true, emptyKind: landed ? "ALREADY_MERGED" : "STAGE_EMPTY_RETRY" };
   }
   // Land the staged diff as ONE plain commit (repo-config identity; clean subject + deterministic trailer).
   const rawSubject = (taskTitle && taskTitle.trim().split(/\r?\n/)[0]!.trim()) || branch;
