@@ -30,6 +30,7 @@ import { clearClaudeRateLimit } from "../orchestration/usage-awareness.js";
 import { GitReader } from "../git/reader.js";
 import { GitWriter } from "../git/writer.js";
 import { workerDiff } from "../git/worktrees.js";
+import { checkRepoRebind } from "../projects/rebind.js";
 import { listVaultTree, readVaultFile } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate } from "../skills/store.js";
@@ -717,14 +718,24 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.patch("/api/projects/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
-    const b = (req.body ?? {}) as { name?: unknown; vaultPath?: unknown };
+    const b = (req.body ?? {}) as { name?: unknown; vaultPath?: unknown; repoPath?: unknown };
     if (b.name !== undefined && (typeof b.name !== "string" || !b.name.trim()))
       return reply.code(400).send({ error: "name must be a non-empty string" });
     if (b.vaultPath !== undefined && (typeof b.vaultPath !== "string" || !b.vaultPath.trim()))
       return reply.code(400).send({ error: "vaultPath must be a non-empty string" });
+    if (b.repoPath !== undefined && (typeof b.repoPath !== "string" || !b.repoPath.trim()))
+      return reply.code(400).send({ error: "repoPath must be a non-empty string" });
+    // repoPath REBIND (human-only): the SHARED guard (isGitRepo + live-worktree refusal), identical to
+    // the elevated platform MCP project_update. A non-repo or a live worktree session blocks the write.
+    const repoPath = b.repoPath === undefined ? undefined : (b.repoPath as string).trim();
+    if (repoPath !== undefined) {
+      const check = await checkRepoRebind(deps.db, id, repoPath);
+      if (!check.ok) return reply.code(400).send({ error: check.error, ...(check.liveSessions ? { liveSessions: check.liveSessions } : {}) });
+    }
     deps.db.updateProject(id, {
       name: b.name === undefined ? undefined : (b.name as string).trim(),
       vaultPath: b.vaultPath === undefined ? undefined : (b.vaultPath as string).trim(),
+      repoPath,
     });
     return deps.db.getProject(id);
   });

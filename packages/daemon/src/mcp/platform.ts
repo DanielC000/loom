@@ -7,6 +7,7 @@ import type { Project, ProjectConfigOverride, PlatformConfigOverride, Agent, Pro
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo } from "../git/reader.js";
+import { checkRepoRebind } from "../projects/rebind.js";
 import { GitWriter } from "../git/writer.js";
 import { writeVaultFile } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
@@ -469,12 +470,18 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_update",
       {
-        description: "Structural edit of any project by id — name and/or vaultPath (omitted fields left as-is). Config changes go through project_configure. 404 if the project is unknown. Returns the updated project.",
-        inputSchema: { projectId: z.string(), name: z.string().optional(), vaultPath: z.string().optional() },
+        description: "Structural edit of any project by id — name, vaultPath, and/or repoPath (omitted fields left as-is). Config changes go through project_configure. repoPath REBINDS the project to a different repo: it MUST exist and be a git repository (rejected otherwise, exactly like project_create), and the rebind is REFUSED while the project has any live session occupying a worktree (those would be stranded — the offending sessions are named). This elevated/human-only surface is the ONLY place repoPath is editable. 404 if the project is unknown. Returns the updated project.",
+        inputSchema: { projectId: z.string(), name: z.string().optional(), vaultPath: z.string().optional(), repoPath: z.string().optional() },
       },
-      async ({ projectId, name, vaultPath }) => {
+      async ({ projectId, name, vaultPath, repoPath }) => {
         if (!db.getProject(projectId)) return ok({ error: "project not found" });
-        db.updateProject(projectId, { name, vaultPath });
+        // repoPath REBIND (elevated/human-only): fronted by the SHARED guard (isGitRepo + live-worktree
+        // refusal), identical to the human REST PATCH path. Non-repo or a live worktree → reject, no write.
+        if (repoPath !== undefined) {
+          const check = await checkRepoRebind(db, projectId, repoPath);
+          if (!check.ok) return ok({ error: check.error, ...(check.liveSessions ? { liveSessions: check.liveSessions } : {}) });
+        }
+        db.updateProject(projectId, { name, vaultPath, repoPath });
         return ok(db.getProject(projectId));
       },
     );

@@ -647,12 +647,14 @@ export class Db {
     ).run({ ...p, config: JSON.stringify(p.config), archivedAt: p.archivedAt, reserved: p.reserved ? 1 : 0 });
   }
   /**
-   * Partial STRUCTURAL edit of a project (name / vaultPath). Provided fields are written; omitted
-   * are left as-is. Deliberately does NOT touch config (that goes through the validated
-   * setProjectConfig path) or repoPath (rebinding a live project's repo is out of scope).
+   * Partial STRUCTURAL edit of a project (name / vaultPath / repoPath). Provided fields are written;
+   * omitted are left as-is. Deliberately does NOT touch config (that goes through the validated
+   * setProjectConfig path). `repoPath` is editable ONLY via the elevated platform MCP project_update +
+   * the human REST PATCH path, both fronted by checkRepoRebind (isGitRepo + live-worktree guard) — it is
+   * NEVER exposed on any agent-facing surface (loom-setup / loom-orchestration).
    */
-  updateProject(id: string, patch: { name?: string; vaultPath?: string }): void {
-    const cols: Record<string, unknown> = { name: patch.name, vault_path: patch.vaultPath };
+  updateProject(id: string, patch: { name?: string; vaultPath?: string; repoPath?: string }): void {
+    const cols: Record<string, unknown> = { name: patch.name, vault_path: patch.vaultPath, repo_path: patch.repoPath };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
     const set = names.map((c) => `${c} = ?`).join(", ");
@@ -704,6 +706,15 @@ export class Db {
   /** Count of a project's sessions still in processState 'live' — the archive/delete guard ("stop the fleet first"). */
   countLiveSessionsInProject(id: string): number {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE project_id = ? AND process_state = 'live'").get(id) as { c: number }).c;
+  }
+  /**
+   * A project's LIVE sessions that occupy a worktree (worktree_path set) — the repoPath-rebind guard's
+   * work set. Rebinding the repo would strand these worktrees (they hang off the OLD repo), so a rebind
+   * is refused while any exist (see checkRepoRebind).
+   */
+  listLiveWorktreeSessionsInProject(id: string): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE project_id = ? AND process_state = 'live' AND worktree_path IS NOT NULL")
+      .all(id) as Row[]).map(toSession);
   }
 
   // --- platform config (daemon-GLOBAL tuning override; singleton row, JSON blob) ---
