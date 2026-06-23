@@ -69,10 +69,15 @@ db.insertProfile({
 db.insertProfile({ id: "profPlatform", name: "PlatRig", role: "platform", description: "", allowDelta: [], skills: null, model: null, icon: null });
 db.insertProfile({ id: "profAuditor", name: "AuditRig", role: "auditor", description: "", allowDelta: [], skills: null, model: null, icon: null });
 db.insertProfile({ id: "profSetup", name: "SetupRig", role: "setup", description: "", allowDelta: [], skills: null, model: null, icon: null });
+// End-User Platform tier B1: a profile carrying the new caller-set-only "workspace-auditor" role. Like
+// auditor it's never validateProfile-mintable, but a mis-seeded/edited row could carry one — the
+// spawn-side clamp (PROFILE_SPAWNABLE_ROLES) must drop it to plain, same backstop as platform/auditor/setup.
+db.insertProfile({ id: "profWsAuditor", name: "WsAuditRig", role: "workspace-auditor", description: "", allowDelta: [], skills: null, model: null, icon: null });
 db.insertProfile({ id: "profWorker", name: "WorkerRig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
 db.insertAgent({ id: "agentPlatform", projectId: "pP", name: "PlatProfiled", startupPrompt: "AGENT_PLAT_PROMPT", position: 4, profileId: "profPlatform" });
 db.insertAgent({ id: "agentAuditor", projectId: "pP", name: "AuditProfiled", startupPrompt: "AGENT_AUD_PROMPT", position: 5, profileId: "profAuditor" });
 db.insertAgent({ id: "agentSetup", projectId: "pP", name: "SetupProfiled", startupPrompt: "AGENT_SETUP_PROMPT", position: 6, profileId: "profSetup" });
+db.insertAgent({ id: "agentWsAuditor", projectId: "pP", name: "WsAuditProfiled", startupPrompt: "AGENT_WSAUD_PROMPT", position: 8, profileId: "profWsAuditor" });
 db.insertAgent({ id: "agentWorker", projectId: "pP", name: "WorkerProfiled", startupPrompt: "AGENT_WORKER_PROMPT", position: 7, profileId: "profWorker" });
 db.insertAgent({ id: "agentMgr", projectId: "pP", name: "Managed", startupPrompt: "AGENT_MGR_PROMPT", position: 0, profileId: "profMgr" });
 db.insertAgent({ id: "agentModel", projectId: "pP", name: "Modelled", startupPrompt: "AGENT_MODEL_PROMPT", position: 3, profileId: "profModel" });
@@ -165,7 +170,7 @@ try {
   // resolves the profile role. A platform/auditor/setup profile MUST be clamped to a plain (role-null)
   // session — those locked roles come ONLY from startPlatformLead/startAuditor/startSetup. This is the
   // hardening backstop for the footgun: a "normal-looking" agent carrying an elevated profile.
-  for (const [agentId, label] of [["agentPlatform", "platform"], ["agentAuditor", "auditor"], ["agentSetup", "setup"]]) {
+  for (const [agentId, label] of [["agentPlatform", "platform"], ["agentAuditor", "auditor"], ["agentSetup", "setup"], ["agentWsAuditor", "workspace-auditor"]]) {
     const s = svc.startNew(agentId);
     const o = optsFor(s.id);
     check(`(b') ${label}-profile default spawn: session.role is NOT '${label}' (downgraded to plain)`, s.role !== label && db.getSession(s.id).role !== label);

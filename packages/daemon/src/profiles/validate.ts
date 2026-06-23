@@ -11,8 +11,10 @@ import type { Profile } from "@loom/shared";
 const profileSchema = z
   .object({
     name: z.string().min(1),
-    // NB: "auditor" is deliberately NOT mintable here — it's caller-set via startAuditor (the security
-    // boundary), so a profile must never confer it. "setup" IS a valid profile role (the Setup Assistant rig).
+    // NB: "auditor" AND "workspace-auditor" are deliberately NOT mintable here — both are caller-set via
+    // their start* paths (startAuditor / the future startWorkspaceAuditor — the security boundary), so a
+    // profile must never confer either. They're absent from this enum, so validateProfile REJECTS them by
+    // construction. "setup" IS a valid profile role (the Setup Assistant rig). (End-User Platform tier B1.)
     role: z.enum(["manager", "worker", "platform", "setup"]).nullable().optional(),
     description: z.string().optional(),
     allowDelta: z.array(z.string()).optional(),

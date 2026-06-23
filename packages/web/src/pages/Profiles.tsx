@@ -14,7 +14,7 @@ const BUNDLED_PROFILE_NAMES = new Set([
 ]);
 
 // A profile's role, as a coloured pill. null = a plain (non-orchestration) session — today's default.
-const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", run: "muted" };
+const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", "workspace-auditor": "muted", run: "muted" };
 function RoleBadge({ role }: { role: SessionRole | null }) {
   return <Badge tone={role ? roleTone[role] : "muted"}>{role ?? "plain"}</Badge>;
 }

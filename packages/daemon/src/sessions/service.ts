@@ -33,12 +33,13 @@ const GIT_TIMEOUT_FLOOR_MS = 1_000;
 
 /**
  * Least-privilege hardening: the ONLY session roles a Profile may confer on a default "+New" spawn.
- * The elevated/locked roles — "platform" (loom-platform surface), "auditor" (loom-audit), "setup"
- * (loom-setup) and "run" (internal-only Agent Runs) — must come EXCLUSIVELY from their explicit human
- * spawn paths (startPlatformLead/startAuditor/startSetup) or internal starters, which pass an explicit
- * caller role. A profile role outside this set is dropped to a plain (role-null) spawn in
- * resolveAgentSpawn, so a "normal-looking" agent carrying an elevated profile + a role-omitted REST
- * spawn can never silently elevate. (Note: validateProfile already forbids "auditor"/"run" on a
+ * The elevated/locked roles — "platform" (loom-platform surface), "auditor" (loom-audit),
+ * "workspace-auditor" (the future loom-user-audit), "setup" (loom-setup) and "run" (internal-only Agent
+ * Runs) — must come EXCLUSIVELY from their explicit human spawn paths (startPlatformLead/startAuditor/
+ * startSetup / the future startWorkspaceAuditor) or internal starters, which pass an explicit caller
+ * role. A profile role outside this set is dropped to a plain (role-null) spawn in resolveAgentSpawn,
+ * so a "normal-looking" agent carrying an elevated profile + a role-omitted REST spawn can never
+ * silently elevate. (Note: validateProfile already forbids "auditor"/"workspace-auditor"/"run" on a
  * profile; this is the spawn-side backstop and also covers the still-mintable "platform"/"setup".)
  */
 const PROFILE_SPAWNABLE_ROLES: ReadonlySet<SessionRole> = new Set<SessionRole>(["manager", "worker"]);

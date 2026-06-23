@@ -136,8 +136,13 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
  * is one of the two platform-exclusive roles. Those two profiles seed only under LOOM_DEV; every other
  * bundled profile is CORE product and always seeds. Keyed by role (not name) so a future bundled platform
  * profile is gated automatically without touching this gate.
+ *
+ * NB: the END-USER Auditor's "workspace-auditor" role is deliberately NOT in this set — it is CORE
+ * product, so its future bundled "Workspace Auditor" rig (B4) must seed ungated for every loomctl user
+ * (like the worker/Setup-Assistant rigs), NOT only under LOOM_DEV. See `[[End-User Platform Tier Design]]`
+ * gotcha #6.
  */
-function isPlatformProfile(p: Omit<Profile, "id">): boolean {
+export function isPlatformProfile(p: Pick<Profile, "role">): boolean {
   return p.role === "platform" || p.role === "auditor";
 }
 

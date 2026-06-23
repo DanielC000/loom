@@ -161,6 +161,16 @@ export type Resumability = "unknown" | "resumable" | "dead";
  *   NATURALLY 404s on the Lead's elevated `/mcp-platform` (resolveRole gates on role==="platform") AND
  *   on `/mcp-orch` (gates on manager|worker). No agent/MCP path may mint one — only `startAuditor`
  *   (human REST) and the human-configured Scheduler spawn it.
+ * - workspace-auditor: the END-USER Auditor (End-User Platform tier, Part B) — the de-privileged,
+ *   user-workspace twin of `auditor`: a read-mostly, SUGGEST-ONLY reviewer of the user's OWN
+ *   sessions/agents/skills/prompts (board-card + preset suggestions, never auto-apply). A DISTINCT role
+ *   from `auditor` BY DESIGN so the two missions are physically separated under LOOM_DEV (where both
+ *   exist): it gets ONLY the restricted `loom-user-audit` surface (B3, not built yet) and 404s on every
+ *   other MCP surface. Like `auditor` it ingests UNTRUSTED transcript content, so it is caller-set ONLY
+ *   by a future `startWorkspaceAuditor` (B5, human REST) — NEVER mintable via a profile
+ *   (`profiles/validate.ts`) or by the operator/Setup surface (`setupRoleError`). See
+ *   `[[End-User Platform Tier Design]]` Part B. (B1 adds ONLY the role + these guards; the router/skill/
+ *   profile/seed/start are B3–B5.)
  * - setup: a Setup Assistant session — the guided onboarding rig that helps a human stand up a project
  *   (see `[[Setup Assistant Design]]`). A first-class role so it can carry its own rig/skills; the
  *   bundled "Setup Assistant" profile sets it and it ships UNGATED (core product, not the dev Platform layer).
@@ -172,7 +182,7 @@ export type Resumability = "unknown" | "resumable" | "dead";
  *   a daemon restart mid-run fails the run clean). Started ONLY by the internal run-starter — no
  *   human/agent session-spawn route mints one (the public keyed trigger is R3). See `[[Agent Runs]]`.
  */
-export type SessionRole = "manager" | "worker" | "platform" | "auditor" | "setup" | "run";
+export type SessionRole = "manager" | "worker" | "platform" | "auditor" | "setup" | "workspace-auditor" | "run";
 
 // --- Agent Runs (R2): the AgentRun primitive ------------------------------------------------------
 /**
