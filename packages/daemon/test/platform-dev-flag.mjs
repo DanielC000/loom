@@ -97,6 +97,12 @@ try {
   check("(3) Setup Assistant skill exists in the bundled assets", allSkillDirs.includes("setup-assistant"));
   check("(3) Setup Assistant is NOT dev-only (ships to all users)", !DEV_ONLY_SKILLS.includes("setup-assistant"));
   check("(3) staged release KEEPS the Setup Assistant skill", kept.includes("setup-assistant"));
+  // The Workspace Auditor skill is the de-Loom-ified, suggest-only cousin of the dev platform-audit and
+  // SHIPS to all users (ungated, core-seed): it must survive curation. Guard against it ever being added
+  // to DEV_ONLY_SKILLS.
+  check("(3) workspace-audit skill exists in the bundled assets", allSkillDirs.includes("workspace-audit"));
+  check("(3) workspace-audit is NOT dev-only (ships to all users)", !DEV_ONLY_SKILLS.includes("workspace-audit"));
+  check("(3) staged release KEEPS the workspace-audit skill", kept.includes("workspace-audit"));
   check("(3) curation drops EXACTLY the two platform skills (kept = all − dev-only)",
     kept.length === allSkillDirs.length - DEV_ONLY_SKILLS.length);
 } finally {

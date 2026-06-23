@@ -56,6 +56,11 @@ try {
   check("re-seeded doc-hygiene reported as seeded", seeded.includes("doc-hygiene"));
   check("edited skill left untouched (UI edit preserved)", fs.readFileSync(path.join(edited, "SKILL.md"), "utf8") === EDIT);
   check("edited skill NOT reported as seeded", !seeded.includes("worker"));
+
+  // (c) A bundled ungated skill absent from the store is COPIED on a clean seed. The ungated, suggest-only
+  // workspace-audit skill (the de-Loom-ified cousin of dev platform-audit) must reach every user's store.
+  check("clean store: workspace-audit copied by seedGlobalSkills", seeded.includes("workspace-audit"));
+  check("clean store: workspace-audit SKILL.md present after seed", fs.existsSync(path.join(skillsDir, "workspace-audit", "SKILL.md")));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
