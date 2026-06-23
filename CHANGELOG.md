@@ -7,7 +7,32 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-23
+
+A real board **column manager**, and a more robust + tunable worker-lifecycle watchdog.
+
+### Added
+- **Board column manager.** Settings → Board Columns replaces the old one-line-per-column textbox with a
+  real editor: drag to reorder, rename inline, assign each lane a lifecycle role, see a live per-column
+  card count, and add or remove columns. Removing or renaming a column **that still has cards is now
+  safe** — its cards are atomically re-homed in one transaction (a removed lane's cards move to your
+  default-landing column), so a card can never be orphaned onto a column that no longer exists. Columns
+  are now identified by a stable lifecycle *role* internally, so renaming a lane no longer breaks
+  delegation; existing boards are migrated automatically with no change to where your cards sit.
+- **Adjustable worker-stuck threshold.** A new **"Worker stuck (min)"** field (Settings → Orchestration
+  Caps) sets how long a worker may sit busy in a single turn before its manager is alerted. Set it to
+  `0` to disable the stuck-worker watchdog for a project.
+
+### Changed
+- **Default worker-stuck threshold raised 20 → 30 minutes** — fewer false "stuck" alerts on a
+  legitimately long single turn (a big build/test run). Override it per project in Settings.
+
 ### Fixed
+- **Workers no longer wedge after committing.** A worker's shell could hang on a pager — e.g. a
+  post-commit `git diff`/`git log` paging into `less` and blocking forever — which froze its turn and
+  tripped a false "stuck" alert while its completion report sat undelivered. The worker environment now
+  disables the git/terminal pager (`GIT_PAGER`/`PAGER`/`GIT_TERMINAL_PROMPT`) so a command can't block
+  the turn.
 - **Reviewer/operator sessions resume cleanly after a daemon restart.** When the daemon restarts, the
   Workspace Auditor, the dev Auditor, and the Platform operator are now nudged to continue (the way worker
   sessions already are) instead of sitting idle after their resume.
