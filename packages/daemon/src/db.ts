@@ -1567,6 +1567,32 @@ export class Db {
     return (this.db.prepare("SELECT * FROM orchestration_events WHERE worker_session_id = ? ORDER BY ts, rowid")
       .all(workerSessionId) as Row[]).map(toOrchestrationEvent);
   }
+  /**
+   * Durable queued-message inbox (card 2ca18433): every `session_message_queued` event with NO matching
+   * `session_message_delivered` marker (paired by `detail.msgId`) — i.e. a held message that was NEVER
+   * handed to its recipient. This is the boot scan's work set (recoverUndeliveredMessagesOnBoot): the ones
+   * to re-enqueue onto a resumed recipient / surface to a resumed sender. Chronological (FIFO) so replay
+   * preserves send order. The anti-join is on the JSON-extracted msgId; a queued event missing a msgId
+   * (shouldn't happen — the helpers always mint one) coalesces to "" and is treated as its own key.
+   */
+  listUndeliveredQueuedMessages(): OrchestrationEvent[] {
+    return (this.db.prepare(
+      `SELECT * FROM orchestration_events
+         WHERE kind = 'session_message_queued'
+           AND COALESCE(json_extract(detail_json, '$.msgId'), '') NOT IN (
+             SELECT COALESCE(json_extract(detail_json, '$.msgId'), '')
+               FROM orchestration_events WHERE kind = 'session_message_delivered'
+           )
+       ORDER BY ts, rowid`,
+    ).all() as Row[]).map(toOrchestrationEvent);
+  }
+  /** True once a `session_message_delivered` marker exists for this msgId — the idempotency guard the
+   *  delivery callback uses so a queued message resolves EXACTLY once (a re-fired onDeliver is a no-op). */
+  isQueuedMessageDelivered(msgId: string): boolean {
+    return !!this.db.prepare(
+      "SELECT 1 FROM orchestration_events WHERE kind = 'session_message_delivered' AND json_extract(detail_json, '$.msgId') = ? LIMIT 1",
+    ).get(msgId);
+  }
 
   // --- tasks ---
   listTasks(projectId: string): Task[] {

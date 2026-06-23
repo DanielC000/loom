@@ -208,7 +208,7 @@ export class PlatformMcpRouter {
     return this.db.getSession(sessionId)?.role === "platform" ? { id: sessionId } : null;
   }
 
-  private buildServer(): McpServer {
+  private buildServer(callerSessionId?: string): McpServer {
     const db = this.db;
     const sessions = this.sessions;
     const gitWriteTimeouts = this.gitWriteTimeouts;
@@ -527,7 +527,10 @@ export class PlatformMcpRouter {
       },
       async ({ sessionId, text }) => {
         try {
-          return ok(sessions.messageSessionAsPlatform(sessionId, text));
+          // Thread the LEAD's own session id (the URL-path caller) as the durable sender, so a queued
+          // dispatch that a daemon restart interrupts can be surfaced back to THIS Lead on resume to
+          // re-send (card 2ca18433). `callerSessionId` is always set on the live request path.
+          return ok(sessions.messageSessionAsPlatform(sessionId, text, callerSessionId));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
@@ -677,7 +680,8 @@ export class PlatformMcpRouter {
       return;
     }
     // Stateless per request (see TaskMcpRouter): no cached transport to be wedged by a dropped stream.
-    const server = this.buildServer();
+    // Thread the caller (Lead) session id so session_message can record it as the durable sender.
+    const server = this.buildServer(sessionId);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => { void transport.close(); void server.close(); });
     await server.connect(transport);

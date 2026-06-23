@@ -403,6 +403,21 @@ async function main(): Promise<void> {
       ` (requester ${restartIntent.managerSessionId.slice(0, 8)})`,
     );
   }
+  // Durable queued-message recovery (card 2ca18433): re-drive any session_message/message_worker that was
+  // HELD in a busy recipient's FIFO and never delivered before this process died — a sender death (API 529)
+  // or a daemon restart used to drop it silently (it lost a P1 cross-project dispatch twice). Runs on EVERY
+  // boot, AFTER the fleet resume above (so resumed recipients are live to re-enqueue onto) and unconditional
+  // of a restart intent (covers crash / OS-service restart too). The single re-enqueue owner — the intent
+  // snapshot now excludes these (getPersistablePending), so no double on a normal restart. Best-effort:
+  // never gate boot.
+  try {
+    const m = sessions.recoverUndeliveredMessagesOnBoot();
+    if (m.reEnqueued || m.retired || m.senderNudges) {
+      console.log(`[boot] queued-message recovery: re-enqueued ${m.reEnqueued} undelivered message(s), retired ${m.retired} (recipient gone), surfaced ${m.senderNudges} to live sender(s)`);
+    }
+  } catch (err) {
+    console.warn(`[boot] queued-message recovery failed (continuing boot): ${(err as Error).message}`);
+  }
 
   // Setup Assistant E1-6: FIRST-RUN auto-launch. On a brand-new/empty install (no ordinary projects + the
   // one-time app_meta marker unset) greet the user by auto-spawning the Setup Assistant ONCE; the marker

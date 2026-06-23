@@ -391,9 +391,17 @@ interface Subscriber {
  * (everything programmatic — worker reports, idle/context/busy nudges, resume notes, escalations).
  * It is the trust boundary the human-facing mutators enforce: delete/edit/reorder may only touch a
  * 'human' entry, so an agent's queued report can never be rewritten or reordered out from under it.
+ *
+ * `onDeliver` is an OPTIONAL, additive delivery callback (card 2ca18433): set ONLY by SessionService's
+ * durable-message helpers, it fires the instant this held entry is actually HANDED to the recipient — at
+ * the next Stop drain (drainPending) or via inbox_pull (consumePending) — so the durable queued-message
+ * event can be marked delivered. It is NEVER invoked on the immediate idle-submit path (that returns
+ * delivered:true synchronously and persists nothing), so the load-bearing M1/M2 busy-gate ordering is
+ * untouched; for every existing (non-messaging) entry it is undefined → a no-op. Internal to the host
+ * (stripped from getPendingEntries, never persisted), the callback dies with the pty like the queue.
  */
 export type QueueSource = "human" | "system";
-export type QueuedMessage = { id: string; text: string; source: QueueSource };
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: () => void };
 
 interface Live {
   pty: IPty;
@@ -991,7 +999,7 @@ export class PtyHost {
    * busy nudges, resume notes, escalations) stays 'system' unchanged; only the REST composer passes
    * 'human'. A held entry's source is what the human-facing mutators gate on (see QueuedMessage).
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system"): { delivered: boolean; position?: number } {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void): { delivered: boolean; position?: number } {
     const live = this.live.get(sessionId);
     if (!live?.alive) return { delivered: false };
     this.healIfStuck(live, sessionId);
@@ -1013,9 +1021,16 @@ export class PtyHost {
       if (!live.busy) {
         throw new Error("M1 invariant violated: submit() did not arm busy synchronously — the optimistic busy=true was deferred, so a concurrent enqueue could race the pending Enter (host.ts).");
       }
+      // Immediate idle-submit: this IS the delivery, but we do NOT invoke onDeliver here — a message
+      // delivered straight as a turn is never persisted as `session_message_queued` (the caller only
+      // records the durable event on the delivered:false path below), so there's nothing to resolve. This
+      // also keeps the load-bearing M1/M2 window byte-identical: no extra work on the synchronous submit.
       return { delivered: true };
     }
-    live.pending.push({ id: randomUUID(), text, source });
+    // Held (busy / not-ready / composer-dirty). Carry the optional delivery callback so that when this
+    // entry is finally handed to the recipient (drainPending or consumePending), the durable queued
+    // message can be marked delivered. Undefined for every existing (non-messaging) caller → a no-op.
+    live.pending.push({ id: randomUUID(), text, source, onDeliver });
     return { delivered: false, position: live.pending.length };
   }
 
@@ -1030,12 +1045,26 @@ export class PtyHost {
   }
 
   /**
+   * Like getPending, but EXCLUDES durable-tracked messages (those carrying an `onDeliver` callback —
+   * the down/cross-tree session_message/message_worker entries persisted as `session_message_queued`).
+   * The daemon_restart intent snapshot uses THIS (card 2ca18433): the durable boot scan
+   * (recoverUndeliveredMessagesOnBoot) owns re-enqueueing those on boot, so snapshotting them into
+   * intent.pending too would deliver them TWICE on a normal restart. Non-durable held items (worker
+   * reports, idle/resume nudges) carry no callback and stay in the snapshot, replayed exactly as before.
+   */
+  getPersistablePending(sessionId: string): string[] {
+    return (this.live.get(sessionId)?.pending ?? []).filter((m) => !m.onDeliver).map((m) => m.text);
+  }
+
+  /**
    * A copy of a session's queued entries (id + text) in FIFO order — for the human-facing UI, which
    * needs the stable id to delete/edit/reorder a SPECIFIC entry (see QueuedMessage). Returns [] for an
    * unknown session. Entries are shallow-copied so a caller can't mutate the live FIFO through them.
    */
   getPendingEntries(sessionId: string): QueuedMessage[] {
-    return (this.live.get(sessionId)?.pending ?? []).map((m) => ({ ...m }));
+    // Strip the internal `onDeliver` callback — the UI only needs {id,text,source}, and a function must
+    // never escape the host (it isn't serializable and is meaningless outside this process).
+    return (this.live.get(sessionId)?.pending ?? []).map(({ id, text, source }) => ({ id, text, source }));
   }
 
   /**
@@ -1056,7 +1085,12 @@ export class PtyHost {
   consumePending(sessionId: string): string[] {
     const live = this.live.get(sessionId);
     if (!live?.alive) return []; // dead/unknown session: nothing to consume (don't hand back a stale queue)
-    return live.pending.splice(0).map((m) => m.text); // empty the queue in place AND return the removed texts (string contract)
+    const removed = live.pending.splice(0); // empty the queue in place AND keep the removed entries
+    // inbox_pull HANDS these to the recipient (it returns them to the agent) — that's delivery, so fire
+    // each entry's optional delivery callback (durable-message resolution) so a pulled message is marked
+    // delivered and won't be re-enqueued on a later boot. Guarded; undefined for non-messaging entries.
+    for (const m of removed) { if (m.onDeliver) { try { m.onDeliver(); } catch { /* never break the pull */ } } }
+    return removed.map((m) => m.text); // string contract unchanged
   }
 
   /**
@@ -1165,7 +1199,12 @@ export class PtyHost {
     // stop() also clears the queue, so this is belt-and-suspenders for a late enqueue during the stop.
     if (live.stopping) return;
     if (this.deferForHumanDraft(live)) return; // HOLD while the human's raw composer is dirty — never land on half-typed text
-    this.submit(sessionId, live.pending.shift()!.text);
+    const msg = live.pending.shift()!;
+    this.submit(sessionId, msg.text);
+    // ADDITIVE delivery hook (card 2ca18433): the head was just handed to the recipient as a turn — fire
+    // its callback (durable-message resolution) AFTER submit, outside the M1/M2 ordering. Guarded so a
+    // faulty callback can never disturb the drain. Undefined for every non-messaging entry → a no-op.
+    if (msg.onDeliver) { try { msg.onDeliver(); } catch { /* a delivery-marking fault never breaks the drain */ } }
   }
 
   /**

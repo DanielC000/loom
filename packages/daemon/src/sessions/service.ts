@@ -681,12 +681,17 @@ export class SessionService {
     // process on exit). Only non-empty FIFOs are included. Defensive caps keep the intent JSON small:
     // a real FIFO holds a handful of short messages, so clip a pathologically long queue and skip a
     // single absurdly large message rather than bloat the persisted intent.
+    //   DEDUP (card 2ca18433): use getPersistablePending, NOT getPending — durable-tracked messages
+    //   (session_message / message_worker, persisted as `session_message_queued`) are EXCLUDED here
+    //   because the boot scan (recoverUndeliveredMessagesOnBoot) is their single re-enqueue owner. Were
+    //   they in BOTH stores, a normal daemon_restart would deliver them TWICE. Non-durable held items
+    //   (worker reports, idle/resume nudges) carry no callback → stay in the snapshot, replayed as before.
     const PENDING_MAX_MSGS = 50;
     const PENDING_MAX_MSG_LEN = 100_000;
     const pending: Record<string, string[]> = {};
     for (const { sessionId } of resume) {
       const snap = this.pty
-        .getPending(sessionId)
+        .getPersistablePending(sessionId)
         .filter((m) => m.length <= PENDING_MAX_MSG_LEN)
         .slice(0, PENDING_MAX_MSGS);
       if (snap.length > 0) pending[sessionId] = snap;
@@ -892,6 +897,73 @@ export class SessionService {
     }
 
     return { resumed, skippedParked, failed };
+  }
+
+  /**
+   * Durable queued-message recovery (card 2ca18433) — re-drive every still-undelivered `session_message_
+   * queued` so a SENDER DEATH (API 529) or a DAEMON RESTART before the recipient's next turn boundary can't
+   * have silently dropped a dispatch (it lost a P1 cross-project dispatch twice). Runs ONCE at boot
+   * (index.ts), AFTER the fleet is resumed, and is the SINGLE re-enqueue owner for these messages: the
+   * daemon_restart intent snapshot now EXCLUDES them (getPersistablePending), so there's no double on a
+   * normal restart, and this also covers the crash / OS-service-restart / non-live-recipient paths the
+   * intent snapshot never reached. Per still-undelivered message:
+   *   • recipient is LIVE → re-enqueue with the SAME msgId (no new queued event), so it drains on the
+   *     recipient's next turn and onDeliver resolves it. Delivery is proven at the TURN BOUNDARY, never
+   *     assumed at dispatch — a board card moving to in_progress means nothing here.
+   *   • recipient is GONE / superseded (recycled) / archived → RETIRE it (a `session_message_delivered`
+   *     marker, reason="recipient-gone-or-superseded") so the undelivered set can't grow without bound (a
+   *     recycle already carried its FIFO forward in-process; an archived/absent one is unrecoverable).
+   *   • recipient EXISTS but isn't live → leave undelivered; a later boot that resumes it re-drives it.
+   * Then every STILL-stuck outbound message (recipient not live, not retired) is surfaced to its LIVE
+   * SENDER so it can re-send. Best-effort + never throws (must not gate boot). Returns counts for the log.
+   */
+  recoverUndeliveredMessagesOnBoot(): { reEnqueued: number; retired: number; senderNudges: number } {
+    let reEnqueued = 0, retired = 0, senderNudges = 0;
+    // recipientId → sender(s) of messages we couldn't re-enqueue (stuck) → surfaced to live senders below.
+    const stuckBySender = new Map<string, Set<string>>();
+    for (const e of this.db.listUndeliveredQueuedMessages()) {
+      const recipientId = e.workerSessionId ?? null;
+      const msgId = typeof e.detail?.msgId === "string" ? e.detail.msgId : null;
+      const text = typeof e.detail?.text === "string" ? e.detail.text : null;
+      const sender = typeof e.detail?.sender === "string" ? e.detail.sender : e.managerSessionId;
+      if (!recipientId || !msgId || text === null) continue; // malformed — skip (can't act on it)
+
+      const recipient = this.db.getSession(recipientId);
+      if (!recipient || this.db.hasSuccessor(recipientId) || recipient.archivedAt) {
+        // Gone / recycled-forward / archived → retire so it never re-scans forever.
+        this.resolveQueuedMessage(msgId, { recipientId, reason: "recipient-gone-or-superseded" });
+        retired++;
+        continue;
+      }
+      if (recipient.processState === "live") {
+        // Re-enqueue with the SAME msgId so its drain resolves THIS queued event (no duplicate record).
+        // Ready-gated in host.ts: a freshly-resumed pty holds it until its TUI boots, then drains.
+        const r = this.pty.enqueueStdin(recipientId, text, "system", () => this.resolveQueuedMessage(msgId, { recipientId }));
+        if (r.delivered || r.position !== undefined) { reEnqueued++; continue; }
+        // delivered:false with no position ⇒ the host has no live pty for it (DB/host skew) → treat as stuck.
+      }
+      // Not live (exited / starting) or live-without-pty → stuck; surface to the sender below.
+      const set = stuckBySender.get(sender) ?? new Set<string>();
+      set.add(recipientId);
+      stuckBySender.set(sender, set);
+    }
+
+    // Surface stuck outbound to LIVE senders so they re-send (delivery is never assumed). A sentinel
+    // sender ("platform" with no live session, or one since exited) simply has nobody to nudge — the
+    // message stays durably undelivered and a later boot re-drives it once its recipient is back.
+    for (const [senderId, recipientIds] of stuckBySender) {
+      const senderSession = this.db.getSession(senderId);
+      if (!senderSession || senderSession.processState !== "live") continue;
+      const ids = [...recipientIds];
+      const note =
+        `[loom:undelivered] ${ids.length} message(s) you sent could NOT be confirmed delivered before the ` +
+        `daemon restarted (their recipients aren't live): ${ids.map((i) => i.slice(0, 8)).join(", ")}. ` +
+        `Loom will re-deliver automatically once each recipient is resumed, but if any is time-critical, ` +
+        `re-send it (or check the recipient's state). Delivery is proven at the recipient's turn boundary, ` +
+        `not at dispatch — so don't assume a queued dispatch landed.`;
+      try { const nr = this.pty.enqueueStdin(senderId, note); if (nr.delivered || nr.position !== undefined) senderNudges++; } catch { /* sender not ready — the durable record stands */ }
+    }
+    return { reEnqueued, retired, senderNudges };
   }
 
   /**
@@ -1461,12 +1533,61 @@ export class SessionService {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     const framed = `[loom:from-manager]\n${text}`;
-    const r = this.pty.enqueueStdin(workerSessionId, framed);
+    // Durable-tracked: if the worker is busy the message is HELD in its FIFO and persisted as
+    // `session_message_queued` so a sender death / daemon restart can't drop it (card 2ca18433).
+    const r = this.enqueueDurableMessage(workerSessionId, framed, { sender: managerSessionId, taskId: worker.taskId ?? null });
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "message_worker",
     });
     return r;
+  }
+
+  /**
+   * Durable down/cross-tree message send (card 2ca18433). Wraps pty.enqueueStdin: if the recipient is
+   * idle the message goes out as a turn now (delivered:true, nothing persisted — it's already live); if
+   * it's BUSY the message is HELD in the recipient's in-memory FIFO (delivered:false) AND persisted as a
+   * `session_message_queued` event, so a sender death (API 529) or a daemon restart before the
+   * recipient's next turn boundary can no longer SILENTLY DROP it (it lost a P1 dispatch twice). The
+   * onDeliver callback resolves the durable event the instant the held message is finally handed to the
+   * recipient — drained at its next Stop or pulled via inbox_pull. The boot scan
+   * (recoverUndeliveredMessagesOnBoot) re-drives any that a process death interrupted before delivery.
+   */
+  private enqueueDurableMessage(
+    recipientId: string, framedText: string, ctx: { sender: string; taskId?: string | null },
+  ): { delivered: boolean; position?: number } {
+    const msgId = randomUUID();
+    const r = this.pty.enqueueStdin(recipientId, framedText, "system", () => this.resolveQueuedMessage(msgId, { recipientId }));
+    if (!r.delivered) {
+      // Held (busy / not-ready) — persist the durable inbox record. delivered:false with no position also
+      // means "recipient not live": we still record it, so the boot scan re-drives it once the recipient
+      // is resumed (never silently lost), and surfaces it to the sender if it stays stuck.
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: ctx.sender, workerSessionId: recipientId, taskId: ctx.taskId ?? null,
+        kind: "session_message_queued", detail: { msgId, text: framedText, sender: ctx.sender },
+      });
+    }
+    return r;
+  }
+
+  /**
+   * Mark a durable queued message DELIVERED (idempotent) — the resolution half of `session_message_queued`.
+   * Fired by the host the instant a held message is handed to the recipient (drainPending / consumePending),
+   * and by the boot scan to RETIRE a message whose recipient is gone/superseded (`reason`). Idempotent via
+   * the delivered-marker check, and NEVER throws (a delivery-marking fault must not disturb the host drain
+   * or gate boot). A msgId that was never persisted (immediate delivery) simply records a harmless marker
+   * with no queued counterpart — but onDeliver is only ever attached to a HELD entry, so that can't occur.
+   */
+  private resolveQueuedMessage(msgId: string, opts: { recipientId?: string; reason?: string } = {}): void {
+    try {
+      if (this.db.isQueuedMessageDelivered(msgId)) return; // already resolved — idempotent no-op
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: "", workerSessionId: opts.recipientId ?? null, taskId: null,
+        kind: "session_message_delivered", detail: opts.reason ? { msgId, reason: opts.reason } : { msgId },
+      });
+    } catch { /* delivery-marking must never disturb the host drain or boot */ }
   }
 
   /**
@@ -1478,12 +1599,16 @@ export class SessionService {
    * DELIVERY ONLY — it never spawns anything. Throws (→ the router's error envelope) if the target session
    * is unknown or not live.
    */
-  messageSessionAsPlatform(sessionId: string, text: string): { delivered: boolean; position?: number } {
+  messageSessionAsPlatform(sessionId: string, text: string, senderSessionId?: string): { delivered: boolean; position?: number } {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
     if (session.processState !== "live") throw new Error("session is not live");
     const framed = `[loom:from-platform]\n${text}`;
-    const r = this.pty.enqueueStdin(sessionId, framed);
+    // Durable-tracked (card 2ca18433): a busy recipient holds it FIFO + we persist it, so the Lead's
+    // cross-project dispatch survives a sender death / daemon restart before the recipient's next turn.
+    // The sender is the Lead's own session id (threaded from the router) so an undelivered dispatch can be
+    // surfaced back to it on resume; "platform" is a sentinel fallback if no caller id was provided.
+    const r = this.enqueueDurableMessage(sessionId, framed, { sender: senderSessionId ?? "platform", taskId: session.taskId ?? null });
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: "", workerSessionId: sessionId, taskId: session.taskId ?? null, kind: "session_message",

@@ -408,7 +408,24 @@ export type OrchestrationEventKind =
   // listEventsForWorker retrieves it; managerSessionId = its parent or its own id); `detail` carries the
   // reporting worker + task. Recorded by recordUndeliveredReport ONLY when the manager is exited (a
   // live-but-busy manager's queue drains on its next turn — not a strand) and not usage-limit parked.
-  | "worker_report_undelivered";
+  | "worker_report_undelivered"
+  // DURABLE QUEUED-MESSAGE INBOX (card 2ca18433): a down/cross-tree message (message_worker /
+  // session_message) that could NOT be delivered as a turn at send time — the recipient was busy, so it
+  // was HELD in the recipient's in-memory FIFO (`delivered:false`). That FIFO dies with the process, so a
+  // sender death or a daemon restart before the recipient's next turn boundary would SILENTLY DROP it
+  // (it lost a P1 dispatch twice). This event PERSISTS the held message so it survives both: filed under
+  // workerSessionId = the RECIPIENT (managerSessionId = the SENDER), `detail` carries { msgId, text,
+  // sender }. Recorded by SessionService's messaging helpers ONLY on the queued (delivered:false) path —
+  // an immediately-delivered message is already a live turn and needs no persistence. The boot scan
+  // (recoverUndeliveredMessagesOnBoot) re-enqueues every still-unresolved one onto its resumed recipient
+  // and surfaces stuck outbound ones to the resumed sender. PAIRED with its resolution marker below.
+  | "session_message_queued"
+  // The resolution half of `session_message_queued`: the held message was finally HANDED to the recipient
+  // — drained as a turn at its next Stop, or consumed via inbox_pull. `detail.msgId` matches the queued
+  // event; a queued event with NO matching delivered event is "still undelivered" (the boot scan's work
+  // set). Also filed by the boot scan to RETIRE a queued event whose recipient is gone/superseded (carried
+  // forward by recycle, or unrecoverable) so the undelivered set can't grow without bound (detail.reason).
+  | "session_message_delivered";
 
 export interface OrchestrationEvent {
   id: string;

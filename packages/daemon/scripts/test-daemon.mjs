@@ -29,7 +29,7 @@ const HERMETIC = [
   "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull", "usage-status", "rate-limit-clear",
   "skills-inject", "skills-subset-spawn", "skills-store-durability", "skills-publish-drift", "vault-lint", "vault-browser", "vault-writer", "git-writer", "git-identity-warning",
   "worker-diff", "worktrees", "worktree-provision", "spawn-recut-stale-branch", "merge-finalize-resilient", "merge-confirm-idempotent", "merge-review-diffstat", "merge-stranded-backstop", "worker-report-precheck", "worker-report-orphan-wake", "worker-spawn-agent-gate",
-  "pty-busy-drain", "pty-composer-dirty", "pty-queue-mutations", "pty-queue-rest", "pty-resume-readiness", "pty-stop-queue", "graceful-stop", "resume-mode-cycles", "resume-mode-detect", "resume-mode-feedback", "shell-terminal",
+  "pty-busy-drain", "pty-composer-dirty", "pty-queue-mutations", "pty-queue-rest", "pty-resume-readiness", "pty-stop-queue", "queued-message-durability", "graceful-stop", "resume-mode-cycles", "resume-mode-detect", "resume-mode-feedback", "shell-terminal",
   "db-backup",
 ];
 
