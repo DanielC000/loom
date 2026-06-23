@@ -247,27 +247,43 @@ try {
   check("(5b) resume() spawned NO pty (no doomed --resume)", recPty.spawns.length === 0);
 
   // ============================ (6) NUDGE COVERAGE — reviewer roles, run-exclusion, converged mgr ====
-  // P1 + folded #7. Standing reviewers (auditor/workspace-auditor/setup) resume with NO startup prompt,
-  // so without a continuation nudge they sit idle until a human types "continue" — each must get a
-  // generic [loom:daemon-restarted] nudge. A `run` (runs don't resume — see shared/types.ts SessionRole)
-  // gets NONE. And the #7 short-circuit: a manager/platform with 0 live workers in the resume set that
-  // last reported done/waiting gets the lightweight FYI, NOT the full "re-check your workers" re-orient.
+  // P1 + folded #7 + card 90058589. Standing reviewers (auditor/workspace-auditor/setup) resume with NO
+  // startup prompt, so without a continuation nudge they sit idle until a human types "continue" — each
+  // must get a generic [loom:daemon-restarted] nudge. A `run` (runs don't resume — see shared/types.ts
+  // SessionRole) gets NONE. And the converged short-circuit is gated on the BOARD, not the stale idle-policy
+  // alone: a manager/platform with 0 live workers in the resume set AND an EMPTY board gets the lightweight
+  // FYI; one with a PENDING board card (even with a stale suppressed/snoozed idle-policy) gets the full
+  // "re-check your workers" re-orient; and the deploy REQUESTER is NEVER FYI-short-circuited.
+  // C.proj is an EMPTY board (no tasks) — its 0-worker managers are GENUINELY converged.
+  // C2.proj has ≥1 PENDING card (mkTask lands at "in_progress" = the `active` lane, neither terminal
+  // nor humanHold) — its 0-worker managers are NOT converged despite a stale suppressed idle-policy
+  // (card 90058589: a manager that deploys mid-queue sits at 0 live workers but still has pending work).
   const C = { proj: `rf-C-${sfx}`, agent: `rf-C-ag-${sfx}` };
+  const C2 = { proj: `rf-C2-${sfx}`, agent: `rf-C2-ag-${sfx}` };
   mkProject(C.proj, "/tmp/rf-C"); mkAgent(C.agent, C.proj);
+  mkProject(C2.proj, "/tmp/rf-C2"); mkAgent(C2.agent, C2.proj);
+  mkTask(`rf-C2-pending-${sfx}`, C2.proj); // one PENDING card on C2's board (column "in_progress")
   const cid = {
     auditor: `rf-auditor-${sfx}`, wsAuditor: `rf-wsaud-${sfx}`, setup: `rf-setup-${sfx}`, run: `rf-run-${sfx}`,
-    reqMgr: `rf-reqMgr-${sfx}`, convMgr: `rf-convMgr-${sfx}`, activeMgr: `rf-activeMgr-${sfx}`, activeWkr: `rf-activeWkr-${sfx}`,
+    reqMgr: `rf-reqMgr-${sfx}`, convMgr: `rf-convMgr-${sfx}`, pendMgr: `rf-pendMgr-${sfx}`,
+    activeMgr: `rf-activeMgr-${sfx}`, activeWkr: `rf-activeWkr-${sfx}`,
   };
   mkSession({ id: cid.auditor, projId: C.proj, agentId: C.agent, role: "auditor" });
   mkSession({ id: cid.wsAuditor, projId: C.proj, agentId: C.agent, role: "workspace-auditor" });
   mkSession({ id: cid.setup, projId: C.proj, agentId: C.agent, role: "setup" });
   mkSession({ id: cid.run, projId: C.proj, agentId: C.agent, role: "run" });
-  // reqMgr: the requester, converged (0 workers + last reported DONE → policy "suppressed").
-  mkSession({ id: cid.reqMgr, projId: C.proj, agentId: C.agent, role: "manager" });
+  // reqMgr: the REQUESTER on C2 (suppressed idle-policy + 0 workers + a PENDING board card). It must
+  // ALWAYS get the full "code is live — continue/verify" nudge — the requester is never FYI-short-circuited.
+  mkSession({ id: cid.reqMgr, projId: C2.proj, agentId: C2.agent, role: "manager" });
   db.setIdleNudgePolicy(cid.reqMgr, "suppressed");
-  // convMgr: a NON-requesting converged manager (0 workers + last reported WAITING → policy "snoozed").
+  // convMgr: a NON-requesting TRULY-converged manager (empty C board + 0 workers + last reported WAITING →
+  // policy "snoozed"). Still gets the lightweight FYI (the genuine bystander-converged case is preserved).
   mkSession({ id: cid.convMgr, projId: C.proj, agentId: C.agent, role: "manager" });
   db.setIdleNudgePolicy(cid.convMgr, "snoozed", future);
+  // pendMgr: a NON-requesting manager on C2 (suppressed idle-policy + 0 workers + a PENDING board card).
+  // The stale suppressed policy alone is NOT sufficient — the pending board makes it NON-converged → full nudge.
+  mkSession({ id: cid.pendMgr, projId: C2.proj, agentId: C2.agent, role: "manager" });
+  db.setIdleNudgePolicy(cid.pendMgr, "suppressed");
   // activeMgr: a NON-requesting manager WITH a live worker → full re-check nudge (the control).
   mkSession({ id: cid.activeMgr, projId: C.proj, agentId: C.agent, role: "manager" });
   mkSession({ id: cid.activeWkr, projId: C.proj, agentId: C.agent, role: "worker", parentSessionId: cid.activeMgr });
@@ -283,6 +299,7 @@ try {
       { sessionId: cid.run, role: "run", parentSessionId: null },
       { sessionId: cid.reqMgr, role: "manager", parentSessionId: null },
       { sessionId: cid.convMgr, role: "manager", parentSessionId: null },
+      { sessionId: cid.pendMgr, role: "manager", parentSessionId: null },
       { sessionId: cid.activeMgr, role: "manager", parentSessionId: null },
       { sessionId: cid.activeWkr, role: "worker", parentSessionId: cid.activeMgr },
     ],
@@ -297,12 +314,19 @@ try {
   check("(6a) setup gets the continue nudge",
     n6(cid.setup).length === 1 && n6(cid.setup)[0].includes("[loom:daemon-restarted]") && /continue your work/i.test(n6(cid.setup)[0]));
   check("(6b) a `run` session gets NO nudge (runs don't resume)", n6(cid.run).length === 0);
-  // (6c) converged managers: the lightweight FYI, NOT the full re-check nudge.
+  // (6c) convergence is gated on the BOARD, not the stale idle-policy alone (card 90058589).
+  // The REQUESTER is never FYI-short-circuited — it always gets the full "code is live, verify + continue".
   const reqMsg = n6(cid.reqMgr);
-  check("(6c) converged REQUESTER gets the lightweight FYI (code-live, no 're-check')",
-    reqMsg.length === 1 && reqMsg[0].includes("now LIVE") && /no action is needed/i.test(reqMsg[0]) && !/re-check/i.test(reqMsg[0]));
+  check("(6c) the deploy REQUESTER (pending board) gets the FULL code-live nudge, NOT the FYI",
+    reqMsg.length === 1 && reqMsg[0].includes("now LIVE") && /verify the live behavior/i.test(reqMsg[0]) && !/no action is needed/i.test(reqMsg[0]));
+  // A NON-requesting manager with a stale suppressed idle-policy + 0 workers but a PENDING board card is
+  // NOT converged — the regression fix: it gets the full re-check nudge, not the wrong "no action" FYI.
+  const pendMsg = n6(cid.pendMgr);
+  check("(6c) a non-requesting manager with a PENDING board (stale suppressed policy) gets the FULL re-check nudge",
+    pendMsg.length === 1 && /re-check your workers/i.test(pendMsg[0]) && !/no action is needed/i.test(pendMsg[0]));
+  // PRESERVED: a NON-requesting manager that is TRULY converged (empty board + 0 workers) still gets the FYI.
   const convMsg = n6(cid.convMgr);
-  check("(6c) converged NON-requesting manager gets the lightweight FYI, not the re-check nudge",
+  check("(6c) a truly-converged NON-requesting manager (empty board) still gets the lightweight FYI",
     convMsg.length === 1 && /no action is needed/i.test(convMsg[0]) && !/re-check/i.test(convMsg[0]));
   // Control: an active manager (still has a live worker) gets the FULL re-check nudge — gate is precise.
   const activeMsg = n6(cid.activeMgr);

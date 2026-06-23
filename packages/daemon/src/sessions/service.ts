@@ -766,9 +766,13 @@ export class SessionService {
    * catch a resume's direct setBusy(false)):
    *   - the REQUESTING manager gets its "merged code is now live — continue/verify" re-prompt;
    *   - every other manager/platform gets a neutral "you were resumed, continue orchestrating" note;
-   *   - a CONVERGED manager/platform (0 live workers in the resume set + last reported done/waiting, per
-   *     #7) gets a lightweight "no action needed" FYI instead of the full re-check nudge — including the
-   *     requester when its own worker set is empty;
+   *   - a CONVERGED bystander manager/platform — 0 live workers in the resume set AND an EMPTY board (no
+   *     pending/actionable task: every column except the terminal + humanHold lanes counts as pending) —
+   *     gets a lightweight "no action needed" FYI instead of the full re-check nudge. The stale idle-nudge
+   *     policy ALONE is no longer sufficient (a manager that deploys mid-queue sits at 0 live workers by
+   *     design yet still has pending cards), so convergence is gated on the board. The deploy REQUESTER is
+   *     NEVER short-circuited — initiating a deploy is active work, so it always gets the full "code is
+   *     live — continue/verify" nudge;
    *   - every worker gets the "your worktree WIP is intact, continue your task" nudge;
    *   - a standing reviewer (auditor/workspace-auditor/setup) gets a generic "you were resumed — continue
    *     your work" nudge (it too resumes with no startup prompt, so it would otherwise sit idle);
@@ -804,19 +808,41 @@ export class SessionService {
       const s = this.db.getSession(id);
       return !!s?.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > now.getTime();
     };
-    // #7 (converged-manager short-circuit): how many of THIS manager's live workers are in the resume
-    // set, and did it last self-report done/waiting? The idle_report disposition is persisted on the
-    // durable idle-nudge policy column (recordIdleReport): waiting → "snoozed", done/blocked_human →
-    // "suppressed", working → "watching" (also the un-reported default). So "last reported done/waiting"
-    // == policy is snoozed or suppressed — no new field needed. (idle_report is manager-only, so a
-    // platform target's policy is always "watching" and it correctly never short-circuits.)
+    // #7 + card 90058589 (converged-manager short-circuit): how many of THIS manager's live workers are
+    // in the resume set, did it last self-report done/waiting, AND is its board actually empty? The
+    // idle_report disposition is persisted on the durable idle-nudge policy column (recordIdleReport):
+    // waiting → "snoozed", done/blocked_human → "suppressed", working → "watching" (also the un-reported
+    // default). So "last reported done/waiting" == policy is snoozed or suppressed. But that policy can be
+    // STALE: a manager that deploys mid-queue sits at 0 live workers (normal at deploy time) while still
+    // carrying a suppressed/snoozed policy from an earlier idle_report — classifying it as converged would
+    // stall it with pending work. So convergence ALSO requires an EMPTY board: a task is PENDING/actionable
+    // when its column is NEITHER the terminal lane NOR the humanHold (blocked) lane — every other lane
+    // (intake/defaultLanding/workReady/active/review/parked) counts as pending. (idle_report is
+    // manager-only, so a platform target's policy is always "watching" and it correctly never short-circuits.)
     const liveWorkerCount = (managerId: string): number =>
       entries.filter((e) => e.role === "worker" && e.parentSessionId === managerId).length;
     const lastReportedDoneOrWaiting = (id: string): boolean => {
       const policy = this.db.getIdleNudgeState(id)?.policy;
       return policy === "snoozed" || policy === "suppressed";
     };
-    const isConverged = (id: string): boolean => liveWorkerCount(id) === 0 && lastReportedDoneOrWaiting(id);
+    const hasPendingBoardWork = (id: string): boolean => {
+      try {
+        const projectId = this.db.getSession(id)?.projectId;
+        if (!projectId) return true; // unknown project → assume pending (a full nudge never stalls)
+        const project = this.db.getProject(projectId);
+        if (!project) return true;
+        const cols = resolveConfig(project.config).kanbanColumns;
+        const terminalKey = columnKeyForRole(cols, "terminal");
+        const humanHoldKey = columnKeyForRole(cols, "humanHold");
+        return this.db.listTasks(projectId).some(
+          (t) => t.columnKey !== terminalKey && t.columnKey !== humanHoldKey,
+        );
+      } catch {
+        return true; // defensive: a board-read fault must never produce a false "converged" stall
+      }
+    };
+    const isConverged = (id: string): boolean =>
+      liveWorkerCount(id) === 0 && lastReportedDoneOrWaiting(id) && !hasPendingBoardWork(id);
 
     const reqWorkers = entries.filter((e) => e.role === "worker" && e.parentSessionId === reqId).map((e) => e.sessionId);
 
@@ -874,24 +900,16 @@ export class SessionService {
       } else {
         replayPending(reqId);
         const reqWorkersResumed = reqWorkers.filter((id) => resumed.includes(id)).length;
-        if (reqWorkers.length === 0 && lastReportedDoneOrWaiting(reqId)) {
-          // #7: the requester converged before requesting the restart (no live workers + last reported
-          // done/waiting) — acknowledge the deploy without the full "re-check your workers" re-orient.
-          this.pty.enqueueStdin(
-            reqId,
-            `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
-            `running daemon (reason: ${intent.reason}). You had no live workers and had last reported ` +
-            `done/waiting, so no action is needed beyond confirming the live behavior if you wish.`,
-          );
-        } else {
-          this.pty.enqueueStdin(
-            reqId,
-            `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
-            `running daemon (reason: ${intent.reason}). ${reqWorkersResumed}/${reqWorkers.length} of your live ` +
-            `workers were resumed (the rest of the fleet across all projects was resumed too). You can now ` +
-            `end-to-end verify the live behavior. Continue.`,
-          );
-        }
+        // card 90058589: the deploy REQUESTER is NEVER FYI-short-circuited — initiating a deploy is active
+        // work, so it always gets the full "code is live — continue/verify" nudge (even at 0 live workers
+        // with a stale done/waiting idle-policy, the case the old converged-FYI branch wrongly stalled).
+        this.pty.enqueueStdin(
+          reqId,
+          `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
+          `running daemon (reason: ${intent.reason}). ${reqWorkersResumed}/${reqWorkers.length} of your live ` +
+          `workers were resumed (the rest of the fleet across all projects was resumed too). You can now ` +
+          `end-to-end verify the live behavior. Continue.`,
+        );
       }
     } else {
       failed.push(reqId);
