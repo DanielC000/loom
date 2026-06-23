@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // FIRST: arms LOOM_TEST=1 + strips GIT_PAGER/PAGER before simple-git is exercised.
 // Unit test for the git WRITER (checkout / createBranch / commit / push) + its bounded,
 // non-interactive guarantee. Claude-free: imports the compiled module and runs real git on a temp
 // repo. Run after build: node test/git-writer.mjs

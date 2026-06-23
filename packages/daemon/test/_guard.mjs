@@ -27,6 +27,16 @@ import path from "node:path";
 // Arm the Db prod-guard for THIS process (and inherited by spawned daemons) the moment we're imported.
 process.env.LOOM_TEST = "1";
 
+// Strip GIT_PAGER/PAGER from the test process env. The suite exercises the daemon's simple-git, which
+// REFUSES to run with GIT_PAGER set ("Use of GIT_PAGER is not permitted without enabling allowUnsafePager").
+// In production that simple-git always runs in the supervisor-spawned daemon process — NEVER the
+// worker/manager pty's GIT_PAGER=cat shell-git backstop env (set in buildSpawnEnv, the actual wedge fix).
+// But when this suite is run FROM a session pty (e.g. a worker gating on `pnpm test`), it inherits that
+// GIT_PAGER=cat/PAGER=cat and 6 simple-git tests fail. Stripping these makes a session-spawned test run
+// faithful to the production daemon env + satisfies simple-git's allowUnsafePager guard.
+delete process.env.GIT_PAGER;
+delete process.env.PAGER;
+
 const REAL_LOOM_HOME = path.resolve(path.join(os.homedir(), ".loom"));
 const PROD_PORT = 4317;
 

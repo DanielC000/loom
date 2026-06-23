@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // FIRST: arms LOOM_TEST=1 + strips GIT_PAGER/PAGER before simple-git is exercised.
 // Unit test for the git WRITER's host↔identity mismatch WARNING on push(). Claude-free: imports the
 // compiled module and runs real git on temp repos + bare local remotes (no network). Proves:
 //   - self-hosted origin + GitHub-noreply identity → warning
