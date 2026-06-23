@@ -46,10 +46,14 @@ self-hosts: Loom is built using Loom.
   phosphor-on-dark instrument panel.
 - **🌐 Opt-in per-worker browser testing.** A worker profile can be granted its own isolated headless
   Playwright browser, so QA-style sessions can drive a running app and verify UI before reporting back.
-- **🚀 Guided onboarding.** A built-in **Setup Assistant** greets you on first run and stays one click away
-  ("Set up Loom"). It helps you create and configure your projects, agents, and profiles, pick your skills
-  and workflow, and can set them up on your behalf — confirming the big moves first, on a deliberately
-  narrow, safe tool surface.
+- **🚀 Guided setup + a standing Platform operator.** A built-in **Platform** operator greets you on
+  first run and stays one click away (the **Platform** page). It helps you create, configure, and archive
+  your projects, agents, and profiles, pick your skills and workflow, and can set them up on your behalf —
+  confirming the big moves first, on a deliberately narrow, safe tool surface.
+- **🔎 Suggest-only Workspace Auditor.** A read-only reviewer scans your own recent sessions for vague or
+  ambiguous instructions in *your* agent prompts and skills, and for prompts you type repeatedly that are
+  worth saving as one-click presets — then files improvement suggestions as cards on your board. It never
+  changes anything itself. Run it on demand ("Review my workspace" on the Platform page) or on a schedule.
 
 ## Quick start
 

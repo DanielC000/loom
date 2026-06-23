@@ -33,14 +33,15 @@ and loads only in dev: boot the daemon with `LOOM_DEV=1` (e.g. `LOOM_DEV=1 pnpm 
 flag is read in ONE helper (`paths.ts` › `isLoomDev`, same shape as `LOOM_SCHEDULER_ENABLED`); CORE
 orchestration (Orchestrator/Dev/Bugfix/QA/Web Designer + their skills) always seeds, flag or not.
 
-**Setup Assistant (ships to ALL users — the ungated, lower-priv cousin of the dev Platform layer):** a
-standing, user-facing onboarding agent on a new `setup` SessionRole, served by a curated **fail-closed**
+**Setup Assistant → "Platform" operator (ships to ALL users — the ungated, lower-priv cousin of the dev Platform layer):** a
+standing, user-facing operator agent — seeded and shown as **"Platform"** since 0.5.0 (legacy display name "Setup Assistant"
+retained for the rename migration), no longer just a one-time onboarding helper — on the `setup` SessionRole, served by a curated **fail-closed**
 `loom-setup` MCP router (`/mcp-setup/:sessionId`, role-gated, 14 tools — incl. the one safe lifecycle cap
 `project_archive`: soft, reversible, and REFUSES a reserved/system home). It acts on the user's behalf —
 `project_create`/`configure`/`update` via the **AGENT validator** (rejects `gateCommand`/`alertWebhook`),
 `agent_create`, `profile_create`/`update`/`assign`, the `list_all_*` reads, and `session_spawn`
 `manager|plain` only — with **no** writers/escalation/auditor/archive surface and no self-elevation. It
-follows the CORE-seed pattern (NOT `LOOM_DEV`-gated): a reserved "Getting Started" home + Setup Assistant
+follows the CORE-seed pattern (NOT `LOOM_DEV`-gated): a reserved "Getting Started" home + the "Platform" operator
 agent + the `setup-assistant` skill, spawned human-REST / first-run-boot only (`startSetup` singleton;
 first-run auto-launch via an `app_meta` one-time marker, exactly-once). The `setup` `profile_create` rejects
 `platform`/`auditor` roles (least-privilege). Design: `Projects/Loom/Setup Assistant Design.md` in the vault.

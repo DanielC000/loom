@@ -7,6 +7,26 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Fixed
+- **Reviewer/operator sessions resume cleanly after a daemon restart.** When the daemon restarts, the
+  Workspace Auditor, the dev Auditor, and the Platform operator are now nudged to continue (the way worker
+  sessions already are) instead of sitting idle after their resume.
+- **Captured transcripts keep tool-result bodies.** Saved session transcripts retain the bodies of tool
+  results, so a later review or audit sees the full record rather than truncated tool output.
+- **The Workspace Auditor's tooling is bounded and forgiving.** Its session listing is capped so a large
+  workspace can't flood the auditor's context, and its transcript reads accept a session-id *prefix*, not
+  only the full id.
+- **Confirming a worker merge is idempotent.** A repeated merge-confirm (e.g. after a reconnect) is now a
+  safe no-op instead of double-applying or erroring.
+- **Queued messages survive a restart or the sender ending.** A message queued to a busy session is
+  persisted, so it still arrives after a daemon restart or after the session that queued it exits —
+  instead of being silently dropped.
+- **A fast-exiting worker always reports back.** A worker that finishes or dies very quickly now always
+  emits its terminal report to its lead, so the lead is never left waiting on a report that never comes.
+- **Corrected the shipped Platform & Workspace Auditor prompts.** The seed prompts that ship to new
+  installs dropped stale, Loom-internal wording (a leftover "auditor stand-down" note and dev-only
+  framing) in favor of clean, user-facing text.
+
 ## [0.5.0] — 2026-06-23
 
 The onboarding assistant grows into a standing **Platform** operator, and a new suggest-only **Workspace
@@ -21,6 +41,9 @@ Auditor** reviews your own workspace and proposes improvements.
   page, or put it on a cron schedule.
 - **Archive a project from the Platform operator.** The operator can now soft-archive a project you're
   done with (reversible; it refuses your reserved home).
+- **Voice dictation on board cards.** The card description field in the board drawer gains the same
+  speech-to-text mic as the composer — dictate a card's description instead of typing it (the mic appears
+  only in browsers that support speech recognition).
 
 ### Changed
 - **The Setup Assistant is now your "Platform" operator.** What greeted you as the "Setup Assistant" is
