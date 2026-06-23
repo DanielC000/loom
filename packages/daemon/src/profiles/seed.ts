@@ -114,7 +114,7 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
     name: "Workspace Auditor",
     role: "workspace-auditor",
     description:
-      "Workspace Auditor rig: the on-demand, read-mostly, SUGGEST-ONLY reviewer of the user's OWN workspace. Scans the user's recent session transcripts for vague/ambiguous instructions in their own agent prompts and skills, and recurring prompts worth saving as presets — filing improvement suggestions as board cards on the user's home and emitting preset suggestions, never auto-applying. De-privileged twin of the dev Platform-audit; it does NOT hunt Loom bugs.",
+      "Workspace Auditor rig: the on-demand, read-mostly, SUGGEST-ONLY reviewer of the user's OWN workspace. Scans the user's recent session transcripts for vague/ambiguous instructions in their own agent prompts and skills, and recurring prompts worth saving as presets — filing improvement suggestions as board cards on the user's home and emitting preset suggestions, never auto-applying. Reviews the user's own workspace for their benefit.",
     allowDelta: [],
     skills: null,
     model: null,
