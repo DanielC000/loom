@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReviewPanel from "./pages/ReviewPanel";
 import { NAV_PAGES, useVisibleNavPages, type NavGroup } from "./nav";
@@ -269,7 +269,7 @@ function Toast({ item, onDismiss, onOpen }: { item: AttentionItem; onDismiss: ()
 
 // Setup Assistant E1-7 — first-run welcome. On a FRESH install (no ordinary projects) the daemon has
 // already auto-launched the setup session; the web additionally presents a one-time welcome that routes
-// the user into the live operator terminal (the "Platform" page, route /setup). Gated purely on the ordinary project
+// the user into the live operator terminal (the "Platform" page, route /platform). Gated purely on the ordinary project
 // list being EMPTY (api.projects excludes the reserved Getting Started + Platform homes), so it vanishes
 // the moment a real project exists — and stays gone. Also human-dismissable (× / "Maybe later"), persisted
 // so it doesn't nag on every reload of a still-empty install; the "Platform" nav entry remains the way in.
@@ -287,7 +287,7 @@ function FirstRunWelcome() {
   const ordinary = (projectsQ.data ?? []).filter((p) => !p.archivedAt);
   if (!projectsQ.isSuccess || ordinary.length > 0 || dismissed) return null;
 
-  const goSetup = () => { navigate("/setup"); dismiss(); };
+  const goSetup = () => { navigate("/platform"); dismiss(); };
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center",
       background: "rgba(0,0,0,0.55)", backdropFilter: "blur(2px)" }}>
@@ -343,6 +343,9 @@ export default function App() {
             {NAV_PAGES.map((p) => (
               <Route key={p.to} path={p.to} element={p.element} />
             ))}
+            {/* /setup was the old end-user Platform route — now consolidated into /platform. Redirect any
+                lingering links/bookmarks (and the first-run welcome's historical target). */}
+            <Route path="/setup" element={<Navigate to="/platform" replace />} />
             <Route path="/review/:workerId" element={<ReviewPanel />} />
           </Routes>
         </main>

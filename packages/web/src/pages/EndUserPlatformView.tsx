@@ -9,11 +9,12 @@ import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../compon
 import { looksLikeCron } from "./Schedules";
 import { color, font } from "../theme";
 
-// Setup Assistant E1-7 / End-User Platform tier B5 — the always-available "Platform" surface (route
-// /setup — an internal anchor kept as-is per the rebrand), SEPARATE from the project picker (mirrors
-// Platform.tsx). The reserved "Getting Started" home is hidden from the ordinary project list (GET
-// /api/projects excludes reserved); this page is its only way in — by design. The reserved home holds
-// TWO agents: the operator ("Platform") and the de-privileged Workspace Auditor (B4).
+// Setup Assistant E1-7 / End-User Platform tier B5 — the SHIPPING-edition Platform surface (the
+// "Getting Started" home), rendered by the consolidated Platform page for shipping users (and as the
+// dev "View as: End-user" preview). SEPARATE from the project picker (mirrors DeveloperPlatformView).
+// The reserved "Getting Started" home is hidden from the ordinary project list (GET /api/projects
+// excludes reserved); this view is its only way in — by design. The reserved home holds TWO agents:
+// the operator ("Platform") and the de-privileged Workspace Auditor (B4).
 //   • Discovery is read-only (api.setupHome) — the reserved home + its agent(s) + any live sessions.
 //   • Operator: Start spawns via startSession(role "setup"); startSetup is a server-side SINGLETON, so a
 //     Start while one is already live just attaches the existing one (never two live setup sessions).
@@ -22,7 +23,7 @@ import { color, font } from "../theme";
 //   • Stop reuses the existing graceful-stop REST. No new write/elevated surface — both spawns are
 //     HUMAN-only REST (no agent MCP path mints a setup OR a workspace-auditor session).
 // "Platform" here is the de-privileged, user-facing workspace operator — NOT the dev Platform Lead.
-export default function Setup() {
+export function EndUserPlatformView() {
   const home = useQuery({ queryKey: ["setupHome"], queryFn: api.setupHome });
   // Profiles resolve each agent's role (setup / workspace-auditor) for the chip; the seeded name is the fallback.
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
