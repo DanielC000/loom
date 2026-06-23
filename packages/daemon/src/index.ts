@@ -88,8 +88,14 @@ async function main(): Promise<void> {
   // guarded one-shot (app_meta marker + explicit-columns-only + assign-if-absent), so it fires exactly
   // once per LOOM_HOME and moves NO cards — an override-less project already inherits role-annotated
   // defaults. Runs AFTER the home seeds so reserved homes with custom boards are covered too.
-  const columnRoles = backfillColumnRoles(db);
-  if (columnRoles.migrated) console.log(`[boot] backfilled column roles on ${columnRoles.migrated} project config(s)`);
+  // Best-effort: a throw in this one-shot migration must NEVER gate boot. The app_meta marker is only
+  // stamped on success inside backfillColumnRoles, so a pre-stamp throw simply retries next boot.
+  try {
+    const columnRoles = backfillColumnRoles(db);
+    if (columnRoles.migrated) console.log(`[boot] backfilled column roles on ${columnRoles.migrated} project config(s)`);
+  } catch (err) {
+    console.warn(`[boot] column-role backfill failed (continuing boot): ${(err as Error).message}`);
+  }
   // Resolve the daemon-global platform tuning ONCE at boot (SQLite singleton override ?? LOOM_* env ??
   // defaults). Every BOOT-BOUND consumer below — PtyHost busy-stale, SessionService git timeouts, the
   // watcher cadences — reads from this. A PATCH to platform.watchers/timeouts therefore takes effect on
