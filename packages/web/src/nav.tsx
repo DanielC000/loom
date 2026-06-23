@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "./lib/api";
 import MissionControl from "./pages/MissionControl";
 import Workspace from "./pages/Workspace";
 import Overview from "./pages/Overview";
@@ -36,6 +38,11 @@ export type NavPage = {
   primary?: boolean;
   /** Responds to the header's active-project picker — gets a scope-marker dot in the nav. */
   scoped?: boolean;
+  /** Gate this nav entry (header tab + Command Palette listing) on the dev "Loom Platform" home
+   *  existing — its `/api/platform/home` only resolves under LOOM_DEV. The ROUTE stays registered
+   *  regardless (App.tsx maps every NAV_PAGES route). Keeps shipping users to exactly ONE "Platform"
+   *  tab (the end-user operator at /setup) with no empty dev Platform page. See useVisibleNavPages. */
+  requiresPlatformHome?: boolean;
 };
 
 // Single source of truth for the nav destinations. The header (primary tabs + the grouped
@@ -60,14 +67,18 @@ export const NAV_PAGES: NavPage[] = [
   // (identity + fleet + go-live + board + schedules + attention/activity + archive count, all rescoped
   // when you switch the active project). Composes the shared fleet widgets off existing endpoints.
   { label: "Overview", to: "/overview", element: <Overview />, group: "project", primary: true, scoped: true },
-  // The Platform section — the reserved "Loom Platform" home (Lead/Auditor + findings board), a
-  // top-level surface SEPARATE from the project picker (the reserved project stays out of that list).
-  // Promoted to a primary tab next to Overview; deliberately stays `scoped` OFF (separate from the picker).
-  { label: "Platform", to: "/platform", element: <Platform />, group: "system", primary: true },
-  // The Setup section — the reserved "Getting Started" home's Setup Assistant (Start/Resume + live
-  // terminal). Always-available top-level surface like Platform, SEPARATE from the project picker (the
-  // reserved home stays out of that list). Unscoped (it has no per-project meaning); the only way in.
-  { label: "Set up Loom", nav: "Set up", to: "/setup", element: <Setup />, group: "system", primary: true },
+  // The dev "Loom Platform" section — the reserved "Loom Platform" home (Lead/Auditor + findings board),
+  // a top-level surface SEPARATE from the project picker (the reserved project stays out of that list).
+  // LOOM_DEV-only: its /api/platform/home 404s for shipping users, so the nav entry is GATED on that home
+  // existing (requiresPlatformHome) — otherwise the end-user "Platform" tab (/setup, below) and this tab
+  // would BOTH read "Platform". Relabeled "Loom Platform" so the two never collide under LOOM_DEV. The
+  // route stays /platform. Deliberately stays `scoped` OFF (separate from the picker).
+  { label: "Loom Platform", to: "/platform", element: <Platform />, group: "system", primary: true, requiresPlatformHome: true },
+  // The end-user Platform section — the reserved "Getting Started" home's operator ("Platform") agent
+  // (Start/Resume + live terminal). Always-available top-level surface, SEPARATE from the project picker
+  // (the reserved home stays out of that list). Unscoped (it has no per-project meaning); the only way in.
+  // The ROUTE stays /setup (an internal anchor — NOT renamed to /platform, which is the dev tab's route).
+  { label: "Platform", to: "/setup", element: <Setup />, group: "system", primary: true },
   { label: "Terminals", to: "/terminals", element: <Terminals />, group: "operate", primary: true },
   { label: "Board", to: "/board", element: <Board />, group: "project", primary: true, scoped: true },
   { label: "Runs", to: "/runs", element: <Runs />, group: "operate", primary: true, scoped: true },
@@ -86,3 +97,17 @@ export const NAV_PAGES: NavPage[] = [
   { label: "Usage", to: "/usage", element: <Usage />, group: "system" },
   { label: "Settings", to: "/settings", element: <Settings />, group: "system", scoped: true },
 ];
+
+// NAV_PAGES filtered by runtime gates — the source of truth for what the header tabs, the "More ▾" menu,
+// and the Command Palette LIST (App.tsx + CommandPalette.tsx all call this). Routes are NOT gated here:
+// App.tsx maps every NAV_PAGES route so a gated page is still reachable by URL. Today the only gate is
+// `requiresPlatformHome`: the dev "Loom Platform" tab is hidden until its /api/platform/home resolves
+// (it 404s for shipping users — LOOM_DEV-only), leaving shipping users exactly one "Platform" tab.
+export function useVisibleNavPages(): NavPage[] {
+  // retry:false — a shipping user's expected 404 must not spin through the default 3 retries before the
+  // tab settles to hidden. Until success the gated tab stays hidden (the safe default), so a slow/absent
+  // home never flashes the dev tab. Same query key as the Platform page → one shared, cached fetch.
+  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
+  const hasPlatformHome = platformHome.isSuccess && !!platformHome.data?.project;
+  return NAV_PAGES.filter((p) => (p.requiresPlatformHome ? hasPlatformHome : true));
+}

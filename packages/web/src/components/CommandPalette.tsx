@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAttention } from "../lib/attention";
-import { NAV_PAGES } from "../nav";
+import { useVisibleNavPages } from "../nav";
 import { color, font } from "../theme";
 
 // Ctrl/Cmd-K fuzzy launcher: jump to any page or open the review panel for a pending attention item.
@@ -10,6 +10,8 @@ export function CommandPalette() {
   const [q, setQ] = useState("");
   const navigate = useNavigate();
   const { items: attention } = useAttention();
+  // Gated nav list — the dev "Loom Platform" entry stays out for shipping users (see useVisibleNavPages).
+  const navPages = useVisibleNavPages();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -23,7 +25,7 @@ export function CommandPalette() {
   if (!open) return null;
 
   const commands = [
-    ...NAV_PAGES.map((p) => ({ label: p.label, hint: "page", run: () => navigate(p.to) })),
+    ...navPages.map((p) => ({ label: p.label, hint: "page", run: () => navigate(p.to) })),
     ...attention.filter((a) => a.workerSessionId).map((a) => ({
       label: `Review · ${a.kind} ${a.text}`, hint: "review", run: () => navigate(`/review/${a.workerSessionId}`),
     })),

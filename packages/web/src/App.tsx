@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReviewPanel from "./pages/ReviewPanel";
-import { NAV_PAGES, type NavGroup } from "./nav";
+import { NAV_PAGES, useVisibleNavPages, type NavGroup } from "./nav";
 import { NavTab, Badge, Select, Button } from "./components/ui";
 import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
@@ -166,7 +166,7 @@ function MoreMenu() {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
-  const items = NAV_PAGES.filter((p) => !p.primary);
+  const items = useVisibleNavPages().filter((p) => !p.primary);
   const isActive = items.some((p) => p.to === location.pathname);
   const ref = useDismissable<HTMLDivElement>(open, () => setOpen(false));
 
@@ -269,10 +269,10 @@ function Toast({ item, onDismiss, onOpen }: { item: AttentionItem; onDismiss: ()
 
 // Setup Assistant E1-7 — first-run welcome. On a FRESH install (no ordinary projects) the daemon has
 // already auto-launched the setup session; the web additionally presents a one-time welcome that routes
-// the user into the live setup terminal (the "Set up Loom" page). Gated purely on the ordinary project
+// the user into the live operator terminal (the "Platform" page, route /setup). Gated purely on the ordinary project
 // list being EMPTY (api.projects excludes the reserved Getting Started + Platform homes), so it vanishes
 // the moment a real project exists — and stays gone. Also human-dismissable (× / "Maybe later"), persisted
-// so it doesn't nag on every reload of a still-empty install; the "Set up Loom" nav entry remains the way in.
+// so it doesn't nag on every reload of a still-empty install; the "Platform" nav entry remains the way in.
 const WELCOME_DISMISSED_KEY = "loom.setupWelcomeDismissed";
 
 function FirstRunWelcome() {
@@ -297,11 +297,11 @@ function FirstRunWelcome() {
           borderTop: `3px solid ${color.phosphor}` }}>
         <div style={{ fontFamily: font.head, fontSize: 20, color: color.text, letterSpacing: "0.01em" }}>Welcome to Loom</div>
         <p style={{ color: color.textDim, fontFamily: font.mono, fontSize: 13, lineHeight: 1.6, margin: "12px 0 22px" }}>
-          Let’s get you set up. The Setup Assistant — a friendly onboarding helper — is already running and ready to
+          Let’s get you set up. Your Platform assistant — a friendly workspace operator — is already running and ready to
           create your first project, agents and profiles, and act on your behalf. Open it to tell it what you want to build.
         </p>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <Button variant="primary" onClick={goSetup} style={{ padding: "6px 14px", fontSize: 13 }}>Set up Loom →</Button>
+          <Button variant="primary" onClick={goSetup} style={{ padding: "6px 14px", fontSize: 13 }}>Open Platform →</Button>
           <Button variant="ghost" onClick={dismiss} style={{ padding: "6px 12px", fontSize: 13, color: color.textMuted }}>Maybe later</Button>
         </div>
       </div>
@@ -310,6 +310,9 @@ function FirstRunWelcome() {
 }
 
 export default function App() {
+  // Gated nav: the dev "Loom Platform" tab only renders once its home resolves (see useVisibleNavPages).
+  // The route table below still maps EVERY NAV_PAGES route, so a gated page stays reachable by URL.
+  const visiblePages = useVisibleNavPages();
   return (
     <ActiveProjectProvider>
       <div style={{ minHeight: "100vh" }}>
@@ -322,7 +325,7 @@ export default function App() {
           <ActiveProjectControl />
           <HeaderDivider />
           <nav style={{ display: "flex", gap: 18, alignItems: "center" }}>
-            {NAV_PAGES.filter((p) => p.primary).map((p) => (
+            {visiblePages.filter((p) => p.primary).map((p) => (
               <NavTab key={p.to} to={p.to} end={p.end}>
                 {p.nav ?? p.label}{p.scoped && <ScopeDot />}
               </NavTab>
