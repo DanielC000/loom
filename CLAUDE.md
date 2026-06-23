@@ -123,6 +123,13 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
 ## Conventions
 - Node 22 + TypeScript, ESM (`NodeNext`) in daemon/shared; `bundler` resolution in web.
 - One config-resolution mechanism (`resolveConfig`) — never read defaults ad hoc.
+- **Conventional Commits, going-forward only** (do NOT rewrite published history). Every Loom-authored
+  commit subject is `type(scope): summary` — lowercase type, imperative, no trailing period, ≤~72 chars.
+  Allowed types: `feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert`. Managers title
+  board cards in this form (NO `[Type, Priority]` bracket — priority is the card's field); the per-task
+  squash merge uses the card title verbatim as the commit subject, so a conventional title is a conventional
+  commit. A title that slips is coerced by a merge-code safety-net (`toConventionalSubject` in
+  `git/worktrees.ts`: legacy bracket → mapped type, bare prose → `chore:`), but title it right at the source.
 - Vault + git writes are enabled via a HUMAN-only REST surface (vault: `vault/writer.ts`; git:
   `git/writer.ts` — checkout/commit/push/create-branch). These are trust-boundary surfaces like
   gateCommand: NO agent MCP tool exposes them; an agent can never write/commit/push from a session.

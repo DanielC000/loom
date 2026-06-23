@@ -117,7 +117,9 @@ try {
     git(H.repo, "rev-list --parents -n 1 HEAD").trim().split(/\s+/).length === 2);
   check("(happy) NO `Merge branch` commit was created",
     git(H.repo, `log --format=%s ${headHBefore}..HEAD`).includes("Merge branch") === false);
-  check("(happy) squash subject is the clean task title", git(H.repo, "log -1 --format=%s") === "MFR-TASK");
+  // The merge safety-net coerces a bare-prose title into Conventional Commits form (no type → "chore: ").
+  check("(happy) squash subject is the task title coerced to Conventional Commits form",
+    git(H.repo, "log -1 --format=%s") === "chore: MFR-TASK");
   check("(happy) squash body carries the Loom-Worker-Branch trailer",
     git(H.repo, "log -1 --format=%b").includes(`Loom-Worker-Branch: ${H.branch}`));
   check("(happy) NO Co-Authored-By trailer", git(H.repo, "log -1 --format=%b").includes("Co-Authored-By") === false);

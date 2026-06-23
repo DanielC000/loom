@@ -848,6 +848,60 @@ export async function workerDiff(
   return null;
 }
 
+/** The Conventional Commits types Loom recognizes (the allowed type list, documented once in CLAUDE.md). */
+const CONVENTIONAL_TYPES = [
+  "feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert",
+] as const;
+
+/** Already-conventional subject: `type` (optional `(scope)`) (optional `!`) `: ` + a non-empty description. */
+const CONVENTIONAL_RE = new RegExp(
+  `^(?:${CONVENTIONAL_TYPES.join("|")})(?:\\([^)]+\\))?!?: .+`,
+);
+
+/** Leading legacy bracket: `[Type]` or `[Type, Priority]` (case-insensitive on the type word). */
+const LEGACY_BRACKET_RE = /^\[\s*([A-Za-z][A-Za-z/ ]*?)\s*(?:,[^\]]*)?\]\s*(.*)$/;
+
+/** Legacy `[Type]` word → Conventional Commits type. Unknown / unmapped → `chore`. */
+const LEGACY_TYPE_MAP: Record<string, string> = {
+  bug: "fix",
+  feature: "feat",
+  refactor: "refactor",
+  perf: "perf",
+  docs: "docs",
+  test: "test",
+  maintenance: "chore",
+  hardening: "fix",
+  release: "chore",
+};
+
+/**
+ * Coerce a commit subject into Conventional Commits form — the merge-code safety-net so every squash
+ * commit on main is conventional even if a card title slips. PURE (no I/O), unit-tested.
+ *
+ * - Already-conventional (`^type(scope)!?: …`) → returned UNCHANGED.
+ * - Legacy bracket (`[Bug, P2] …` / `[Release] …`) → map the type via {@link LEGACY_TYPE_MAP} (unknown →
+ *   `chore`), strip the bracket → `"<type>: <rest>"`. A multi-type bracket (e.g. `[Bug/Docs]`) takes the
+ *   FIRST listed type.
+ * - Bare prose → prepend `"chore: "`.
+ *
+ * Description casing is left untouched; this only guarantees a valid lowercase type prefix.
+ */
+export function toConventionalSubject(raw: string): string {
+  const subject = raw.trim();
+  if (CONVENTIONAL_RE.test(subject)) return subject;
+
+  const bracket = LEGACY_BRACKET_RE.exec(subject);
+  if (bracket) {
+    // First listed type in a multi-type bracket (e.g. "Bug/Docs" → "Bug"); ", Priority" already stripped.
+    const typeWord = bracket[1]!.trim().split(/[/,]/)[0]!.trim().toLowerCase();
+    const rest = bracket[2]!.trim();
+    const type = LEGACY_TYPE_MAP[typeWord] ?? "chore";
+    return rest ? `${type}: ${rest}` : `${type}:`;
+  }
+
+  return `chore: ${subject}`;
+}
+
 /**
  * Merge a worker's branch into the repo's current branch as a SINGLE SQUASH COMMIT — `git merge --squash`
  * stages the combined diff WITHOUT committing, then a plain `git commit` lands it as ONE commit, so each
@@ -897,7 +951,8 @@ export async function mergeBranch(
     return { ok: true, noop: true }; // branch already in main → nothing to commit
   }
   // Land the staged diff as ONE plain commit (repo-config identity; clean subject + deterministic trailer).
-  const subject = (taskTitle && taskTitle.trim().split(/\r?\n/)[0]!.trim()) || branch;
+  const rawSubject = (taskTitle && taskTitle.trim().split(/\r?\n/)[0]!.trim()) || branch;
+  const subject = toConventionalSubject(rawSubject);
   const message = `${subject}\n\nLoom-Worker-Branch: ${branch}\n`;
   try {
     await git.raw(["commit", "-m", message]);

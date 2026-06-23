@@ -50,7 +50,12 @@ owner drops **raw one-liner wishes** — unrefined bug/issue/feature requests. I
 to `blocked`'s brake: `blocked` is the owner's stop, `inbox` is the owner's start. **Auto pick these
 up** — don't wait for a direct prompt and don't let them sit: convert each wish into scoped, actionable
 task(s) with a clear definition of done, move it out of `inbox` into the normal flow, and drive it
-through like any other card. **Safety:** if an item is ambiguous, irreversible, or outward-facing beyond
+through like any other card. **Retitle on intake — no raw owner placeholder survives into a working
+column.** When you refine a raw wish (from `inbox`, or a raw placeholder in `backlog`), `tasks_update`
+its TITLE to a proper, descriptive Conventional-Commits title: whether you (a) refine it in place and
+implement it directly (the title becomes the squash commit subject on main, so it MUST be conventional)
+or (b) keep it as a decomposed umbrella (the title must still be descriptive; the child cards carry their
+own conventional titles). **Safety:** if an item is ambiguous, irreversible, or outward-facing beyond
 your autonomy bar, refine it into a task and **escalate** per the escalation bar below — don't guess, and
 never auto-run destructive or irreversible work off a one-liner.
 
@@ -145,6 +150,12 @@ scope, and never address the human. You make the call and `worker_message` it ba
 2. **Decompose into delegable tasks**, each with an explicit **definition of done**. A task without a
    DoD/acceptance check can't be delegated — state what *proves* it works (your agent prompt names the
    project's gate command). One task = one focused, independently-mergeable change.
+   - **Title cards in Conventional Commits form** — `type(scope): summary` (lowercase type, imperative
+     mood, no trailing period, ≤~72-char subject). **DROP the old `[Type, Priority]` bracket** — priority
+     lives in the card's priority field, not the title. WHY: the squash merge uses the card title verbatim
+     as the commit subject on main, so a conventional title *is* a conventional commit. Allowed types:
+     `feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert`. (A title that slips through
+     is coerced by a merge-code safety-net, but title it right — don't lean on the net.)
 3. **Write self-contained kickoff prompts** via `worker_spawn`: context + the task + its DoD + the
    escalate-up rule. Tell the worker to follow its `/worker` doctrine and point at the repo's
    `CLAUDE.md` / conventions rather than restating them.

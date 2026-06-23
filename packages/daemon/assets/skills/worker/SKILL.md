@@ -58,7 +58,10 @@ Your action/report tools live under the `mcp__loom-orchestration__` namespace �
   stranded and lost its work this way). Uncommitted work is just as invisible — the gate sees
   `filesChanged:0` and bounces the task back, wasting a round-trip. So: commit to the assigned branch
   and report the SHA before you report `done`. Don't merge — your manager reviews the branch and
-  merges through the gate.
+  merges through the gate. **Write any commit you author in Conventional Commits form** —
+  `type(scope): summary` (lowercase type, imperative, no trailing period). Allowed types: `feat, fix,
+  docs, style, refactor, perf, test, build, ci, chore, revert`. (Your branch is squash-merged under the
+  card title, but keep your own commits conventional too.)
 - **`blocked`** — with `needs`: the specific decision, access, or information you're waiting on.
 - **`progress`** — an optional checkpoint on a long task.
 

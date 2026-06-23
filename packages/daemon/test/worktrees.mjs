@@ -9,7 +9,7 @@ import { execSync } from "node:child_process";
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wt-home-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
-const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged, findLandedSquashCommit } = await import("../dist/git/worktrees.js");
+const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged, findLandedSquashCommit, toConventionalSubject } = await import("../dist/git/worktrees.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 
 let failures = 0;
@@ -80,7 +80,9 @@ try {
     git(repo, "rev-list --parents -n 1 HEAD").trim().split(/\s+/).length === 2);
   check("(f) NO `Merge branch` commit was created",
     git(repo, `log --format=%s ${headBeforeF}..HEAD`).includes("Merge branch") === false);
-  check("(f) subject is the clean task title", git(repo, "log -1 --format=%s") === "Feature F task title");
+  // The safety-net coerces the bare-prose title into Conventional Commits form (no leading type → "chore: ").
+  check("(f) subject is the task title coerced to Conventional Commits form",
+    git(repo, "log -1 --format=%s") === "chore: Feature F task title");
   check("(f) body carries the deterministic Loom-Worker-Branch trailer",
     git(repo, "log -1 --format=%b").includes(`Loom-Worker-Branch: ${brF}`));
   check("(f) NO Co-Authored-By trailer (repo-config identity only)",
@@ -245,6 +247,43 @@ try {
       (await findLandedSquashCommit(repo, brM2)) === null);
     await removeWorktree(repo, wtM2);
     await deleteBranch(repo, brM2);
+  }
+
+  // (n) toConventionalSubject — the PURE merge safety-net that guarantees every squash subject is
+  //     Conventional Commits even if a card title slips. Unit cases for the three branches (passthrough,
+  //     legacy-bracket map, bare-prose default) + an END-TO-END proof through mergeBranch that the subject
+  //     is coerced AND the load-bearing Loom-Worker-Branch trailer survives EXACTLY (reconcile keys on it).
+  {
+    // Already-conventional → UNCHANGED (incl. scope and the `!` breaking marker).
+    check("(n) passthrough: plain conventional", toConventionalSubject("fix: paste double-fires") === "fix: paste double-fires");
+    check("(n) passthrough: scope + bang", toConventionalSubject("feat(web)!: drop old API") === "feat(web)!: drop old API");
+    // Legacy [Type, Priority] / [Type] bracket → mapped type + bracket stripped.
+    check("(n) legacy [Bug, P2] → fix:", toConventionalSubject("[Bug, P2] Fix paste") === "fix: Fix paste");
+    check("(n) legacy [Release] → chore:", toConventionalSubject("[Release] Bump to v0.5.0") === "chore: Bump to v0.5.0");
+    check("(n) legacy [Feature, P1] → feat:", toConventionalSubject("[Feature, P1] Voice input") === "feat: Voice input");
+    check("(n) legacy [Maintenance] → chore:", toConventionalSubject("[Maintenance] Bump actions") === "chore: Bump actions");
+    check("(n) legacy [Hardening] → fix:", toConventionalSubject("[Hardening, P2] Bound git op") === "fix: Bound git op");
+    check("(n) legacy unknown type → chore:", toConventionalSubject("[Frobnicate] Do a thing") === "chore: Do a thing");
+    // Multi-type bracket → FIRST listed type (documented behavior; spec map has no multi-type case).
+    check("(n) multi-type [Bug/Docs] → first type (fix:)", toConventionalSubject("[Bug/Docs] Fix and document") === "fix: Fix and document");
+    // Bare prose → default chore: prefix; description casing untouched.
+    check("(n) bare prose → chore:", toConventionalSubject("Refresh the dashboard") === "chore: Refresh the dashboard");
+    check("(n) bare prose keeps description casing", toConventionalSubject("ALL CAPS thing") === "chore: ALL CAPS thing");
+
+    // END-TO-END through mergeBranch: a legacy-bracket title is coerced on the squash subject AND the
+    // Loom-Worker-Branch trailer is preserved EXACTLY (the downstream reconcile key — must not regress).
+    const tN = "convsubj-eeee-5555";
+    const { worktreePath: wtN, branch: brN } = await createWorktree(repo, "projWT", tN);
+    commitInto(wtN, "n.txt", "n\n", "n commit");
+    const mN = await mergeBranch(repo, brN, "[Bug, P2] Fix the thing");
+    check("(n) e2e squash ok", mN.ok === true && typeof mN.sha === "string");
+    check("(n) e2e subject coerced to conventional through mergeBranch",
+      git(repo, "log -1 --format=%s") === "fix: Fix the thing");
+    check("(n) e2e Loom-Worker-Branch trailer preserved EXACTLY (reconcile key intact)",
+      git(repo, "log -1 --format=%b").includes(`Loom-Worker-Branch: ${brN}`));
+    check("(n) e2e the coerced commit is still discoverable by its trailer", (await findLandedSquashCommit(repo, brN)) === mN.sha);
+    await removeWorktree(repo, wtN);
+    await deleteBranch(repo, brN);
   }
 } finally {
   fs.rmSync(repo, { recursive: true, force: true });

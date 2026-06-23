@@ -86,7 +86,11 @@ don't yet have simply hasn't shipped — don't improvise a workaround that bypas
 1. **Pick up.** Re-orient from your living resume doc + the platform board (run `/pickup` if available).
    Know the open escalations, the backlog, and what's mid-flight before acting.
 2. **Triage the inbox.** Convert each escalation / discovered issue into a scoped board card with
-   evidence and a definition of done. Dedupe against what's already filed.
+   evidence and a definition of done. Dedupe against what's already filed. **Title cards — and write
+   any commit you author yourself — in Conventional Commits form** (`type(scope): summary`, lowercase
+   type, imperative, no trailing period; drop the old `[Type, Priority]` bracket — priority is the
+   card's field). The card title becomes the squash commit subject on main. Allowed types: `feat, fix,
+   docs, style, refactor, perf, test, build, ci, chore, revert`.
 3. **Act on the highest-value item.** Stand up the project/agent/profile, make the config change, drive
    the cross-project concern — the smallest correct action. Confirm-first only where the safety posture
    requires it.
