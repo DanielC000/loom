@@ -6,6 +6,7 @@ import Board from "./Board";
 import { TerminalPane } from "../components/Terminal";
 import { Composer } from "../components/Composer";
 import { PresetPromptsButton } from "../components/PresetPrompts";
+import { AgentPromptEditor } from "../components/AgentPromptEditor";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { Panel, Button, Input, SectionLabel, StatusPill, Badge, Chip } from "../components/ui";
 import { color, font } from "../theme";
@@ -166,6 +167,8 @@ function AgentControl({ agent, role, session, missingLabel }:
         )}
       </div>
       {spawn.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{(spawn.error as Error).message}</span>}
+      {/* View / edit this reserved-home agent's startup prompt (the spawn kickoff). */}
+      <AgentPromptEditor key={`prompt-${agent.id}`} agent={agent} homeKey={["platformHome"]} />
     </Panel>
   );
 }

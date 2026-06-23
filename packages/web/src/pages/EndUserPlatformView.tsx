@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 import { TerminalPane } from "../components/Terminal";
 import { Composer } from "../components/Composer";
 import { PresetPromptsButton } from "../components/PresetPrompts";
+import { AgentPromptEditor } from "../components/AgentPromptEditor";
 import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../components/ui";
 import { looksLikeCron } from "./Schedules";
 import { color, font } from "../theme";
@@ -149,6 +150,8 @@ function AssistantControl({ agent, session }: { agent?: Agent; session?: Session
         )}
       </div>
       {spawn.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{(spawn.error as Error).message}</span>}
+      {/* View / edit the operator's startup prompt (the spawn kickoff). */}
+      <AgentPromptEditor key={`prompt-${agent.id}`} agent={agent} homeKey={["setupHome"]} />
     </Panel>
   );
 }
@@ -197,6 +200,8 @@ function AuditorControl({ agent, session }: { agent?: Agent; session?: SessionLi
         )}
       </div>
       {review.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{(review.error as Error).message}</span>}
+      {/* View / edit the Workspace Auditor's startup prompt (the spawn kickoff). */}
+      <AgentPromptEditor key={`prompt-${agent.id}`} agent={agent} homeKey={["setupHome"]} />
       {/* B6: opt-in cadence — co-located with "Review my workspace" because the reserved home is hidden
           from the Schedules-page project picker, so the Auditor can't be targeted there. */}
       <AuditorSchedule agent={agent} />
