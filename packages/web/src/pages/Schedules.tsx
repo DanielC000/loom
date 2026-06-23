@@ -10,7 +10,8 @@ import { color, font } from "../theme";
 // whitespace-separated fields — enough to catch a fat-fingered expression before the round-trip. The
 // daemon does the REAL parse (nextFireAt) and 400s anything it can't compute, surfaced here as the
 // mutation error.
-function looksLikeCron(s: string): boolean {
+// Exported so the Platform page's "Run automatically" Auditor-schedule control reuses the SAME gate (B6).
+export function looksLikeCron(s: string): boolean {
   const t = s.trim();
   return t.length > 0 && t.split(/\s+/).length === 5;
 }

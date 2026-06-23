@@ -276,7 +276,7 @@ async function main(): Promise<void> {
   // floor-clamped inside resolveConfig; default 60s).
   const intervalMs = watchers.schedulerMs;
   const maxConcurrentManagers = resolved.orchestration.maxConcurrentManagers;
-  const scheduler = new Scheduler({ db, control, startManager: (agentId) => sessions.startManager(agentId), startAuditor: (agentId) => sessions.startAuditor(agentId), intervalMs, maxConcurrentManagers });
+  const scheduler = new Scheduler({ db, control, startManager: (agentId) => sessions.startManager(agentId), startAuditor: (agentId) => sessions.startAuditor(agentId), startWorkspaceAuditor: (agentId) => sessions.startWorkspaceAuditor(agentId), intervalMs, maxConcurrentManagers });
   if (schedulerEnabled) {
     scheduler.start();
     console.log(`[boot] scheduler enabled (tick ${intervalMs}ms)`);

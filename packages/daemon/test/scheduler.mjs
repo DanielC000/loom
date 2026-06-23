@@ -45,9 +45,14 @@ function makeEnv(opts = {}) {
   let failsLeft = opts.failFirstN ?? 0;
   const startManager = (tid) => {
     if (failsLeft > 0) { failsLeft--; throw new Error("startManager failed (simulated)"); }
-    const id = `mgr-${calls.length}`; calls.push({ agentId: tid, id }); return { id };
+    const id = `mgr-${calls.length}`; calls.push({ via: "manager", agentId: tid, id }); return { id };
   };
-  const scheduler = new Scheduler({ db, control, startManager, maxConcurrentManagers: opts.cap });
+  // B6: a recording stub for the workspace-auditor spawn (the kind="workspace-auditor" route). Tagged
+  // via:"workspace-auditor" so a test can assert the Scheduler dispatched THIS fn, not startManager.
+  const startWorkspaceAuditor = (tid) => {
+    const id = `wsa-${calls.length}`; calls.push({ via: "workspace-auditor", agentId: tid, id }); return { id };
+  };
+  const scheduler = new Scheduler({ db, control, startManager, startWorkspaceAuditor, maxConcurrentManagers: opts.cap });
   return { dbFile, db, projId, agentId, control, calls, scheduler };
 }
 // Seed a live MANAGER session row directly (for the manager-cap DB-count axis).
@@ -78,6 +83,35 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
   const after = e.db.getSchedule("sch-fire");
   check("Fires: next_fire_at advanced to the future", new Date(after.nextFireAt).getTime() > now.getTime());
   check("Fires: last_fired_at stamped with the tick's now", after.lastFiredAt === now.toISOString());
+  cleanupEnv(e);
+}
+
+// B6 — kind routing: a due "workspace-auditor" schedule dispatches the injected startWorkspaceAuditor
+// stub (NOT startManager), counts against the cap, and logs kind in the schedule_fired event.
+{
+  const e = makeEnv();
+  seedSchedule(e, "sch-wsa", { kind: "workspace-auditor" });
+  const now = new Date();
+  await e.scheduler.tick(now);
+  check("Workspace-auditor kind: routed to startWorkspaceAuditor (not startManager)",
+    e.calls.length === 1 && e.calls[0].via === "workspace-auditor" && e.calls[0].agentId === e.agentId);
+  const evs = e.db.listEvents(e.calls[0].id);
+  check("Workspace-auditor kind: schedule_fired event records kind=workspace-auditor",
+    evs.length === 1 && evs[0].kind === "schedule_fired" && evs[0].detail?.kind === "workspace-auditor");
+  check("Workspace-auditor kind: next_fire_at advanced (slot claimed)", new Date(e.db.getSchedule("sch-wsa").nextFireAt).getTime() > now.getTime());
+  cleanupEnv(e);
+}
+
+// B6 — fallback: a "workspace-auditor" schedule with startWorkspaceAuditor UNWIRED falls back to
+// startManager (mirrors the auditor fallback — the manager path stays correct when the spawn is absent).
+{
+  const e = makeEnv();
+  // Re-wire a scheduler WITHOUT the workspace-auditor stub to exercise the fallback branch.
+  e.scheduler = new Scheduler({ db: e.db, control: e.control, startManager: (tid) => { const id = `mgr-${e.calls.length}`; e.calls.push({ via: "manager", agentId: tid, id }); return { id }; } });
+  seedSchedule(e, "sch-wsa-fallback", { kind: "workspace-auditor" });
+  await e.scheduler.tick(new Date());
+  check("Workspace-auditor fallback: unwired startWorkspaceAuditor → falls back to startManager",
+    e.calls.length === 1 && e.calls[0].via === "manager");
   cleanupEnv(e);
 }
 
@@ -225,6 +259,17 @@ try {
   // Validation: a bad cron is rejected 400 (not inserted).
   const bad = await post("/api/schedules", { agentId: ragent, cron: "not a cron" });
   check("REST create: invalid cron → 400", bad.status === 400);
+  // B6 — kind round-trip: create with kind="workspace-auditor" persists it on the row (create→row).
+  const wsa = await (await post("/api/schedules", { agentId: ragent, cron: "0 0 1 1 *", kind: "workspace-auditor" })).json();
+  check("REST create: kind=workspace-auditor round-trips onto the row", wsa.kind === "workspace-auditor" && !!wsa.id);
+  const wsaList = await get("/api/schedules");
+  check("REST list: the workspace-auditor schedule shows its kind", wsaList.some((s) => s.id === wsa.id && s.kind === "workspace-auditor"));
+  const wsaDisabled = await (await post(`/api/schedules/${wsa.id}`, { enabled: false })).json();
+  check("REST update: disable a workspace-auditor schedule (kind preserved)", wsaDisabled.enabled === false && wsaDisabled.kind === "workspace-auditor");
+  await fetch(`${BASE}/api/schedules/${wsa.id}`, { method: "DELETE" });
+  // Validation: an unknown kind is rejected 400 (not coerced).
+  const badKind = await post("/api/schedules", { agentId: ragent, cron: "0 0 1 1 *", kind: "bogus" });
+  check("REST create: invalid kind → 400", badKind.status === 400);
 } finally {
   const t = new Database(DB_FILE);
   t.prepare("DELETE FROM schedules WHERE agent_id = ?").run(ragent);

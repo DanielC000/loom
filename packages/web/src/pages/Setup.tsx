@@ -1,11 +1,12 @@
-import { type CSSProperties } from "react";
+import { type CSSProperties, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Agent, SessionListItem, SessionRole } from "@loom/shared";
+import type { Agent, SessionListItem, SessionRole, Schedule } from "@loom/shared";
 import { api } from "../lib/api";
 import { TerminalPane } from "../components/Terminal";
 import { Composer } from "../components/Composer";
 import { PresetPromptsButton } from "../components/PresetPrompts";
-import { Panel, Button, SectionLabel, StatusPill, Badge } from "../components/ui";
+import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../components/ui";
+import { looksLikeCron } from "./Schedules";
 import { color, font } from "../theme";
 
 // Setup Assistant E1-7 / End-User Platform tier B5 — the always-available "Platform" surface (route
@@ -195,7 +196,69 @@ function AuditorControl({ agent, session }: { agent?: Agent; session?: SessionLi
         )}
       </div>
       {review.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{(review.error as Error).message}</span>}
+      {/* B6: opt-in cadence — co-located with "Review my workspace" because the reserved home is hidden
+          from the Schedules-page project picker, so the Auditor can't be targeted there. */}
+      <AuditorSchedule agent={agent} />
     </Panel>
+  );
+}
+
+function fmtFire(iso: string | null): string { return iso ? new Date(iso).toLocaleString() : "—"; }
+
+// B6 — the Workspace Auditor's opt-in cadence. Looks up THIS agent's existing kind:"workspace-auditor"
+// schedule (god-eye api.schedules, filtered to the agent + kind) and lets the user create / edit-cron /
+// enable-disable / remove a SINGLE cadence. A fired workspace-auditor schedule boots a fresh suggest-only
+// Auditor run via startWorkspaceAuditor (role locked server-side) — same human-only REST as the button
+// above, never an agent MCP tool. Keyed by the schedule id in the parent so cron state resets on change.
+function AuditorSchedule({ agent }: { agent: Agent }) {
+  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
+  const existing = (schedules.data ?? []).find((s) => s.agentId === agent.id && s.kind === "workspace-auditor");
+  return <AuditorScheduleForm key={existing?.id ?? "new"} agentId={agent.id} existing={existing} />;
+}
+
+function AuditorScheduleForm({ agentId, existing }: { agentId: string; existing?: Schedule }) {
+  const qc = useQueryClient();
+  const [cron, setCron] = useState(existing?.cron ?? "0 9 * * *");
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["schedules"] });
+  const create = useMutation({ meta: { inlineError: true },
+    mutationFn: () => api.createSchedule({ agentId, cron: cron.trim(), enabled: true, kind: "workspace-auditor" }), onSuccess: invalidate });
+  const save = useMutation({ meta: { inlineError: true },
+    mutationFn: () => api.updateSchedule(existing!.id, { cron: cron.trim() }), onSuccess: invalidate });
+  const toggle = useMutation({ mutationFn: () => api.updateSchedule(existing!.id, { enabled: !existing!.enabled }), onSuccess: invalidate });
+  const remove = useMutation({ mutationFn: () => api.deleteSchedule(existing!.id), onSuccess: invalidate });
+
+  const cronValid = looksLikeCron(cron);
+  const dirty = !!existing && cron.trim() !== existing.cron;
+  const err = (create.error ?? save.error) as Error | null;
+
+  return (
+    <div style={{ borderTop: `1px solid ${color.border}`, paddingTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", fontSize: 11, fontWeight: 700, color: color.textDim }}>Run automatically</span>
+        {existing && <Badge tone={existing.enabled ? "phosphor" : "muted"}>{existing.enabled ? "on" : "paused"}</Badge>}
+      </div>
+      <p style={{ color: color.textMuted, fontSize: 11, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+        Review your workspace on a schedule, not just on demand — each fire spawns a fresh read-only run.
+        Reading transcripts costs tokens, so favour a sparse cadence. Schedules run only while the
+        scheduler is enabled (Settings › Scheduler).
+      </p>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <Input value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 9 * * *" spellCheck={false} style={{ width: 150 }} />
+        <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 10 }}>min hour dom mon dow</span>
+        {existing ? (
+          <>
+            <Button variant="primary" disabled={!cronValid || !dirty || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : "Save"}</Button>
+            <Button disabled={toggle.isPending} onClick={() => toggle.mutate()} title={existing.enabled ? "Pause this cadence (stops firing)" : "Resume this cadence"}>{existing.enabled ? "Disable" : "Enable"}</Button>
+            <Button variant="danger" disabled={remove.isPending} onClick={() => remove.mutate()}>Remove</Button>
+          </>
+        ) : (
+          <Button variant="primary" disabled={!cronValid || create.isPending} onClick={() => create.mutate()}>{create.isPending ? "Scheduling…" : "Schedule"}</Button>
+        )}
+      </div>
+      {!cronValid && cron.trim().length > 0 && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>Expected 5 whitespace-separated fields.</span>}
+      {existing && <span style={{ color: color.textDim, fontFamily: font.mono, fontSize: 11 }}>next · {fmtFire(existing.nextFireAt)}</span>}
+      {err && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{err.message.includes("400") ? "Daemon rejected the cron expression." : err.message}</span>}
+    </div>
   );
 }
 

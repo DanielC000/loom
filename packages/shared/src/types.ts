@@ -516,12 +516,15 @@ export interface Schedule {
   /**
    * What a fired schedule spawns (Platform Manager P5):
    * - "manager" (DEFAULT) — boots a manager session that runs the Pillar-A loop (today's behavior).
-   * - "auditor" — boots the Platform Auditor via `startAuditor` (role locked to "auditor", the
+   * - "auditor" — boots the dev Platform Auditor via `startAuditor` (role locked to "auditor", the
    *   read-and-file-only transcript reviewer). The Scheduler routes by this field.
+   * - "workspace-auditor" — boots the END-USER Workspace Auditor via `startWorkspaceAuditor` (role
+   *   locked to "workspace-auditor", the de-privileged suggest-only user-workspace reviewer; B6). It
+   *   lets a user run "Review my workspace" on a cron, not just on-demand.
    * Additive + idempotent: legacy rows backfill to "manager" (column DEFAULT), so every existing
    * schedule keeps spawning a manager exactly as before.
    */
-  kind: "manager" | "auditor";
+  kind: "manager" | "auditor" | "workspace-auditor";
 }
 
 /**

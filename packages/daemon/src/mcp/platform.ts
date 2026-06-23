@@ -473,8 +473,8 @@ export class PlatformMcpRouter {
     server.registerTool(
       "schedule_create",
       {
-        description: "Create a cron schedule that boots a session in an agent (explicit cross-project agentId) on each tick (5-field cron). kind selects WHAT it spawns: \"manager\" (default — a manager session that runs the orchestration loop) or \"auditor\" (the read-and-file-only Platform Auditor, spawned with a locked auditor role). enabled defaults to true. An unknown agent or an invalid cron is rejected. next_fire_at is computed here.",
-        inputSchema: { agentId: z.string(), cron: z.string(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor"]).optional() },
+        description: "Create a cron schedule that boots a session in an agent (explicit cross-project agentId) on each tick (5-field cron). kind selects WHAT it spawns: \"manager\" (default — a manager session that runs the orchestration loop), \"auditor\" (the read-and-file-only Platform Auditor, spawned with a locked auditor role), or \"workspace-auditor\" (the suggest-only end-user Workspace Auditor, spawned with a locked workspace-auditor role). enabled defaults to true. An unknown agent or an invalid cron is rejected. next_fire_at is computed here.",
+        inputSchema: { agentId: z.string(), cron: z.string(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional() },
       },
       async ({ agentId, cron, enabled, kind }) => {
         if (!db.getAgent(agentId)) return ok({ error: "agent not found" });
@@ -493,12 +493,12 @@ export class PlatformMcpRouter {
     server.registerTool(
       "schedule_update",
       {
-        description: "Update a schedule's cron, enabled flag, and/or kind (\"manager\"|\"auditor\") by id. A changed cron recomputes next_fire_at (rejected if invalid); enabled toggles the Scheduler for this row; kind changes what a fire spawns. Omitted fields are left as-is. 404 if the schedule is unknown.",
-        inputSchema: { scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor"]).optional() },
+        description: "Update a schedule's cron, enabled flag, and/or kind (\"manager\"|\"auditor\"|\"workspace-auditor\") by id. A changed cron recomputes next_fire_at (rejected if invalid); enabled toggles the Scheduler for this row; kind changes what a fire spawns. Omitted fields are left as-is. 404 if the schedule is unknown.",
+        inputSchema: { scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional() },
       },
       async ({ scheduleId, cron, enabled, kind }) => {
         if (!db.getSchedule(scheduleId)) return ok({ error: "schedule not found" });
-        const patch: { cron?: string; enabled?: boolean; nextFireAt?: string; kind?: "manager" | "auditor" } = {};
+        const patch: { cron?: string; enabled?: boolean; nextFireAt?: string; kind?: "manager" | "auditor" | "workspace-auditor" } = {};
         if (typeof enabled === "boolean") patch.enabled = enabled;
         if (kind !== undefined) patch.kind = kind;
         if (typeof cron === "string") {

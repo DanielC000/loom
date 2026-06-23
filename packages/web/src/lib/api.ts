@@ -341,10 +341,11 @@ export const api = {
   // → 201; updateSchedule patches cron/enabled only (agentId is immutable) and recomputes nextFireAt
   // server-side on a cron change. Both the create and the cron patch 400 on an invalid cron expression. ---
   schedules: () => get<Schedule[]>("/api/schedules"),
-  // `kind` (Platform Manager P5) selects what a fire spawns — "manager" (default) or "auditor" (the
-  // read-and-file-only Platform Auditor). The Platform section puts the Auditor on a cadence with it.
+  // `kind` (Platform Manager P5 / B6) selects what a fire spawns — "manager" (default), "auditor" (the
+  // dev read-and-file-only Platform Auditor), or "workspace-auditor" (the end-user Workspace Auditor).
+  // The Platform page's Auditor card puts the Workspace Auditor on a cadence with it.
   createSchedule: (b: { agentId: string; cron: string; enabled?: boolean; kind?: Schedule["kind"] }) => post<Schedule>("/api/schedules", b),
-  updateSchedule: (id: string, patch: { cron?: string; enabled?: boolean }) => post<Schedule>(`/api/schedules/${encodeURIComponent(id)}`, patch),
+  updateSchedule: (id: string, patch: { cron?: string; enabled?: boolean; kind?: Schedule["kind"] }) => post<Schedule>(`/api/schedules/${encodeURIComponent(id)}`, patch),
   deleteSchedule: (id: string) => del<{ ok: boolean }>(`/api/schedules/${encodeURIComponent(id)}`),
 
   // --- Preset Prompts (the GLOBAL "terminal action-buttons" store — one shared list, same on every

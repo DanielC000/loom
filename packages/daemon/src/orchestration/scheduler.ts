@@ -20,6 +20,13 @@ export interface SchedulerDeps {
    * legacy (manager) schedule correctly — an auditor schedule then falls back to startManager.
    */
   startAuditor?: (agentId: string) => { id: string };
+  /**
+   * Boots the suggest-only END-USER Workspace Auditor session (B6) — the spawn for a schedule whose
+   * `kind` is "workspace-auditor". Prod-wired to SessionService.startWorkspaceAuditor; a test injects a
+   * recording stub. Optional, exactly like startAuditor: a wiring that omits it falls back to
+   * startManager (so the manager path stays unchanged when the workspace-auditor spawn isn't wired).
+   */
+  startWorkspaceAuditor?: (agentId: string) => { id: string };
   /** Tick cadence; defaults to 60s. Injectable so a test can drive tick() directly instead. */
   intervalMs?: number;
   /**
@@ -95,11 +102,16 @@ export class Scheduler {
         // Finding 2 — claim the slot FIRST: advance next_fire_at before any side effect, so a
         // failed spawn/event can't leave the slot un-advanced and re-fire (double-spawn) next tick.
         this.deps.db.markFired(s.id, now.toISOString(), nextFireAt(s.cron, now));
-        // P5: route by the schedule's kind. An "auditor" schedule spawns the read-and-file-only Platform
-        // Auditor (startAuditor — role locked to "auditor"); everything else (incl. legacy rows that
-        // backfilled to "manager") boots a manager. startAuditor is optional in the deps, so a wiring that
-        // omits it falls back to startManager (keeps the manager path unchanged when auditor isn't wired).
-        const startFn = s.kind === "auditor" && this.deps.startAuditor ? this.deps.startAuditor : this.deps.startManager;
+        // P5/B6: route by the schedule's kind. An "auditor" schedule spawns the dev read-and-file-only
+        // Platform Auditor (startAuditor — role locked to "auditor"); a "workspace-auditor" schedule spawns
+        // the end-user suggest-only Workspace Auditor (startWorkspaceAuditor — role locked to
+        // "workspace-auditor"); everything else (incl. legacy rows that backfilled to "manager") boots a
+        // manager. Both auditor start-fns are optional in the deps, so a wiring that omits either falls back
+        // to startManager (keeps the manager path unchanged when the auditor spawn isn't wired).
+        const startFn =
+          s.kind === "workspace-auditor" && this.deps.startWorkspaceAuditor ? this.deps.startWorkspaceAuditor
+          : s.kind === "auditor" && this.deps.startAuditor ? this.deps.startAuditor
+          : this.deps.startManager;
         const spawned = startFn(s.agentId);
         this.deps.db.appendEvent({
           id: randomUUID(), ts: now.toISOString(),

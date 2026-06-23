@@ -42,6 +42,9 @@ const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 /** Whitelist guard for the human REST task surfaces — rejects any value outside the p0–p3 enum. */
 const isTaskPriority = (v: unknown): v is Task["priority"] => v === "p0" || v === "p1" || v === "p2" || v === "p3";
+// P5/B6: the valid Schedule.kind values a fire can route on — "manager" (default), the dev "auditor",
+// and the end-user "workspace-auditor". Mirrors the Schedule.kind union (any new kind goes here too).
+const isScheduleKind = (v: unknown): v is Schedule["kind"] => v === "manager" || v === "auditor" || v === "workspace-auditor";
 
 /** Bounds for the Preset Prompts REST surface (label = short button text; prompt = the text to send). */
 const PRESET_LABEL_MAX = 200;
@@ -243,10 +246,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const b = (req.body ?? {}) as { agentId?: string; cron?: string; enabled?: boolean; kind?: string };
     if (!b.agentId || !b.cron) return reply.code(400).send({ error: "agentId and cron required" });
     if (!deps.db.getAgent(b.agentId)) return reply.code(404).send({ error: "agent not found" });
-    // P5: kind selects what a fire spawns — "manager" (default) or "auditor" (the read-and-file-only
-    // Platform Auditor). Reject any other value rather than silently coercing.
-    if (b.kind !== undefined && b.kind !== "manager" && b.kind !== "auditor") {
-      return reply.code(400).send({ error: 'kind must be "manager" or "auditor"' });
+    // P5/B6: kind selects what a fire spawns — "manager" (default), "auditor" (the dev read-and-file-only
+    // Platform Auditor), or "workspace-auditor" (the suggest-only end-user Workspace Auditor). Reject any
+    // other value rather than silently coercing.
+    if (b.kind !== undefined && !isScheduleKind(b.kind)) {
+      return reply.code(400).send({ error: 'kind must be "manager", "auditor", or "workspace-auditor"' });
     }
     let next: string;
     try { next = nextFireAt(b.cron, new Date()); } catch { return reply.code(400).send({ error: "invalid cron expression" }); }
@@ -262,12 +266,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getSchedule(id)) return reply.code(404).send({ error: "schedule not found" });
     const b = (req.body ?? {}) as { cron?: string; enabled?: boolean; kind?: string };
-    if (b.kind !== undefined && b.kind !== "manager" && b.kind !== "auditor") {
-      return reply.code(400).send({ error: 'kind must be "manager" or "auditor"' });
+    if (b.kind !== undefined && !isScheduleKind(b.kind)) {
+      return reply.code(400).send({ error: 'kind must be "manager", "auditor", or "workspace-auditor"' });
     }
-    const patch: { cron?: string; enabled?: boolean; nextFireAt?: string; kind?: "manager" | "auditor" } = {};
+    const patch: { cron?: string; enabled?: boolean; nextFireAt?: string; kind?: Schedule["kind"] } = {};
     if (typeof b.enabled === "boolean") patch.enabled = b.enabled;
-    if (b.kind === "manager" || b.kind === "auditor") patch.kind = b.kind;
+    if (isScheduleKind(b.kind)) patch.kind = b.kind;
     if (typeof b.cron === "string") {
       try { patch.nextFireAt = nextFireAt(b.cron, new Date()); } catch { return reply.code(400).send({ error: "invalid cron expression" }); }
       patch.cron = b.cron;

@@ -215,8 +215,10 @@ CREATE TABLE IF NOT EXISTS schedules (
   next_fire_at TEXT NOT NULL,
   last_fired_at TEXT,
   created_at TEXT NOT NULL,
-  -- What a fired schedule spawns (Platform Manager P5): 'manager' (default) or 'auditor' (the
-  -- read-and-file-only Platform Auditor, spawned via startAuditor). Legacy rows backfill to 'manager'.
+  -- What a fired schedule spawns (Platform Manager P5): 'manager' (default), 'auditor' (the dev
+  -- read-and-file-only Platform Auditor, spawned via startAuditor), or 'workspace-auditor' (the
+  -- end-user Workspace Auditor, spawned via startWorkspaceAuditor; B6). Plain TEXT — a new kind value
+  -- needs no migration. Legacy rows backfill to 'manager'.
   kind TEXT NOT NULL DEFAULT 'manager'
 );
 -- One-shot self-scheduled wake-ups (the agent wake_me primitive): the daemon WakeService
@@ -1607,7 +1609,7 @@ export class Db {
     return r ? toSchedule(r) : undefined;
   }
   /** Partial edit (REST): any provided field is written; omitted fields are left as-is. */
-  updateSchedule(id: string, patch: { cron?: string; enabled?: boolean; nextFireAt?: string; lastFiredAt?: string | null; kind?: "manager" | "auditor" }): void {
+  updateSchedule(id: string, patch: { cron?: string; enabled?: boolean; nextFireAt?: string; lastFiredAt?: string | null; kind?: "manager" | "auditor" | "workspace-auditor" }): void {
     const cols: Record<string, unknown> = {
       cron: patch.cron,
       enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
