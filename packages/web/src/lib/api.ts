@@ -1,4 +1,9 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion } from "@loom/shared";
+
+// One desired column in the atomic board-column layout PUT (card B). `prevKey` (when set) marks a KEY
+// RENAME — the server re-keys that column's cards old→new. A column omitted from the array is REMOVED;
+// its cards auto-move to the defaultLanding column server-side.
+export interface DesiredColumn { key: string; label: string; role?: ColumnRole; prevKey?: string; }
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 // One queued (not-yet-delivered) message. `id` is server-minted and stable, so the UI can
@@ -225,6 +230,14 @@ export const api = {
     post<{ ok: boolean; branch?: string; error?: string }>(`/api/projects/${projectId}/git/push`),
   board: (projectId: string) =>
     get<{ columns: KanbanColumn[]; tasks: Task[] }>(`/api/projects/${projectId}/board`),
+  // Atomic safe board-column layout change (card B's endpoint) — the column-manager editor's ONLY
+  // mutation path, NOT the blind config PATCH (which still owns every other setting). Sends the FULL
+  // desired layout; the server diffs vs current, re-keys cards (renames + removals → defaultLanding) in
+  // ONE transaction, and HARD-rejects a guard violation (no/duplicate required role, <1-column floor,
+  // bad rename) with a 400 whose `{ error }` body surfaces verbatim via putErr. `warnings` are soft
+  // (e.g. dropping a non-required role lane) — shown but non-blocking.
+  updateProjectColumns: (id: string, columns: DesiredColumn[]) =>
+    putErr<{ ok: boolean; columns: KanbanColumn[]; warnings: string[] }>(`/api/projects/${id}/columns`, { columns }),
   updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority">>) =>
     post<{ ok: boolean }>(`/api/tasks/${id}`, patch),
   // PERMANENTLY delete a task card (drawer Delete button). HUMAN/loopback REST only — no MCP path. Uses

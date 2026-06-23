@@ -11,6 +11,7 @@ import {
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Panel, Button, Input, Select, SectionLabel } from "../components/ui";
+import { ColumnManager } from "../components/ColumnManager";
 import { color, font } from "../theme";
 
 // Project-scoped settings — edit the per-project config OVERRIDE (deep-partial of ResolvedConfig).
@@ -57,15 +58,6 @@ const ta = {
   background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
 };
 
-// One line per `key: Label`; a line without a colon uses the whole line as both. Empty → null (inherit).
-function parseColumns(text: string): { key: string; label: string }[] | null {
-  const cols = text.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
-    const i = l.indexOf(":");
-    if (i < 0) return { key: l, label: l };
-    return { key: l.slice(0, i).trim(), label: l.slice(i + 1).trim() };
-  });
-  return cols.length ? cols : null;
-}
 function parseLines(text: string): string[] {
   return text.split("\n").map((l) => l.trim()).filter(Boolean);
 }
@@ -80,9 +72,9 @@ function ConfigEditor({ project }: { project: Project }) {
   const defaults = resolveConfig(undefined);
 
   // Override-backed form state. "" / "inherit" means NOT overridden (omitted on save → inherits default).
-  const [columnsText, setColumnsText] = useState(
-    ov.kanbanColumns ? ov.kanbanColumns.map((c) => `${c.key}: ${c.label}`).join("\n") : "",
-  );
+  // NOTE: kanbanColumns is NOT modeled here — it has its own atomic editor (ColumnManager → the columns
+  // endpoint). buildOverride clones the stored override, so a column layout saved there is preserved by
+  // this PATCH untouched (the two surfaces never fight over the same field).
   const [allowText, setAllowText] = useState(ov.permission?.allow ? ov.permission.allow.join("\n") : "");
   const [gateCommand, setGateCommand] = useState(ov.orchestration?.gateCommand ?? "");
   const [maxWorkers, setMaxWorkers] = useState(numStr(ov.orchestration?.maxConcurrentWorkers));
@@ -107,8 +99,8 @@ function ConfigEditor({ project }: { project: Project }) {
   function buildOverride(): ProjectConfigOverride {
     const o: ProjectConfigOverride = structuredClone(ov);
 
-    const cols = parseColumns(columnsText);
-    if (cols) o.kanbanColumns = cols; else delete o.kanbanColumns;
+    // kanbanColumns is intentionally left as-cloned — owned by the dedicated atomic columns endpoint, not
+    // this PATCH (see the state note above). Touching it here would race the column editor.
 
     const allow = parseLines(allowText);
     if (allow.length) {
@@ -174,12 +166,9 @@ function ConfigEditor({ project }: { project: Project }) {
       </Panel>
 
       <Panel>
-        <SectionLabel>Kanban Columns</SectionLabel>
-        <Field hint={`effective: ${resolved.kanbanColumns.map((c) => c.key).join(", ")}`}>
-          <textarea value={columnsText} onChange={(e) => setColumnsText(e.target.value)} spellCheck={false}
-            style={{ ...ta, minHeight: 120 }} placeholder={"backlog: Backlog\ntodo: To Do\nin_progress: In Progress\ndone: Done"} />
-          <Hint>one <code>key: Label</code> per line · blank inherits the default board</Hint>
-        </Field>
+        <SectionLabel>Board Columns</SectionLabel>
+        {/* Its OWN atomic save (the columns endpoint) — independent of the project-config Save below. */}
+        <ColumnManager project={project} />
       </Panel>
 
       <Panel>
