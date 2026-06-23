@@ -42,6 +42,13 @@ gate command). This skill is the doctrine those plug into.
    and any known limitation rather than papering over it. Keep any docs you touch accurate: rewrite
    stale claims in place, no "UPDATE:" appends.
 
+**Never let a shell command hang your turn.** Your session is **unattended** — a command that blocks on
+input never returns, so the turn never ends and you wedge at `busy` (a false "stuck" trip + your report
+sits undelivered). Always inspect git with **`git --no-pager`** (`git --no-pager diff`, `git --no-pager
+log`) so it can never page into `less` and block on `q`; and never start a foreground process that
+doesn't exit on its own. (Your spawn env also sets `GIT_PAGER=cat`/`PAGER=cat`/`GIT_TERMINAL_PROMPT=0`
+as a backstop, but write `--no-pager` anyway.)
+
 ## Report protocol
 
 Your action/report tools live under the `mcp__loom-orchestration__` namespace — `worker_report`,

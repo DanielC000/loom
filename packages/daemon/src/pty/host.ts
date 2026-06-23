@@ -560,6 +560,40 @@ export function buildSpawnArgs(o: {
 }
 
 /**
+ * Assemble the environment for a `claude` worker pty — extracted as a PURE, testable seam mirroring
+ * buildMcpServers / buildSpawnArgs. Behavior-preserving for the INHERITED env: the CLAUDECODE/CLAUDE_CODE_*
+ * scrub (those vars would make the nested `claude` believe it is running inside another claude) and the
+ * sessionEnv merge are unchanged — PLUS three git-safety vars that close the "git wedges the UNATTENDED
+ * worker pty" class:
+ *   - GIT_PAGER=cat / PAGER=cat — git (and other pager-using tools) can never launch `less` and block
+ *     forever on `q`. Without this a worker's post-commit `git diff`/`git log` could page and never
+ *     return, freezing the turn at busy → a FALSE [loom:worker-stuck] trip + its worker_report queued
+ *     undelivered (the bug this fixes).
+ *   - GIT_TERMINAL_PROMPT=0 — git FAILS FAST on an auth/credential prompt instead of hanging on it
+ *     (mirrors git/writer.ts; same unattended-wedge class as the pager).
+ * The three are set BEFORE the sessionEnv merge, so a project that deliberately overrides any of them via
+ * config.sessionEnv still wins (no capability regression). Every other byte of the env is identical to
+ * before. Exported so the hermetic spawn-env test asserts the vars, the scrub, and the override.
+ */
+export function buildSpawnEnv(
+  processEnv: Record<string, string | undefined>,
+  sessionEnv: Record<string, string>,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(processEnv)) {
+    if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
+    if (v !== undefined) env[k] = v;
+  }
+  // Git-safety vars for the unattended worker pty (close the "git blocks the pty" wedge class). Set
+  // BEFORE the sessionEnv merge so a project's deliberate override still wins.
+  env.GIT_PAGER = "cat";
+  env.PAGER = "cat";
+  env.GIT_TERMINAL_PROMPT = "0";
+  Object.assign(env, sessionEnv);
+  return env;
+}
+
+/**
  * The host's default interactive shell, used to PREFILL the "+ Shell" modal (the human can override).
  * Windows: prefer PowerShell 7 (pwsh), else Windows PowerShell, else cmd — returned as an ABSOLUTE path
  * (node-pty's Windows agent doesn't search %PATH%). Unix: $SHELL, else /bin/bash. This is a convenience
@@ -866,12 +900,9 @@ export class PtyHost {
     const mcpServers = buildMcpServers({ sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting });
     const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt, model: opts.model });
 
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
-      if (v !== undefined) env[k] = v;
-    }
-    Object.assign(env, opts.sessionEnv);
+    // Inherited env (CLAUDE_*/CLAUDECODE scrubbed) + sessionEnv merge + the three git-safety vars that
+    // keep an unattended worker pty from wedging on a pager / credential prompt. See buildSpawnEnv.
+    const env = buildSpawnEnv(process.env, opts.sessionEnv);
 
     // eslint-disable-next-line no-console
     console.log(`[pty] spawn ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${opts.resumeId ?? "none"} args=${JSON.stringify(args)}`);
