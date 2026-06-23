@@ -52,6 +52,7 @@
     "test:config-bounds": "node test/config-bounds.mjs",
     "test:platform-config": "node test/platform-config.mjs",
     "test:audit-surface": "node test/audit-surface.mjs",
+    "test:user-audit-surface": "node test/user-audit-surface.mjs",
     "test:setup-surface": "node test/setup-surface.mjs",
     "test:setup-first-run": "node test/setup-first-run.mjs",
     "test:alert-webhook": "node test/alert-webhook.mjs",

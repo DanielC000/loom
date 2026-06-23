@@ -376,6 +376,11 @@ export type OrchestrationEventKind =
   // durable TASK on the reserved Platform board. `detail` carries the severity, title, and Platform task id.
   // The ONLY write the read-and-file-only Auditor can make (it has no git/vault/config/spawn capability).
   | "audit_finding"
+  // End-user Auditor improvement suggestion (loom-user-audit `audit_suggest_improvement`, End-User Platform
+  // tier B3): the de-privileged twin of `audit_finding` — a transcript-review SUGGESTION filed as a durable
+  // TASK on the USER'S OWN "Getting Started" home inbox (never the dev Platform board). `detail` carries the
+  // severity, title, and the user-home task id. One of the workspace-auditor's two inert daemon-local writes.
+  | "workspace_audit_suggestion"
   // ── Crash-recovery watchdog (CrashRecoveryWatcher) ─────────────────────────────────────────────
   // A resumable session's pty process died UNEXPECTEDLY while the daemon stayed healthy — i.e. NOT via
   // pty.stop() (graceful/idle/user-stop/recycle/merge-stop) and NOT a whole-daemon restart/crash (those

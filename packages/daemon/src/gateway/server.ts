@@ -20,6 +20,7 @@ import type { TaskMcpRouter } from "../mcp/server.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
 import type { AuditMcpRouter } from "../mcp/audit.js";
+import type { WorkspaceAuditMcpRouter } from "../mcp/user-audit.js";
 import type { SetupMcpRouter } from "../mcp/setup.js";
 import type { RunMcpRouter } from "../mcp/run.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride } from "../mcp/platform.js";
@@ -63,6 +64,7 @@ export interface GatewayDeps {
   orchMcp: OrchestrationMcpRouter;
   platformMcp: PlatformMcpRouter;
   auditMcp: AuditMcpRouter;
+  userAuditMcp: WorkspaceAuditMcpRouter;
   setupMcp: SetupMcpRouter;
   runMcp: RunMcpRouter;
   control: OrchestrationControl;
@@ -156,6 +158,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { sessionId } = req.params as { sessionId: string };
     reply.hijack();
     await deps.auditMcp.handle(req.raw, reply.raw, sessionId, req.body);
+  });
+
+  // --- Workspace-auditor MCP (role-gated to 'workspace-auditor'; the END-USER Auditor's READ-AND-
+  // SUGGEST-ONLY surface — End-User Platform tier B3). A distinct route + router so a workspace-auditor
+  // session reaches ONLY its 4 curated tools: it 404s on /mcp-platform, /mcp-orch, /mcp-audit and
+  // /mcp-setup (their resolveRole gate other roles), and NO agent/MCP path can mint a workspace-auditor
+  // session (caller-set only), so a non-workspace-auditor session can never reach here. ---
+  app.all("/mcp-user-audit/:sessionId", async (req, reply) => {
+    const { sessionId } = req.params as { sessionId: string };
+    reply.hijack();
+    await deps.userAuditMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
 
   // --- Setup-Assistant MCP (role-gated to 'setup'; the ungated, user-facing onboarding assistant's

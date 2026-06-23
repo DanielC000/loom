@@ -17,6 +17,7 @@ import { TaskMcpRouter } from "./mcp/server.js";
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
 import { PlatformMcpRouter } from "./mcp/platform.js";
 import { AuditMcpRouter } from "./mcp/audit.js";
+import { WorkspaceAuditMcpRouter } from "./mcp/user-audit.js";
 import { SetupMcpRouter } from "./mcp/setup.js";
 import { RunMcpRouter } from "./mcp/run.js";
 import { OrchestrationControl } from "./orchestration/control.js";
@@ -133,7 +134,7 @@ async function main(): Promise<void> {
       // its handles are released). Runs the SAME teardown whether the run completed via submit_result or
       // the session died first (→ failed). Best-effort: a throw here must not disturb the exit path.
       try { if (exited?.role === "run") sessions.onRunSessionExit(sessionId); } catch { /* never disturb the exit path */ }
-      mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); setupMcp.dispose(sessionId); runMcp.dispose(sessionId);
+      mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); userAuditMcp.dispose(sessionId); setupMcp.dispose(sessionId); runMcp.dispose(sessionId);
     },
   }, { busyStaleMs: timeouts.busyStaleMs }); // BOOT-BOUND: stuck-busy self-heal threshold from resolved platform config
 
@@ -192,6 +193,11 @@ async function main(): Promise<void> {
   // (transcript reads + session list) AND SessionService (audit_file_finding → reserved Platform board).
   // Deliberately gets NO git-write timeouts: it has no git/vault/config/spawn tools, by design.
   const auditMcp = new AuditMcpRouter(db, sessions);
+  // Workspace-audit MCP (End-User Platform tier B3) — the END-USER Auditor's de-privileged read-and-
+  // suggest-only surface. Needs the registry (shared transcript reads + preset suggestions) AND
+  // SessionService (audit_suggest_improvement → the user's reserved "Getting Started" home). Like the dev
+  // Auditor it gets NO git-write timeouts: it has no git/vault/config/spawn tools, by design.
+  const userAuditMcp = new WorkspaceAuditMcpRouter(db, sessions);
   // Setup MCP (Setup Assistant E1-3) — the ungated, user-facing onboarding assistant's CURATED,
   // fail-closed surface (project/agent/profile create+configure + manager|plain spawn). Needs the
   // registry (structural/profile/read ops) AND SessionService (session_spawn). Deliberately gets NO
@@ -247,7 +253,7 @@ async function main(): Promise<void> {
     }
   };
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, setupMcp, runMcp, control, usageStatus, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"), updateStatus: () => updateCheck.current(), beginSelfUpdate });
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"), updateStatus: () => updateCheck.current(), beginSelfUpdate });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon v${loomVersion()} listening on http://127.0.0.1:${PORT}`);

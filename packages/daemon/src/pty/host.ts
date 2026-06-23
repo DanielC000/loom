@@ -313,7 +313,7 @@ export function playwrightMcpServer(): { type: "stdio"; command: string; args: s
  * Assemble the `--mcp-config` mcpServers map for a Claude spawn (extracted from createPty as the ONE
  * testable seam for the MCP surface). ALWAYS the project-scoped `loom-tasks` HTTP server; PLUS the
  * role-gated surface (manager/worker → loom-orchestration, platform → loom-platform, auditor → loom-audit,
- * setup → loom-setup);
+ * workspace-auditor → loom-user-audit, setup → loom-setup);
  * PLUS — only when `browserTesting` is set — the per-session stdio Playwright MCP. The browser server is
  * fully ADDITIVE: with the flag off the map is byte-identical to today's. Pure + deterministic (no pty, no
  * network), so the spawn-config test can assert the iff-browserTesting inclusion directly.
@@ -334,6 +334,7 @@ export function buildMcpServers(o: {
   const wantsOrch = o.role === "manager" || o.role === "worker";
   const wantsPlatform = o.role === "platform";
   const wantsAudit = o.role === "auditor";
+  const wantsUserAudit = o.role === "workspace-auditor";
   const wantsSetup = o.role === "setup";
   const mcpServers: Record<string, unknown> = {
     "loom-tasks": { type: "http", url: `http://127.0.0.1:${o.port}/mcp/${o.sessionId}` },
@@ -346,6 +347,12 @@ export function buildMcpServers(o: {
   }
   if (wantsAudit) {
     mcpServers["loom-audit"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-audit/${o.sessionId}` };
+  }
+  // End-User Platform tier B3: a "workspace-auditor" session gets ONLY the curated loom-user-audit surface
+  // (on top of loom-tasks) — NEVER loom-platform/orchestration/audit/setup. A tool not registered there
+  // can't be reached (its whole tool world is 2 reads + 2 inert daemon-local suggest-writes).
+  if (wantsUserAudit) {
+    mcpServers["loom-user-audit"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-user-audit/${o.sessionId}` };
   }
   // Setup Assistant (E1-3): a "setup" session gets ONLY the curated loom-setup surface (on top of
   // loom-tasks) — NEVER loom-platform/orchestration/audit. A tool not registered there can't be reached.
@@ -822,6 +829,7 @@ export class PtyHost {
     const wantsOrch = opts.role === "manager" || opts.role === "worker";
     const wantsPlatform = opts.role === "platform";
     const wantsAudit = opts.role === "auditor";
+    const wantsUserAudit = opts.role === "workspace-auditor";
     const wantsSetup = opts.role === "setup";
     const wantsRun = opts.role === "run";
     // A browser-testing session ALSO needs its Playwright MCP tools allowlisted — acceptEdits doesn't
@@ -832,6 +840,7 @@ export class PtyHost {
     const roleAllow = wantsOrch ? ["mcp__loom-orchestration"]
       : wantsPlatform ? ["mcp__loom-platform"]
       : wantsAudit ? ["mcp__loom-audit"]
+      : wantsUserAudit ? ["mcp__loom-user-audit"]
       : wantsSetup ? ["mcp__loom-setup"]
       : wantsRun ? ["mcp__loom-run"]
       : [];

@@ -26,6 +26,7 @@ import { recordUndeliveredReport } from "../orchestration/crash-recovery-watcher
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
+import { SETUP_PROJECT_NAME } from "../setup/seed.js";
 
 /** Floor (1s) for any threaded git-op timeout — a sub-second misconfig must never make every git op
  *  fail-fast (mirrors GitWriter's GIT_TIMEOUT_FLOOR_MS). Applied where the resolved value is threaded. */
@@ -1496,6 +1497,62 @@ export class SessionService {
       id: randomUUID(), ts: now,
       managerSessionId: auditorSessionId, taskId: task.id, kind: "audit_finding",
       detail: { severity, platformProjectId: home.id, title: input.title },
+    });
+    return { taskId: task.id, projectId: home.id };
+  }
+
+  /**
+   * END-USER Auditor improvement suggestion (loom-user-audit `audit_suggest_improvement`, End-User Platform
+   * tier B3 — WRITE A) — the de-privileged, user-workspace twin of auditFileFinding. MIRRORS its shape but
+   * files to the USER'S OWN reserved home — the "Getting Started" setup home (NAME-SCOPED via
+   * getReservedProjectByName(SETUP_PROJECT_NAME)), NOT the dev "Loom Platform" home — onto its `inbox`
+   * column with an `[Auditor]` title prefix, so a suggestion lands where the user already looks. The target
+   * is HARDCODED server-side (the caller passes NO projectId), so this can never become a general
+   * cross-project task-write and can never target Loom Platform or an arbitrary id. Caller-role check
+   * (defense in depth — the tool is also workspace-auditor-gated at the router): refuses anything but a
+   * "workspace-auditor" session. NO git/vault/config/spawn — that capability doesn't exist on this path.
+   * SAFE when the reserved home is absent: returns {error} (no throw-crash of the surface) rather than
+   * filing anywhere else. Returns {taskId, projectId} on a genuine file.
+   */
+  workspaceAuditSuggest(
+    auditorSessionId: string,
+    input: { title: string; detail: string; severity?: string },
+  ): { taskId: string; projectId: string } | { error: string } {
+    const caller = this.db.getSession(auditorSessionId);
+    if (!caller || caller.role !== "workspace-auditor") return { error: "audit_suggest_improvement is a workspace-auditor-only surface" };
+    // HARDCODED target: the user's OWN reserved "Getting Started" home — NAME-SCOPED so it is NEVER the dev
+    // "Loom Platform" home and NEVER an arbitrary caller-supplied id. Absent home ⇒ no-op safely (the
+    // surface stays alive; the suggestion is simply not filed).
+    const home = this.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+    if (!home) return { error: "no reserved \"Getting Started\" home exists — cannot file the suggestion" };
+
+    const severity = (input.severity ?? "").trim() || "unspecified";
+    const now = new Date().toISOString();
+    const body = [
+      "**Filed by your Auditor** (read-mostly review of your own workspace — a suggestion to consider, never an auto-applied change).",
+      "",
+      `- **Severity:** ${severity}`,
+      "",
+      "## Suggested improvement / evidence",
+      "",
+      input.detail,
+    ].join("\n");
+    const task: Task = {
+      id: randomUUID(),
+      projectId: home.id,
+      title: `[Auditor] ${input.title}`,
+      body,
+      columnKey: "inbox", // the user's home inbox — where they already triage, not a hidden backlog
+      position: Date.now(),
+      priority: DEFAULT_TASK_PRIORITY,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.db.insertTask(task);
+    this.db.appendEvent({
+      id: randomUUID(), ts: now,
+      managerSessionId: auditorSessionId, taskId: task.id, kind: "workspace_audit_suggestion",
+      detail: { severity, homeProjectId: home.id, title: input.title },
     });
     return { taskId: task.id, projectId: home.id };
   }
