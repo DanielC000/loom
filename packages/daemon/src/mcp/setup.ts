@@ -44,7 +44,8 @@ function setupRoleError(role: string | null | undefined): string | null {
  * ║   reads     — list_all_projects / list_all_agents / list_all_sessions                                 ║
  * ║   structure — project_create / project_configure / project_update / agent_create                      ║
  * ║   rigs       — profile_create / profile_update / profile_assign                                       ║
- * ║   lifecycle  — session_spawn (manager|plain ONLY — never platform/auditor/worker/setup)               ║
+ * ║   lifecycle  — session_spawn (manager|plain ONLY — never platform/auditor/worker/setup);              ║
+ * ║                project_archive (SOFT, reversible — REFUSES a reserved/system home; rows retained)      ║
  * ║   skills     — skill_list (read) / skill_write (USER skills ONLY, confirm-first — never bundled/dev)   ║
  * ║                                                                                                       ║
  * ║ EVERY config-setting path (create/configure/update) routes through validateAgentProjectConfigOverride ║
@@ -56,7 +57,7 @@ function setupRoleError(role: string | null | undefined): string | null {
  * ║   git_checkout/create_branch/commit/push, vault_write (host/outward writers — human-only);            ║
  * ║   gateCommand/alertWebhook (excluded via the agent validator above);                                  ║
  * ║   session_message (cross-project, above-the-tree); session_stop;                                      ║
- * ║   schedule_create/schedule_update (esp. the auditor kind); project_archive (teardown);                ║
+ * ║   schedule_create/schedule_update (esp. the auditor kind);                                             ║
  * ║   platform_escalate, preset-suggestion, audit_file_finding (those live on other surfaces);            ║
  * ║   skill reset/publish-to-bundled (publishSkillToBundled writes the shipped ASSET — human-only REST,    ║
  * ║   like the vault/git writers); skill_write here is bounded to USER skills and cannot reach the asset.  ║
@@ -93,7 +94,8 @@ export class SetupMcpRouter {
     const sessions = this.sessions;
     const server = new McpServer({ name: "loom-setup", version: "0.1.0" });
 
-    // === structure (create-forward; NEVER teardown). All config goes through the AGENT validator. ===
+    // === structure (create-forward + ONE soft, reversible, reserved-guarded teardown: project_archive).
+    // All config goes through the AGENT validator. ===
     server.registerTool(
       "project_create",
       {
@@ -160,6 +162,27 @@ export class SetupMcpRouter {
         }
         if (name !== undefined || vaultPath !== undefined) db.updateProject(projectId, { name, vaultPath });
         return ok(db.getProject(projectId));
+      },
+    );
+
+    // SOFT teardown — the ONE lifecycle cap the operator gains (design Part A / A1). Reuses the dev
+    // PlatformMcpRouter.project_archive shape VERBATIM: soft-archive by id (hidden from the active list;
+    // rows + sessions retained), REFUSE a reserved/system project so the operator can NEVER archive its
+    // own "Getting Started" home (or the dev "Loom Platform" home), 404 on unknown. No outward/host
+    // capability — purely local + reversible, so it's the only safe teardown for the ungated surface.
+    server.registerTool(
+      "project_archive",
+      {
+        description: "Soft-archive a project by id (hidden from the active list; rows + sessions retained — reversible). REFUSES a reserved/system project so you can never archive the workspace's own home. 404 if unknown.",
+        inputSchema: { projectId: z.string() },
+      },
+      async ({ projectId }) => {
+        const p = db.getProject(projectId);
+        if (!p) return ok({ error: "project not found" });
+        // Guard: never let the operator archive a reserved/system home (the "Getting Started" / "Loom Platform" home).
+        if (p.reserved) return ok({ error: "cannot archive a reserved/system project (the workspace home)" });
+        db.archiveProject(projectId);
+        return ok({ archived: true, projectId });
       },
     );
 

@@ -35,7 +35,8 @@ orchestration (Orchestrator/Dev/Bugfix/QA/Web Designer + their skills) always se
 
 **Setup Assistant (ships to ALL users — the ungated, lower-priv cousin of the dev Platform layer):** a
 standing, user-facing onboarding agent on a new `setup` SessionRole, served by a curated **fail-closed**
-`loom-setup` MCP router (`/mcp-setup/:sessionId`, role-gated, 11 tools). It acts on the user's behalf —
+`loom-setup` MCP router (`/mcp-setup/:sessionId`, role-gated, 14 tools — incl. the one safe lifecycle cap
+`project_archive`: soft, reversible, and REFUSES a reserved/system home). It acts on the user's behalf —
 `project_create`/`configure`/`update` via the **AGENT validator** (rejects `gateCommand`/`alertWebhook`),
 `agent_create`, `profile_create`/`update`/`assign`, the `list_all_*` reads, and `session_spawn`
 `manager|plain` only — with **no** writers/escalation/auditor/archive surface and no self-elevation. It

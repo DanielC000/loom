@@ -12,10 +12,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       Symmetrically, the setup router returns NULL for every NON-setup role (manager/worker/plain/
 //       platform/auditor) — an agent/non-setup session can never reach /mcp-setup. buildMcpServers(setup)
 //       mounts loom-setup ONLY (+loom-tasks), never platform/orch/audit, with a ["mcp__loom-setup"] allow.
-//   (b) the surface is EXACTLY the curated subset — and NONE of the elevated/outward/self-improvement
-//       tools (no git/vault/message/stop/schedule/archive/escalate/audit).
+//   (b) the surface is EXACTLY the curated subset of 14 (incl. the one v1 widen, project_archive) — and
+//       NONE of the elevated/outward/self-improvement tools (no git/vault/message/stop/schedule/escalate/audit).
 //   (c) the curated tools work end-to-end: project_create (real git repo), project_configure,
-//       project_update, agent_create, profile_create/update/assign, list_all_*, session_spawn(manager|plain).
+//       project_update, project_archive (soft + reserved-guarded), agent_create,
+//       profile_create/update/assign, list_all_*, session_spawn(manager|plain).
 //   (d) THE VALIDATOR REJECTIONS — project_create/configure/update REJECT orchestration.gateCommand
 //       (host-RCE) and alertWebhook (exfil) by construction (agent validator); session_spawn REFUSES
 //       platform/auditor/worker/setup (no self-elevation) and creates nothing.
@@ -148,14 +149,16 @@ try {
   const expected = [
     "agent_create", "list_all_agents", "list_all_projects", "list_all_sessions",
     "profile_assign", "profile_create", "profile_update",
-    "project_configure", "project_create", "project_update", "session_spawn",
+    "project_archive", "project_configure", "project_create", "project_update", "session_spawn",
     "skill_list", "skill_write",
   ];
-  check(`(b) setup surface is EXACTLY the curated subset (got: ${tools.join(",")})`,
+  check(`(b) setup surface is EXACTLY the curated subset of 14 (got ${tools.length}: ${tools.join(",")})`,
     JSON.stringify(tools) === JSON.stringify(expected));
+  // The still-ABSENT trust boundary — project_archive is now INCLUDED (the ONE v1 widen), but the
+  // outward/host/elevated/self-improvement set must stay unreachable.
   const forbidden = [
     "git_checkout", "git_create_branch", "git_commit", "git_push", "vault_write",
-    "session_message", "session_stop", "schedule_create", "schedule_update", "project_archive",
+    "session_message", "session_stop", "schedule_create", "schedule_update",
     "platform_escalate", "audit_file_finding", "preset_suggestion_suggest", "worker_spawn", "daemon_restart",
   ];
   check("(b) setup surface has NONE of the elevated/outward/self-improvement tools",
@@ -242,6 +245,23 @@ try {
   const sess = await call("list_all_sessions", {});
   check("(c) list_all_sessions: returns the live session summaries", Array.isArray(sess) && sess.some((s) => s.id === "SETUP"));
 
+  // project_archive (the ONE v1 widen) — soft, reversible, reserved-guarded.
+  // A NON-reserved project archives (hidden from the active list; row retained).
+  const toArchive = await call("project_create", { name: "Disposable", repoPath: repo });
+  check("(c) project_archive: precondition — a fresh non-reserved project exists & is active",
+    !!toArchive.id && db.listAllProjects().some((p) => p.id === toArchive.id));
+  const archived = await call("project_archive", { projectId: toArchive.id });
+  check("(c) project_archive: a non-reserved project archives (archived:true)", archived.archived === true && !archived.error);
+  check("(c) project_archive: the project is now hidden from the active list", !db.listAllProjects().some((p) => p.id === toArchive.id));
+  check("(c) project_archive: the row is retained (soft, reversible)", !!db.getProject(toArchive.id)?.archivedAt);
+  // REFUSED on a reserved/system home (the operator can never archive its own "Getting Started" home).
+  const archiveReserved = await call("project_archive", { projectId: "pHome" });
+  check("(c) project_archive: REFUSES a reserved/system home", typeof archiveReserved.error === "string" && !archiveReserved.archived);
+  check("(c) project_archive: the reserved home is left active (not archived)", db.getProject("pHome")?.archivedAt == null);
+  // 404 on an unknown id.
+  const archiveUnknown = await call("project_archive", { projectId: "nope" });
+  check("(c) project_archive: unknown id 404s", typeof archiveUnknown.error === "string" && !archiveUnknown.archived);
+
   // session_spawn(manager|plain) → drives the (fake) pty.
   const nSpawnBefore = db.listAllSessions().length;
   const mgr = await call("session_spawn", { projectId: created.id, agentId: agent.id, role: "manager" });
@@ -327,6 +347,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Setup Assistant surface is the curated, fail-closed subset (project/agent/profile create+configure + manager|plain spawn + reads + skill_list/skill_write), a setup session 404s on /mcp-platform, /mcp-orch AND /mcp-audit, a non-setup session can never reach /mcp-setup, every config path rejects gateCommand/alertWebhook, session_spawn refuses platform/auditor/worker/setup, and skill_write is confirm-first + bounded to the USER store (never the bundled/dev set) — claude-free, network-free."
+  ? "\n✅ ALL PASS — the Setup Assistant surface is the curated, fail-closed subset of 14 (project/agent/profile create+configure + project_archive (soft, reserved-guarded) + manager|plain spawn + reads + skill_list/skill_write), a setup session 404s on /mcp-platform, /mcp-orch AND /mcp-audit, a non-setup session can never reach /mcp-setup, every config path rejects gateCommand/alertWebhook, session_spawn refuses platform/auditor/worker/setup, and skill_write is confirm-first + bounded to the USER store (never the bundled/dev set) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
