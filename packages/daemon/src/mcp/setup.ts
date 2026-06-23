@@ -9,7 +9,7 @@ import type { SessionService } from "../sessions/service.js";
 import { isGitRepo } from "../git/reader.js";
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentProjectConfigOverride } from "./platform.js";
-import { projectSessionList } from "./sessionView.js";
+import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { listSkills, readSkill, writeSkill, isValidSkillName, isBundledSkill } from "../skills/store.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
@@ -271,18 +271,20 @@ export class SetupMcpRouter {
     server.registerTool(
       "list_all_sessions",
       {
-        description: "List live sessions across the platform (archived excluded), each enriched with its project + agent name. Optional projectId narrows to one project. DEFAULT returns a lightweight SUMMARY per session so the list stays bounded; pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first).",
+        description: "List sessions across the platform (archived excluded), each enriched with its project + agent name. state (default \"live\") filters by PROCESS lifecycle: \"live\" = non-exited sessions only (the bounded default — finished but un-archived sessions are dropped so the feed doesn't grow without limit); \"exited\" = terminated sessions only (history); \"all\" = both. Optional projectId narrows to one project. DEFAULT returns a lightweight SUMMARY per session so the list stays bounded; pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first); summary reads are capped at " + DEFAULT_SESSION_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
         inputSchema: {
           projectId: z.string().optional(),
+          state: z.enum(["live", "exited", "all"]).optional(),
           full: z.boolean().optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
         },
       },
-      async ({ projectId, full, limit, offset }) => {
-        const all = db.listAllSessions();
+      async ({ projectId, state, full, limit, offset }) => {
+        const all = filterSessionsByState(db.listAllSessions(), state ?? "live");
         const filtered = projectId === undefined ? all : all.filter((s) => s.projectId === projectId);
-        return ok(projectSessionList(filtered, { full, limit, offset }));
+        const effLimit = limit ?? (full ? undefined : DEFAULT_SESSION_SUMMARY_CAP);
+        return ok(projectSessionList(filtered, { full, limit: effLimit, offset }));
       },
     );
 

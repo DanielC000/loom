@@ -11,7 +11,7 @@ import { GitWriter } from "../git/writer.js";
 import { writeVaultFile } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateProfile } from "../profiles/validate.js";
-import { projectSessionList } from "./sessionView.js";
+import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 
 // Same envelope as the task / orchestration MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -328,18 +328,21 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_sessions",
       {
-        description: "List live sessions across the platform (the Mission-Control feed; archived excluded), each enriched with its project + agent name. Optional projectId narrows to one project. DEFAULT returns a lightweight SUMMARY per session (id, projectId, projectName, agentName, role, processState, busy, archivedAt, createdAt, lastActivity, model, ctxInputTokens, ctxTurns) so the list stays bounded; heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. Pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first).",
+        description: "List sessions across the platform (archived excluded), each enriched with its project + agent name. state (default \"live\") filters by PROCESS lifecycle: \"live\" = non-exited sessions only (the bounded default — finished sessions that have NOT been archived are dropped, so the feed doesn't grow without limit); \"exited\" = terminated sessions only (history); \"all\" = both. Optional projectId narrows to one project. DEFAULT returns a lightweight SUMMARY per session (id, projectId, projectName, agentName, role, processState, busy, archivedAt, createdAt, lastActivity, model, ctxInputTokens, ctxTurns) so the list stays bounded; heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. Pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first); summary reads are capped at " + DEFAULT_SESSION_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
         inputSchema: {
           projectId: z.string().optional(),
+          state: z.enum(["live", "exited", "all"]).optional(),
           full: z.boolean().optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
         },
       },
-      async ({ projectId, full, limit, offset }) => {
-        const all = db.listAllSessions();
+      async ({ projectId, state, full, limit, offset }) => {
+        const all = filterSessionsByState(db.listAllSessions(), state ?? "live");
         const filtered = projectId === undefined ? all : all.filter((s) => s.projectId === projectId);
-        return ok(projectSessionList(filtered, { full, limit, offset }));
+        // Backstop the summary feed so an `all`/`exited` history read can't overflow with no explicit limit.
+        const effLimit = limit ?? (full ? undefined : DEFAULT_SESSION_SUMMARY_CAP);
+        return ok(projectSessionList(filtered, { full, limit: effLimit, offset }));
       },
     );
 

@@ -37,6 +37,32 @@ export const toSessionSummary = (s: SessionListItem): SessionSummary => ({
 });
 
 /**
+ * The session-list STATE filter (process lifecycle), mirroring tasks_list's excludeDone precedent:
+ * the lightweight cross-project feed DEFAULTS to live (non-exited) sessions so it stays bounded as
+ * finished sessions pile up; "exited"/"all" opt into history. This is the process axis (has the engine
+ * exited) and is ORTHOGONAL to the audit tool's `scope` axis (archived-vs-not) — a session can be
+ * exited-but-not-archived (which is exactly what was streaming back forever). "live" keeps every
+ * non-terminal ProcessState (none|starting|live); only "exited" is dropped.
+ */
+export type SessionStateFilter = "live" | "exited" | "all";
+
+/** Filter an enriched session list by process-lifecycle state (see {@link SessionStateFilter}). Pure. */
+export function filterSessionsByState(
+  rows: SessionListItem[], state: SessionStateFilter,
+): SessionListItem[] {
+  if (state === "all") return rows;
+  const wantExited = state === "exited";
+  return rows.filter((s) => (s.processState === "exited") === wantExited);
+}
+
+/**
+ * Backstop cap on a DEFAULT (summary) cross-project session list so an `state:"all"`/`"exited"` history
+ * read can't overflow the tool-result token cap even with no explicit limit. Callers opt past it with an
+ * explicit limit/offset. full:true is an explicit heavy opt-in and is NOT capped here.
+ */
+export const DEFAULT_SESSION_SUMMARY_CAP = 200;
+
+/**
  * Apply the shared MCP-layer list shape to an already-fetched, already-filtered session list:
  * optional offset/limit pagination, then summary projection unless full:true. Pure — no db access.
  */

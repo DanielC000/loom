@@ -10,6 +10,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     (title, cwd, engineSessionId, branch, worktreePath, lastError, …) are OMITTED.
 //   - full:true returns the WHOLE session record (heavy fields restored).
 //   - limit/offset paginate the result.
+// And for platform list_all_sessions specifically (the bugfix):
+//   - the `state` filter DEFAULTS to "live" so a finished-but-unarchived (exited) session is dropped
+//     from the feed; state:"exited"/"all" opt into history. Mirrors tasks_list's excludeDone default.
 // Run: 1) build (turbo builds shared first), 2) node test/session-list-summary.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -76,6 +79,10 @@ db.insertSession({ id: "W2", projectId: "pOrd", agentId: "agentWork", engineSess
   processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: new Date(Date.now() + 3_000).toISOString(), lastError: null, role: "worker", parentSessionId: null, model: "claude-sonnet-4-6", ctxInputTokens: 10, ctxTurns: 2 });
 db.insertSession({ id: "W3", projectId: "pOrd", agentId: "agentWork", engineSessionId: "eng-3", title: "third", cwd: repo,
   processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: new Date(Date.now() + 1_000).toISOString(), lastError: null, role: "worker", parentSessionId: null });
+// An EXITED (finished, NOT archived) worker — the row that used to stream back forever. Older lastActivity
+// so it sorts AFTER the live rows (proving `limit` alone is a band-aid: it'd never be pruned by recency).
+db.insertSession({ id: "WEXIT", projectId: "pOrd", agentId: "agentWork", engineSessionId: "eng-exit", title: "finished", cwd: repo,
+  processState: "exited", resumability: "resumable", busy: false, createdAt: now, lastActivity: new Date(Date.now() - 10_000).toISOString(), lastError: null, role: "worker", parentSessionId: null });
 
 // Fake pty seam (no real claude).
 class SeamHost extends PtyHost {
@@ -138,6 +145,19 @@ try {
   await pClient.connect(pcT);
   await assertProjection("platform.list_all_sessions", async (extra) =>
     parse(await pClient.callTool({ name: "list_all_sessions", arguments: { projectId: "pOrd", ...extra } })));
+
+  // ---- STATE filter (the bugfix): default EXCLUDES exited; state opts into history ----
+  const platIds = async (args) => new Set(
+    parse(await pClient.callTool({ name: "list_all_sessions", arguments: { projectId: "pOrd", ...args } })).map((s) => s.id));
+  const def = await platIds({});
+  check("state default: EXCLUDES the exited session (WEXIT dropped)", !def.has("WEXIT"));
+  check("state default: keeps the live sessions (WHEAVY/W2/W3 present)", def.has("WHEAVY") && def.has("W2") && def.has("W3"));
+  const live = await platIds({ state: "live" });
+  check("state:live: same set as default (no exited)", !live.has("WEXIT") && live.has("WHEAVY"));
+  const exited = await platIds({ state: "exited" });
+  check("state:exited: returns ONLY the exited session", exited.has("WEXIT") && !exited.has("WHEAVY") && !exited.has("W2") && !exited.has("W3"));
+  const all = await platIds({ state: "all" });
+  check("state:all: includes BOTH exited and live", all.has("WEXIT") && all.has("WHEAVY") && all.has("W2") && all.has("W3"));
   await pClient.close();
 } finally {
   db.close();
@@ -146,6 +166,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — both audit list_sessions and platform list_all_sessions default to a lightweight summary (key fields kept, heavy fields dropped), restore the whole record on full:true, and paginate via limit/offset."
+  ? "\n✅ ALL PASS — both audit list_sessions and platform list_all_sessions default to a lightweight summary (key fields kept, heavy fields dropped), restore the whole record on full:true, paginate via limit/offset; and platform list_all_sessions defaults its `state` filter to live (exited dropped) with state:exited/all opting into history."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
