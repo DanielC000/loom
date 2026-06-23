@@ -257,6 +257,8 @@ try {
     // Already-conventional → UNCHANGED (incl. scope and the `!` breaking marker).
     check("(n) passthrough: plain conventional", toConventionalSubject("fix: paste double-fires") === "fix: paste double-fires");
     check("(n) passthrough: scope + bang", toConventionalSubject("feat(web)!: drop old API") === "feat(web)!: drop old API");
+    // Plain scoped subject (no bang) — the form doctrine now requires — passes through untouched.
+    check("(n) passthrough: scope, no bang", toConventionalSubject("docs(skills): require commit scope") === "docs(skills): require commit scope");
     // Legacy [Type, Priority] / [Type] bracket → mapped type + bracket stripped.
     check("(n) legacy [Bug, P2] → fix:", toConventionalSubject("[Bug, P2] Fix paste") === "fix: Fix paste");
     check("(n) legacy [Release] → chore:", toConventionalSubject("[Release] Bump to v0.5.0") === "chore: Bump to v0.5.0");

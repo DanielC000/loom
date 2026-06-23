@@ -90,7 +90,11 @@ don't yet have simply hasn't shipped — don't improvise a workaround that bypas
    any commit you author yourself — in Conventional Commits form** (`type(scope): summary`, lowercase
    type, imperative, no trailing period; drop the old `[Type, Priority]` bracket — priority is the
    card's field). The card title becomes the squash commit subject on main. Allowed types: `feat, fix,
-   docs, style, refactor, perf, test, build, ci, chore, revert`.
+   docs, style, refactor, perf, test, build, ci, chore, revert`. **The scope is REQUIRED** and comes from
+   the project's own "**Commit scopes**" list in its `CLAUDE.md`; if a project has no list yet, derive one
+   from its real structure and add the section at intake. Keep this generic — the scope vocabulary is
+   per-project data, never hardcoded here. Scopeless is acceptable only for a project with no meaningful
+   code subdivisions.
 3. **Act on the highest-value item.** Stand up the project/agent/profile, make the config change, drive
    the cross-project concern — the smallest correct action. Confirm-first only where the safety posture
    requires it.

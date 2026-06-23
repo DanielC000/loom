@@ -156,6 +156,14 @@ scope, and never address the human. You make the call and `worker_message` it ba
      as the commit subject on main, so a conventional title *is* a conventional commit. Allowed types:
      `feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert`. (A title that slips through
      is coerced by a merge-code safety-net, but title it right — don't lean on the net.)
+   - **The scope is REQUIRED**, and it comes from the **project's own documented list** — a "**Commit
+     scopes**" section in that project's `CLAUDE.md`. Pick the scope that names the subsystem the change
+     lands in. If the project has **no such list yet**, **DERIVE one at intake** from the repo's real
+     structure (packages / subsystems / top-level dirs) and add the "Commit scopes" section to its
+     `CLAUDE.md` as part of the same work. Scopeless (`type: summary`) is acceptable **only** for a
+     project with no meaningful code subdivisions (e.g. a single-vault research project). Keep this rule
+     generic — the scope *vocabulary* is per-project data that lives in each project's `CLAUDE.md`, never
+     baked into this doctrine.
 3. **Write self-contained kickoff prompts** via `worker_spawn`: context + the task + its DoD + the
    escalate-up rule. Tell the worker to follow its `/worker` doctrine and point at the repo's
    `CLAUDE.md` / conventions rather than restating them.

@@ -125,11 +125,27 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
 - One config-resolution mechanism (`resolveConfig`) — never read defaults ad hoc.
 - **Conventional Commits, going-forward only** (do NOT rewrite published history). Every Loom-authored
   commit subject is `type(scope): summary` — lowercase type, imperative, no trailing period, ≤~72 chars.
-  Allowed types: `feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert`. Managers title
-  board cards in this form (NO `[Type, Priority]` bracket — priority is the card's field); the per-task
-  squash merge uses the card title verbatim as the commit subject, so a conventional title is a conventional
-  commit. A title that slips is coerced by a merge-code safety-net (`toConventionalSubject` in
-  `git/worktrees.ts`: legacy bracket → mapped type, bare prose → `chore:`), but title it right at the source.
+  Allowed types: `feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert`. **The scope is
+  REQUIRED** and must come from the "Commit scopes" list below. Managers title board cards in this form
+  (NO `[Type, Priority]` bracket — priority is the card's field); the per-task squash merge uses the card
+  title verbatim as the commit subject, so a conventional title is a conventional commit. A title that
+  slips is coerced by a merge-code safety-net (`toConventionalSubject` in `git/worktrees.ts`: legacy
+  bracket → mapped type, bare prose → `chore:`) — but the net only guarantees a valid *type*; it can't know
+  the scope, so scope is enforced by titling, not the helper. Title it right at the source.
+
+### Commit scopes
+Loom's commit scope vocabulary, derived from the real tree. Pick the one subsystem a change lands in;
+prefer the finest-grained scope that fits.
+- **Packages:** `daemon`, `web`, `shared`, `cli` (the `bin/loom.mjs` management CLI).
+- **Daemon subsystems** (`packages/daemon/src/*`): `gateway`, `git`, `mcp`, `orchestration`, `platform`,
+  `profiles`, `pty`, `runs`, `sessions`, `setup`, `skills`, `tasks` (the task board / cards domain),
+  `update`, `vault`.
+- **Cross-cutting / process:** `deps` (dependency bumps), `ci`, `release`, `docs`, `assets` (bundled
+  skills / hook-relay / vault-lint under `assets/**`).
+
+This list is **Loom-specific**. Every project keeps its OWN "Commit scopes" list in its OWN `CLAUDE.md`;
+a project with no documented list gets one derived from its structure at intake, and only a project with
+no meaningful code subdivisions may go scopeless.
 - Vault + git writes are enabled via a HUMAN-only REST surface (vault: `vault/writer.ts`; git:
   `git/writer.ts` — checkout/commit/push/create-branch). These are trust-boundary surfaces like
   gateCommand: NO agent MCP tool exposes them; an agent can never write/commit/push from a session.

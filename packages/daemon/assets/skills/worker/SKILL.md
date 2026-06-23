@@ -60,8 +60,10 @@ Your action/report tools live under the `mcp__loom-orchestration__` namespace �
   and report the SHA before you report `done`. Don't merge — your manager reviews the branch and
   merges through the gate. **Write any commit you author in Conventional Commits form** —
   `type(scope): summary` (lowercase type, imperative, no trailing period). Allowed types: `feat, fix,
-  docs, style, refactor, perf, test, build, ci, chore, revert`. (Your branch is squash-merged under the
-  card title, but keep your own commits conventional too.)
+  docs, style, refactor, perf, test, build, ci, chore, revert`. **The scope is REQUIRED** — use one from
+  the project's "**Commit scopes**" list in its `CLAUDE.md` (the subsystem your change lands in);
+  scopeless is fine only for a project with no meaningful code subdivisions. (Your branch is
+  squash-merged under the card title, but keep your own commits conventional + scoped too.)
 - **`blocked`** — with `needs`: the specific decision, access, or information you're waiting on.
 - **`progress`** — an optional checkpoint on a long task.
 
