@@ -54,6 +54,7 @@
     "test:audit-surface": "node test/audit-surface.mjs",
     "test:user-audit-surface": "node test/user-audit-surface.mjs",
     "test:setup-surface": "node test/setup-surface.mjs",
+    "test:surface-subset": "node test/surface-subset.mjs",
     "test:setup-first-run": "node test/setup-first-run.mjs",
     "test:alert-webhook": "node test/alert-webhook.mjs",
     "test:tasks-filter": "node test/tasks-filter.mjs",

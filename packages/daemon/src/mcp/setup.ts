@@ -10,7 +10,7 @@ import { isGitRepo } from "../git/reader.js";
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentProjectConfigOverride } from "./platform.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
-import { listSkills, readSkill, writeSkill, isValidSkillName, isBundledSkill } from "../skills/store.js";
+import { skillListData, skillWriteData } from "./skillTools.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -357,13 +357,7 @@ export class SetupMcpRouter {
           "List the skills in the user's skill store. Each entry has name, description, bundled (a Loom-shipped skill — read-only on this surface) and editable (= !bundled). USER (editable) skills ALSO include their full SKILL.md `content` so you can edit them in place; a bundled skill's content is omitted here (edit those via the Skills UI). Read-only.",
         inputSchema: {},
       },
-      async () => {
-        const skills = listSkills().map((s) => {
-          const editable = !s.bundled;
-          return { ...s, editable, ...(editable ? { content: readSkill(s.name)?.content ?? "" } : {}) };
-        });
-        return ok({ skills });
-      },
+      async () => ok(skillListData()),
     );
 
     server.registerTool(
@@ -379,24 +373,10 @@ export class SetupMcpRouter {
           confirm: z.boolean().optional(),
         },
       },
-      async ({ name, content, confirm }) => {
-        // CONFIRM-FIRST gate: refuse unless the agent attests it confirmed with the user. The real
-        // enforcement is the setup-assistant doctrine (show + confirm before calling); this tool-level
-        // attestation makes the requirement legible and fails closed if the agent skips it.
-        if (confirm !== true) {
-          return ok({ error: "skill_write requires confirm:true — first show the user the skill name + full content and get their explicit confirmation, then retry with confirm:true." });
-        }
-        if (!isValidSkillName(name)) {
-          return ok({ error: "invalid skill name (kebab-case: a-z, 0-9, -, ≤64 chars)" });
-        }
-        // BOUND (load-bearing): USER skills ONLY. A bundled/shipped name is rejected so this surface can
-        // never create a divergent store copy of — or otherwise touch — the bundled/dev skill set.
-        if (isBundledSkill(name)) {
-          return ok({ error: `"${name}" is a bundled Loom skill — skill_write is bounded to USER skills and cannot modify the bundled/dev skill set. Edit a bundled skill via the Skills UI.` });
-        }
-        if (!writeSkill(name, content)) return ok({ error: "invalid skill name" });
-        return ok({ ok: true, name, bundled: false, skill: listSkills().find((s) => s.name === name) ?? null });
-      },
+      // Shared handler (mcp/skillTools.ts) with allowBundledAsset:FALSE — the load-bearing setup bound:
+      // USER store ONLY, a bundled name is REJECTED. Same validated logic the Lead's loom-platform
+      // skill_write reuses (with allowBundledAsset:true), so the confirm/slug guards can't diverge.
+      async ({ name, content, confirm }) => ok(skillWriteData({ name, content, confirm }, { allowBundledAsset: false })),
     );
 
     return server;

@@ -12,6 +12,7 @@ import { writeVaultFile } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateProfile } from "../profiles/validate.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
+import { skillListData, skillWriteData, skillWriteInputSchema } from "./skillTools.js";
 
 // Same envelope as the task / orchestration MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -632,6 +633,37 @@ export class PlatformMcpRouter {
         if (!p) return ok({ error: "project not found" });
         return ok(await writeVaultFile(p.vaultPath, relPath, content));
       },
+    );
+
+    // --- skills (the SUPERSET-closing pair: the ONLY two tools the ungated loom-setup surface carried
+    //     that the Lead lacked — see test/surface-subset.mjs). REUSES the SAME validated handlers as
+    //     loom-setup (mcp/skillTools.ts), so the confirm-first gate + kebab-slug guard cannot diverge.
+    //     skill_list is an identical read; skill_write is the Lead's ELEVATED variant (allowBundledAsset
+    //     :true) — its WRITE TARGET reaches the SOURCE-OF-TRUTH bundled ASSET, not only the user store,
+    //     which is why it lives in this P3 elevated block (it reuses publishSkillToBundled, the same
+    //     store→asset path the human POST /api/skills/:name/publish route uses — no guard bypassed). See
+    //     the WRITE TARGET box in mcp/skillTools.ts for the full rationale. ---
+    server.registerTool(
+      "skill_list",
+      {
+        description:
+          "List the skills in the user's skill store. Each entry has name, description, bundled (a Loom-shipped skill, kept in sync with its asset) and editable (= !bundled). USER (editable) skills ALSO include their full SKILL.md `content` so you can edit them in place; a bundled skill's content is omitted here (use skill_write to edit a bundled skill's source-of-truth asset). Read-only.",
+        inputSchema: {},
+      },
+      async () => ok(skillListData()),
+    );
+
+    server.registerTool(
+      "skill_write",
+      {
+        description:
+          "Create or update a skill (the Lead's ELEVATED, superset variant of the operator's skill_write). The editable unit is the skill's SKILL.md (frontmatter name/description + body); the full `content` you pass REPLACES it. name must be a kebab slug (a-z, 0-9, -, ≤64 chars). Edits apply to new sessions on next spawn.\n" +
+          "WRITE TARGET — unlike the loom-setup operator (USER store only), THIS surface can edit a BUNDLED Loom skill: for a bundled name it writes the SOURCE-OF-TRUTH shipped ASSET (assets/skills/<name>/SKILL.md) via the same validated publish path the human Skills UI uses (store then store→asset, leaving them in sync / diverged:false). A USER (non-bundled) name writes the user store, exactly like the operator surface.\n" +
+          "CONFIRM-FIRST (load-bearing): NEVER call this without first showing the user the skill name + content and getting their explicit confirmation. Pass confirm:true to attest you have done so; a missing/false confirm is rejected and nothing is written.",
+        inputSchema: skillWriteInputSchema,
+      },
+      // allowBundledAsset:TRUE — the Lead's bundled-asset edit (the operator surface passes false).
+      async ({ name, content, confirm }) => ok(skillWriteData({ name, content, confirm }, { allowBundledAsset: true })),
     );
 
     return server;
