@@ -142,6 +142,12 @@ async function main(): Promise<void> {
       // its handles are released). Runs the SAME teardown whether the run completed via submit_result or
       // the session died first (→ failed). Best-effort: a throw here must not disturb the exit path.
       try { if (exited?.role === "run") sessions.onRunSessionExit(sessionId); } catch { /* never disturb the exit path */ }
+      // Exited-without-report guard (board card 84151b99): a worker that UNEXPECTEDLY exited (intended
+      // === false) before ever calling worker_report leaves its task in_progress with no signal up — the
+      // idle nudge only fires on a busy→false edge, which a fast exit can outrun. Surface a DISTINCT
+      // worker_exited_without_report event + nudge to the manager so it isn't left with a silent idle.
+      // Best-effort: never disturb the exit path.
+      try { if (exited?.role === "worker") sessions.notifyManagerOfExitedWorker(sessionId, info.intended); } catch { /* never disturb the exit path */ }
       mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); userAuditMcp.dispose(sessionId); setupMcp.dispose(sessionId); runMcp.dispose(sessionId);
     },
   }, { busyStaleMs: timeouts.busyStaleMs }); // BOOT-BOUND: stuck-busy self-heal threshold from resolved platform config

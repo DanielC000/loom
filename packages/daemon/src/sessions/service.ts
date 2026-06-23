@@ -1925,6 +1925,46 @@ export class SessionService {
   }
 
   /**
+   * Exited-without-report guard (board card 84151b99). A worker's ONLY channel up is worker_report's
+   * push, and the idle nudge above (notifyManagerOfIdleWorker) fires on a busy→false EDGE — but a
+   * fast/first worker can EXIT before that edge ever lands: a pty exit routes through the onExit hook,
+   * NOT the onBusy callback, so notifyManagerOfIdleWorker is never called on exit. The manager — which
+   * has no idle/exit signal for its children — would then see a silent idle (or nothing) and have to
+   * self-rescue via worker_transcript (incident: a session, turns 80-86). Recurrence of the strand
+   * family but a DISTINCT mechanism: no report fires AT ALL (vs. worker_report_undelivered, where a
+   * report fired but reached an exited manager).
+   *
+   * Called from the pty onExit hook (index.ts), AFTER the row is marked `exited`. If an UNEXPECTEDLY-
+   * exited worker (intended===false — NOT a manager-issued worker_stop/recycle/merge stop, which set the
+   * pty's `stopping` flag) left its task STILL in_progress (worker_report would have moved it to
+   * review/waiting), record a DISTINCT, DURABLE `worker_exited_without_report` event AND push a
+   * [loom:worker-exited] nudge to the manager — the worker is GONE and will never report, so the manager
+   * must review its branch or re-dispatch. No-op for non-workers, parentless/taskless sessions, an
+   * intended stop, a recycled/superseded worker (its successor took over — intended), or a worker that
+   * already reported (its task moved out of in_progress).
+   */
+  notifyManagerOfExitedWorker(workerSessionId: string, intended: boolean): void {
+    if (intended) return; // a deliberate Loom stop() (worker_stop / recycle / merge-stop) — not a strand
+    const w = this.db.getSession(workerSessionId);
+    if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return;
+    if (this.db.hasSuccessor(workerSessionId)) return; // recycled/superseded — its successor owns the task
+    const task = this.db.getTask(w.taskId);
+    if (!task || task.columnKey !== "in_progress") return; // already reported done/blocked, or merged
+    // DURABLE first: record the distinct event regardless of whether the manager is live to receive the
+    // nudge — so it's auditable and not lost if the manager is mid-turn or momentarily down. Distinct
+    // kind from both worker_report (a real report) and the in-memory [loom:worker-idle] nudge (which is
+    // never recorded), so the manager (or a later boot scan) can tell "the worker is GONE" from "it's
+    // just idle and may still be working".
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: w.parentSessionId, workerSessionId, taskId: w.taskId,
+      kind: "worker_exited_without_report", detail: { branch: w.branch ?? null },
+    });
+    const msg = `[loom:worker-exited] worker ${workerSessionId} (task ${w.taskId}) EXITED without ever calling worker_report — its task is still in_progress and it will NOT come back on its own. Any work it committed is on branch ${w.branch ?? "(unknown)"}. Pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review/merge any committed work, or re-dispatch the task.`;
+    try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live — the durable event stands */ }
+  }
+
+  /**
    * Recycle a worker whose context has grown too large (phase-2 §A4). Close the old worker and
    * spawn a FRESH one in the SAME retained worktree, seeded with the manager-supplied handoff:
    * the worktree carries CODE state forward, the handoff carries INTENT — and we spawn fresh

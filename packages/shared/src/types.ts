@@ -409,6 +409,17 @@ export type OrchestrationEventKind =
   // reporting worker + task. Recorded by recordUndeliveredReport ONLY when the manager is exited (a
   // live-but-busy manager's queue drains on its next turn — not a strand) and not usage-limit parked.
   | "worker_report_undelivered"
+  // EXITED-WITHOUT-REPORT (board card 84151b99): a worker's pty exited UNEXPECTEDLY (intended===false —
+  // not a manager-issued worker_stop/recycle/merge) while its task was STILL in_progress, i.e. it never
+  // called worker_report at all. The idle nudge (notifyManagerOfIdleWorker) only fires on a busy→false
+  // EDGE, but a fast/first worker can exit before that edge ever lands (a pty exit routes through onExit,
+  // NOT the onBusy callback) → the manager would see a silent idle (or nothing) and have to self-rescue via
+  // worker_transcript. This is the DISTINCT, DURABLE signal that the worker is GONE and will never report:
+  // filed under the MANAGER (managerSessionId = the parent, workerSessionId = the dead worker), `detail`
+  // carries the worker's branch. Recorded by notifyManagerOfExitedWorker from the onExit hook; paired with
+  // a [loom:worker-exited] nudge enqueued to the (live) manager. Sibling of `worker_report_undelivered`
+  // (report reached nobody) — this is "no report at all".
+  | "worker_exited_without_report"
   // DURABLE QUEUED-MESSAGE INBOX (card 2ca18433): a down/cross-tree message (message_worker /
   // session_message) that could NOT be delivered as a turn at send time — the recipient was busy, so it
   // was HELD in the recipient's in-memory FIFO (`delivered:false`). That FIFO dies with the process, so a
