@@ -1,10 +1,10 @@
 {
-    "version": "0.4.2",
+    "version": "0.5.0",
     "description": "Local-first AI project workspace — weaves Claude Code sessions, Obsidian docs, and tasks into one fabric.",
     "homepage": "https://github.com/DanielC000/loom",
     "license": "MIT",
     "depends": "nodejs-lts",
-    "url": "https://registry.npmjs.org/loomctl/-/loomctl-0.4.2.tgz",
+    "url": "https://registry.npmjs.org/loomctl/-/loomctl-0.5.0.tgz",
     "hash": "sha256:REPLACE_WITH_SHA256_OF_PUBLISHED_ARTIFACT",
     "extract_dir": "package",
     "installer": {

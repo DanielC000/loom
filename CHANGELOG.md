@@ -7,6 +7,28 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-23
+
+The onboarding assistant grows into a standing **Platform** operator, and a new suggest-only **Workspace
+Auditor** reviews your own workspace and proposes improvements.
+
+### Added
+- **Workspace Auditor — a suggest-only review of your own workspace.** A new read-only reviewer scans
+  your recent sessions for vague or ambiguous instructions in *your* own agent prompts and skills, and
+  for prompts you type repeatedly that are worth saving as one-click presets. It files improvement
+  suggestions as cards on your home board and proposes presets — it never changes anything itself, and it
+  does not touch Loom's own internals. Run it on demand with **"Review my workspace"** on the Platform
+  page, or put it on a cron schedule.
+- **Archive a project from the Platform operator.** The operator can now soft-archive a project you're
+  done with (reversible; it refuses your reserved home).
+
+### Changed
+- **The Setup Assistant is now your "Platform" operator.** What greeted you as the "Setup Assistant" is
+  rebranded **"Platform"** — a standing, user-facing operator you return to whenever you want to create,
+  configure, or archive your projects, agents, and profiles, not just a one-time onboarding helper.
+  Existing installs are migrated automatically, and the Platform surface is now a single consolidated
+  page (one tab per edition).
+
 ## [0.4.2] — 2026-06-17
 
 ### Fixed
