@@ -23,6 +23,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       emptyKind 'ALREADY_MERGED' and finishes the bookkeeping idempotently (worktree gone, task done).
 //   (b2) STAGE_EMPTY_RETRY: a branch ahead but with NO diff to merge → confirm returns merged:false with
 //       emptyKind 'STAGE_EMPTY_RETRY', fail-closed (worktree RETAINED), NOT a "nothing staged" no-op.
+//   (d) FIRST-CALL despite UNMERGED-INDEX residue with NO MERGE_HEAD: the up-front clear now probes
+//       `ls-files --unmerged` FIRST (never throws) and the MERGE_HEAD rev-parse in its OWN try/catch, so a
+//       dirty index without a MERGE_HEAD is auto-recovered up front and the +2 branch merges on the FIRST
+//       confirm — under the OLD ordering the rev-parse throw skipped the unmerged probe and the merge bounced.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-confirm-idempotent.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -75,6 +79,7 @@ const mk = (label, file) => ({
 const A = mk("a", "feat-a.txt");   // (a) stale MERGE_HEAD → first-call merge
 const B = mk("b", "feat-b.txt");   // (b1) already-merged
 const C = mk("c", "feat-c.txt");   // (b2) stage-empty
+const D = mk("d", "feat-d.txt");   // (d) unmerged index, NO MERGE_HEAD → first-call merge
 
 try {
   // ── (a) FIRST-CALL merge despite a stale MERGE_HEAD in the canonical repo ──────────────────────────
@@ -149,9 +154,53 @@ try {
     check("(b2) worktree RETAINED (manager can investigate)", fs.existsSync(C.worktreePath));
     check("(b2) task NOT moved to done (still in review/in_progress)", db.getTask(C.taskId).columnKey !== "done");
   }
+
+  // ── (d) FIRST-CALL merge despite unmerged-index residue WITHOUT a MERGE_HEAD ─────────────────────────
+  // The reorder this card lands: the up-front clear now runs `ls-files --unmerged` FIRST (never throws) so
+  // a dirty index with NO MERGE_HEAD is auto-recovered up front too. Under the OLD ordering the
+  // `rev-parse --verify MERGE_HEAD` threw (no MERGE_HEAD) BEFORE the unmerged probe ran, so the residue was
+  // missed up front, the FIRST squash aborted on the dirty index, and the merge bounced to the retry path.
+  makeRepo(D);
+  {
+    const mainBranch = git(D.repo, "rev-parse --abbrev-ref HEAD"); // default init branch (master|main)
+    const base = git(D.repo, "rev-parse HEAD");
+    // Worker branch off base: +2 clean commits adding new files (no conflict with main).
+    const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
+    fs.writeFileSync(path.join(worktreePath, D.file), "part 1\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${D.file} part 1"`, { cwd: worktreePath });
+    fs.writeFileSync(path.join(worktreePath, `${D.file}.2`), "part 2\n"); // 2 commits → must collapse to ONE
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${D.file} part 2"`, { cwd: worktreePath });
+    D.worktreePath = worktreePath; D.branch = branch;
+    seed(D);
+
+    // Plant unmerged-index residue WITHOUT a MERGE_HEAD: provoke a REAL conflicting merge in the canonical
+    // repo (so the index holds unmerged stage entries), then delete .git/MERGE_HEAD — exactly the residue
+    // the reordered probe must still auto-recover up front.
+    execSync(`git ${GIT_ID} checkout -q -b mci-d-theirs ${base}`, { cwd: D.repo });
+    fs.writeFileSync(path.join(D.repo, "README.md"), "theirs side\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "theirs side"`, { cwd: D.repo });
+    execSync(`git ${GIT_ID} checkout -q ${mainBranch}`, { cwd: D.repo });          // back to main (advanced HEAD)
+    fs.writeFileSync(path.join(D.repo, "README.md"), "main side\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "main side"`, { cwd: D.repo });
+    try { execSync(`git ${GIT_ID} merge mci-d-theirs`, { cwd: D.repo, stdio: "ignore" }); } catch { /* expected README conflict */ }
+    fs.rmSync(path.join(D.repo, ".git", "MERGE_HEAD"), { force: true });          // drop the in-progress marker, KEEP the unmerged index
+    check("(d) precondition: NO MERGE_HEAD present", !fs.existsSync(path.join(D.repo, ".git", "MERGE_HEAD")));
+    check("(d) precondition: unmerged index entries present", git(D.repo, "ls-files --unmerged") !== "");
+
+    const headBefore = git(D.repo, "rev-parse HEAD");
+    const confirmD = await sessions.confirmWorkerMerge(D.mgrId, D.workerId); // the FIRST (and only) call
+    check("(d) FIRST confirm merges the +2-commit branch (unmerged index cleared up front, no MERGE_HEAD)", confirmD.merged === true);
+    check("(d) NOT reported as an empty no-op / conflict (emptyKind absent on a real merge)", confirmD.emptyKind === undefined);
+    check("(d) both worker files landed on the canonical repo", fs.existsSync(path.join(D.repo, D.file)) && fs.existsSync(path.join(D.repo, `${D.file}.2`)));
+    check("(d) exactly ONE new commit on main (2 worker commits collapsed into the squash)",
+      git(D.repo, `rev-list --count ${headBefore}..HEAD`) === "1");
+    check("(d) the unmerged-index residue was cleared (clean index after the merge)", git(D.repo, "ls-files --unmerged") === "");
+    check("(d) task moved to done", db.getTask(D.taskId).columnKey === "done");
+    check("(d) worktree removed after the merge", !fs.existsSync(D.worktreePath));
+  }
 } finally {
   db.close();
-  for (const p of [A, B, C]) {
+  for (const p of [A, B, C, D]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }
   }

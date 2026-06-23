@@ -942,12 +942,18 @@ export async function mergeBranch(
   // Re-derive from a CLEAN index: clear any AFFIRMATIVE in-progress-merge residue (a stale MERGE_HEAD or
   // unmerged entries from an aborted op) BEFORE the squash, so a leftover state can't make the first
   // --squash stage nothing (the idempotency bug). Gated on a positive signal so a clean canonical repo is
-  // never touched; `rev-parse --verify MERGE_HEAD` exits non-zero (→ catch) when there is no in-progress merge.
+  // never touched. The two probes are INDEPENDENT: `ls-files --unmerged` exits 0 on a clean repo (never
+  // throws), so it runs FIRST and unconditionally; the `rev-parse --verify MERGE_HEAD` check (which exits
+  // non-zero → throws when there is no in-progress merge) is isolated in its OWN try/catch so its throw
+  // can't skip the unmerged probe — unmerged residue WITHOUT a MERGE_HEAD is now auto-recovered up front too.
   try {
-    const inProgressMerge = (await git.raw(["rev-parse", "-q", "--verify", "MERGE_HEAD"])).trim() !== "";
     const unmerged = (await git.raw(["ls-files", "--unmerged"])).trim() !== "";
+    let inProgressMerge = false;
+    try {
+      inProgressMerge = (await git.raw(["rev-parse", "-q", "--verify", "MERGE_HEAD"])).trim() !== "";
+    } catch { /* no MERGE_HEAD ⇒ that signal is simply false */ }
     if (inProgressMerge || unmerged) await git.raw(["reset", "--hard", "HEAD"]);
-  } catch { /* no MERGE_HEAD ⇒ no residue to clear */ }
+  } catch { /* ls-files failed (e.g. not a repo / no HEAD) ⇒ no residue to clear */ }
 
   let rawError = false;
   try {
