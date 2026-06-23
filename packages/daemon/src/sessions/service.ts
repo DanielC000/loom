@@ -4,10 +4,10 @@ import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { Ajv } from "ajv";
 import {
-  resolveConfig, resolveProfile, DEFAULT_TASK_PRIORITY,
+  resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY,
   type Session, type StopMode, type OrchestrationEvent, type Task,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
-  type AgentRun,
+  type AgentRun, type ColumnRole, type KanbanColumn,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
@@ -27,6 +27,7 @@ import { nextFireAt } from "../orchestration/cron.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
+import { planColumnLayout, type DesiredColumn } from "../tasks/columns.js";
 
 /** Floor (1s) for any threaded git-op timeout — a sub-second misconfig must never make every git op
  *  fail-fast (mirrors GitWriter's GIT_TIMEOUT_FLOOR_MS). Applied where the resolved value is threaded. */
@@ -1491,7 +1492,11 @@ export class SessionService {
       browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
       skills, // deliver only the worker profile's skill subset (null ⇒ all)
     });
-    this.db.updateTask(opts.taskId, { columnKey: "in_progress" });
+    // Move the task into the `active` lane (role-resolved off the manager-project config, not the
+    // hardcoded "in_progress" key). If the board has no active lane, leave the card where it is rather
+    // than inventing a key — the invariant: a move never points a task at a non-existent column.
+    const activeKey = columnKeyForRole(config.kanbanColumns, "active");
+    if (activeKey) this.db.updateTask(opts.taskId, { columnKey: activeKey });
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId: worker.id, taskId: opts.taskId, kind: "spawn_worker",
@@ -1660,7 +1665,8 @@ export class SessionService {
       projectId: home.id,
       title: input.title,
       body,
-      columnKey: "backlog", // the Platform backlog (matches createProjectTask's default landing column)
+      // The Platform home's default-landing lane (role-resolved, matches createProjectTask's landing).
+      columnKey: this.columnKeyForProjectRole(home.id, "defaultLanding") ?? "backlog",
       position: Date.now(),
       priority: DEFAULT_TASK_PRIORITY,
       createdAt: now,
@@ -1724,7 +1730,8 @@ export class SessionService {
       projectId: home.id,
       title: input.title,
       body,
-      columnKey: "backlog", // the Platform backlog (matches platformEscalate's landing column)
+      // The Platform home's default-landing lane (role-resolved, matches platformEscalate's landing).
+      columnKey: this.columnKeyForProjectRole(home.id, "defaultLanding") ?? "backlog",
       position: Date.now(),
       priority: DEFAULT_TASK_PRIORITY,
       createdAt: now,
@@ -1780,7 +1787,10 @@ export class SessionService {
       projectId: home.id,
       title: `[Auditor] ${input.title}`,
       body,
-      columnKey: "inbox", // the user's home inbox — where they already triage, not a hidden backlog
+      // The user's home `intake` lane (role-resolved) — where they already triage, not a hidden backlog.
+      // Falls back to the default-landing lane, then the literal "inbox", so a suggestion always lands.
+      columnKey: this.columnKeyForProjectRole(home.id, "intake")
+        ?? this.columnKeyForProjectRole(home.id, "defaultLanding") ?? "inbox",
       position: Date.now(),
       priority: DEFAULT_TASK_PRIORITY,
       createdAt: now,
@@ -1793,6 +1803,42 @@ export class SessionService {
       detail: { severity, homeProjectId: home.id, title: input.title },
     });
     return { taskId: task.id, projectId: home.id };
+  }
+
+  /**
+   * Resolve the column KEY a lifecycle ROLE maps to on a project's board (role-resolved, never a
+   * hardcoded key — task B). Looks up the project's resolved config and delegates to the shared
+   * `columnKeyForRole` (which keeps the documented fallbacks: terminal→last column, defaultLanding→first
+   * column, any other absent role→undefined). Returns undefined for an unknown project or an absent
+   * non-required role, in which case the caller leaves the card in its current (valid) column — so a
+   * board edit can never make a move orphan a card onto a non-existent key.
+   */
+  private columnKeyForProjectRole(projectId: string, role: ColumnRole): string | undefined {
+    return columnKeyForRole(resolveConfig(this.db.getProject(projectId)?.config).kanbanColumns, role);
+  }
+
+  /**
+   * Atomic safe board-column layout change (task B) — the NEW mutation behind the column editor (card C),
+   * NOT the blind config PATCH. Diffs the DESIRED layout against the project's current resolved columns
+   * (planColumnLayout, pure), HARD-rejects a guard violation (no defaultLanding/terminal, ≥1-column floor,
+   * bad rename source, …), then executes the plan in ONE DB transaction (db.applyBoardColumnLayout):
+   * renamed columns' cards follow old→new, removed columns' cards land in the desired defaultLanding lane,
+   * and a backstop sweep + assertion guarantee NO task is left on a non-existent column. Soft warnings
+   * (e.g. dropping a non-required role lane) are returned, not blocking. Returns the stored columns +
+   * warnings on success, or {error} on a hard reject / unknown project.
+   */
+  updateBoardColumns(
+    projectId: string, desired: DesiredColumn[],
+  ): { ok: true; columns: KanbanColumn[]; warnings: string[] } | { ok: false; error: string } {
+    const project = this.db.getProject(projectId);
+    if (!project) return { ok: false, error: "project not found" };
+    const current = resolveConfig(project.config).kanbanColumns;
+    const plan = planColumnLayout(current, desired);
+    if (!plan.ok || !plan.columns || !plan.rekeys || !plan.defaultLandingKey) {
+      return { ok: false, error: plan.error ?? "invalid column layout" };
+    }
+    this.db.applyBoardColumnLayout(projectId, plan.columns, plan.rekeys, plan.defaultLandingKey);
+    return { ok: true, columns: plan.columns, warnings: plan.warnings };
   }
 
   /**
@@ -1848,10 +1894,12 @@ export class SessionService {
       }
     }
 
-    // Task move by status: done → review (ready for the manager's diff review), blocked →
-    // waiting, progress → no move.
+    // Task move by status: done → the `review` lane (ready for the manager's diff review), blocked →
+    // the `parked` lane, progress → no move. Role-resolved off the worker-project config (never the
+    // hardcoded "review"/"waiting" keys); an absent lane leaves the card put (no orphaning move).
     if (taskId) {
-      const col = report.status === "done" ? "review" : report.status === "blocked" ? "waiting" : null;
+      const role: ColumnRole | null = report.status === "done" ? "review" : report.status === "blocked" ? "parked" : null;
+      const col = role ? this.columnKeyForProjectRole(worker.projectId, role) : undefined;
       if (col) this.db.updateTask(taskId, { columnKey: col });
     }
 
@@ -1919,7 +1967,9 @@ export class SessionService {
     const w = this.db.getSession(workerSessionId);
     if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return;
     const task = this.db.getTask(w.taskId);
-    if (!task || task.columnKey !== "in_progress") return; // reported done/blocked, or already merged
+    // Still sitting in the `active` lane ⇒ hasn't reported (worker_report would have moved it out).
+    const activeKey = this.columnKeyForProjectRole(w.projectId, "active");
+    if (!task || task.columnKey !== activeKey) return; // reported done/blocked, already merged, or no active lane
     const msg = `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review, or worker_message it.`;
     try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
   }
@@ -1949,7 +1999,9 @@ export class SessionService {
     if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return;
     if (this.db.hasSuccessor(workerSessionId)) return; // recycled/superseded — its successor owns the task
     const task = this.db.getTask(w.taskId);
-    if (!task || task.columnKey !== "in_progress") return; // already reported done/blocked, or merged
+    // Still in the `active` lane ⇒ never reported (worker_report would have moved it out).
+    const activeKey = this.columnKeyForProjectRole(w.projectId, "active");
+    if (!task || task.columnKey !== activeKey) return; // already reported done/blocked, merged, or no active lane
     // DURABLE first: record the distinct event regardless of whether the manager is live to receive the
     // nudge — so it's auditable and not lost if the manager is mid-turn or momentarily down. Distinct
     // kind from both worker_report (a real report) and the in-memory [loom:worker-idle] nudge (which is
@@ -2574,7 +2626,13 @@ export class SessionService {
         `merge already landed — finishing bookkeeping, boot-reconcile Pass B will GC the dir: ${(e as Error).message}`);
     }
     // Terminal bookkeeping BEFORE the destructive deleteBranch (see the ORDER IS CRASH-CRITICAL note).
-    if (args.taskId) this.db.updateTask(args.taskId, { columnKey: "done" });
+    // Land the task in the `terminal` lane (role-resolved off its project, last-column fallback) — not the
+    // hardcoded "done" key. A merge always has a terminal lane (the role is required + falls back to last).
+    if (args.taskId) {
+      const task = this.db.getTask(args.taskId);
+      const terminalKey = task ? this.columnKeyForProjectRole(task.projectId, "terminal") : undefined;
+      if (terminalKey) this.db.updateTask(args.taskId, { columnKey: terminalKey });
+    }
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
@@ -2653,7 +2711,8 @@ export class SessionService {
         if (!landedSha) continue;
         const worktreePath = s.worktreePath ?? s.cwd;
         const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
-        const taskDone = this.db.getTask(s.taskId)?.columnKey === "done";
+        const terminalKey = this.columnKeyForProjectRole(s.projectId, "terminal");
+        const taskDone = this.db.getTask(s.taskId)?.columnKey === terminalKey;
         if (taskDone && !worktreeOnDisk) continue; // already fully reconciled — nothing to finish
         await this.finalizeMerge({
           managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId,
@@ -2678,7 +2737,8 @@ export class SessionService {
     for (const s of all) {
       if (s.role !== "worker" || !s.taskId) continue;
       if (protectedSessionIds.has(s.id)) continue; // about to be resumed — leave its lifecycle intact
-      if (this.db.getTask(s.taskId)?.columnKey !== "done") continue; // not a demonstrably-landed merge
+      const terminalKey = this.columnKeyForProjectRole(s.projectId, "terminal");
+      if (this.db.getTask(s.taskId)?.columnKey !== terminalKey) continue; // not a demonstrably-landed merge
       const evts = this.db.listEventsForWorker(s.id);
       const hasMergeRequest = evts.some((e) => e.kind === "merge_request");
       const hasTerminal = evts.some((e) => e.kind === "merge_done" || e.kind === "merge_rejected");

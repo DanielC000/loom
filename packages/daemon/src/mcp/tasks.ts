@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Task, TaskPriority } from "@loom/shared";
-import { DEFAULT_TASK_PRIORITY, resolveConfig } from "@loom/shared";
+import { DEFAULT_TASK_PRIORITY, resolveConfig, columnKeyForRole } from "@loom/shared";
 import type { Db } from "../db.js";
 
 // Task-tool business logic. EVERY function takes the projectId resolved SERVER-SIDE from the
@@ -13,7 +13,7 @@ export type TaskSummary = Pick<Task, "id" | "title" | "columnKey" | "position" |
 export interface ListTasksOptions {
   /** Return only tasks in these column keys; omit/empty = all columns. */
   columns?: string[];
-  /** Drop terminal ("done") cards — the resolved board's LAST column. Default true. */
+  /** Drop terminal cards — the column with the `terminal` role (last-column fallback). Default true. */
   excludeDone?: boolean;
   /** Return full Task rows (with body) instead of lightweight summaries. Default false. */
   includeBody?: boolean;
@@ -30,9 +30,10 @@ const toSummary = (t: Task): TaskSummary => ({
 
 /**
  * List a project's board tasks, filtered + projected. DEFAULTS to a lightweight SUMMARY (no body)
- * with terminal ("done") cards excluded — a bounded board read that doesn't grow without limit as
- * cards pile up in Done. The terminal column is DERIVED from the resolved config (last kanban
- * column), never hardcoded. Pass includeBody:true for full bodies (or use {@link getProjectTask}).
+ * with terminal cards excluded — a bounded board read that doesn't grow without limit as cards pile
+ * up in the terminal lane. The terminal column is DERIVED from the resolved config by its `terminal`
+ * ROLE (with last-column fallback for legacy boards), never hardcoded. Pass includeBody:true for full
+ * bodies (or use {@link getProjectTask}).
  */
 export function listProjectTasks(
   db: Db, projectId: string, opts: ListTasksOptions = {},
@@ -41,7 +42,7 @@ export function listProjectTasks(
   let tasks = db.listTasks(projectId);
   if (excludeDone) {
     const cols = resolveConfig(db.getProject(projectId)?.config).kanbanColumns;
-    const terminalKey = cols.at(-1)?.key;
+    const terminalKey = columnKeyForRole(cols, "terminal");
     if (terminalKey) tasks = tasks.filter((t) => t.columnKey !== terminalKey);
   }
   if (columns && columns.length) {
@@ -71,12 +72,15 @@ export function createProjectTask(
   input: { title: string; body?: string; columnKey?: string; priority?: TaskPriority },
 ): Task {
   const now = new Date().toISOString();
+  // New cards land in the project's `defaultLanding` column (role-resolved, not the hardcoded key) so a
+  // renamed/reordered landing lane still receives them; "backlog" is a defensive backstop only.
+  const landing = columnKeyForRole(resolveConfig(db.getProject(projectId)?.config).kanbanColumns, "defaultLanding") ?? "backlog";
   const task: Task = {
     id: randomUUID(),
     projectId,
     title: input.title,
     body: input.body ?? "",
-    columnKey: input.columnKey ?? "backlog",
+    columnKey: input.columnKey ?? landing,
     position: Date.now(),
     priority: input.priority ?? DEFAULT_TASK_PRIORITY,
     createdAt: now,

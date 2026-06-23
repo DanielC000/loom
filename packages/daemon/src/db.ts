@@ -33,7 +33,7 @@ import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PresetPrompt, PresetPromptSuggestion,
-  ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind,
+  ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
 } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret } from "./keys/hash.js";
 
@@ -1627,6 +1627,48 @@ export class Db {
    * card out from under a running worker"), mirroring countLiveSessionsForAgent/InProject. */
   countLiveSessionsForTask(id: string): number {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE task_id = ? AND process_state = 'live'").get(id) as { c: number }).c;
+  }
+
+  /**
+   * Atomic safe board-column layout change (task B). In ONE transaction: (1) apply the planned card
+   * re-keys (renames old→new, removed-column cards → defaultLandingKey) IN ORDER; (2) sweep ANY remaining
+   * card whose column_key is not in the new layout to defaultLandingKey — the unconditional backstop that
+   * upholds the HARD INVARIANT (no task references a non-existent column), covering even a pre-existing
+   * orphan the planner couldn't see; (3) persist the new columns onto the project's config override,
+   * preserving every other config field; (4) ASSERT zero orphans remain or throw to roll the whole thing
+   * back. The plan is computed by planColumnLayout (pure); this method only executes it transactionally.
+   *
+   * Pass `columns` (the final KanbanColumn[]), `rekeys` (ordered from→to), and `defaultLandingKey` (the
+   * sweep target — must be one of `columns`' keys). Throws on an unknown project or a post-apply orphan.
+   */
+  applyBoardColumnLayout(
+    projectId: string,
+    columns: KanbanColumn[],
+    rekeys: { from: string; to: string }[],
+    defaultLandingKey: string,
+  ): void {
+    const project = this.getProject(projectId);
+    if (!project) throw new Error("project not found");
+    const validKeys = columns.map((c) => c.key);
+    if (!validKeys.includes(defaultLandingKey)) throw new Error("defaultLandingKey must be one of the new columns");
+    const placeholders = validKeys.map(() => "?").join(",");
+    this.db.transaction(() => {
+      const now = new Date().toISOString();
+      for (const { from, to } of rekeys) {
+        this.db.prepare("UPDATE tasks SET column_key = ?, updated_at = ? WHERE project_id = ? AND column_key = ?")
+          .run(to, now, projectId, from);
+      }
+      // Backstop sweep: any card still on a key not in the new layout (incl. a pre-existing orphan) → landing.
+      this.db.prepare(`UPDATE tasks SET column_key = ?, updated_at = ? WHERE project_id = ? AND column_key NOT IN (${placeholders})`)
+        .run(defaultLandingKey, now, projectId, ...validKeys);
+      // Persist the layout, preserving every other config field.
+      this.db.prepare("UPDATE projects SET config_json = ? WHERE id = ?")
+        .run(JSON.stringify({ ...project.config, kanbanColumns: columns }), projectId);
+      // Invariant assertion (belt-and-suspenders): a non-empty orphan count rolls the transaction back.
+      const orphans = (this.db.prepare(`SELECT COUNT(*) AS c FROM tasks WHERE project_id = ? AND column_key NOT IN (${placeholders})`)
+        .get(projectId, ...validKeys) as { c: number }).c;
+      if (orphans > 0) throw new Error(`column layout would orphan ${orphans} task(s) — aborted`);
+    })();
   }
 
   // --- schedules (phase-2 Pillar B) ---

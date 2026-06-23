@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { resolveConfig, contextWindowForModel } from "@loom/shared";
+import { resolveConfig, contextWindowForModel, columnKeyForRole } from "@loom/shared";
 import type { OrchestrationEventKind } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
@@ -141,7 +141,10 @@ export class IdleWatcher {
         continue;
       }
 
-      const openTodos = db.listTasks(m.projectId).filter((t) => t.columnKey === "todo").length;
+      // Count cards in the project's `workReady` lane (role-resolved, not the hardcoded "todo" key) so a
+      // renamed work-ready column is still counted. No workReady lane → count 0 (the message degrades gracefully).
+      const workReadyKey = columnKeyForRole(resolveConfig(db.getProject(m.projectId)?.config).kanbanColumns, "workReady");
+      const openTodos = workReadyKey ? db.listTasks(m.projectId).filter((t) => t.columnKey === workReadyKey).length : 0;
       const n = Math.round((nowMs - lastActivityMs) / 60_000);
       const msg =
         `[loom:idle] You've been idle ~${n} min with no live workers and ${openTodos} open todo task(s). ` +

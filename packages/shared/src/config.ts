@@ -26,6 +26,35 @@ export interface KanbanColumn {
   role?: ColumnRole;
 }
 
+/**
+ * Resolve the column KEY a given lifecycle ROLE maps to on a board, so the daemon's lifecycle logic
+ * (new-card landing, worker_spawn/report moves, terminal detection) never hardcodes a key and a column
+ * can be renamed/reordered/removed without orphaning cards or breaking delegation (task B). Pass a
+ * resolved config's `kanbanColumns` (every resolveConfig consumer has them).
+ *
+ * Documented fallbacks — these matter only for a board that lacks the role entirely (the migration +
+ * fresh-project defaults guarantee `defaultLanding` + `terminal` are always present, so for those two
+ * the fallback is purely defensive):
+ *  - `terminal` → the LAST column's key (preserves today's `cols.at(-1)` terminal/excludeDone behavior).
+ *  - `defaultLanding` → the FIRST column's key (cards always land somewhere visible; the ≥1-column
+ *    floor guarantees one exists).
+ *  - any other role absent → `undefined`; the caller treats that as "no such lane" (typically a no-op
+ *    move, leaving the card in its current valid column — never inventing a non-existent key).
+ *
+ * Returns `undefined` only for a non-required role with no column, or an empty board.
+ */
+export function columnKeyForRole(
+  columns: readonly KanbanColumn[],
+  role: ColumnRole,
+): string | undefined {
+  if (!columns.length) return undefined;
+  const exact = columns.find((c) => c.role === role);
+  if (exact) return exact.key;
+  if (role === "terminal") return columns[columns.length - 1]?.key; // last-as-terminal (today's behavior)
+  if (role === "defaultLanding") return columns[0]?.key; // first column as the catch-all landing
+  return undefined; // non-required role absent → caller decides (no move)
+}
+
 /** §9 permission policy. Default is acceptEdits + a warmup/read allowlist (NOT blanket skip). */
 export interface PermissionPolicy {
   mode: "default" | "acceptEdits" | "plan" | "bypassPermissions";

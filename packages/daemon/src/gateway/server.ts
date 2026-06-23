@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
-import { resolveConfig } from "@loom/shared";
+import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { resolveWebDistDir } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
@@ -23,7 +23,7 @@ import type { AuditMcpRouter } from "../mcp/audit.js";
 import type { WorkspaceAuditMcpRouter } from "../mcp/user-audit.js";
 import type { SetupMcpRouter } from "../mcp/setup.js";
 import type { RunMcpRouter } from "../mcp/run.js";
-import { validateProjectConfigOverride, validatePlatformConfigOverride } from "../mcp/platform.js";
+import { validateProjectConfigOverride, validatePlatformConfigOverride, validateColumnLayout } from "../mcp/platform.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
 import { clearClaudeRateLimit } from "../orchestration/usage-awareness.js";
@@ -791,6 +791,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return deps.db.getProject(id);
   });
 
+  // Atomic safe board-column layout change (task B) — the editor's mutation (card C), NOT the blind
+  // config PATCH above. Diffs the desired layout against current, re-keys cards (renames + removals →
+  // defaultLanding) and persists the columns in ONE transaction so no card is ever orphaned; HARD-rejects
+  // a guard violation (no/duplicate defaultLanding+terminal, ≥1-column floor, bad rename) with a 400 +
+  // reason, and returns soft warnings (dropping a non-required role lane) on success. HUMAN/REST-only.
+  app.put("/api/projects/:id/columns", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    const v = validateColumnLayout(req.body);
+    if (!v.ok) return reply.code(400).send({ error: `invalid column layout: ${v.error}` });
+    const result = deps.sessions.updateBoardColumns(id, v.value.columns);
+    if (!result.ok) return reply.code(400).send({ error: result.error });
+    return { ok: true, columns: result.columns, warnings: result.warnings };
+  });
+
   // --- Daemon-GLOBAL platform tuning (rate-limit numbers / watcher cadences / op timeouts) ---
   // HUMAN-only + NOT project-scoped (one shared daemon), exactly like the trust-boundary project
   // config PATCH above: NO agent MCP tool exposes this surface — globals are human-set only. GET
@@ -1149,9 +1164,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!b.title) return reply.code(400).send({ error: "title required" });
     if (b.priority !== undefined && !isTaskPriority(b.priority)) return reply.code(400).send({ error: "priority must be one of p0|p1|p2|p3" });
     const now = new Date().toISOString();
+    // Role-resolved default landing (not the hardcoded "backlog" key) so a renamed lane still receives
+    // new cards; "backlog" is a defensive backstop only.
+    const landing = columnKeyForRole(resolveConfig(deps.db.getProject(projectId)?.config).kanbanColumns, "defaultLanding") ?? "backlog";
     const task: Task = {
       id: randomUUID(), projectId, title: b.title, body: b.body ?? "",
-      columnKey: b.columnKey ?? "backlog", position: Date.now(),
+      columnKey: b.columnKey ?? landing, position: Date.now(),
       priority: b.priority ?? "p2", createdAt: now, updatedAt: now,
     };
     deps.db.insertTask(task);

@@ -22,7 +22,11 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * ProjectConfigOverride. `.strict()` everywhere rejects unknown keys (typo guard); types are
  * checked too. ONE validator, shared by project_create + project_configure + the REST PATCH path.
  */
-const kanbanColumn = z.object({ key: z.string(), label: z.string() }).strict();
+// ColumnRole (shared) mirror — kept in lockstep with the ColumnRole union in shared/src/config.ts.
+const columnRole = z.enum([
+  "intake", "defaultLanding", "workReady", "active", "review", "parked", "humanHold", "terminal",
+]);
+const kanbanColumn = z.object({ key: z.string(), label: z.string(), role: columnRole.optional() }).strict();
 const permissionOverride = z.object({
   mode: z.enum(["default", "acceptEdits", "plan", "bypassPermissions"]).optional(),
   allow: z.array(z.string()).optional(),
@@ -177,6 +181,29 @@ export function validatePlatformConfigOverride(
   const r = platformConfigOverrideSchema.safeParse(raw ?? {});
   if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
   return { ok: true, value: r.data as PlatformConfigOverride };
+}
+
+/**
+ * Body validator for the atomic board-column layout API (task B): a non-empty `columns` array of desired
+ * columns, each with key/label, an optional `role`, and an optional `prevKey` marking a KEY rename. Type
+ * + shape only — the LIFECYCLE guards (exactly one defaultLanding/terminal, ≥1 floor, valid rename source)
+ * live in planColumnLayout, which has the current board to diff against. HUMAN/REST-only (the editor's
+ * surface); there is no agent MCP path to it, like the config PATCH.
+ */
+const desiredColumn = z.object({
+  key: z.string().min(1),
+  label: z.string().min(1),
+  role: columnRole.optional(),
+  prevKey: z.string().min(1).optional(),
+}).strict();
+const columnLayoutSchema = z.object({ columns: z.array(desiredColumn).min(1) }).strict();
+
+export function validateColumnLayout(
+  raw: unknown,
+): { ok: true; value: { columns: z.infer<typeof desiredColumn>[] } } | { ok: false; error: string } {
+  const r = columnLayoutSchema.safeParse(raw ?? {});
+  if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
+  return { ok: true, value: r.data };
 }
 
 /**

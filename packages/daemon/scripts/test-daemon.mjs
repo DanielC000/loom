@@ -22,7 +22,7 @@ const HERMETIC = [
   "orch-model", "dead-id", "boot-reconcile", "boot-reconcile-keep-work", "merge-done-crash-recovery", "restart-intent", "restart-fleet", "build-gate-integrity",
   "profiles", "profiles-crud", "profile-spawn", "setup-profile", "setup-home", "browser-testing-spawn", "platform-dev-flag", "platform-home", "platform-home-rest", "platform-lead-singleton", "platform-mgmt-surface", "platform-elevated-surface", "platform-config", "platform-messaging", "audit-surface", "setup-surface", "setup-singleton", "setup-first-run", "workspace-auditor-role", "user-audit-surface", "surface-subset", "workspace-auditor-start",
   "agent-runs-keys", "agent-runs-primitive", "agent-runs-rest", "agent-runs-idempotency", "agent-runs-caps", "agent-runs-spend", "agent-runs-hardening", "agent-runs-audit",
-  "tasks-filter", "tasks-priority", "task-delete", "preset-prompts", "preset-prompt-suggestions", "config-bounds", "config-rewire", "kanban-defaults", "transcript-encode", "alert-webhook",
+  "tasks-filter", "tasks-priority", "task-delete", "column-lifecycle", "preset-prompts", "preset-prompt-suggestions", "config-bounds", "config-rewire", "kanban-defaults", "transcript-encode", "alert-webhook",
   "session-archive", "session-list-summary", "all-archived-sessions", "periodic-snapshot", "shutdown-snapshot", "shutdown-endpoint", "mgmt-project-agent", "web-static-serve", "version", "cli-args", "cli-direct-invocation", "cli-service", "cli-channel", "update-check", "update-endpoint",
   "claude-config", "trust-lock", "spawn-args",
   "context-watcher", "context-stats", "recycle-handoff", "wake", "worker-reported-state", "crash-recovery-watcher", "busy-worker-watcher",

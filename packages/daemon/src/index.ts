@@ -11,6 +11,7 @@ import { seedDefaultProfiles } from "./profiles/seed.js";
 import { seedPlatformHome } from "./platform/seed.js";
 import { seedSetupHome, seedSetupAgentRename, seedSetupAuditorAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
+import { backfillColumnRoles } from "./tasks/columns.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
 import { TaskMcpRouter } from "./mcp/server.js";
@@ -83,6 +84,12 @@ async function main(): Promise<void> {
   // DEV-ONLY: the whole Platform layer is gated behind LOOM_DEV — this no-ops for regular loomctl users.
   const seededPlatform = seedPlatformHome(db);
   if (seededPlatform.length) console.log(`[boot] seeded platform home: ${seededPlatform.join(", ")}`);
+  // Task B: one-time backfill of `role` onto legacy stored project configs (pre-role boards). Triple-
+  // guarded one-shot (app_meta marker + explicit-columns-only + assign-if-absent), so it fires exactly
+  // once per LOOM_HOME and moves NO cards — an override-less project already inherits role-annotated
+  // defaults. Runs AFTER the home seeds so reserved homes with custom boards are covered too.
+  const columnRoles = backfillColumnRoles(db);
+  if (columnRoles.migrated) console.log(`[boot] backfilled column roles on ${columnRoles.migrated} project config(s)`);
   // Resolve the daemon-global platform tuning ONCE at boot (SQLite singleton override ?? LOOM_* env ??
   // defaults). Every BOOT-BOUND consumer below — PtyHost busy-stale, SessionService git timeouts, the
   // watcher cadences — reads from this. A PATCH to platform.watchers/timeouts therefore takes effect on
