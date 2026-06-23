@@ -2,9 +2,28 @@
 // This is also the machine-writable schema phase-2 AI-driven project creation will target.
 import type { Profile, SessionRole, OrchestrationEventKind } from "./types.js";
 
+/**
+ * Semantic role a board column plays in the worker lifecycle. Columns are identified by stable ROLE,
+ * not by hardcoded key — so a column can be renamed/reordered without orphaning cards or breaking the
+ * lifecycle logic that repoints to these roles (task B). Optional on the interface (existing stored
+ * configs predate it and must still type-check; B's migration backfills them). Fresh projects ship
+ * with the two REQUIRED roles `defaultLanding` + `terminal` set on the platform defaults below.
+ */
+export type ColumnRole =
+  | "intake"
+  | "defaultLanding"
+  | "workReady"
+  | "active"
+  | "review"
+  | "parked"
+  | "humanHold"
+  | "terminal";
+
 export interface KanbanColumn {
   key: string;
   label: string;
+  /** Semantic lifecycle role (see ColumnRole). Optional: stored configs may lack it. */
+  role?: ColumnRole;
 }
 
 /** §9 permission policy. Default is acceptEdits + a warmup/read allowlist (NOT blanket skip). */
@@ -305,14 +324,14 @@ export interface PlatformConfigOverride {
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
   kanbanColumns: [
-    { key: "inbox", label: "Inbox" },
-    { key: "backlog", label: "Backlog" },
-    { key: "blocked", label: "Blocked (Human)" },
-    { key: "todo", label: "To Do" },
-    { key: "in_progress", label: "In Progress" },
-    { key: "waiting", label: "Waiting" },
-    { key: "review", label: "Review" },
-    { key: "done", label: "Done" },
+    { key: "inbox", label: "Inbox", role: "intake" },
+    { key: "backlog", label: "Backlog", role: "defaultLanding" },
+    { key: "blocked", label: "Blocked (Human)", role: "humanHold" },
+    { key: "todo", label: "To Do", role: "workReady" },
+    { key: "in_progress", label: "In Progress", role: "active" },
+    { key: "waiting", label: "Waiting", role: "parked" },
+    { key: "review", label: "Review", role: "review" },
+    { key: "done", label: "Done", role: "terminal" },
   ],
   permission: {
     mode: "acceptEdits",
