@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
 import type { Task, TaskPriority, KanbanColumn, SessionListItem } from "@loom/shared";
@@ -6,6 +6,8 @@ import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Button, Input, SectionLabel, StatusPill, Chip } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
+import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
+import { useVoiceLang } from "../lib/useVoiceLang";
 // Priority chip + metadata live in one place so the board and the /terminals task card never drift.
 import { PRIORITY_META, PriorityChip, prio } from "../components/priority";
 
@@ -297,6 +299,50 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [dirty, onClose]);
+
+  // ── Voice dictation for the Description field (v1: this field only) ───────────────────────────
+  // Reuses the same Web Speech recognizer the terminal composer uses (lib/useSpeechRecognition), so
+  // there is ONE recording state machine + privacy posture across the app. The transcript is inserted
+  // AT THE CARET captured when recording started — interim text shows live and is replaced as it
+  // finalizes — so existing description text is never clobbered. Absence/insecure context degrade to a
+  // disabled, explained mic button (the recognizer no-ops); the drawer is otherwise untouched.
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const [voiceLang] = useVoiceLang(); // shared, persisted app-wide language (read-only here)
+  // Caret split captured at start: text before/after the insertion point. Insertion grows between them.
+  const anchorRef = useRef<{ before: string; after: string } | null>(null);
+  const [finals, setFinals] = useState(""); // finalized transcript accrued during the current recording
+  const speech = useSpeechRecognition({
+    lang: voiceLang,
+    onFinalTranscript: (chunk) => {
+      const piece = chunk.trim();
+      if (!piece) return;
+      setFinals((f) => (f ? `${f.replace(/\s+$/, "")} ${piece}` : piece));
+    },
+  });
+  const dictating = speech.status === "listening" || speech.status === "requesting";
+  // Compose `before + <finals + live interim> + after` into the field on every recognizer update, and
+  // park the caret just past the inserted text so continued dictation reads naturally. Only while a
+  // recording is live — outside that, the user owns the textarea (manual edits aren't fought).
+  useEffect(() => {
+    if (!dictating) return;
+    const a = anchorRef.current;
+    if (!a) return;
+    const live = [finals.trimEnd(), speech.interim.trim()].filter(Boolean).join(" ");
+    const lead = a.before && live && !/\s$/.test(a.before) ? " " : "";
+    const tail = a.after && live && !/^\s/.test(a.after) ? " " : "";
+    const next = a.before + lead + live + tail + a.after;
+    setBody(next);
+    const caret = a.before.length + lead.length + live.length;
+    const ta = bodyRef.current;
+    if (ta) requestAnimationFrame(() => { try { ta.setSelectionRange(caret, caret); } catch { /* detached */ } });
+  }, [finals, speech.interim, dictating]);
+  const startDictation = () => {
+    const ta = bodyRef.current;
+    const caret = ta && ta.selectionStart != null ? ta.selectionStart : body.length;
+    anchorRef.current = { before: body.slice(0, caret), after: body.slice(caret) };
+    setFinals("");
+    speech.start();
+  };
   const labelStyle = { fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim } as const;
   return (
     <div onClick={requestClose}
@@ -338,14 +384,18 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
             );
           })}
         </div>
-        <span style={labelStyle}>Description</span>
-        <textarea value={body} onChange={(e) => setBody(e.target.value)} spellCheck={false}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ ...labelStyle, flex: 1 }}>Description</span>
+          <DescriptionMic speech={speech} dictating={dictating} onStart={startDictation} />
+        </div>
+        <textarea ref={bodyRef} value={body} onChange={(e) => setBody(e.target.value)} spellCheck={false}
           placeholder="No description yet — agents fill this in via the task tools, or write one here."
           style={{
             flex: 1, minHeight: 200, width: "100%", boxSizing: "border-box", resize: "none",
             fontFamily: font.mono, fontSize: 13, lineHeight: 1.5,
             background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
           }} />
+        {speech.supported && <DescriptionVoiceNote speech={speech} />}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave({ title, body, priority })}>{saving ? "Saving…" : "Save"}</Button>
           {dirty
@@ -367,6 +417,70 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
         {/* The server's live-session guard (or any failure) surfaces here rather than silently closing. */}
         {deleteError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{deleteError}</span>}
       </div>
+    </div>
+  );
+}
+
+// Click-only mic toggle beside the Description label. Idle → click to dictate; listening → red pulse +
+// click to stop. Always rendered (so the capability is discoverable) but disabled — with an explaining
+// tooltip — when the browser lacks the Web Speech API (e.g. Firefox) or the page isn't a secure context.
+function DescriptionMic({ speech, dictating, onStart }:
+  { speech: SpeechRecognitionApi; dictating: boolean; onStart: () => void }) {
+  const listening = speech.status === "listening";
+  const requesting = speech.status === "requesting";
+  const disabled = !speech.supported || !speech.secure || requesting;
+  const title = !speech.supported
+    ? "Voice dictation isn't available in this browser — try Chrome"
+    : !speech.secure
+      ? "Voice dictation needs a secure context (https or localhost)"
+      : listening
+        ? "Stop dictation"
+        : "Dictate into the description — the transcript inserts at the caret (review before saving)";
+  return (
+    <Button
+      type="button"
+      variant={listening ? "danger" : "default"}
+      disabled={disabled}
+      aria-pressed={listening}
+      aria-label={listening ? "Stop voice dictation" : "Start voice dictation for the description"}
+      title={title}
+      onClick={dictating ? speech.stop : onStart}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 9px" }}
+    >
+      <span
+        className={listening ? "loom-mic-pulse" : undefined}
+        style={{ width: 7, height: 7, borderRadius: 7, display: "inline-block",
+          background: listening ? color.red : disabled ? color.textMuted : color.phosphor }}
+      />
+      {listening ? "Stop" : requesting ? "starting…" : "Dictate"}
+    </Button>
+  );
+}
+
+// One muted line under the Description: live recognition state on the left, the standing privacy
+// disclosure on the right. Local-first honesty: browser dictation is NOT on-device — Chrome streams the
+// captured audio to Google's speech service — so we say so plainly rather than implying it stays local.
+function DescriptionVoiceNote({ speech }: { speech: SpeechRecognitionApi }) {
+  const { status, interim, error, secure } = speech;
+  let node: React.ReactNode = null;
+  if (!secure) node = <span style={{ color: color.amber }}>voice needs a secure context</span>;
+  else if (status === "requesting") node = <span style={{ color: color.textDim }}>requesting microphone…</span>;
+  else if (status === "listening") node = (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+      <StatusPill tone="red" label="rec" glow />
+      {interim
+        ? <span style={{ color: color.textMuted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{interim}…</span>
+        : <span style={{ color: color.textDim }}>listening — speak, then Stop</span>}
+    </span>
+  );
+  else if (status === "denied") node = <span style={{ color: color.red }}>mic permission denied — allow it in your browser site settings</span>;
+  else if (status === "error") node = <span style={{ color: color.red }}>{error ?? "voice error"} — click Dictate to retry</span>;
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 2,
+      fontFamily: font.mono, fontSize: 10, minHeight: 16 }}>
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{node}</span>
+      <span title="The browser Web Speech API is not on-device — Chrome streams audio to Google's speech service."
+        style={{ color: color.textMuted, whiteSpace: "nowrap" }}>dictation may send audio to your browser's speech service</span>
     </div>
   );
 }
