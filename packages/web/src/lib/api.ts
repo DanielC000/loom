@@ -169,8 +169,9 @@ export const api = {
   // role omitted/undefined = auto (the agent's profile role applies, server-side); "manager"/"platform"
   // = explicit role; "auditor" = the read-and-file-only Platform Auditor (P5; locked role server-side);
   // "setup" = the ungated, user-facing Setup Assistant (singleton, reused server-side — startSetup);
-  // "plain" = force-plain (ignore the profile's role → a role-null session).
-  startSession: (agentId: string, role?: "manager" | "platform" | "auditor" | "setup" | "plain") =>
+  // "workspace-auditor" = the de-privileged end-user Workspace Auditor (B5; locked role server-side,
+  // CREATE-ONLY — each Review spawns a fresh run); "plain" = force-plain (role-null session).
+  startSession: (agentId: string, role?: "manager" | "platform" | "auditor" | "setup" | "workspace-auditor" | "plain") =>
     post<Session>(`/api/agents/${agentId}/sessions`, role ? { role } : undefined),
   resumeSession: (id: string) => post<Session>(`/api/sessions/${id}/resume`),
   forkSession: (id: string) => post<Session>(`/api/sessions/${id}/fork`),

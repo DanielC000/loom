@@ -35,9 +35,9 @@ const GIT_TIMEOUT_FLOOR_MS = 1_000;
 /**
  * Least-privilege hardening: the ONLY session roles a Profile may confer on a default "+New" spawn.
  * The elevated/locked roles — "platform" (loom-platform surface), "auditor" (loom-audit),
- * "workspace-auditor" (the future loom-user-audit), "setup" (loom-setup) and "run" (internal-only Agent
+ * "workspace-auditor" (loom-user-audit), "setup" (loom-setup) and "run" (internal-only Agent
  * Runs) — must come EXCLUSIVELY from their explicit human spawn paths (startPlatformLead/startAuditor/
- * startSetup / the future startWorkspaceAuditor) or internal starters, which pass an explicit caller
+ * startSetup/startWorkspaceAuditor) or internal starters, which pass an explicit caller
  * role. A profile role outside this set is dropped to a plain (role-null) spawn in resolveAgentSpawn,
  * so a "normal-looking" agent carrying an elevated profile + a role-omitted REST spawn can never
  * silently elevate. (Note: validateProfile already forbids "auditor"/"workspace-auditor"/"run" on a
@@ -397,6 +397,70 @@ export class SessionService {
     // Explicit 'auditor' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the restricted loom-audit surface.
     const { role, startupPrompt, permission, browserTesting, model, skills } = this.resolveAgentSpawn(agent, config, "auditor");
+
+    const now = new Date().toISOString();
+    const session: Session = {
+      id: randomUUID(),
+      projectId: project.id,
+      agentId,
+      engineSessionId: null,
+      title: null,
+      cwd: project.repoPath,
+      processState: "starting",
+      resumability: "unknown",
+      busy: false,
+      createdAt: now,
+      lastActivity: now,
+      lastError: null,
+      role,
+      browserTesting,
+      skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
+    };
+    this.db.insertSession(session);
+    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
+    this.db.setProcessState(session.id, "live");
+    this.pty.spawn({
+      sessionId: session.id,
+      cwd: session.cwd,
+      permission,
+      geometry: config.pty,
+      sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      startupPrompt,
+      role,
+      browserTesting,
+      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+    });
+    return { ...session, processState: "live" };
+  }
+
+  /**
+   * Start a NEW END-USER WORKSPACE-AUDITOR session in an agent (End-User Platform tier B5). Mirrors
+   * startAuditor EXACTLY — incl. its CREATE-ONLY (NON-singleton) shape — but passes callerRole
+   * "workspace-auditor", so the session role is LOCKED to "workspace-auditor" regardless of the agent's
+   * profile role (an EXPLICIT caller role always wins in resolveAgentSpawn). The locked role — NOT the
+   * profile role — drives the de-privileged loom-user-audit surface (buildMcpServers, B3): a
+   * workspace-auditor session gets loom-tasks + loom-user-audit ONLY and 404s on /mcp-platform,
+   * /mcp-orch, /mcp-audit and /mcp-setup, so a hostile transcript can never escape the read-and-suggest box.
+   *
+   * CREATE-ONLY, NOT a singleton (design gotcha #9): each on-demand "Review my workspace" run is a fresh
+   * ephemeral read-and-file session, exactly like the dev Auditor (startAuditor). Do NOT copy startSetup's
+   * live-reuse guard here — that would attach a repeated Review click to a stale, already-finished run.
+   *
+   * HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"workspace-auditor"}) — no agent/MCP path
+   * mints one (session_spawn refuses everything but manager|plain; the role is absent from the mintable
+   * profile enum + setupRoleError). The Workspace Auditor agent lives in the reserved "Getting Started" home (B4).
+   */
+  startWorkspaceAuditor(agentId: string): Session {
+    const agent = this.db.getAgent(agentId);
+    if (!agent) throw new Error("agent not found");
+    const project = this.db.getProject(agent.projectId);
+    if (!project) throw new Error("project not found");
+    const config = resolveConfig(project.config);
+    // Explicit 'workspace-auditor' role from the caller ALWAYS wins; the profile (if any) only layers its
+    // prompt + allowDelta. The locked role — NOT the profile role — drives the loom-user-audit surface.
+    const { role, startupPrompt, permission, browserTesting, model, skills } = this.resolveAgentSpawn(agent, config, "workspace-auditor");
 
     const now = new Date().toISOString();
     const session: Session = {

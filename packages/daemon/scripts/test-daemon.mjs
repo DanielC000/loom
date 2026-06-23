@@ -20,7 +20,7 @@ const TEST_DIR = path.join(__dirname, "..", "test");
 const HERMETIC = [
   "prod-guard",               // the guard itself
   "orch-model", "dead-id", "boot-reconcile", "boot-reconcile-keep-work", "merge-done-crash-recovery", "restart-intent", "restart-fleet", "build-gate-integrity",
-  "profiles", "profiles-crud", "profile-spawn", "setup-profile", "setup-home", "browser-testing-spawn", "platform-dev-flag", "platform-home", "platform-home-rest", "platform-lead-singleton", "platform-mgmt-surface", "platform-elevated-surface", "platform-config", "platform-messaging", "audit-surface", "setup-surface", "setup-singleton", "setup-first-run", "workspace-auditor-role", "user-audit-surface",
+  "profiles", "profiles-crud", "profile-spawn", "setup-profile", "setup-home", "browser-testing-spawn", "platform-dev-flag", "platform-home", "platform-home-rest", "platform-lead-singleton", "platform-mgmt-surface", "platform-elevated-surface", "platform-config", "platform-messaging", "audit-surface", "setup-surface", "setup-singleton", "setup-first-run", "workspace-auditor-role", "user-audit-surface", "workspace-auditor-start",
   "agent-runs-keys", "agent-runs-primitive", "agent-runs-rest", "agent-runs-idempotency", "agent-runs-caps", "agent-runs-spend", "agent-runs-hardening", "agent-runs-audit",
   "tasks-filter", "tasks-priority", "task-delete", "preset-prompts", "preset-prompt-suggestions", "config-bounds", "config-rewire", "kanban-defaults", "transcript-encode", "alert-webhook",
   "session-archive", "session-list-summary", "all-archived-sessions", "periodic-snapshot", "shutdown-snapshot", "shutdown-endpoint", "mgmt-project-agent", "web-static-serve", "version", "cli-args", "cli-direct-invocation", "cli-service", "cli-channel", "update-check", "update-endpoint",
