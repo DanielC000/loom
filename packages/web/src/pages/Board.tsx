@@ -128,7 +128,12 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
     const existing = new Set(desired.map((d) => d.key));
     let key = "new_column";
     for (let i = 2; existing.has(key); i++) key = `new_column_${i}`;
-    desired.push({ key, label: "New column" }); // no role → server keeps the required-role assignments
+    const newCol: DesiredColumn = { key, label: "New column" }; // no role → server keeps the required-role assignments
+    // Insert just LEFT of the terminal (Done) lane so a new column reads with the left→right→Done flow,
+    // not appended after Done. No terminal lane → append at the end (graceful fallback).
+    const termIdx = desired.findIndex((d) => d.role === "terminal");
+    if (termIdx >= 0) desired.splice(termIdx, 0, newCol);
+    else desired.push(newCol);
     columns.mutate(desired);
   };
   const removeColumn = (key: string) => columns.mutate(columnsToDesired(liveCols).filter((d) => d.key !== key));

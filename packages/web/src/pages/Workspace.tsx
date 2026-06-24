@@ -12,7 +12,7 @@ import { SessionWakes } from "../components/SessionWakes";
 import { SessionQueue } from "../components/SessionQueue";
 import { SessionActions } from "../components/SessionActions";
 import { SpawnControls } from "../components/SpawnControls";
-import { Panel, Button, Input, Select, SectionLabel, StatusPill } from "../components/ui";
+import { Panel, Button, Input, Select, SectionLabel, StatusPill, PresetAccentDots } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
 
 const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", "workspace-auditor": "muted", run: "muted" };
@@ -535,8 +535,10 @@ function ProjectForm({ onCreate }: { onCreate: (b: { name: string; repoPath: str
             <option key={p.id} value={p.id}>{p.name}{p.id === DEFAULT_COLUMN_PRESET_ID ? " (default)" : ""}</option>
           ))}
         </Select>
-        <span style={{ color: color.textMuted, lineHeight: 1.5 }}>
-          {preset.description} · {preset.columns.map((c) => c.label).join(" → ")}
+        <span style={{ color: color.textMuted, lineHeight: 1.5, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <PresetAccentDots accents={preset.columns.map((c) => c.accentColor)}
+            title={preset.columns.map((c) => c.label).join(" → ")} />
+          <span>{preset.description} · {preset.columns.map((c) => c.label).join(" → ")}</span>
         </span>
       </label>
       <label style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11, color: color.textDim }}>

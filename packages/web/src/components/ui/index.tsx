@@ -136,6 +136,22 @@ export function Badge({ tone: t, children }: { tone: Tone; children: ReactNode }
   );
 }
 
+// ── PresetAccentDots ─────────────────────────────────────────────────────────────
+// A small row of colored dots previewing a board preset's per-lane accents, so the preset
+// pickers (project-create + reset-to-preset) read as a VISUAL choice, not text alone. One dot
+// per column in board order, tinted by that column's accentColor (a preset's accentColor == its
+// role color); a column with no accent falls to a neutral hairline-grey dot. aria-hidden — the
+// adjacent label/description text already names the lanes, so the dots are pure decoration.
+export function PresetAccentDots({ accents, title }: { accents: (string | undefined)[]; title?: string }) {
+  return (
+    <span aria-hidden title={title} style={{ display: "inline-flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
+      {accents.map((a, i) => (
+        <span key={i} style={{ width: 8, height: 8, borderRadius: 8, flexShrink: 0, background: a ?? color.border }} />
+      ))}
+    </span>
+  );
+}
+
 // ── Chip ───────────────────────────────────────────────────────────────────────
 // Inline metadata, e.g. `branch loom/8f3a`, `ctx 56,200`.
 export function Chip({ label, value, tone: t }: { label?: string; value: ReactNode; tone?: Tone }) {

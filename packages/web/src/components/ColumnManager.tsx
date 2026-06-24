@@ -13,7 +13,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
 import { resolveConfig, COLUMN_PRESETS, presetById, presetToDesired, ACCENT_PALETTE, DEFAULT_COLUMN_PRESET_ID, type ColumnRole, type Project } from "@loom/shared";
 import { api, type DesiredColumn } from "../lib/api";
-import { Button, Input, Select, Badge } from "./ui";
+import { Button, Input, Select, Badge, PresetAccentDots } from "./ui";
 import { color, font, radius, tone, roleTone, type Tone } from "../theme";
 
 // The eight lifecycle roles, in board order, with a human label and which two are REQUIRED exactly once
@@ -166,9 +166,13 @@ export function ColumnManager({ project }: { project: Project }) {
 
   const patchRow = (uid: string, p: Partial<Row>) => setRows((rs) => rs.map((r) => (r.uid === uid ? { ...r, ...p } : r)));
   const removeRow = (uid: string) => setRows((rs) => rs.filter((r) => r.uid !== uid));
-  const addRow = () => setRows((rs) => [...rs, {
-    uid: nextUid(), key: "", label: "New column", role: undefined, originalKey: undefined, keyOpen: true, keyTouched: false,
-  }]);
+  const addRow = () => setRows((rs) => {
+    const newRow: Row = { uid: nextUid(), key: "", label: "New column", role: undefined, originalKey: undefined, keyOpen: true, keyTouched: false };
+    // Insert just BEFORE the terminal (done) lane so a new column reads with the left→right→Done flow,
+    // not appended after Done. No terminal lane → append at the end (graceful fallback).
+    const termIdx = rs.findIndex((r) => r.role === "terminal");
+    return termIdx >= 0 ? [...rs.slice(0, termIdx), newRow, ...rs.slice(termIdx)] : [...rs, newRow];
+  });
   const onLabel = (uid: string, label: string) => setRows((rs) => rs.map((r) => {
     if (r.uid !== uid) return r;
     // Auto-slug the key from the label for a NEW, un-touched column (one less field to fill); a column
@@ -269,9 +273,13 @@ export function ColumnManager({ project }: { project: Project }) {
             <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(applyPreset.error as Error).message}</span>
           )}
         </div>
-        <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
-          {presetById(resetPresetId).columns.map((c) => c.label).join(" → ")}
-          {resetConfirming ? " · cards in dropped lanes move to the preset's default landing" : ""}
+        <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <PresetAccentDots accents={presetById(resetPresetId).columns.map((c) => c.accentColor)}
+            title={presetById(resetPresetId).columns.map((c) => c.label).join(" → ")} />
+          <span>
+            {presetById(resetPresetId).columns.map((c) => c.label).join(" → ")}
+            {resetConfirming ? " · cards in dropped lanes move to the preset's default landing" : ""}
+          </span>
         </span>
       </div>
     </div>
