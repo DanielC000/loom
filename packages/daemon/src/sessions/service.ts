@@ -53,6 +53,32 @@ const PROFILE_SPAWNABLE_ROLES: ReadonlySet<SessionRole> = new Set<SessionRole>([
 const RUN_TEARDOWN_DELAY_MS = 250;
 
 /**
+ * PL Auditor finding #11: the shared tail appended to EVERY daemon-restart resume nudge (resumeFleetOnBoot).
+ * It carries two facts the engine does NOT preserve across `claude --resume`, so the resumed agent acts
+ * deliberately instead of being surprised:
+ *
+ *   1. FILE-READ TRACKING RESET — the engine's per-session "you have Read this file" set is in-memory state
+ *      that a `--resume` does NOT restore (confirmed first-hand: a post-resume Edit reports "File has not
+ *      been read yet"). The daemon has NO API into that engine-internal state, so preserving it is infeasible;
+ *      per the card's accepted fallback we NOTE the reset so the agent re-Reads intentionally before editing.
+ *
+ *   2. BARE-CONTINUE ABSORPTION (the "merge") — a session that was mid-turn when the restart killed its pty
+ *      (ALWAYS the requester, which is mid-`daemon_restart`-call; often a working worker) is auto-continued by
+ *      the engine with a bare "Continue from where you left off." turn that lands BEFORE this nudge. That turn
+ *      is an empty engine artifact the daemon can neither author nor suppress (it's not a Loom string — it
+ *      originates in `claude --resume` of an interrupted transcript). Rather than leave the agent with a no-op
+ *      turn THEN the real one, this single nudge is declared the authoritative resume context and MERGES the
+ *      bare continue into itself: the agent is told to treat any preceding bare "continue" as the same turn.
+ *      Phrased conditionally ("if … just before this") so it stays accurate for an idle session that was NOT
+ *      mid-turn and therefore never saw one.
+ */
+const RESUME_NUDGE_TAIL =
+  ' (Note: this restart reset your file-read tracking — Read a file again before you Edit it, or the edit ' +
+  'is rejected as "not read yet". And if your client auto-submitted a bare "Continue from where you left ' +
+  'off." turn just before this message, that was an empty resume artifact with no content — THIS message is ' +
+  'your resume context; treat them as a single turn.)';
+
+/**
  * Agent Runs R3: the run-completion webhook (POSTed the run summary on a terminal transition). The
  * network primitive is injectable (tests stub it); the default is a SINGLE bounded fetch. Mirrors the
  * alert-webhook + bounded-git posture EXACTLY: a hard timeout caps a hung/garbage endpoint and ALL
@@ -786,6 +812,11 @@ export class SessionService {
    *   - a PARKED (rate-limited) session is resumed live so the rate-limit watcher can recover it, but
    *     its nudge + pending replay are WITHHELD — we never push a held turn back into the cap (honors
    *     the park; a staggered resume via the watcher at reset). Its DB park state is left intact.
+   * EVERY continuation nudge above (worker / re-check / converged-FYI / reviewer / requester) carries the
+   * shared {@link RESUME_NUDGE_TAIL} (PL Auditor #11): it NOTEs the engine's file-read tracking was reset by
+   * the restart (not preservable from the daemon — re-Read before Edit) and MERGES the engine's bare
+   * "Continue from where you left off." auto-resume turn into this one authoritative nudge, so the agent gets
+   * a single coherent resume turn instead of a no-op then the real one.
    * Best-effort per session: an unresumable one (dead transcript / gone worktree) is skipped + counted.
    * `resumeOne` is injectable for hermetic tests (default drives this.resume); `now` likewise for tests.
    */
@@ -865,7 +896,7 @@ export class SessionService {
           e.sessionId,
           `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — your worktree ` +
           `WIP is intact. Continue your assigned task from where you left off. If you had already finished, ` +
-          `call worker_report (done/blocked) so your manager isn't left waiting.`,
+          `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL,
         );
       } else if (e.role === "manager" || e.role === "platform") {
         if (isConverged(e.sessionId)) {
@@ -875,14 +906,14 @@ export class SessionService {
             e.sessionId,
             `[loom:daemon-restarted] The daemon was restarted (reason: ${intent.reason}) and you were ` +
             `resumed. You had no live workers and had last reported done/waiting, so no action is needed — ` +
-            `your state is intact.`,
+            `your state is intact.` + RESUME_NUDGE_TAIL,
           );
         } else {
           this.pty.enqueueStdin(
             e.sessionId,
             `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you + ` +
             `your live workers were resumed — your worktrees are intact. Resume orchestrating from where you ` +
-            `left off (re-check your workers' state; some may have just been resumed too).`,
+            `left off (re-check your workers' state; some may have just been resumed too).` + RESUME_NUDGE_TAIL,
           );
         }
       } else if (e.role === "auditor" || e.role === "workspace-auditor" || e.role === "setup") {
@@ -891,7 +922,7 @@ export class SessionService {
         this.pty.enqueueStdin(
           e.sessionId,
           `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — continue your ` +
-          `work from where you left off.`,
+          `work from where you left off.` + RESUME_NUDGE_TAIL,
         );
       }
       // role null (plain session) or "run" (runs don't resume — see shared/types.ts SessionRole):
@@ -914,7 +945,7 @@ export class SessionService {
           `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
           `running daemon (reason: ${intent.reason}). ${reqWorkersResumed}/${reqWorkers.length} of your live ` +
           `workers were resumed (the rest of the fleet across all projects was resumed too). You can now ` +
-          `end-to-end verify the live behavior. Continue.`,
+          `end-to-end verify the live behavior. Continue.` + RESUME_NUDGE_TAIL,
         );
       }
     } else {

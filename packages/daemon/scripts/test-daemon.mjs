@@ -20,6 +20,8 @@ const TEST_DIR = path.join(__dirname, "..", "test");
 const HERMETIC = [
   "prod-guard",               // the guard itself
   "orch-model", "dead-id", "boot-reconcile", "boot-reconcile-keep-work", "merge-done-crash-recovery", "restart-intent", "restart-fleet", "build-gate-integrity",
+  "restart-resume-coherence", // PL Auditor finding #11: resume nudges NOTE the file-read tracking reset + merge the engine's bare "Continue" into one coherent turn
+
   "manager-context-block", // PL Auditor finding #8: managers get the "Where things live" absolute repo+vault block; workers stay byte-identical
   "profiles", "profiles-crud", "profile-spawn", "setup-profile", "setup-home", "browser-testing-spawn", "platform-dev-flag", "platform-home", "platform-home-rest", "platform-lead-singleton", "platform-mgmt-surface", "platform-elevated-surface", "platform-agent-update", "platform-config", "platform-messaging", "project-rebind", "audit-surface", "setup-surface", "setup-singleton", "setup-first-run", "workspace-auditor-role", "user-audit-surface", "surface-subset", "workspace-auditor-start",
   "platform-prompt-migration",
