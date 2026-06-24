@@ -83,6 +83,13 @@ const obsidianOverride = z.object({
   autoStart: z.boolean().optional(),
   path: z.string().min(1).optional(),
 }).strict();
+// Python tooling. `interpreterPath` is an arbitrary host INTERPRETER the daemon runs to BUILD its shared
+// venv — host-launch capable, so it's HUMAN-only (the whole `python` block is dropped from the agent shape
+// below, exactly like obsidian.path / gateCommand). `.strict()` then makes an agent's `python` a REJECTED
+// unknown key.
+const pythonOverride = z.object({
+  interpreterPath: z.string().min(1).optional(),
+}).strict();
 const projectConfigOverrideSchema = z.object({
   kanbanColumns: z.array(kanbanColumn).optional(),
   permission: permissionOverride.optional(),
@@ -91,6 +98,7 @@ const projectConfigOverrideSchema = z.object({
   orchestration: orchestrationOverride.optional(),
   docLint: z.boolean().optional(),
   obsidian: obsidianOverride.optional(),
+  python: pythonOverride.optional(),
 }).strict();
 
 /**
@@ -114,8 +122,11 @@ const agentOrchestrationOverride = orchestrationOverride
 // `.strict()` REJECTS an agent's `obsidian.path` — the agent can flip the convenience on but can't point
 // the daemon-spawned preflight at an arbitrary executable. Mirrors the gateCommand/alertWebhook split above.
 const agentObsidianOverride = obsidianOverride.omit({ path: true }).strict();
+// Agent-facing python shape: `interpreterPath` is omitted (host-launch capable, human-only), leaving an
+// EMPTY strict object, so `.strict()` REJECTS an agent's `python.interpreterPath`. Mirrors obsidian.path.
+const agentPythonOverride = pythonOverride.omit({ interpreterPath: true }).strict();
 const agentProjectConfigOverrideSchema = projectConfigOverrideSchema
-  .extend({ orchestration: agentOrchestrationOverride.optional(), obsidian: agentObsidianOverride.optional() })
+  .extend({ orchestration: agentOrchestrationOverride.optional(), obsidian: agentObsidianOverride.optional(), python: agentPythonOverride.optional() })
   .strict();
 
 function formatZodIssues(error: z.ZodError): string {
@@ -434,7 +445,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_create",
       {
-        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting). Validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
+        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion). Validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
         inputSchema: { profile: z.object({}).passthrough() },
       },
       async ({ profile }) => {

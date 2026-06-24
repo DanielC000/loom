@@ -24,6 +24,9 @@ const profileSchema = z
     // Opt-in browser-automation capability (default off). Human-set via this REST path only — there is
     // NO agent MCP write surface for profiles, so the capability stays human-gated (like role/allow).
     browserTesting: z.boolean().optional(),
+    // Opt-in document-conversion capability (default off). Human-gated identically to browserTesting —
+    // it launches a host markitdown process, so it is never an agent MCP write surface.
+    documentConversion: z.boolean().optional(),
   })
   .strict();
 
@@ -47,6 +50,7 @@ export function validateProfile(
       model: d.model ?? null,
       icon: d.icon ?? null,
       browserTesting: d.browserTesting ?? false, // normalize to the stored default (off)
+      documentConversion: d.documentConversion ?? false, // normalize to the stored default (off)
     },
   };
 }

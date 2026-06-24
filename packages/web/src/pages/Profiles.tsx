@@ -111,6 +111,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
   const [icon, setIcon] = useState(profile.icon ?? "");
   const [model, setModel] = useState(profile.model ?? "");
   const [browserTesting, setBrowserTesting] = useState(profile.browserTesting ?? false);
+  const [documentConversion, setDocumentConversion] = useState(profile.documentConversion ?? false);
   // Skill subset (empty = deliver ALL, the default — null and [] are equivalent, matching the daemon).
   const [skills, setSkills] = useState<string[]>(profile.skills ?? []);
   const [confirmDel, setConfirmDel] = useState(false);
@@ -131,6 +132,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
     (icon || null) !== profile.icon ||
     (model.trim() || null) !== profile.model ||
     browserTesting !== (profile.browserTesting ?? false) ||
+    documentConversion !== (profile.documentConversion ?? false) ||
     sortedJson(skills) !== sortedJson(profile.skills ?? []);
 
   const fieldLabel = { fontFamily: font.head as string, fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: color.textDim };
@@ -139,7 +141,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
     background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
   };
 
-  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setSkills(profile.skills ?? []); };
+  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setSkills(profile.skills ?? []); };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
@@ -203,6 +205,20 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
         </span>
       </label>
 
+      {/* Opt-in document-conversion: a session under this rig spawns with its own per-session markitdown
+          MCP. Launches a host process — human-set here only, never via an agent tool. */}
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+        <input type="checkbox" checked={documentConversion} onChange={(e) => setDocumentConversion(e.target.checked)} style={{ marginTop: 2 }} />
+        <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <span style={fieldLabel}>Document conversion</span>
+          <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+            Inject a per-session markitdown MCP so this rig can convert files (PDF / Office / images / HTML)
+            to Markdown to save tokens. Gated — needs a base Python (≥3.10) on the host; Loom provisions its
+            own venv on first use. Leave off unless this rig works with documents.
+          </span>
+        </span>
+      </label>
+
       {/* Model emits `--model <id>` at spawn (blank = engine default). Skills is a SUBSET filter: pick the
           skills a session under this rig may see; pick NONE to deliver ALL (the default). Pinned on the
           session row at spawn so resume/fork/recycle honor the same subset. */}
@@ -240,7 +256,7 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
       <span style={{ flex: 1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || !name.trim() || saving}
-          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, skills: skills.length ? skills : null })}>
+          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, skills: skills.length ? skills : null })}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {dirty

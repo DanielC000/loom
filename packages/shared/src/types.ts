@@ -103,6 +103,15 @@ export interface Profile {
    * tool (a browser is a navigate-anywhere capability — same capability-gating posture as gateCommand).
    */
   browserTesting?: boolean;
+  /**
+   * Opt-in document-conversion capability: when true, a session under this rig is spawned with its
+   * OWN per-session stdio markitdown MCP (`markitdown-mcp`) so the agent can convert files
+   * (PDF/Office/images/HTML/…) to Markdown to save tokens. Default OFF (absent/false) and fully
+   * additive — a rig without it spawns byte-identically to today. HUMAN-set only (Profiles UI / REST),
+   * like role/allow/browserTesting: NEVER exposed via an agent MCP tool (it launches a host process —
+   * same capability-gating posture as browserTesting/gateCommand).
+   */
+  documentConversion?: boolean;
 }
 
 // --- Agent Runs API keys (R1) ---------------------------------------------------------------------
@@ -326,6 +335,13 @@ export interface Session {
    * existing session ⇒ no Playwright MCP, byte-identical spawn.
    */
   browserTesting?: boolean;
+  /**
+   * Opt-in document-conversion capability, resolved from the session's Profile at spawn and PINNED
+   * here (mirrors `browserTesting`): a per-session stdio markitdown MCP is injected iff this is true.
+   * Persisted so EVERY respawn path (resume / fork / recycle) carries the capability forward unchanged.
+   * Absent/false on every existing session ⇒ no markitdown MCP, byte-identical spawn.
+   */
+  documentConversion?: boolean;
   /**
    * Profile-resolved skill-name SUBSET to deliver to this session, PINNED here at fresh spawn (mirrors
    * `role`/`browserTesting`): `injectSkills` mirrors ONLY these skills into the session's `.claude/skills`.

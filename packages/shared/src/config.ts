@@ -111,6 +111,22 @@ export interface ObsidianConfig {
 }
 
 /**
+ * Python tooling (document conversion + future Python-backed features). Loom owns ONE shared venv under
+ * `<LOOM_HOME>/python/venv` and pip-installs packages into it on first use (see the daemon's `python/venv.ts`
+ * `ensurePythonPackage`). The user supplies only a BASE Python interpreter (≥3.10): discovered on PATH
+ * (`python3` → `python` → `py -3`) by default, or pointed at explicitly via `interpreterPath`.
+ */
+export interface PythonConfig {
+  /**
+   * Override path to the BASE Python INTERPRETER Loom runs to CREATE its shared venv (PATH discovery is used
+   * when absent). HUMAN-ONLY: this is an arbitrary host EXECUTABLE the daemon launches, so — exactly like
+   * `obsidian.path` / `gateCommand` — the agent-facing config validator REJECTS it (only the human REST path
+   * accepts a `python` block). Loom installs PACKAGES into the venv; it NEVER installs the interpreter.
+   */
+  interpreterPath?: string;
+}
+
+/**
  * Outbound alert webhook (Richer-notifications, external delivery). When set, the daemon POSTs a
  * small JSON payload to `url` on each orchestration event whose `kind` is in `events`, so the human
  * is alerted OUTSIDE the UI (a generic webhook works for Slack/Discord incoming-webhook URLs + any
@@ -352,6 +368,8 @@ export interface ResolvedConfig {
   docLint: boolean;
   /** Obsidian auto-start (self-healing vault tooling). Default OFF — see ObsidianConfig. */
   obsidian: ObsidianConfig;
+  /** Python tooling (shared Loom-managed venv). Only `interpreterPath` is configurable — see PythonConfig. */
+  python: PythonConfig;
 }
 
 /** Per-project overrides. Deep-partial of ResolvedConfig; anything omitted inherits the default. */
@@ -367,6 +385,7 @@ export interface ProjectConfigOverride {
   // resolveConfig's SEPARATE 2nd arg (PlatformConfigOverride), never nested in a per-project override.
   docLint?: boolean;
   obsidian?: Partial<ObsidianConfig>;
+  python?: Partial<PythonConfig>;
 }
 
 /**
@@ -431,6 +450,9 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   docLint: true, // Pillar D vault-lint hook on by default
   // Obsidian auto-start OFF by default: opt-in per project (a daemon-launched GUI process is deliberate).
   obsidian: { autoStart: false },
+  // Python: no base-interpreter override by default — the daemon discovers python3/python/`py -3` on PATH.
+  // Loom owns + provisions the shared venv on first use of a Python-backed capability (e.g. documentConversion).
+  python: {},
 };
 
 /**
@@ -446,6 +468,20 @@ export function obsidianSessionEnv(o: ObsidianConfig): Record<string, string> {
   const env: Record<string, string> = { LOOM_OBSIDIAN_AUTOSTART: "1" };
   if (o.path) env.LOOM_OBSIDIAN_PATH = o.path;
   return env;
+}
+
+/**
+ * Carry the HUMAN-only base-Python override (`python.interpreterPath`) to the daemon's venv-provisioning
+ * resolver via the EXISTING `sessionEnv` transport (mirrors `obsidianSessionEnv`). Emits
+ * `LOOM_PYTHON_INTERPRETER` ONLY when an interpreter path is configured — otherwise `{}`, so a project that
+ * never sets it has a BYTE-IDENTICAL resolved `sessionEnv` (additive-when-absent, the browserTesting
+ * discipline). The daemon reads this off the session env at the spawn seam and hands it to the shared-venv
+ * provisioner; it never widens the agent surface (the value is human-only by construction — the agent-facing
+ * config validator rejects `python.interpreterPath`).
+ */
+export function pythonSessionEnv(p: PythonConfig): Record<string, string> {
+  if (!p.interpreterPath) return {};
+  return { LOOM_PYTHON_INTERPRETER: p.interpreterPath };
 }
 
 // --- Profiles: the resolved "who" ------------------------------------------------------
@@ -469,6 +505,8 @@ export interface ResolvedProfile {
   icon: string | null;
   /** Opt-in browser-automation: inject a per-session Playwright MCP at spawn. Backstops to false. */
   browserTesting: boolean;
+  /** Opt-in document-conversion: inject a per-session markitdown MCP at spawn. Backstops to false. */
+  documentConversion: boolean;
 }
 
 /**
@@ -488,8 +526,8 @@ export function resolveProfile(
   // The injected prompt is sourced from the agent regardless of whether a profile is present.
   const startupPrompt = agent.startupPrompt ?? "";
   if (!profile) {
-    // The backstop: a null/absent profile confers NO browser capability (false) — today's behavior.
-    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false };
+    // The backstop: a null/absent profile confers NO browser/document capability (false) — today's behavior.
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false };
   }
   return {
     role: profile.role ?? null,
@@ -500,6 +538,7 @@ export function resolveProfile(
     icon: profile.icon ?? null,
     // Pass the flag through when the profile sets it; backstop false for an unset/absent flag.
     browserTesting: profile.browserTesting ?? false,
+    documentConversion: profile.documentConversion ?? false,
   };
 }
 
@@ -625,6 +664,11 @@ export function resolveConfig(
   const obsidian: ObsidianConfig = { autoStart: override.obsidian?.autoStart ?? d.obsidian.autoStart };
   const obsidianPath = override.obsidian?.path ?? d.obsidian.path;
   if (obsidianPath !== undefined) obsidian.path = obsidianPath;
+  // Resolve the python field (only the optional base-interpreter override), then derive its session-env so
+  // the venv-provisioning resolver reads it via the EXISTING sessionEnv transport (mirrors obsidian).
+  const python: PythonConfig = {};
+  const interpreterPath = override.python?.interpreterPath ?? d.python.interpreterPath;
+  if (interpreterPath !== undefined) python.interpreterPath = interpreterPath;
   return {
     kanbanColumns: override.kanbanColumns ?? structuredClone(d.kanbanColumns),
     permission: {
@@ -639,7 +683,7 @@ export function resolveConfig(
     },
     // obsidian-derived env goes LAST so the dedicated `obsidian` config field is authoritative over a
     // manually-set sessionEnv key (when autoStart is OFF this spread is `{}` → byte-identical to before).
-    sessionEnv: { ...d.sessionEnv, ...(override.sessionEnv ?? {}), ...obsidianSessionEnv(obsidian) },
+    sessionEnv: { ...d.sessionEnv, ...(override.sessionEnv ?? {}), ...obsidianSessionEnv(obsidian), ...pythonSessionEnv(python) },
     orchestration: {
       gateCommand: override.orchestration?.gateCommand ?? d.orchestration.gateCommand,
       // Per-project timeout pairing gateCommand (no env layer). `??` so an explicit value survives.
@@ -673,5 +717,6 @@ export function resolveConfig(
     platform: resolvePlatform(platformOverride),
     docLint: override.docLint ?? d.docLint,
     obsidian,
+    python,
   };
 }

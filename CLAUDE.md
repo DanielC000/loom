@@ -111,6 +111,42 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
   keep the browser. HUMAN-set only (Profiles UI/REST) — never an agent MCP tool (same capability-gating
   posture as gateCommand/shell). The MCP launches Chromium lazily on first use; needs a one-time
   `npx playwright install chromium`. The bundled "QA Tester" profile is the browser-capable rig.
+- **Opt-in document conversion (`documentConversion`):** a session whose resolved Profile sets
+  `documentConversion` spawns with its OWN per-session stdio markitdown MCP (Microsoft `markitdown-mcp`,
+  resolved to an ABSOLUTE path) and its single tool `mcp__markitdown__convert_to_markdown` allowlisted —
+  so a research/document rig can convert files (PDF/Office/images/HTML/…) to Markdown to save tokens.
+  Structurally identical to `browserTesting`: default OFF + fully additive (every existing spawn
+  byte-identical when off); pinned on the session row so resume/fork/recycle keep it. HUMAN-set only
+  (Profiles UI/REST) — never an agent MCP tool (it launches a host process; same capability-gating posture
+  as browserTesting/gateCommand). The binary is resolved (`pty/host.ts` › `markitdownMcpServer`) via the
+  shared Python venv (below): first the human-only `LOOM_MARKITDOWN_BIN` override (an already-installed
+  binary — and the TEST seam, so CI never builds a venv), else a single `fs.existsSync(loomVenvBin(…))` —
+  if the venv is warm, inject it; if cold, return null (THIS spawn skips the MCP, like Playwright's
+  missing-cli) and kick BACKGROUND provisioning. A later spawn picks it up once the venv lands. **One-time
+  USER setup is just a base Python ≥3.10** discoverable on PATH (or pointed at via `python.interpreterPath`)
+  — Loom owns the venv and the install.
+- **Shared Loom-managed Python venv (`python/venv.ts`) + `python.interpreterPath`:** Loom owns ONE shared
+  venv under `<LOOM_HOME>/python/venv` — NOT a venv-per-tool. **Event-loop discipline (load-bearing):** the
+  spawn HOT PATH (`createPty` → `buildMcpServers`) does NO blocking work — only `fs.existsSync(loomVenvBin(
+  binary))` (instant). Creating the venv + `pip install markitdown[all]` takes minutes, so provisioning is
+  fully ASYNC (`child_process.spawn`, never `spawnSync`) and BEST-EFFORT, off the event loop — mirroring
+  `git/worktrees.ts` `createWorktree`. A synchronous `spawnSync` venv-create/pip on the spawn path would
+  FREEZE the whole daemon (every spawn/resume, the web UI, all HTTP/MCP) for the entire install; that bug is
+  what this split avoids. `ensurePythonPackageAsync({ package, binary, probeImport?, timeoutMs?,
+  interpreterOverride? })` is the reusable surface EVERY Python-backed capability calls OFF the hot path
+  (e.g. from a background job): it creates the venv if missing (from a discovered base Python via async
+  `discoverBasePythonAsync` — `python.interpreterPath` FIRST, then `python3` → `python` → win32 `py -3`),
+  pip-installs, and returns the ABSOLUTE path to a venv console script (or null). Idempotent (a ready venv
+  hits a fast path via an import probe), BOUNDED (every spawn has a timeout; pip reuses the worktree-provision
+  bound), NEVER throws. The markitdown consumer kicks it ONCE per process (deduped — concurrent spawns never
+  launch parallel installs); on success the resolved path is memoized (never a null — the cold case re-checks
+  `fs.existsSync` each spawn until warm). `LOOM_PYTHON_NO_PROVISION=1` disables real venv/pip provisioning
+  (CI hermetic tests + an ops escape hatch). Loom installs PACKAGES, never the interpreter.
+  `python.interpreterPath` is a top-level human-only config (resolved by `resolveConfig`, carried to the
+  daemon resolver via the session-env transport `pythonSessionEnv` → `LOOM_PYTHON_INTERPRETER`); it points
+  at a host EXECUTABLE, so — exactly like `obsidian.path`/`gateCommand` — the agent-facing config validator
+  REJECTS it (human REST path only). *(Deferred cheap follow-up: warm the venv at daemon boot / on a profile
+  save with `documentConversion`, so the first session rarely hits the cold-skip window.)*
 - **Worktree dep-provisioning (`git/worktrees.ts`):** `createWorktree` best-effort-installs deps at
   creation so a worker boots build-ready. It picks the package manager by lockfile marker IN the worktree
   root — deterministic precedence pnpm (`pnpm-lock.yaml`) → npm (`package-lock.json`) → yarn (`yarn.lock`),

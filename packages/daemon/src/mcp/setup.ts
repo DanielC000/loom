@@ -222,7 +222,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_create",
       {
-        description: "Create a Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting). role may be manager|worker|setup or omitted ONLY — an elevated \"platform\"/\"auditor\" role is rejected here (human-only). Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
+        description: "Create a Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion). role may be manager|worker|setup or omitted ONLY — an elevated \"platform\"/\"auditor\" role is rejected here (human-only). Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
         inputSchema: { profile: z.object({}).passthrough() },
       },
       async ({ profile }) => {

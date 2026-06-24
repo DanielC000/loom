@@ -12,6 +12,7 @@ import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { detectUsageLimit, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT } from "../paths.js";
+import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 
 const RING_CAP_BYTES = 256 * 1024;
 /**
@@ -310,6 +311,99 @@ export function playwrightMcpServer(): { type: "stdio"; command: string; args: s
 }
 
 /**
+ * Resolve the Microsoft markitdown MCP (`markitdown-mcp`) console script to an ABSOLUTE path, for the
+ * per-session document-conversion server injected ONLY for a documentConversion session (opt-in, gated).
+ *
+ * markitdown is a PYTHON tool, NOT a node_modules dependency, so it can't be resolved off `require`. Loom
+ * owns ONE shared Python venv under `<LOOM_HOME>/python/venv` and pip-installs markitdown into it.
+ *
+ * EVENT-LOOP SAFETY (the load-bearing rule): this runs on the SYNCHRONOUS spawn hot path (`createPty` →
+ * `buildMcpServers`), so it must do NO blocking work. Creating the venv + `pip install markitdown[all]`
+ * takes minutes — running that via `spawnSync` here would FREEZE the whole daemon (every spawn/resume, the
+ * web UI, all HTTP/MCP) for the entire install. So the hot path is fast + sync-safe only:
+ *   (a) a HUMAN-only override via `LOOM_MARKITDOWN_BIN` — host-set, NEVER an agent MCP parameter (identical
+ *       trust posture + mechanism to `LOOM_CLAUDE_BIN`). Resolved through `resolveExecutable` (fast, no
+ *       child process); it's the TEST seam too (a fake binary, so CI never builds a venv). Checked FIRST.
+ *   (b) else a single `fs.existsSync(loomVenvBin('markitdown-mcp'))` (instant): if the venv binary is
+ *       present → inject it; if NOT → return null (this spawn skips the MCP, exactly like Playwright's
+ *       missing-cli fallback) AND kick BACKGROUND provisioning ({@link kickMarkitdownProvision}) so the
+ *       venv warms up off the event loop. A later spawn picks it up once the async job lands the binary.
+ *
+ * CACHE: memoize ONLY a resolved absolute path (success) — never memoize `null`, or a pre-warm skip would
+ * stick forever. The not-ready case re-checks `fs.existsSync` cheaply on every spawn until it flips ready.
+ */
+let markitdownBin: string | undefined; // success memo (stable once resolved); never holds null
+function resolveMarkitdownBin(pythonInterpreterPath?: string): string | null {
+  if (markitdownBin) return markitdownBin;
+  const override = process.env.LOOM_MARKITDOWN_BIN;
+  if (override) {
+    const resolved = resolveExecutable(override);
+    if (path.isAbsolute(resolved)) { markitdownBin = resolved; return resolved; }
+    return null; // human pointed the override somewhere unresolvable — respect it, don't auto-provision
+  }
+  const bin = loomVenvBin("markitdown-mcp");
+  if (fs.existsSync(bin)) { markitdownBin = bin; return bin; } // venv warm → use it (and cache)
+  kickMarkitdownProvision(pythonInterpreterPath); // cold → provision in the BACKGROUND; skip this spawn
+  return null;
+}
+
+/**
+ * Kick BACKGROUND provisioning of the shared venv's markitdown (async `child_process.spawn` under the hood
+ * — NEVER `spawnSync`), so the heavy venv-create + pip install runs OFF the event loop. One-shot per daemon
+ * process and deduped: an in-flight job or a prior attempt suppresses re-kicks, so concurrent documentConversion
+ * spawns never launch parallel pip installs. On success it lands the resolved binary into the `markitdownBin`
+ * memo (subsequent spawns inject it); on failure it warn-logs and documentConversion sessions keep spawning
+ * WITHOUT the MCP until the daemon restarts (best-effort, the worktree-provisioning discipline).
+ */
+let markitdownProvisionInFlight: Promise<void> | null = null;
+let markitdownProvisionTried = false;
+let markitdownProvisionKicks = 0; // test observability (see __markitdownProvisionKicks)
+function kickMarkitdownProvision(pythonInterpreterPath?: string): void {
+  if (markitdownProvisionInFlight || markitdownProvisionTried) return; // dedupe + one-shot
+  markitdownProvisionTried = true;
+  markitdownProvisionKicks++;
+  // eslint-disable-next-line no-console
+  console.warn("[pty] markitdown venv not ready — provisioning in the BACKGROUND; documentConversion spawns skip the MCP until it's warm.");
+  markitdownProvisionInFlight = ensurePythonPackageAsync({
+    // markitdown-mcp is the MCP server / console script; markitdown[all] pulls the full
+    // PDF/Office/image converters into the SAME shared venv.
+    package: ["markitdown-mcp", "markitdown[all]"],
+    binary: "markitdown-mcp",
+    probeImport: "markitdown_mcp",
+    interpreterOverride: pythonInterpreterPath,
+  })
+    .then((bin) => {
+      if (bin) {
+        markitdownBin = bin;
+        // eslint-disable-next-line no-console
+        console.warn(`[pty] markitdown venv ready (${bin}) — documentConversion sessions now spawn with the MCP.`);
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn("[pty] markitdown background provisioning did not complete (no base Python >=3.10, or venv/pip failed) — documentConversion sessions spawn WITHOUT the markitdown MCP. Install a base Python (or set python.interpreterPath) and restart.");
+      }
+    })
+    .catch(() => { /* ensurePythonPackageAsync never throws; belt-and-suspenders */ })
+    .finally(() => { markitdownProvisionInFlight = null; });
+}
+
+/** TEST-ONLY: how many times background markitdown provisioning has been kicked this process. */
+export function __markitdownProvisionKicks(): number {
+  return markitdownProvisionKicks;
+}
+
+/**
+ * The stdio MCP-config entry for a documentConversion session, or null if markitdown can't be resolved
+ * (no base Python / venv or pip failure). `markitdown-mcp` speaks STDIO by default and needs NO args (the
+ * one tool, `convert_to_markdown(uri)`, accepts file:/http(s):/data: URIs) — the args difference from
+ * Playwright. `pythonInterpreterPath` is the HUMAN-only `python.interpreterPath` (carried via session env).
+ */
+export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "stdio"; command: string; args: string[] } | null {
+  const bin = resolveMarkitdownBin(pythonInterpreterPath);
+  if (!bin) return null;
+  return { type: "stdio", command: bin, args: [] };
+}
+
+/**
  * Assemble the `--mcp-config` mcpServers map for a Claude spawn (extracted from createPty as the ONE
  * testable seam for the MCP surface). ALWAYS the project-scoped `loom-tasks` HTTP server; PLUS the
  * role-gated surface (manager/worker → loom-orchestration, platform → loom-platform, auditor → loom-audit,
@@ -323,7 +417,9 @@ export function playwrightMcpServer(): { type: "stdio"; command: string; args: s
  * tool world, so a prompt-injection in an audited transcript has no outward/destructive tool to reach.
  */
 export function buildMcpServers(o: {
-  sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean;
+  sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean; documentConversion?: boolean;
+  /** HUMAN-only `python.interpreterPath` (carried via session env) — forwarded to the markitdown venv resolver. */
+  pythonInterpreterPath?: string;
 }): Record<string, unknown> {
   // Agent Runs R2: a `run` session gets ONLY the restricted run surface — NOT even loom-tasks. This is
   // the one path that does not mount loom-tasks (every other role layers ON TOP of it). The early return
@@ -370,6 +466,22 @@ export function buildMcpServers(o: {
     } else {
       // eslint-disable-next-line no-console
       console.warn(`[pty] ${o.sessionId} browserTesting set but @playwright/mcp could not be resolved — spawning WITHOUT a browser MCP. Is the daemon dependency installed?`);
+    }
+  }
+  // Opt-in: a per-session stdio markitdown MCP for a document-conversion session, so the agent can
+  // convert files (PDF/Office/images/HTML/…) to Markdown to save tokens. Same additive discipline as
+  // the Playwright server above: omitted for every non-documentConversion spawn (byte-identical map when
+  // off). `markitdownMcpServer` is fast + sync-safe (fs.existsSync on the hot path); a null means the
+  // shared venv isn't warm yet — it has kicked BACKGROUND provisioning, so THIS spawn just skips the MCP
+  // (logged, never crashes), and a later spawn picks it up once the venv lands. The one-time host setup is
+  // just a base Python ≥3.10 (PATH or python.interpreterPath); Loom provisions the venv.
+  if (o.documentConversion) {
+    const md = markitdownMcpServer(o.pythonInterpreterPath);
+    if (md) {
+      mcpServers["markitdown"] = md;
+    } else {
+      // eslint-disable-next-line no-console
+      console.warn(`[pty] ${o.sessionId} documentConversion set but the markitdown venv isn't warm yet — spawning WITHOUT the document MCP (provisioning in the background; a later spawn will pick it up). Needs a base Python >=3.10 on PATH (or python.interpreterPath).`);
     }
   }
   return mcpServers;
@@ -480,6 +592,12 @@ export interface SpawnOpts {
    * allowlist its tool surface. Default OFF — every existing spawn is byte-identical when unset/false.
    */
   browserTesting?: boolean;
+  /**
+   * Opt-in document-conversion (resolved from the session's Profile, gated). When true, inject a
+   * per-session stdio markitdown MCP (`markitdown-mcp`) so the agent can convert files to Markdown, and
+   * allowlist its tool surface. Default OFF — every existing spawn is byte-identical when unset/false.
+   */
+  documentConversion?: boolean;
   /**
    * Profile-resolved skill-name SUBSET pinned on the session row (mirrors browserTesting): injectSkills
    * delivers ONLY these skills. null/empty/absent ⇒ ALL store skills (byte-identical to today). Threaded
@@ -886,9 +1004,12 @@ export class PtyHost {
       : wantsSetup ? ["mcp__loom-setup"]
       : wantsRun ? ["mcp__loom-run"]
       : [];
+    // A document-conversion session ALSO needs its markitdown MCP tool allowlisted (acceptEdits doesn't
+    // auto-approve MCP tools — the §9 lesson), so it layers ON TOP of the role surface like browserTesting.
     const extraAllow = [
       ...roleAllow,
       ...(opts.browserTesting ? ["mcp__playwright"] : []),
+      ...(opts.documentConversion ? ["mcp__markitdown__convert_to_markdown"] : []),
     ];
     const permission = extraAllow.length
       ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
@@ -897,7 +1018,9 @@ export class PtyHost {
 
     // §6 scoping: route by session id in the URL path; daemon derives the project server-side. The
     // mcpServers map (loom-tasks + role surface + opt-in Playwright) is assembled by the testable seam.
-    const mcpServers = buildMcpServers({ sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting });
+    // The HUMAN-only python.interpreterPath rides the session env (config → pythonSessionEnv); read it here
+    // and hand it to the shared-venv markitdown resolver (only consulted when documentConversion is on).
+    const mcpServers = buildMcpServers({ sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion, pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER });
     const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt, model: opts.model });
 
     // Inherited env (CLAUDE_*/CLAUDECODE scrubbed) + sessionEnv merge + the three git-safety vars that

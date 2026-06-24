@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS profiles (
   skills TEXT,                            -- JSON string[] | NULL (NULL = deliver all skills)
   model TEXT,                             -- model id | NULL (NULL = engine default)
   icon TEXT,                              -- UI icon | NULL
-  browser_testing INTEGER NOT NULL DEFAULT 0 -- opt-in: inject a per-session Playwright MCP at spawn
+  browser_testing INTEGER NOT NULL DEFAULT 0, -- opt-in: inject a per-session Playwright MCP at spawn
+  document_conversion INTEGER NOT NULL DEFAULT 0 -- opt-in: inject a per-session markitdown MCP at spawn
 );
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
@@ -159,6 +160,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- opt-in browser-automation, pinned at spawn from the session's Profile (mirrors role): a
   -- per-session Playwright MCP is injected iff 1. Carried across every respawn (resume/fork/recycle).
   browser_testing INTEGER NOT NULL DEFAULT 0,
+  -- opt-in document-conversion, pinned at spawn from the session's Profile (mirrors browser_testing): a
+  -- per-session markitdown MCP is injected iff 1. Carried across every respawn (resume/fork/recycle).
+  document_conversion INTEGER NOT NULL DEFAULT 0,
   -- profile-resolved skill subset pinned at fresh spawn (JSON array of skill names); NULL = deliver all
   -- skills (today's behavior). Carried verbatim across every respawn (resume/fork/recycle) like role.
   skills TEXT,
@@ -301,6 +305,8 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   // opt-in browser-automation (pinned at spawn from the Profile; carried across respawns). NOT NULL +
   // constant DEFAULT is legal on ALTER TABLE ADD COLUMN, so legacy rows backfill to 0 (off).
   browser_testing: "INTEGER NOT NULL DEFAULT 0",
+  // opt-in document-conversion (pinned at spawn from the Profile; carried across respawns); legacy rows ⇒ 0.
+  document_conversion: "INTEGER NOT NULL DEFAULT 0",
   // profile-resolved skill subset pinned at spawn (JSON array). Nullable; legacy rows backfill to NULL
   // = deliver all skills (today's behavior — the regression-guarded default).
   skills: "TEXT",
@@ -346,6 +352,8 @@ const AGENT_ADDED_COLUMNS: Record<string, string> = {
 const PROFILE_ADDED_COLUMNS: Record<string, string> = {
   // opt-in browser-automation flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
   browser_testing: "INTEGER NOT NULL DEFAULT 0",
+  // opt-in document-conversion flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
+  document_conversion: "INTEGER NOT NULL DEFAULT 0",
 };
 
 /** Columns added to `schedules` after phase-2; applied to existing DBs by migrateSchedules(). */
@@ -1203,8 +1211,8 @@ export class Db {
   }
   insertProfile(p: Profile): void {
     this.db.prepare(
-      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing)
-       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting)`,
+      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion)
+       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion)`,
     ).run({
       id: p.id, name: p.name, role: p.role ?? null, description: p.description,
       // string[] columns persist as JSON text; skills NULL means "deliver all".
@@ -1212,6 +1220,7 @@ export class Db {
       skills: p.skills == null ? null : JSON.stringify(p.skills),
       model: p.model ?? null, icon: p.icon ?? null,
       browserTesting: p.browserTesting ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
+      documentConversion: p.documentConversion ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
     });
   }
   /** Partial edit of a profile. Provided fields are written (null clears); omitted are left as-is. */
@@ -1225,6 +1234,7 @@ export class Db {
       model: patch.model,
       icon: patch.icon,
       browser_testing: patch.browserTesting === undefined ? undefined : patch.browserTesting ? 1 : 0,
+      document_conversion: patch.documentConversion === undefined ? undefined : patch.documentConversion ? 1 : 0,
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
@@ -1343,12 +1353,12 @@ export class Db {
       `INSERT INTO sessions (
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
-         role,browser_testing,skills,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
+         role,browser_testing,document_conversion,skills,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
          ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
-         @role,@browserTesting,@skills,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
+         @role,@browserTesting,@documentConversion,@skills,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
          @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline)`,
     ).run({
       ...s,
@@ -1357,6 +1367,7 @@ export class Db {
       // so plain phase-1 session literals insert unchanged.
       role: s.role ?? null,
       browserTesting: s.browserTesting ? 1 : 0, // off (0) on every plain session literal
+      documentConversion: s.documentConversion ? 1 : 0, // off (0) on every plain session literal
       // skill subset → JSON text; null/absent ⇒ NULL = deliver all (today's behavior). An empty array is
       // also stored as NULL ("no subset ⇒ all") so the read side never has to special-case [].
       skills: s.skills && s.skills.length ? JSON.stringify(s.skills) : null,
@@ -1853,6 +1864,7 @@ function toProfile(r0: unknown): Profile {
     model: (r.model as string) ?? null,
     icon: (r.icon as string) ?? null,
     browserTesting: (r.browser_testing as number) === 1,
+    documentConversion: (r.document_conversion as number) === 1,
   };
 }
 function toSession(r0: unknown): Session {
@@ -1868,6 +1880,7 @@ function toSession(r0: unknown): Session {
     // phase-2 orchestration (null/0 on plain phase-1 rows)
     role: (r.role as SessionRole) ?? null,
     browserTesting: (r.browser_testing as number) === 1,
+    documentConversion: (r.document_conversion as number) === 1,
     // pinned skill subset; NULL ⇒ null = deliver all. Defensive parse: a malformed value degrades to
     // null (deliver all), never throws toSession.
     skills: r.skills == null ? null : (() => { try { return JSON.parse(r.skills as string) as string[]; } catch { return null; } })(),
