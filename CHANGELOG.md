@@ -7,6 +7,53 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-06-24
+
+Board lanes you can **color, limit, and edit in place**, opt-in **Obsidian auto-start**, and a large batch
+of **multi-agent orchestration reliability** hardening.
+
+### Added
+- **Board column customization.** Give each lane an **accent color** and a soft **WIP limit** (with an
+  unobtrusive over-limit indicator), apply a **column preset** at project creation (Agent Dev / Research /
+  Ops / Simple) with a reset-to-preset action, and edit the board **in place** — rename, add, or remove
+  columns directly on the board header with a live preview and role-coupling warnings. New columns are
+  inserted before the terminal lane.
+- **Opt-in Obsidian auto-start.** A new per-project setting (`obsidian.autoStart`, default **off**) that
+  self-heals the vault tooling: when a skill needs the `obsidian` CLI and Obsidian isn't running, Loom
+  launches it and waits until it's ready, then proceeds — falling back to direct filesystem access when
+  it's disabled, headless, or not installed (never a hard error). Cross-platform, with an optional
+  human-only launch-path override.
+- **Repository-path editing.** Change a project's bound git repository from Settings (validated as a real
+  repo; refused while a worktree session is live so an in-flight worker can't be rebound out from under).
+- **Spawn a worker by agent name.** `worker_spawn` now accepts an agent's **name or slug** (not only its
+  id), and a mistyped value returns a "did you mean …?" suggestion instead of a bare failure.
+- **Editable agent prompts on the Platform page** and a `agent_update` patch surface.
+
+### Changed
+- **Manager sessions know where things live.** An orchestrator session now starts with its project's
+  absolute repo and vault paths, so it reads its notes by path instead of a slow filesystem search.
+- **Upward reports carry a delivery status.** A worker's report (and a platform escalation) now reports
+  whether it was delivered live, queued, durably boarded, or dropped — and a **report wakes a parked
+  manager**, so completed work is never left sitting unnoticed.
+- **Bounded cross-project listings.** The platform/audit agent and session listings are capped to fit the
+  context budget, so a large workspace can't overflow an operator.
+
+### Fixed
+- **`worker_spawn` validates its inputs up front** — a malformed or stale task id is rejected before any
+  worktree or session is created, instead of binding a worker to a bogus task.
+- **`worker_merge` won't silently pass an empty merge.** When a worker reported changes but its branch has
+  nothing to merge (work was committed to the wrong place), the gate now hard-flags it for recovery
+  instead of quietly marking the task done. The worker doctrine also now says, explicitly, never commit to
+  `main`.
+- **Usage-limit handling on spawn is self-healing.** A `worker_spawn` blocked by a usage limit now returns
+  a retry-after deadline and the manager is auto-woken when the limit clears — no manual "retry" pokes.
+- **Cleaner restart resumes.** After a daemon restart a session resumes as one coherent turn (the bare
+  "Continue" no-op the engine emits is absorbed) and is told its file-read tracking was reset, so it
+  re-reads before editing.
+- **Vault-tooling correctness across the board** — unified board column coloring with AA-contrast-safe
+  labels, Settings now preserves per-column accent/WIP on save, rate-limit holds clear cleanly across
+  parked sessions, and several boot-migration and merge-recovery edge cases were hardened.
+
 ## [0.6.0] — 2026-06-23
 
 A real board **column manager**, and a more robust + tunable worker-lifecycle watchdog.
