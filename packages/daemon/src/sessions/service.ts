@@ -25,6 +25,7 @@ import { rateLimitDeadline } from "../orchestration/usage-limit.js";
 import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport } from "../orchestration/crash-recovery-watcher.js";
+import { RESUME_NUDGE_TAIL } from "../orchestration/resume-nudge.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
@@ -52,32 +53,6 @@ const PROFILE_SPAWNABLE_ROLES: ReadonlySet<SessionRole> = new Set<SessionRole>([
  *  response flushes to the agent BEFORE its turn is interrupted (mirrors requestDaemonRestart's
  *  respond-then-teardown 300ms). The run row is already terminal by the time this fires. */
 const RUN_TEARDOWN_DELAY_MS = 250;
-
-/**
- * PL Auditor finding #11: the shared tail appended to EVERY daemon-restart resume nudge (resumeFleetOnBoot).
- * It carries two facts the engine does NOT preserve across `claude --resume`, so the resumed agent acts
- * deliberately instead of being surprised:
- *
- *   1. FILE-READ TRACKING RESET — the engine's per-session "you have Read this file" set is in-memory state
- *      that a `--resume` does NOT restore (confirmed first-hand: a post-resume Edit reports "File has not
- *      been read yet"). The daemon has NO API into that engine-internal state, so preserving it is infeasible;
- *      per the card's accepted fallback we NOTE the reset so the agent re-Reads intentionally before editing.
- *
- *   2. BARE-CONTINUE ABSORPTION (the "merge") — a session that was mid-turn when the restart killed its pty
- *      (ALWAYS the requester, which is mid-`daemon_restart`-call; often a working worker) is auto-continued by
- *      the engine with a bare "Continue from where you left off." turn that lands BEFORE this nudge. That turn
- *      is an empty engine artifact the daemon can neither author nor suppress (it's not a Loom string — it
- *      originates in `claude --resume` of an interrupted transcript). Rather than leave the agent with a no-op
- *      turn THEN the real one, this single nudge is declared the authoritative resume context and MERGES the
- *      bare continue into itself: the agent is told to treat any preceding bare "continue" as the same turn.
- *      Phrased conditionally ("if … just before this") so it stays accurate for an idle session that was NOT
- *      mid-turn and therefore never saw one.
- */
-const RESUME_NUDGE_TAIL =
-  ' (Note: this restart reset your file-read tracking — Read a file again before you Edit it, or the edit ' +
-  'is rejected as "not read yet". And if your client auto-submitted a bare "Continue from where you left ' +
-  'off." turn just before this message, that was an empty resume artifact with no content — THIS message is ' +
-  'your resume context; treat them as a single turn.)';
 
 /**
  * Agent Runs R3: the run-completion webhook (POSTed the run summary on a terminal transition). The

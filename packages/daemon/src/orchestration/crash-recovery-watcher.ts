@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolveConfig, type SessionRole, type OrchestrationEvent } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
+import { RESUME_NUDGE_TAIL } from "./resume-nudge.js";
 
 /**
  * Session roles the crash-recovery watchdog covers — coordination/work sessions worth auto-recovering.
@@ -286,7 +287,9 @@ export class CrashRecoveryWatcher {
           : `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — your worktrees are ` +
             `intact. Re-check your workers' state (some may need attention) and continue orchestrating from where ` +
             `you left off.`;
-        try { pty.enqueueStdin(s.id, note); } catch { /* not ready yet — the resume stands */ }
+        // Same engine reality as resumeFleetOnBoot: a `claude --resume`'d session gets a bare "Continue"
+        // turn + a reset file-read set, so carry the SHARED RESUME_NUDGE_TAIL (PL Auditor #11) here too.
+        try { pty.enqueueStdin(s.id, note + RESUME_NUDGE_TAIL); } catch { /* not ready yet — the resume stands */ }
       }
       // eslint-disable-next-line no-console
       console.log(`[crash-recovery-watcher] auto-resume ${s.id} (${s.role}) attempt ${attemptNo}/${maxAttempts} → ${started ? "started" : `failed${error ? ` (${error})` : ""}`}`);

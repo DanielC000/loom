@@ -25,6 +25,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Db } from "../dist/db.js";
 import { CrashRecoveryWatcher, recordUnexpectedExit } from "../dist/orchestration/crash-recovery-watcher.js";
+import { RESUME_NUDGE_TAIL } from "../dist/orchestration/resume-nudge.js";
 import { OrchestrationControl } from "../dist/orchestration/control.js";
 import { validateProjectConfigOverride, validateAgentProjectConfigOverride } from "../dist/mcp/platform.js";
 
@@ -125,6 +126,13 @@ function cleanup(e) {
   check("(2) a dead session with session_died is AUTO-RESUMED on tick", e.resumes.length === 1 && e.resumes[0] === "s2");
   check("(2) the resume attempt is recorded (attempt 1 of 3)", evKinds(e, "s2", "session_resume_attempt").length === 1 && evKinds(e, "s2", "session_resume_attempt")[0].detail?.attempt === 1 && evKinds(e, "s2", "session_resume_attempt")[0].detail?.maxAttempts === 3);
   check("(2) a continuation nudge is enqueued to the recovered session (so it re-engages, not just idle)", e.enqueued.length === 1 && e.enqueued[0].id === "s2" && /auto-recovered/.test(e.enqueued[0].text));
+  // PL Auditor #11 consistency follow-up: the watcher's auto-resume nudge carries the SAME shared
+  // RESUME_NUDGE_TAIL as resumeFleetOnBoot — a `claude --resume`'d session has the same engine reality
+  // (reset file-read tracking + a bare "Continue" turn), so the nudge must NOTE both.
+  const nudge = e.enqueued[0].text;
+  check("(2) the auto-resume nudge carries the shared RESUME_NUDGE_TAIL (DRY — one source)", nudge.includes(RESUME_NUDGE_TAIL));
+  check("(2) the tail's file-read-reset note is present (re-Read before Edit)", /reset your file-read tracking/.test(nudge) && /Read a file again before you Edit/.test(nudge));
+  check("(2) the tail's bare-continue-merge clause is present (treat as a single turn)", /Continue from where you left off/.test(nudge) && /treat them as a single turn/.test(nudge));
   cleanup(e);
 }
 
