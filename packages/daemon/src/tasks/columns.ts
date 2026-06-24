@@ -93,6 +93,10 @@ export interface DesiredColumn {
   role?: ColumnRole;
   /** When the user RENAMED this column's key, the previous key. Its cards are re-keyed prevKey→key. */
   prevKey?: string;
+  /** CSS header accent (e.g. "#6b8afd"). Optional — carried through to the stored KanbanColumn when present. */
+  accentColor?: string;
+  /** SOFT (advisory) work-in-progress limit. Optional — carried through to the stored KanbanColumn when present. */
+  wipLimit?: number;
 }
 
 /** The outcome of planning a layout change: a hard reject, or the columns + card re-keys to apply. */
@@ -199,7 +203,14 @@ export function planColumnLayout(
   }
   for (const removed of removedKeys) rekeys.push({ from: removed, to: defaultLandingKey }); // removed cards → landing
 
-  const columns: KanbanColumn[] = desired.map((d) => (d.role ? { key: d.key, label: d.label, role: d.role } : { key: d.key, label: d.label }));
+  // Carry every present KanbanColumn field through; an ABSENT optional stays absent (no undefined-injection).
+  const columns: KanbanColumn[] = desired.map((d) => {
+    const col: KanbanColumn = { key: d.key, label: d.label };
+    if (d.role) col.role = d.role;
+    if (d.accentColor !== undefined) col.accentColor = d.accentColor;
+    if (d.wipLimit !== undefined) col.wipLimit = d.wipLimit;
+    return col;
+  });
   return { ok: true, warnings, columns, rekeys, defaultLandingKey };
 }
 

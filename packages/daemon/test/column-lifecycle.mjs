@@ -141,6 +141,38 @@ try {
   check("(d) bad rename source (prevKey not a current column) is rejected",
     planColumnLayout(DEFAULT, DEFAULT.map((c) => (c.key === "backlog" ? { ...c, prevKey: "nope" } : c))).ok === false);
 
+  // === (f) accentColor + wipLimit round-trip through planColumnLayout (the new optional KanbanColumn fields) ===
+  // Set on a desired column → present on the output column; survive a rename (prevKey carries them); an
+  // ABSENT field stays absent (no undefined-injection — JSON.stringify of an undefined value DROPS the key,
+  // so an explicit `'wipLimit' in col` check distinguishes absent from `undefined`).
+  const fPlan = planColumnLayout(DEFAULT, DEFAULT.map((c) =>
+    c.key === "todo" ? { key: "todo", label: "To Do", role: c.role, accentColor: "#6b8afd", wipLimit: 3 } : c));
+  check("(f) plan succeeds with accentColor + wipLimit set", fPlan.ok === true);
+  const fTodo = fPlan.columns.find((c) => c.key === "todo");
+  check("(f) accentColor round-trips onto the output column", fTodo.accentColor === "#6b8afd");
+  check("(f) wipLimit round-trips onto the output column", fTodo.wipLimit === 3);
+  const fBacklog = fPlan.columns.find((c) => c.key === "backlog");
+  check("(f) an ABSENT accentColor stays absent (no undefined-injection)", !("accentColor" in fBacklog));
+  check("(f) an ABSENT wipLimit stays absent (no undefined-injection)", !("wipLimit" in fBacklog));
+  // The fields survive a KEY RENAME (prevKey present): rename todo→queued carrying both.
+  const fRename = planColumnLayout(DEFAULT, DEFAULT.map((c) =>
+    c.key === "todo" ? { key: "queued", label: "Queued", role: c.role, prevKey: "todo", accentColor: "#ff0066", wipLimit: 5 } : c));
+  check("(f) rename plan succeeds carrying the new fields", fRename.ok === true);
+  const fQueued = fRename.columns.find((c) => c.key === "queued");
+  check("(f) accentColor survives a rename (prevKey)", fQueued.accentColor === "#ff0066");
+  check("(f) wipLimit survives a rename (prevKey)", fQueued.wipLimit === 5);
+  // End-to-end DB persistence: the serialized config JSON keeps both fields after applyBoardColumnLayout.
+  mkProject("pf", {});
+  const pfDesired = DEFAULT.map((c) =>
+    c.key === "in_progress" ? { key: "in_progress", label: "In Progress", role: c.role, accentColor: "#00cc88", wipLimit: 2 } : c);
+  const rf = updateColumns("pf", pfDesired);
+  check("(f) DB write succeeds with the new fields", rf.ok === true);
+  const pfStored = resolveConfig(db.getProject("pf").config).kanbanColumns.find((c) => c.key === "in_progress");
+  check("(f) accentColor persisted through the DB write path", pfStored.accentColor === "#00cc88");
+  check("(f) wipLimit persisted through the DB write path", pfStored.wipLimit === 2);
+  const pfBacklog = resolveConfig(db.getProject("pf").config).kanbanColumns.find((c) => c.key === "backlog");
+  check("(f) an untouched column carries NO accentColor after the DB round-trip", !("accentColor" in pfBacklog));
+
   // === (e) the invariant: a PRE-EXISTING orphan is swept on the next layout change ===
   mkProject("pe", {});
   mkTask("e1", "pe", "ghost"); // a card on a key that is NOT in any column (data-state orphan)
