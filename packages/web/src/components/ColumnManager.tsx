@@ -42,6 +42,11 @@ interface Row {
   key: string;
   label: string;
   role?: ColumnRole;
+  // Per-column accent + soft WIP limit (set by a preset / the board-header editor). This Settings editor
+  // doesn't EDIT them, but it carries them on the row so a Save preserves what it didn't touch — the
+  // atomic PUT replaces the whole array, so an absent field here would strip a column's accent / WIP limit.
+  accentColor?: string;
+  wipLimit?: number;
   originalKey?: string;
   keyOpen: boolean;
   keyTouched: boolean;
@@ -52,11 +57,16 @@ const nextUid = () => `row-${UID++}`;
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 
 // The desired layout this UI will PUT — strip the client-only fields, and set prevKey only on a real
-// rename of an existing column (key changed AND the column already existed server-side).
+// rename of an existing column (key changed AND the column already existed server-side). accentColor +
+// wipLimit are carried through untouched (absent stays absent) so a Settings Save preserves the per-column
+// accent / soft WIP limit a preset or the board-header editor set — mirrors Board.tsx's columnsToDesired,
+// since the atomic PUT replaces the entire array (an omitted field would silently strip it).
 function toDesired(rows: Row[]): DesiredColumn[] {
   return rows.map((r) => {
     const d: DesiredColumn = { key: r.key.trim(), label: r.label.trim() };
     if (r.role) d.role = r.role;
+    if (r.accentColor !== undefined) d.accentColor = r.accentColor;
+    if (r.wipLimit !== undefined) d.wipLimit = r.wipLimit;
     if (r.originalKey && r.originalKey !== r.key.trim()) d.prevKey = r.originalKey;
     return d;
   });
@@ -97,7 +107,8 @@ export function ColumnManager({ project }: { project: Project }) {
   // Edit the EFFECTIVE columns (override or inherited default) — saving materializes the full array as
   // the project's override. Seeded once on mount (keyed by project id upstream → a switch remounts).
   const seedRows = useMemo<Row[]>(() => resolveConfig(project.config).kanbanColumns.map((c) => ({
-    uid: nextUid(), key: c.key, label: c.label, role: c.role, originalKey: c.key, keyOpen: false, keyTouched: true,
+    uid: nextUid(), key: c.key, label: c.label, role: c.role, accentColor: c.accentColor, wipLimit: c.wipLimit,
+    originalKey: c.key, keyOpen: false, keyTouched: true,
   })), [project.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const [rows, setRows] = useState<Row[]>(seedRows);
   const baseline = useRef(JSON.stringify(toDesired(seedRows)));
@@ -109,9 +120,10 @@ export function ColumnManager({ project }: { project: Project }) {
 
   // Re-seed the staged rows from the server's canonical, just-stored columns — clearing dirty and
   // re-baselining the originalKeys so a subsequent rename diffs against the new persisted keys.
-  const reseedFrom = (cols: { key: string; label: string; role?: ColumnRole }[]) => {
+  const reseedFrom = (cols: { key: string; label: string; role?: ColumnRole; accentColor?: string; wipLimit?: number }[]) => {
     const fresh: Row[] = cols.map((c) => ({
-      uid: nextUid(), key: c.key, label: c.label, role: c.role, originalKey: c.key, keyOpen: false, keyTouched: true,
+      uid: nextUid(), key: c.key, label: c.label, role: c.role, accentColor: c.accentColor, wipLimit: c.wipLimit,
+      originalKey: c.key, keyOpen: false, keyTouched: true,
     }));
     setRows(fresh);
     baseline.current = JSON.stringify(toDesired(fresh));
