@@ -48,7 +48,7 @@ const { AuditMcpRouter } = await import("../dist/mcp/audit.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { Scheduler } = await import("../dist/orchestration/scheduler.js");
-const { engineTranscriptPath, archivedTranscriptPath, TOOL_RESULT_BODY_CAP } = await import("../dist/sessions/transcript.js");
+const { engineTranscriptPath, archivedTranscriptPath, TOOL_RESULT_BODY_CAP, TRANSCRIPT_PAGE_CHAR_BUDGET } = await import("../dist/sessions/transcript.js");
 const { DEFAULT_SESSION_SUMMARY_CAP } = await import("../dist/mcp/sessionView.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -83,8 +83,10 @@ seedSession("W", "worker");
 seedSession("P", null);
 // A LIVE session with an engine transcript on disk (transcript_read live path).
 seedSession("LIVE1", null, { engineSessionId: "eng-live-1" });
+// A LIVE session with a LARGE transcript (many turns, total > one page budget) — the pagination path.
+seedSession("PAGE1", null, { engineSessionId: "eng-page-1" });
 // A LIVE session whose transcript carries tool_result BODIES — the render-collapse fix: an auditor must
-// be able to read the actual structured return / error string, not a bare "↳ tool result" placeholder.
+// be able to read the actual structured return / error string, not a bare "-> tool result" placeholder.
 seedSession("TR1", null, { engineSessionId: "eng-toolresult-1" });
 // An ARCHIVED session with a snapshot on disk (transcript_read archived path + scope:"archived").
 seedSession("ARCH1", null, { processState: "exited" });
@@ -131,6 +133,15 @@ fs.writeFileSync(trFile, [
     { type: "tool_result", tool_use_id: "t4", content: bigBody },
   ] } }),
 ].join("\n") + "\n");
+// The LARGE transcript: enough ~800-char turns that the whole thing far exceeds one page char budget
+// (so it spans multiple pages). Each turn's text is index-stamped so paging order / no-overlap is checkable.
+const PAGE_TURN_COUNT = 130;
+const pageFile = engineTranscriptPath(repo, "eng-page-1");
+fs.mkdirSync(path.dirname(pageFile), { recursive: true });
+fs.writeFileSync(pageFile, Array.from({ length: PAGE_TURN_COUNT }, (_, i) =>
+  JSON.stringify({ type: i % 2 === 0 ? "user" : "assistant", message: { content: [
+    { type: "text", text: `turn-${String(i).padStart(4, "0")} ${"x".repeat(800)}` },
+  ] } })).join("\n") + "\n");
 // The prefix-resolution session's engine transcript (so a unique 8-char prefix resolves to real turns).
 const prefixFile = engineTranscriptPath(repo, "eng-prefix-1");
 fs.mkdirSync(path.dirname(prefixFile), { recursive: true });
@@ -217,14 +228,18 @@ try {
   const trTurns = await call("transcript_read", { projectId: "pOrd", sessionId: "TR1" });
   check("(b5) transcript_read: tool_result turns are present", Array.isArray(trTurns) && trTurns.length === 4);
   const trText = (trTurns ?? []).map((t) => t.text).join("\n");
-  check("(b5) NOT a bare placeholder — no turn is the old 13-char \"↳ tool result\" stub",
-    (trTurns ?? []).every((t) => t.text.trim() !== "↳ tool result"));
+  check("(b5) NOT a bare placeholder — no turn is the old \"-> tool result\" stub",
+    (trTurns ?? []).every((t) => t.text.trim() !== "-> tool result"));
   check("(b5) small structured return (string form) comes through intact (delivered flag / error code / exit status)",
     /"delivered":false/.test(trText) && /"errorCode":"E_TIMEOUT"/.test(trText) && /"exitStatus":1/.test(trText));
   check("(b5) small structured return (array-of-blocks form) comes through intact",
     /"ok":true,"merged":2/.test(trText));
   check("(b5) an is_error tool_result is flagged AND its error string is preserved",
-    /↳ tool result \(error\)/.test(trText) && /fatal: not a git repository/.test(trText));
+    /-> tool result \(error\)/.test(trText) && /fatal: not a git repository/.test(trText));
+  // (b5b) cp1252-SAFETY — OUR injected turn markup is pure ASCII so a downstream char-slice / print of
+  // the transcript on a Windows cp1252 console can't crash on a non-ASCII marker glyph (the "↳"/"⚙" hazard).
+  check("(b5b) rendered tool markers are ASCII-only (no non-ASCII marker glyphs in Loom's own markup)",
+    (trTurns ?? []).every((t) => [...t.text].every((ch) => ch.codePointAt(0) < 128)));
   // The oversized body is truncated to the cap (it appears, but bounded — not the full +500 over-cap blob).
   const bigTurn = (trTurns ?? []).find((t) => /X{100}/.test(t.text));
   check("(b5) an OVERSIZED tool_result body is TRUNCATED to the cap (bounded, with a truncation marker)",
@@ -269,6 +284,49 @@ try {
   const reallyMissing = await call("transcript_read", { projectId: "pOrd", sessionId: "ffffffff-dead-beef-0000-000000000000" });
   check("(b4) transcript_read: a long, genuinely-unknown id → generic \"session not found\" (still distinct)",
     reallyMissing.error === "session not found");
+
+  // (b6) transcript_read PAGINATION — a large transcript reads in bounded pages that fit the token cap,
+  // and paging start → nextOffset → … → null covers the WHOLE transcript with no gaps/overlaps. ---------
+  // A small transcript with NO paging arg still returns the bare turns array (backward compat).
+  check("(b6) small transcript, no paging arg → bare turns ARRAY (backward compat)",
+    Array.isArray(liveTurns) && liveTurns.length === 2);
+  // The LARGE transcript with NO paging arg can't fit one page → returns the self-describing ENVELOPE
+  // (NOT silently truncated to a bare array): a bounded page + totalTurns + a numeric nextOffset.
+  const firstPage = await call("transcript_read", { projectId: "pOrd", sessionId: "PAGE1" });
+  check("(b6) large transcript, no paging arg → page ENVELOPE (not a silently-truncated bare array)",
+    !Array.isArray(firstPage) && Array.isArray(firstPage.turns) && firstPage.totalTurns === PAGE_TURN_COUNT);
+  check("(b6) the first page is BOUNDED — fewer turns than the whole, within the char budget, more to come",
+    firstPage.turns.length > 0 && firstPage.turns.length < PAGE_TURN_COUNT &&
+    JSON.stringify(firstPage.turns).length <= TRANSCRIPT_PAGE_CHAR_BUDGET &&
+    typeof firstPage.nextOffset === "number" && firstPage.offset === 0);
+  // Page deterministically from offset 0 via nextOffset until null; accumulate.
+  const collected = [];
+  let off = 0, pages = 0, guard = 0;
+  for (;;) {
+    if (++guard > PAGE_TURN_COUNT + 5) { check("(b6) paging terminates (guard)", false); break; }
+    const pg = await call("transcript_read", { projectId: "pOrd", sessionId: "PAGE1", offset: off });
+    pages++;
+    check(`(b6) page @${off}: an explicit offset always returns the envelope, every page within the char budget`,
+      !Array.isArray(pg) && pg.offset === off && pg.returned === pg.turns.length &&
+      JSON.stringify(pg.turns).length <= TRANSCRIPT_PAGE_CHAR_BUDGET);
+    for (const t of pg.turns) collected.push(t);
+    if (pg.nextOffset === null) break;
+    check(`(b6) page @${off}: nextOffset advances past this page (no overlap, no gap)`, pg.nextOffset === off + pg.returned);
+    off = pg.nextOffset;
+  }
+  check("(b6) paging took MORE THAN ONE page (the transcript genuinely exceeded a single page)", pages > 1);
+  check("(b6) paging covered the WHOLE transcript exactly — right count, in order, no gaps/overlaps",
+    collected.length === PAGE_TURN_COUNT &&
+    collected.every((t, i) => t.text.startsWith(`turn-${String(i).padStart(4, "0")} `)));
+  // turnRange reads a specific window; a small-enough window comes back whole (nextOffset null).
+  const windowed = await call("transcript_read", { projectId: "pOrd", sessionId: "PAGE1", turnRange: [3, 6] });
+  check("(b6) turnRange [3,6) returns exactly that window (start-inclusive, end-exclusive), complete",
+    !Array.isArray(windowed) && windowed.offset === 3 && windowed.returned === 3 && windowed.nextOffset === null &&
+    windowed.turns.every((t, i) => t.text.startsWith(`turn-${String(i + 3).padStart(4, "0")} `)));
+  // limit caps turns-per-page; the char budget may cap even tighter (returned ≤ limit, nextOffset still set).
+  const limited = await call("transcript_read", { projectId: "pOrd", sessionId: "PAGE1", limit: 5 });
+  check("(b6) limit:5 returns at most 5 turns and points at the next page",
+    !Array.isArray(limited) && limited.returned <= 5 && limited.returned > 0 && limited.nextOffset === limited.returned);
 
   // audit_file_finding → files a structured task on the RESERVED Platform board.
   const tasksBefore = db.listTasks("pHome").length;
