@@ -382,9 +382,11 @@ export type OrchestrationEventKind =
   | "spawn_worker" | "message_worker" | "worker_report" | "stop_worker"
   | "recycle_begin" | "recycle_complete" | "merge_request" | "merge_done"
   | "merge_rejected" | "build_gate" | "kill_switch" | "schedule_fired"
-  // worker_report(done) PRE-CHECK refusal (board card 907b9f50): a worker reported done with UNCOMMITTED
-  // work in its worktree — caught at the source, the task kept in_progress (not moved to review). `detail`
-  // carries the reason ("uncommitted") + the named files. Composes with the divergent-branch merge_rejected.
+  // worker_report(done) PRE-CHECK refusal (board cards 907b9f50, dcb25bd9): a worker reported done but was
+  // refused at the source — `detail.reason` discriminates: "uncommitted" (UNCOMMITTED work in its worktree,
+  // + the named files) or "pending-direction" (UNRESOLVED manager direction still queued, + the queued
+  // count). Either way the task is kept in_progress (not moved to review). Composes with the divergent-
+  // branch merge_rejected.
   | "worker_report_rejected"
   | "wake_scheduled" | "wake_fired" | "wake_dropped" | "idle_report" | "idle_escalated"
   // Busy-worker stuck watchdog (BusyWorkerWatcher): a LIVE worker has been `busy` in a single

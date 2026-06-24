@@ -2067,6 +2067,33 @@ export class SessionService {
     // check can never wedge a legitimate done. Only the AFFIRMATIVE uncommitted signal refuses.
     let warning: string | undefined;
     if (report.status === "done") {
+      // PENDING-DIRECTION PRE-CHECK (board card dcb25bd9): REFUSE a done-report while the worker still has
+      // UNRESOLVED manager direction queued. The real incident: a worker raced to `done` on a SUPERSEDED
+      // design and committed it BEFORE consuming the manager's queued redirects — "finishing" the wrong
+      // thing. We gate on MANAGER-origin direction only (detail.sender === the worker's own manager), read
+      // from the durable `session_message_queued` events: origin-accurate, because watcher/system nudges go
+      // out via the non-durable enqueue and never create these. A message held mid-turn is unresolved
+      // precisely DURING the racing turn (it only resolves once the worker ends a turn and the FIFO drains),
+      // so refusing here forces the worker to end its turn, drain the (coalesced) direction into its next
+      // turn, act on it, THEN re-report. Mirrors the uncommitted-files refusal shape exactly (task NOT moved).
+      if (managerSessionId) {
+        const pending = this.db
+          .listUnresolvedQueuedMessagesForWorker(workerSessionId)
+          .filter((e) => e.detail?.sender === managerSessionId);
+        if (pending.length > 0) {
+          const error =
+            `worker_report(done) REFUSED — you have ${pending.length} UNRESOLVED instruction(s) queued from your manager that you have NOT consumed yet. ` +
+            `These may SUPERSEDE the work you're about to report (the incident this guards: a worker committed a superseded design before reading the manager's redirect). ` +
+            `End this turn so the queued manager direction drains into your next turn, act on it, THEN re-report done. Your task stays in_progress.`;
+          this.db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(),
+            managerSessionId, workerSessionId, taskId, kind: "worker_report_rejected",
+            detail: { reason: "pending-direction", queued: pending.length },
+          });
+          // `dropped`: nothing routed, the task was NOT moved (stays in_progress to drain + re-report).
+          return { reported: false, refused: true, error, deliveryStatus: "dropped" };
+        }
+      }
       const project = this.db.getProject(worker.projectId);
       const worktreePath = worker.worktreePath ?? worker.cwd;
       if (project && worktreePath && worker.branch && fs.existsSync(worktreePath)) {

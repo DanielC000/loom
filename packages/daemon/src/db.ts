@@ -1632,6 +1632,26 @@ export class Db {
       "SELECT 1 FROM orchestration_events WHERE kind = 'session_message_delivered' AND json_extract(detail_json, '$.msgId') = ? LIMIT 1",
     ).get(msgId);
   }
+  /**
+   * Like listUndeliveredQueuedMessages but SCOPED to one recipient worker (card dcb25bd9): every unresolved
+   * `session_message_queued` event whose recipient (worker_session_id) is this worker — i.e. queued
+   * direction that was HELD and never handed to it. The worker-done guard (workerReport) reads this to
+   * REFUSE a done-report while manager direction is still pending, then narrows by origin (detail.sender ===
+   * the worker's manager) so platform/cross-tree sends don't gate. Same msgId anti-join + FIFO order as the
+   * unscoped scan; watcher/system nudges use the non-durable enqueue and never appear here (origin-accurate).
+   */
+  listUnresolvedQueuedMessagesForWorker(workerSessionId: string): OrchestrationEvent[] {
+    return (this.db.prepare(
+      `SELECT * FROM orchestration_events
+         WHERE kind = 'session_message_queued'
+           AND worker_session_id = ?
+           AND COALESCE(json_extract(detail_json, '$.msgId'), '') NOT IN (
+             SELECT COALESCE(json_extract(detail_json, '$.msgId'), '')
+               FROM orchestration_events WHERE kind = 'session_message_delivered'
+           )
+       ORDER BY ts, rowid`,
+    ).all(workerSessionId) as Row[]).map(toOrchestrationEvent);
+  }
 
   // --- tasks ---
   listTasks(projectId: string): Task[] {
