@@ -36,6 +36,7 @@ const HERMETIC = [
 
   "pty-busy-drain", "pty-composer-dirty", "pty-queue-mutations", "pty-queue-rest", "pty-resume-readiness", "pty-stop-queue", "spawn-env", "queued-message-durability", "graceful-stop", "resume-mode-cycles", "resume-mode-detect", "resume-mode-feedback", "shell-terminal",
   "db-backup",
+  "my-context-gate", // PL Auditor finding #9: my_context folds in the RESOLVED project gateCommand, READ-ONLY (no set/propose surface)
 ];
 
 // NOT run here (require a human-started isolated daemon and/or a real `claude` login, or are helpers):

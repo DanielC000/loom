@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { contextWindowForModel, resolveProfile, type SessionRole } from "@loom/shared";
+import { contextWindowForModel, resolveConfig, resolveProfile, type SessionRole } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript } from "../sessions/transcript.js";
@@ -30,10 +30,38 @@ export class OrchestrationMcpRouter {
   }
 
   /**
+   * READ-ONLY projection of the caller's project RESOLVED gateCommand (the build/DoD gate run in a
+   * worker's worktree before merge), folded into `my_context` so a manager/worker can SEE the gate
+   * without a new tool. Resolved through the ONE config mechanism (`resolveConfig`) — never the default
+   * ad hoc — so a per-project override or human PATCH is reflected with no daemon restart.
+   *
+   * TRUST BOUNDARY — this is READ-ONLY by design (PL Auditor finding #9, signed off on option (b)).
+   * `gateCommand` runs arbitrary host shell at daemon privilege, so it stays HUMAN-only-to-SET (same
+   * class as the vault/git writers + alertWebhook). NO set/propose/confirm-queue surface exists here.
+   * When NO gate is configured (the platform default is the empty string), this returns an explicit
+   * `configured:false` + a note so the manager ASKS THE OWNER to set one (a human action) rather than
+   * hand-rolling a gate string into a worker's DoD.
+   */
+  private resolvedGateCommand(projectId: string | undefined):
+    | { configured: true; command: string }
+    | { configured: false; command: null; note: string } {
+    const project = projectId ? this.db.getProject(projectId) : undefined;
+    const command = resolveConfig(project?.config).orchestration.gateCommand;
+    if (command && command.trim() !== "") return { configured: true, command };
+    return {
+      configured: false,
+      command: null,
+      note: "none configured — this project has no build/DoD gateCommand. Ask the OWNER to set one " +
+        "(a HUMAN-only action; agents cannot set it). Do NOT hand-roll a gate command into a worker's DoD.",
+    };
+  }
+
+  /**
    * The caller's OWN measured context occupancy (server-derived from the URL-path session id — a
    * session can only ever read itself, so cross-session reads are impossible). Reuses the value the
    * Stop-time measurement path persists (`ctx_input_tokens`, via sessions/context.ts) — NO new
-   * measurement. Returns `pct: null` + a note when not yet measured (never a fake 0%).
+   * measurement. Returns `pct: null` + a note when not yet measured (never a fake 0%). Also folds in the
+   * project's RESOLVED `gateCommand` (READ-ONLY — see resolvedGateCommand).
    */
   private myContext(sessionId: string): Record<string, unknown> {
     const s = this.db.getSession(sessionId);
@@ -41,8 +69,9 @@ export class OrchestrationMcpRouter {
     const contextWindow = contextWindowForModel(model);
     const ctxInputTokens = s?.ctxInputTokens ?? null;
     const measuredAt = s?.ctxUpdatedAt ?? null;
+    const gateCommand = this.resolvedGateCommand(s?.projectId);
     if (ctxInputTokens == null) {
-      return { ctxInputTokens: null, contextWindow, pct: null, model, measuredAt,
+      return { ctxInputTokens: null, contextWindow, pct: null, model, measuredAt, gateCommand,
         note: "context not measured yet (no completed turn) — occupancy unknown" };
     }
     return {
@@ -51,6 +80,7 @@ export class OrchestrationMcpRouter {
       pct: Math.round((ctxInputTokens / contextWindow) * 100),
       model,
       measuredAt,
+      gateCommand,
     };
   }
 
@@ -61,10 +91,13 @@ export class OrchestrationMcpRouter {
       {
         description:
           "Read YOUR OWN context occupancy (no args — server-derived from your session). Returns " +
-          "{ctxInputTokens, contextWindow, pct, model, measuredAt}: pct is your measured context size " +
-          "as a percentage of your model's window. Use it at a clean seam to self-assess — a manager to " +
-          "decide whether to recycle_me, a worker to worker_report that it's getting heavy. If not yet " +
-          "measured, pct is null with a note (not a fake 0).",
+          "{ctxInputTokens, contextWindow, pct, model, measuredAt, gateCommand}: pct is your measured " +
+          "context size as a percentage of your model's window. Use it at a clean seam to self-assess — " +
+          "a manager to decide whether to recycle_me, a worker to worker_report that it's getting heavy. " +
+          "If not yet measured, pct is null with a note (not a fake 0). `gateCommand` is the project's " +
+          "RESOLVED build/DoD gate, READ-ONLY: {configured:true, command} when set, else " +
+          "{configured:false, command:null, note} — when unconfigured, ASK THE OWNER to set one (a " +
+          "human-only action); never hand-roll a gate command into a worker's DoD.",
         inputSchema: {},
       },
       async () => ok(this.myContext(sessionId)),
