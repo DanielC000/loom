@@ -56,6 +56,12 @@ export function resolveWebDistDir(): string {
 export const RELAY_SCRIPT = path.join(__dirname, "..", "assets", "hook-relay.mjs");
 /** vault-lint.mjs (Pillar D PostToolUse hook) ships as an asset too. */
 export const VAULT_LINT_SCRIPT = path.join(__dirname, "..", "assets", "vault-lint.mjs");
+/**
+ * ensure-obsidian.mjs (Obsidian auto-start vault preflight) ships as an asset too. Injected into a
+ * session's env as LOOM_OBSIDIAN_PREFLIGHT only when obsidian.autoStart is on, so a vault skill can run
+ * `node "$LOOM_OBSIDIAN_PREFLIGHT"` before its `obsidian` CLI calls (self-heals or falls back to FS).
+ */
+export const ENSURE_OBSIDIAN_SCRIPT = path.join(__dirname, "..", "assets", "scripts", "ensure-obsidian.mjs");
 
 export const PORT = Number(process.env.LOOM_PORT || 4317);
 

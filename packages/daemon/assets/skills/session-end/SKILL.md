@@ -21,6 +21,14 @@ prose. The daemon auto-commits the vault — never run manual vault git.
    prioritized backlog, key decisions, where things stand. A successor should be able to read it cold.
 5. **Summary** — a short, factual wrap-up: what shipped, what's verified, what's left.
 
+## Vault preflight (Obsidian auto-start)
+
+If a step uses the `obsidian` CLI (it needs the Obsidian DESKTOP app running) and the env var
+**`LOOM_OBSIDIAN_PREFLIGHT`** is set, run it FIRST — `node "$LOOM_OBSIDIAN_PREFLIGHT"` — to self-heal a
+down Obsidian (launch + poll-until-ready, bounded). Opt-in (set only when the project enabled
+`obsidian.autoStart`) and **default-safe**: on disabled/headless/not-installed/timeout it reports a
+non-`ready` status and you fall back to **direct filesystem** writes of the vault — never block on it.
+
 ## By role
 
 - **Worker:** finish with `worker_report` — `done` (one-line summary + key decisions) or `blocked`

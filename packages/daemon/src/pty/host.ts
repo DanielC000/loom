@@ -11,7 +11,7 @@ import { ensureTrusted } from "./claude-config.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { detectUsageLimit, rateLimitedUntil } from "../orchestration/usage-limit.js";
-import { PORT, LOGS_DIR } from "../paths.js";
+import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT } from "../paths.js";
 
 const RING_CAP_BYTES = 256 * 1024;
 /**
@@ -903,6 +903,14 @@ export class PtyHost {
     // Inherited env (CLAUDE_*/CLAUDECODE scrubbed) + sessionEnv merge + the three git-safety vars that
     // keep an unattended worker pty from wedging on a pager / credential prompt. See buildSpawnEnv.
     const env = buildSpawnEnv(process.env, opts.sessionEnv);
+    // Obsidian auto-start: when the resolved config turned it on (LOOM_OBSIDIAN_AUTOSTART rode in via
+    // sessionEnv → obsidianSessionEnv), hand the vault preflight helper its ABSOLUTE path so a vault skill
+    // can `node "$LOOM_OBSIDIAN_PREFLIGHT"`. The asset path is daemon-side (not knowable in browser-pure
+    // shared), so it's injected HERE, the single createPty chokepoint. Additive-when-off: with autoStart
+    // off the var is absent and every existing spawn's env is byte-identical. A deliberate override wins.
+    if (env.LOOM_OBSIDIAN_AUTOSTART === "1" && !env.LOOM_OBSIDIAN_PREFLIGHT) {
+      env.LOOM_OBSIDIAN_PREFLIGHT = ENSURE_OBSIDIAN_SCRIPT;
+    }
 
     // eslint-disable-next-line no-console
     console.log(`[pty] spawn ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${opts.resumeId ?? "none"} args=${JSON.stringify(args)}`);

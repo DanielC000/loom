@@ -27,6 +27,15 @@ project id anywhere; it's derived server-side.
    block; skim the latest design/task notes under `<vaultRoot>/Projects/<Project>/` (by absolute path,
    never Glob) for decisions and rationale.
 
+## Vault preflight (Obsidian auto-start)
+
+If a step uses the `obsidian` CLI (it needs the Obsidian DESKTOP app running, not just the REST API) and
+the env var **`LOOM_OBSIDIAN_PREFLIGHT`** is set, run it FIRST — `node "$LOOM_OBSIDIAN_PREFLIGHT"` — to
+self-heal a down Obsidian (launch + poll-until-ready, bounded). It's opt-in (only set when the project
+enabled `obsidian.autoStart`) and **default-safe**: on disabled/headless/not-installed/timeout it prints a
+non-`ready` status and you simply fall back to **direct filesystem** reads of the vault (by absolute path)
+— never block on it. Reading vault notes by path (the steps above) needs no preflight.
+
 ## Brief
 
 Summarize concisely — only what's needed to resume, not an exhaustive report:

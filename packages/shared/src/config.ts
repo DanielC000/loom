@@ -88,6 +88,29 @@ export interface PtyGeometry {
 }
 
 /**
+ * Obsidian auto-start (self-healing vault tooling). The `obsidian` CLI the vault skills use needs the
+ * Obsidian DESKTOP PROCESS running (NOT the Local REST API — port 27124 can be down yet the CLI works
+ * once the process is up). When `autoStart` is on, a session's vault preflight helper
+ * (`assets/scripts/ensure-obsidian.mjs`) launches Obsidian if it's found down, then polls the CLI until
+ * ready — falling back to direct filesystem access when disabled/headless/not-installed/launch-timeout
+ * (NEVER a hard error). Plumbed to the helper as session env (`LOOM_OBSIDIAN_AUTOSTART` /
+ * `LOOM_OBSIDIAN_PATH`) by resolveConfig — see `obsidianSessionEnv`. Default OFF (opt-in; Loom ships to
+ * public npm, where a daemon-launched GUI process must be deliberately enabled).
+ */
+export interface ObsidianConfig {
+  /** Launch Obsidian when the vault CLI finds it down. Default false (opt-in). */
+  autoStart: boolean;
+  /**
+   * Override path to the Obsidian executable / `.app` bundle (the helper's OS-aware default is used when
+   * absent). HUMAN-ONLY: this is an arbitrary host EXECUTABLE the daemon-spawned preflight launches, so —
+   * exactly like `gateCommand` — the agent-facing config validator REJECTS it (only the human REST path
+   * accepts a `path`). `autoStart` alone (a boolean using the OS-default install location) stays
+   * agent-settable, so the Setup operator can enable the convenience without the host-launch escape hatch.
+   */
+  path?: string;
+}
+
+/**
  * Outbound alert webhook (Richer-notifications, external delivery). When set, the daemon POSTs a
  * small JSON payload to `url` on each orchestration event whose `kind` is in `events`, so the human
  * is alerted OUTSIDE the UI (a generic webhook works for Slack/Discord incoming-webhook URLs + any
@@ -327,6 +350,8 @@ export interface ResolvedConfig {
    * (flags doc-hygiene anti-patterns on .md vault writes). Default true; set false to disable.
    */
   docLint: boolean;
+  /** Obsidian auto-start (self-healing vault tooling). Default OFF — see ObsidianConfig. */
+  obsidian: ObsidianConfig;
 }
 
 /** Per-project overrides. Deep-partial of ResolvedConfig; anything omitted inherits the default. */
@@ -341,6 +366,7 @@ export interface ProjectConfigOverride {
   // NOTE: no `platform` key either — platform tuning is daemon-GLOBAL (one shared daemon), supplied as
   // resolveConfig's SEPARATE 2nd arg (PlatformConfigOverride), never nested in a per-project override.
   docLint?: boolean;
+  obsidian?: Partial<ObsidianConfig>;
 }
 
 /**
@@ -403,7 +429,24 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     timeouts: { gitOpMs: 15000, gitLocalMs: 15000, gitPushMs: 45000, provisionMs: 180000, busyStaleMs: 300000, runMs: 600000 },
   },
   docLint: true, // Pillar D vault-lint hook on by default
+  // Obsidian auto-start OFF by default: opt-in per project (a daemon-launched GUI process is deliberate).
+  obsidian: { autoStart: false },
 };
+
+/**
+ * Derive the session-env vars the vault preflight helper (`assets/scripts/ensure-obsidian.mjs`) reads
+ * from a RESOLVED ObsidianConfig. Returns `{}` when `autoStart` is OFF (the default), so an off project's
+ * resolved `sessionEnv` is BYTE-IDENTICAL to before this feature — additive-when-off, mirroring the
+ * browserTesting discipline. When ON it emits `LOOM_OBSIDIAN_AUTOSTART=1` plus `LOOM_OBSIDIAN_PATH` when a
+ * path override is set. (The daemon adds `LOOM_OBSIDIAN_PREFLIGHT` — the absolute helper path — at the
+ * spawn seam, since that path is daemon-side and not knowable in browser-pure `shared`.)
+ */
+export function obsidianSessionEnv(o: ObsidianConfig): Record<string, string> {
+  if (!o.autoStart) return {};
+  const env: Record<string, string> = { LOOM_OBSIDIAN_AUTOSTART: "1" };
+  if (o.path) env.LOOM_OBSIDIAN_PATH = o.path;
+  return env;
+}
 
 // --- Profiles: the resolved "who" ------------------------------------------------------
 
@@ -570,11 +613,18 @@ export function resolveConfig(
     const base = structuredClone(d);
     if (envIdle !== undefined) base.orchestration.idleNudgeMinutes = envIdle;
     if (envBackup !== undefined) base.backup.intervalMinutes = envBackup;
+    // obsidian defaults OFF on this fast path → obsidianSessionEnv({autoStart:false}) is {} → base.sessionEnv
+    // stays byte-identical to today (no injection). Nothing to do; left explicit for the next reader.
     // Daemon-global tuning still applies on the no-(project)-override fast path: the global override
     // (2nd arg) + LOOM_* watcher env layer beneath, so `resolveConfig(undefined, po)` honors them.
     base.platform = resolvePlatform(platformOverride);
     return base;
   }
+  // Resolve the obsidian field (autoStart + optional path override), then derive its session-env so the
+  // preflight helper reads it via the EXISTING sessionEnv transport. path is optional — only carried when set.
+  const obsidian: ObsidianConfig = { autoStart: override.obsidian?.autoStart ?? d.obsidian.autoStart };
+  const obsidianPath = override.obsidian?.path ?? d.obsidian.path;
+  if (obsidianPath !== undefined) obsidian.path = obsidianPath;
   return {
     kanbanColumns: override.kanbanColumns ?? structuredClone(d.kanbanColumns),
     permission: {
@@ -587,7 +637,9 @@ export function resolveConfig(
       cols: override.pty?.cols ?? d.pty.cols,
       rows: override.pty?.rows ?? d.pty.rows,
     },
-    sessionEnv: { ...d.sessionEnv, ...(override.sessionEnv ?? {}) },
+    // obsidian-derived env goes LAST so the dedicated `obsidian` config field is authoritative over a
+    // manually-set sessionEnv key (when autoStart is OFF this spread is `{}` → byte-identical to before).
+    sessionEnv: { ...d.sessionEnv, ...(override.sessionEnv ?? {}), ...obsidianSessionEnv(obsidian) },
     orchestration: {
       gateCommand: override.orchestration?.gateCommand ?? d.orchestration.gateCommand,
       // Per-project timeout pairing gateCommand (no env layer). `??` so an explicit value survives.
@@ -620,5 +672,6 @@ export function resolveConfig(
     // Daemon-global (no per-project layer): global override (2nd arg) ?? LOOM_* watcher env ?? default.
     platform: resolvePlatform(platformOverride),
     docLint: override.docLint ?? d.docLint,
+    obsidian,
   };
 }

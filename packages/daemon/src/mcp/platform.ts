@@ -75,6 +75,14 @@ const orchestrationOverride = z.object({
   // honored as a real value (disable), same rationale as the leashes above.
   crashRecoveryMaxAttempts: z.number().int().min(0).max(100).optional(),
 }).strict();
+// Obsidian auto-start. `autoStart` (boolean, OS-default install location) is benign and stays on the
+// agent path; `path` is an arbitrary host EXECUTABLE the daemon-spawned preflight launches — host-launch
+// capable, so it's HUMAN-only (dropped from the agent shape below, exactly like gateCommand). `.strict()`
+// then makes an agent's `path` a REJECTED unknown key.
+const obsidianOverride = z.object({
+  autoStart: z.boolean().optional(),
+  path: z.string().min(1).optional(),
+}).strict();
 const projectConfigOverrideSchema = z.object({
   kanbanColumns: z.array(kanbanColumn).optional(),
   permission: permissionOverride.optional(),
@@ -82,6 +90,7 @@ const projectConfigOverrideSchema = z.object({
   sessionEnv: z.record(z.string(), z.string()).optional(),
   orchestration: orchestrationOverride.optional(),
   docLint: z.boolean().optional(),
+  obsidian: obsidianOverride.optional(),
 }).strict();
 
 /**
@@ -101,8 +110,12 @@ const projectConfigOverrideSchema = z.object({
 const agentOrchestrationOverride = orchestrationOverride
   .omit({ gateCommand: true, gateCommandTimeoutMs: true, alertWebhook: true, alertWebhookTimeoutMs: true })
   .strict();
+// Agent-facing obsidian shape: `autoStart` only. `path` is omitted (host-launch capable, human-only), so
+// `.strict()` REJECTS an agent's `obsidian.path` — the agent can flip the convenience on but can't point
+// the daemon-spawned preflight at an arbitrary executable. Mirrors the gateCommand/alertWebhook split above.
+const agentObsidianOverride = obsidianOverride.omit({ path: true }).strict();
 const agentProjectConfigOverrideSchema = projectConfigOverrideSchema
-  .extend({ orchestration: agentOrchestrationOverride.optional() })
+  .extend({ orchestration: agentOrchestrationOverride.optional(), obsidian: agentObsidianOverride.optional() })
   .strict();
 
 function formatZodIssues(error: z.ZodError): string {
