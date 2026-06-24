@@ -14,6 +14,7 @@ import { nextFireAt } from "../orchestration/cron.js";
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
+import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData, skillWriteInputSchema } from "./skillTools.js";
 
 // Same envelope as the task / orchestration MCP servers.
@@ -374,13 +375,22 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_agents",
       {
-        description: "List agents across the platform. Optional projectId narrows to one project (unknown id ⇒ []). With no filter, aggregates the agents of every live project (incl. the reserved home). Returns lightweight agent rows.",
-        inputSchema: { projectId: z.string().optional() },
+        description: "List agents across the platform. Optional projectId narrows to one project (unknown id ⇒ []). With no filter, aggregates the agents of every live project (incl. the reserved home). DEFAULT returns a lightweight SUMMARY per agent (id, projectId, name, position, profileId, endpoint) so the aggregate stays bounded; the heavy startupPrompt + ioSchema are DROPPED (a full aggregate overflowed at ~104K chars). Pass full:true for whole agent rows. Summary reads are capped at " + DEFAULT_AGENT_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
+        inputSchema: {
+          projectId: z.string().optional(),
+          full: z.boolean().optional(),
+          limit: z.number().int().positive().optional(),
+          offset: z.number().int().nonnegative().optional(),
+        },
       },
-      async ({ projectId }) => {
-        if (projectId !== undefined) return ok(db.listAgents(projectId));
+      async ({ projectId, full, limit, offset }) => {
         // No db.listAllAgents — aggregate across every live project (reuses listAllProjects + listAgents).
-        return ok(db.listAllProjects().flatMap((p) => db.listAgents(p.id)));
+        const all = projectId !== undefined
+          ? db.listAgents(projectId)
+          : db.listAllProjects().flatMap((p) => db.listAgents(p.id));
+        // Backstop the summary feed so an aggregate read can't overflow the tool-result cap with no limit.
+        const effLimit = limit ?? (full ? undefined : DEFAULT_AGENT_SUMMARY_CAP);
+        return ok(projectAgentList(all, { full, limit: effLimit, offset }));
       },
     );
 

@@ -10,6 +10,7 @@ import { isGitRepo } from "../git/reader.js";
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentProjectConfigOverride } from "./platform.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
+import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData } from "./skillTools.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
@@ -285,12 +286,20 @@ export class SetupMcpRouter {
     server.registerTool(
       "list_all_agents",
       {
-        description: "List agents across the platform. Optional projectId narrows to one project (unknown id ⇒ []). With no filter, aggregates the agents of every live project. Returns lightweight agent rows.",
-        inputSchema: { projectId: z.string().optional() },
+        description: "List agents across the platform. Optional projectId narrows to one project (unknown id ⇒ []). With no filter, aggregates the agents of every live project. DEFAULT returns a lightweight SUMMARY per agent (id, projectId, name, position, profileId, endpoint) so the aggregate stays bounded; the heavy startupPrompt + ioSchema are DROPPED. Pass full:true for whole agent rows. Summary reads are capped at " + DEFAULT_AGENT_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
+        inputSchema: {
+          projectId: z.string().optional(),
+          full: z.boolean().optional(),
+          limit: z.number().int().positive().optional(),
+          offset: z.number().int().nonnegative().optional(),
+        },
       },
-      async ({ projectId }) => {
-        if (projectId !== undefined) return ok(db.listAgents(projectId));
-        return ok(db.listAllProjects().flatMap((p) => db.listAgents(p.id)));
+      async ({ projectId, full, limit, offset }) => {
+        const all = projectId !== undefined
+          ? db.listAgents(projectId)
+          : db.listAllProjects().flatMap((p) => db.listAgents(p.id));
+        const effLimit = limit ?? (full ? undefined : DEFAULT_AGENT_SUMMARY_CAP);
+        return ok(projectAgentList(all, { full, limit: effLimit, offset }));
       },
     );
 

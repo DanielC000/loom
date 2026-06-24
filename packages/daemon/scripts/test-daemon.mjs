@@ -25,6 +25,8 @@ const HERMETIC = [
   "agent-runs-keys", "agent-runs-primitive", "agent-runs-rest", "agent-runs-idempotency", "agent-runs-caps", "agent-runs-spend", "agent-runs-hardening", "agent-runs-audit",
   "tasks-filter", "tasks-priority", "task-delete", "column-lifecycle", "column-presets", "preset-prompts", "preset-prompt-suggestions", "config-bounds", "config-rewire", "kanban-defaults", "transcript-encode", "alert-webhook",
   "session-archive", "session-list-summary", "all-archived-sessions", "periodic-snapshot", "shutdown-snapshot", "shutdown-endpoint", "mgmt-project-agent", "web-static-serve", "version", "cli-args", "cli-direct-invocation", "cli-service", "cli-channel", "update-check", "update-endpoint",
+  "mcp-list-budget", // PL Auditor finding #5: default list_all_agents + audit list_sessions fit the token budget
+
   "claude-config", "trust-lock", "spawn-args",
   "context-watcher", "context-stats", "recycle-handoff", "wake", "worker-reported-state", "crash-recovery-watcher", "busy-worker-watcher",
   "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull", "usage-status", "rate-limit-clear", "rate-limit-cascade",

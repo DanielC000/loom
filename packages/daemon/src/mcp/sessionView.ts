@@ -56,11 +56,16 @@ export function filterSessionsByState(
 }
 
 /**
- * Backstop cap on a DEFAULT (summary) cross-project session list so an `state:"all"`/`"exited"` history
- * read can't overflow the tool-result token cap even with no explicit limit. Callers opt past it with an
- * explicit limit/offset. full:true is an explicit heavy opt-in and is NOT capped here.
+ * Backstop cap on a DEFAULT (summary) cross-project session list so a `state:"all"`/`"exited"` (or audit
+ * `scope:"all"`, which keeps every archived row) read can't overflow the tool-result token cap with no
+ * explicit limit. Callers opt past it with an explicit limit/offset; full:true is an explicit heavy
+ * opt-in and is NOT capped here. SIZED BY MEASUREMENT, not a round number: the old 200 LIED — 200 summary
+ * rows ran ~71K chars at audit scope:all and still overflowed the cap (PL Auditor finding #5), forcing a
+ * manual re-issue at limit:40. A worst-case summary row is ~480 chars, so 50 rows ≈ 24K chars —
+ * comfortably under the ~48K-char "safely under the tool-result cap" figure the transcript pager uses
+ * (TRANSCRIPT_PAGE_CHAR_BUDGET), with ~2× headroom.
  */
-export const DEFAULT_SESSION_SUMMARY_CAP = 200;
+export const DEFAULT_SESSION_SUMMARY_CAP = 50;
 
 /**
  * Apply the shared MCP-layer list shape to an already-fetched, already-filtered session list:
