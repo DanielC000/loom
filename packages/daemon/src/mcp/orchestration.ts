@@ -6,6 +6,7 @@ import { contextWindowForModel, resolveConfig, resolveProfile, type SessionRole 
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript } from "../sessions/transcript.js";
+import { UsageLimitError } from "../orchestration/usage-awareness.js";
 
 // Same envelope as the task MCP server (mcp/server.ts).
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -221,8 +222,12 @@ export class OrchestrationMcpRouter {
           const worker = await sessions.spawnWorker(managerSessionId, { taskId, agentId, kickoffPrompt });
           return ok({ workerSessionId: worker.id, branch: worker.branch, worktreePath: worker.worktreePath });
         } catch (e) {
-          // Surface a refused spawn (paused / over-cap / bad task) to the manager as data, not an
-          // MCP protocol error — same envelope as the sibling lifecycle tools.
+          // A usage-limit refusal carries a STRUCTURED retry-after deadline (PL Auditor finding #7) so the
+          // manager can schedule a wake to it instead of guessing (and the daemon also auto-wakes it on
+          // hold-clear). Surface `retryAfter` alongside the message — NOT a bare string.
+          if (e instanceof UsageLimitError) return ok({ error: e.message, retryAfter: e.retryAfter });
+          // Other refusals (paused / over-cap / bad task) stay a bare { error } string — same envelope as
+          // the sibling lifecycle tools.
           return ok({ error: (e as Error).message });
         }
       },

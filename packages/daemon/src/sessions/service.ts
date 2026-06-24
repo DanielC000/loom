@@ -20,7 +20,8 @@ import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../r
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt } from "./manager-prompt.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
-import { isLikelyNearClaudeUsageLimit } from "../orchestration/usage-awareness.js";
+import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
+import { rateLimitDeadline } from "../orchestration/usage-limit.js";
 import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport } from "../orchestration/crash-recovery-watcher.js";
@@ -1515,8 +1516,30 @@ export class SessionService {
     if (this.control.isPaused(managerSessionId)) throw new Error("orchestration paused");
     // §19c: don't spawn a worker into a known usage-limited account (whole-queue awareness). The recency
     // window is the daemon-global `platform.rateLimit.recencyWindowMs`, resolved LIVE here (db in scope).
-    const recencyWindowMs = resolveConfig(undefined, this.db.getPlatformConfig()).platform.rateLimit.recencyWindowMs;
-    if (isLikelyNearClaudeUsageLimit(new Date(), recencyWindowMs)) throw new Error("usage limit active");
+    const rl = resolveConfig(undefined, this.db.getPlatformConfig()).platform.rateLimit;
+    const recencyWindowMs = rl.recencyWindowMs;
+    const usageNow = new Date();
+    if (isLikelyNearClaudeUsageLimit(usageNow, recencyWindowMs)) {
+      // STRUCTURED retry-after + AUTO-WAKE wiring (PL Auditor finding #7). The old bare
+      // `throw new Error("usage limit active")` left a spawn-blocked manager with no deadline (→ guesswork)
+      // and no auto-wake (→ the repro: THREE human "retry" pokes to clear one transient limit).
+      // (1) Derive the retry-after deadline from the SAME awareness boundary the check above used.
+      const retryAfter = getClaudeUsageLimitRetryAfter(usageNow, recencyWindowMs)?.toISOString();
+      // (2) Register THIS manager into the EXISTING rate-limit park machinery so it is AUTO-WOKEN on
+      // hold-clear with no human poke — NOT a parallel mechanism: the clear-usage-hold cascade
+      // (gateway `/api/usage/clear-hold` → db.listRateLimited → pty.resumeAfterRateLimit) wakes it on a
+      // manual clear, and the RateLimitWatcher (db.listRateLimitEpisodes, deadline-armed) auto-resumes it
+      // once the reset passes. setRateLimitedUntil stamps the resume-at (so the watcher waits, not resumes,
+      // until then); armRateLimitDeadline COALESCEs (a live StopFailure episode's give-up deadline wins).
+      // Skip the park if the limit raced to clear (retryAfter undefined) — nothing to wait for.
+      if (retryAfter) {
+        const knownReset = getClaudeExpectedResetAt(usageNow);
+        const giveUp = rateLimitDeadline(knownReset ? Math.floor(knownReset.getTime() / 1000) : undefined, usageNow, rl);
+        this.db.setRateLimitedUntil(managerSessionId, retryAfter, `usage limit active — worker_spawn deferred; resumes ${retryAfter}`);
+        this.db.armRateLimitDeadline(managerSessionId, giveUp);
+      }
+      throw new UsageLimitError(retryAfter);
+    }
     const liveWorkers = this.db.listWorkers(managerSessionId).filter((w) => w.processState === "live").length;
     const cap = config.orchestration.maxConcurrentWorkers;
     if (liveWorkers >= cap) throw new Error(`concurrency cap reached (${cap})`);

@@ -92,3 +92,44 @@ export function isLikelyNearClaudeUsageLimit(now: Date = new Date(), recencyWind
   if (Number.isNaN(hitAt.getTime())) return false;
   return now.getTime() - hitAt.getTime() < recencyWindowMs;
 }
+
+/**
+ * The instant the current usage limit is expected to clear — the RETRY-AFTER deadline. Derived from the
+ * SAME boundary `isLikelyNearClaudeUsageLimit` uses to decide "still limited", surfaced as a Date so a
+ * spawn-blocked manager can compute when to retry instead of guessing: a KNOWN future reset wins;
+ * otherwise the recency-window end (`lastRateLimitAt + recencyWindowMs`). Returns undefined exactly when
+ * `isLikelyNearClaudeUsageLimit` would return false (not currently limited / reset already passed).
+ */
+export function getClaudeUsageLimitRetryAfter(now: Date = new Date(), recencyWindowMs: number = RECENCY_WINDOW_MS): Date | undefined {
+  const state = readClaudeUsageState();
+  if (!state.lastRateLimitAt) return undefined;
+
+  if (state.lastResetsAt) {
+    const resetAt = new Date(state.lastResetsAt);
+    if (!Number.isNaN(resetAt.getTime())) {
+      if (now.getTime() > resetAt.getTime()) return undefined; // reset passed → not limited
+      return resetAt;                                          // known future reset = the retry-after
+    }
+  }
+
+  const hitAt = new Date(state.lastRateLimitAt);
+  if (Number.isNaN(hitAt.getTime())) return undefined;
+  const recencyEnd = new Date(hitAt.getTime() + recencyWindowMs);
+  return recencyEnd.getTime() > now.getTime() ? recencyEnd : undefined;
+}
+
+/**
+ * Structured refusal for a usage-limit-blocked `worker_spawn` (PL Auditor finding #7). Carries the
+ * retry-after deadline (ISO) so the MCP surface returns `{ error, retryAfter }` instead of the old bare
+ * `throw new Error("usage limit active")` string — a spawn-blocked manager can schedule a wake to that
+ * deadline rather than guess, and the daemon registers it for the clear-usage-hold auto-wake cascade.
+ * `retryAfter` is absent only in the degenerate race where the limit cleared between the check and the throw.
+ */
+export class UsageLimitError extends Error {
+  readonly retryAfter?: string; // ISO deadline
+  constructor(retryAfter?: string) {
+    super(retryAfter ? `usage limit active — retry after ${retryAfter}` : "usage limit active");
+    this.name = "UsageLimitError";
+    this.retryAfter = retryAfter;
+  }
+}
