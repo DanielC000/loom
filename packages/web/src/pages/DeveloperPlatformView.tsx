@@ -302,6 +302,12 @@ function fmtDur(startIso: string, endIso: string): string {
 // only) comes from audit_finding events resolved against the reserved board() — fetched only when
 // showFindings. Everything reuses EXISTING api methods — no new daemon/REST. The live+exited reserved
 // sessions are passed in (already filtered by the page); we add the archive locally.
+// How many runs the history renders by default. Each Lead recycle / audit run mints a NEW session, so the
+// run list grows without bound over the life of the daemon; capping the default view keeps the page
+// bounded. Capping ALSO bounds the per-row orchestrationEvents query fan-out (each RunRow mounts its own
+// query) — only the visible rows fetch until the human expands the list with "Show all".
+const DEFAULT_VISIBLE = 12;
+
 function RunHistory({ reservedProjectId, sessions, role, emptyLabel, showFindings = false }:
   { reservedProjectId: string; sessions: SessionListItem[]; role: SessionRole; emptyLabel: string; showFindings?: boolean }) {
   const archived = useQuery({ queryKey: ["allArchivedSessions"], queryFn: api.allArchivedSessions, refetchInterval: 8000 });
@@ -312,6 +318,8 @@ function RunHistory({ reservedProjectId, sessions, role, emptyLabel, showFinding
   // mounting N would hammer the daemon). Mirrors the Overview Fleet accordion's openId pattern.
   const [openId, setOpenId] = useState<string | null>(null);
   const toggle = (id: string) => setOpenId((cur) => (cur === id ? null : id));
+  // Default-bounded view: render only the most recent DEFAULT_VISIBLE runs unless the human expands.
+  const [showAll, setShowAll] = useState(false);
 
   const runs = useMemo(() => {
     const live = sessions.filter((s) => s.role === role); // already reserved-project + non-archived
@@ -322,12 +330,21 @@ function RunHistory({ reservedProjectId, sessions, role, emptyLabel, showFinding
   if (runs.length === 0) {
     return <Panel style={{ padding: 12 }}><span style={{ color: color.textMuted, fontSize: 12 }}>{emptyLabel}</span></Panel>;
   }
+  // Newest-first is preserved, so a LIVE run (top of the sort) always stays in the default window.
+  const visible = showAll ? runs : runs.slice(0, DEFAULT_VISIBLE);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {runs.map((run) => (
+      {visible.map((run) => (
         <RunRow key={run.id} run={run} schedules={schedules.data ?? []} tasks={board.data?.tasks ?? []}
           showFindings={showFindings} open={openId === run.id} onToggle={() => toggle(run.id)} />
       ))}
+      {runs.length > DEFAULT_VISIBLE && (
+        <button onClick={() => setShowAll((v) => !v)}
+          style={{ alignSelf: "flex-start", background: "transparent", border: `1px solid ${color.border}`, borderRadius: 4,
+            padding: "4px 10px", cursor: "pointer", fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
+          {showAll ? "Show fewer" : `Show all (${runs.length})`}
+        </button>
+      )}
     </div>
   );
 }
