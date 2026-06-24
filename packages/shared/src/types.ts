@@ -345,6 +345,22 @@ export interface Session {
   archivedAt?: string | null;
 }
 
+/**
+ * Routing outcome for an UPWARD report/escalation (worker_report → manager, platform_escalate → Lead).
+ * Replaces the old boolean `delivered`, which couldn't tell a durable queue from a genuine drop (the
+ * `{delivered:false}` ambiguity — board card fc9a27d5). The caller reads this to know whether to relax
+ * (it's durably routed) or act (it was dropped):
+ *   • `delivered-live` — a LIVE, idle parent received it as a turn NOW (it's already engaged).
+ *   • `queued`         — a LIVE-but-busy/parked parent has it HELD in its FIFO; it drains on the parent's
+ *                        next turn boundary (durable for the life of the process; re-driven on restart).
+ *   • `boarded`        — no live session to take it, but it is DURABLY PERSISTED (platform_escalate always
+ *                        files a board task; a worker_report records its event + a wake trigger so the
+ *                        crash-recovery watcher auto-resumes the parent). Surfaces later, never lost.
+ *   • `dropped`        — a genuine failure to route: there was no target to reach AND nothing durable will
+ *                        surface it (e.g. a parentless worker report). The ONLY value that warrants alarm.
+ */
+export type DeliveryStatus = "delivered-live" | "queued" | "boarded" | "dropped";
+
 /** Append-only orchestration audit record (the manager↔worker timeline). */
 export type OrchestrationEventKind =
   | "spawn_worker" | "message_worker" | "worker_report" | "stop_worker"

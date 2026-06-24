@@ -67,11 +67,14 @@ const lastTriggerOf = (events: OrchestrationEvent[]): OrchestrationEvent | undef
 };
 
 /**
- * Strand backstop (incident 22a44352): record the DURABLE `worker_report_undelivered` wake trigger when a
- * worker's report reached NOBODY because its parent manager had already exited. Called from
- * SessionService.workerReport ONLY after the framed notify came back `delivered:false` AND the manager row
- * is `exited` (a live-but-busy manager's queue drains on its next turn — not a strand; that case never gets
- * here). The watchdog then bounded-auto-resumes the manager via the SAME machinery as a `session_died`.
+ * Strand backstop (incident 22a44352; gate broadened by card fc9a27d5): record the DURABLE
+ * `worker_report_undelivered` wake trigger when a worker's report reached NO live FIFO. Called from
+ * SessionService.workerReport after the framed notify came back `boarded` — `delivered:false` with NO
+ * queue position, i.e. the manager's pty isn't alive (it idle-reaped after dispatching its last worker, or
+ * its pty is otherwise gone while the row still lags `live`). A live-but-busy/parked manager (`queued`,
+ * delivered:false WITH a position) is NOT a strand — its FIFO drains on its next turn — so that case never
+ * records a trigger. The watchdog then bounded-auto-resumes the manager (once its row is exited) via the
+ * SAME machinery as a `session_died`.
  *
  * Guards (mirroring recordUnexpectedExit) so we never record a useless trigger: the manager must be a
  * recoverable, resumable role with a captured engine id, not superseded by a recycle successor, and NOT

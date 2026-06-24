@@ -87,7 +87,7 @@ function cleanup(e) {
   // The worker reports done — this IS the terminal report. workerReport records + enqueues synchronously,
   // so even an immediate exit right after cannot lose it.
   const res = await e.sessions.workerReport("wkr-a", { status: "done", summary: "FAST-DONE" });
-  check("(a) the terminal worker_report reaches the LIVE manager (delivered:true)", res.reported === true && res.delivered === true);
+  check("(a) the terminal worker_report reaches the LIVE manager (delivered-live)", res.reported === true && res.deliveryStatus === "delivered-live");
   check("(a) the task moved → review (the report landed)", e.db.getTask("tk-a").columnKey === "review");
   check("(a) the manager actually received the framed worker-report", e.enqueued.some((x) => x.id === "mgr-a" && /worker-report/.test(x.text) && /FAST-DONE/.test(x.text)));
 

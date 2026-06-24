@@ -33,6 +33,7 @@ const HERMETIC = [
   "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull", "usage-status", "rate-limit-clear", "rate-limit-cascade",
   "skills-inject", "skills-subset-spawn", "skills-store-durability", "skills-publish-drift", "vault-lint", "vault-browser", "vault-writer", "git-writer", "git-identity-warning",
   "worker-diff", "worktrees", "worktree-provision", "spawn-recut-stale-branch", "merge-finalize-resilient", "merge-confirm-idempotent", "merge-review-diffstat", "merge-stranded-backstop", "worker-report-precheck", "worker-report-orphan-wake", "worker-exited-without-report", "worker-spawn-agent-gate", "worker-spawn-task-gate",
+  "worker-report-delivery-status", // card fc9a27d5: worker_report/platform_escalate DeliveryStatus enum + parked-parent wake
   "merge-orphaned-to-main",
 
   "pty-busy-drain", "pty-composer-dirty", "pty-queue-mutations", "pty-queue-rest", "pty-resume-readiness", "pty-stop-queue", "spawn-env", "queued-message-durability", "graceful-stop", "resume-mode-cycles", "resume-mode-detect", "resume-mode-feedback", "shell-terminal",

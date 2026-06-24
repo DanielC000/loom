@@ -7,7 +7,7 @@ import {
   resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY,
   type Session, type StopMode, type OrchestrationEvent, type Task,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
-  type AgentRun, type ColumnRole, type KanbanColumn,
+  type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
@@ -1672,7 +1672,7 @@ export class SessionService {
   platformEscalate(
     managerSessionId: string,
     input: { title: string; detail: string; severity?: string },
-  ): { taskId: string; projectId: string; delivered: boolean } {
+  ): { taskId: string; projectId: string; deliveryStatus: DeliveryStatus } {
     const caller = this.db.getSession(managerSessionId);
     if (!caller || caller.role !== "manager") throw new Error("platform_escalate is a manager-only surface");
     // HARDCODED target: the reserved Platform home — never an arbitrary projectId from the manager.
@@ -1719,13 +1719,15 @@ export class SessionService {
     // Additive best-effort live nudge: if a Lead session happens to be live, push a heads-up via the same
     // enqueue channel — but the board TASK is the durable source of truth (the Lead reads escalations as
     // tasks on its home board). This never builds a fragile live-only inbox; it just saves the Lead a poll.
-    let delivered = false;
+    // The board task is always created above, so the FLOOR is `boarded` (durably persisted, no live taker);
+    // a live Lead upgrades it to `delivered-live` (idle, took the turn) or `queued` (busy, held FIFO).
+    let deliveryStatus: DeliveryStatus = "boarded";
     const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live");
     if (liveLead) {
       const note = `[loom:escalation] ${originName} manager escalated a Loom issue → Platform board task ${task.id}: ${input.title} (severity: ${severity})`;
-      try { delivered = this.pty.enqueueStdin(liveLead.id, note).delivered; } catch { /* Lead not live/ready — the board task stands */ }
+      try { deliveryStatus = this.deliveryStatusFor(this.pty.enqueueStdin(liveLead.id, note)); } catch { /* Lead not live/ready — `boarded` stands */ }
     }
-    return { taskId: task.id, projectId: home.id, delivered };
+    return { taskId: task.id, projectId: home.id, deliveryStatus };
   }
 
   /**
@@ -1879,16 +1881,52 @@ export class SessionService {
   }
 
   /**
+   * Classify an `enqueueStdin` outcome into the DeliveryStatus enum (board card fc9a27d5). The host's
+   * three return shapes map 1:1 to the live-routing cases — `{delivered:true}` (idle, submitted now),
+   * `{delivered:false, position:N}` (live-but-busy/parked/not-ready, held FIFO), and `{delivered:false}`
+   * with NO position (the pty isn't alive at all). The not-alive case is `boarded` here: every caller of
+   * this helper persists a DURABLE record (a board task, or a worker_report event + wake trigger) before
+   * relying on it, so "no live taker" still means "durably routed, surfaces later", never lost.
+   */
+  private deliveryStatusFor(r: { delivered: boolean; position?: number }): DeliveryStatus {
+    if (r.delivered) return "delivered-live";
+    if (r.position !== undefined) return "queued";
+    return "boarded";
+  }
+
+  /**
+   * Parked-parent wake (board card fc9a27d5, the live repro): a manager that idle_reported `waiting`
+   * (→ idle policy `snoozed`) or `done`/`blocked_human` (→ `suppressed`) is SILENCED on the idle path —
+   * the Asleep-at-the-Wheel watcher won't re-engage it until the snooze window elapses. So a fresh worker
+   * report would otherwise only flip the derived `awaitingReview` flag and sit there until the manager
+   * happened to poll. RE-ARM it ('watching', snooze cleared, unanswered 0) so the idle path wakes it
+   * promptly to run the review→gate→merge it now has waiting — wiring the report into the SAME idle/wake
+   * machinery the manager parked itself with. No-op for an already-`watching` (or missing) manager, so a
+   * non-parked manager's byte-stream is unchanged. Pure DB + never throws (must not disturb the report).
+   */
+  private wakeParkedManagerOnReport(managerSessionId: string): void {
+    try {
+      const state = this.db.getIdleNudgeState(managerSessionId);
+      if (state && state.policy !== "watching") this.db.resetIdleNudgeState(managerSessionId);
+    } catch { /* never let the parked-wake disturb the report path */ }
+  }
+
+  /**
    * A worker reports to its manager (phase-2 §A3, the worker→manager direction). Moves the
    * worker's task by status, records the event, and notifies the manager via the busy-gated
    * queue — exactly the predecessor's role:notification semantics: if the manager is mid-turn the report
    * queues behind its running turn and drains on its next Stop. The caller IS the worker
    * (workerSessionId is derived server-side from the URL path), so there's no id to spoof.
+   *
+   * Returns a `deliveryStatus` enum (board card fc9a27d5) — `delivered-live` | `queued` | `boarded` |
+   * `dropped` — so the worker (and any consumer) can tell a durable route from a genuine drop, replacing
+   * the old ambiguous boolean `delivered`. It ALSO wakes a parked/snoozed manager (wakeParkedManagerOnReport)
+   * so the report reaches it instead of only flagging awaitingReview.
    */
   async workerReport(
     workerSessionId: string,
     report: { status: "done" | "blocked" | "progress"; summary: string; prUrl?: string; needs?: string },
-  ): Promise<{ reported: boolean; delivered: boolean; refused?: boolean; error?: string; uncommittedFiles?: string[]; warning?: string }> {
+  ): Promise<{ reported: boolean; deliveryStatus: DeliveryStatus; refused?: boolean; error?: string; uncommittedFiles?: string[]; warning?: string }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker) throw new Error("unknown worker session");
     const managerSessionId = worker.parentSessionId ?? null;
@@ -1918,7 +1956,9 @@ export class SessionService {
             managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report_rejected",
             detail: { reason: "uncommitted", files: precheck.files },
           });
-          return { reported: false, refused: true, error, uncommittedFiles: precheck.files, delivered: false };
+          // `dropped`: nothing was routed and the task was NOT moved (it stays in_progress to re-report) —
+          // there is no durable report to surface, so this is a genuine non-delivery, not a queue.
+          return { reported: false, refused: true, error, uncommittedFiles: precheck.files, deliveryStatus: "dropped" };
         }
         if (precheck.zeroAhead) {
           // WARN only: a clean worktree on an assigned branch with 0 commits ahead of base. A genuine
@@ -1946,29 +1986,39 @@ export class SessionService {
       detail: { status: report.status, summary: report.summary, prUrl: report.prUrl, needs: report.needs, ...(warning ? { warning } : {}) },
     });
 
-    let delivered = false;
+    // No parent to route to (a parentless worker — practically impossible, but if it happens the report
+    // reaches nobody and nothing will auto-resume a non-existent manager): a genuine `dropped`. The event
+    // + task move above still stand as the audit trail; the status just tells the caller it wasn't routed.
+    let deliveryStatus: DeliveryStatus = "dropped";
     if (managerSessionId) {
       let framed = `[loom:worker-report] worker ${workerSessionId} (task ${taskId ?? "none"}) — ${report.status}: ${report.summary}`;
       if (report.prUrl) framed += ` | PR: ${report.prUrl}`;
       if (report.needs) framed += ` | needs: ${report.needs}`;
       if (warning) framed += ` | warning: ${warning}`;
-      delivered = this.pty.enqueueStdin(managerSessionId, framed).delivered;
-      // STRAND BACKSTOP (incident 22a44352): if the report reached NOBODY because the parent manager has
-      // EXITED (it idle-reaped after dispatching its last worker), the completed branch would sit unmerged
-      // with no live or boot-time consumer. Record the durable `worker_report_undelivered` wake trigger so
-      // the crash-recovery watchdog bounded-auto-resumes the manager to run review→gate→merge. A LIVE-but-
-      // busy manager (delivered:false but the message is queued in its FIFO) is NOT orphaned — its queue
-      // drains on the next turn — so gate strictly on the manager row being `exited`. Best-effort + never
-      // throws: the report itself is already durably recorded above regardless.
-      if (!delivered) {
+      const r = this.pty.enqueueStdin(managerSessionId, framed);
+      deliveryStatus = this.deliveryStatusFor(r);
+      // STRAND BACKSTOP (incident 22a44352, broadened by card fc9a27d5): if the report reached no LIVE
+      // FIFO at all — `delivered:false` with NO queue position (the manager's pty isn't alive: it idle-
+      // reaped after dispatching its last worker, or its pty is otherwise gone while the row lags `live`) —
+      // the completed branch would sit unmerged with no consumer. Record the durable
+      // `worker_report_undelivered` wake trigger so the crash-recovery watchdog bounded-auto-resumes the
+      // manager to run review→gate→merge once its row is exited. A LIVE-but-busy/parked manager (`queued`,
+      // position set) is NOT orphaned — its FIFO drains on the next turn — so we gate on `boarded` (no
+      // position), NOT on the DB processState (which can lag the pty). recordUndeliveredReport's own guards
+      // (recoverable+resumable role, not superseded, not usage-parked) keep it from firing where it
+      // shouldn't. Best-effort + never throws: the report itself is already durably recorded above.
+      if (deliveryStatus === "boarded") {
         const mgr = this.db.getSession(managerSessionId);
-        if (mgr && mgr.processState === "exited") {
+        if (mgr) {
           try { recordUndeliveredReport(this.db, mgr, { reportingWorkerId: workerSessionId, taskId }); }
           catch { /* never let the wake-trigger record disturb the report path */ }
         }
       }
+      // PARKED-PARENT WAKE (card fc9a27d5): re-arm a snoozed/suppressed manager so the idle path wakes it
+      // to review the work it now has waiting — instead of only flipping its derived awaitingReview flag.
+      this.wakeParkedManagerOnReport(managerSessionId);
     }
-    return warning ? { reported: true, delivered, warning } : { reported: true, delivered };
+    return warning ? { reported: true, deliveryStatus, warning } : { reported: true, deliveryStatus };
   }
 
   /**

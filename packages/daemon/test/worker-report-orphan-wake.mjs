@@ -41,17 +41,21 @@ function makeEnv({ projectConfig = {} } = {}) {
   db.insertProject({ id: projId, name: "Orphan", repoPath: projId, vaultPath: projId, config: projectConfig, createdAt: now, archivedAt: null });
   db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "orchestrate", position: 0 });
 
-  // Fake PtyHost shared by SessionService AND the watcher. enqueueStdin mirrors reality: an idle-LIVE manager
-  // takes the turn (delivered:true); an EXITED one delivers to nobody; `forceQueued` simulates a LIVE-but-busy
-  // manager whose message is QUEUED (delivered:false WITH a position) — not a strand.
+  // Fake PtyHost shared by SessionService AND the watcher. enqueueStdin mirrors reality EXACTLY (host.ts):
+  //   • live-but-busy (`forceQueued`) → HELD FIFO: {delivered:false, position:1}  → deliveryStatus 'queued'
+  //   • idle-LIVE manager            → takes the turn now: {delivered:true}        → deliveryStatus 'delivered-live'
+  //   • NOT live (exited / pty gone)  → unreachable, NO position: {delivered:false} → deliveryStatus 'boarded'
+  // (the old fake returned position:1 for the not-live case too, which the real host never does — the enum
+  // mapping depends on the no-position signal, so it now matches reality.)
   const enqueued = [];
   let forceQueued = false;
   const pty = {
     enqueueStdin: (id, text) => {
       enqueued.push({ id, text });
       const s = db.getSession(id);
-      if (!forceQueued && s?.processState === "live") return { delivered: true };
-      return { delivered: false, position: 1 };
+      if (forceQueued) return { delivered: false, position: 1 };
+      if (s?.processState === "live") return { delivered: true };
+      return { delivered: false };
     },
   };
   // Recording resume stub: marks the session live (mirrors sessions.resume) and records the call.
@@ -89,7 +93,7 @@ function cleanup(e) {
   seedSession(e, "wkr-1", { role: "worker", processState: "live", parentSessionId: "mgr-1", taskId: "tk-1" });
 
   const res = await e.sessions.workerReport("wkr-1", { status: "done", summary: "WORK-DONE" });
-  check("(1) the report reached NOBODY (delivered:false) — the parent had exited", res.reported === true && res.delivered === false);
+  check("(1) the report reached no live FIFO → 'boarded' (durably recorded) — the parent had exited", res.reported === true && res.deliveryStatus === "boarded");
   check("(1) the task was still moved → review (work is ready, just unconsumed)", e.db.getTask("tk-1").columnKey === "review");
   check("(1) a worker_report event was recorded", evKinds(e, "wkr-1", "worker_report").length === 1);
   const trig = evKinds(e, "mgr-1", "worker_report_undelivered");
@@ -113,7 +117,7 @@ function cleanup(e) {
   seedSession(e, "wkr-2", { role: "worker", processState: "live", parentSessionId: "mgr-2", taskId: "tk-2" });
 
   const res = await e.sessions.workerReport("wkr-2", { status: "done", summary: "WORK-DONE" });
-  check("(2) a live idle manager RECEIVES the report (delivered:true)", res.delivered === true);
+  check("(2) a live idle manager RECEIVES the report (delivered-live)", res.deliveryStatus === "delivered-live");
   check("(2) NO worker_report_undelivered trigger when the report was delivered", evKinds(e, "mgr-2", "worker_report_undelivered").length === 0);
   e.watcher.tick(at(60_000));
   check("(2) the watchdog does NOT resume a live, delivered-to manager", e.resumes.length === 0);
@@ -129,7 +133,7 @@ function cleanup(e) {
   seedSession(e, "wkr-3", { role: "worker", processState: "live", parentSessionId: "mgr-3", taskId: "tk-3" });
 
   const res = await e.sessions.workerReport("wkr-3", { status: "done", summary: "WORK-DONE" });
-  check("(3) a live-but-busy manager's report is delivered:false BUT queued (drains next turn)", res.delivered === false);
+  check("(3) a live-but-busy manager's report is 'queued' (held FIFO, drains next turn)", res.deliveryStatus === "queued");
   check("(3) NO trigger for a LIVE manager — its FIFO drains; the gate requires an EXITED manager", evKinds(e, "mgr-3", "worker_report_undelivered").length === 0);
   e.watcher.tick(at(60_000));
   check("(3) the watchdog does NOT resume a still-live manager", e.resumes.length === 0);
@@ -145,7 +149,7 @@ function cleanup(e) {
   seedSession(e, "wkr-4", { role: "worker", processState: "live", parentSessionId: "mgr-4", taskId: "tk-4" });
 
   const res = await e.sessions.workerReport("wkr-4", { status: "done", summary: "WORK-DONE" });
-  check("(4) report still recorded + task moved (work is ready)", res.delivered === false && e.db.getTask("tk-4").columnKey === "review");
+  check("(4) report still recorded + task moved (work is ready)", res.deliveryStatus === "boarded" && e.db.getTask("tk-4").columnKey === "review");
   check("(4) NO trigger for a PARKED manager — the rate-limit watcher owns its resume (don't fight the usage hold)", evKinds(e, "mgr-4", "worker_report_undelivered").length === 0);
   e.watcher.tick(at(60_000));
   check("(4) the watchdog does not early-wake a usage-limit-parked manager", e.resumes.length === 0);

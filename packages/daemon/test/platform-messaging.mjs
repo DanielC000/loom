@@ -164,7 +164,7 @@ try {
   // Additive best-effort live nudge: a live Lead (PL) got a heads-up via the enqueue channel.
   const escNudge = host.enqueued.slice(enqBeforeEsc).find((e) => e.id === "PL");
   check("(b) a live Lead session was nudged [loom:escalation] (additive — board task is the durable inbox)",
-    esc.delivered === true && !!escNudge && escNudge.text.startsWith("[loom:escalation]") && escNudge.text.includes(esc.taskId));
+    esc.deliveryStatus === "delivered-live" && !!escNudge && escNudge.text.startsWith("[loom:escalation]") && escNudge.text.includes(esc.taskId));
 
   await mgrClient.close();
 

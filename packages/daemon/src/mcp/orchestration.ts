@@ -115,7 +115,7 @@ export class OrchestrationMcpRouter {
       server.registerTool(
         "worker_report",
         {
-          description: "Report your status up to your manager: moves your task (done→review, blocked→waiting) and notifies the manager. Call when done, blocked, or to checkpoint progress.",
+          description: "Report your status up to your manager: moves your task (done→review, blocked→waiting) and notifies the manager. Call when done, blocked, or to checkpoint progress. Returns a `deliveryStatus` (delivered-live | queued | boarded | dropped): your manager got it now, it's queued for its next turn, or it's durably boarded for a parked/offline manager (Loom auto-wakes it) — all safe; only `dropped` means it reached nobody.",
           inputSchema: {
             status: z.enum(["done", "blocked", "progress"]),
             summary: z.string(),
@@ -572,8 +572,10 @@ export class OrchestrationMcpRouter {
           "session is live), capturing your origin project + this manager session, the title, the detail/" +
           "evidence, and a severity. This is the ONLY cross-project write you have, and ONLY this escalation: " +
           "the target is the Platform board, fixed server-side (you cannot pick a project). Returns the created " +
-          "Platform task id. Use it for platform-level problems (a Loom bug, a confusing tool/skill, friction " +
-          "that slowed your workers) — NOT for your own project's task board (use tasks_create there).",
+          "Platform task id plus a `deliveryStatus` (delivered-live | queued | boarded | dropped): `boarded` " +
+          "means no Lead session was live but the board task is durably filed (the normal, safe case) — only " +
+          "`dropped` warrants concern. Use it for platform-level problems (a Loom bug, a confusing tool/skill, " +
+          "friction that slowed your workers) — NOT for your own project's task board (use tasks_create there).",
         inputSchema: {
           title: z.string(),
           detail: z.string(),
