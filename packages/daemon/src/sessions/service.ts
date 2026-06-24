@@ -2502,6 +2502,26 @@ export class SessionService {
   }
 
   /**
+   * Did this worker REPORT work complete/changes (a `worker_report` done|blocked)? The merge gate uses
+   * this to tell the orphaned-commit-to-main case (0-ahead branch WHILE the worker claimed work) from a
+   * genuine empty no-op (0-ahead, never reported). Reads the MOST-RECENT `worker_report` event, skipping
+   * the `merge_request`/other events reviewWorkerMerge appends AFTER the report (so it isn't fooled by a
+   * non-report latest event); a trailing `progress` report is not a completion claim → null. FAILS SAFE
+   * to null on any read error (treated as "not reported" → the soft no-op path, never a false hard error).
+   */
+  private workerReportedComplete(workerSessionId: string): "done" | "blocked" | null {
+    try {
+      const events = this.db.listEventsForWorker(workerSessionId);
+      for (let i = events.length - 1; i >= 0; i--) {
+        if (events[i]!.kind !== "worker_report") continue;
+        const status = events[i]!.detail?.status as string | undefined;
+        return status === "done" || status === "blocked" ? status : null;
+      }
+    } catch { /* no events / read error → treat as not reported */ }
+    return null;
+  }
+
+  /**
    * Step 2: run the build/DoD gate, and ONLY if green merge the branch as ONE squash commit, remove the
    * worktree, and move the task to done. FAIL-CLOSED — a failed gate or a merge conflict leaves
    * the canonical repo UNTOUCHED and the worktree RETAINED (so the manager can re-task a fix).
@@ -2514,11 +2534,16 @@ export class SessionService {
    *   - `ALREADY_MERGED`   — the branch already landed in main → treated as a successful idempotent
    *                          completion: the worktree is retired and the task finished (`merged:true`).
    *   - `STAGE_EMPTY_RETRY` — no diff to merge → fail-closed (`merged:false`), worktree RETAINED so the
-   *                          manager can investigate why the worker produced no change.
+   *                          manager can investigate why the worker produced no change. SPLIT by whether the
+   *                          worker REPORTED work (PL Auditor finding #2, card 1550eb87): a 0-ahead branch
+   *                          WHILE the worker reported done/blocked is the orphaned-commit-to-main signature
+   *                          (the reported work landed on main, not the branch; a later sync can orphan it) →
+   *                          HARD error (`hardError:true`, `reportedState`), loud refusal so the manager
+   *                          recovers the commit. A 0-ahead branch with NO report stays the gentle soft retry.
    */
   async confirmWorkerMerge(
     managerSessionId: string, workerSessionId: string,
-  ): Promise<{ merged: boolean; reason?: string; emptyKind?: MergeEmptyKind }> {
+  ): Promise<{ merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked" }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     if (!worker.branch) throw new Error("worker has no branch");
@@ -2585,8 +2610,27 @@ export class SessionService {
     // stale-state false negative — it is a true empty merge. Distinguish the two kinds for the manager:
     if (merge.noop) {
       if (merge.emptyKind === "STAGE_EMPTY_RETRY") {
-        // No diff to merge. Fail-closed: leave the worktree retained so the manager can see why the worker
-        // produced no change (and the task stays in review) rather than silently finishing an empty task.
+        // No diff to merge. SPLIT on whether the worker REPORTED work (PL Auditor finding #2, card
+        // 1550eb87 — silent work loss). A 0-ahead assigned branch WHILE the worker reported done/blocked
+        // is the orphaned-commit-to-main signature: the reported work was committed somewhere OTHER than
+        // the branch (almost always straight to main — incident: commit 28ae791), so the branch is empty
+        // and a later main sync can ORPHAN that commit and lose it silently. That is a HARD error — a loud
+        // refusal requiring the manager to recover the commit, NOT the soft pass-through that let the
+        // orphaned done sail through before.
+        const reported = this.workerReportedComplete(workerSessionId);
+        if (reported) {
+          evt("merge_rejected", { reason: "orphaned_zero_ahead", reportedState: reported });
+          rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — ORPHANED WORK (HARD): your worker REPORTED ${reported} but its assigned branch '${branch}' is 0 commits ahead of main — there is NOTHING on the branch to merge. The reported work was almost certainly committed to MAIN directly (or another branch); a later main sync can ORPHAN it and lose it silently. Refusing the empty merge. RECOVER it: 'git --no-pager log main' to find the commit, cherry-pick it onto '${branch}', then re-confirm — or if the report was mistaken, re-task. (Workers must NEVER commit to main — commit only to the assigned branch.)`);
+          return {
+            merged: false,
+            reason: `orphaned work: assigned branch '${branch}' is 0 commits ahead of main but the worker reported ${reported} — the committed work is not on the branch (likely committed straight to main); recover the commit onto '${branch}' before merging`,
+            emptyKind: "STAGE_EMPTY_RETRY",
+            hardError: true,
+            reportedState: reported,
+          };
+        }
+        // No report of work → a genuine empty no-op. Fail-closed (worktree retained so the manager can see
+        // why the worker produced no change, task stays in review) but soft — no alarm.
         evt("merge_rejected", { reason: "stage_empty" });
         rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — STAGE_EMPTY_RETRY: the branch has no diff to merge; canonical repo + worktree untouched. The worker committed nothing that differs from main — re-task or close the task by hand.`);
         return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", emptyKind: "STAGE_EMPTY_RETRY" };

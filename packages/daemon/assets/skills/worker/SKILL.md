@@ -60,9 +60,12 @@ Your action/report tools live under the `mcp__loom-orchestration__` namespace �
 - **`done`** — stage + **commit** your verified work *first*, then report `done` with the **commit
   SHA** plus a one-line summary of what you did + your key decisions / anything the reviewer should
   check. Your worktree is **already checked out on your assigned branch** — commit straight to it.
-  Never `git checkout -b` or create a new branch: the merge gate keys off your assigned branch, so
-  commits on any other branch are invisible to your manager and **silently dropped** (a worker once
-  stranded and lost its work this way). Uncommitted work is just as invisible — the gate sees
+  **Never commit to `main`; commit ONLY to your assigned branch `loom/<id>`** — never `git checkout`/
+  `git switch` to `main` (or any other branch) and never `git checkout -b` a new one. The merge gate keys
+  off your assigned branch, so commits on any other branch are invisible to your manager and **silently
+  dropped** (a worker once stranded and lost its work this way); a commit you land on `main` directly is
+  even worse — the assigned branch stays empty so the gate has nothing to merge, and a later main sync can
+  **orphan that commit and lose it for good**. Uncommitted work is just as invisible — the gate sees
   `filesChanged:0` and bounces the task back, wasting a round-trip. So: commit to the assigned branch
   and report the SHA before you report `done`. Don't merge — your manager reviews the branch and
   merges through the gate. **Write any commit you author in Conventional Commits form** —
