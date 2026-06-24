@@ -1,6 +1,6 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Agent, Project, Session, SessionRole } from "@loom/shared";
+import { COLUMN_PRESETS, DEFAULT_COLUMN_PRESET_ID, presetById, presetToDesired, type Agent, type Project, type Session, type SessionRole } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { bySessionActivity, byCreatedStable } from "../lib/sessions";
@@ -66,8 +66,14 @@ export default function Workspace() {
   }
 
   const createProject = useMutation({
-    mutationFn: async (b: { name: string; repoPath: string; vaultPath: string; seedAgents: boolean }) => {
+    mutationFn: async (b: { name: string; repoPath: string; vaultPath: string; seedAgents: boolean; presetId: string }) => {
       const project = await api.createProject({ name: b.name, repoPath: b.repoPath, vaultPath: b.vaultPath });
+      // Seed the chosen board preset through the SAME atomic columns API the editor uses (no new
+      // endpoint). The default preset matches PLATFORM_DEFAULTS, so skip the call — a fresh project
+      // already inherits that board and applying it would be a no-op write.
+      if (b.presetId && b.presetId !== DEFAULT_COLUMN_PRESET_ID) {
+        await api.updateProjectColumns(project.id, presetToDesired(presetById(b.presetId)));
+      }
       if (b.seedAgents) for (const t of TEMPLATE_AGENTS) await api.createAgent(project.id, t);
       return project;
     },
@@ -510,20 +516,35 @@ function ArchivedProjects(
   );
 }
 
-function ProjectForm({ onCreate }: { onCreate: (b: { name: string; repoPath: string; vaultPath: string; seedAgents: boolean }) => void }) {
+function ProjectForm({ onCreate }: { onCreate: (b: { name: string; repoPath: string; vaultPath: string; seedAgents: boolean; presetId: string }) => void }) {
   const [name, setName] = useState(""), [repoPath, setRepo] = useState(""), [vaultPath, setVault] = useState("");
   const [seedAgents, setSeed] = useState(true);
+  // Board preset to seed the new project's columns with. Defaults to Agent Dev so a fresh project keeps
+  // today's exact board; any other choice is applied via the atomic columns API right after creation.
+  const [presetId, setPreset] = useState(DEFAULT_COLUMN_PRESET_ID);
+  const preset = presetById(presetId);
   return (
     <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
       <Input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
       <Input placeholder="repo path" value={repoPath} onChange={(e) => setRepo(e.target.value)} />
       <Input placeholder="vault path" value={vaultPath} onChange={(e) => setVault(e.target.value)} />
+      <label style={{ display: "flex", flexDirection: "column", gap: 4, fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
+        board preset
+        <Select value={presetId} onChange={(e) => setPreset(e.target.value)} aria-label="Board preset">
+          {COLUMN_PRESETS.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}{p.id === DEFAULT_COLUMN_PRESET_ID ? " (default)" : ""}</option>
+          ))}
+        </Select>
+        <span style={{ color: color.textMuted, lineHeight: 1.5 }}>
+          {preset.description} · {preset.columns.map((c) => c.label).join(" → ")}
+        </span>
+      </label>
       <label style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
         <input type="checkbox" checked={seedAgents} onChange={(e) => setSeed(e.target.checked)} />
         seed starter agents (Orchestrator · Planning · Dev · Bugfix · Content)
       </label>
       <Button variant="primary" disabled={!name || !repoPath || !vaultPath}
-        onClick={() => { onCreate({ name, repoPath, vaultPath, seedAgents }); setName(""); setRepo(""); setVault(""); }}>Create project</Button>
+        onClick={() => { onCreate({ name, repoPath, vaultPath, seedAgents, presetId }); setName(""); setRepo(""); setVault(""); setPreset(DEFAULT_COLUMN_PRESET_ID); }}>Create project</Button>
     </div>
   );
 }

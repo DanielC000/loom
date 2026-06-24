@@ -11,7 +11,7 @@
 import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
-import { resolveConfig, type ColumnRole, type Project } from "@loom/shared";
+import { resolveConfig, COLUMN_PRESETS, presetById, presetToDesired, DEFAULT_COLUMN_PRESET_ID, type ColumnRole, type Project } from "@loom/shared";
 import { api, type DesiredColumn } from "../lib/api";
 import { Button, Input, Select, Badge } from "./ui";
 import { color, font, radius, tone, type Tone } from "../theme";
@@ -101,6 +101,23 @@ export function ColumnManager({ project }: { project: Project }) {
   })), [project.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const [rows, setRows] = useState<Row[]>(seedRows);
   const baseline = useRef(JSON.stringify(toDesired(seedRows)));
+  // Soft warnings from the LAST successful apply (a manual Save or a Reset-to-preset), surfaced inline.
+  const [warnings, setWarnings] = useState<string[]>([]);
+  // Preset chosen in the Reset-to-preset control (defaults to today's board).
+  const [resetPresetId, setResetPresetId] = useState(DEFAULT_COLUMN_PRESET_ID);
+  const [resetConfirming, setResetConfirming] = useState(false);
+
+  // Re-seed the staged rows from the server's canonical, just-stored columns — clearing dirty and
+  // re-baselining the originalKeys so a subsequent rename diffs against the new persisted keys.
+  const reseedFrom = (cols: { key: string; label: string; role?: ColumnRole }[]) => {
+    const fresh: Row[] = cols.map((c) => ({
+      uid: nextUid(), key: c.key, label: c.label, role: c.role, originalKey: c.key, keyOpen: false, keyTouched: true,
+    }));
+    setRows(fresh);
+    baseline.current = JSON.stringify(toDesired(fresh));
+    qc.invalidateQueries({ queryKey: ["projects"] });
+    qc.invalidateQueries({ queryKey: ["board", project.id] });
+  };
 
   // Live card counts per column key — so each row shows its load, a rename can preview "moves N cards",
   // and a delete can warn how many cards will re-home. Polls in step with the board view.
@@ -122,18 +139,16 @@ export function ColumnManager({ project }: { project: Project }) {
   const save = useMutation({
     mutationFn: () => api.updateProjectColumns(project.id, desired),
     meta: { inlineError: true }, // surfaced inline below (no blocking window.alert)
-    onSuccess: (res) => {
-      // Re-seed from the server's canonical, just-stored columns — clearing dirty and re-baselining the
-      // originalKeys so a subsequent rename diffs against the new persisted keys.
-      const fresh: Row[] = res.columns.map((c) => ({
-        uid: nextUid(), key: c.key, label: c.label, role: c.role, originalKey: c.key, keyOpen: false, keyTouched: true,
-      }));
-      setRows(fresh);
-      baseline.current = JSON.stringify(toDesired(fresh));
-      // Repoint the cached project override + board so the rest of the app sees the new columns at once.
-      qc.invalidateQueries({ queryKey: ["projects"] });
-      qc.invalidateQueries({ queryKey: ["board", project.id] });
-    },
+    onSuccess: (res) => { reseedFrom(res.columns); setWarnings(res.warnings); },
+  });
+
+  // Reset-to-preset: apply a chosen preset to the CURRENT board through the SAME atomic columns API
+  // (no new endpoint). The server diffs preset-vs-current — re-keys/removes/adds, and cards in dropped
+  // columns fall back to the preset's defaultLanding — then returns its soft warnings (surfaced below).
+  const applyPreset = useMutation({
+    mutationFn: () => api.updateProjectColumns(project.id, presetToDesired(presetById(resetPresetId))),
+    meta: { inlineError: true },
+    onSuccess: (res) => { reseedFrom(res.columns); setWarnings(res.warnings); setResetConfirming(false); },
   });
 
   const patchRow = (uid: string, p: Partial<Row>) => setRows((rs) => rs.map((r) => (r.uid === uid ? { ...r, ...p } : r)));
@@ -182,10 +197,11 @@ export function ColumnManager({ project }: { project: Project }) {
         <Button onClick={addRow} style={{ borderStyle: "dashed" }}>+ Add column</Button>
       </div>
 
-      {/* Soft warnings the server returned on the last successful save (e.g. a dropped non-required role). */}
-      {save.data?.warnings?.length ? (
+      {/* Soft warnings the server returned on the last successful apply (a Save or a Reset-to-preset),
+          e.g. a dropped non-required role. */}
+      {warnings.length ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {save.data.warnings.map((w, i) => (
+          {warnings.map((w, i) => (
             <span key={i} style={{ color: color.amber, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>⚠ {w}</span>
           ))}
         </div>
@@ -207,6 +223,40 @@ export function ColumnManager({ project }: { project: Project }) {
             {(save.error as Error).message}
           </span>
         )}
+      </div>
+
+      {/* Reset-to-preset: replace the whole board with a ready-made layout. Re-keys cards atomically —
+          cards in dropped lanes fall to the preset's default-landing column. Two-step confirm (it's a
+          board-wide change), and it applies IMMEDIATELY via the same atomic API (no separate Save). */}
+      <div style={{ borderTop: `1px solid ${color.border}`, paddingTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+        <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim }}>
+          reset to a preset board
+        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <Select value={resetPresetId} onChange={(e) => { setResetPresetId(e.target.value); setResetConfirming(false); }}
+            aria-label="Preset board" style={{ width: 170 }} disabled={applyPreset.isPending}>
+            {COLUMN_PRESETS.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}{p.id === DEFAULT_COLUMN_PRESET_ID ? " (default)" : ""}</option>
+            ))}
+          </Select>
+          {resetConfirming ? (
+            <>
+              <Button variant="danger" disabled={applyPreset.isPending} onClick={() => applyPreset.mutate()}>
+                {applyPreset.isPending ? "Applying…" : "Apply & re-key cards"}
+              </Button>
+              <Button variant="ghost" disabled={applyPreset.isPending} onClick={() => setResetConfirming(false)}>Cancel</Button>
+            </>
+          ) : (
+            <Button onClick={() => setResetConfirming(true)} disabled={applyPreset.isPending}>Reset board</Button>
+          )}
+          {applyPreset.isError && (
+            <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(applyPreset.error as Error).message}</span>
+          )}
+        </div>
+        <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+          {presetById(resetPresetId).columns.map((c) => c.label).join(" → ")}
+          {resetConfirming ? " · cards in dropped lanes move to the preset's default landing" : ""}
+        </span>
       </div>
     </div>
   );
