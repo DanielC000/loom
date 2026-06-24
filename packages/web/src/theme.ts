@@ -4,6 +4,8 @@
 // This module exposes them to TS / React inline-styles as var() references, so there is
 // a single source of truth and no drifting hex literals. Spec: packages/web/design/DESIGN.md.
 
+import type { ColumnRole } from "@loom/shared";
+
 export const color = {
   // Surfaces — depth comes from hairline borders, not shadows.
   bg: "var(--loom-bg)",
@@ -44,4 +46,19 @@ export const tone: Record<Tone, string> = {
   cyan: color.cyan,
   red: color.red,
   muted: color.textMuted,
+};
+
+// Lifecycle-role → signal tone. The ONE place a board lane's role maps to a color, so every surface
+// that tints a lane by its role agrees: the board header (accent bar + label + card left-border) AND
+// the Settings ColumnManager (role badge + row border) both read this map. (Mirrors the preset
+// ROLE_ACCENT palette in shared/presets.ts, which is its own — cosmetic, persisted — accent source.)
+export const roleTone: Record<ColumnRole, Tone> = {
+  intake: "cyan", // info / new arrivals
+  defaultLanding: "phosphor", // the catch-all landing
+  workReady: "muted", // queued, not yet active
+  active: "amber", // in flight
+  review: "cyan", // under review
+  parked: "muted", // waiting / parked
+  humanHold: "red", // needs a human
+  terminal: "phosphor", // done
 };

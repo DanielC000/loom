@@ -173,6 +173,12 @@ body {
   border-bottom-color: var(--loom-phosphor);
 }
 
+/* Hover/focus-reveal fade (e.g. the board column-header actions): opacity is toggled inline; this
+   carries the transition so it can be nulled under prefers-reduced-motion (an inline transition can't). */
+.loom-fade {
+  transition: opacity 120ms ease;
+}
+
 /* Mic recording indicator (Composer voice input): a gentle pulse while the recognizer is live. */
 @keyframes loom-mic-pulse {
   0%,
@@ -193,7 +199,8 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .loom-btn,
   .loom-navtab,
-  .loom-toggle {
+  .loom-toggle,
+  .loom-fade {
     transition: none;
   }
   .loom-mic-pulse {

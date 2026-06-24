@@ -14,21 +14,22 @@ import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-
 import { resolveConfig, COLUMN_PRESETS, presetById, presetToDesired, DEFAULT_COLUMN_PRESET_ID, type ColumnRole, type Project } from "@loom/shared";
 import { api, type DesiredColumn } from "../lib/api";
 import { Button, Input, Select, Badge } from "./ui";
-import { color, font, radius, tone, type Tone } from "../theme";
+import { color, font, radius, tone, roleTone, type Tone } from "../theme";
 
-// The eight lifecycle roles, in board order, with a human label, a signal tone, and which two are
-// REQUIRED exactly once (defaultLanding + terminal — the server's hard floor). Kept here so the badge,
-// the assignment dropdown, and the validator all read one table.
+// The eight lifecycle roles, in board order, with a human label and which two are REQUIRED exactly once
+// (defaultLanding + terminal — the server's hard floor). Kept here so the badge, the assignment dropdown,
+// and the validator all read one table. The signal tone comes from the shared `roleTone` map (theme.ts)
+// so the role coloring here can never drift from the board header's lane coloring.
 interface RoleMeta { label: string; short: string; t: Tone; required?: boolean; }
 const ROLE_META: Record<ColumnRole, RoleMeta> = {
-  intake: { label: "Intake", short: "INTAKE", t: "cyan" },
-  defaultLanding: { label: "Default landing", short: "LANDING", t: "phosphor", required: true },
-  workReady: { label: "Work ready", short: "READY", t: "muted" },
-  active: { label: "Active", short: "ACTIVE", t: "amber" },
-  review: { label: "Review", short: "REVIEW", t: "cyan" },
-  parked: { label: "Parked", short: "PARKED", t: "muted" },
-  humanHold: { label: "Human hold", short: "HOLD", t: "red" },
-  terminal: { label: "Terminal (done)", short: "DONE", t: "phosphor", required: true },
+  intake: { label: "Intake", short: "INTAKE", t: roleTone.intake },
+  defaultLanding: { label: "Default landing", short: "LANDING", t: roleTone.defaultLanding, required: true },
+  workReady: { label: "Work ready", short: "READY", t: roleTone.workReady },
+  active: { label: "Active", short: "ACTIVE", t: roleTone.active },
+  review: { label: "Review", short: "REVIEW", t: roleTone.review },
+  parked: { label: "Parked", short: "PARKED", t: roleTone.parked },
+  humanHold: { label: "Human hold", short: "HOLD", t: roleTone.humanHold },
+  terminal: { label: "Terminal (done)", short: "DONE", t: roleTone.terminal, required: true },
 };
 const ROLE_ORDER: ColumnRole[] = ["intake", "defaultLanding", "workReady", "active", "review", "parked", "humanHold", "terminal"];
 

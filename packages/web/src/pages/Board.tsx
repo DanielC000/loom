@@ -5,7 +5,7 @@ import type { Task, TaskPriority, KanbanColumn, SessionListItem, ColumnRole } fr
 import { api, type DesiredColumn } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Button, Input, SectionLabel, StatusPill, Chip } from "../components/ui";
-import { color, font, tone, type Tone } from "../theme";
+import { color, font, tone, roleTone, type Tone } from "../theme";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
 import { useVoiceLang } from "../lib/useVoiceLang";
 // Priority chip + metadata live in one place so the board and the /terminals task card never drift.
@@ -220,23 +220,41 @@ function isDoneColumn(key: string): boolean {
   return k.includes("done") || k.includes("complete") || k.includes("merged");
 }
 
-// Map a column to a signal tone (done = phosphor, review = cyan, in-progress = amber, else muted).
-function columnTone(key: string): Tone {
-  const k = key.toLowerCase();
-  if (isDoneColumn(key)) return "phosphor";
-  if (k.includes("review")) return "cyan";
-  if (k.includes("progress") || k.includes("doing") || k.includes("wip") || k.includes("active")) return "amber";
-  return "muted";
+// ── One source of truth for a board lane's color ──────────────────────────────────
+// A lane is tinted by its lifecycle ROLE (via the shared `roleTone` map), so the board agrees with
+// Settings' role coloring. The ONE resolved color drives the accent bar, the header label, AND each
+// card's left border — they can no longer diverge the way the old key-substring heuristic let them
+// (Blocked = red bar but grey label/cards). A role-less lane has no signal tone (it may still carry an
+// explicit accentColor — e.g. a future per-column accent set without a role).
+function columnTone(col: KanbanColumn): Tone | null {
+  return col.role ? roleTone[col.role] : null;
+}
+// The resolved accent COLOR for a lane, or null when it has neither a role nor an explicit accentColor
+// (an un-accented lane → transparent bar + neutral label/border). The "muted" role tone resolves to
+// textDim (#8a929b = 5.92:1), never textMuted (#5a636c = 3.05:1), so an 11px-bold lane title that
+// inherits this color always clears WCAG AA contrast on the panel.
+function columnAccent(col: KanbanColumn): string | null {
+  const t = columnTone(col);
+  if (t) return t === "muted" ? color.textDim : tone[t];
+  return col.accentColor ?? null;
 }
 
 function Column({ col, tasks, filterActive, workers, onOpen, cardCount, landingLabel, busy, onRename, onRemove }:
   { col: KanbanColumn; tasks: Task[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void;
     cardCount: number; landingLabel: string; busy: boolean; onRename: (key: string, label: string) => void; onRemove: (key: string) => void }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key });
-  const t = columnTone(col.key);
-  // SOFT WIP limit (advisory, never blocks): when the column's live card count exceeds its wipLimit, the
-  // count reads as "N / limit" in amber. Absent wipLimit → plain "(N)", today's neutral look.
-  const overWip = col.wipLimit !== undefined && tasks.length > col.wipLimit;
+  // ONE resolved color for the lane (role → tone, else accentColor, else null). Drives the accent bar,
+  // the header label, and each card's left border so all three agree. null = un-accented: transparent
+  // bar, neutral AA-safe label, neutral hairline card border.
+  const accent = columnAccent(col);
+  const labelColor = accent ?? color.textDim; // never textMuted — keeps the 11px-bold title AA-legible
+  const cardAccent = accent ?? color.border; // un-accented lane → a neutral hairline left-border
+  // SOFT WIP limit (advisory, never blocks). Shown as "N / limit" WHENEVER a limit is set (so an
+  // approaching "2 / 3" is visible, not just a breach) — neutral under, amber AT-or-over. The count is
+  // the column's TRUE card load (`cardCount`, unfiltered), NOT the filtered `tasks.length`, so an active
+  // board filter can't make the WIP count / over-limit state read wrong.
+  const hasWipLimit = col.wipLimit !== undefined;
+  const atOrOverWip = hasWipLimit && cardCount >= col.wipLimit!;
 
   // ── Contextual header editing (card 5d) ────────────────────────────────────────
   // The actions (✎ rename, ✕ remove) are hover/focus-revealed to keep the header clean; the rename
@@ -262,32 +280,38 @@ function Column({ col, tasks, filterActive, workers, onOpen, cardCount, landingL
       onFocus={() => setHover(true)} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setHover(false); }}
       style={{ background: isOver ? color.phosphorDim : color.panel, border: `1px solid ${color.border}`, borderRadius: 4,
         display: "flex", flexDirection: "column", minHeight: 200, maxHeight: "75vh" }}>
-      {/* Restrained per-column header accent: a thin top bar tinted with the column's accentColor (drawn
-          from the preset role palette / the column editor). Top corners rounded to nest inside the
-          wrapper's radius. Absent → no bar, today's neutral header. */}
-      {col.accentColor && <div aria-hidden style={{ height: 3, background: col.accentColor, flexShrink: 0,
-        borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />}
-      <SectionLabel style={{ color: tone[t], margin: 0, padding: "12px 12px 8px", display: "flex", alignItems: "center", gap: 6 }}>
+      {/* Restrained per-column header accent: a thin top bar in the lane's resolved color. The 3px height
+          is ALWAYS reserved (transparent when un-accented) so accented and freshly-added lanes share one
+          label baseline. Top corners rounded to nest inside the wrapper's radius. */}
+      <div aria-hidden style={{ height: 3, background: accent ?? "transparent", flexShrink: 0,
+        borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />
+      <SectionLabel style={{ color: labelColor, margin: 0, padding: "12px 12px 8px", display: "flex", alignItems: "center", gap: 6 }}>
         {renaming ? (
           <Input autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} aria-label={`Rename ${col.label} column`}
             onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitRename(); } else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cancelRename(); } }}
             onBlur={commitRename} disabled={busy}
             style={{ flex: 1, minWidth: 0, padding: "2px 6px", fontFamily: font.head, fontSize: 11, fontWeight: 700,
-              textTransform: "uppercase", letterSpacing: "0.1em", color: tone[t] }} />
+              textTransform: "uppercase", letterSpacing: "0.1em", color: labelColor }} />
         ) : (
           <span onDoubleClick={startRename} title="Double-click to rename"
             style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", cursor: "text" }}>{col.label}</span>
         )}
-        <span aria-label={overWip ? `${tasks.length} cards, over the soft WIP limit of ${col.wipLimit}` : undefined}
-          title={overWip ? `Over the soft WIP limit of ${col.wipLimit} (advisory — does not block)` : undefined}
-          style={{ flexShrink: 0, color: overWip ? color.amber : "inherit", fontWeight: overWip ? 700 : undefined }}>
-          {overWip ? `${tasks.length} / ${col.wipLimit}` : `(${tasks.length})`}
-        </span>
+        {hasWipLimit ? (
+          <span aria-label={`${cardCount} of ${col.wipLimit} cards${atOrOverWip ? ", at or over the soft WIP limit" : ""}`}
+            title={atOrOverWip
+              ? `At or over the soft WIP limit of ${col.wipLimit} (advisory — does not block; counts the column's true load)`
+              : `Soft WIP limit of ${col.wipLimit} (advisory; counts the column's true load)`}
+            style={{ flexShrink: 0, color: atOrOverWip ? color.amber : color.textDim, fontWeight: atOrOverWip ? 700 : undefined }}>
+            {cardCount} / {col.wipLimit}
+          </span>
+        ) : (
+          <span style={{ flexShrink: 0, color: "inherit" }}>({tasks.length})</span>
+        )}
         {/* Hover/focus-revealed header actions — kept in the DOM (so keyboard reaches them), faded out
             when idle. Hidden entirely while the inline rename input owns the header. */}
         {!renaming && (
-          <span style={{ marginLeft: "auto", flexShrink: 0, display: "inline-flex", gap: 2, opacity: showActions ? 1 : 0,
-            transition: "opacity 120ms ease", pointerEvents: showActions ? "auto" : "none" }}>
+          <span className="loom-fade" style={{ marginLeft: "auto", flexShrink: 0, display: "inline-flex", gap: 2,
+            opacity: showActions ? 1 : 0, pointerEvents: showActions ? "auto" : "none" }}>
             <HeaderIconButton label={`Rename ${col.label} column`} onClick={startRename} disabled={busy}>✎</HeaderIconButton>
             <HeaderIconButton label={removable ? `Remove ${col.label} column` : `${col.label} can't be removed — it's a required lifecycle lane`}
               onClick={() => setConfirmingRemove(true)} disabled={busy || !removable} danger>✕</HeaderIconButton>
@@ -315,7 +339,7 @@ function Column({ col, tasks, filterActive, workers, onOpen, cardCount, landingL
         </div>
       )}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
-        {tasks.map((task) => <Card key={task.id} task={task} accent={tone[t]} worker={workers.get(task.id)} onOpen={() => onOpen(task.id)} />)}
+        {tasks.map((task) => <Card key={task.id} task={task} accent={cardAccent} worker={workers.get(task.id)} onOpen={() => onOpen(task.id)} />)}
         {/* Filtered-empty state: the filter hid every card in this column. Reads as deliberate, not broken. */}
         {tasks.length === 0 && filterActive && (
           <div style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11, padding: "8px 2px" }}>no matches</div>
@@ -426,7 +450,7 @@ function FilterBar({ search, onSearch, columns, priFilter, onTogglePri, colFilte
             <span aria-hidden style={groupLabel}>Column</span>
             {columns.map((c) => (
               <ToggleChip key={c.key} label={c.label} ariaLabel={`Filter by ${c.label} column`}
-                t={columnTone(c.key)} active={colFilter.has(c.key)} onToggle={() => onToggleCol(c.key)} />
+                t={columnTone(c) ?? "muted"} active={colFilter.has(c.key)} onToggle={() => onToggleCol(c.key)} />
             ))}
           </div>
         )}
