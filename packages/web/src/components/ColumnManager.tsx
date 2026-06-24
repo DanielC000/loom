@@ -11,7 +11,7 @@
 import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
-import { resolveConfig, COLUMN_PRESETS, presetById, presetToDesired, DEFAULT_COLUMN_PRESET_ID, type ColumnRole, type Project } from "@loom/shared";
+import { resolveConfig, COLUMN_PRESETS, presetById, presetToDesired, ACCENT_PALETTE, DEFAULT_COLUMN_PRESET_ID, type ColumnRole, type Project } from "@loom/shared";
 import { api, type DesiredColumn } from "../lib/api";
 import { Button, Input, Select, Badge } from "./ui";
 import { color, font, radius, tone, roleTone, type Tone } from "../theme";
@@ -43,9 +43,9 @@ interface Row {
   key: string;
   label: string;
   role?: ColumnRole;
-  // Per-column accent + soft WIP limit (set by a preset / the board-header editor). This Settings editor
-  // doesn't EDIT them, but it carries them on the row so a Save preserves what it didn't touch — the
-  // atomic PUT replaces the whole array, so an absent field here would strip a column's accent / WIP limit.
+  // Per-column accent + soft WIP limit. Editable in-row (the swatch picker + WIP field below) AND carried
+  // through untouched when not edited — the atomic PUT replaces the whole array, so an absent field here
+  // would strip a column's accent / WIP limit. undefined = absent (cleared) → omitted by toDesired.
   accentColor?: string;
   wipLimit?: number;
   originalKey?: string;
@@ -190,7 +190,8 @@ export function ColumnManager({ project }: { project: Project }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <p style={{ color: color.textMuted, fontSize: 11, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
         Drag <span style={{ color: color.textDim }}>⠿</span> to reorder · rename inline · assign a lifecycle
-        role · delete or add a lane. Saving re-keys cards atomically — nothing is ever orphaned.
+        role · set an accent or WIP limit · delete or add a lane. Saving re-keys cards atomically — nothing
+        is ever orphaned.
       </p>
 
       <DndContext onDragEnd={onDragEnd}>
@@ -200,6 +201,8 @@ export function ColumnManager({ project }: { project: Project }) {
               onLabel={(v) => onLabel(r.uid, v)}
               onKey={(v) => patchRow(r.uid, { key: v, keyTouched: true })}
               onRole={(role) => patchRow(r.uid, { role })}
+              onAccent={(accentColor) => patchRow(r.uid, { accentColor })}
+              onWip={(wipLimit) => patchRow(r.uid, { wipLimit })}
               onToggleKey={() => patchRow(r.uid, { keyOpen: !r.keyOpen })}
               onRemove={() => removeRow(r.uid)} />
           ))}
@@ -279,12 +282,14 @@ export function ColumnManager({ project }: { project: Project }) {
 // editor (with a "moves N cards" preview on a rename), and a two-step delete (the second step previews
 // where the lane's cards re-home). Draggable (the grip) AND droppable (the whole row) so a drop anywhere
 // over a row targets it — see onDragEnd's reorder.
-function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onToggleKey, onRemove }: {
+function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAccent, onWip, onToggleKey, onRemove }: {
   row: Row; cards: number; landingLabel: string;
   onLabel: (v: string) => void; onKey: (v: string) => void; onRole: (role: ColumnRole | undefined) => void;
+  onAccent: (v: string | undefined) => void; onWip: (v: number | undefined) => void;
   onToggleKey: () => void; onRemove: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const [accentOpen, setAccentOpen] = useState(false);
   const { setNodeRef: dropRef, isOver } = useDroppable({ id: row.uid });
   const { setNodeRef: dragRef, listeners, attributes, transform, isDragging } = useDraggable({ id: row.uid });
   const renamed = !!row.originalKey && row.originalKey !== row.key.trim();
@@ -325,6 +330,27 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onTog
           {cards} card{cards === 1 ? "" : "s"}
         </span>
 
+        {/* Per-column accent swatch (opens the restrained palette below) — a filled chip in the current
+            accent, or a dashed empty chip when un-accented. Token-consistent: the palette is the shared
+            ACCENT_PALETTE, not a free hex picker. */}
+        <button type="button" onClick={() => setAccentOpen((o) => !o)} aria-expanded={accentOpen}
+          aria-label="Accent color" title={row.accentColor ? "Change the column accent color" : "Set a column accent color"}
+          style={{
+            width: 20, height: 20, flexShrink: 0, padding: 0, cursor: "pointer", borderRadius: radius.sm,
+            borderWidth: row.accentColor ? 1 : 1, borderStyle: row.accentColor ? "solid" : "dashed",
+            borderColor: accentOpen ? color.cyan : row.accentColor ? color.borderStrong : color.border,
+            background: row.accentColor ?? "transparent",
+          }} />
+
+        {/* Soft WIP limit — small, empty-allowed. Empty clears it (field absent), matching carry-through. */}
+        <Input value={row.wipLimit ?? ""} onChange={(e) => {
+            const v = e.target.value.trim();
+            const n = v === "" ? undefined : Math.max(0, Math.floor(Number(v)));
+            onWip(v === "" || Number.isNaN(n!) ? undefined : n);
+          }}
+          type="number" min={0} inputMode="numeric" aria-label="WIP limit" placeholder="WIP" title="Soft WIP limit (advisory; empty = none)"
+          style={{ width: 56, flexShrink: 0, textAlign: "right" }} />
+
         <Button variant="ghost" onClick={onToggleKey} aria-expanded={row.keyOpen}
           title="Advanced: edit the stable column key" style={{ color: row.keyOpen ? color.cyan : color.textMuted }}>key</Button>
 
@@ -343,6 +369,34 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onTog
       {confirming && cards > 0 && (
         <div style={{ padding: "0 9px 8px 28px", fontFamily: font.mono, fontSize: 11, color: color.amber, lineHeight: 1.5 }}>
           {cards} card{cards === 1 ? "" : "s"} will move to <span style={{ color: color.text }}>{landingLabel}</span> when you save.
+        </div>
+      )}
+
+      {/* Accent palette — the restrained, token-consistent swatch set (shared ACCENT_PALETTE) plus a clear
+          choice. Picks a per-column accent WITHOUT applying a whole preset; clearing removes it (absent). */}
+      {accentOpen && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 9px 8px 28px", flexWrap: "wrap" }}>
+          <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim }}>accent</span>
+          {ACCENT_PALETTE.map((s) => {
+            const selected = row.accentColor === s.value;
+            return (
+              <button key={s.value} type="button" aria-label={s.name} aria-pressed={selected} title={s.name}
+                onClick={() => { onAccent(s.value); setAccentOpen(false); }}
+                style={{
+                  width: 18, height: 18, flexShrink: 0, padding: 0, cursor: "pointer", borderRadius: radius.sm,
+                  background: s.value, borderWidth: 2, borderStyle: "solid",
+                  borderColor: selected ? color.text : "transparent",
+                }} />
+            );
+          })}
+          <button type="button" aria-label="No accent" aria-pressed={!row.accentColor} title="No accent"
+            onClick={() => { onAccent(undefined); setAccentOpen(false); }}
+            style={{
+              fontFamily: font.mono, fontSize: 11, cursor: "pointer", padding: "2px 8px", borderRadius: radius.sm,
+              background: "transparent", borderWidth: 1, borderStyle: "dashed",
+              borderColor: !row.accentColor ? color.text : color.border,
+              color: !row.accentColor ? color.text : color.textMuted,
+            }}>none</button>
         </div>
       )}
 

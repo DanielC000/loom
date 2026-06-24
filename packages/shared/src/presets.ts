@@ -12,7 +12,7 @@ import { PLATFORM_DEFAULTS, type KanbanColumn, type ColumnRole } from "./config.
 /** Accent palette keyed by lifecycle role, drawn from the web theme tokens (global.css) so the preset
  *  colors match the app's design language rather than an ad-hoc rainbow. Cosmetic only — the atomic API
  *  now persists `accentColor` (card 5b), so a preset's role-accents store and render on the board. */
-const ROLE_ACCENT: Readonly<Record<ColumnRole, string>> = {
+export const ROLE_ACCENT: Readonly<Record<ColumnRole, string>> = {
   intake: "#5bc8ff", // cyan — info / new arrivals
   defaultLanding: "#2ee66e", // phosphor — the catch-all landing
   workReady: "#7c8b9a", // slate — queued, not yet active
@@ -22,6 +22,19 @@ const ROLE_ACCENT: Readonly<Record<ColumnRole, string>> = {
   humanHold: "#ff5c5c", // red — needs a human
   terminal: "#2ee66e", // phosphor — done
 };
+
+/** The restrained accent palette for the per-column accent PICKER (Settings ColumnManager) — the DISTINCT
+ *  colors from ROLE_ACCENT, each named. A deliberate, token-consistent set (one swatch per theme tone) so a
+ *  user sets a per-column accent WITHOUT applying a whole preset, and the choices match the preset role-
+ *  accents rather than a free hex rainbow. Order mirrors the signal palette: phosphor → amber → cyan → red
+ *  → slate. */
+export const ACCENT_PALETTE: ReadonlyArray<{ name: string; value: string }> = [
+  { name: "Phosphor", value: ROLE_ACCENT.defaultLanding },
+  { name: "Amber", value: ROLE_ACCENT.active },
+  { name: "Cyan", value: ROLE_ACCENT.intake },
+  { name: "Red", value: ROLE_ACCENT.humanHold },
+  { name: "Slate", value: ROLE_ACCENT.workReady },
+];
 
 /** Build a column with its role's accent applied, so each preset reads as a tidy table below. */
 function col(key: string, label: string, role: ColumnRole): KanbanColumn {
