@@ -8,7 +8,7 @@ import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles } from "./profiles/seed.js";
-import { seedPlatformHome } from "./platform/seed.js";
+import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
 import { seedSetupHome, seedSetupAgentRename, seedSetupAuditorAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles } from "./tasks/columns.js";
@@ -84,6 +84,16 @@ async function main(): Promise<void> {
   // DEV-ONLY: the whole Platform layer is gated behind LOOM_DEV — this no-ops for regular loomctl users.
   const seededPlatform = seedPlatformHome(db);
   if (seededPlatform.length) console.log(`[boot] seeded platform home: ${seededPlatform.join(", ")}`);
+  // One-time migration: refresh an ALREADY-seeded platform agent's stored startupPrompt to the new clean
+  // text when it is byte-identical to the prior (phase-NOTE-bearing) seeded text — the seeder is
+  // seed-if-absent, so editing the prompt constants alone never updates a live row. Marker-guarded one-shot,
+  // never clobbers a user edit. Best-effort: a throw must NEVER gate boot (the marker stamps only on success).
+  try {
+    const promptMig = migratePlatformPrompts(db);
+    if (promptMig.migrated) console.log(`[boot] refreshed ${promptMig.migrated} platform agent prompt(s) (stripped phase-gated NOTE)`);
+  } catch (err) {
+    console.warn(`[boot] platform-prompt migration failed (continuing boot): ${(err as Error).message}`);
+  }
   // Task B: one-time backfill of `role` onto legacy stored project configs (pre-role boards). Triple-
   // guarded one-shot (app_meta marker + explicit-columns-only + assign-if-absent), so it fires exactly
   // once per LOOM_HOME and moves NO cards — an override-less project already inherits role-annotated
