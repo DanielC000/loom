@@ -26,7 +26,7 @@ const HERMETIC = [
   "session-archive", "session-list-summary", "all-archived-sessions", "periodic-snapshot", "shutdown-snapshot", "shutdown-endpoint", "mgmt-project-agent", "web-static-serve", "version", "cli-args", "cli-direct-invocation", "cli-service", "cli-channel", "update-check", "update-endpoint",
   "claude-config", "trust-lock", "spawn-args",
   "context-watcher", "context-stats", "recycle-handoff", "wake", "worker-reported-state", "crash-recovery-watcher", "busy-worker-watcher",
-  "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull", "usage-status", "rate-limit-clear",
+  "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull", "usage-status", "rate-limit-clear", "rate-limit-cascade",
   "skills-inject", "skills-subset-spawn", "skills-store-durability", "skills-publish-drift", "vault-lint", "vault-browser", "vault-writer", "git-writer", "git-identity-warning",
   "worker-diff", "worktrees", "worktree-provision", "spawn-recut-stale-branch", "merge-finalize-resilient", "merge-confirm-idempotent", "merge-review-diffstat", "merge-stranded-backstop", "worker-report-precheck", "worker-report-orphan-wake", "worker-exited-without-report", "worker-spawn-agent-gate",
   "pty-busy-drain", "pty-composer-dirty", "pty-queue-mutations", "pty-queue-rest", "pty-resume-readiness", "pty-stop-queue", "spawn-env", "queued-message-durability", "graceful-stop", "resume-mode-cycles", "resume-mode-detect", "resume-mode-feedback", "shell-terminal",

@@ -31,6 +31,7 @@ export interface AttentionItem {
   kind: string;
   text: string;
   workerSessionId?: string | null; // when set, the item is openable in the review panel
+  rateLimitSessionId?: string | null; // when set, the row offers a "clear / retry now" action (POST .../rate-limit/clear)
 }
 
 export function useAttention(): { items: AttentionItem[]; count: number } {
@@ -112,9 +113,12 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     }
     // a latest idle_report of working/waiting falls through → no item (the alert is cleared).
   }
-  for (const s of all.filter(isRateLimited)) {
+  // Defense-in-depth: only a LIVE session is actionably rate-limited. The durable fix clears
+  // rate_limited_until on session EXIT, but an exited row that pre-dates that fix (or races a tick)
+  // could still carry a future timestamp — it can never resume, so it must not linger here.
+  for (const s of all.filter((s) => isRateLimited(s) && s.processState === "live")) {
     items.push({
-      key: `r-${s.id}`, tone: "red", kind: "RATE-LIMITED",
+      key: `r-${s.id}`, tone: "red", kind: "RATE-LIMITED", rateLimitSessionId: s.id,
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — resumes ${s.rateLimitedUntil ? new Date(s.rateLimitedUntil).toLocaleTimeString() : "?"}`,
     });
   }

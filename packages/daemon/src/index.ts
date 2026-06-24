@@ -137,6 +137,11 @@ async function main(): Promise<void> {
     onExit: (sessionId, _code, info) => {
       db.setProcessState(sessionId, "exited");
       db.setBusy(sessionId, false);
+      // Clear any rate-limit park on EXIT: an exited session can never auto-resume, so a lingering
+      // rate_limited_until (whose timestamp is still in the future) would keep showing RATE-LIMITED in
+      // the Attention queue for hours after the session is gone. Clears ONLY the two park columns
+      // (lastError is preserved — a crash-loop banner etc. must survive). Idempotent + cheap.
+      db.clearRateLimit(sessionId);
       // Crash-recovery trigger: record a durable `session_died` event IFF this was an UNEXPECTED death
       // (`intended === false` — no pty.stop() was issued) of a resumable coordination/work session, so the
       // CrashRecoveryWatcher can bounded-auto-resume it. An intended stop records nothing (untouched); a

@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, UsageLimitsStatus, UsageWindow } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
@@ -121,8 +121,29 @@ export function AttentionRow({ item, onOpen }: { item: AttentionItem; onOpen?: (
       <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[item.tone], textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{item.kind}</span>
       <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis" }}>{item.text}</span>
       <span style={{ flex: 1 }} />
+      {item.rateLimitSessionId && <ClearRateLimitButton sessionId={item.rateLimitSessionId} />}
       {onOpen && <Button onClick={onOpen}>Open</Button>}
     </div>
+  );
+}
+
+// Per-session "clear / retry now" for a RATE-LIMITED attention item — mirrors the global Clear-usage-
+// hold button but scoped to one session: POST /api/sessions/:id/rate-limit/clear ends the park, drops
+// the global latch, and re-submits the held turn. HUMAN-only REST (no agent MCP surface). On success
+// we invalidate the session poll so the cleared row drops out of the queue promptly.
+function ClearRateLimitButton({ sessionId }: { sessionId: string }) {
+  const qc = useQueryClient();
+  const clear = useMutation({
+    mutationFn: () => api.clearSessionRateLimit(sessionId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
+    onError: (e) => window.alert((e as Error).message),
+  });
+  return (
+    <Button variant="default" disabled={clear.isPending}
+      title="Clear this session's rate-limit park and re-submit its held turn now"
+      onClick={() => clear.mutate()}>
+      {clear.isPending ? "Clearing…" : "Clear / retry"}
+    </Button>
   );
 }
 

@@ -5,7 +5,9 @@
 //      (rate_limited_until) AND the episode deadline (rate_limit_deadline), drops the GLOBAL usage
 //      latch, and re-submits the held turn on a LIVE session (stub pty records the call). 404 unknown.
 //      No-op-safe + still clears on a NON-live session (resume returns false — fine).
-//   B. POST /api/usage/clear-hold — drops the global latch ONLY, touching no session row.
+//   B. POST /api/usage/clear-hold — drops the global latch and CASCADES to parked sessions; here, by
+//      section B, no session is left parked (A cleared them), so it touches no row. The cascade itself
+//      (clears + resumes every parked LIVE session) is covered in rate-limit-cascade.mjs.
 //
 // RUN (self-isolating; sets its OWN temp LOOM_HOME before importing dist):
 //   1) build the daemon, 2) node test/rate-limit-clear.mjs
@@ -93,11 +95,11 @@ try {
   const rf = await app.inject({ method: "POST", url: "/api/sessions/free/rate-limit/clear" });
   check("A: no-op-safe — unparked session → 200, columns stay null", rf.statusCode === 200 && db.getSession("free").rateLimitedUntil === null && db.getSession("free").rateLimitDeadline === null);
 
-  // ════════ B. global hold clear — drops the latch, touches NO session ════════
+  // ════════ B. global hold clear — drops the latch; nothing parked here → touches NO session ════════
   recordClaudeRateLimit();
   check("B: latch present before clear-hold", fs.existsSync(LATCH));
   const rh = await app.inject({ method: "POST", url: "/api/usage/clear-hold" });
-  check("B: 200 OK { cleared:true }", rh.statusCode === 200 && rh.json().cleared === true);
+  check("B: 200 OK { cleared:true, resumed:0 } — nothing left parked to cascade", rh.statusCode === 200 && rh.json().cleared === true && rh.json().resumed === 0);
   check("B: GLOBAL latch file removed", !fs.existsSync(LATCH));
   check("B: no session row touched (live still clear, free still live)", db.getSession("live").rateLimitedUntil === null && db.getSession("free").processState === "live");
 } finally {

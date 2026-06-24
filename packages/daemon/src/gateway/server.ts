@@ -232,9 +232,25 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/api/usage/limits", async () => deps.usageStatus.getStatus());
   // Manual GLOBAL hold clear (HUMAN/REST only — trust boundary like the git/vault writers; NEVER an
   // MCP tool). Drops the global usage-awareness latch (~/.loom/tmp/claude-usage.json) so new
-  // worker_spawn is unblocked WITHOUT touching any session — for a transient overload with real
-  // headroom. ADDITIVE: detection re-arms the latch on the next real cap.
-  app.post("/api/usage/clear-hold", async () => { clearClaudeRateLimit(); return { cleared: true }; });
+  // worker_spawn is unblocked. ADDITIVE: detection re-arms the latch on the next real cap.
+  //
+  // CASCADE + AUTO-NUDGE (owner requirement): clearing the global hold ALSO clears every session still
+  // parked with a rate-limit AND resumes the LIVE ones — per-session this is exactly the proven
+  // /api/sessions/:id/rate-limit/clear path (setRateLimitedUntil(null) + clearRateLimitDeadline +
+  // resumeAfterRateLimit). So the user never has to retry each parked session by hand. The CLEAR
+  // applies to every parked row (live or stale); the RESUME is scoped to LIVE (an exited session can't
+  // resume — resumeAfterRateLimit also no-ops on a dead pty as a backstop). The global latch is dropped
+  // ONCE up front (not per session). Returns how many live sessions were resumed.
+  app.post("/api/usage/clear-hold", async () => {
+    clearClaudeRateLimit();
+    let resumed = 0;
+    for (const s of deps.db.listRateLimited()) {
+      deps.db.setRateLimitedUntil(s.id, null, null);
+      deps.db.clearRateLimitDeadline(s.id);
+      if (s.processState === "live" && deps.pty.resumeAfterRateLimit(s.id)) resumed++;
+    }
+    return { cleared: true, resumed };
+  });
   // A manager's orchestration_events timeline (chronological). READ-ONLY — emits no event.
   app.get("/api/orchestration/events", async (req) => {
     const { managerId } = req.query as { managerId?: string };

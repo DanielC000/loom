@@ -1469,6 +1469,23 @@ export class Db {
     return (this.db.prepare("SELECT * FROM sessions WHERE rate_limit_deadline IS NOT NULL AND process_state = 'live'")
       .all() as Row[]).map(toSession);
   }
+  /** EVERY session currently parked with a rate-limit (rate_limited_until set), live or not — the
+   *  clear-usage-hold CASCADE's work set. (Distinct from listRateLimitEpisodes, which is LIVE +
+   *  deadline-armed: a session can carry a park with no episode deadline, and a dead row may linger.) */
+  listRateLimited(): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE rate_limited_until IS NOT NULL")
+      .all() as Row[]).map(toSession);
+  }
+  /**
+   * Clear the rate-limit park (rate_limited_until + rate_limit_deadline) WITHOUT touching lastError —
+   * the on-EXIT cleanup. An exited/terminal session must never read RATE-LIMITED (its until-timestamp
+   * would otherwise linger in the Attention queue until it naturally passes), but its lastError (e.g. a
+   * crash-loop banner the attention surface keys off) must survive — so unlike setRateLimitedUntil
+   * (which also writes lastError + bumps last_activity), this touches ONLY the two park columns.
+   */
+  clearRateLimit(id: string): void {
+    this.db.prepare("UPDATE sessions SET rate_limited_until = NULL, rate_limit_deadline = NULL WHERE id = ?").run(id);
+  }
 
   // --- Asleep-at-the-Wheel idle watchdog state (FOUNDATION; persisted per-manager, parity with the
   // rate-limit accessors above). Nothing reads/writes these yet — the IdleWatcher ticker and the
