@@ -229,14 +229,43 @@ function isDoneColumn(key: string): boolean {
 function columnTone(col: KanbanColumn): Tone | null {
   return col.role ? roleTone[col.role] : null;
 }
-// The resolved accent COLOR for a lane, or null when it has neither a role nor an explicit accentColor
-// (an un-accented lane → transparent bar + neutral label/border). The "muted" role tone resolves to
-// textDim (#8a929b = 5.92:1), never textMuted (#5a636c = 3.05:1), so an 11px-bold lane title that
-// inherits this color always clears WCAG AA contrast on the panel.
+// The resolved accent COLOR for a lane: an explicit per-column accentColor WINS, then the role tone,
+// then null. accentColor-first is what makes the Settings accent picker take effect on the board even
+// for role-bearing lanes (f033daeb added the picker; before this it silently lost to the role tone on
+// the typical all-role board). A preset's accentColor equals its role color, and the DEFAULT board sets
+// no accentColor at all, so default/preset boards look unchanged. A role-less lane with no accent → null
+// (transparent bar + neutral label/border). The "muted" role tone resolves to textDim (#8a929b =
+// 5.92:1), never textMuted (#5a636c = 3.05:1).
 function columnAccent(col: KanbanColumn): string | null {
+  if (col.accentColor) return col.accentColor;
   const t = columnTone(col);
   if (t) return t === "muted" ? color.textDim : tone[t];
-  return col.accentColor ?? null;
+  return null;
+}
+
+// WCAG-AA guard for the 11px-bold lane LABEL, which must clear 4.5:1 on the panel. The accent bar and
+// each card's left border are decorative (no contrast floor) and always use the resolved accent; the
+// LABEL uses it ONLY when it clears AA, else falls back to textDim. Only a raw accentColor hex can fail
+// — the role tones are var() refs vetted AA-safe by design — so the guard runs the contrast math on hex
+// accents alone (every ACCENT_PALETTE swatch happens to clear AA; the guard is the floor if one didn't).
+// Panel hex mirrors --loom-panel (global.css :root).
+const PANEL_HEX = "#101316";
+function relLuminance(hex: string): number {
+  const lin = (i: number): number => {
+    const v = parseInt(hex.slice(1 + i, 3 + i), 16) / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * lin(0) + 0.7152 * lin(2) + 0.0722 * lin(4);
+}
+function labelColorFor(accent: string | null): string {
+  if (!accent) return color.textDim;
+  if (accent.startsWith("#")) {
+    const a = relLuminance(accent) + 0.05;
+    const b = relLuminance(PANEL_HEX) + 0.05;
+    const ratio = a > b ? a / b : b / a;
+    if (ratio < 4.5) return color.textDim;
+  }
+  return accent;
 }
 
 function Column({ col, tasks, filterActive, workers, onOpen, cardCount, landingLabel, busy, onRename, onRemove }:
@@ -247,7 +276,7 @@ function Column({ col, tasks, filterActive, workers, onOpen, cardCount, landingL
   // the header label, and each card's left border so all three agree. null = un-accented: transparent
   // bar, neutral AA-safe label, neutral hairline card border.
   const accent = columnAccent(col);
-  const labelColor = accent ?? color.textDim; // never textMuted — keeps the 11px-bold title AA-legible
+  const labelColor = labelColorFor(accent); // resolved accent if it clears AA on the panel, else textDim
   const cardAccent = accent ?? color.border; // un-accented lane → a neutral hairline left-border
   // SOFT WIP limit (advisory, never blocks). Shown as "N / limit" WHENEVER a limit is set (so an
   // approaching "2 / 3" is visible, not just a breach) — neutral under, amber AT-or-over. The count is
