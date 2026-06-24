@@ -16,12 +16,16 @@ project id anywhere; it's derived server-side.
 2. **Code** — `git log --oneline -20` and `git status` for recent and in-flight work.
 3. **Conventions** — read `CLAUDE.md` at the repo root if present.
 4. **Your role's anchor** (whichever applies):
-   - *Lead / orchestrator:* read your **living resume doc** (your agent prompt names it) — it's the
-     "you are here + what's next" source of truth. Cross-check it against the board.
+   - *Lead / orchestrator:* read your **living resume doc** — it's the "you are here + what's next"
+     source of truth. Your session's **"Where things live"** context block gives your project's
+     absolute **vault root**; your resume doc is `<vaultRoot>/Projects/<Project>/Orchestrator Log.md`
+     (substitute your project's name). **Read it by that ABSOLUTE path — never Glob for it** (a broad
+     Glob from your home directory hits the search timeout). Cross-check it against the board.
    - *Worker:* your scope is your assigned board task / kickoff — orient narrowly to it, not the whole
      project.
-5. **Design notes** (optional) — if your context names the project's vault folder, skim the latest
-   design/task notes there for decisions and rationale.
+5. **Design notes** (optional) — the **vault root** is the one in your "Where things live" context
+   block; skim the latest design/task notes under `<vaultRoot>/Projects/<Project>/` (by absolute path,
+   never Glob) for decisions and rationale.
 
 ## Brief
 

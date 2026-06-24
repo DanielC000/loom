@@ -18,6 +18,7 @@ import { readRunUsage, readRunUsageFromFile } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
+import { composeManagerStartupPrompt } from "./manager-prompt.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit } from "../orchestration/usage-awareness.js";
 import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
@@ -288,7 +289,12 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      startupPrompt,
+      // PL Auditor finding #8: MANAGERS ONLY get a "Where things live" pre-block (absolute repo+vault
+      // roots) so a cold-boot orchestrator reads its resume doc by absolute path instead of Globbing.
+      // vaultPath is passed here UNGATED by docLint — the orchestrator needs the location regardless of
+      // whether the vault-lint hook is on. Additive to the manager prompt only; every other spawn path
+      // is untouched (byte-identical).
+      startupPrompt: composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath }),
       role,
       browserTesting,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)

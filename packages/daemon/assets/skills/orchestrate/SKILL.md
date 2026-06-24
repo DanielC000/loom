@@ -182,10 +182,15 @@ scope, and never address the human. You make the call and `worker_message` it ba
 7. **Control worker lifecycle & context.** You persist; workers are reuse-until-recycle. Supervise by
    **artifact**, not keystrokes. When a worker's context grows too large, `worker_recycle` it: capture
    its state into a handoff, then a fresh worker takes the same worktree/branch/task seeded from it.
-8. **Maintain a living resume doc.** Keep ONE always-current handoff doc (your agent prompt says
-   where) — rewritten in place, never an append log — that a successor can read COLD: what's merged,
+8. **Maintain a living resume doc.** Keep ONE always-current handoff doc — rewritten in place, never an
+   append log — that a successor can read COLD: what's merged,
    the prioritized backlog, key decisions, open findings + gotchas, where things stand. Update it after
    each meaningful step. This single doc IS your recycle handoff and your re-orientation after a pause.
+   **Where it lives:** your session's **"Where things live"** context block gives your project's
+   absolute **vault root**; your resume doc is `<vaultRoot>/Projects/<Project>/Orchestrator Log.md`
+   (substitute your project's name). **Read and write it by that ABSOLUTE path — never Glob for it** (a
+   broad Glob from your home directory hits the search timeout). The vault root is the injected value;
+   the doc path is derived from it.
    A handoff (your resume doc, or a worker recycle handoff) is a **hint, not the source of truth**: when
    its claimed state conflicts with the **live board + code**, the live board and code win — verify
    against them and proceed, don't act on the stale claim.
