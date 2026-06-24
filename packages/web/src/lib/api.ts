@@ -2,8 +2,10 @@ import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListIt
 
 // One desired column in the atomic board-column layout PUT (card B). `prevKey` (when set) marks a KEY
 // RENAME — the server re-keys that column's cards old→new. A column omitted from the array is REMOVED;
-// its cards auto-move to the defaultLanding column server-side.
-export interface DesiredColumn { key: string; label: string; role?: ColumnRole; prevKey?: string; }
+// its cards auto-move to the defaultLanding column server-side. `accentColor`/`wipLimit` are carried
+// through so an editor that rebuilds the whole layout (the board-header editor, card 5d) never strips
+// the per-column accent / soft WIP limit it didn't touch — the PUT replaces the entire array.
+export interface DesiredColumn { key: string; label: string; role?: ColumnRole; prevKey?: string; accentColor?: string; wipLimit?: number; }
 
 export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 // One queued (not-yet-delivered) message. `id` is server-minted and stable, so the UI can
