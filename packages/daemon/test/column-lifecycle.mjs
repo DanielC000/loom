@@ -61,6 +61,17 @@ try {
   check("(a) no orphan after remove-with-cards", noOrphan("pa"));
   check("(a) 'review' is gone from the stored board", !resolveConfig(db.getProject("pa").config).kanbanColumns.some((c) => c.key === "review"));
 
+  // === (a2) the removal warning names the column's LABEL, not its snake_case key ===
+  // Use in_progress (key "in_progress" / label "In Progress" / role "active") where key≠label, so the
+  // assertion can distinguish the two (the "review" case above can't — its key, label, and role coincide).
+  mkProject("pa2", {});
+  const removeInProgress = DEFAULT.filter((c) => c.key !== "in_progress"); // drop the active lane
+  const ra2 = updateColumns("pa2", removeInProgress);
+  const warnIp = !!ra2.ok && ra2.warnings.find((w) => w.includes("active"));
+  check("(a2) removing 'in_progress' WARNS (active role)", !!warnIp);
+  check("(a2) the warning shows the LABEL 'In Progress'", !!warnIp && warnIp.includes("In Progress"));
+  check("(a2) the warning does NOT leak the snake_case key 'in_progress'", !!warnIp && !warnIp.includes("in_progress"));
+
   // === (b) rename a column KEY → cards follow old→new ===
   mkProject("pb", {});
   mkTask("b1", "pb", "todo");

@@ -188,10 +188,12 @@ export function planColumnLayout(
   // Removal warnings for role-bearing non-required lanes (the required ones are guarded above: removing
   // a defaultLanding/terminal column is fine since the role is reassigned to a kept column).
   for (const removed of removedKeys) {
-    const role = current.find((c) => c.key === removed)?.role;
+    const removedCol = current.find((c) => c.key === removed);
+    const role = removedCol?.role;
     if (role && role !== "defaultLanding" && role !== "terminal") {
       const depends = ROLE_DEPENDS[role] ?? `the '${role}' lane`;
-      warnings.push(`removing column '${removed}' drops the '${role}' role (${depends}); that behavior falls back until you reassign the role`);
+      const removedLabel = removedCol?.label ?? removed; // human label, not the snake_case key
+      warnings.push(`removing column '${removedLabel}' drops the '${role}' role (${depends}); that behavior falls back until you reassign the role`);
     }
   }
 
