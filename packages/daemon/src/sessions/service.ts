@@ -37,6 +37,72 @@ import { planColumnLayout, type DesiredColumn } from "../tasks/columns.js";
 const GIT_TIMEOUT_FLOOR_MS = 1_000;
 
 /**
+ * PL Auditor finding #10: slugify an agent name for the worker_spawn `agentId` name/slug path — lowercase,
+ * collapse any run of non-alphanumerics to a single hyphen, trim leading/trailing hyphens. Deterministic +
+ * dependency-free. So "QA Tester" ⇄ "qa-tester" both resolve to that agent.
+ */
+function slugifyAgentName(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/**
+ * PL Auditor finding #10: resolve a worker_spawn `agentId` that may be EITHER a real agent id OR a stable
+ * agent NAME/SLUG within the manager's project (the project is derived server-side; a client never passes a
+ * projectId). Resolution order is deterministic:
+ *   1. exact agent id (the historical contract — preserved byte-for-byte);
+ *   2. case-insensitive exact NAME within the project;
+ *   3. SLUG (slugifyAgentName) within the project.
+ * COLLISION RULE: a name/slug matching multiple agents resolves to the LOWEST-position agent — `listAgents`
+ * is `ORDER BY position`, so the first match is the lowest position. Deterministic, never a random pick.
+ */
+function resolveWorkerAgentRef(db: Db, projectId: string, ref: string): Agent | undefined {
+  const byId = db.getAgent(ref);
+  if (byId) return byId;
+  const agents = db.listAgents(projectId); // ORDER BY position ⇒ index 0 is the lowest position
+  const lower = ref.toLowerCase();
+  const byName = agents.find((a) => a.name.toLowerCase() === lower);
+  if (byName) return byName;
+  const slug = slugifyAgentName(ref);
+  return slug ? agents.find((a) => slugifyAgentName(a.name) === slug) : undefined;
+}
+
+/** Case-insensitive Levenshtein edit distance — dependency-free, deterministic, for the "did you mean" hint. */
+function editDistance(a: string, b: string): number {
+  const s = a.toLowerCase();
+  const t = b.toLowerCase();
+  const m = s.length, n = t.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const curr = new Array<number>(n + 1);
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = s.charCodeAt(i - 1) === t.charCodeAt(j - 1) ? 0 : 1;
+      curr[j] = Math.min((prev[j] ?? 0) + 1, (curr[j - 1] ?? 0) + 1, (prev[j - 1] ?? 0) + cost);
+    }
+    prev = curr;
+  }
+  return prev[n] ?? 0;
+}
+
+/**
+ * PL Auditor finding #10: the NEAREST agent name to a bad `agentId`, for the "did you mean '<X>'?" hint —
+ * the edit distance is taken to the closer of each agent's NAME or its SLUG (so a near-miss on either form
+ * is caught). Deterministic: agents are scanned in position order with a STRICT `<`, so on a distance tie the
+ * lowest-position agent wins. Returns undefined when the project has no agents.
+ */
+function nearestAgentName(agents: Agent[], ref: string): string | undefined {
+  let best: string | undefined;
+  let bestDist = Infinity;
+  for (const a of agents) {
+    const d = Math.min(editDistance(ref, a.name), editDistance(ref, slugifyAgentName(a.name)));
+    if (d < bestDist) { bestDist = d; best = a.name; }
+  }
+  return best;
+}
+
+/**
  * Least-privilege hardening: the ONLY session roles a Profile may confer on a default "+New" spawn.
  * The elevated/locked roles — "platform" (loom-platform surface), "auditor" (loom-audit),
  * "workspace-auditor" (loom-user-audit), "setup" (loom-setup) and "run" (internal-only Agent
@@ -1455,9 +1521,18 @@ export class SessionService {
     // worker to the manager-role agent, mis-grouping it AND inheriting that agent's browserTesting. The
     // agentId must be an explicit WORKER agent; defend at runtime so the service is robust regardless of
     // caller (the MCP schema also marks it required).
-    if (!opts.agentId) throw new Error("worker_spawn requires an explicit worker agentId (a Dev/Bugfix/QA/Docs agent) — never the manager's own agent");
-    const workerAgent = this.db.getAgent(opts.agentId);
-    if (!workerAgent) throw new Error(`worker_spawn agentId '${opts.agentId}' does not resolve to an existing agent`);
+    const agentRef = (opts.agentId ?? "").trim();
+    if (!agentRef) throw new Error("worker_spawn requires an explicit worker agentId (a Dev/Bugfix/QA/Docs agent) — never the manager's own agent");
+    // PL Auditor finding #10 (the agentId UX cousin of the taskId guard #1): accept EITHER a real agent id OR a
+    // stable agent NAME/SLUG, resolved SERVER-SIDE within this manager's project (the project is derived from
+    // the manager; a client never passes a projectId). A hand-copied 36-char UUID with a one-char typo no longer
+    // just 404s — it resolves by name, and failing that the error carries a deterministic "did you mean" hint.
+    // Name/slug collisions resolve to the lowest-position agent (see resolveWorkerAgentRef).
+    const workerAgent = resolveWorkerAgentRef(this.db, manager.projectId, agentRef);
+    if (!workerAgent) {
+      const suggestion = nearestAgentName(this.db.listAgents(manager.projectId), agentRef);
+      throw new Error(`worker_spawn agentId '${agentRef}' does not resolve to an existing agent${suggestion ? ` — did you mean '${suggestion}'?` : ""}`);
+    }
     // Reject a manager/platform-role rig: a worker must run under a worker (or plain) agent, never a
     // coordination agent. The role is the agent's resolved PROFILE role (resolveProfile — the canonical
     // mechanism); a profile-less agent (Dev/Bugfix/Docs/QA today) resolves to null and is allowed.
@@ -1525,7 +1600,7 @@ export class SessionService {
     const worker: Session = {
       id: randomUUID(),
       projectId: manager.projectId,
-      agentId: opts.agentId,
+      agentId: workerAgent.id, // the RESOLVED agent (opts.agentId may have been a name/slug — bind to the real id)
       engineSessionId: null,
       title: null,
       cwd: worktreePath, // worker runs IN its worktree (parallel-worker isolation)
