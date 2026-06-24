@@ -141,6 +141,9 @@ db.insertAgent({ id: "agentPlain", projectId: "pP", name: "Plain", startupPrompt
 db.insertAgent({ id: "agentWorkerSub", projectId: "pP", name: "WSub", startupPrompt: "WSUB_PROMPT", position: 2, profileId: "profWorkerSub" });
 db.insertSession({ id: "mgr1", projectId: "pP", agentId: "agentPlain", engineSessionId: null, title: null,
   cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+// worker_spawn validates taskId (PL finding #1): the success-case spawn needs a real, non-terminal task.
+const tW1 = "11111111-1111-4111-8111-111111111111";
+db.insertTask({ id: tW1, projectId: "pP", title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 
 check("(roundtrip) profile persists its skills subset", sameSet(db.getProfile("profSub").skills, ["alpha", "beta"]));
 check("(roundtrip) a plain profile reads skills:null", db.getProfile("profWorkerSub") && db.getProfile("profSub") && db.getProfile("profSub").skills !== null);
@@ -209,7 +212,7 @@ try {
     sameSet(optsFor(sSub.id)?.skills ?? [], ["alpha", "beta"]));
 
   // spawnWorker pointed at a subset worker profile → resolves + pins the subset (worker = own worktree).
-  const wSub = await svc.spawnWorker("mgr1", { taskId: "tW1", agentId: "agentWorkerSub", kickoffPrompt: "GO" });
+  const wSub = await svc.spawnWorker("mgr1", { taskId: tW1, agentId: "agentWorkerSub", kickoffPrompt: "GO" });
   workerWorktree = wSub.worktreePath;
   check("(C) spawnWorker: spawn opts.skills === the worker profile subset", sameSet(optsFor(wSub.id)?.skills ?? [], ["gamma"]));
   check("(C) spawnWorker: DB row pins the worker subset", sameSet(db.getSession(wSub.id).skills ?? [], ["gamma"]));

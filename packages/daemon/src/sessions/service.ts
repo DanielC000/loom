@@ -1452,6 +1452,19 @@ export class SessionService {
     if (profileRole === "manager" || profileRole === "platform" || profileRole === "auditor" || profileRole === "run") {
       throw new Error(`cannot spawn a worker under the '${workerAgent.name}' agent (a ${profileRole}-role profile); pick a worker agent (Dev/Bugfix/QA/Docs)`);
     }
+    // Validate the taskId BEFORE any side effect (worktree/session/branch) — mirror the agentId existence
+    // guard above. A truncated id WITH a trailing space + a placeholder kickoff once SUCCEEDED, binding a
+    // live worker to a bogus task string (a zombie) while the real task stayed in backlog. Trim first (so a
+    // pasted id with stray whitespace normalizes), reject an empty/whitespace-only or whitespace-containing
+    // id, then require the id to resolve to a REAL, NON-terminal task IN THIS PROJECT — a truncated/malformed/
+    // unknown id won't resolve and is rejected with the same "does not resolve" shape the agentId guard uses.
+    // A bad id must create NOTHING.
+    const taskId = (opts.taskId ?? "").trim();
+    if (!taskId || /\s/.test(taskId)) throw new Error(`worker_spawn taskId '${opts.taskId}' is not a valid task id`);
+    const task = this.db.getTask(taskId);
+    if (!task || task.projectId !== manager.projectId) throw new Error(`worker_spawn taskId '${taskId}' does not resolve to an existing task in this project`);
+    const terminalKey = columnKeyForRole(config.kanbanColumns, "terminal");
+    if (task.columnKey === terminalKey) throw new Error(`worker_spawn taskId '${taskId}' is in the terminal column ('${task.columnKey}') — pick a non-terminal task`);
     // Resolve THAT agent's profile for its browser-automation opt-in + skill subset — a manager spawns a
     // QA worker by pointing it at a browserTesting profile (e.g. the bundled "QA Tester"). Explicit role is
     // "worker"; we read browserTesting + skills (permission stays config.permission, byte-identical to
@@ -1471,7 +1484,7 @@ export class SessionService {
     const cap = config.orchestration.maxConcurrentWorkers;
     if (liveWorkers >= cap) throw new Error(`concurrency cap reached (${cap})`);
 
-    const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, opts.taskId, { timeoutMs: this.provisionMs });
+    const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, taskId, { timeoutMs: this.provisionMs });
 
     const now = new Date().toISOString();
     const worker: Session = {
@@ -1491,7 +1504,7 @@ export class SessionService {
       browserTesting, // QA worker (profile opt-in) ⇒ per-session Playwright MCP; else false (plain)
       skills, // profile-pinned skill subset for the worker (null ⇒ all); pinned so resume/recycle honor it
       parentSessionId: managerSessionId,
-      taskId: opts.taskId,
+      taskId,
       worktreePath,
       branch,
     };
@@ -1514,10 +1527,10 @@ export class SessionService {
     // hardcoded "in_progress" key). If the board has no active lane, leave the card where it is rather
     // than inventing a key — the invariant: a move never points a task at a non-existent column.
     const activeKey = columnKeyForRole(config.kanbanColumns, "active");
-    if (activeKey) this.db.updateTask(opts.taskId, { columnKey: activeKey });
+    if (activeKey) this.db.updateTask(taskId, { columnKey: activeKey });
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId, workerSessionId: worker.id, taskId: opts.taskId, kind: "spawn_worker",
+      managerSessionId, workerSessionId: worker.id, taskId, kind: "spawn_worker",
     });
     return { ...worker, processState: "live" };
   }

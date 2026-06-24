@@ -103,6 +103,10 @@ db.insertAgent({ id: "agentDev", projectId: "pP", name: "Dev", startupPrompt: "D
 // A live manager (plain-role session is fine) to drive spawnWorker.
 db.insertSession({ id: "mgr1", projectId: "pP", agentId: "agentPlain", engineSessionId: null, title: null,
   cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+// worker_spawn now validates taskId (PL finding #1): the success-case spawns need real, non-terminal tasks.
+const tW1 = "11111111-1111-4111-8111-111111111111", tW2 = "22222222-2222-4222-8222-222222222222";
+for (const id of [tW1, tW2])
+  db.insertTask({ id, projectId: "pP", title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 
 // roundtrip: the profile's flag persists through the DB
 check("(roundtrip) QA profile persists browserTesting=true", db.getProfile("profQA").browserTesting === true);
@@ -153,7 +157,7 @@ try {
     oResume?.browserTesting === true);
 
   // spawnWorker pointed at the QA agent → resolves browserTesting from THAT agent's profile.
-  const wQA = await svc.spawnWorker("mgr1", { taskId: "tW1", agentId: "agentQA", kickoffPrompt: "GO" });
+  const wQA = await svc.spawnWorker("mgr1", { taskId: tW1, agentId: "agentQA", kickoffPrompt: "GO" });
   workerWorktree = wQA.worktreePath;
   const oWQA = optsFor(wQA.id);
   check("(e2e) spawnWorker(QA agent): spawn opts.browserTesting === true", oWQA?.browserTesting === true);
@@ -161,7 +165,7 @@ try {
   check("(e2e) spawnWorker(QA agent): DB row persists browser_testing=1", db.getSession(wQA.id).browserTesting === true);
 
   // spawnWorker pointed at a plain worker (Dev profile, no flag) → false, byte-identical.
-  const wDev = await svc.spawnWorker("mgr1", { taskId: "tW2", agentId: "agentDev", kickoffPrompt: "GO" });
+  const wDev = await svc.spawnWorker("mgr1", { taskId: tW2, agentId: "agentDev", kickoffPrompt: "GO" });
   const oWDev = optsFor(wDev.id);
   check("(e2e) spawnWorker(Dev agent): browserTesting is falsy (no browser)", !oWDev?.browserTesting);
   check("(e2e) spawnWorker(Dev agent): DB row browser_testing=0", db.getSession(wDev.id).browserTesting === false);

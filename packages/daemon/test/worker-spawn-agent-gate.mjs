@@ -20,6 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -71,6 +72,11 @@ db.insertAgent({ id: "agentPlain", projectId: "pP", name: "Plain", startupPrompt
 // the bug: an Orchestrator-agent manager spawning workers).
 db.insertSession({ id: "mgr1", projectId: "pP", agentId: "agentMgr", engineSessionId: null, title: null,
   cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+// Real, non-terminal tasks for the SUCCESS cases — worker_spawn now validates taskId (PL finding #1), so a
+// spawn that passes the agent gate must reference a real backlog task in this project (default landing key).
+const taskA = randomUUID(), taskA2 = randomUUID(), taskD = randomUUID();
+for (const id of [taskA, taskA2, taskD])
+  db.insertTask({ id, projectId: "pP", title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 
 class SeamHost extends PtyHost {
   constructor(events) { super(events); this.capture = []; }
@@ -102,7 +108,7 @@ try {
     () => svc.spawnWorker("mgr1", { taskId: "tB2", agentId: "agentPlat", kickoffPrompt: "GO" }), "platform-role");
 
   // ===================== (a) a worker-agent spawn SUCCEEDS, binds to the nominated agent =====================
-  const wDev = await svc.spawnWorker("mgr1", { taskId: "tA", agentId: "agentDev", kickoffPrompt: "GO" });
+  const wDev = await svc.spawnWorker("mgr1", { taskId: taskA, agentId: "agentDev", kickoffPrompt: "GO" });
   worktrees.push(wDev.worktreePath);
   check("(a) Dev-agent spawn succeeds, role=worker", wDev.role === "worker");
   check("(a) worker BINDS to the nominated Dev agent (NOT the manager's agentMgr)", wDev.agentId === "agentDev");
@@ -110,7 +116,7 @@ try {
   check("(a) DB row persists role=worker", db.getSession(wDev.id).role === "worker");
 
   // a profile-LESS (plain) worker agent is allowed too (role null ⇒ not manager/platform).
-  const wPlain = await svc.spawnWorker("mgr1", { taskId: "tA2", agentId: "agentPlain", kickoffPrompt: "GO" });
+  const wPlain = await svc.spawnWorker("mgr1", { taskId: taskA2, agentId: "agentPlain", kickoffPrompt: "GO" });
   worktrees.push(wPlain.worktreePath);
   check("(a') plain (no-profile) worker agent spawn succeeds", wPlain.role === "worker" && wPlain.agentId === "agentPlain");
 
@@ -120,7 +126,7 @@ try {
   check("(d) Dev-agent worker does NOT inherit the manager agent's browserTesting (false)",
     optsFor(wDev.id)?.browserTesting === false && db.getSession(wDev.id).browserTesting === false);
   check("(d) plain-agent worker browserTesting=false", db.getSession(wPlain.id).browserTesting === false);
-  const wQA = await svc.spawnWorker("mgr1", { taskId: "tD", agentId: "agentQA", kickoffPrompt: "GO" });
+  const wQA = await svc.spawnWorker("mgr1", { taskId: taskD, agentId: "agentQA", kickoffPrompt: "GO" });
   worktrees.push(wQA.worktreePath);
   check("(d) QA-agent worker resolves browserTesting=true from its OWN profile",
     optsFor(wQA.id)?.browserTesting === true && db.getSession(wQA.id).browserTesting === true);

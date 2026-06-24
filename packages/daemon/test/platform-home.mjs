@@ -135,6 +135,10 @@ db3.insertAgent({ id: "aMgr", projectId: "pRepo", name: "Mgr", startupPrompt: "M
 db3.insertAgent({ id: "aDev", projectId: "pRepo", name: "Dev", startupPrompt: "D", position: 1, profileId: null });
 db3.insertSession({ id: "mgr1", projectId: "pRepo", agentId: "aMgr", engineSessionId: null, title: null,
   cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+// worker_spawn validates taskId (PL finding #1): the success-case spawns need real, non-terminal tasks.
+const tW1 = "11111111-1111-4111-8111-111111111111", tW2 = "22222222-2222-4222-8222-222222222222";
+for (const id of [tW1, tW2])
+  db3.insertTask({ id, projectId: "pRepo", title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 
 class SeamHost extends PtyHost {
   constructor(events) { super(events); this.capture = []; }
@@ -148,7 +152,7 @@ const optsFor = (sid) => host.capture.find((o) => o.sessionId === sid);
 let worktrees = [];
 try {
   // The agent-facing spawn (what the worker_spawn MCP tool calls) ALWAYS yields role=worker.
-  const w = await svc.spawnWorker("mgr1", { taskId: "tW1", agentId: "aDev", kickoffPrompt: "GO" });
+  const w = await svc.spawnWorker("mgr1", { taskId: tW1, agentId: "aDev", kickoffPrompt: "GO" });
   worktrees.push(w.worktreePath);
   check("(d) spawnWorker yields a WORKER-role session (never platform)", w.role === "worker");
   check("(d) spawnWorker spawn opts.role === 'worker' (hardcoded)", optsFor(w.id)?.role === "worker");
@@ -156,7 +160,7 @@ try {
 
   // spawnWorker takes NO role param — its only inputs are taskId/agentId/kickoffPrompt. Passing an extra
   // role is simply ignored by the service signature (proves there's no agent-supplied role channel).
-  const w2 = await svc.spawnWorker("mgr1", { taskId: "tW2", agentId: "aDev", kickoffPrompt: "GO", role: "platform" });
+  const w2 = await svc.spawnWorker("mgr1", { taskId: tW2, agentId: "aDev", kickoffPrompt: "GO", role: "platform" });
   worktrees.push(w2.worktreePath);
   check("(d) an injected role:'platform' arg is IGNORED — still a worker", w2.role === "worker");
 

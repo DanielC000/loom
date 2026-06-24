@@ -90,7 +90,9 @@ db.insertSession({
   cwd: repo, processState: "live", resumability: "unknown", busy: false,
   createdAt: now, lastActivity: now, lastError: null, role: "manager",
 });
-db.insertTask({ id: "taskW", projectId: "pP", title: "WORK", body: "", columnKey: "todo", position: 1, createdAt: now, updatedAt: now });
+// worker_spawn validates taskId (PL finding #1): the id must be a real, non-terminal task with a UUID id.
+const taskW = "33333333-3333-4333-8333-333333333333";
+db.insertTask({ id: taskW, projectId: "pP", title: "WORK", body: "", columnKey: "todo", position: 1, createdAt: now, updatedAt: now });
 
 // --- the fake pty + a PtyHost subclass that captures every SpawnOpts via the createPty() seam.
 // `failFast` makes the NEXT spawn's pty fire onExit SYNCHRONOUSLY (during spawn()) — the M5 race. ---
@@ -193,14 +195,14 @@ try {
 
   // ===================== (c) worker_spawn still produces a worker (explicit role wins) =====================
   // agentId is now REQUIRED (no silent ?? manager.agentId fallback) — nominate the plain worker agent.
-  const w = await svc.spawnWorker("mgr1", { taskId: "taskW", agentId: "agentPlain", kickoffPrompt: "WORKER_KICKOFF" });
+  const w = await svc.spawnWorker("mgr1", { taskId: taskW, agentId: "agentPlain", kickoffPrompt: "WORKER_KICKOFF" });
   workerWorktree = w.worktreePath;
   const oW = optsFor(w.id);
   check("(c) worker_spawn returns role=worker", w.role === "worker");
   check("(c) DB persists role=worker", db.getSession(w.id).role === "worker");
   check("(c) spawn opts.role === 'worker' (explicit caller role, not the agent's profile)", oW?.role === "worker");
   check("(c) worker prompt is the manager's kickoff (NOT the agent/profile prompt)", oW?.startupPrompt === "WORKER_KICKOFF");
-  check("(c) task moved to in_progress", db.getTask("taskW")?.columnKey === "in_progress");
+  check("(c) task moved to in_progress", db.getTask(taskW)?.columnKey === "in_progress");
   check("(c) worker is live", db.getSession(w.id).processState === "live");
 
   // ===================== (d) M5 — a spawn that exits immediately ends 'exited', never stuck 'live' =====================
