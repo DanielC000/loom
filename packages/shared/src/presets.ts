@@ -11,7 +11,7 @@ import { PLATFORM_DEFAULTS, type KanbanColumn, type ColumnRole } from "./config.
 
 /** Accent palette keyed by lifecycle role, drawn from the web theme tokens (global.css) so the preset
  *  colors match the app's design language rather than an ad-hoc rainbow. Cosmetic only — the atomic API
- *  drops `accentColor` until the sibling persistence card lands; the key/label/role set persists today. */
+ *  now persists `accentColor` (card 5b), so a preset's role-accents store and render on the board. */
 const ROLE_ACCENT: Readonly<Record<ColumnRole, string>> = {
   intake: "#5bc8ff", // cyan — info / new arrivals
   defaultLanding: "#2ee66e", // phosphor — the catch-all landing
@@ -117,16 +117,24 @@ export function presetById(id: string | undefined): ColumnPreset {
 }
 
 /** A column in the shape the atomic columns API (PUT /…/columns) expects. Mirrors the daemon's
- *  `DesiredColumn` without importing it (shared stays daemon-free): key/label/role only. No `prevKey` —
- *  applying a preset is a fresh layout, not a rename, so dropped columns' cards fall to defaultLanding. */
+ *  `DesiredColumn` without importing it (shared stays daemon-free): key/label/role + the now-persisted
+ *  `accentColor`. No `prevKey` — applying a preset is a fresh layout, not a rename, so dropped columns'
+ *  cards fall to defaultLanding. */
 export interface PresetDesiredColumn {
   key: string;
   label: string;
   role?: ColumnRole;
+  accentColor?: string;
 }
 
-/** Convert a preset's columns into the atomic-API payload. Drops `accentColor` (the API drops it today;
- *  persistence rides the sibling card) and omits `prevKey` (a preset apply is a re-layout, not a rename). */
+/** Convert a preset's columns into the atomic-API payload. CARRIES `accentColor` through (card 5b persists
+ *  it, so a preset's role-accents store + render on the board) and omits `prevKey` (a preset apply is a
+ *  re-layout, not a rename). An absent optional stays absent — no `undefined`-injection. */
 export function presetToDesired(preset: ColumnPreset): PresetDesiredColumn[] {
-  return preset.columns.map((c) => (c.role ? { key: c.key, label: c.label, role: c.role } : { key: c.key, label: c.label }));
+  return preset.columns.map((c) => {
+    const d: PresetDesiredColumn = { key: c.key, label: c.label };
+    if (c.role) d.role = c.role;
+    if (c.accentColor !== undefined) d.accentColor = c.accentColor;
+    return d;
+  });
 }

@@ -4,7 +4,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   - feeding each preset as `desired` to planColumnLayout (against BOTH the default board AND a custom
 //     board as `current`) yields plan.ok === true (it would be applyable to a real project);
 //   - each preset has EXACTLY one defaultLanding + EXACTLY one terminal, and any other role at most once;
-//   - presetToDesired() round-trips into a payload the planner still accepts (key/label/role only);
+//   - presetToDesired() round-trips into a payload the planner still accepts (key/label/role + the
+//     now-persisted accentColor, card 5b) and CARRIES each column's accentColor through;
 //   - the default preset (agent-dev) matches PLATFORM_DEFAULTS' columns key/label/role (today's board).
 // Run: 1) build shared + daemon, 2) node test/column-presets.mjs
 import { planColumnLayout } from "../dist/tasks/columns.js";
@@ -44,8 +45,12 @@ for (const preset of COLUMN_PRESETS) {
   check(`[${preset.id}] keys are non-empty + unique`, keys.every((k) => k && k.trim()) && new Set(keys).size === keys.length);
   check(`[${preset.id}] labels are non-empty`, cols.every((c) => c.label && c.label.trim()));
 
-  // === the load-bearing assertion: each preset PASSES planColumnLayout against multiple current boards ===
+  // === presetToDesired CARRIES accentColor through (card 5b persists it; it must reach the atomic API) ===
   const desired = presetToDesired(preset); // the exact payload the web sends to the atomic API
+  check(`[${preset.id}] presetToDesired carries each column's accentColor`,
+    desired.every((d, i) => d.accentColor === cols[i].accentColor));
+
+  // === the load-bearing assertion: each preset PASSES planColumnLayout against multiple current boards ===
   for (const [name, current] of [["default board", DEFAULT_BOARD], ["custom board", CUSTOM_BOARD]]) {
     const plan = planColumnLayout(current, desired);
     check(`[${preset.id}] plans OK against the ${name} (plan.ok)`, plan.ok === true);

@@ -137,6 +137,9 @@ function Column({ col, tasks, filterActive, workers, onOpen }:
   { col: KanbanColumn; tasks: Task[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key });
   const t = columnTone(col.key);
+  // SOFT WIP limit (advisory, never blocks): when the column's live card count exceeds its wipLimit, the
+  // count reads as "N / limit" in amber. Absent wipLimit → plain "(N)", today's neutral look.
+  const overWip = col.wipLimit !== undefined && tasks.length > col.wipLimit;
   // Bounded, viewport-relative height so a long column scrolls internally instead of stretching the
   // page. Flex column: header stays pinned; the card list is the lone flex:1 scroll region. The
   // droppable ref stays on this outer wrapper, so a drop lands anywhere over the column (incl. when
@@ -145,7 +148,19 @@ function Column({ col, tasks, filterActive, workers, onOpen }:
     <div ref={setNodeRef} className="loom-grid"
       style={{ background: isOver ? color.phosphorDim : color.panel, border: `1px solid ${color.border}`, borderRadius: 4,
         display: "flex", flexDirection: "column", minHeight: 200, maxHeight: "75vh" }}>
-      <SectionLabel style={{ color: tone[t], margin: 0, padding: "12px 12px 8px" }}>{col.label} ({tasks.length})</SectionLabel>
+      {/* Restrained per-column header accent: a thin top bar tinted with the column's accentColor (drawn
+          from the preset role palette / the column editor). Top corners rounded to nest inside the
+          wrapper's radius. Absent → no bar, today's neutral header. */}
+      {col.accentColor && <div aria-hidden style={{ height: 3, background: col.accentColor, flexShrink: 0,
+        borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />}
+      <SectionLabel style={{ color: tone[t], margin: 0, padding: "12px 12px 8px", display: "flex", alignItems: "baseline", gap: 6 }}>
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{col.label}</span>
+        <span aria-label={overWip ? `${tasks.length} cards, over the soft WIP limit of ${col.wipLimit}` : undefined}
+          title={overWip ? `Over the soft WIP limit of ${col.wipLimit} (advisory — does not block)` : undefined}
+          style={{ flexShrink: 0, color: overWip ? color.amber : "inherit", fontWeight: overWip ? 700 : undefined }}>
+          {overWip ? `${tasks.length} / ${col.wipLimit}` : `(${tasks.length})`}
+        </span>
+      </SectionLabel>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
         {tasks.map((task) => <Card key={task.id} task={task} accent={tone[t]} worker={workers.get(task.id)} onOpen={() => onOpen(task.id)} />)}
         {/* Filtered-empty state: the filter hid every card in this column. Reads as deliberate, not broken. */}
