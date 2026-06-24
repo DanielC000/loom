@@ -24,6 +24,10 @@ export interface KanbanColumn {
   label: string;
   /** Semantic lifecycle role (see ColumnRole). Optional: stored configs may lack it. */
   role?: ColumnRole;
+  /** CSS color for the column header accent (e.g. "#6b8afd"). Optional; absent = today's look. */
+  accentColor?: string;
+  /** SOFT (advisory, non-blocking) work-in-progress limit. Optional; absent = no limit. */
+  wipLimit?: number;
 }
 
 /**
