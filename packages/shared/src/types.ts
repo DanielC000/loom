@@ -380,6 +380,13 @@ export type DeliveryStatus = "delivered-live" | "queued" | "boarded" | "dropped"
 /** Append-only orchestration audit record (the manager↔worker timeline). */
 export type OrchestrationEventKind =
   | "spawn_worker" | "message_worker" | "worker_report" | "stop_worker"
+  // Manager→worker REDIRECT (orchestration `worker_redirect`): the "land it NOW" escalation — END the
+  // worker's CURRENT turn (a single Esc cancel) + flush/SUPERSEDE its queued direction + deliver ONE
+  // authoritative instruction as the next turn. Parent-scoped exactly like message_worker/stop_worker.
+  // Filed under the owning MANAGER (workerSessionId = the steered worker); `detail` carries whether the
+  // redirect delivered live or queued. The flushed durable messages resolve as session_message_delivered
+  // with reason "superseded" (so the done-guard + boot-recovery never re-drive them).
+  | "redirect_worker"
   | "recycle_begin" | "recycle_complete" | "merge_request" | "merge_done"
   | "merge_rejected" | "build_gate" | "kill_switch" | "schedule_fired"
   // worker_report(done) PRE-CHECK refusal (board cards 907b9f50, dcb25bd9): a worker reported done but was

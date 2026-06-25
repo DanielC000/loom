@@ -1713,6 +1713,55 @@ export class SessionService {
   }
 
   /**
+   * REDIRECT one of a manager's workers (parent-scoped) — the "land it NOW" steer, strictly more forceful
+   * than messageWorker (additive, non-interrupting): END the worker's CURRENT turn and REPLACE its pending
+   * direction with this single authoritative instruction, delivered as the next turn. NO new trust surface —
+   * steering your own worker is strictly LESS than the stopWorker process-kill the manager already holds.
+   *
+   * ORDER IS LOAD-BEARING (so the redirect deterministically lands as the next turn):
+   *   (a) FLUSH the worker's pending FIFO and SUPERSEDE each flushed durable record (fire its onDeliver with
+   *       reason "superseded" → a session_message_delivered marker), so the worker_report done-guard and the
+   *       boot-recovery scan never later re-drive the direction we're replacing. Plain (non-durable) held
+   *       nudges carry no callback and are simply dropped — the redirect supersedes them too.
+   *   (b) ENQUEUE the authoritative redirect (framed `[loom:from-manager:redirect]`) via the SAME durable
+   *       channel as messageWorker: a busy worker HOLDS it (delivered:false, persisted) — it is now the only
+   *       entry in the freshly-flushed queue; an idle worker submits it immediately (delivered:true).
+   *   (c) ONLY IF it was HELD (delivered:false ⇒ the worker was busy) do we interrupt: pty.interruptForRedirect
+   *       writes a single Esc to cancel the in-flight turn, then after a bounded settle clears the (stale) busy
+   *       and drains — delivering the redirect we enqueued in (b). The enqueue is SYNCHRONOUS and precedes the
+   *       interrupt's settle timer, so the message is always in the queue before the settle-drain fires (if it
+   *       were idle there's no turn to cancel, so we skip the Esc and the redirect already went out as a turn).
+   *
+   * Returns the enqueue status ({delivered, position?}). Throws "not your worker" for a non-child (mirrors
+   * messageWorker/stopWorker's parent gate).
+   */
+  redirectWorker(
+    managerSessionId: string, workerSessionId: string, text: string,
+  ): { delivered: boolean; position?: number } {
+    const worker = this.db.getSession(workerSessionId);
+    if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
+    // (a) FLUSH + SUPERSEDE the worker's queued direction before the authoritative redirect lands.
+    const flushed = this.pty.flushPending(workerSessionId);
+    for (const m of flushed) {
+      if (m.onDeliver) { try { m.onDeliver("superseded"); } catch { /* a resolution fault must never block the redirect */ } }
+    }
+    // (b) ENQUEUE the authoritative redirect (durable-tracked like messageWorker). Distinctly framed so the
+    // worker knows this REPLACED its pending direction and may have interrupted it mid-edit.
+    const framed = `[loom:from-manager:redirect]\n${text}`;
+    const r = this.enqueueDurableMessage(workerSessionId, framed, { sender: managerSessionId, taskId: worker.taskId ?? null });
+    // (c) Interrupt ONLY when the redirect was HELD (the worker was busy). For an idle worker the redirect
+    // already went out as a turn (delivered:true) — there is nothing to cancel, and an Esc would wrongly
+    // cancel that very turn.
+    if (!r.delivered) this.pty.interruptForRedirect(workerSessionId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "redirect_worker",
+      detail: { delivered: r.delivered, superseded: flushed.length },
+    });
+    return r;
+  }
+
+  /**
    * Durable down/cross-tree message send (card 2ca18433). Wraps pty.enqueueStdin: if the recipient is
    * idle the message goes out as a turn now (delivered:true, nothing persisted — it's already live); if
    * it's BUSY the message is HELD in the recipient's in-memory FIFO (delivered:false) AND persisted as a
@@ -1726,7 +1775,10 @@ export class SessionService {
     recipientId: string, framedText: string, ctx: { sender: string; taskId?: string | null },
   ): { delivered: boolean; position?: number } {
     const msgId = randomUUID();
-    const r = this.pty.enqueueStdin(recipientId, framedText, "system", () => this.resolveQueuedMessage(msgId, { recipientId }));
+    // onDeliver carries an OPTIONAL reason: the normal drain/pull paths fire it with no arg (a plain
+    // delivery); a flush/SUPERSEDE caller (redirectWorker) passes "superseded" so the resolution event
+    // records WHY the durable record closed without being delivered as a turn.
+    const r = this.pty.enqueueStdin(recipientId, framedText, "system", (reason?: string) => this.resolveQueuedMessage(msgId, { recipientId, reason }));
     if (!r.delivered) {
       // Held (busy / not-ready) — persist the durable inbox record. delivered:false with no position also
       // means "recipient not live": we still record it, so the boot scan re-drives it once the recipient

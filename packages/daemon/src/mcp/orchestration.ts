@@ -265,6 +265,32 @@ export class OrchestrationMcpRouter {
     );
 
     server.registerTool(
+      "worker_redirect",
+      {
+        description:
+          "FORCEFULLY redirect one of your workers — the \"land it NOW\" steer. This ENDS the worker's " +
+          "CURRENT turn immediately and REPLACES its entire pending direction with this ONE instruction, " +
+          "delivered as its next turn. Use it ONLY when you must change course NOW and cannot wait for the " +
+          "worker to finish — e.g. you've spotted it building the wrong thing. CONTRAST with worker_message, " +
+          "which is ADDITIVE and NON-interrupting (it queues behind the current turn and coalesces with other " +
+          "pending messages); prefer worker_message unless you truly need to interrupt. " +
+          "CAUTION: the interrupt may land MID-EDIT, leaving the worker's working tree partly changed — so " +
+          "phrase `text` so the worker FIRST reconciles/inspects its working tree (e.g. `git status`, finish " +
+          "or revert the half-done edit) BEFORE acting on the new direction. Any messages that were queued for " +
+          "the worker are discarded (superseded by this one). Returns {delivered} — true if it went out as a " +
+          "turn immediately (worker was idle), false if queued to land right after the interrupt clears.",
+        inputSchema: { workerSessionId: z.string(), text: z.string() },
+      },
+      async ({ workerSessionId, text }) => {
+        try {
+          return ok(sessions.redirectWorker(managerSessionId, workerSessionId, text));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
       "inbox_pull",
       {
         description:

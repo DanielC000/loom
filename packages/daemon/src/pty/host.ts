@@ -277,6 +277,17 @@ const GRACEFUL_STOP_RETRY_MS = Number(process.env.LOOM_GRACEFUL_RETRY_MS) || 2_0
 const GRACEFUL_STOP_KILL_MS = Number(process.env.LOOM_GRACEFUL_KILL_MS) || 6_000;
 
 /**
+ * Settle window for `interruptForRedirect`: after writing the single Esc that cancels a busy worker's
+ * in-flight generation, wait this long for the engine to unwind back to an idle prompt before we
+ * SYNCHRONOUSLY clear the (now stale) busy and drain the freshly-enqueued redirect as the next turn. An
+ * Esc-cancel fires NO Stop hook (same as the Ctrl-C interrupt), so nothing else lowers busy — this timer
+ * is what does. Env-overridable so the hermetic test drives it in milliseconds (mirrors GRACEFUL_STOP_*);
+ * default unset = production behaviour (a beat for the cancel to land). Sized well under BUSY_STALE_MS so
+ * it always wins the self-heal race.
+ */
+const REDIRECT_SETTLE_MS = Number(process.env.LOOM_REDIRECT_SETTLE_MS) || 1_500;
+
+/**
  * Resolve the per-session Playwright MCP (`@playwright/mcp`) stdio server entry, injected at spawn
  * ONLY for a browserTesting session (opt-in, gated). Built with ABSOLUTE paths — the same lesson as
  * the absolute-claude-path invariant: node-pty's Windows agent does NOT search %PATH%, and a bare
@@ -519,9 +530,14 @@ interface Subscriber {
  * delivered:true synchronously and persists nothing), so the load-bearing M1/M2 busy-gate ordering is
  * untouched; for every existing (non-messaging) entry it is undefined → a no-op. Internal to the host
  * (stripped from getPendingEntries, never persisted), the callback dies with the pty like the queue.
+ *
+ * It takes an OPTIONAL `reason`: the drain/pull paths call it with NO arg (a plain delivery), while a
+ * caller that RETIRES a held entry rather than delivering it — `flushPending`'s consumer (worker_redirect)
+ * — passes a reason ("superseded") so the resolution event records WHY. Back-compatible: every existing
+ * no-arg call leaves reason undefined (unchanged behaviour).
  */
 export type QueueSource = "human" | "system";
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: () => void };
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void };
 
 interface Live {
   pty: IPty;
@@ -1264,6 +1280,25 @@ export class PtyHost {
   }
 
   /**
+   * Splice and RETURN a session's entire pending FIFO as its raw id-bearing entries (onDeliver INCLUDED —
+   * unlike getPendingEntries, which strips it for the UI). The redirect path (SessionService.redirectWorker)
+   * uses this to SUPERSEDE a busy worker's queued direction before enqueueing the one authoritative redirect:
+   * it RETIRES the flushed entries rather than delivering them, firing each durable entry's onDeliver with a
+   * "superseded" reason so the boot-recovery scan + the worker_report done-guard never re-drive them.
+   *
+   * DISTINCT from consumePending: this neither delivers nor fires onDeliver itself — the caller decides the
+   * fate of each entry (consumePending = "I delivered these"; flushPending = "I'm discarding these, here they
+   * are so you can resolve them how you see fit"). SYNCHRONOUS (array splice only — no await, no submit, no
+   * pty write), so it never enters deliverHook's M2 lower-busy→drain window. Returns [] for a dead/unknown
+   * session. Internal to the host (called by SessionService), never exposed to the UI or an agent.
+   */
+  flushPending(sessionId: string): QueuedMessage[] {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) return [];
+    return live.pending.splice(0); // empty the queue in place AND hand the removed entries (with onDeliver) back
+  }
+
+  /**
    * The three human-facing queue mutators (delete / edit / reorder a queued entry). All are addressed
    * by the stable QueuedMessage.id and are SYNCHRONOUS BY CONSTRUCTION — they only touch the
    * `live.pending` array (no `await`, no submit(), never a pty write), exactly like consumePending. So
@@ -1707,6 +1742,48 @@ export class PtyHost {
       console.log(`[pty] ${sessionId} graceful stop: still live after ${GRACEFUL_STOP_KILL_MS}ms — escalating to hard kill`);
       live.pty.kill();
     }, GRACEFUL_STOP_KILL_MS);
+  }
+
+  /**
+   * REDIRECT interrupt (worker_redirect, the "land it NOW" steer): END a BUSY worker's current turn so a
+   * freshly-enqueued redirect drains as the very next turn. Writes a SINGLE Esc — "stop generating, return
+   * to the prompt" — GENTLER than stop()'s Ctrl-C×2 (which EXITS the process). Like the Ctrl-C interrupt,
+   * an Esc-cancel fires NO Stop hook, so `busy` would go STALE (the same gap healIfStuck/escalateGracefulStop
+   * cover); after a BOUNDED settle we SYNCHRONOUSLY setBusy(false) + drainPending in the SAME tick — exactly
+   * like deliverHook's Stop branch (respecting the M2 window: NO await between the two) — so the redirect
+   * that redirectWorker enqueued before calling us is delivered (coalesced) as the next turn.
+   *
+   * NO-OP unless there's a live, in-flight turn to interrupt: a dead/unknown session, a session already
+   * `stopping` (a real stop must win — never fight it / re-arm busy past it), or an idle (busy=false) one
+   * (nothing to cancel — redirectWorker submits the redirect as a normal turn for the idle case and only
+   * calls us when the redirect was HELD, i.e. the worker was busy).
+   *
+   * The settle callback SNAPSHOTS busySince at interrupt time and bails if it changed — guarding the narrow
+   * race where the worker's real turn ends NATURALLY (a real Stop drains the redirect and the worker starts
+   * acting on it, re-arming busy with a NEW busySince) within the settle window: we must NOT then clobber
+   * that live turn's busy. If it ended and stayed idle, our setBusy(false) is a harmless idempotent repeat.
+   */
+  interruptForRedirect(sessionId: string): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive || live.stopping || !live.ready || !live.busy) return; // nothing in flight to interrupt
+    const busySinceAtInterrupt = live.busySince; // snapshot: a NEW turn (re-armed busy) updates this
+    live.pty.write(ESC_KEY); // single Esc: cancel the in-flight generation, return to the idle prompt
+    setTimeout(() => {
+      const l = this.live.get(sessionId);
+      if (!l?.alive || l.stopping || !l.ready) return; // died / a real stop won / never readied → drop the self-clear
+      if (!l.busy) return;                              // a real Stop already cleared it (and drained) — nothing to heal
+      if (l.busySince !== busySinceAtInterrupt) return; // a NEW turn started since the Esc — do NOT clobber its busy
+      // No Stop hook fired on the Esc-cancel → clear the stale busy OURSELVES and drain the redirect in the
+      // SAME tick (the M2 window: strictly no await between setBusy(false) and drainPending), mirroring the
+      // Stop branch. finalizingTurn arms the same tripwire so a future async leak here is caught loudly.
+      this.finalizingTurn = true;
+      try {
+        this.setBusy(sessionId, false);
+        this.drainPending(sessionId);
+      } finally {
+        this.finalizingTurn = false;
+      }
+    }, REDIRECT_SETTLE_MS);
   }
 
   isAlive(sessionId: string): boolean {
