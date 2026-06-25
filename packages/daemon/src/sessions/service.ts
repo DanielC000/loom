@@ -1975,12 +1975,20 @@ export class SessionService {
    * (defense in depth — the tool is also workspace-auditor-gated at the router): refuses anything but a
    * "workspace-auditor" session. NO git/vault/config/spawn — that capability doesn't exist on this path.
    * SAFE when the reserved home is absent: returns {error} (no throw-crash of the surface) rather than
-   * filing anywhere else. Returns {taskId, projectId} on a genuine file.
+   * filing anywhere else. Returns {taskId, projectId, deliveryStatus} on a genuine file.
+   *
+   * HANDOFF (board card 5eb8438a — the owner's #1 complaint: the auditor could SUGGEST but never reach an
+   * actor to ACTION its findings): after filing, it does a CONFINED best-effort live nudge to the user's
+   * home operator (nudgeHomeOperator) — mirroring platformEscalate's Lead nudge. The board card is the
+   * DURABLE source of truth, so the FLOOR is `boarded` (no live operator); a live operator upgrades it to
+   * delivered-live/queued. This is NOT the generic harness SendMessage (which has no Loom routing — the
+   * very reason the auditor's "message Platform" attempts failed "not addressable"); it can reach ONLY the
+   * home operator, never arbitrary cross-session messaging.
    */
   workspaceAuditSuggest(
     auditorSessionId: string,
     input: { title: string; detail: string; severity?: string },
-  ): { taskId: string; projectId: string } | { error: string } {
+  ): { taskId: string; projectId: string; deliveryStatus: DeliveryStatus } | { error: string } {
     const caller = this.db.getSession(auditorSessionId);
     if (!caller || caller.role !== "workspace-auditor") return { error: "audit_suggest_improvement is a workspace-auditor-only surface" };
     // HARDCODED target: the user's OWN reserved "Getting Started" home — NAME-SCOPED so it is NEVER the dev
@@ -2015,12 +2023,60 @@ export class SessionService {
       updatedAt: now,
     };
     this.db.insertTask(task);
+    // CONFINED best-effort live nudge to the user's home operator so a filed suggestion actually reaches an
+    // actor (the owner's #1 complaint). The card above is durable, so this never loses the suggestion.
+    const note = `[loom:from-auditor] new workspace suggestion on your home board — "${input.title}" — please review/apply`;
+    const deliveryStatus = this.nudgeHomeOperator(note);
     this.db.appendEvent({
       id: randomUUID(), ts: now,
       managerSessionId: auditorSessionId, taskId: task.id, kind: "workspace_audit_suggestion",
-      detail: { severity, homeProjectId: home.id, title: input.title },
+      detail: { severity, homeProjectId: home.id, title: input.title, deliveryStatus },
     });
-    return { taskId: task.id, projectId: home.id };
+    return { taskId: task.id, projectId: home.id, deliveryStatus };
+  }
+
+  /**
+   * END-USER Auditor explicit HANDOFF (loom-user-audit `audit_handoff`, board card 5eb8438a) — a CONFINED,
+   * inert "I'm done filing, please review/apply the batch" nudge to the user's home operator. The auditor's
+   * one outward signal: it carries NO arbitrary target and NO arbitrary payload — the target is server-
+   * resolved (ONLY the live home operator) and the note is server-composed (a framed [loom:from-auditor]
+   * heads-up). Best-effort + non-durable by design: the DURABLE record is the suggestion cards already on
+   * the home board, so a missed nudge loses nothing (the FLOOR is `boarded`). Caller-role check (defense in
+   * depth — the tool is also workspace-auditor-gated at the router): refuses anything but a "workspace-
+   * auditor" session. Returns {deliveryStatus}.
+   */
+  workspaceAuditHandoff(
+    auditorSessionId: string,
+    input: { count?: number; note?: string },
+  ): { deliveryStatus: DeliveryStatus } | { error: string } {
+    const caller = this.db.getSession(auditorSessionId);
+    if (!caller || caller.role !== "workspace-auditor") return { error: "audit_handoff is a workspace-auditor-only surface" };
+    const n = input.count !== undefined && Number.isFinite(input.count) && input.count > 0 ? Math.floor(input.count) : null;
+    const extra = (input.note ?? "").trim();
+    const summary = n ? `${n} workspace suggestion${n === 1 ? "" : "s"} on your home board` : "workspace suggestions on your home board";
+    const note = `[loom:from-auditor] ${summary} — please review/apply${extra ? ` — ${extra}` : ""}`;
+    return { deliveryStatus: this.nudgeHomeOperator(note) };
+  }
+
+  /**
+   * The CONFINED messaging primitive behind both workspace-auditor handoffs (board card 5eb8438a). It can
+   * reach EXACTLY ONE session: the LIVE operator of the user's OWN reserved "Getting Started" home (role
+   * "setup" — the singleton Platform operator, SETUP_AGENT_NAME — IN that home, NAME-SCOPED so it is never
+   * the dev "Loom Platform" Lead and never an arbitrary id). The caller passes NO target; this resolves it
+   * server-side, so the auditor can never address any other session (no arbitrary cross-session messaging —
+   * the load-bearing containment). Best-effort, mirroring platformEscalate's Lead nudge: returns `boarded`
+   * if no home / no live operator (the suggestion cards are the durable inbox), else the live `enqueueStdin`
+   * outcome classified (delivered-live | queued). NEVER throws.
+   */
+  private nudgeHomeOperator(note: string): DeliveryStatus {
+    const home = this.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+    if (!home) return "boarded";
+    const operator = this.db
+      .listAllSessions()
+      .find((s) => s.role === "setup" && s.projectId === home.id && s.processState === "live");
+    if (!operator) return "boarded"; // no live operator — the cards sit on the now-visible home board
+    try { return this.deliveryStatusFor(this.pty.enqueueStdin(operator.id, note)); }
+    catch { return "boarded"; } // operator not ready/live — `boarded` stands
   }
 
   /**

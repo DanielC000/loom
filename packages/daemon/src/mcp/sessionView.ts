@@ -14,7 +14,7 @@ import type { SessionListItem } from "@loom/shared";
  */
 export type SessionSummary = Pick<
   SessionListItem,
-  | "id" | "projectId" | "projectName" | "agentName" | "role" | "processState"
+  | "id" | "projectId" | "projectName" | "agentId" | "agentName" | "role" | "processState"
   | "busy" | "archivedAt" | "createdAt" | "lastActivity" | "model"
   | "ctxInputTokens" | "ctxTurns"
 >;
@@ -24,6 +24,7 @@ export const toSessionSummary = (s: SessionListItem): SessionSummary => ({
   id: s.id,
   projectId: s.projectId,
   projectName: s.projectName,
+  agentId: s.agentId,
   agentName: s.agentName,
   role: s.role ?? null,
   processState: s.processState,
