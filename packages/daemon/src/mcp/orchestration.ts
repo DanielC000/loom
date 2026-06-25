@@ -252,7 +252,7 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_message",
       {
-        description: "Send a message to one of your workers. Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn.",
+        description: "Send a message to one of your workers. Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn. If several messages stack up while it's busy, they're COALESCED and delivered together as ONE turn (FIFO order, newest last) — so a later message supersedes/augments earlier ones in the same turn rather than replaying one-per-turn.",
         inputSchema: { workerSessionId: z.string(), text: z.string() },
       },
       async ({ workerSessionId, text }) => {
@@ -271,7 +271,7 @@ export class OrchestrationMcpRouter {
           "Pull (return AND clear) every queued inbound message in YOUR inbox — worker reports and Loom " +
           "notifications that arrived while you were mid-turn and are waiting to be delivered. Use it when " +
           "you've ALREADY handled work proactively (e.g. you read a worker's worker_transcript and merged it): " +
-          "those reports otherwise sit queued and later surface ONE-per-turn as redundant wasted turns. " +
+          "those reports otherwise sit queued and later surface as a redundant wasted turn (coalesced into one). " +
           "Pulling consumes them in one shot so they won't re-surface; the underlying events stay recorded. " +
           "Returns {messages: string[]} (FIFO order, empty if your inbox is clear). If you DON'T pull, Loom " +
           "still delivers them the normal way — this is an optional fast-drain, not required.",

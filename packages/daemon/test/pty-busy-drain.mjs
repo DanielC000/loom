@@ -5,8 +5,9 @@
 //   M1 — submit() arms busy=true SYNCHRONOUSLY (the optimistic set), so a concurrent enqueueStdin
 //        QUEUES rather than racing the still-pending Enter.
 //   M2 — on Stop, busy is lowered and the FIFO is drained in the SAME synchronous tick (no await
-//        between them), so exactly ONE queued message drains per Stop, in FIFO order, with no
-//        interleave of a concurrently-enqueued turn.
+//        between them), so exactly ONE submit() goes out per Stop, in FIFO order, with no interleave
+//        of a concurrently-enqueued turn. (The drain COALESCES the whole pending FIFO into that one
+//        submit — see pty-coalesce-drain.mjs — so "one submit per Stop" holds even with N queued.)
 //
 // It exercises the real PtyHost state machine (submit/enqueueStdin/deliverHook/drainPending) against
 // a FAKE pty injected via the createPty() seam — NO real claude, NO ~/.claude.json trust writes, no
@@ -108,7 +109,7 @@ try {
   check("M1: ALPHA WAS written (the immediate submit)", countOf(ALPHA) === 1);
   check("M1: pending FIFO holds exactly [BETA]", JSON.stringify(host.getPending(SID)) === JSON.stringify([BETA]));
 
-  // ===================== M2 — drain ordering: FIFO, one-per-Stop, no interleave =====================
+  // ===================== M2 — drain ordering: FIFO, one SUBMIT per Stop, no interleave =====================
   // Enqueue two more while still busy — they must stack FIFO behind BETA.
   const r3 = host.enqueueStdin(SID, GAMMA);
   const r4 = host.enqueueStdin(SID, DELTA);
@@ -116,42 +117,39 @@ try {
   check("M2: DELTA queued at position 3", r4.delivered === false && r4.position === 3);
   check("M2: pending FIFO is [BETA, GAMMA, DELTA]", JSON.stringify(host.getPending(SID)) === JSON.stringify([BETA, GAMMA, DELTA]));
 
+  const PASTE_START = "\x1b[200~";
+  const pasteBeforeStop = countOf(PASTE_START);
   const busyLenBeforeStop = busyLog.length;
-  // First Stop: lowers busy then (same tick) drains exactly ONE — the FIFO head BETA — re-arming busy.
+  // First Stop: lowers busy then (same tick) COALESCE-drains the WHOLE FIFO — BETA, GAMMA, DELTA all go
+  // out in ONE submit (one paste, one busy re-arm), FIFO order preserved. The M2 invariant is "one
+  // SUBMIT per Stop, no interleave" — the coalesce (pty-coalesce-drain.mjs) hands over the whole queue
+  // in that single submit instead of just the head.
   host.deliverHook(SID, { hook_event_name: "Stop" });
-  check("M2: Stop drained exactly ONE — BETA written once", countOf(BETA) === 1);
-  check("M2: Stop did NOT also drain GAMMA/DELTA (no interleave)", countOf(GAMMA) === 0 && countOf(DELTA) === 0);
-  check("M2: pending advanced to [GAMMA, DELTA]", JSON.stringify(host.getPending(SID)) === JSON.stringify([GAMMA, DELTA]));
+  check("M2: Stop drained the whole FIFO — BETA, GAMMA, DELTA each written once", countOf(BETA) === 1 && countOf(GAMMA) === 1 && countOf(DELTA) === 1);
+  check("M2: exactly ONE submit for the coalesced drain (a single new bracketed paste, no interleave)", countOf(PASTE_START) - pasteBeforeStop === 1);
+  check("M2: pending fully drained (queue empty)", host.getPending(SID).length === 0);
+  // FIFO order preserved within the single concatenated turn.
+  const turn = written();
+  check("M2: FIFO order preserved in the concatenated turn (BETA < GAMMA < DELTA)", turn.indexOf(BETA) < turn.indexOf(GAMMA) && turn.indexOf(GAMMA) < turn.indexOf(DELTA));
   // The drain happened in the same tick as lowering busy → the transition log shows false THEN true,
-  // and busy is re-armed (true) so the next enqueue would queue again, not race.
-  check("M2: busy fell (false) then the drain re-armed it (true), in order", busyLog.slice(busyLenBeforeStop).join(",") === "false,true" && lastBusy() === true);
+  // and busy is re-armed (true) ONCE so the next enqueue would queue again, not race.
+  check("M2: busy fell (false) then the single drain re-armed it (true), in order", busyLog.slice(busyLenBeforeStop).join(",") === "false,true" && lastBusy() === true);
 
-  // Second Stop: drains GAMMA (FIFO preserved).
-  host.deliverHook(SID, { hook_event_name: "Stop" });
-  check("M2: second Stop drained GAMMA (FIFO order held)", countOf(GAMMA) === 1 && countOf(DELTA) === 0);
-  check("M2: pending advanced to [DELTA]", JSON.stringify(host.getPending(SID)) === JSON.stringify([DELTA]));
-
-  // Third Stop: drains DELTA — queue now empty, busy re-armed for the in-flight DELTA turn.
-  host.deliverHook(SID, { hook_event_name: "Stop" });
-  check("M2: third Stop drained DELTA — queue empty", countOf(DELTA) === 1 && host.getPending(SID).length === 0);
-  check("M2: busy re-armed for the drained DELTA turn", lastBusy() === true);
-
-  // Fourth Stop on an empty queue: lowers busy and writes nothing more (no phantom drain).
+  // Second Stop on an empty queue: lowers busy and writes nothing more (no phantom drain).
   const writesBeforeIdleStop = fake.writes.length;
   host.deliverHook(SID, { hook_event_name: "Stop" });
   check("M2: Stop on an empty queue lowers busy and stays idle", lastBusy() === false);
   check("M2: Stop on an empty queue writes nothing more (no phantom drain)", fake.writes.length === writesBeforeIdleStop);
 
-  // ===================== sanity: each turn went out as a distinct bracketed paste =====================
-  // Four turns submitted total (ALPHA, BETA, GAMMA, DELTA) → four paste-start markers.
-  const PASTE_START = "\x1b[200~";
-  check("Sanity: exactly four turns submitted as bracketed pastes (no dropped/duplicated turn)", countOf(PASTE_START) === 4);
+  // ===================== sanity: each Stop went out as ONE distinct bracketed paste =====================
+  // Two submits total: ALPHA (the immediate idle-submit) + the one coalesced drain of [BETA,GAMMA,DELTA].
+  check("Sanity: exactly two submits as bracketed pastes (immediate ALPHA + one coalesced drain)", countOf(PASTE_START) === 2);
 } finally {
   try { host.stop(SID, "hard"); } catch { /* ignore */ }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — M1 (synchronous optimistic busy) + M2 (FIFO one-per-Stop drain, no interleave) hold, claude-free."
+  ? "\n✅ ALL PASS — M1 (synchronous optimistic busy) + M2 (FIFO, one-submit-per-Stop coalesced drain, no interleave) hold, claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

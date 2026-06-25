@@ -2182,9 +2182,10 @@ export class SessionService {
    * mirrors recordIdleReport's role gate.
    *
    * WHY: a worker report enqueued while the manager is mid-turn sits in `live.pending` (delivered:false)
-   * and otherwise drains ONE-per-turn-boundary via drainPending. A manager that has already handled the
-   * work proactively (it read each worker's transcript directly) would then get those stale queued copies
-   * re-surfaced as wasted turns. inbox_pull lets it consume the whole inbox at once and discard/act as it
+   * and otherwise drains on the next turn boundary via drainPending (coalesced — the whole queue lands as
+   * one turn). A manager that has already handled the work proactively (it read each worker's transcript
+   * directly) would then get those stale queued copies re-surfaced as a wasted turn. inbox_pull lets it
+   * consume the whole inbox at once and discard/act as it
    * sees fit. The underlying worker_report (and other) events stay recorded in the DB — this only clears
    * the in-memory delivery queue, never the audit log. The auto-drain remains the safety net for a manager
    * that doesn't pull; a pulled message is removed from the same FIFO, so it can't also drain later.

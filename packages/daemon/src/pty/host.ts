@@ -42,6 +42,14 @@ const BRACKET_PASTE_START = "\x1b[200~";
 const BRACKET_PASTE_END = "\x1b[201~";
 
 /**
+ * Visible separator between coalesced queued messages when drainPending delivers the WHOLE pending FIFO
+ * as ONE turn. Each queued entry is already independently framed (e.g. `[loom:from-manager]\n…`); this
+ * rule keeps consecutive messages legible as distinct items within the single concatenated turn, in
+ * FIFO order (so e.g. 3 superseding manager redirects arrive together, newest last, not one-per-Stop).
+ */
+const DRAIN_SEPARATOR = "\n\n────────\n\n";
+
+/**
  * A session marked busy with NO engine output for this long is treated as STUCK (a turn that never
  * really started, or a missed Stop hook) and self-healed to idle so its queued messages can drain
  * and the UI stops showing a phantom 'busy'. Conservative — a genuinely long, silent tool call is
@@ -1351,7 +1359,23 @@ export class PtyHost {
     }
   }
 
-  /** Deliver the next queued message when it's safe (idle + composer free). Shared by Stop + reconcile. */
+  /**
+   * Deliver ALL queued messages when it's safe (idle + composer free), COALESCED into ONE turn. Shared
+   * by Stop + reconcile + the markReady / box-free transitions.
+   *
+   * COALESCE (mirror consumePending's splice-all): we drain the ENTIRE pending FIFO as one concatenated,
+   * framed turn — splice the whole queue, join the texts in FIFO order with a visible separator, do
+   * exactly ONE submit() (one busy re-arm, one `\r`), and fire EVERY spliced entry's onDeliver so every
+   * durable session_message_queued record resolves. Previously this shift()'d ONE entry then submit()'d,
+   * and submit() re-arms busy SYNCHRONOUSLY (M1), so the rest couldn't drain until the NEXT Stop hook —
+   * that one-per-turn asymmetry (a worker had no consumePending equivalent) let 3 superseding manager
+   * redirects replay one-at-a-time. Now all pending direction reaches the recipient in a single turn.
+   *
+   * STILL one submit per drain: the splice + concat + submit are SYNCHRONOUS in one tick, so the
+   * load-bearing M1/M2 busy-gate invariants are untouched (the Stop branch still lowers busy and drains
+   * in the same tick; this just hands over the whole FIFO instead of its head). Daemon-wide, no role
+   * special-casing — managers benefit too.
+   */
   private drainPending(sessionId: string): void {
     const live = this.live.get(sessionId);
     if (!live?.alive || !live.ready || live.busy || live.pending.length === 0) return;
@@ -1361,12 +1385,13 @@ export class PtyHost {
     // stop() also clears the queue, so this is belt-and-suspenders for a late enqueue during the stop.
     if (live.stopping) return;
     if (this.deferForHumanDraft(live)) return; // HOLD while the human's raw composer is dirty — never land on half-typed text
-    const msg = live.pending.shift()!;
-    this.submit(sessionId, msg.text);
-    // ADDITIVE delivery hook (card 2ca18433): the head was just handed to the recipient as a turn — fire
-    // its callback (durable-message resolution) AFTER submit, outside the M1/M2 ordering. Guarded so a
-    // faulty callback can never disturb the drain. Undefined for every non-messaging entry → a no-op.
-    if (msg.onDeliver) { try { msg.onDeliver(); } catch { /* a delivery-marking fault never breaks the drain */ } }
+    const drained = live.pending.splice(0); // splice the WHOLE FIFO (mirror consumePending) — coalesce all into one turn
+    this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR)); // one submit, one busy re-arm, FIFO order preserved
+    // ADDITIVE delivery hook (card 2ca18433): every drained entry was just handed to the recipient as
+    // part of this turn — fire each callback (durable-message resolution) AFTER submit, outside the
+    // M1/M2 ordering. Guarded so a faulty callback can never disturb the drain. Undefined for every
+    // non-messaging entry → a no-op.
+    for (const msg of drained) { if (msg.onDeliver) { try { msg.onDeliver(); } catch { /* a delivery-marking fault never breaks the drain */ } } }
   }
 
   /**

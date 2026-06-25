@@ -78,19 +78,19 @@ try {
   check("(A3) getPending holds BOTH [DURABLE_HELD, PLAIN_HELD]", JSON.stringify(host.getPending(SID)) === JSON.stringify(["DURABLE_HELD", "PLAIN_HELD"]));
   check("(A3) getPersistablePending EXCLUDES the durable msg, keeps the plain one", JSON.stringify(host.getPersistablePending(SID)) === JSON.stringify(["PLAIN_HELD"]));
 
-  // (A4) Stop drains the FIFO head (DURABLE_HELD) → onDeliver fires exactly once.
+  // (A4) ONE Stop COALESCE-drains the WHOLE held FIFO (DURABLE_HELD + PLAIN_HELD) as a single turn:
+  // the durable entry's onDeliver fires exactly once, the plain (no-callback) entry fires nothing.
   host.deliverHook(SID, { hook_event_name: "Stop" });
   check("(A4) Stop drained DURABLE_HELD (written once)", countOf("DURABLE_HELD") === 1);
-  check("(A4) onDeliver fired exactly once on the turn-boundary drain", durFired === 1);
+  check("(A4) Stop ALSO drained PLAIN_HELD in the same coalesced turn", countOf("PLAIN_HELD") === 1);
+  check("(A4) onDeliver fired exactly once for the durable msg; the plain (no-callback) msg fired none", durFired === 1);
+  check("(A4) the coalesced drain emptied the held queue", host.getPending(SID).length === 0);
 
-  // (A5) Next Stop drains the PLAIN message → no onDeliver (durFired unchanged).
-  host.deliverHook(SID, { hook_event_name: "Stop" });
-  check("(A5) Stop drained PLAIN_HELD", countOf("PLAIN_HELD") === 1);
-  check("(A5) draining a plain (no-callback) message fired no delivery hook", durFired === 1);
-
-  // (A6) consumePending (inbox_pull) ALSO fires onDeliver for a held durable message.
+  // (A6) consumePending (inbox_pull) ALSO fires onDeliver for a held durable message. The coalesced
+  // drain above re-armed busy, so this fresh enqueue is HELD (not submitted) — perfect to pull.
   let pullFired = 0;
-  host.enqueueStdin(SID, "PULLED_DURABLE", "system", () => { pullFired++; }); // busy ⇒ queued
+  const rPull = host.enqueueStdin(SID, "PULLED_DURABLE", "system", () => { pullFired++; }); // busy ⇒ queued
+  check("(A6) PULLED_DURABLE held behind busy (not immediately submitted)", rPull.delivered === false);
   const pulled = host.consumePending(SID);
   check("(A6) consumePending returned the held durable message text", pulled.length === 1 && pulled[0] === "PULLED_DURABLE");
   check("(A6) consumePending fired onDeliver (inbox_pull counts as delivery)", pullFired === 1);

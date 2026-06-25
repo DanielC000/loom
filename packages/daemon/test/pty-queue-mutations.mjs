@@ -123,17 +123,24 @@ try {
   check("reorder subset: named human first, un-named human preserved, system pinned → [AAA,SYS1,ZZZ,EEE]",
     ro2.reordered === true && JSON.stringify(texts()) === JSON.stringify(["AAA", "SYS1", "ZZZ", "EEE"]));
 
-  // ---- DRAIN follows the reordered FIFO: a Stop drains the head (AAA), one per turn boundary ----
+  // ---- DRAIN follows the reordered FIFO: a Stop COALESCE-drains the WHOLE queue in reordered order ----
   const idA = idOf("AAA"); // capture before it drains, for the already-drained no-op below
   check("pre-drain: nothing from the queue written yet", countOf("AAA") === 0);
   host.deliverHook(SID, { hook_event_name: "Stop" });
-  check("drain: Stop drained the reordered head AAA exactly once", countOf("AAA") === 1);
-  check("drain: queue advanced to [SYS1,ZZZ,EEE]", JSON.stringify(texts()) === JSON.stringify(["SYS1", "ZZZ", "EEE"]));
+  check("drain: Stop drained the whole reordered FIFO — each entry written once", countOf("AAA") === 1 && countOf("SYS1") === 1 && countOf("ZZZ") === 1 && countOf("EEE") === 1);
+  const turn = written();
+  check("drain: reordered FIFO order preserved in the one coalesced turn ([AAA,SYS1,ZZZ,EEE])",
+    turn.indexOf("AAA") < turn.indexOf("SYS1") && turn.indexOf("SYS1") < turn.indexOf("ZZZ") && turn.indexOf("ZZZ") < turn.indexOf("EEE"));
+  check("drain: queue fully emptied by the coalesced drain", texts().length === 0);
   const dDrained = host.deleteQueued(SID, idA);
   check("drain: deleting an ALREADY-DRAINED human id is a safe no-op (false, no refused)", dDrained.deleted === false && dDrained.refused === undefined);
 
   // ---- stop() still CLEARS the held queue (the stop-vs-queued-turn invariant) ----
-  check("pre-stop: queue non-empty", texts().length === 3);
+  // Re-populate first (the coalesced drain above emptied the queue): enqueue while the drained turn
+  // holds busy, so these are HELD, then assert stop() clears them.
+  host.enqueueStdin(SID, "QQQ", "human");
+  host.enqueueStdin(SID, "RRR", "human");
+  check("pre-stop: queue non-empty (re-populated)", texts().length === 2);
   host.stop(SID, "graceful");
   check("stop() cleared the held queue", host.getPending(SID).length === 0 && host.getPendingEntries(SID).length === 0);
 
