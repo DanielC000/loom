@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, SessionRole } from "@loom/shared";
-import { api, type ProfileFieldResolution } from "../lib/api";
+import { api, type ProfileFieldResolution, type PythonProvisioning, type PythonProvisioningReason } from "../lib/api";
 import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components/ui";
 import { color, font, radius, tone, type Tone } from "../theme";
 
@@ -124,6 +124,109 @@ function StatusDots({ customized, updateAvailable }: { customized: boolean; upda
 function Dot({ tone: t, title }: { tone: Tone; title: string }) {
   const c = { cyan: color.cyan, amber: color.amber } as Record<string, string>;
   return <span title={title} style={{ width: 7, height: 7, borderRadius: 7, background: c[t] ?? color.textMuted, display: "inline-block" }} />;
+}
+
+// Reason → human one-liner for a FAILED provisioning attempt. The daemon classifies the cause; we phrase
+// it for a human and, for the one self-service case (no base Python), point at the Settings field below.
+const PROVISION_REASON: Record<PythonProvisioningReason, string> = {
+  "no-base-python": "no base Python ≥3.10 found — set its path in Settings → Python interpreter",
+  "venv-create-failed": "couldn't create the shared venv",
+  "pip-failed": "pip install of markitdown failed",
+  timeout: "install timed out",
+  disabled: "provisioning disabled on this daemon (LOOM_PYTHON_NO_PROVISION)",
+};
+
+// One-line human summary per provisioning state — its signal tone + label.
+const PROVISION_META: Record<PythonProvisioning["state"], { tone: Tone; label: string }> = {
+  idle: { tone: "muted", label: "not provisioned yet" },
+  installing: { tone: "amber", label: "installing…" },
+  ready: { tone: "phosphor", label: "ready" },
+  failed: { tone: "red", label: "install failed" },
+};
+
+// GLOBAL document-conversion provisioning status. ONE Loom-managed venv backs EVERY documentConversion
+// rig, so this reads the capability-wide state — not a per-profile one. Today a session can silently lack
+// the markitdown MCP when the venv is still installing or failed to provision; this makes that visible and
+// self-service. Polls only while `installing` (terminal states don't change on their own). `failed` shows
+// the classified reason + an expandable errorTail (the captured pip/venv output) and a human Retry that
+// re-kicks provisioning. Restrained: a hairline row tinted by state, mirroring the UpdateBanner above.
+function MarkitdownProvisioning() {
+  const qc = useQueryClient();
+  const [showTail, setShowTail] = useState(false);
+  const q = useQuery({
+    queryKey: ["pythonProvisioning"],
+    queryFn: api.pythonProvisioning,
+    refetchInterval: (query) => (query.state.data?.state === "installing" ? 2000 : false),
+  });
+  const retry = useMutation({
+    mutationFn: () => api.retryPythonProvisioning(),
+    onSuccess: (s) => { qc.setQueryData(["pythonProvisioning"], s); qc.invalidateQueries({ queryKey: ["pythonProvisioning"] }); },
+  });
+
+  const s = q.data;
+  const state = s?.state;
+  const meta = state ? PROVISION_META[state] : null;
+  const accent = meta ? tone[meta.tone] : color.border;
+  // The hairline tints toward the state ONLY when it wants attention (installing / failed); ready + idle
+  // stay neutral so the row reads as ambient status, not an alert.
+  const borderColor = state === "failed" || state === "installing" ? accent : color.border;
+  const reasonText = s?.reason ? PROVISION_REASON[s.reason] : null;
+  const labelStyle = { fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 };
+
+  return (
+    <div data-testid="markitdown-provisioning" style={{ border: `1px solid ${borderColor}`, borderRadius: radius.base,
+      padding: "8px 10px", background: color.panel2, display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: font.head, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim }}>
+          Document-conversion venv
+        </span>
+        {q.isLoading && !s ? (
+          <span style={labelStyle}>checking…</span>
+        ) : q.isError && !s ? (
+          <span style={{ ...labelStyle, color: color.red }}>couldn't read status</span>
+        ) : meta ? (
+          <span data-testid="provisioning-state" style={{ display: "inline-flex", alignItems: "center", gap: 6,
+            fontFamily: font.mono, fontSize: 11, color: accent, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+            <span aria-hidden style={{ width: 8, height: 8, borderRadius: 8, background: accent, display: "inline-block",
+              ...(state === "installing" ? { boxShadow: `0 0 6px ${accent}` } : null) }} />
+            {meta.label}
+            {state === "failed" && reasonText && (
+              <span style={{ textTransform: "none", letterSpacing: 0, color: color.textMuted }}>— {reasonText}</span>
+            )}
+          </span>
+        ) : null}
+        <span style={{ flex: 1 }} />
+        {s?.errorTail && (
+          <Button onClick={() => setShowTail((v) => !v)}>{showTail ? "Hide details" : "Show details"}</Button>
+        )}
+        {state === "failed" && (
+          <Button variant="primary" disabled={retry.isPending} onClick={() => retry.mutate()}
+            title="Re-run the venv create + markitdown install">
+            {retry.isPending ? "Retrying…" : "Retry install"}
+          </Button>
+        )}
+      </div>
+
+      {/* Ready: name the resolved binary so the user can confirm WHICH interpreter/venv is live. */}
+      {state === "ready" && s?.binary && (
+        <span style={{ ...labelStyle, wordBreak: "break-all" }}>{s.binary}</span>
+      )}
+      {/* Idle: explain it provisions lazily — no action needed. */}
+      {state === "idle" && (
+        <span style={labelStyle}>Loom installs the shared venv on the first document-conversion session, or you can pre-warm it by saving a profile with this on.</span>
+      )}
+      {retry.isError && <span style={{ ...labelStyle, color: color.red }}>retry failed: {(retry.error as Error).message}</span>}
+
+      {/* The captured pip/venv output tail — the real proxy / SSL / resolver cause, shown on demand. */}
+      {showTail && s?.errorTail && (
+        <pre style={{ margin: 0, maxHeight: 220, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word",
+          fontFamily: font.mono, fontSize: 11, lineHeight: 1.5, color: color.textMuted,
+          background: color.panel, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: 8 }}>
+          {s.errorTail}
+        </pre>
+      )}
+    </div>
+  );
 }
 
 // Remounted per profile (key=id:nonce) so the fields reset on switch / revert / adopt; after Save the
@@ -269,6 +372,11 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
           </span>
         </span>
       </label>
+
+      {/* Shared-venv provisioning status — surfaced only when this rig opts into documentConversion. ONE
+          Loom-managed venv backs the capability, so this is a GLOBAL status (not per-profile): a session
+          can silently lack the markitdown MCP only because the venv is still installing or failed to. */}
+      {documentConversion && <MarkitdownProvisioning />}
 
       {/* Model emits `--model <id>` at spawn (blank = engine default). Skills is a SUBSET filter: pick the
           skills a session under this rig may see; pick NONE to deliver ALL (the default). Pinned on the

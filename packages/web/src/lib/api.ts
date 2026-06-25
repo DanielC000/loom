@@ -39,6 +39,20 @@ export interface UpdateStatus {
   checkedAt: string | null;
 }
 
+// The shared Loom-managed Python venv provisioning status (GET /api/python/provisioning). ONE venv backs
+// every `documentConversion` rig, so this is a CAPABILITY-wide status, not per-profile. `failed` carries a
+// classified `reason` + the captured ~4KB `errorTail` (the real proxy/SSL/resolver cause). Human-only
+// loopback REST — the retry POST re-kicks provisioning off the daemon's event loop. See pty/host.ts +
+// python/venv.ts in the daemon.
+export type PythonProvisioningReason = "no-base-python" | "venv-create-failed" | "pip-failed" | "timeout" | "disabled";
+export interface PythonProvisioning {
+  state: "idle" | "installing" | "ready" | "failed";
+  reason?: PythonProvisioningReason;
+  errorTail?: string;
+  binary?: string;
+  lastAttemptAt?: number;
+}
+
 async function get<T>(url: string): Promise<T> {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
@@ -417,6 +431,13 @@ export const api = {
   // profile + computed state. 409 (surfaced via postErr) if conflicts are left unresolved or there's no update.
   adoptProfile: (id: string, resolutions?: Record<string, ProfileFieldResolution>) =>
     postErr<ProfileSummary>(`/api/profiles/${encodeURIComponent(id)}/adopt`, resolutions ? { resolutions } : undefined),
+
+  // --- Shared Python venv provisioning (document conversion). HUMAN-only loopback REST — provisioning
+  // launches a host process (venv create + pip install), same trust posture as the git/vault writers, so
+  // there is NO agent MCP path. `pythonProvisioning` reads the live status (poll while `installing`);
+  // `retryPythonProvisioning` re-kicks it off the daemon's event loop and returns the same status shape. ---
+  pythonProvisioning: () => get<PythonProvisioning>("/api/python/provisioning"),
+  retryPythonProvisioning: () => post<PythonProvisioning>("/api/python/provisioning/retry"),
 
   // --- Schedules (phase-2 Pillar B): cron triggers that boot a manager in `agentId` on each due
   // boundary. HUMAN-managed (this page + REST) — there is no agent-writable MCP surface. createSchedule

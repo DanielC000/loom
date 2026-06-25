@@ -170,6 +170,10 @@ function ConfigEditor({ project }: { project: Project }) {
   const [idleSnooze, setIdleSnooze] = useState(numStr(ov.orchestration?.idleDefaultSnoozeMinutes));
   const [scheduler, setScheduler] = useState(triStr(ov.orchestration?.schedulerEnabled));
   const [docLint, setDocLint] = useState(triStr(ov.docLint));
+  // Human-only base-Python override for the shared venv (document conversion). Like gateCommand it points
+  // at a host executable, so the AGENT config validator rejects it — only this REST path accepts it. Blank
+  // inherits PATH discovery (python3 → python → py -3).
+  const [pythonInterpreter, setPythonInterpreter] = useState(ov.python?.interpreterPath ?? "");
   // Human-only timeouts (paired with gateCommand / alertWebhook). Stored canonical ms; the form shows
   // SECONDS (÷1000 display, ×1000 store) — blank inherits the platform default.
   const [gateTimeout, setGateTimeout] = useState(msStr(ov.orchestration?.gateCommandTimeoutMs, "s"));
@@ -210,6 +214,13 @@ function ConfigEditor({ project }: { project: Project }) {
     if (Object.keys(orch).length) o.orchestration = orch; else delete o.orchestration;
 
     if (docLint !== "inherit") o.docLint = docLint === "true"; else delete o.docLint;
+
+    // python.interpreterPath: set when non-blank, else drop the key (and the now-empty python block) so a
+    // blank field inherits PATH discovery rather than persisting an empty override.
+    const py = pythonInterpreter.trim();
+    if (py) o.python = { ...o.python, interpreterPath: py };
+    else if (o.python) { const { interpreterPath: _drop, ...rest } = o.python; if (Object.keys(rest).length) o.python = rest; else delete o.python; }
+
     return o;
   }
 
@@ -300,6 +311,16 @@ function ConfigEditor({ project }: { project: Project }) {
         <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 280 }}>
           <span style={fieldLabel}>Vault-lint hook on .md writes</span>
           <TriSelect value={docLint} set={setDocLint} def={defaults.docLint} />
+        </label>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Python</SectionLabel>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={fieldLabel}>Python interpreter</span>
+          <Input value={pythonInterpreter} onChange={(e) => setPythonInterpreter(e.target.value)} spellCheck={false}
+            placeholder={`inherit (PATH: ${defaults.python.interpreterPath ?? "python3 → python → py -3"})`} />
+          <Hint>host path to a base Python ≥3.10 (e.g. C:\Python312\python.exe) · Loom builds its own shared venv from it for document conversion · blank inherits PATH discovery</Hint>
         </label>
       </Panel>
 
