@@ -4,7 +4,7 @@ import { LOOM_HOME } from "../paths.js";
 import type { Db } from "../db.js";
 
 /**
- * Setup Assistant — the reserved, UNGATED "Getting Started" home + its single Setup Assistant agent.
+ * Setup Assistant — the reserved, UNGATED "Platform" home + its single Setup Assistant agent.
  *
  * The user-facing onboarding rig that ships to EVERY loomctl user. It is the lower-privilege sibling of
  * the dev-only Platform home (platform/seed.ts): same reserved-project pattern (a real board/agent/session
@@ -22,8 +22,23 @@ import type { Db } from "../db.js";
  * its own. The invariant that NO agent MCP path can mint a setup-role session is preserved elsewhere.
  */
 
-/** The reserved setup home's display name (also the name-scoped idempotency anchor). */
-export const SETUP_PROJECT_NAME = "Getting Started";
+/**
+ * The reserved setup home's display name (also the name-scoped idempotency anchor). Renamed
+ * "Getting Started" → "Platform": the home is now exposed in the project picker (GET /api/setup/home), and
+ * "Platform" reads better there than "Getting Started". DISTINCT from the dev-only platform home's
+ * PLATFORM_PROJECT_NAME ("Loom Platform"), so the name-scoped reserved-home lookups never collide. Existing
+ * installs are migrated in place by the boot-time seedSetupProjectRename below.
+ */
+export const SETUP_PROJECT_NAME = "Platform";
+
+/**
+ * The pre-rename reserved setup-home name. Existing installs seeded the home under this literal before the
+ * "Getting Started" → "Platform" rename; the boot-time guarded rename (seedSetupProjectRename) backfills
+ * them to SETUP_PROJECT_NAME. Kept as a named constant — typed `string` so the migration's revert guard
+ * (`SETUP_PROJECT_NAME === LEGACY_SETUP_PROJECT_NAME`) type-checks — so the migration matches the EXACT old
+ * literal (never a user-renamed home).
+ */
+const LEGACY_SETUP_PROJECT_NAME: string = "Getting Started";
 
 /**
  * The Setup home has NO real git repo — it is an onboarding scope, not a codebase. Both repoPath and
@@ -44,7 +59,8 @@ const SETUP_PROFILE_NAME = "Setup Assistant";
  * The seeded operator agent's DISPLAY name (also the name-scoped anchor the first-run auto-launch resolves
  * by). Rebranded "Setup Assistant" → "Platform" (A2): the operator's displayed identity is now "Platform".
  * first-run.ts resolves by this constant, so the lookup moves in lockstep. Internal ids/anchors (the `setup`
- * role, `setup-assistant` skill id, SETUP_PROJECT_NAME "Getting Started", the profile name above) are KEPT.
+ * role, `setup-assistant` skill id, the profile name above) are KEPT. (SETUP_PROJECT_NAME was later renamed
+ * "Getting Started" → "Platform" by a SEPARATE change — see its own doc + seedSetupProjectRename below.)
  */
 export const SETUP_AGENT_NAME = "Platform";
 
@@ -71,7 +87,7 @@ Be warm, concrete, and brief — guide, don't lecture. Ask what the user is tryi
 You help users shape and maintain their own workspace. If someone asks for something outside that, say so plainly and point them to the right place rather than improvising.`;
 
 /**
- * Seed the reserved "Getting Started" home and its Setup Assistant agent IF ABSENT. UNGATED — runs for
+ * Seed the reserved "Platform" home and its Setup Assistant agent IF ABSENT. UNGATED — runs for
  * every loomctl user regardless of LOOM_DEV (the deliberate difference from seedPlatformHome). Idempotent:
  * once the named reserved home exists this no-ops (preserving any user edits). The agent is bound to the
  * bundled "Setup Assistant" profile, looked up by name from the already-seeded profiles (seedDefaultProfiles
@@ -110,15 +126,48 @@ export function seedSetupHome(db: Db): string[] {
 }
 
 /**
+ * "Getting Started" → "Platform" home rename backfill — the GUARDED one-shot rename of the reserved SETUP
+ * HOME ROW for existing installs (the project-level analog of seedSetupAgentRename). `seedSetupHome` is
+ * seed-if-absent keyed on the NEW name, so an install seeded BEFORE this rename keeps its reserved home row
+ * under the OLD `LEGACY_SETUP_PROJECT_NAME` literal while every resolver (getReservedProjectByName,
+ * /api/setup/home, the workspace-audit suggest target) now looks it up by the new SETUP_PROJECT_NAME.
+ *
+ * MUST run at boot BEFORE seedSetupHome: seedSetupHome's absence-check keys on the NEW name, so if it ran
+ * first on a pre-rename install it would see no "Platform" home and mint a SECOND, empty one beside the old
+ * "Getting Started" row (the user's home + its boards orphaned). Renaming the existing row in place first
+ * avoids that.
+ *
+ * Scoped tightly so it only ever touches that one home:
+ *   - the RESERVED home named by the EXACT old literal (getReservedProjectByName / hasReservedProjectNamed
+ *     are reserved=1 only) — a user's ORDINARY project named "Getting Started" is never touched;
+ *   - refuses if a reserved home ALREADY holds the new name (collision / already-migrated guard) — it never
+ *     creates a duplicate or clobbers a distinct reserved "Platform".
+ *
+ * Idempotent by NAME-MATCH, no marker needed: after the rename the old literal is gone, so a re-run finds
+ * nothing and no-ops (returns null). Also no-ops on a fresh install (seed already created "Platform"), on a
+ * user-renamed home (any other name), and if the rename were ever reverted (new === old). Returns the new
+ * name when it renamed, else null.
+ */
+export function seedSetupProjectRename(db: Db): string | null {
+  if (SETUP_PROJECT_NAME === LEGACY_SETUP_PROJECT_NAME) return null; // rename reverted — nothing to migrate
+  if (!db.hasReservedProjectNamed(LEGACY_SETUP_PROJECT_NAME)) return null; // fresh install / user-renamed / already migrated
+  if (db.hasReservedProjectNamed(SETUP_PROJECT_NAME)) return null; // new name already taken — never duplicate/clobber
+  const home = db.getReservedProjectByName(LEGACY_SETUP_PROJECT_NAME);
+  if (!home) return null; // archived edge — getReservedProjectByName excludes archived; nothing live to rename
+  db.updateProject(home.id, { name: SETUP_PROJECT_NAME });
+  return SETUP_PROJECT_NAME;
+}
+
+/**
  * A2 rebrand backfill — the GUARDED one-shot rename for existing installs. `seedSetupHome` no-ops once the
- * "Getting Started" home exists, so an install seeded BEFORE the Setup Assistant → "Platform" rebrand keeps
+ * setup home exists, so an install seeded BEFORE the Setup Assistant → "Platform" rebrand keeps
  * its operator agent under the OLD `LEGACY_SETUP_AGENT_NAME` literal while first-run.ts now resolves it by
  * the new `SETUP_AGENT_NAME`. Run at boot AFTER seedSetupHome: rename the SINGLE reserved-home operator
  * agent to the new name so the rebrand takes effect on every existing user (incl. our self-host), not just
  * fresh installs.
  *
  * Scoped tightly so it only ever touches that one agent:
- *   - the reserved "Getting Started" home ONLY (resolved by name, never a name-agnostic reserved lookup —
+ *   - the reserved "Platform" setup home ONLY (resolved by name, never a name-agnostic reserved lookup —
  *     gotcha #1) — a non-reserved-home agent is never touched;
  *   - matched by the EXACT old literal — a user-renamed agent (any other name) is left alone;
  *   - AND it must run the setup-role profile (the operator's rig) — a stray same-named agent isn't renamed.
@@ -166,7 +215,7 @@ You review the user's OWN workspace for THEIR benefit. Cover the user's manager/
 Your audit + suggestion tools and the "Review my workspace" trigger are live — when started, run a bounded review per your doctrine.`;
 
 /**
- * B4 backfill — seed the bundled Workspace Auditor agent into the SAME reserved "Getting Started" home as
+ * B4 backfill — seed the bundled Workspace Auditor agent into the SAME reserved "Platform" setup home as
  * the operator (one home, two agents), SEED-IF-ABSENT BY AGENT-NAME. Run at boot AFTER seedSetupHome, and
  * mirroring seedSetupAgentRename's containment: scoped to the reserved home (resolved by NAME — gotcha #1),
  * never a name-agnostic reserved lookup.

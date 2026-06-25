@@ -1,10 +1,10 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Setup Assistant E1-4 — the reserved, UNGATED "Getting Started" onboarding home + its Setup Assistant
+// Setup Assistant E1-4 — the reserved, UNGATED "Platform" onboarding home + its Setup Assistant
 // agent, AND the name-scoped reserved-project idempotency that lets it coexist with the dev-only platform
 // home. HERMETIC + CLAUDE-FREE + NETWORK-FREE, modeled on platform-dev-flag.mjs: an isolated LOOM_HOME +
 // sandboxed HOME, REAL Db handles (separate files per phase) + the REAL seeders. isLoomDev() reads
 // process.env.LOOM_DEV at CALL time, so one process exercises BOTH modes by toggling the env. Proves:
-//   (1) DEFAULT boot (LOOM_DEV unset): seedSetupHome seeds the reserved "Getting Started" home + a single
+//   (1) DEFAULT boot (LOOM_DEV unset): seedSetupHome seeds the reserved "Platform" setup home + a single
 //       "Setup Assistant" agent bound to the ungated Setup Assistant profile — and is idempotent across a
 //       re-seed AND a fresh DB handle (a second boot); the home is hidden from the picker, in the admin feed.
 //   (2) COEXISTENCE (LOOM_DEV=1): both reserved homes seed and live side-by-side — each name-scoped check
@@ -35,7 +35,7 @@ delete process.env.LOOM_DEV;           // ensure phase 1 sees the default-OFF st
 const { Db } = await import("../dist/db.js");
 const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
 const { seedPlatformHome, PLATFORM_PROJECT_NAME } = await import("../dist/platform/seed.js");
-const { seedSetupHome, seedSetupAgentRename, seedSetupAuditorAgent, SETUP_PROJECT_NAME, SETUP_AGENT_NAME, SETUP_AUDITOR_AGENT_NAME } = await import("../dist/setup/seed.js");
+const { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, SETUP_PROJECT_NAME, SETUP_AGENT_NAME, SETUP_AUDITOR_AGENT_NAME } = await import("../dist/setup/seed.js");
 const now = new Date().toISOString();
 const { isLoomDev } = await import("../dist/paths.js");
 
@@ -45,7 +45,7 @@ try {
   const dbA = new Db(path.join(tmpHome, "default.db"));
   seedDefaultProfiles(dbA);
   const seededSetupA = seedSetupHome(dbA);
-  check("(1) seedSetupHome seeds the Getting Started home + Platform operator agent (ungated)",
+  check("(1) seedSetupHome seeds the 'Platform' setup home + Platform operator agent (ungated)",
     seededSetupA.includes(`project:${SETUP_PROJECT_NAME}`) && seededSetupA.includes(`agent:${SETUP_AGENT_NAME}`));
   // The platform home must NOT seed in default mode (proves my change didn't accidentally ungate it).
   const seededPlatA = seedPlatformHome(dbA);
@@ -54,7 +54,7 @@ try {
   const reservedA = dbA.listAllProjects().filter((p) => p.reserved);
   check("(1) exactly ONE reserved project (the setup home only)", reservedA.length === 1);
   const setupProject = reservedA[0];
-  check("(1) the reserved project is the Getting Started home bound to LOOM_HOME",
+  check("(1) the reserved project is the 'Platform' setup home bound to LOOM_HOME",
     setupProject.name === SETUP_PROJECT_NAME && setupProject.repoPath === tmpHome && setupProject.vaultPath === tmpHome);
   const agentsA = dbA.listAgents(setupProject.id);
   check("(1) exactly ONE agent seeded into the setup home", agentsA.length === 1);
@@ -175,7 +175,7 @@ try {
   dbE.close();
 
   // ===================== (5) B4 — the bundled Workspace Auditor agent (one home, TWO agents) =====================
-  // seedSetupAuditorAgent seeds a SECOND agent into the SAME reserved "Getting Started" home, seed-if-absent
+  // seedSetupAuditorAgent seeds a SECOND agent into the SAME reserved "Platform" setup home, seed-if-absent
   // BY AGENT-NAME — a separate boot-time backfill (NOT folded into seedSetupHome, which no-ops once the home
   // exists). It must: backfill EXISTING installs (home + operator already there → add the auditor), cover
   // FRESH installs (operator + auditor on one boot), be idempotent (present → no-op), never clobber a
@@ -247,13 +247,97 @@ try {
   // (5e) no setup home at all → the auditor seeder no-ops (nothing to attach to; seedSetupHome runs first).
   const dbH = new Db(path.join(tmpHome, "auditor-nohome.db"));
   seedDefaultProfiles(dbH);
-  check("(5e) seedSetupAuditorAgent no-ops when the Getting Started home is absent", seedSetupAuditorAgent(dbH) === null);
+  check("(5e) seedSetupAuditorAgent no-ops when the setup home is absent", seedSetupAuditorAgent(dbH) === null);
   dbH.close();
+
+  // ===================== (6) "Getting Started" → "Platform" home rename migration (existing installs) =====
+  // seedSetupHome is seed-if-absent keyed on the NEW name, so an install seeded BEFORE this rename keeps its
+  // reserved home ROW under the OLD "Getting Started" literal while every resolver now looks it up by the new
+  // SETUP_PROJECT_NAME. seedSetupProjectRename renames that one reserved home IN PLACE — and ONLY that one:
+  // never a user-renamed home, never a user's ordinary project, never when a reserved "Platform" already
+  // exists. It must run BEFORE seedSetupHome at boot (else seedSetupHome mints a 2nd empty "Platform" home).
+  const LEGACY = "Getting Started";
+  check("(6) the rename landed — SETUP_PROJECT_NAME is now 'Platform' (distinct from 'Loom Platform')",
+    SETUP_PROJECT_NAME === "Platform" && SETUP_PROJECT_NAME !== PLATFORM_PROJECT_NAME);
+
+  // (6a) EXISTING install: a reserved home seeded under the OLD literal → the migration backfills it in place.
+  const dbI = new Db(path.join(tmpHome, "home-rename.db"));
+  seedDefaultProfiles(dbI);
+  const oldHomeId = "old-setup-home";
+  dbI.insertProject({ id: oldHomeId, name: LEGACY, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: true });
+  check("(6a) pre-rename: the reserved home resolves under the OLD literal only (new name not yet present)",
+    dbI.getReservedProjectByName(LEGACY)?.id === oldHomeId && dbI.getReservedProjectByName(SETUP_PROJECT_NAME) === undefined);
+  const renamedHome = seedSetupProjectRename(dbI);
+  check("(6a) migration renames the reserved 'Getting Started' home → 'Platform' (returns the new name)",
+    renamedHome === SETUP_PROJECT_NAME && dbI.getProject(oldHomeId)?.name === SETUP_PROJECT_NAME);
+  check("(6a) getReservedProjectByName('Platform') resolves the SAME row post-rename (id stable, renamed in place)",
+    dbI.getReservedProjectByName(SETUP_PROJECT_NAME)?.id === oldHomeId);
+  check("(6a) the old literal no longer resolves to any reserved home after the rename",
+    dbI.getReservedProjectByName(LEGACY) === undefined && dbI.hasReservedProjectNamed(LEGACY) === false);
+  check("(6a) still exactly ONE reserved home after the rename (renamed in place, not duplicated)",
+    dbI.listAllProjects().filter((p) => p.reserved).length === 1);
+  check("(6a) migration is idempotent — a second run finds no legacy home → no-op (null)",
+    seedSetupProjectRename(dbI) === null);
+  dbI.close();
+
+  // (6b) FRESH install: seedSetupHome already creates the home under the NEW name → the migration no-ops.
+  const dbJ = new Db(path.join(tmpHome, "home-rename-fresh.db"));
+  seedDefaultProfiles(dbJ);
+  seedSetupHome(dbJ);
+  check("(6b) fresh install seeds the home as 'Platform' AND the migration no-ops on it (null)",
+    dbJ.getReservedProjectByName(SETUP_PROJECT_NAME)?.name === SETUP_PROJECT_NAME && seedSetupProjectRename(dbJ) === null);
+  check("(6b) no reserved home is ever named under the old literal on a fresh install",
+    dbJ.hasReservedProjectNamed(LEGACY) === false);
+  dbJ.close();
+
+  // (6c) USER-RENAMED home: a reserved home the user renamed to something else is left ALONE (the migration
+  // only matches the EXACT old literal); and a user's ORDINARY (non-reserved) project named "Getting Started"
+  // is never touched (the lookup is reserved-scoped).
+  const dbK = new Db(path.join(tmpHome, "home-rename-user.db"));
+  seedDefaultProfiles(dbK);
+  dbK.insertProject({ id: "user-home", name: "My Workspace", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: true });
+  dbK.insertProject({ id: "ord-gs", name: LEGACY, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  check("(6c) migration no-ops when no RESERVED home carries the old literal (user-renamed home untouched)",
+    seedSetupProjectRename(dbK) === null && dbK.getProject("user-home")?.name === "My Workspace");
+  check("(6c) a user's ORDINARY project named 'Getting Started' is never renamed (reserved-scoped lookup)",
+    dbK.getProject("ord-gs")?.name === LEGACY);
+  dbK.close();
+
+  // (6d) COLLISION guard: if a reserved "Platform" ALREADY exists, an old-named reserved home is NOT renamed
+  // into it — never creates a duplicate / clobbers a distinct reserved "Platform".
+  const dbL = new Db(path.join(tmpHome, "home-rename-collision.db"));
+  seedDefaultProfiles(dbL);
+  dbL.insertProject({ id: "new-plat", name: SETUP_PROJECT_NAME, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: true });
+  dbL.insertProject({ id: "old-gs", name: LEGACY, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: true });
+  check("(6d) migration refuses to rename when a reserved 'Platform' already exists (collision guard → null)",
+    seedSetupProjectRename(dbL) === null && dbL.getProject("old-gs")?.name === LEGACY && dbL.getProject("new-plat")?.name === SETUP_PROJECT_NAME);
+  dbL.close();
+
+  // (6e) ABSENT home: no reserved home at all → the migration no-ops (nothing to rename).
+  const dbM = new Db(path.join(tmpHome, "home-rename-absent.db"));
+  seedDefaultProfiles(dbM);
+  check("(6e) migration no-ops when there is no reserved home at all (null)", seedSetupProjectRename(dbM) === null);
+  dbM.close();
+
+  // (6f) END-TO-END boot order: on a pre-rename install, running the rename BEFORE seedSetupHome (as boot
+  // does) renames the existing home in place — NOT a 2nd empty home; the operator agent stays attached.
+  const dbN = new Db(path.join(tmpHome, "home-rename-bootorder.db"));
+  seedDefaultProfiles(dbN);
+  const preHomeId = "pre-rename-home";
+  dbN.insertProject({ id: preHomeId, name: LEGACY, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: true });
+  dbN.insertAgent({ id: "pre-op", projectId: preHomeId, name: SETUP_AGENT_NAME, startupPrompt: "x".repeat(220), position: 0, profileId: null, endpoint: false, ioSchema: null });
+  seedSetupProjectRename(dbN); // boot runs this FIRST...
+  const afterSeed = seedSetupHome(dbN); // ...then seedSetupHome, which must now find "Platform" and no-op
+  check("(6f) boot order (rename THEN seedSetupHome) keeps exactly ONE reserved home (no duplicate seeded)",
+    afterSeed.length === 0 && dbN.listAllProjects().filter((p) => p.reserved).length === 1);
+  check("(6f) the renamed home is the SAME row (id stable) and still holds its operator agent",
+    dbN.getReservedProjectByName(SETUP_PROJECT_NAME)?.id === preHomeId && dbN.listAgents(preHomeId).some((a) => a.name === SETUP_AGENT_NAME));
+  dbN.close();
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle on Windows) */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the ungated 'Getting Started' setup home + 'Platform' operator agent seed for every user (no LOOM_DEV gate), idempotently across reboots, COEXIST with the dev-only platform home (name-scoped gate; platform seeding unchanged at 2 agents); the A2 guarded rename backfills a pre-rebrand 'Setup Assistant' operator → 'Platform' while leaving user-renamed + non-reserved-home agents untouched; and the B4 seedSetupAuditorAgent backfill seeds a 2nd 'Workspace Auditor' agent into the SAME home (fresh + existing installs), idempotently, never clobbering a user edit and scoped to the reserved home by name."
+  ? "\n✅ ALL PASS — the ungated 'Platform' setup home + 'Platform' operator agent seed for every user (no LOOM_DEV gate), idempotently across reboots, COEXIST with the dev-only 'Loom Platform' home (name-scoped gate; platform seeding unchanged at 2 agents); the A2 guarded rename backfills a pre-rebrand 'Setup Assistant' operator → 'Platform' while leaving user-renamed + non-reserved-home agents untouched; the B4 seedSetupAuditorAgent backfill seeds a 2nd 'Workspace Auditor' agent into the SAME home (fresh + existing installs), idempotently, never clobbering a user edit and scoped to the reserved home by name; and the 'Getting Started' → 'Platform' home rename migration backfills an existing install's reserved home IN PLACE (idempotent, collision-refusing, reserved-scoped, no-op on fresh/user-renamed/absent homes), with the boot order (rename THEN seed) never minting a duplicate home."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -4,7 +4,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // a one-time daemon-global marker so it never re-fires (not after a daemon_restart, not after the user later
 // deletes all their projects). RUN-SHAPED (boot behavior) but driven HERMETICALLY: a REAL Db +
 // SessionService against a FAKE pty (createPty seam — no real claude, no network), exactly like
-// setup-singleton.mjs. The reserved "Getting Started" home + its Setup Assistant agent are seeded by the
+// setup-singleton.mjs. The reserved "Platform" setup home + its Setup Assistant agent are seeded by the
 // REAL seedSetupHome (E1-4), so the by-name resolution is exercised end-to-end.
 //
 // Proves the DoD (all 4 cases + the two guard reasons):
@@ -45,7 +45,7 @@ const { PtyHost } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
-const { seedSetupHome, seedSetupAuditorAgent, SETUP_AGENT_NAME, SETUP_AUDITOR_AGENT_NAME } = await import("../dist/setup/seed.js");
+const { seedSetupHome, seedSetupAuditorAgent, SETUP_PROJECT_NAME, SETUP_AGENT_NAME, SETUP_AUDITOR_AGENT_NAME } = await import("../dist/setup/seed.js");
 const { maybeAutoLaunchSetup, SETUP_FIRST_RUN_KEY } = await import("../dist/setup/first-run.js");
 
 const now = new Date().toISOString();
@@ -63,7 +63,7 @@ const events = {
 
 const mainDbFile = path.join(tmpHome, "loom.db");
 const setupRows = (db) => {
-  const home = db.getReservedProjectByName("Getting Started");
+  const home = db.getReservedProjectByName(SETUP_PROJECT_NAME);
   return home ? db.listSessions(db.listAgents(home.id)[0].id).filter((s) => s.role === "setup") : [];
 };
 
@@ -71,7 +71,7 @@ try {
   // ===== MAIN SEQUENCE on one db file (the marker is daemon-GLOBAL, so it persists across these calls) =====
   let db = new Db(mainDbFile);
   seedDefaultProfiles(db);                 // so the bundled "Setup Assistant" profile exists to assign
-  const seeded = seedSetupHome(db);        // the reserved "Getting Started" home + its Setup Assistant agent
+  const seeded = seedSetupHome(db);        // the reserved "Platform" setup home + its Setup Assistant agent
   check("(pre) seedSetupHome created the reserved home + agent", seeded.length === 2);
   check("(pre) a fresh install reads as ZERO ordinary projects (reserved homes excluded)", db.listProjects().length === 0);
   check("(pre) the first-run marker is unset on a fresh install", db.getMeta(SETUP_FIRST_RUN_KEY) === undefined);
@@ -141,7 +141,7 @@ try {
   seedDefaultProfiles(dbTwo);
   seedSetupHome(dbTwo);
   const seededAud = seedSetupAuditorAgent(dbTwo); // the 2nd agent in the same reserved home
-  const homeTwo = dbTwo.getReservedProjectByName("Getting Started");
+  const homeTwo = dbTwo.getReservedProjectByName(SETUP_PROJECT_NAME);
   check("(7-pre) the home holds BOTH the operator and the auditor agent",
     seededAud === SETUP_AUDITOR_AGENT_NAME && dbTwo.listAgents(homeTwo.id).length === 2);
   const hostTwo = new SeamHost(events);

@@ -452,9 +452,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // 404 only if no reserved home exists (impossible after boot-seed). ---
   app.get("/api/platform/home", async (_req, reply) => {
     // NAME-SCOPED: resolve the Platform home by PLATFORM_PROJECT_NAME, NOT a bare `.find(reserved)`. A
-    // second reserved home (the ungated "Getting Started" setup home) now coexists, so "the one reserved
-    // project" is ambiguous and could return Getting Started instead of Loom Platform (the live regression
-    // this fixes). The setup home has its own discovery route below (GET /api/setup/home).
+    // second reserved home (the ungated "Platform" setup home) now coexists, so "the one reserved project"
+    // is ambiguous and could return the setup home instead of Loom Platform (the live regression this
+    // fixes). The setup home has its own discovery route below (GET /api/setup/home).
     const project = deps.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
     if (!project) return reply.code(404).send({ error: "no reserved Loom Platform project" });
     const agents = deps.db.listAgents(project.id);
@@ -474,17 +474,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { project, agents, liveSessions };
   });
 
-  // --- Setup home discovery (Setup Assistant E1-7): the reserved "Getting Started" project + its Setup
-  // Assistant agent(s), surfaced to the dedicated Setup page. MIRRORS /api/platform/home but NAME-SCOPED
-  // to the SETUP home (getReservedProjectByName(SETUP_PROJECT_NAME)) — Getting Started must NEVER be
-  // returned by a Platform-home lookup, nor vice-versa. Unlike the platform home this is UNGATED (the
-  // setup home seeds for every loomctl user, no LOOM_DEV). READ-ONLY: the human attach/stop controls reuse
-  // the EXISTING agent-session + stop REST routes; the Setup page fetches this to find + attach the Setup
-  // Assistant session (liveSessions lets it reuse an already-live one instead of minting a duplicate).
-  // 404 only if no setup home exists (impossible after boot-seed). ---
+  // --- Setup home discovery (Setup Assistant E1-7): the reserved "Platform" setup project + its Setup
+  // Assistant agent(s), surfaced to the dedicated Setup page AND the project picker (this home is hidden
+  // from GET /api/projects, so this READ-ONLY route is how the web discovers it). MIRRORS /api/platform/home
+  // but NAME-SCOPED to the SETUP home (getReservedProjectByName(SETUP_PROJECT_NAME)) — the setup home must
+  // NEVER be returned by a Platform-home lookup, nor vice-versa (distinct names: "Platform" vs "Loom
+  // Platform"). Unlike the platform home this is UNGATED (the setup home seeds for every loomctl user, no
+  // LOOM_DEV). READ-ONLY: the human attach/stop controls reuse the EXISTING agent-session + stop REST
+  // routes; the web fetches this to find + attach the Setup Assistant session (liveSessions lets it reuse an
+  // already-live one instead of minting a duplicate). 404 only if no setup home exists (impossible after
+  // boot-seed). ---
   app.get("/api/setup/home", async (_req, reply) => {
     const project = deps.db.getReservedProjectByName(SETUP_PROJECT_NAME);
-    if (!project) return reply.code(404).send({ error: "no reserved Getting Started project" });
+    if (!project) return reply.code(404).send({ error: "no reserved setup home" });
     const agents = deps.db.listAgents(project.id);
     const liveSessions = agents.flatMap((a) =>
       deps.db.liveSessions(a.id).map((s) => ({

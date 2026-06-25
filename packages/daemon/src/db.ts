@@ -635,8 +635,8 @@ export class Db {
   }
   /**
    * The LIVE reserved/system project with this exact name, if present. The NAME-SCOPED home resolver:
-   * once Loom seeds more than one reserved home (the dev-only "Loom Platform" AND the ungated
-   * "Getting Started"), a bare `listAllProjects().find(p => p.reserved)` is ambiguous — it returns
+   * once Loom seeds more than one reserved home (the dev-only "Loom Platform" AND the ungated setup
+   * home "Platform"), a bare `listAllProjects().find(p => p.reserved)` is ambiguous — it returns
    * whichever reserved home sorts first by name, mis-targeting home lookups. Reader sites (the
    * /api/platform/home + /api/setup/home discovery routes, platformEscalate, auditFileFinding) resolve by
    * THIS, keyed to the home's own name. EXCLUDES archived (archived_at IS NULL) — mirroring the

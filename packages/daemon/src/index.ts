@@ -9,7 +9,7 @@ import { snapshotTranscript } from "./sessions/transcript.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
 import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
-import { seedSetupHome, seedSetupAgentRename, seedSetupAuditorAgent } from "./setup/seed.js";
+import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles } from "./tasks/columns.js";
 import { prewarmMarkitdownForProfilesAtBoot } from "./python/prewarm.js";
@@ -62,10 +62,23 @@ async function main(): Promise<void> {
   // and the field-level adopt-update merge has a common ancestor — the profiles analog of seedBaseSnapshots.
   const seededBases = seedProfileBaseSnapshots(db);
   if (seededBases.length) console.log(`[boot] seeded profile base snapshot(s): ${seededBases.join(", ")}`);
-  // Setup Assistant E1: seed the reserved "Getting Started" onboarding home + its Setup Assistant agent,
+  // "Getting Started" → "Platform" home rename backfill — rename an EXISTING install's reserved setup-home
+  // ROW before seedSetupHome runs. seedSetupHome is seed-if-absent keyed on the NEW name, so if it ran first
+  // on a pre-rename install it would mint a SECOND, empty "Platform" home beside the old "Getting Started"
+  // one (orphaning the user's home + boards); renaming the existing row in place first avoids that. Guarded +
+  // idempotent (name-scoped, reserved-only, collision-refusing); no-op on fresh installs / user-renamed
+  // homes. Best-effort: a throw in this one-shot migration must NEVER gate boot.
+  try {
+    const renamedSetupHome = seedSetupProjectRename(db);
+    if (renamedSetupHome) console.log(`[boot] rename: renamed legacy setup home → ${renamedSetupHome}`);
+  } catch (err) {
+    console.warn(`[boot] setup-home rename failed (continuing boot): ${(err as Error).message}`);
+  }
+  // Setup Assistant E1: seed the reserved "Platform" onboarding home + its Setup Assistant agent,
   // seed-if-absent by name (idempotent; runs AFTER seedDefaultProfiles so the bundled Setup Assistant
-  // profile exists to assign). UNGATED — unlike the platform home below, this ships to EVERY loomctl user
-  // (no LOOM_DEV gate). Hidden from the project picker; surfaced via the always-available Setup page.
+  // profile exists to assign, and AFTER the rename above so an existing home is renamed not duplicated).
+  // UNGATED — unlike the platform home below, this ships to EVERY loomctl user (no LOOM_DEV gate). Hidden
+  // from the project picker; surfaced via the always-available Setup page.
   const seededSetup = seedSetupHome(db);
   if (seededSetup.length) console.log(`[boot] seeded setup home: ${seededSetup.join(", ")}`);
   // A2 rebrand backfill: seedSetupHome no-ops once the home exists, so installs seeded BEFORE the
@@ -75,8 +88,8 @@ async function main(): Promise<void> {
   // or non-reserved agent. No-ops on fresh installs (the seed already created "Platform").
   const renamedSetupAgent = seedSetupAgentRename(db);
   if (renamedSetupAgent) console.log(`[boot] rebrand: renamed legacy setup agent → ${renamedSetupAgent}`);
-  // End-User Platform tier B4: seed the bundled Workspace Auditor agent into the SAME reserved "Getting
-  // Started" home as the operator (one home, two agents). A SEPARATE boot-time backfill — NOT folded into
+  // End-User Platform tier B4: seed the bundled Workspace Auditor agent into the SAME reserved "Platform"
+  // setup home as the operator (one home, two agents). A SEPARATE boot-time backfill — NOT folded into
   // seedSetupHome, which no-ops the whole seed once the home exists (gotcha #2) and so would never give an
   // EXISTING install the auditor. seed-if-absent BY AGENT-NAME within the reserved home: backfills upgrades
   // AND covers fresh installs (operator from seedSetupHome above + auditor here, same boot), idempotent,
@@ -252,7 +265,7 @@ async function main(): Promise<void> {
   const auditMcp = new AuditMcpRouter(db, sessions);
   // Workspace-audit MCP (End-User Platform tier B3) — the END-USER Auditor's de-privileged read-and-
   // suggest-only surface. Needs the registry (shared transcript reads + preset suggestions) AND
-  // SessionService (audit_suggest_improvement → the user's reserved "Getting Started" home). Like the dev
+  // SessionService (audit_suggest_improvement → the user's reserved "Platform" setup home). Like the dev
   // Auditor it gets NO git-write timeouts: it has no git/vault/config/spawn tools, by design.
   const userAuditMcp = new WorkspaceAuditMcpRouter(db, sessions);
   // Setup MCP (Setup Assistant E1-3) — the ungated, user-facing onboarding assistant's CURATED,

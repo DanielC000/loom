@@ -12,7 +12,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (b) THE 4-TOOL SURFACE — EXACTLY [audit_suggest_improvement, list_sessions, preset_suggestion_suggest,
 //       transcript_read]; NONE of the elevated/structural/dev-only tools (no git/vault/config/spawn/message/
 //       host/escalate/archive/audit_file_finding). The two shared READS work (factored from audit.ts).
-//   (c) WRITE A (audit_suggest_improvement) — files to the USER'S OWN reserved "Getting Started" home `inbox`
+//   (c) WRITE A (audit_suggest_improvement) — files to the USER'S OWN reserved "Platform" setup home `inbox`
 //       with an `[Auditor]` prefix; NEVER the dev "Loom Platform" home; IGNORES a caller-supplied projectId
 //       (server-resolved); refuses a non-workspace-auditor caller; SAFE (returns {error}, no crash, no task)
 //       when the reserved home is absent.
@@ -48,6 +48,7 @@ const { AuditMcpRouter } = await import("../dist/mcp/audit.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
+const { SETUP_PROJECT_NAME } = await import("../dist/setup/seed.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -60,10 +61,10 @@ execSync(`git init -q && git add . && git -c user.email=b3@loom -c user.name=b3 
 
 const now = new Date().toISOString();
 const db = new Db();
-// BOTH reserved homes coexist (as in prod under LOOM_DEV). "Getting Started" is the workspace Auditor's
-// target; "Loom Platform" is the dev Auditor's — write-A must NEVER touch it. Note "Getting Started" sorts
-// BEFORE "Loom Platform" (listAllProjects ORDER BY name), the bare-.find(reserved) trap.
-db.insertProject({ id: "pSetup", name: "Getting Started", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: true });
+// BOTH reserved homes coexist (as in prod under LOOM_DEV). The "Platform" setup home is the workspace
+// Auditor's target; "Loom Platform" is the dev Auditor's — write-A must NEVER touch it. (Names are
+// distinct — "Platform" vs "Loom Platform" — so the name-scoped reserved-home lookups never cross.)
+db.insertProject({ id: "pSetup", name: SETUP_PROJECT_NAME, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: true });
 db.insertProject({ id: "pHome", name: "Loom Platform", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: true });
 db.insertProject({ id: "pOrd", name: "Ordinary", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
 db.insertAgent({ id: "agentWsa", projectId: "pSetup", name: "Workspace Auditor", startupPrompt: "AUDIT", position: 0, profileId: null });
@@ -166,9 +167,9 @@ try {
   // Pass an ADVERSARIAL projectId — it must be IGNORED (the target is server-resolved; the schema has no
   // projectId field, so it is silently dropped and the card still lands in the user's own home).
   const sug = await call("audit_suggest_improvement", { title: "Save the repeated /deploy prompt as a preset", detail: "User retyped it 5×.", severity: "medium", projectId: "pHome" });
-  check("(c) audit_suggest_improvement: returns the created task id + the user's reserved 'Getting Started' projectId (pSetup)", !!sug.taskId && sug.projectId === "pSetup" && !sug.error);
+  check("(c) audit_suggest_improvement: returns the created task id + the user's reserved 'Platform' setup-home projectId (pSetup)", !!sug.taskId && sug.projectId === "pSetup" && !sug.error);
   const filed = db.getTask(sug.taskId);
-  check("(c) audit_suggest_improvement: a card landed on the 'Getting Started' INBOX with an [Auditor] prefix",
+  check("(c) audit_suggest_improvement: a card landed on the 'Platform' setup-home INBOX with an [Auditor] prefix",
     db.listTasks("pSetup").length === setupBefore + 1 && filed && filed.projectId === "pSetup" && filed.columnKey === "inbox" && /^\[Auditor\] /.test(filed.title));
   check("(c) audit_suggest_improvement: body mirrors the auditFileFinding shape ('Filed by your Auditor' + severity + evidence)",
     filed && /Filed by your Auditor/.test(filed.body) && /medium/.test(filed.body) && /retyped it 5/.test(filed.body));
@@ -190,7 +191,7 @@ try {
   check("(c2) workspaceAuditSuggest refuses a non-workspace-auditor caller (auditor) — no task, just {error}",
     typeof refusedRole.error === "string" && !refusedRole.taskId);
 
-  // Absent-home path: ARCHIVE the "Getting Started" home (getReservedProjectByName excludes archived) so the
+  // Absent-home path: ARCHIVE the "Platform" setup home (getReservedProjectByName excludes archived) so the
   // reserved home is now absent → {error}, files nothing (no throw-crash of the surface). Done last so it
   // doesn't perturb the earlier write-A assertions.
   db.archiveProject("pSetup");
@@ -205,6 +206,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the B3 workspace-Auditor surface is read+suggest-only (shared transcript reads + a board-card suggestion to the USER'S OWN 'Getting Started' inbox [never Loom Platform, caller projectId ignored] + a deduped preset suggestion), a workspace-auditor session 404s on /mcp-platform, /mcp-orch, /mcp-audit AND /mcp-setup, the write refuses a non-workspace-auditor caller, and is safe when the home is absent — claude-free, network-free."
+  ? "\n✅ ALL PASS — the B3 workspace-Auditor surface is read+suggest-only (shared transcript reads + a board-card suggestion to the USER'S OWN 'Platform' setup-home inbox [never Loom Platform, caller projectId ignored] + a deduped preset suggestion), a workspace-auditor session 404s on /mcp-platform, /mcp-orch, /mcp-audit AND /mcp-setup, the write refuses a non-workspace-auditor caller, and is safe when the home is absent — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
