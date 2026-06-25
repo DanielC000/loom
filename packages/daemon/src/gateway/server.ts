@@ -31,7 +31,7 @@ import { GitReader } from "../git/reader.js";
 import { GitWriter } from "../git/writer.js";
 import { workerDiff } from "../git/worktrees.js";
 import { checkRepoRebind } from "../projects/rebind.js";
-import { listVaultTree, readVaultFile } from "../vault/browser.js";
+import { listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff } from "../skills/store.js";
 import { validateProfile } from "../profiles/validate.js";
@@ -43,6 +43,11 @@ import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+/** Upper bound for the raw vault-file serving route. Vault attachments are normally small (images,
+ *  PDFs); this is a guard against streaming a pathologically large file, not a real working limit —
+ *  a file over the cap is refused with 413 rather than streamed. */
+const VAULT_RAW_MAX_BYTES = 50 * 1024 * 1024; // 50 MB
 
 /** Whitelist guard for the human REST task surfaces — rejects any value outside the p0–p3 enum. */
 const isTaskPriority = (v: unknown): v is Task["priority"] => v === "p0" || v === "p1" || v === "p2" || v === "p3";
@@ -723,6 +728,26 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const content = readVaultFile(p.vaultPath, rel);
     if (content === null) return reply.code(404).send({ error: "file not found" });
     return { path: rel, content };
+  });
+  // Raw, binary-safe, content-typed vault file serving (read-only) — backs the Vault page's <img> /
+  // sandboxed PDF embed / inline markdown images, which can't use the utf8 …/vault/file route (it
+  // garbles binaries). SAME trust posture as …/vault/file: read-only browser, NOT a writer, NOT an
+  // MCP tool. Guard is shared with readVaultFile (statVaultFile → traversal + symlink-escape check).
+  // STREAMS via fs.createReadStream (never buffers); refuses files > VAULT_RAW_MAX_BYTES with 413 so
+  // an enormous file can't blow up memory. nosniff so the browser honours our declared Content-Type.
+  app.get("/api/projects/:id/vault/raw", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const rel = (req.query as { path?: string }).path ?? "";
+    if (!rel) return reply.code(400).send({ error: "path required" });
+    const stat = statVaultFile(p.vaultPath, rel); // null on traversal/symlink-escape/missing/non-file
+    if (!stat) return reply.code(404).send({ error: "file not found" });
+    if (stat.size > VAULT_RAW_MAX_BYTES) return reply.code(413).send({ error: "file too large" });
+    reply
+      .header("Content-Type", vaultFileContentType(rel))
+      .header("Content-Length", stat.size)
+      .header("X-Content-Type-Options", "nosniff");
+    return reply.send(fs.createReadStream(stat.real));
   });
 
   // Vault WRITE (HUMAN/REST + the role-gated PLATFORM exception). No loom-tasks/orchestration MCP tool
