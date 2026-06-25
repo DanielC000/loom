@@ -16,6 +16,8 @@ import { validateAgentPatch } from "../agents/validate.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData, skillWriteInputSchema } from "./skillTools.js";
+import { createProjectTask } from "./tasks.js";
+import { prioritySchema } from "./server.js";
 
 // Same envelope as the task / orchestration MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -605,6 +607,39 @@ export class PlatformMcpRouter {
         if (p.reserved) return ok({ error: "cannot archive a reserved/system project (the Loom Platform home)" });
         db.archiveProject(projectId);
         return ok({ archived: true, projectId });
+      },
+    );
+
+    // --- cross-project task boarding (PL Auditor finding #4). The Lead stands ABOVE all boards, so it can
+    //     board a card DIRECTLY onto ANOTHER project's board instead of spawn-and-narrate (~24 cards + ~40
+    //     reconcile calls for a 12-fix batch). REUSES createProjectTask VERBATIM — the EXACT path loom-tasks
+    //     uses — so title/body/priority/column (incl. the role-resolved defaultLanding fallback) behave
+    //     identically to a card boarded from inside the project. TRUST: cross-project WRITE is inherently a
+    //     PLATFORM (cross-project admin) capability — it lives ONLY on this platform-role-gated router. It is
+    //     deliberately ABSENT from the agent-facing surfaces (loom-orchestration manager/worker, loom-setup
+    //     operator): a project orchestrator/worker/setup-operator stays confined to its OWN board (those
+    //     surfaces resolve the projectId SERVER-SIDE and never take one), so none can gain cross-project write. ---
+    server.registerTool(
+      "project_task_create",
+      {
+        description:
+          "Board a card DIRECTLY onto ANOTHER project's board by explicit projectId (the Lead's cross-project " +
+          "task-create — boards a finding on the destination board instead of spawning a session to narrate it). " +
+          "title (required), body?, priority? (p0|p1|p2|p3, low number = higher priority, default p2), and an " +
+          "optional columnKey (omit to land in the project's role-resolved defaultLanding column). Reuses the " +
+          "SAME create path the in-project loom-tasks tasks_create uses, so columns/priorities behave identically. " +
+          "Validates the projectId exists (404 otherwise). Returns the created Task row.",
+        inputSchema: {
+          projectId: z.string(),
+          title: z.string(),
+          body: z.string().optional(),
+          priority: prioritySchema.optional(),
+          columnKey: z.string().optional(),
+        },
+      },
+      async ({ projectId, title, body, priority, columnKey }) => {
+        if (!db.getProject(projectId)) return ok({ error: "project not found" });
+        return ok(createProjectTask(db, projectId, { title, body, priority, columnKey }));
       },
     );
 
