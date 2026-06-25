@@ -7,6 +7,27 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-06-25
+
+Document conversion no longer fails **silently**: when the converter can't install, Loom now shows you
+**why** and lets you fix it — instead of the agent quietly lacking the tool.
+
+### Fixed
+- **Document-conversion (`documentConversion`) provisioning is now diagnostic and self-healing.** When Loom
+  builds its shared Python venv for markitdown, it now **captures and classifies the real failure** (no base
+  Python ≥3.10 / venv-create / pip / **timeout**) with the captured pip output — instead of one opaque "no
+  Python, or venv/pip failed." The heavy `markitdown[all]` install timeout is **raised to ~15 minutes** (the
+  old 3-minute bound killed legitimate first installs on slower/corporate networks and mislabeled them a
+  failure), and a failed attempt **no longer permanently dead-ends** — it retries on the next session, on a
+  profile re-save, or via an explicit retry, with no daemon restart needed.
+
+### Added
+- **See document-conversion status in the UI, and point Loom at your Python.** A profile with document
+  conversion enabled now shows the shared converter's live state — **installing… / ready / failed (with the
+  reason and the captured install log)** — with a **Retry install** button when it fails. Settings gains a
+  **Python interpreter** field so you can point Loom at a specific base Python (≥3.10) when it isn't on
+  PATH, instead of the converter silently never appearing.
+
 ## [0.8.0] — 2026-06-25
 
 **Customize the bundled skills & profiles** with precise, update-safe tracking, opt-in **document-to-Markdown
