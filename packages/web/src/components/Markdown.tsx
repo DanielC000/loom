@@ -31,14 +31,24 @@ function outsideCode(src: string, fn: (s: string) => string): string {
     .join("");
 }
 
+/** Extensions we render as an inline <img> (matches the daemon raw endpoint's image content-types). */
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|avif|svg)$/i;
+const isImageTarget = (t: string): boolean => IMAGE_EXT.test((t.split("#")[0] ?? "").trim());
+const baseName = (p: string): string => p.split("/").pop() ?? p;
+
 /** Rewrite [[wikilinks]] and ![[embeds]] to markdown links with custom URI schemes. */
 function transformWikilinks(body: string): string {
   return outsideCode(body, (text) =>
     text
       .replace(/!\[\[([^\]]+)\]\]/g, (_full, inner: string) => {
         const [target, alias] = inner.split("|");
-        const label = (alias ?? target ?? "").trim() || (target ?? "").trim();
-        return `[${label}](wikiembed:${encodeURIComponent((target ?? "").trim())})`;
+        const t = (target ?? "").trim();
+        const label = (alias ?? "").trim() || t;
+        // ![[image.png]] → a real markdown image (the `!` makes react-markdown emit an <img> node we
+        // resolve to the raw endpoint); ![[note]] stays an embed chip link that opens the target note.
+        return isImageTarget(t)
+          ? `![${label}](wikiembed:${encodeURIComponent(t)})`
+          : `[${label}](wikiembed:${encodeURIComponent(t)})`;
       })
       .replace(/\[\[([^\]]+)\]\]/g, (_full, inner: string) => {
         const [target, alias] = inner.split("|");
@@ -112,11 +122,27 @@ function resolveRelative(href: string, currentPath: string, files: string[]): st
   return files.find((f) => base(f) === wanted) ?? null;
 }
 
-export default function Markdown({ source, files, currentPath = "", onOpen }: { source: string; files: string[]; currentPath?: string; onOpen: (path: string) => void }) {
+export default function Markdown({ source, files, currentPath = "", onOpen, assetSrc }: { source: string; files: string[]; currentPath?: string; onOpen: (path: string) => void; assetSrc?: (vaultPath: string) => string }) {
   const { props, body } = splitFrontmatter(source);
   const transformed = transformWikilinks(body);
 
   const components: Components = {
+    // Inline images: ![[image.png]] embeds (wikiembed: scheme) and standard ![](relative) images both
+    // resolve to a vault file, then to the raw endpoint via assetSrc. External http(s) images pass through.
+    img({ src, alt }) {
+      const s = typeof src === "string" ? src : "";
+      const altText = typeof alt === "string" ? alt : "";
+      if (s.startsWith("wikiembed:")) {
+        const target = s.slice("wikiembed:".length);
+        const path = resolveWiki(target, files);
+        if (path && assetSrc) return <img className="md-img" src={assetSrc(path)} alt={altText || baseName(path)} loading="lazy" />;
+        return <span className="md-broken" title="unresolved image">{altText || decodeURIComponent(target)}</span>;
+      }
+      if (isExternalHref(s)) return <img className="md-img" src={s} alt={altText} loading="lazy" />;
+      const path = resolveRelative(s, currentPath, files);
+      if (path && assetSrc) return <img className="md-img" src={assetSrc(path)} alt={altText || baseName(path)} loading="lazy" />;
+      return <span className="md-broken" title="unresolved image">{altText || s}</span>;
+    },
     a({ href, children }) {
       const h = typeof href === "string" ? href : "";
       if (h.startsWith("wikilink:") || h.startsWith("wikiembed:")) {
@@ -187,7 +213,8 @@ const MD_CSS = `
 .loom-md th, .loom-md td { border: 1px solid #2a2a2e; padding: 5px 10px; }
 .loom-md th { background: #161618; color: #fff; }
 .loom-md hr { border: none; border-top: 1px solid #2a2a2e; margin: 1.2em 0; }
-.loom-md img { max-width: 100%; }
+.loom-md img, .loom-md .md-img { max-width: 100%; }
+.loom-md .md-img { display: block; max-height: 70vh; height: auto; margin: 0.6em 0; border: 1px solid #2a2a2e; border-radius: 6px; background: #131316; }
 .loom-md .md-props { border-collapse: collapse; margin-bottom: 1em; background: #131316; border: 1px solid #2a2a2e; border-radius: 6px; }
 .loom-md .md-props-k { color: #9aa; padding: 3px 12px; font-size: 12px; vertical-align: top; white-space: nowrap; }
 .loom-md .md-props-v { color: #ddd; padding: 3px 12px; font-size: 12px; }

@@ -173,6 +173,21 @@ body {
   border-bottom-color: var(--loom-phosphor);
 }
 
+/* Vault file-tree rows + breadcrumb segments: a quiet hover wash, no layout shift. */
+.loom-tree-row {
+  transition: background-color 80ms linear;
+}
+.loom-tree-row:hover {
+  background-color: var(--loom-panel-2) !important;
+}
+.loom-crumb {
+  transition: color 80ms linear;
+}
+.loom-crumb:hover {
+  color: var(--loom-text) !important;
+  text-decoration: underline;
+}
+
 /* Hover/focus-reveal fade (e.g. the board column-header actions): opacity is toggled inline; this
    carries the transition so it can be nulled under prefers-reduced-motion (an inline transition can't). */
 .loom-fade {
@@ -200,7 +215,9 @@ body {
   .loom-btn,
   .loom-navtab,
   .loom-toggle,
-  .loom-fade {
+  .loom-fade,
+  .loom-tree-row,
+  .loom-crumb {
     transition: none;
   }
   .loom-mic-pulse {

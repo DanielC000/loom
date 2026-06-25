@@ -264,6 +264,19 @@ export const api = {
   vaultTree: (projectId: string) => get<VaultEntry[]>(`/api/projects/${projectId}/vault`),
   vaultFile: (projectId: string, path: string) =>
     get<{ path: string; content: string }>(`/api/projects/${projectId}/vault/file?path=${encodeURIComponent(path)}`),
+  // Raw bytes of a vault file, served with a content-type by extension + X-Content-Type-Options: nosniff
+  // (daemon `vault/raw`). Returns the URL string — used directly as an `<img>`/`<iframe>`/`<object>`/
+  // download `src`/`href` (the vite dev proxy forwards /api to the live daemon); the browser fetches it.
+  vaultRawUrl: (projectId: string, path: string) =>
+    `/api/projects/${projectId}/vault/raw?path=${encodeURIComponent(path)}`,
+  // HEAD the raw endpoint for a binary file's size/content-type without downloading the bytes — for the
+  // "Binary file · <size> · Download" card. Returns nulls if the headers are absent.
+  vaultRawHead: async (projectId: string, path: string): Promise<{ size: number | null; contentType: string | null }> => {
+    const r = await fetch(`/api/projects/${projectId}/vault/raw?path=${encodeURIComponent(path)}`, { method: "HEAD" });
+    if (!r.ok) throw new Error(`vault/raw HEAD -> ${r.status}`);
+    const len = r.headers.get("content-length");
+    return { size: len ? Number(len) : null, contentType: r.headers.get("content-type") };
+  },
   // Vault WRITE (HUMAN-only; mirrors skills/profiles — no agent MCP surface). Each op commits
   // through the daemon's shared vault-commit path. saveVaultFile = write/overwrite (PUT),
   // createVaultFile = new file, 409 if exists (POST), deleteVaultFile = remove (DELETE).
