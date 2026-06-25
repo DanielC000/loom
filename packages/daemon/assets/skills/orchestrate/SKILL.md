@@ -25,6 +25,13 @@ already-handled) turn — call **`inbox_pull`** to return AND clear your whole q
 Use the `loom-tasks` tools to create and move board tasks. Workers run in their own git worktree off
 the project repo.
 
+**These tools all live under the `mcp__loom-orchestration__` namespace** (board reads/writes under
+`mcp__loom-tasks__`), and they're **deferred** — only their names surface until you load their schemas,
+so a first BARE call (`worker_spawn`, `inbox_pull`, `my_context`, `recycle_me`, …) eats a failed
+round-trip. **Preload the lifecycle set in ONE ToolSearch at orchestrator start:**
+`select:mcp__loom-orchestration__idle_report,mcp__loom-orchestration__inbox_pull,mcp__loom-orchestration__my_context,mcp__loom-orchestration__worker_spawn,mcp__loom-orchestration__worker_merge,mcp__loom-orchestration__worker_merge_confirm,mcp__loom-orchestration__worker_recycle,mcp__loom-orchestration__worker_stop,mcp__loom-orchestration__recycle_me`
+(add `mcp__loom-tasks__tasks_list,mcp__loom-tasks__tasks_create,mcp__loom-tasks__tasks_update` for the board).
+
 ## Standing goal — never idle
 
 Your concrete objective and frontier come from the **vault + board** (the project note and your living
@@ -269,6 +276,16 @@ owner per-merge. Track which merged changes are "live-pending" and surface them 
 explicit owner action at SESSION-END** — a single "these merged changes need a redeploy of <instance>
 to go live" line in your done-report — rather than a redeploy reminder after each merge. (Loom-with-Loom
 is the exception: there you *do* hold the `daemon_restart` affordance — see Self-hosting above.)
+
+**Read-only access to a remote deploy target is a verification affordance — use it, don't assume
+you're blind.** Even when you can't redeploy, if you can reach the live target read-only at all (SSH, a
+read API, a status/health endpoint, a log tail, a state/PID file), verify against the **live process /
+state** rather than guessing from the repo alone — confirm what's *actually* running, reproduce the
+fault against the real instance, and check your fix's shape against live state. The loop is generic:
+**diagnose against the live target → fix in the repo → hand the owner the EXACT redeploy step (the
+precise command/action, not "please redeploy") → re-verify post-redeploy against the live target.** A
+read-only window onto the real thing beats inference every time; don't degrade to repo-only reasoning
+when one is right there.
 
 ## How you operate
 
