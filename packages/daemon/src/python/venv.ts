@@ -19,8 +19,9 @@ import { LOOM_HOME } from "../paths.js";
  *
  * `ensurePythonPackageAsync` is the reusable surface a Python-backed capability calls (off the hot path) to
  * provision + resolve a venv console script. Everything is BOUNDED (spawn timeouts), IDEMPOTENT (a ready
- * venv hits a fast path), and NEVER throws — a failure resolves to `null` and the caller degrades (warn +
- * skip).
+ * venv hits a fast path), and NEVER throws — it resolves a CLASSIFIED {@link EnsurePythonResult} (the
+ * absolute binary on success, else `{ binary:null, outcome, errorTail? }` naming the specific failure) so the
+ * caller can log the real reason + surface it to a status/REST layer, then degrade (warn + skip).
  */
 export function loomVenvDir(): string {
   return path.join(LOOM_HOME, "python", "venv");
@@ -54,10 +55,15 @@ const PROBE_TIMEOUT_MS = 15_000;
 const VENV_CREATE_TIMEOUT_MS = 120_000;
 /**
  * Default bound (ms) for `pip install` — far larger than a venv create because a first-time install
- * (e.g. `markitdown[all]`) downloads wheels. Mirrors the worktree provisioning bound; callers override
- * via `ensurePythonPackageAsync({ timeoutMs })`. On timeout the child is killed and we degrade to `null`.
+ * downloads wheels. Mirrors the worktree provisioning bound; callers override via
+ * `ensurePythonPackageAsync({ timeoutMs })` (the markitdown consumer passes a far larger bound because
+ * `markitdown[all]` is heavy — onnxruntime + many converters). On timeout the child is killed and the
+ * outcome is classified `timeout`.
  */
 const PIP_INSTALL_TIMEOUT_MS = 180_000;
+
+/** Cap (bytes) on the captured stdout+stderr tail kept for diagnostics — a bounded ring, never the full log. */
+const OUTPUT_TAIL_BYTES = 4096;
 
 /** A base-Python invocation: the command plus any fixed leading args (e.g. the `py -3` launcher). */
 export interface BasePython {
@@ -66,24 +72,83 @@ export interface BasePython {
 }
 
 /**
- * Run a child process to completion ASYNCHRONOUSLY (never blocks the event loop), resolving `{ ok }`:
- * `ok` is true iff the process exited 0 within `timeoutMs`. NEVER rejects — a spawn error, non-zero exit,
- * or timeout all resolve `{ ok: false }` (best-effort, the worktree-provisioning discipline). stdio ignored.
+ * The classified outcome of a Python provisioning attempt — distinguishing the genuinely-different failure
+ * modes that used to be lumped into one opaque "venv/pip failed" message:
+ *   - `ready`           — the binary resolved (fast path, or after a successful create + install);
+ *   - `no-base-python`  — {@link discoverBasePythonAsync} found no usable base interpreter (≥3.10 on PATH /
+ *                         `python.interpreterPath`);
+ *   - `venv-create-failed` — `python -m venv` exited non-zero (errorTail carries the captured output);
+ *   - `pip-failed`      — `pip install` exited non-zero, or produced no functional binary (errorTail carries
+ *                         the captured stderr/stdout tail — the SSL/proxy/resolver reason);
+ *   - `timeout`         — a step was killed by its bound (the heavy first install exceeding the pip bound is
+ *                         the most likely real-world cause on a corporate network);
+ *   - `disabled`        — `LOOM_PYTHON_NO_PROVISION=1` (tests / ops): provisioning was not attempted.
  */
-function runAsync(command: string, args: string[], timeoutMs: number): Promise<{ ok: boolean }> {
+export type ProvisionOutcome =
+  | "ready" | "no-base-python" | "venv-create-failed" | "pip-failed" | "timeout" | "disabled";
+
+/** Structured result of {@link ensurePythonPackageAsync}: the resolved absolute binary path (or null) + why. */
+export interface EnsurePythonResult {
+  /** Absolute path to the venv console script on success; null on any non-`ready` outcome. */
+  binary: string | null;
+  /** The classified outcome — see {@link ProvisionOutcome}. */
+  outcome: ProvisionOutcome;
+  /** On a failure that captured child output: the bounded (~4KB) stdout+stderr tail, for diagnosis. */
+  errorTail?: string;
+}
+
+/** What {@link runAsync} resolves: success flag, exit code, whether the BOUND killed it, and the output tail. */
+interface RunResult {
+  /** True iff the process exited 0 within `timeoutMs`. */
+  ok: boolean;
+  /** The exit code (null on spawn error / kill). */
+  code: number | null;
+  /** True iff the child was KILLED by the timeout bound (distinguishes `timeout` from a plain non-zero exit). */
+  timedOut: boolean;
+  /** The last {@link OUTPUT_TAIL_BYTES} of combined stdout+stderr, for diagnostics. "" when nothing captured. */
+  output: string;
+}
+
+/**
+ * Run a child process to completion ASYNCHRONOUSLY (never blocks the event loop), resolving a {@link RunResult}.
+ * NEVER rejects — a spawn error, non-zero exit, or timeout all resolve `ok:false` (best-effort, the
+ * worktree-provisioning discipline). Unlike the old `stdio:'ignore'` version it CAPTURES stdout+stderr into a
+ * bounded ring (last ~4KB) so a caller can log/return the REAL failure (proxy / SSL / resolver / timeout)
+ * instead of an opaque "it failed". The ring is bounded as output streams in, so a multi-minute verbose pip
+ * install can't grow the buffer without limit.
+ */
+function runAsync(command: string, args: string[], timeoutMs: number): Promise<RunResult> {
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (ok: boolean) => { if (!settled) { settled = true; resolve({ ok }); } };
+    let timedOut = false;
+    // Bounded capture ring: keep roughly the last OUTPUT_TAIL_BYTES, dropping whole chunks off the front as
+    // newer ones arrive. The final tail() slices to exactly the cap.
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    const capture = (b: Buffer): void => {
+      chunks.push(b);
+      bytes += b.length;
+      while (bytes > OUTPUT_TAIL_BYTES && chunks.length > 1) bytes -= chunks.shift()!.length;
+    };
+    const tail = (): string => {
+      const s = Buffer.concat(chunks).toString("utf-8").trim();
+      return s.length > OUTPUT_TAIL_BYTES ? s.slice(-OUTPUT_TAIL_BYTES) : s;
+    };
+    const finish = (ok: boolean, code: number | null) => {
+      if (!settled) { settled = true; resolve({ ok, code, timedOut, output: tail() }); }
+    };
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(command, args, { stdio: "ignore" });
+      child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
     } catch {
-      finish(false);
+      finish(false, null);
       return;
     }
-    const timer = setTimeout(() => { try { child.kill(); } catch { /* noop */ } finish(false); }, timeoutMs);
-    child.on("error", () => { clearTimeout(timer); finish(false); });
-    child.on("exit", (code) => { clearTimeout(timer); finish(code === 0); });
+    child.stdout?.on("data", capture);
+    child.stderr?.on("data", capture);
+    const timer = setTimeout(() => { timedOut = true; try { child.kill(); } catch { /* noop */ } finish(false, null); }, timeoutMs);
+    child.on("error", () => { clearTimeout(timer); finish(false, null); });
+    child.on("exit", (code) => { clearTimeout(timer); finish(code === 0, code); });
   });
 }
 
@@ -110,25 +175,35 @@ export async function discoverBasePythonAsync(override?: string): Promise<BasePy
   return null;
 }
 
+/** What {@link ensureLoomVenvAsync} resolves: the venv interpreter path on success, else a classified failure. */
+interface VenvEnsureResult {
+  /** Absolute path to the venv's python on success; null on failure. */
+  py: string | null;
+  /** `ready` on success, else the specific failure mode. */
+  outcome: Extract<ProvisionOutcome, "ready" | "no-base-python" | "venv-create-failed" | "timeout">;
+  /** Captured output tail on a venv-create failure. */
+  errorTail?: string;
+}
+
 /**
- * Ensure the shared venv exists, returning the ABSOLUTE path to its python interpreter, or `null` if it
- * can't be created (no base Python, or `python -m venv` failed). Idempotent: if the venv python is already
- * present this is a fast no-op. ASYNC + bounded + never throws. Loom creates ONLY the venv — never the
- * interpreter.
+ * Ensure the shared venv exists, returning the ABSOLUTE path to its python interpreter, or a CLASSIFIED
+ * failure (no base Python / venv-create non-zero / timeout) with the captured output tail. Idempotent: if
+ * the venv python is already present this is a fast no-op. ASYNC + bounded + never throws. Loom creates ONLY
+ * the venv — never the interpreter.
  */
-async function ensureLoomVenvAsync(interpreterOverride?: string): Promise<string | null> {
+async function ensureLoomVenvAsync(interpreterOverride?: string): Promise<VenvEnsureResult> {
   const py = venvPython();
-  if (fs.existsSync(py)) return py; // fast path: already provisioned
+  if (fs.existsSync(py)) return { py, outcome: "ready" }; // fast path: already provisioned
   const base = await discoverBasePythonAsync(interpreterOverride);
-  if (!base) return null;
+  if (!base) return { py: null, outcome: "no-base-python" };
   try {
     fs.mkdirSync(path.dirname(loomVenvDir()), { recursive: true }); // `python -m venv` makes the leaf, not parents
   } catch {
     /* best-effort */
   }
   const r = await runAsync(base.command, [...base.args, "-m", "venv", loomVenvDir()], VENV_CREATE_TIMEOUT_MS);
-  if (!r.ok) return null;
-  return fs.existsSync(py) ? py : null;
+  if (!r.ok) return { py: null, outcome: r.timedOut ? "timeout" : "venv-create-failed", errorTail: r.output || undefined };
+  return fs.existsSync(py) ? { py, outcome: "ready" } : { py: null, outcome: "venv-create-failed" };
 }
 
 export interface EnsurePythonPackageOpts {
@@ -147,18 +222,22 @@ export interface EnsurePythonPackageOpts {
 /**
  * THE reusable surface a Python-backed Loom capability calls — OFF the event-loop hot path (e.g. from a
  * background provisioning job) — to resolve an ABSOLUTE path to a console script in the shared venv,
- * provisioning the venv + pip-installing the package on first use. Returns the absolute binary path, or
- * `null` if anything fails (no base Python, venv/pip failure, install produced no functional binary) — the
- * caller then degrades (warn + skip the feature) rather than crashing.
+ * provisioning the venv + pip-installing the package on first use. Returns an {@link EnsurePythonResult}:
+ * `{ binary, outcome, errorTail? }`. On success `binary` is the absolute path and `outcome` is `ready`; on
+ * failure `binary` is null and `outcome` CLASSIFIES why (no base Python / venv-create / pip / timeout /
+ * disabled) with the captured output tail — so the caller logs the SPECIFIC reason (and surfaces it to the
+ * status/REST layer) instead of an opaque "it failed", and degrades (warn + skip the feature) rather than
+ * crashing.
  *
- * Fast path: if the binary already exists and the optional import probe passes, returns immediately (no
- * venv/pip work). ASYNC, idempotent, bounded (every spawn has a timeout), and never throws.
+ * Fast path: if the binary already exists and the optional import probe passes, returns `ready` immediately
+ * (no venv/pip work). ASYNC, idempotent, bounded (every spawn has a timeout), and never throws.
  *
  * TEST/ops seam: `LOOM_PYTHON_NO_PROVISION=1` makes this NEVER create a venv or run pip (it only ever
- * resolves an already-present binary) — so CI hermetic tests can exercise the not-ready path without
- * building a real venv or hitting the network, and an operator can forbid Loom from provisioning venvs.
+ * resolves an already-present binary, else returns `disabled`) — so CI hermetic tests can exercise the
+ * not-ready path without building a real venv or hitting the network, and an operator can forbid Loom from
+ * provisioning venvs.
  */
-export async function ensurePythonPackageAsync(opts: EnsurePythonPackageOpts): Promise<string | null> {
+export async function ensurePythonPackageAsync(opts: EnsurePythonPackageOpts): Promise<EnsurePythonResult> {
   try {
     const bin = loomVenvBin(opts.binary);
 
@@ -171,21 +250,22 @@ export async function ensurePythonPackageAsync(opts: EnsurePythonPackageOpts): P
 
     // Fast path: a ready venv already has a functional binary — nothing to do (works even when provisioning
     // is disabled, so a pre-warmed venv is always usable).
-    if (await probeOk(venvPython())) return bin;
+    if (await probeOk(venvPython())) return { binary: bin, outcome: "ready" };
 
     // Provisioning disabled (tests / ops) → never build a venv or hit the network.
-    if (process.env.LOOM_PYTHON_NO_PROVISION === "1") return null;
+    if (process.env.LOOM_PYTHON_NO_PROVISION === "1") return { binary: null, outcome: "disabled" };
 
-    const venvPy = await ensureLoomVenvAsync(opts.interpreterOverride);
-    if (!venvPy) return null;
+    const venv = await ensureLoomVenvAsync(opts.interpreterOverride);
+    if (!venv.py) return { binary: null, outcome: venv.outcome, errorTail: venv.errorTail };
     // The venv may have pre-existed without this package (or with it) — re-check before installing.
-    if (await probeOk(venvPy)) return bin;
+    if (await probeOk(venv.py)) return { binary: bin, outcome: "ready" };
 
     const pkgs = Array.isArray(opts.package) ? opts.package : [opts.package];
-    const r = await runAsync(venvPy, ["-m", "pip", "install", ...pkgs], opts.timeoutMs ?? PIP_INSTALL_TIMEOUT_MS);
-    if (!r.ok) return null;
-    return (await probeOk(venvPy)) ? bin : null;
+    const r = await runAsync(venv.py, ["-m", "pip", "install", ...pkgs], opts.timeoutMs ?? PIP_INSTALL_TIMEOUT_MS);
+    if (!r.ok) return { binary: null, outcome: r.timedOut ? "timeout" : "pip-failed", errorTail: r.output || undefined };
+    // Installed but the import probe still fails → a half-built install; classify as pip-failed.
+    return (await probeOk(venv.py)) ? { binary: bin, outcome: "ready" } : { binary: null, outcome: "pip-failed" };
   } catch {
-    return null; // belt-and-suspenders: this surface NEVER throws
+    return { binary: null, outcome: "pip-failed" }; // belt-and-suspenders: this surface NEVER throws
   }
 }

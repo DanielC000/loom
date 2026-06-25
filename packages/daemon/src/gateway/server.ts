@@ -38,7 +38,7 @@ import { validateProfile } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
 import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge, profileUpdateDiff, adoptProfileUpdate, type ProfileFieldResolution } from "../profiles/customization.js";
-import { prewarmMarkitdown, resolvePrewarmInterpreterPath } from "../python/prewarm.js";
+import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
 
@@ -253,6 +253,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     return { cleared: true, resumed };
   });
+  // --- Markitdown (shared Python venv) provisioning status + retry. HUMAN/REST-ONLY (loopback) — NOT an MCP
+  // tool: provisioning launches a host process (venv-create + pip), the same host-launch trust posture as the
+  // git/vault/gateCommand writers, so the agent surface never exposes it. GET is read-only (the classified
+  // state/reason/errorTail the UI shows so the user can SEE why documentConversion isn't ready, replacing the
+  // buried console.warn); POST re-kicks provisioning OFF the event loop — now that the kick is retryable (not a
+  // permanent one-shot) this actually retries after a prior failure without a daemon restart. Both return the
+  // current status. (`python.interpreterPath` itself is set via the existing human project-config REST — the
+  // agent validator rejects it; no new write surface is needed here.)
+  app.get("/api/python/provisioning", async () => getMarkitdownProvisionStatus());
+  app.post("/api/python/provisioning/retry", async () => {
+    prewarmMarkitdown(resolvePrewarmInterpreterPath(deps.db.listAllProjects()));
+    return getMarkitdownProvisionStatus();
+  });
+
   // A manager's orchestration_events timeline (chronological). READ-ONLY — emits no event.
   app.get("/api/orchestration/events", async (req) => {
     const { managerId } = req.query as { managerId?: string };

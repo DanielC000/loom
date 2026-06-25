@@ -1,9 +1,13 @@
 import { resolveConfig, type ProjectConfigOverride } from "@loom/shared";
-import { prewarmMarkitdown } from "../pty/host.js";
+import { prewarmMarkitdown, getMarkitdownProvisionStatus } from "../pty/host.js";
+import type { MarkitdownProvisionStatus } from "../pty/host.js";
 
-// Re-export the host primitive so this module is the single "pre-warm" surface callers import (the REST
-// profile-save handlers call it directly with a resolved interpreter; boot uses the helper below).
-export { prewarmMarkitdown };
+// Re-export the host primitives so this module is the single "pre-warm / provisioning status" surface callers
+// import (the REST profile-save handlers call prewarmMarkitdown with a resolved interpreter; the human-only
+// `/api/python/provisioning` GET/POST read + re-kick via getMarkitdownProvisionStatus + prewarmMarkitdown;
+// boot uses the helper below).
+export { prewarmMarkitdown, getMarkitdownProvisionStatus };
+export type { MarkitdownProvisionStatus };
 
 /**
  * Pre-warming the shared Python venv (markitdown today) BEFORE the first documentConversion session needs

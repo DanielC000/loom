@@ -134,9 +134,10 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
   shared Python venv (below): first the human-only `LOOM_MARKITDOWN_BIN` override (an already-installed
   binary — and the TEST seam, so CI never builds a venv), else a single `fs.existsSync(loomVenvBin(…))` —
   if the venv is warm, inject it; if cold, return null (THIS spawn skips the MCP, like Playwright's
-  missing-cli) and kick BACKGROUND provisioning. A later spawn picks it up once the venv lands. **One-time
-  USER setup is just a base Python ≥3.10** discoverable on PATH (or pointed at via `python.interpreterPath`)
-  — Loom owns the venv and the install.
+  missing-cli) and kick BACKGROUND provisioning. A later spawn picks it up once the venv lands — and the
+  kick is RETRYABLE + DIAGNOSTIC (a failed attempt no longer dead-ends; the classified reason + captured
+  error tail is surfaced via the status model + REST below). **One-time USER setup is just a base Python
+  ≥3.10** discoverable on PATH (or pointed at via `python.interpreterPath`) — Loom owns the venv and the install.
 - **Shared Loom-managed Python venv (`python/venv.ts`) + `python.interpreterPath`:** Loom owns ONE shared
   venv under `<LOOM_HOME>/python/venv` — NOT a venv-per-tool. **Event-loop discipline (load-bearing):** the
   spawn HOT PATH (`createPty` → `buildMcpServers`) does NO blocking work — only `fs.existsSync(loomVenvBin(
@@ -148,10 +149,21 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
   interpreterOverride? })` is the reusable surface EVERY Python-backed capability calls OFF the hot path
   (e.g. from a background job): it creates the venv if missing (from a discovered base Python via async
   `discoverBasePythonAsync` — `python.interpreterPath` FIRST, then `python3` → `python` → win32 `py -3`),
-  pip-installs, and returns the ABSOLUTE path to a venv console script (or null). Idempotent (a ready venv
-  hits a fast path via an import probe), BOUNDED (every spawn has a timeout; pip reuses the worktree-provision
-  bound), NEVER throws. The markitdown consumer kicks it ONCE per process (deduped — concurrent spawns never
-  launch parallel installs); on success the resolved path is memoized (never a null — the cold case re-checks
+  pip-installs, and returns a CLASSIFIED `{ binary, outcome, errorTail }` — the ABSOLUTE console-script path +
+  `ready` on success, else `binary:null` with the SPECIFIC failure (`no-base-python` / `venv-create-failed` /
+  `pip-failed` / `timeout` / `disabled`) and the captured ~4KB stdout+stderr tail. venv/pip run with PIPED
+  stdio (NOT `stdio:'ignore'`), so the REAL cause (proxy / SSL / resolver / timeout) is logged + surfaced, not
+  lumped into one opaque "venv/pip failed". Idempotent (a ready venv hits a fast path via an import probe),
+  BOUNDED (every spawn has a timeout; the markitdown `pip install` gets a ~15-min / `900_000`ms bound —
+  `markitdown[all]` is heavy: onnxruntime + many converters — killed-on-exceed ⇒ classified `timeout`, while
+  venv-create/probe keep their fast bounds), NEVER throws. The markitdown consumer kicks it RETRYABLY — deduped
+  ONLY while a job is genuinely IN-FLIGHT (concurrent spawns never launch parallel installs), but a fresh kick
+  is allowed after a TERMINAL outcome, so a profile-save pre-warm, a later spawn, or the human-only retry below
+  all actually retry (NOT the old PERMANENT one-shot that dead-ended every retry until a daemon restart). It
+  tracks a status `{ state: idle|installing|ready|failed, reason, errorTail, binary, lastAttemptAt }` read via
+  the human-only loopback `GET /api/python/provisioning`; `POST /api/python/provisioning/retry` re-kicks it off
+  the event loop (both NOT agent MCP tools — provisioning launches a host process, same trust posture as the
+  git/vault/gateCommand writers). On success the resolved path is memoized (the cold case re-checks
   `fs.existsSync` each spawn until warm). `LOOM_PYTHON_NO_PROVISION=1` disables real venv/pip provisioning
   (CI hermetic tests + an ops escape hatch). Loom installs PACKAGES, never the interpreter.
   `python.interpreterPath` is a top-level human-only config (resolved by `resolveConfig`, carried to the

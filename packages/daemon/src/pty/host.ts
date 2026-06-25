@@ -13,6 +13,7 @@ import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { detectUsageLimit, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
+import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 
 const RING_CAP_BYTES = 256 * 1024;
 /**
@@ -352,62 +353,142 @@ export function playwrightMcpServer(): { type: "stdio"; command: string; args: s
  * stick forever. The not-ready case re-checks `fs.existsSync` cheaply on every spawn until it flips ready.
  */
 let markitdownBin: string | undefined; // success memo (stable once resolved); never holds null
+/**
+ * Mark a WARM-resolved binary as `ready` in the status model — for the two warm branches that resolve the
+ * tool WITHOUT a kick (the `LOOM_MARKITDOWN_BIN` override, and a venv binary already present on disk, e.g. a
+ * manually-built venv or one boot-pre-warm found already there). Without this the status would sit at `idle`
+ * even though document conversion fully works, so GET /api/python/provisioning (the UI card) would falsely
+ * read "not ready". Cheap + sync (a plain object assignment) — safe on the hot path, no I/O.
+ */
+function markMarkitdownReady(bin: string): void {
+  markitdownBin = bin;
+  markitdownProvisionStatus = { state: "ready", binary: bin, lastAttemptAt: Date.now() };
+}
 function resolveMarkitdownBin(pythonInterpreterPath?: string): string | null {
   if (markitdownBin) return markitdownBin;
   const override = process.env.LOOM_MARKITDOWN_BIN;
   if (override) {
     const resolved = resolveExecutable(override);
-    if (path.isAbsolute(resolved)) { markitdownBin = resolved; return resolved; }
+    if (path.isAbsolute(resolved)) { markMarkitdownReady(resolved); return resolved; }
     return null; // human pointed the override somewhere unresolvable — respect it, don't auto-provision
   }
   const bin = loomVenvBin("markitdown-mcp");
-  if (fs.existsSync(bin)) { markitdownBin = bin; return bin; } // venv warm → use it (and cache)
+  if (fs.existsSync(bin)) { markMarkitdownReady(bin); return bin; } // venv warm → use it (cache + status ready)
   kickMarkitdownProvision(pythonInterpreterPath); // cold → provision in the BACKGROUND; skip this spawn
   return null;
 }
 
 /**
+ * Bound (ms) for the markitdown `pip install`. Much larger than the default pip bound because `markitdown[all]`
+ * is a HEAVY first install — it pulls onnxruntime + a long tail of format converters, which on a real/corporate
+ * network (or behind a slow proxy) routinely exceeds a few minutes. The old 3-min default killed the download
+ * mid-flight and mislabeled it a generic failure. ~15 min gives the heavy first install room while still being
+ * KILLED-on-exceed (classified `timeout`), never unbounded. The venv-create/probe bounds stay as-is (fast).
+ */
+const MARKITDOWN_PIP_TIMEOUT_MS = 900_000;
+
+/**
+ * Live markitdown provisioning status — the model the REST/UI layer reads ({@link getMarkitdownProvisionStatus}).
+ *   - `idle`       — never attempted (or reset);
+ *   - `installing` — a background kick is IN-FLIGHT;
+ *   - `ready`      — the venv binary resolved (`binary` set);
+ *   - `failed`     — a terminal failure (`reason` = the classified {@link ProvisionOutcome}; `errorTail` = the
+ *                    captured stdout/stderr tail when one was produced).
+ * `lastAttemptAt` is the epoch-ms of the most recent kick. A failure is NOT sticky — it's retryable (see
+ * {@link kickMarkitdownProvision}) — so the UI can show the reason + offer a retry.
+ */
+export type MarkitdownProvisionState = "idle" | "installing" | "ready" | "failed";
+export interface MarkitdownProvisionStatus {
+  state: MarkitdownProvisionState;
+  reason?: ProvisionOutcome;
+  errorTail?: string;
+  binary?: string;
+  lastAttemptAt?: number;
+}
+let markitdownProvisionStatus: MarkitdownProvisionStatus = { state: "idle" };
+
+/** A COPY of the live markitdown provisioning status, for the human-only REST surface. Never the live object. */
+export function getMarkitdownProvisionStatus(): MarkitdownProvisionStatus {
+  return { ...markitdownProvisionStatus };
+}
+
+/**
+ * The provisioner the kick calls — `ensurePythonPackageAsync` in production, swappable in a hermetic test via
+ * {@link __setMarkitdownProvisionerForTest} so the failure-classification / retry / status-transition tests can
+ * drive every outcome WITHOUT building a real venv or hitting the network.
+ */
+type MarkitdownProvisioner = (opts: EnsurePythonPackageOpts) => Promise<EnsurePythonResult>;
+let markitdownProvisioner: MarkitdownProvisioner = ensurePythonPackageAsync;
+
+/**
  * Kick BACKGROUND provisioning of the shared venv's markitdown (async `child_process.spawn` under the hood
- * — NEVER `spawnSync`), so the heavy venv-create + pip install runs OFF the event loop. One-shot per daemon
- * process and deduped: an in-flight job or a prior attempt suppresses re-kicks, so concurrent documentConversion
- * spawns never launch parallel pip installs. On success it lands the resolved binary into the `markitdownBin`
- * memo (subsequent spawns inject it); on failure it warn-logs and documentConversion sessions keep spawning
- * WITHOUT the MCP until the daemon restarts (best-effort, the worktree-provisioning discipline).
+ * — NEVER `spawnSync`), so the heavy venv-create + pip install runs OFF the event loop.
+ *
+ * RETRYABLE, not a permanent one-shot: the dedupe guard is ONLY a genuinely IN-FLIGHT install
+ * (`markitdownProvisionInFlight`), so concurrent documentConversion spawns never launch parallel pip installs —
+ * but after a TERMINAL outcome (ready/failed) the in-flight clears and a fresh kick is allowed. So a
+ * profile-save pre-warm, a later spawn, or an explicit `POST /api/python/provisioning/retry` all actually
+ * retry (the old PERMANENT `markitdownProvisionTried` flag dead-ended every retry until a daemon restart — the
+ * defect this fixes).
+ *
+ * On success it lands the resolved binary into the `markitdownBin` memo (subsequent spawns inject it) and the
+ * status → `ready`; on failure it warn-logs the SPECIFIC classified reason + captured tail and the status →
+ * `failed` (documentConversion sessions keep spawning WITHOUT the MCP, best-effort), retryable as above.
  */
 let markitdownProvisionInFlight: Promise<void> | null = null;
-let markitdownProvisionTried = false;
 let markitdownProvisionKicks = 0; // test observability (see __markitdownProvisionKicks)
 function kickMarkitdownProvision(pythonInterpreterPath?: string): void {
-  if (markitdownProvisionInFlight || markitdownProvisionTried) return; // dedupe + one-shot
-  markitdownProvisionTried = true;
+  if (markitdownProvisionInFlight) return; // dedupe ONLY an in-flight install (retryable after a terminal outcome)
   markitdownProvisionKicks++;
+  const attemptAt = Date.now();
+  markitdownProvisionStatus = { state: "installing", lastAttemptAt: attemptAt };
   // eslint-disable-next-line no-console
   console.warn("[pty] markitdown venv not ready — provisioning in the BACKGROUND; documentConversion spawns skip the MCP until it's warm.");
-  markitdownProvisionInFlight = ensurePythonPackageAsync({
+  markitdownProvisionInFlight = markitdownProvisioner({
     // markitdown-mcp is the MCP server / console script; markitdown[all] pulls the full
     // PDF/Office/image converters into the SAME shared venv.
     package: ["markitdown-mcp", "markitdown[all]"],
     binary: "markitdown-mcp",
     probeImport: "markitdown_mcp",
+    timeoutMs: MARKITDOWN_PIP_TIMEOUT_MS,
     interpreterOverride: pythonInterpreterPath,
   })
-    .then((bin) => {
-      if (bin) {
-        markitdownBin = bin;
+    .then((res) => {
+      if (res.outcome === "ready" && res.binary) {
+        markitdownBin = res.binary;
+        markitdownProvisionStatus = { state: "ready", binary: res.binary, lastAttemptAt: attemptAt };
         // eslint-disable-next-line no-console
-        console.warn(`[pty] markitdown venv ready (${bin}) — documentConversion sessions now spawn with the MCP.`);
+        console.warn(`[pty] markitdown venv ready (${res.binary}) — documentConversion sessions now spawn with the MCP.`);
       } else {
+        markitdownProvisionStatus = { state: "failed", reason: res.outcome, errorTail: res.errorTail, lastAttemptAt: attemptAt };
         // eslint-disable-next-line no-console
-        console.warn("[pty] markitdown background provisioning did not complete (no base Python >=3.10, or venv/pip failed) — documentConversion sessions spawn WITHOUT the markitdown MCP. Install a base Python (or set python.interpreterPath) and restart.");
+        console.warn(`[pty] markitdown background provisioning FAILED (${res.outcome}) — documentConversion sessions spawn WITHOUT the markitdown MCP. Retryable: re-save the profile or POST /api/python/provisioning/retry (no daemon restart needed).${res.errorTail ? `\n  captured output tail:\n${res.errorTail}` : ""}`);
       }
     })
-    .catch(() => { /* ensurePythonPackageAsync never throws; belt-and-suspenders */ })
+    .catch(() => {
+      // ensurePythonPackageAsync never throws; belt-and-suspenders for an injected test provisioner that might.
+      markitdownProvisionStatus = { state: "failed", reason: "pip-failed", lastAttemptAt: attemptAt };
+    })
     .finally(() => { markitdownProvisionInFlight = null; });
 }
 
 /** TEST-ONLY: how many times background markitdown provisioning has been kicked this process. */
 export function __markitdownProvisionKicks(): number {
   return markitdownProvisionKicks;
+}
+
+/**
+ * TEST-ONLY: swap the provisioner the kick calls (pass nothing/undefined to restore the real
+ * `ensurePythonPackageAsync`) and reset provisioning module state back to idle (status, the success memo, the
+ * kick counter, any in-flight handle). Lets a hermetic test drive every classified outcome + the retry/dedupe
+ * semantics with NO real venv or network.
+ */
+export function __setMarkitdownProvisionerForTest(fn?: MarkitdownProvisioner): void {
+  markitdownProvisioner = fn ?? ensurePythonPackageAsync;
+  markitdownProvisionInFlight = null;
+  markitdownProvisionStatus = { state: "idle" };
+  markitdownBin = undefined;
+  markitdownProvisionKicks = 0;
 }
 
 /**
@@ -420,10 +501,11 @@ export function __markitdownProvisionKicks(): number {
  *
  * Pure delegation to {@link resolveMarkitdownBin} — it REUSES the SAME gating (the `LOOM_MARKITDOWN_BIN`
  * override + the venv-already-warm short-circuits, both of which simply return without kicking) and the SAME
- * deduped, one-shot {@link kickMarkitdownProvision} the spawn path uses. So a pre-warm never double-provisions,
- * never blocks (the heavy venv-create + pip runs in the EXISTING async background job — best-effort, off the
- * event loop), and is safe to call before/independent of any spawn. The resolved path is discarded; the POINT
- * is the background-kick side effect.
+ * in-flight-deduped, RETRYABLE {@link kickMarkitdownProvision} the spawn path uses. So a pre-warm never
+ * launches a parallel install (an in-flight job suppresses it), never blocks (the heavy venv-create + pip runs
+ * in the EXISTING async background job — best-effort, off the event loop), and — because the guard is no longer
+ * a permanent one-shot — a pre-warm AFTER a prior failed attempt actually RE-kicks (so re-saving the profile
+ * retries). The resolved path is discarded; the POINT is the background-kick side effect.
  */
 export function prewarmMarkitdown(pythonInterpreterPath?: string): void {
   resolveMarkitdownBin(pythonInterpreterPath);
