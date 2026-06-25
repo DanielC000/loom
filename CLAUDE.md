@@ -104,6 +104,15 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
 - **Sessions outlive viewers:** closing a ws never kills the pty. Fixed pty geometry (120×40),
   no resize. Stop: graceful (Ctrl-C ×2, clean) default, hard (`pty.kill`) escalation — both
   resumable and orphan-free (node-pty Job Object).
+- **Manager→worker direction is coalesced + supersession-guarded** (`orchestration/`): worker-bound
+  messages **drain as ONE turn** — the whole pending FIFO lands together, not one-injection-per-turn — so
+  a burst of `worker_message`s is delivered as a single authoritative batch. The daemon also **refuses a
+  worker's `done` report while it still has unconsumed manager direction queued** (the hard guard), so a
+  worker can't finish a now-stale plan; the `/worker` doctrine is the soft complement (re-check for newer
+  `[loom:from-manager]` direction before reporting). For a "land it NOW" steer, the manager has
+  **`worker_redirect`** — it interrupts the worker's current turn, **flushes** any superseded queued
+  direction, and delivers ONE authoritative instruction immediately — the escalation above the additive
+  `worker_message`.
 - **Opt-in worker browser (`browserTesting`):** a session whose resolved Profile sets `browserTesting`
   spawns with its OWN per-session stdio Playwright MCP (`@playwright/mcp`, absolute node + absolute
   `cli.js`, `--headless --isolated`) and that tool surface allowlisted. Default OFF + fully additive

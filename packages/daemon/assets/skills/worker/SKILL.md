@@ -77,7 +77,12 @@ Your action/report tools live under the `mcp__loom-orchestration__` namespace �
 - **`blocked`** — with `needs`: the specific decision, access, or information you're waiting on.
 - **`progress`** — an optional checkpoint on a long task.
 
-You **receive** direction via `worker_message`. Act on it, then report again.
+You **receive** direction via `worker_message`. Act on it, then report again. **Before you commit and
+report `done`, re-check whether newer manager direction has arrived** — if a `[loom:from-manager]`
+message has landed that supersedes your current approach, **reconcile to it before reporting**; don't
+finish a now-stale plan. This is the soft complement to the daemon's hard guard, which **refuses** a
+`done` report while you still have unconsumed manager direction queued — a well-behaved worker reconciles
+proactively and so rarely trips it.
 
 You may also call **`my_context`** (no args) at a clean seam to self-assess your own context occupancy
 (returns your `pct` of your model's window). If you're getting heavy on a long task, `worker_report`
