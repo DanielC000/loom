@@ -7,7 +7,7 @@ import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
-import { resolveWebDistDir } from "../paths.js";
+import { resolveWebDistDir, isLoomDev } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt } from "../orchestration/cron.js";
@@ -33,7 +33,7 @@ import { workerDiff } from "../git/worktrees.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { listVaultTree, readVaultFile } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
-import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate } from "../skills/store.js";
+import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff } from "../skills/store.js";
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
@@ -503,20 +503,65 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deleteSkill(name);
     return { ok: true };
   });
-  // Restore a bundled skill to its shipped version (discards UI edits) — the explicit fix for the
-  // seed-if-absent gap. 404 if the skill isn't bundled (nothing to reset to).
+  // Restore a bundled skill to its shipped version (discards UI edits + re-syncs the base snapshot, so
+  // mine=base=shipped) — the explicit destructive discard. 404 if the skill isn't bundled (nothing to reset to).
   app.post("/api/skills/:name/reset", async (req, reply) => {
     const { name } = req.params as { name: string };
     if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
     if (!resetSkillToBundled(name)) return reply.code(404).send({ error: "no bundled version for this skill" });
     return readSkill(name);
   });
+  // "What shipped changed" since the user's last sync: base + current shipped asset, for the web to render
+  // the incoming base→shipped diff next to "update available". 404 if not a bundled skill.
+  app.get("/api/skills/:name/update-diff", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
+    const d = skillUpdateDiff(name);
+    if (!d) return reply.code(404).send({ error: "no bundled version for this skill" });
+    return d;
+  });
+  // Preview the non-destructive 3-way adopt merge (base, mine, shipped). Only meaningful when an update is
+  // available (409 otherwise). { clean:true, merged } for a one-click apply; { clean:false, merged, conflicts:[…] }
+  // when the shipped delta overlaps the user's edits (conflicts for a per-hunk resolver; merged carries
+  // git-style conflict markers for a whole-file side-by-side editor).
+  app.get("/api/skills/:name/merge-preview", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
+    if (!skillUpdateAvailable(name)) return reply.code(409).send({ error: "no update available" });
+    const m = previewSkillMerge(name);
+    if (!m) return reply.code(404).send({ error: "no bundled version for this skill" });
+    return m;
+  });
+  // Adopt the shipped update NON-DESTRUCTIVELY: body { content } is the resolved SKILL.md (the clean
+  // merged content, or the user-resolved content for a conflicted merge); an EMPTY/absent content adopts
+  // the clean auto-merge (refused 409 if the merge actually conflicts — the resolver must supply content).
+  // Writes mine, advances base=shipped. Guarded to updateAvailable; NEVER auto-applied.
+  app.post("/api/skills/:name/adopt", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
+    if (!skillUpdateAvailable(name)) return reply.code(409).send({ error: "no update available" });
+    const b = (req.body ?? {}) as { content?: string };
+    let content = b.content;
+    if (typeof content !== "string" || content.length === 0) {
+      const m = previewSkillMerge(name);
+      if (!m) return reply.code(404).send({ error: "no bundled version for this skill" });
+      if (!m.clean) return reply.code(409).send({ error: "merge has conflicts; resolve and resubmit content" });
+      content = m.merged;
+    }
+    const updated = adoptSkillUpdate(name, content);
+    if (!updated) return reply.code(404).send({ error: "no bundled version for this skill" });
+    return updated;
+  });
   // Inverse of reset: publish the store's edited SKILL.md back into the repo's bundled asset so the edit
   // becomes committable (HUMAN commits — this never commits). Restricted to existing bundled skills.
   // Trust-boundary write like the vault/git writers — HUMAN-only REST, NO agent MCP tool exposes it.
+  // EDITION-GATED (fail-closed): the asset dir is the Loom git repo only in dev/self-host; for an end-user
+  // npm install it's inside node_modules (wiped on update), so publish is meaningless there → 403 when not
+  // isLoomDev(). Defense-in-depth: the web edition also hides the button.
   app.post("/api/skills/:name/publish", async (req, reply) => {
     const { name } = req.params as { name: string };
     if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
+    if (!isLoomDev()) return reply.code(403).send({ error: "publish to repo is a dev/self-host-only feature" });
     if (!publishSkillToBundled(name)) return reply.code(404).send({ error: "no bundled version for this skill" });
     return { ok: true };
   });

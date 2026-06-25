@@ -44,7 +44,9 @@ export default function Skills() {
   const validNew = /^[a-z0-9][a-z0-9-]{0,63}$/.test(newName);
   const selectedSkill = skills.data?.find((s) => s.name === selected);
   const bundled = selectedSkill?.bundled ?? false;
-  const diverged = selectedSkill?.diverged ?? false;
+  // Compile-compat shim until the customization UX card (295a50f9) lands precise badges: "out of sync" =
+  // either the user customized OR a shipped update is available, derived from the new state booleans.
+  const diverged = !!(selectedSkill?.customized || selectedSkill?.updateAvailable);
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16 }}>
@@ -59,7 +61,7 @@ export default function Skills() {
             <Button key={s.name} variant={s.name === selected ? "primary" : "default"} style={{ textAlign: "left" }}
               onClick={() => setSelected(s.name)} title={s.description || s.name}>
               {s.name}{s.bundled ? "  ·  bundled" : "  ·  local"}
-              {s.diverged && <span style={{ color: color.amber }}>  ·  out of sync</span>}
+              {(s.customized || s.updateAvailable) && <span style={{ color: color.amber }}>  ·  out of sync</span>}
             </Button>
           ))}
           {skills.data?.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No skills yet.</span>}

@@ -35,6 +35,16 @@ export const AUTO_BACKUP_DIR = path.join(BACKUPS_DIR, "auto");
 export const SKILLS_DIR = path.join(LOOM_HOME, "skills");
 
 /**
+ * Per-bundled-skill `base` snapshots — the shipped SKILL.md content as of the user's LAST sync (the
+ * third version, alongside `mine` = the store under SKILLS_DIR and `shipped` = the bundled asset). One
+ * flat `<name>.md` file each. DELIBERATELY OUTSIDE SKILLS_DIR so session injection (skills/inject.ts
+ * mirrors the skill DIR into <cwd>/.claude/skills) NEVER copies a base file, and listSkills/seed never
+ * mistake it for a skill. Used only to derive precise customization state (customized / updateAvailable)
+ * and to drive the non-destructive 3-way adopt-update merge.
+ */
+export const SKILL_BASE_DIR = path.join(LOOM_HOME, "skill-base");
+
+/**
  * Single-process mode (Releases v1): where the PREBUILT web viewport (Vite output) lives, so the daemon
  * can serve the UI from its own loopback origin — no separate `pnpm web`. One resolver, with an env
  * override so it works in the monorepo NOW and from a bundled npm package LATER (Part 2). Priority:
@@ -78,5 +88,5 @@ export function isLoomDev(): boolean {
 }
 
 export function ensureDirs(): void {
-  for (const d of [LOOM_HOME, SETTINGS_DIR, LOGS_DIR, WORKTREES_DIR, RUNS_DIR, SKILLS_DIR]) fs.mkdirSync(d, { recursive: true });
+  for (const d of [LOOM_HOME, SETTINGS_DIR, LOGS_DIR, WORKTREES_DIR, RUNS_DIR, SKILLS_DIR, SKILL_BASE_DIR]) fs.mkdirSync(d, { recursive: true });
 }

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SKILLS_DIR } from "../paths.js";
+import { seedBaseSnapshots } from "./store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // dist/skills -> dist -> daemon root -> assets/skills
@@ -34,5 +35,9 @@ export function seedGlobalSkills(): string[] {
     fs.cpSync(path.join(ASSET_SKILLS, e.name), dest, { recursive: true }); // missing or hollow dir → (re)seed
     seeded.push(e.name);
   }
+  // Backfill the per-bundled-skill `base` snapshot (seed-if-absent) so listSkills can derive precise
+  // customized / updateAvailable state and the adopt-update 3-way merge has a common ancestor. Lives
+  // OUTSIDE SKILLS_DIR (never injected); store.ts owns the asset-path resolution (LOOM_ASSET_SKILLS-aware).
+  seedBaseSnapshots();
   return seeded;
 }

@@ -619,8 +619,10 @@ export interface SkillSummary {
   name: string;
   description: string;
   bundled: boolean;
-  /** Bundled skills only: store SKILL.md differs from the shipped asset (UI edit not yet published). */
-  diverged?: boolean;
+  /** Bundled skills only: the user's store SKILL.md (`mine`) differs from the `base` snapshot — they edited it. */
+  customized?: boolean;
+  /** Bundled skills only: Loom shipped a newer asset than the `base` snapshot — an update is available to adopt. */
+  updateAvailable?: boolean;
 }
 
 // --- Context-window sizing -------------------------------------------------------------------
