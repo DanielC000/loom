@@ -64,7 +64,11 @@ CREATE TABLE IF NOT EXISTS profiles (
   model TEXT,                             -- model id | NULL (NULL = engine default)
   icon TEXT,                              -- UI icon | NULL
   browser_testing INTEGER NOT NULL DEFAULT 0, -- opt-in: inject a per-session Playwright MCP at spawn
-  document_conversion INTEGER NOT NULL DEFAULT 0 -- opt-in: inject a per-session markitdown MCP at spawn
+  document_conversion INTEGER NOT NULL DEFAULT 0, -- opt-in: inject a per-session markitdown MCP at spawn
+  -- bundled-profile customization base snapshot: JSON of the shipped def (sans id) at the user's last
+  -- sync. NULL = unset (falls back to shipped at read time, like a missing skill base). Backfilled at boot
+  -- by seedProfileBaseSnapshots for bundled-by-name rows; advanced on adopt/reset. Computed state only.
+  base_snapshot TEXT
 );
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
@@ -354,6 +358,9 @@ const PROFILE_ADDED_COLUMNS: Record<string, string> = {
   browser_testing: "INTEGER NOT NULL DEFAULT 0",
   // opt-in document-conversion flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
   document_conversion: "INTEGER NOT NULL DEFAULT 0",
+  // bundled-profile customization `base` snapshot (JSON of the shipped def, sans id). Nullable; legacy
+  // rows backfill to NULL and seedProfileBaseSnapshots fills bundled-by-name rows at boot (safe direction).
+  base_snapshot: "TEXT",
 };
 
 /** Columns added to `schedules` after phase-2; applied to existing DBs by migrateSchedules(). */
@@ -1248,6 +1255,21 @@ export class Db {
    */
   deleteProfile(id: string): void {
     this.db.prepare("DELETE FROM profiles WHERE id = ?").run(id);
+  }
+  /**
+   * Read a profile's bundled-customization `base` snapshot (raw JSON text of the shipped def at last
+   * sync); null when unset. Kept OFF the Profile shape (toProfile ignores the column) — it's internal
+   * customization plumbing, not part of the entity the validator/resolver see.
+   */
+  getProfileBaseSnapshot(id: string): string | null {
+    const r = this.db.prepare("SELECT base_snapshot FROM profiles WHERE id = ?").get(id) as
+      | { base_snapshot: string | null }
+      | undefined;
+    return r ? (r.base_snapshot ?? null) : null;
+  }
+  /** Advance (or clear, with null) a profile's `base` snapshot — set on adopt/reset and the boot backfill. */
+  setProfileBaseSnapshot(id: string, snapshot: string | null): void {
+    this.db.prepare("UPDATE profiles SET base_snapshot = ? WHERE id = ?").run(snapshot, id);
   }
 
   // --- sessions ---

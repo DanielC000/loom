@@ -37,6 +37,7 @@ import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, pu
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
+import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge, profileUpdateDiff, adoptProfileUpdate, type ProfileFieldResolution } from "../profiles/customization.js";
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath } from "../python/prewarm.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
@@ -572,11 +573,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // ONLY (REST + later web UI) — profiles confer role + permission allowlists (= privilege), so they
   // are deliberately kept OFF the agent-writable MCP surface. Writes are schema-validated (strict,
   // typo-guarded) by validateProfile, mirroring the project-config validator. ---
-  app.get("/api/profiles", async () => deps.db.listProfiles());
+  // Each profile carries computed customization state (bundled + customized/updateAvailable for
+  // bundled-by-name rows; never persisted) — the profiles analog of listSkills's SkillSummary state.
+  app.get("/api/profiles", async () =>
+    deps.db.listProfiles().map((p) => ({ ...p, ...profileCustomizationState(deps.db, p.id) })));
   app.get("/api/profiles/:id", async (req, reply) => {
-    const p = deps.db.getProfile((req.params as { id: string }).id);
+    const id = (req.params as { id: string }).id;
+    const p = deps.db.getProfile(id);
     if (!p) return reply.code(404).send({ error: "profile not found" });
-    return p;
+    return { ...p, ...profileCustomizationState(deps.db, id) };
   });
   app.post("/api/profiles", async (req, reply) => {
     const v = validateProfile(req.body);
@@ -594,9 +599,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const existing = deps.db.getProfile(id);
     if (!existing) return reply.code(404).send({ error: "profile not found" });
     // Merge the patch over the existing profile, then validate the RESULT (so a partial patch that
-    // omits required fields still passes). `id` is path-scoped — drop it from both sides so a verbatim
-    // round-trip PUT (GET → PUT the same body) doesn't trip .strict()'s unknown-key guard.
-    const { id: _drop, ...patch } = (req.body ?? {}) as Record<string, unknown>;
+    // omits required fields still passes). `id` is path-scoped, and bundled/customized/updateAvailable are
+    // COMPUTED read-model fields the GET response now carries — drop all four so a verbatim round-trip PUT
+    // (GET → PUT the same body) doesn't trip validateProfile's .strict() unknown-key guard.
+    const { id: _drop, bundled: _b, customized: _c, updateAvailable: _u, ...patch } = (req.body ?? {}) as Record<string, unknown>;
     const { id: _eid, ...base } = existing;
     const v = validateProfile({ ...base, ...patch });
     if (!v.ok) return reply.code(400).send({ error: `invalid profile: ${v.error}` });
@@ -613,11 +619,44 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true };
   });
   // Restore a bundled profile to its shipped fields (discards UI edits) — the profile analogue of the
-  // skill reset. 404 if the id is unknown or its name isn't a bundled one (a user-created profile).
+  // skill reset. ALSO advances base=shipped (in resetProfileToBundled) so the result is pristine. 404 if
+  // the id is unknown or its name isn't a bundled one (a user-created profile).
   app.post("/api/profiles/:id/reset", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!resetProfileToBundled(deps.db, id)) return reply.code(404).send({ error: "no bundled version for this profile" });
-    return deps.db.getProfile(id);
+    return { ...deps.db.getProfile(id), ...profileCustomizationState(deps.db, id) };
+  });
+  // "What shipped changed" since the user's last sync: the base→shipped FIELD changes, for the web to render
+  // the incoming update next to "update available". 404 if not a bundled-by-name profile.
+  app.get("/api/profiles/:id/update-diff", async (req, reply) => {
+    const d = profileUpdateDiff(deps.db, (req.params as { id: string }).id);
+    if (!d) return reply.code(404).send({ error: "no bundled version for this profile" });
+    return d;
+  });
+  // Preview the field-level 3-way adopt merge (base, mine, shipped). Only meaningful when an update is
+  // available (409 otherwise). { clean:true, merged } for a one-click apply; { clean:false, merged, conflicts:[…] }
+  // when fields differ all three ways (each conflict a wholesale mine-vs-shipped pick for the resolver).
+  app.get("/api/profiles/:id/merge-preview", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const m = previewProfileMerge(deps.db, id);
+    if (!m) return reply.code(404).send({ error: "no bundled version for this profile" });
+    if (!profileUpdateAvailable(deps.db, id)) return reply.code(409).send({ error: "no update available" });
+    return m;
+  });
+  // Adopt the shipped update NON-DESTRUCTIVELY: body { resolutions } maps each CONFLICT field to "mine" or
+  // "shipped" (empty/absent adopts a clean auto-merge; refused 409 if conflicts are left unresolved).
+  // Applies the merge, advances base=shipped. Guarded to updateAvailable; NEVER auto-applied. Mirrors the
+  // skills adopt route (here per-field resolutions replace the skills' resolved-text content).
+  app.post("/api/profiles/:id/adopt", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const body = (req.body ?? {}) as { resolutions?: Record<string, ProfileFieldResolution> };
+    const r = adoptProfileUpdate(deps.db, id, body.resolutions ?? {});
+    if (!r.ok) {
+      if (r.reason === "not-bundled") return reply.code(404).send({ error: "no bundled version for this profile" });
+      if (r.reason === "no-update") return reply.code(409).send({ error: "no update available" });
+      return reply.code(409).send({ error: "merge has conflicts; resolve and resubmit", unresolved: r.unresolved });
+    }
+    return { ...deps.db.getProfile(id), ...profileCustomizationState(deps.db, id) };
   });
 
   app.get("/api/projects/:id/agents", async (req) =>

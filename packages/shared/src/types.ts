@@ -114,6 +114,43 @@ export interface Profile {
   documentConversion?: boolean;
 }
 
+// --- Bundled-profile customization (the profiles analog of skill customization) -------------------
+/**
+ * One field's three-way view in a profile merge/diff (`mine` = the user's row, `base` = the shipped def
+ * at last sync, `shipped` = Loom's current bundled def). The profile analog of a skill's conflict hunk,
+ * but FIELD-level (profiles are structured, not text): each entry is one whole mergeable field's value.
+ */
+export interface ProfileFieldMerge {
+  field: string;
+  mine: unknown;
+  base: unknown;
+  shipped: unknown;
+}
+/**
+ * The result of a field-level 3-way merge of a bundled profile (`mergeProfile(base, mine, shipped)`):
+ * `clean` ⇔ no field where all three differ; `merged` is the auto-resolved field set (conflict fields
+ * left at `mine`, pending the user's per-field choice); `conflicts` lists the fields where all three
+ * differ (each a wholesale mine-vs-shipped pick). The structured-data counterpart of SkillMergeResult.
+ */
+export interface ProfileMergeResult {
+  clean: boolean;
+  merged: Partial<Profile>;
+  conflicts: ProfileFieldMerge[];
+}
+/**
+ * A profile enriched with its computed customization state — the read-model the profile list/get REST
+ * returns. `bundled` = the row's name matches a shipped BUNDLED_PROFILES entry; `customized`/`updateAvailable`
+ * are present ONLY for bundled-by-name profiles (computed from the three versions, NEVER persisted), exactly
+ * like SkillSummary. The profile analog of SkillSummary, carrying the FULL row (profiles ARE DB entities).
+ */
+export interface ProfileSummary extends Profile {
+  bundled: boolean;
+  /** Bundled-by-name only: the row (`mine`) differs from the `base` snapshot — the user edited it. */
+  customized?: boolean;
+  /** Bundled-by-name only: Loom shipped a newer bundled def than the `base` snapshot — an update to adopt. */
+  updateAvailable?: boolean;
+}
+
 // --- Agent Runs API keys (R1) ---------------------------------------------------------------------
 /** A project API key's lifecycle status: active (auths), paused (temporarily blocked), revoked (dead). */
 export type ApiKeyStatus = "active" | "paused" | "revoked";

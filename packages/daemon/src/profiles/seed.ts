@@ -189,6 +189,18 @@ export function seedDefaultProfiles(db: Db): string[] {
 }
 
 /**
+ * The shipped definition for a bundled profile, matched BY NAME (the seed key) — the profile analog of
+ * skills/store.ts's asset lookup. Returns undefined for a user-created (or renamed-away) name. Extracted
+ * from resetProfileToBundled's inline lookup so the customization engine (base snapshot / merge / adopt)
+ * shares ONE definition of "what's the shipped version of this profile". Distinct from isBundledProfile(),
+ * which checks role ∈ {platform,auditor} (a platform-LAYER gate) — this is matched-BY-NAME, a different
+ * concept (a bundled-by-name profile may be any role).
+ */
+export function bundledProfileByName(name: string): Omit<Profile, "id"> | undefined {
+  return BUNDLED_PROFILES.find((b) => b.name === name);
+}
+
+/**
  * Restore a profile to its shipped BUNDLED_PROFILES version, discarding any UI edits — the profile
  * analogue of skills/store.ts resetSkillToBundled, closing the same seed-if-absent gap (seeding never
  * overwrites, so improvements to a bundled profile don't reach an existing row on reboot). The bundled
@@ -196,12 +208,39 @@ export function seedDefaultProfiles(db: Db): string[] {
  * false (caller → 404) if the id is unknown OR its name isn't a bundled one (a user-created profile
  * can't be "reset"). The user may have renamed a bundled profile, in which case it's no longer matchable
  * — that's the documented limitation, identical to the skill reset's bundled-by-name contract.
+ *
+ * ALSO advances the `base` snapshot to shipped (mirrors resetSkillToBundled's base re-sync) so the
+ * post-reset state is PRISTINE (mine == base == shipped) rather than a stale "update available".
  */
 export function resetProfileToBundled(db: Db, id: string): boolean {
   const existing = db.getProfile(id);
   if (!existing) return false;
-  const bundled = BUNDLED_PROFILES.find((b) => b.name === existing.name);
+  const bundled = bundledProfileByName(existing.name);
   if (!bundled) return false; // not a bundled profile (or renamed away from its bundled name)
   db.updateProfile(id, { ...bundled }); // overwrite every field with the shipped values
+  db.setProfileBaseSnapshot(id, JSON.stringify(bundled)); // base = shipped: post-reset is pristine
   return true;
+}
+
+/**
+ * Backfill the `base` snapshot for every bundled-by-name profile row that has none — one-time,
+ * seed-if-absent (called from boot AFTER seedDefaultProfiles). base := the CURRENT shipped def. The SAFE
+ * direction, exactly like skills/store.ts seedBaseSnapshots:
+ *  - pristine (mine == shipped): base == mine == shipped → neither customized nor update.
+ *  - already-customized (mine != shipped, edited before base existed): base == shipped → customized, no
+ *    update — until a NEWER def ships ahead of this base (then it surfaces as an update, correctly).
+ * base only ADVANCES later on adopt / reset (explicit syncs); a base left behind a freshly-shipped def is
+ * exactly the "update available" signal. Newly-seeded bundled profiles get their base the same boot pass.
+ * Returns the names backfilled.
+ */
+export function seedProfileBaseSnapshots(db: Db): string[] {
+  const seeded: string[] = [];
+  for (const p of db.listProfiles()) {
+    const shipped = bundledProfileByName(p.name);
+    if (!shipped) continue; // user-created / not bundled-by-name
+    if (db.getProfileBaseSnapshot(p.id) != null) continue; // already snapshotted — never clobber
+    db.setProfileBaseSnapshot(p.id, JSON.stringify(shipped));
+    seeded.push(p.name);
+  }
+  return seeded;
 }

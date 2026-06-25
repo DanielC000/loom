@@ -7,7 +7,7 @@ import { Db } from "./db.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
 import { seedGlobalSkills } from "./skills/seed.js";
-import { seedDefaultProfiles } from "./profiles/seed.js";
+import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
 import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
 import { seedSetupHome, seedSetupAgentRename, seedSetupAuditorAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
@@ -57,6 +57,11 @@ async function main(): Promise<void> {
   // (Platform-lead/Platform-audit) seed only under LOOM_DEV; the core profiles always seed.
   const seededProfiles = seedDefaultProfiles(db);
   if (seededProfiles.length) console.log(`[boot] seeded default profile(s): ${seededProfiles.join(", ")}`);
+  // Backfill the per-bundled-profile `base` snapshot (seed-if-absent, AFTER seedDefaultProfiles so freshly
+  // seeded rows are covered) so the profile list/get can derive precise customized / updateAvailable state
+  // and the field-level adopt-update merge has a common ancestor — the profiles analog of seedBaseSnapshots.
+  const seededBases = seedProfileBaseSnapshots(db);
+  if (seededBases.length) console.log(`[boot] seeded profile base snapshot(s): ${seededBases.join(", ")}`);
   // Setup Assistant E1: seed the reserved "Getting Started" onboarding home + its Setup Assistant agent,
   // seed-if-absent by name (idempotent; runs AFTER seedDefaultProfiles so the bundled Setup Assistant
   // profile exists to assign). UNGATED — unlike the platform home below, this ships to EVERY loomctl user
