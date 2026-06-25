@@ -13,7 +13,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       onto the config allow;
 //   (b) an agent with NO profile → startNew spawns today's plain session (role null, today's prompt,
 //       config allow unchanged — no allow delta);
-//   (c) worker_spawn (spawnWorker) still produces a worker (explicit role wins; kickoff is the prompt);
+//   (c) worker_spawn (spawnWorker) still produces a worker (explicit role wins; prompt = agent brief + kickoff);
 //   (d) M5: a spawn that exits IMMEDIATELY (onExit fires during spawn) ends 'exited', never stuck 'live'.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/profile-spawn.mjs
@@ -201,7 +201,7 @@ try {
   check("(c) worker_spawn returns role=worker", w.role === "worker");
   check("(c) DB persists role=worker", db.getSession(w.id).role === "worker");
   check("(c) spawn opts.role === 'worker' (explicit caller role, not the agent's profile)", oW?.role === "worker");
-  check("(c) worker prompt is the manager's kickoff (NOT the agent/profile prompt)", oW?.startupPrompt === "WORKER_KICKOFF");
+  check("(c) worker prompt composes the agent brief THEN the manager's kickoff (card af902717)", oW?.startupPrompt?.includes("AGENT_PLAIN_PROMPT") && oW?.startupPrompt?.includes("WORKER_KICKOFF") && oW.startupPrompt.indexOf("AGENT_PLAIN_PROMPT") < oW.startupPrompt.indexOf("WORKER_KICKOFF"));
   check("(c) task moved to in_progress", db.getTask(taskW)?.columnKey === "in_progress");
   check("(c) worker is live", db.getSession(w.id).processState === "live");
 

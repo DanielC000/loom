@@ -7,7 +7,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Proves the DoD:
 //   (1) a spawned MANAGER session's composed startupPrompt CONTAINS the project's absolute repoPath
 //       AND vaultPath (the "Where things live" pre-block), with the agent's OWN prompt preserved after;
-//   (2) a WORKER spawn does NOT get the block (byte-identical: opts.startupPrompt === the kickoff);
+//   (2) a WORKER spawn does NOT get the MANAGER block (its opening is its agent brief + the kickoff — card af902717);
 //   (3) the pure composeManagerStartupPrompt wraps/derives correctly (incl. the no-own-prompt case);
 //   (4) the pickup + orchestrate skill ASSETS instruct reading the resume doc by ABSOLUTE path.
 //
@@ -97,12 +97,12 @@ try {
   check("(1) manager spawn preserves the agent's OWN doctrine after the block", oM?.startupPrompt?.includes("AGENT_MGR_DOCTRINE"));
   check("(1) manager session is live + role manager", db.getSession(sM.id).processState === "live" && oM?.role === "manager");
 
-  // ===================== (2) WORKER spawn does NOT get the block (byte-identical to the kickoff) =====================
+  // ===================== (2) WORKER spawn does NOT get the MANAGER block (card af902717: it DOES now carry its agent brief) =====================
   const w = await svc.spawnWorker("mgr1", { taskId: taskW, agentId: "agentWorker", kickoffPrompt: "WORKER_KICKOFF" });
   workerWorktree = w.worktreePath;
   const oW = optsFor(w.id);
-  check("(2) worker spawn opts.startupPrompt is EXACTLY the kickoff (no block injected)", oW?.startupPrompt === "WORKER_KICKOFF");
-  check("(2) worker spawn opts.startupPrompt does NOT carry the 'Where things live' block", !oW?.startupPrompt?.includes("Where things live"));
+  check("(2) worker spawn opts.startupPrompt carries its agent brief THEN the kickoff", oW?.startupPrompt?.includes("AGENT_WORKER_PROMPT") && oW?.startupPrompt?.includes("WORKER_KICKOFF") && oW.startupPrompt.indexOf("AGENT_WORKER_PROMPT") < oW.startupPrompt.indexOf("WORKER_KICKOFF"));
+  check("(2) worker spawn opts.startupPrompt does NOT carry the manager 'Where things live' block", !oW?.startupPrompt?.includes("Where things live"));
 
   // ===================== (4) skill ASSETS instruct read-by-absolute-path =====================
   const pickup = fs.readFileSync(path.join(__dirname, "..", "assets", "skills", "pickup", "SKILL.md"), "utf8");

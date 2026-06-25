@@ -19,6 +19,7 @@ import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt } from "./manager-prompt.js";
+import { composeWorkerStartupPrompt } from "./worker-prompt.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
@@ -1650,7 +1651,10 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      startupPrompt: opts.kickoffPrompt,
+      // Compose the worker's opening: its agent BASE BRIEF first (Dev/Bugfix/etc. doctrine — run
+      // `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief degrades to the
+      // kickoff alone (today's behavior). Without this, the agent brief was dead config for workers.
+      startupPrompt: composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt),
       role: "worker", // gives the worker the orchestration surface (worker_report only)
       browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
       documentConversion, // inject the per-session markitdown MCP iff this worker's profile opted in
@@ -2384,6 +2388,7 @@ export class SessionService {
     const project = this.db.getProject(old.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
+    const agent = this.db.getAgent(old.agentId); // the worker's agent — for its base brief in the handoff opening
     const newGen = (old.gen ?? 0) + 1;
 
     this.db.appendEvent({
@@ -2446,7 +2451,9 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      startupPrompt: framed,
+      // Lead with the worker's agent base brief, then the handoff (mirrors spawnWorker + the manager
+      // recycle warm-up). Empty brief ⇒ the handoff alone (today's behavior).
+      startupPrompt: composeWorkerStartupPrompt(agent?.startupPrompt, framed),
       role: "worker",
       browserTesting: old.browserTesting ?? false,
       documentConversion: old.documentConversion ?? false,

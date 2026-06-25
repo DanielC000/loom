@@ -496,8 +496,9 @@ export class OrchestrationMcpRouter {
       "agent_update",
       {
         description:
-          "Update an agent's name (title) and/or startupPrompt (the project-specific brief injected as the " +
-          "first turn of its next NEW session). Structural edit only — to change the agent's rig use " +
+          "Update an agent's name (title) and/or startupPrompt (the project-specific brief that LEADS the " +
+          "opening of its next NEW session — prepended ahead of any dynamic kickoff/handoff; an empty brief " +
+          "leaves the opening as the dynamic part alone). Structural edit only — to change the agent's rig use " +
           "agent_assign_profile. Omitted fields are left as-is.",
         inputSchema: { agentId: z.string(), name: z.string().optional(), startupPrompt: z.string().optional() },
       },
