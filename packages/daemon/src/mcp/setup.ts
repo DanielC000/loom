@@ -8,7 +8,7 @@ import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo } from "../git/reader.js";
 import { validateProfile } from "../profiles/validate.js";
-import { validateAgentProjectConfigOverride } from "./platform.js";
+import { validateAgentProjectConfigOverride, mergeConfigOverride } from "./platform.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData } from "./skillTools.js";
@@ -128,21 +128,29 @@ export class SetupMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "Set a project's config override, validated against the AGENT project-config schema (NOT the elevated platform validator). Replaces the project's override; resolveConfig merges it over the platform defaults. Can set columns/permission/pty/sessionEnv, but orchestration.gateCommand (host-RCE) and alertWebhook (data-exfil) — and any unknown key — are REJECTED and the stored config is left unchanged.",
+        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). Validated against the AGENT project-config schema (NOT the elevated platform validator); resolveConfig merges the result over the platform defaults. Can set columns/permission/pty/sessionEnv, but orchestration.gateCommand (host-RCE) and alertWebhook (data-exfil) — and any unknown key — are REJECTED and the stored config is left unchanged.",
         inputSchema: {
           projectId: z.string(),
           config: z.object({}).passthrough(),
         },
       },
       async ({ projectId, config }) => {
-        if (!db.getProject(projectId)) return ok({ error: "project not found" });
+        const project = db.getProject(projectId);
+        if (!project) return ok({ error: "project not found" });
         // FAIL-CLOSED: the AGENT validator — gateCommand/alertWebhook are rejected (unlike the Lead's
         // project_configure, which uses the full human-equivalent validator). This is the load-bearing
         // posture difference of the setup surface.
         const v = validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
-        db.setProjectConfig(projectId, v.value);
-        return ok({ ok: true, projectId, config: v.value });
+        // PATCH/MERGE (card 28c21fe1): deep-merge the VALIDATED partial into the existing override instead
+        // of replacing it, so setting one key never clobbers a board's other overrides. The trust boundary
+        // is UNCHANGED: the partial is validated by the AGENT validator ABOVE (a human-only key is a
+        // rejected unknown and never reaches the merge); a PRE-EXISTING human-set key is preserved but the
+        // operator can never INTRODUCE one through this path. The merged whole is not re-validated (see
+        // mergeConfigOverride) — re-running the agent validator over a preserved human key would falsely reject.
+        const merged = mergeConfigOverride(project.config, v.value);
+        db.setProjectConfig(projectId, merged);
+        return ok({ ok: true, projectId, config: merged });
       },
     );
 

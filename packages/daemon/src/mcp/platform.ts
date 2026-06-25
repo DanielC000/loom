@@ -155,6 +155,43 @@ export function validateAgentProjectConfigOverride(
   return { ok: true, value: r.data as ProjectConfigOverride };
 }
 
+// True only for a real, plain (non-array) object — the recursion gate for the config deep-merge below.
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Deep-MERGE a config PATCH onto a project's existing stored override — the patch/merge write path
+ * (card 28c21fe1) shared by project_configure on BOTH the platform (full-validator) and setup
+ * (agent-validator) surfaces. Plain-object values RECURSE (so patching ONE `obsidian`/`orchestration`/
+ * `permission` key preserves its siblings); arrays and scalars REPLACE (patching `kanbanColumns` swaps
+ * the whole array — the only sensible column semantics; `permission.allow`/`deny` likewise replace).
+ *
+ * TRUST BOUNDARY (load-bearing): the caller validates the INCOMING PATCH with its OWN surface validator
+ * BEFORE this runs (platform → full, setup/agent → agent), so an agent's patch can NEVER INTRODUCE a
+ * human-only key (gateCommand/alertWebhook/obsidian.path/python.interpreterPath are rejected unknowns on
+ * the agent shape). We deliberately do NOT re-validate the MERGED whole: config keys are independent and
+ * both inputs are individually valid, so the merge of two valid configs is valid — AND re-running the
+ * AGENT validator over a result that legitimately contains a PRE-EXISTING human-set key (e.g. a Lead-set
+ * gateCommand the agent never touched) would FALSELY reject. Validate the partial, merge, store.
+ */
+function deepMergeRecord(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [k, v] of Object.entries(patch)) {
+    const prev = out[k];
+    out[k] = isPlainObject(prev) && isPlainObject(v) ? deepMergeRecord(prev, v) : v;
+  }
+  return out;
+}
+export function mergeConfigOverride(
+  existing: ProjectConfigOverride, patch: ProjectConfigOverride,
+): ProjectConfigOverride {
+  return deepMergeRecord(
+    (existing ?? {}) as Record<string, unknown>,
+    (patch ?? {}) as Record<string, unknown>,
+  ) as ProjectConfigOverride;
+}
+
 /**
  * Daemon-GLOBAL platform override schema — a strict zod mirror of `PlatformConfigOverride` (deep-partial
  * of PlatformConfig). Every numeric is `.int()` and range-checked per the epic BOUNDS table, so an
@@ -358,14 +395,15 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "Set a project's config override (validated against the FULL project-config schema). Replaces the project's override; resolveConfig merges it over the platform defaults. As an ELEVATED platform-role tool (P3, trust boundary) this may set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–1800000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected).",
+        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. As an ELEVATED platform-role tool (P3, trust boundary) this may set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–1800000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). To RESET/unset a key, use the human REST PATCH /api/projects/:id/config (whole-object replace).",
         inputSchema: {
           projectId: z.string(),
           config: z.object({}).passthrough(),
         },
       },
       async ({ projectId, config }) => {
-        if (!db.getProject(projectId)) return ok({ error: "project not found" });
+        const project = db.getProject(projectId);
+        if (!project) return ok({ error: "project not found" });
         // P3 ELEVATION (trust boundary): the platform role is HUMAN-EQUIVALENT, so config-set on THIS
         // platform-route tool goes through the FULL human/REST validator (validateProjectConfigOverride) —
         // NOT validateAgentProjectConfigOverride. The full validator carries the SAME bounds the REST PATCH
@@ -375,8 +413,12 @@ export class PlatformMcpRouter {
         // validateAgentProjectConfigOverride, which still REJECTS gateCommand/alertWebhook (unchanged).
         const v = validateProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
-        db.setProjectConfig(projectId, v.value);
-        return ok({ ok: true, projectId, config: v.value });
+        // PATCH/MERGE (card 28c21fe1): deep-merge the VALIDATED partial into the existing override instead
+        // of replacing it, so setting one key never clobbers a board's kanbanColumns (or any other key).
+        // The partial is validated ABOVE; the merged whole is not re-validated (see mergeConfigOverride).
+        const merged = mergeConfigOverride(project.config, v.value);
+        db.setProjectConfig(projectId, merged);
+        return ok({ ok: true, projectId, config: merged });
       },
     );
 
