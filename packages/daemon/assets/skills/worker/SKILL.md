@@ -20,7 +20,9 @@ gate command). This skill is the doctrine those plug into.
 2. **Stay in scope.** Do exactly the assigned task and its definition of done — one logical change.
    Don't sprawl scope mid-task. If you discover something bigger (a real bug, a wrong assumption, a
    missing piece), surface it **up** via `worker_report` and let your manager decide — don't quietly
-   expand or leave the task half-done.
+   expand or leave the task half-done. The minimal-change boundary: a pure-function extraction of the
+   EXACT branch under change (to make it testable) is IN-SCOPE; structural reorganization of the
+   surrounding code is NOT — escalate that.
 3. **Escalate up, never sideways.** On a decision, ambiguity, or blocker beyond the task's clear scope,
    STOP and `worker_report` (`status=blocked`, with `needs`) — do not guess, do not expand scope, and
    **never address the human**. Your manager makes the call and `worker_message`s you back down. And
