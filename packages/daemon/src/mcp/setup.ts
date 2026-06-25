@@ -8,7 +8,8 @@ import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo } from "../git/reader.js";
 import { validateProfile } from "../profiles/validate.js";
-import { validateAgentProjectConfigOverride, mergeConfigOverride } from "./platform.js";
+import { validateAgentPatch } from "../agents/validate.js";
+import { validateAgentProjectConfigOverride, mergeConfigOverride, CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData } from "./skillTools.js";
@@ -128,7 +129,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). Validated against the AGENT project-config schema (NOT the elevated platform validator); resolveConfig merges the result over the platform defaults. Can set columns/permission/pty/sessionEnv, but orchestration.gateCommand (host-RCE) and alertWebhook (data-exfil) — and any unknown key — are REJECTED and the stored config is left unchanged.",
+        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). Validated against the AGENT project-config schema (NOT the elevated platform validator); resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, obsidian. The human-only orchestration.gateCommand (host-RCE) and alertWebhook (data-exfil), obsidian.path/python (host-launch) — and any unknown key — are REJECTED and the stored config is left unchanged.",
         inputSchema: {
           projectId: z.string(),
           config: z.object({}).passthrough(),
@@ -141,7 +142,10 @@ export class SetupMcpRouter {
         // project_configure, which uses the full human-equivalent validator). This is the load-bearing
         // posture difference of the setup surface.
         const v = validateAgentProjectConfigOverride(config);
-        if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
+        // List the valid top-level keys on rejection so a fat-fingered key (the kanbanColumns-vs-"columns"
+        // confusion that motivated this card) converges instead of giving up. gateCommand/alertWebhook/
+        // obsidian.path/python stay human-only and are deliberately omitted from the agent-settable hint.
+        if (!v.ok) return ok({ error: `invalid config: ${v.error}`, validTopLevelKeys: CONFIG_TOP_LEVEL_KEYS });
         // PATCH/MERGE (card 28c21fe1): deep-merge the VALIDATED partial into the existing override instead
         // of replacing it, so setting one key never clobbers a board's other overrides. The trust boundary
         // is UNCHANGED: the partial is validated by the AGENT validator ABOVE (a human-only key is a
@@ -222,6 +226,47 @@ export class SetupMcpRouter {
         };
         db.insertAgent(agent);
         return ok(agent);
+      },
+    );
+
+    // Edit an EXISTING agent (the gap that collapsed "action these workspace cards for me" into
+    // "here's text, paste it into the UI" — every such card amends an agent's startupPrompt). Mirrors
+    // PlatformMcpRouter.agent_update VERBATIM (reuses the SAME validateAgentPatch the human REST POST
+    // /api/agents/:id uses, with allowEndpointFlags:false — the human-only endpoint/ioSchema flags aren't
+    // even in the inputSchema). LEAST-PRIVILEGE ADDITION over the platform twin: assigning a profile whose
+    // RESOLVED role is elevated (platform/auditor/workspace-auditor) is REJECTED here via setupRoleError,
+    // exactly like profile_create/update — a setup operator can never elevate an agent by binding it to an
+    // elevated rig (which a later default spawn could silently honor). profileId:null CLEARS the assignment.
+    server.registerTool(
+      "agent_update",
+      {
+        description:
+          "Edit an existing agent by id (cross-project) so you can action workspace-improvement cards directly — amend its startupPrompt / rename it / (re)assign its profile — instead of handing the user text to paste. PATCH semantics: only the keys you pass are applied (omitted keys left as-is); profileId:null CLEARS the assignment (the agent falls back to the plain backstop). 404 if the agent id is unknown. Edits apply to the agent's NEXT new session. LEAST-PRIVILEGE: the human-only endpoint/ioSchema flags are NOT settable here, and you may NOT assign a profile whose role is platform/auditor/workspace-auditor (a setup operator can never elevate an agent — that's human-only).",
+        inputSchema: {
+          agentId: z.string(),
+          name: z.string().optional(),
+          startupPrompt: z.string().optional(),
+          profileId: z.string().nullable().optional(),
+        },
+      },
+      async (rawArgs) => {
+        const { agentId } = rawArgs as { agentId: string };
+        if (!db.getAgent(agentId)) return ok({ error: "agent not found" });
+        // Drop agentId; the rest IS the PATCH. Raw args so an explicit profileId:null is PRESENT (clears)
+        // while an omitted key stays absent (left as-is) — the same presence semantics the REST path relies
+        // on. allowEndpointFlags:false (also absent from inputSchema) keeps the Agent Runs surface human-only.
+        const { agentId: _aid, ...rawPatch } = rawArgs as Record<string, unknown>;
+        const v = validateAgentPatch(rawPatch, (pid) => !!db.getProfile(pid), { allowEndpointFlags: false });
+        if (!v.ok) return ok({ error: v.error });
+        // LEAST-PRIVILEGE (setup-only, ON TOP of the shared validator): a non-null profileId is validated to
+        // EXIST by validateAgentPatch above, so getProfile resolves — reject if its role is elevated, so the
+        // ungated setup surface can never bind an agent to a platform/auditor/workspace-auditor rig.
+        if (v.patch.profileId != null) {
+          const roleErr = setupRoleError(db.getProfile(v.patch.profileId)?.role);
+          if (roleErr) return ok({ error: roleErr });
+        }
+        db.updateAgent(agentId, v.patch);
+        return ok(db.getAgent(agentId));
       },
     );
 
@@ -328,6 +373,46 @@ export class SetupMcpRouter {
         const filtered = projectId === undefined ? all : all.filter((s) => s.projectId === projectId);
         const effLimit = limit ?? (full ? undefined : DEFAULT_SESSION_SUMMARY_CAP);
         return ok(projectSessionList(filtered, { full, limit: effLimit, offset }));
+      },
+    );
+
+    // Single-record FULL reads (so the operator stops reading via empty-payload mutators — e.g. a
+    // `profile_update {}` round-trip just to see a profile). Read-only, scoped like the list_all_* reads;
+    // each returns the WHOLE record (incl. the heavy startupPrompt / config the summary feeds drop), or a
+    // not-found error. No mutation, no host/outward capability.
+    server.registerTool(
+      "agent_get",
+      {
+        description: "Read ONE agent by id — the FULL record incl. its startupPrompt and profileId (the list_all_agents summary drops startupPrompt). Read-only. Error if the id is unknown.",
+        inputSchema: { agentId: z.string() },
+      },
+      async ({ agentId }) => {
+        const agent = db.getAgent(agentId);
+        return ok(agent ?? { error: "agent not found" });
+      },
+    );
+
+    server.registerTool(
+      "profile_get",
+      {
+        description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion). Read-only. Error if the id is unknown.",
+        inputSchema: { profileId: z.string() },
+      },
+      async ({ profileId }) => {
+        const profile = db.getProfile(profileId);
+        return ok(profile ?? { error: "profile not found" });
+      },
+    );
+
+    server.registerTool(
+      "project_get",
+      {
+        description: "Read ONE project by id — the FULL record incl. its config override (so you can see what's set before a project_configure PATCH). Read-only. Error if the id is unknown.",
+        inputSchema: { projectId: z.string() },
+      },
+      async ({ projectId }) => {
+        const project = db.getProject(projectId);
+        return ok(project ?? { error: "project not found" });
       },
     );
 

@@ -135,6 +135,14 @@ function formatZodIssues(error: z.ZodError): string {
   return error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
 }
 
+/**
+ * The settable TOP-LEVEL config keys, derived ONCE from the strict schema shape so it can never drift
+ * from the validator. Surfaced in an "invalid config" rejection (project_configure on both the platform
+ * and setup routers) so a caller that fat-fingered a key — the `kanbanColumns`-vs-"columns" confusion
+ * that motivated this — sees the real key names and converges instead of giving up.
+ */
+export const CONFIG_TOP_LEVEL_KEYS: readonly string[] = Object.keys(projectConfigOverrideSchema.shape);
+
 /** REST/human path validator: the full schema (gateCommand allowed). */
 export function validateProjectConfigOverride(
   raw: unknown,
@@ -397,7 +405,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. As an ELEVATED platform-role tool (P3, trust boundary) this may set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–1800000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). To RESET/unset a key, use the human REST PATCH /api/projects/:id/config (whole-object replace).",
+        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, obsidian, python. As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–1800000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). To RESET/unset a key, use the human REST PATCH /api/projects/:id/config (whole-object replace).",
         inputSchema: {
           projectId: z.string(),
           config: z.object({}).passthrough(),
@@ -414,7 +422,9 @@ export class PlatformMcpRouter {
         // platform route (resolveRole 404s non-platform); the manager/worker orchestration MCP keeps using
         // validateAgentProjectConfigOverride, which still REJECTS gateCommand/alertWebhook (unchanged).
         const v = validateProjectConfigOverride(config);
-        if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
+        // List the valid top-level keys on rejection so a fat-fingered key (e.g. "columns" instead of
+        // kanbanColumns) converges instead of giving up — mirrors the setup router's project_configure.
+        if (!v.ok) return ok({ error: `invalid config: ${v.error}`, validTopLevelKeys: CONFIG_TOP_LEVEL_KEYS });
         // PATCH/MERGE (card 28c21fe1): deep-merge the VALIDATED partial into the existing override instead
         // of replacing it, so setting one key never clobbers a board's kanbanColumns (or any other key).
         // The partial is validated ABOVE; the merged whole is not re-validated (see mergeConfigOverride).
@@ -481,6 +491,37 @@ export class PlatformMcpRouter {
         const effLimit = limit ?? (full ? undefined : DEFAULT_SESSION_SUMMARY_CAP);
         return ok(projectSessionList(filtered, { full, limit: effLimit, offset }));
       },
+    );
+
+    // --- single-record FULL reads (cross-project). The list_all_* feeds are bounded SUMMARIES; these
+    // return the WHOLE record (incl. the heavy startupPrompt / config the summaries drop) for ONE id, so
+    // an operator can inspect before an edit instead of round-tripping an empty-payload mutator. Read-only.
+    // Mirrored on the loom-setup surface (the ⊆ invariant: every setup tool also exists here). ---
+    server.registerTool(
+      "agent_get",
+      {
+        description: "Read ONE agent by id — the FULL record incl. its startupPrompt and profileId (the list_all_agents summary drops startupPrompt). Read-only. Error if the id is unknown.",
+        inputSchema: { agentId: z.string() },
+      },
+      async ({ agentId }) => ok(db.getAgent(agentId) ?? { error: "agent not found" }),
+    );
+
+    server.registerTool(
+      "profile_get",
+      {
+        description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion). Read-only. Error if the id is unknown.",
+        inputSchema: { profileId: z.string() },
+      },
+      async ({ profileId }) => ok(db.getProfile(profileId) ?? { error: "profile not found" }),
+    );
+
+    server.registerTool(
+      "project_get",
+      {
+        description: "Read ONE project by id — the FULL record incl. its config override (so you can see what's set before a project_configure PATCH). Read-only. Error if the id is unknown.",
+        inputSchema: { projectId: z.string() },
+      },
+      async ({ projectId }) => ok(db.getProject(projectId) ?? { error: "project not found" }),
     );
 
     // --- profiles (cross-project rigs). HUMAN-EQUIVALENT ops — gated to the platform role only; the

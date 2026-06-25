@@ -12,11 +12,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       Symmetrically, the setup router returns NULL for every NON-setup role (manager/worker/plain/
 //       platform/auditor) — an agent/non-setup session can never reach /mcp-setup. buildMcpServers(setup)
 //       mounts loom-setup ONLY (+loom-tasks), never platform/orch/audit, with a ["mcp__loom-setup"] allow.
-//   (b) the surface is EXACTLY the curated subset of 14 (incl. the one v1 widen, project_archive) — and
-//       NONE of the elevated/outward/self-improvement tools (no git/vault/message/stop/schedule/escalate/audit).
+//   (b) the surface is EXACTLY the curated subset of 18 (incl. project_archive, agent_update, and the
+//       agent_get/profile_get/project_get reads) — and NONE of the elevated/outward/self-improvement
+//       tools (no git/vault/message/stop/schedule/escalate/audit).
 //   (c) the curated tools work end-to-end: project_create (real git repo), project_configure,
 //       project_update, project_archive (soft + reserved-guarded), agent_create,
 //       profile_create/update/assign, list_all_*, session_spawn(manager|plain).
+//   (g) agent_update EDITS an existing agent (amend startupPrompt / rename / (re)assign-or-clear profile),
+//       404s an unknown id, and LEAST-PRIVILEGE rejects assigning an elevated-role (platform/auditor/
+//       workspace-auditor) rig — the gap that collapsed "action these cards for me" into "paste this text."
+//   (h) the single-record reads (agent_get/profile_get/project_get) return FULL records (so the operator
+//       stops reading via empty-payload mutators), not-found on an unknown id.
+//   (i) a kanbanColumns config — the board-rename the operator wrongly called "not implemented" — is
+//       ACCEPTED by the setup AGENT validator, and an invalid config's rejection lists the valid keys.
 //   (d) THE VALIDATOR REJECTIONS — project_create/configure/update REJECT orchestration.gateCommand
 //       (host-RCE) and alertWebhook (exfil) by construction (agent validator); session_spawn REFUSES
 //       platform/auditor/worker/setup (no self-elevation) and creates nothing.
@@ -147,12 +155,12 @@ try {
 
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
   const expected = [
-    "agent_create", "list_all_agents", "list_all_projects", "list_all_sessions",
-    "profile_assign", "profile_create", "profile_update",
-    "project_archive", "project_configure", "project_create", "project_update", "session_spawn",
+    "agent_create", "agent_get", "agent_update", "list_all_agents", "list_all_projects", "list_all_sessions",
+    "profile_assign", "profile_create", "profile_get", "profile_update",
+    "project_archive", "project_configure", "project_create", "project_get", "project_update", "session_spawn",
     "skill_list", "skill_write",
   ];
-  check(`(b) setup surface is EXACTLY the curated subset of 14 (got ${tools.length}: ${tools.join(",")})`,
+  check(`(b) setup surface is EXACTLY the curated subset of 18 (got ${tools.length}: ${tools.join(",")})`,
     JSON.stringify(tools) === JSON.stringify(expected));
   // The still-ABSENT trust boundary — project_archive is now INCLUDED (the ONE v1 widen), but the
   // outward/host/elevated/self-improvement set must stay unreachable.
@@ -338,6 +346,65 @@ try {
   const traversal = await call("skill_write", { name: "../evil", content: "x", confirm: true });
   check("(f) skill_write: REJECTS a path-traversal / invalid name", typeof traversal.error === "string" && !traversal.ok);
 
+  // ============ (g) agent_update — the card's core: action workspace cards by EDITING an agent ============
+  // The operator can now amend an EXISTING agent's startupPrompt (the gap that collapsed "action these
+  // cards for me" into "paste this text"). `agent` was created in (c) under the new project.
+  const editPrompt = await call("agent_update", { agentId: agent.id, startupPrompt: "AMENDED prompt v2" });
+  check("(g) agent_update: amends an agent's startupPrompt", editPrompt.startupPrompt === "AMENDED prompt v2" && !editPrompt.error);
+  check("(g) agent_update: the edit is persisted (next session picks it up)", db.getAgent(agent.id)?.startupPrompt === "AMENDED prompt v2");
+  // PATCH semantics: a name-only edit leaves the (just-amended) startupPrompt as-is.
+  const editName = await call("agent_update", { agentId: agent.id, name: "Renamed Worker" });
+  check("(g) agent_update: PATCH — a name-only edit leaves startupPrompt as-is",
+    editName.name === "Renamed Worker" && editName.startupPrompt === "AMENDED prompt v2" && !editName.error);
+  // 404 on an unknown agent id (nothing mutated).
+  const editUnknown = await call("agent_update", { agentId: "nope", startupPrompt: "x" });
+  check("(g) agent_update: 404s an unknown agent id", typeof editUnknown.error === "string" && /not found/i.test(editUnknown.error));
+  // (Re)assign an ALLOWED-role profile (worker rig `prof` from (c)) — succeeds.
+  const editAssign = await call("agent_update", { agentId: agent.id, profileId: prof.id });
+  check("(g) agent_update: assigns an allowed-role (worker) profile", editAssign.profileId === prof.id && !editAssign.error);
+  // profileId:null CLEARS the assignment (falls back to the plain backstop).
+  const editClear = await call("agent_update", { agentId: agent.id, profileId: null });
+  check("(g) agent_update: profileId:null CLEARS the assignment", editClear.profileId === null && !editClear.error);
+
+  // LEAST-PRIVILEGE: the setup operator can NEVER bind an agent to an elevated-role rig. The setup surface
+  // can't MINT one (proved in (e)), so seed an elevated profile directly via Db, then prove agent_update
+  // REJECTS assigning it — and leaves the agent's assignment unchanged.
+  db.insertProfile({ id: "elevatedRig", name: "Platform Rig", role: "platform", description: "elevated rig", allowDelta: [], skills: null, model: null, icon: "🛡️" });
+  const assignBefore = db.getAgent(agent.id)?.profileId ?? null;
+  const editElev = await call("agent_update", { agentId: agent.id, profileId: "elevatedRig" });
+  check("(g) agent_update REJECTS assigning an elevated-role (platform) profile", typeof editElev.error === "string" && /platform|elevat|cannot/i.test(editElev.error));
+  check("(g) agent_update: the rejected elevate left the agent's assignment UNCHANGED", (db.getAgent(agent.id)?.profileId ?? null) === assignBefore);
+
+  // ============ (h) single-record READ tools — stop reading via empty-payload mutators ============
+  const gotAgent = await call("agent_get", { agentId: agent.id });
+  check("(h) agent_get: returns the FULL agent record incl. startupPrompt",
+    gotAgent.id === agent.id && gotAgent.startupPrompt === "AMENDED prompt v2" && !gotAgent.error);
+  check("(h) agent_get: unknown id → not-found error", typeof (await call("agent_get", { agentId: "nope" })).error === "string");
+  const gotProfile = await call("profile_get", { profileId: prof.id });
+  check("(h) profile_get: returns the FULL profile record (role)", gotProfile.id === prof.id && gotProfile.role === "worker" && !gotProfile.error);
+  check("(h) profile_get: unknown id → not-found error", typeof (await call("profile_get", { profileId: "nope" })).error === "string");
+  const gotProject = await call("project_get", { projectId: created.id });
+  check("(h) project_get: returns the FULL project record incl. config", gotProject.id === created.id && !!gotProject.config && !gotProject.error);
+  check("(h) project_get: unknown id → not-found error", typeof (await call("project_get", { projectId: "nope" })).error === "string");
+
+  // ============ (i) the BOARD-RENAME the operator failed at now SUCCEEDS via the setup AGENT validator ====
+  // The motivating bug: the operator told the user kanbanColumns config was "not implemented." Prove a
+  // kanbanColumns PATCH is ACCEPTED by the setup surface's AGENT validator, and an invalid config's
+  // rejection now names the valid top-level keys (so a future fat-finger converges).
+  const renameCols = await call("project_configure", {
+    projectId: created.id,
+    config: { kanbanColumns: [{ key: "todo", label: "To Do" }, { key: "doing", label: "Doing" }, { key: "done", label: "Done", role: "terminal" }] },
+  });
+  check("(i) project_configure: a kanbanColumns layout is ACCEPTED by the setup AGENT validator", renameCols.ok === true && !renameCols.error);
+  check("(i) project_configure: the renamed columns are stored (resolveConfig reflects 3 columns)",
+    resolveConfig(db.getProject(created.id).config).kanbanColumns.length === 3
+    && resolveConfig(db.getProject(created.id).config).kanbanColumns[0].label === "To Do");
+  // An invalid config (the wrong "columns" key) is rejected AND lists the valid keys to aid discovery.
+  const wrongKey = await call("project_configure", { projectId: created.id, config: { columns: [{ key: "x", label: "X" }] } });
+  check("(i) project_configure: the wrong 'columns' key is rejected", typeof wrongKey.error === "string" && !wrongKey.ok);
+  check("(i) project_configure: the rejection lists valid top-level keys incl. kanbanColumns",
+    Array.isArray(wrongKey.validTopLevelKeys) && wrongKey.validTopLevelKeys.includes("kanbanColumns") && wrongKey.validTopLevelKeys.includes("permission"));
+
   await client.close();
 } finally {
   db.close();
@@ -347,6 +414,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Setup Assistant surface is the curated, fail-closed subset of 14 (project/agent/profile create+configure + project_archive (soft, reserved-guarded) + manager|plain spawn + reads + skill_list/skill_write), a setup session 404s on /mcp-platform, /mcp-orch AND /mcp-audit, a non-setup session can never reach /mcp-setup, every config path rejects gateCommand/alertWebhook, session_spawn refuses platform/auditor/worker/setup, and skill_write is confirm-first + bounded to the USER store (never the bundled/dev set) — claude-free, network-free."
+  ? "\n✅ ALL PASS — the Setup Assistant surface is the curated, fail-closed subset of 18 (project/agent/profile create+configure + agent_update (least-privilege, no elevated-rig assignment) + agent_get/profile_get/project_get reads + project_archive (soft, reserved-guarded) + manager|plain spawn + list_all_* + skill_list/skill_write), a setup session 404s on /mcp-platform, /mcp-orch AND /mcp-audit, a non-setup session can never reach /mcp-setup, every config path rejects gateCommand/alertWebhook, session_spawn refuses platform/auditor/worker/setup, a kanbanColumns layout is accepted by the AGENT validator, and skill_write is confirm-first + bounded to the USER store (never the bundled/dev set) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
