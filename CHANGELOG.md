@@ -7,6 +7,45 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-06-25
+
+**Customize the bundled skills & profiles** with precise, update-safe tracking, opt-in **document-to-Markdown
+conversion**, and a batch of **manager→worker message-delivery** hardening.
+
+### Added
+- **Customize bundled skills and profiles — and adopt Loom's updates without losing your edits.** Edit a
+  bundled skill or profile and Loom now tracks precisely what you changed against the shipped version: clear
+  badges show whether an item is untouched, customized, or has an update available; a **"what changed"** diff
+  shows your edits; and when Loom later ships a new version of a bundled item, an **update banner** offers a
+  two-step adopt with a **field-level conflict resolver** — take the upstream change while keeping your own
+  edits, line by line. Backed by a base-snapshot store and a 3-way merge engine (with `adopt` / `reset` /
+  update-diff REST). New customizations work entirely off the server's notion of which items are bundled.
+- **Opt-in document conversion (`documentConversion`).** A profile can enable a per-session **markitdown**
+  MCP that converts PDFs, Office files, images, and HTML to Markdown — so a research/document rig can read
+  documents cheaply in tokens. Default off and fully additive; **human-set only** (Profiles UI/REST), never
+  an agent tool. Loom owns a shared Python venv for it and **pre-warms** it on profile-save and at boot, so
+  the first document-conversion session usually finds the converter already ready.
+- **Cross-project task-boarding for the Platform Lead.** The Platform operator can file a task directly onto
+  another project's board (and link an escalation to the task it relates to).
+
+### Changed
+- **`project_configure` does a patch/merge instead of a clobber.** Changing a single config key no longer
+  wipes your other per-project overrides.
+- **Manager steering of workers is more authoritative.** A burst of manager→worker messages is now delivered
+  as **one coalesced batch** (a single authoritative turn, not one injection per message), and a new
+  **`worker_redirect`** lets a manager interrupt a worker's current turn, flush any now-superseded queued
+  direction, and deliver one "do this now" instruction immediately.
+
+### Fixed
+- **A worker can no longer finish on a stale plan.** The daemon refuses a worker's completion report while it
+  still has unconsumed manager direction queued, so a just-superseded plan can't be reported done.
+- **`/session-end` stages only the files your session touched** in the shared vault (never a blanket
+  `git add -A`), and drops an invalid merge flag — so wrapping up a session can't sweep in unrelated changes.
+- **Orchestration tools resolve correctly in `/orchestrate`.** The lead doctrine now namespaces the
+  `mcp__loom-orchestration__*` tools and preloads the lifecycle set, so a manager's first calls don't miss.
+- **The skill "what changed" diff is line-ending tolerant** — it strips `\r` before comparing, so a CRLF
+  edit no longer shows a whole file as changed.
+
 ## [0.7.0] — 2026-06-24
 
 Board lanes you can **color, limit, and edit in place**, opt-in **Obsidian auto-start**, and a large batch
