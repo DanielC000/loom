@@ -31,7 +31,7 @@ const HERMETIC = [
   "session-archive", "session-list-summary", "all-archived-sessions", "periodic-snapshot", "shutdown-snapshot", "shutdown-endpoint", "mgmt-project-agent", "web-static-serve", "version", "cli-args", "cli-direct-invocation", "cli-service", "cli-channel", "update-check", "update-endpoint",
   "mcp-list-budget", // PL Auditor finding #5: default list_all_agents + audit list_sessions fit the token budget
 
-  "claude-config", "trust-lock", "spawn-args",
+  "claude-config", "trust-lock", "spawn-args", "disallow-prompt-tools",
   "context-watcher", "context-stats", "recycle-handoff", "wake", "worker-reported-state", "crash-recovery-watcher", "busy-worker-watcher",
   "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull", "usage-status", "rate-limit-clear", "rate-limit-cascade", "usage-limit-spawn-wake",
   "skills-inject", "skills-subset-spawn", "skills-store-durability", "skills-publish-drift", "skills-customization", "vault-lint", "vault-browser", "vault-raw", "vault-writer", "git-writer", "git-identity-warning",

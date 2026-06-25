@@ -763,6 +763,44 @@ export interface PtyHostEvents {
 }
 
 /**
+ * The interactive HUMAN-prompt tools Claude Code exposes that would BLOCK an unattended, Loom-driven
+ * session on input that can never come from the human:
+ *   - `AskUserQuestion` — surfaces a multiple-choice question to the human and waits on their pick.
+ *   - `ExitPlanMode` / `EnterPlanMode` — the plan-mode approval prompts (entering plan mode and asking
+ *     the human to approve a plan), both model-callable tools.
+ * A Loom-driven session's stdin is owned by Loom (a worker by its manager via worker_message/redirect;
+ * an operator by the daemon), so any of these blocks the turn forever waiting on a human who will never
+ * answer — AND it's a doctrine violation (a worker's only channel is worker_report UP; it must never
+ * address the user). `/worker` doctrine already forbids it, but a model reached for the prompt anyway,
+ * so we make it STRUCTURALLY impossible at spawn (board card 8dd1dd1c).
+ */
+export const HUMAN_PROMPT_TOOLS: readonly string[] = ["AskUserQuestion", "ExitPlanMode", "EnterPlanMode"];
+
+/**
+ * The set of roles whose stdin is Loom-driven and which must NEVER block on a human — so they spawn with
+ * {@link HUMAN_PROMPT_TOOLS} disallowed:
+ *   - `worker`            — driven by its manager (worker_message/redirect); channel up is worker_report.
+ *   - `setup`             — the user-facing "Platform" operator; acts on the user's behalf, never blocks.
+ *   - `auditor`           — the Platform Auditor (scheduled, read-mostly transcript reviewer).
+ *   - `workspace-auditor` — the Workspace Auditor (read-mostly reviewer of the user's own workspace).
+ * DELIBERATELY EXCLUDED (left byte-identical): `manager`/orchestrator + `platform` (the human-driven
+ * Platform Lead) legitimately surface decisions to the human; a `run` and a plain (role-less) session are
+ * out of this fix's scope. Pure + exported so the spawn-args test asserts the per-role mapping with no
+ * real claude. (board card 8dd1dd1c)
+ */
+export function disallowedToolsForRole(role?: SessionRole | null): string[] {
+  switch (role) {
+    case "worker":
+    case "setup":
+    case "auditor":
+    case "workspace-auditor":
+      return [...HUMAN_PROMPT_TOOLS];
+    default:
+      return []; // manager / platform / run / plain — unchanged, no disallow
+  }
+}
+
+/**
  * Assemble the `claude` argv (extracted so the ordering is unit-testable). The startup/kickoff
  * prompt is positional and goes LAST, behind a `--` end-of-options separator (H2): a manager
  * controls kickoffPrompt, and a prompt beginning with `-`/`--` would otherwise be parsed as a flag.
@@ -779,6 +817,13 @@ export function buildSpawnArgs(o: {
   startupPrompt?: string;
   /** Profile-pinned model id → `--model <id>`. Undefined/empty ⇒ NO `--model` (byte-identical to today). */
   model?: string;
+  /**
+   * Role-scoped tools to forbid the model from EVER calling (the interactive human-prompt tools, for a
+   * Loom-driven role — see {@link disallowedToolsForRole}). Emitted as `--disallowedTools <name…>` (the
+   * documented variadic flag, which REMOVES the tools from the model's tool list, not merely auto-denies).
+   * Empty/absent ⇒ NO `--disallowedTools` (byte-identical to today for every out-of-scope role).
+   */
+  disallowedTools?: string[];
 }): string[] {
   const args: string[] = [];
   if (o.resumeId) args.push("--resume", o.resumeId);
@@ -797,6 +842,11 @@ export function buildSpawnArgs(o: {
   // model-null / resume / fork spawn is byte-identical (no `--model`) and inherits the engine default
   // (or, on resume, the conversation's own model from the transcript).
   if (o.model) args.push("--model", o.model);
+  // Role-scoped disallow of the interactive human-prompt tools. Placed BEFORE --strict-mcp-config so its
+  // variadic value list is terminated by that flag — keeping the variadic `--mcp-config` the LAST flag,
+  // its value sitting right before the `--` separator (the H2 ordering invariant). Emitted ONLY when
+  // non-empty, so every out-of-scope role's argv is byte-identical (additive-when-applicable discipline).
+  if (o.disallowedTools && o.disallowedTools.length) args.push("--disallowedTools", ...o.disallowedTools);
   args.push("--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: o.mcpServers }));
   if (o.startupPrompt) args.push("--", o.startupPrompt);
   return args;
@@ -1146,7 +1196,12 @@ export class PtyHost {
     // The HUMAN-only python.interpreterPath rides the session env (config → pythonSessionEnv); read it here
     // and hand it to the shared-venv markitdown resolver (only consulted when documentConversion is on).
     const mcpServers = buildMcpServers({ sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion, pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER });
-    const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt, model: opts.model });
+    // Role-scoped disallow of the interactive human-prompt tools (AskUserQuestion / Exit|EnterPlanMode):
+    // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human. Computed
+    // from the session role at the single spawn chokepoint, so EVERY path (fresh/resume/fork/recycle/boot)
+    // inherits it; empty for every out-of-scope role ⇒ no flag ⇒ byte-identical argv. See disallowedToolsForRole.
+    const disallowedTools = disallowedToolsForRole(opts.role);
+    const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt, model: opts.model, disallowedTools });
 
     // Inherited env (CLAUDE_*/CLAUDECODE scrubbed) + sessionEnv merge + the three git-safety vars that
     // keep an unattended worker pty from wedging on a pager / credential prompt. See buildSpawnEnv.

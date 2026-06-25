@@ -97,6 +97,16 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
   `CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT=1`; `--permission-mode acceptEdits` + allowlist (NOT
   `--dangerously-skip-permissions`, which shows a blocking gate); `--strict-mcp-config` WITH an
   explicit `--mcp-config` (suppresses the `.mcp.json` enable prompt). This combo boots unattended.
+  - **Role-scoped human-prompt disallow** (`buildSpawnArgs`/`disallowedToolsForRole`): a Loom-DRIVEN role —
+    **worker, setup, auditor, workspace-auditor** — spawns with `--disallowedTools AskUserQuestion
+    ExitPlanMode EnterPlanMode`, so the interactive human-prompt tools are REMOVED from the model's tool
+    list and can never block the turn on input that the human will never give (a worker's stdin is owned by
+    its manager). The flag sits BEFORE `--strict-mcp-config` so its variadic value list is terminated by
+    that flag, keeping `--mcp-config` the last flag before `--`. **Manager/orchestrator + the human-driven
+    platform lead are DELIBERATELY excluded** (a manager legitimately surfaces decisions to the human), as
+    are `run`/plain sessions — for every out-of-scope role the flag is omitted and the argv is byte-identical.
+    Computed at the single `createPty` spawn chokepoint, so every path (fresh/resume/fork/recycle/boot)
+    inherits it. `/worker` doctrine is the soft complement; this is the structural backstop (board card 8dd1dd1c).
 - **Engine session id** captured via the SessionStart hook → `assets/hook-relay.mjs` →
   `/internal/hook`; persisted on receipt. New session injects the topic startup prompt; resume injects nothing.
 - **MCP scoping:** session id is in the URL path (`/mcp/:sessionId`); the project is derived
