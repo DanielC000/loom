@@ -1,17 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Profile, SessionRole } from "@loom/shared";
-import { api } from "../lib/api";
+import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, SessionRole } from "@loom/shared";
+import { api, type ProfileFieldResolution } from "../lib/api";
 import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components/ui";
-import { color, font, tone, type Tone } from "../theme";
-
-// Mirror of the daemon's BUNDLED_PROFILES names (profiles/seed.ts). The list endpoint returns full
-// Profile rows with no `bundled` flag, so the UI keys "Revert to bundled" off the shipped names —
-// the reset endpoint also matches by name server-side (a renamed bundled profile is no longer
-// matchable, the documented limitation shared with the skill reset).
-const BUNDLED_PROFILE_NAMES = new Set([
-  "Orchestrator", "Planning & Triage", "Dev", "Bugfix", "QA Tester", "Web Designer", "Content Strategy", "Setup Assistant", "Platform-lead",
-]);
+import { color, font, radius, tone, type Tone } from "../theme";
 
 // A profile's role, as a coloured pill. null = a plain (non-orchestration) session — today's default.
 const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", "workspace-auditor": "muted", run: "muted" };
@@ -23,11 +15,17 @@ function RoleBadge({ role }: { role: SessionRole | null }) {
 // agent runs under via its profileId. The injected prompt comes from the AGENT; a profile's
 // `description` is a UI-only blurb. HUMAN-managed only (profiles confer role + privilege), so there
 // is no agent MCP surface — just this page + REST. Edits apply on the next spawn.
+//
+// Bundled profiles carry a precise customization state computed server-side from three versions —
+// `base` (the shipped def at last sync), `mine` (the user's row, what sessions use) and the current
+// `shipped` bundled def (see `Profile Customization.md`). Unlike skills (line-based text), the merge is
+// FIELD-level: `customized` = mine ≠ base, `updateAvailable` = base ≠ shipped. "Adopt update" applies
+// Loom's field changes onto the user's edits, resolving any all-three-differ conflict per field.
 export default function Profiles() {
   const qc = useQueryClient();
   const [selected, setSelected] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
-  const [reloadNonce, setReloadNonce] = useState(0); // bumped on revert to remount the editor onto bundled content
+  const [reloadNonce, setReloadNonce] = useState(0); // bumped on revert/adopt to remount the editor onto fresh fields
 
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const current = useQuery({ queryKey: ["profile", selected], queryFn: () => api.profile(selected!), enabled: !!selected });
@@ -40,9 +38,8 @@ export default function Profiles() {
   const save = useMutation({
     mutationFn: (v: { id: string; patch: Partial<Omit<Profile, "id">> }) => api.updateProfile(v.id, v.patch),
     onSuccess: (p) => {
-      qc.setQueryData(["profile", p.id], p);
       qc.invalidateQueries({ queryKey: ["profiles"] });
-      qc.invalidateQueries({ queryKey: ["profile", p.id] });
+      qc.invalidateQueries({ queryKey: ["profile", p.id] }); // refetch the SUMMARY (PUT returns the bare row, no computed state)
     },
   });
   const remove = useMutation({
@@ -52,14 +49,25 @@ export default function Profiles() {
   const revert = useMutation({
     mutationFn: (id: string) => api.resetProfile(id),
     onSuccess: (p) => {
-      qc.setQueryData(["profile", p.id], p); // sync editor to bundled fields (no refetch race)
+      qc.setQueryData(["profile", p.id], p); // sync editor to bundled fields (the reset response carries computed state)
       qc.invalidateQueries({ queryKey: ["profiles"] });
-      setReloadNonce((n) => n + 1); // remount the editor onto the restored content
+      setReloadNonce((n) => n + 1); // remount the editor onto the restored fields
+    },
+  });
+  // Adopt the shipped update: empty resolutions one-clicks a clean auto-merge; a per-conflict-field map
+  // lands a conflict resolution. Mirrors `revert` — refresh the editor onto the merged fields and remount
+  // it, which also closes the resolver (the editor's local state resets on the key change).
+  const adopt = useMutation({
+    mutationFn: (resolutions?: Record<string, ProfileFieldResolution>) => api.adoptProfile(selected!, resolutions),
+    onSuccess: (p) => {
+      qc.setQueryData(["profile", p.id], p);
+      qc.invalidateQueries({ queryKey: ["profiles"] });
+      qc.invalidateQueries({ queryKey: ["profile", p.id, "update-diff"] });
+      setReloadNonce((n) => n + 1);
     },
   });
 
   const validNew = newName.trim().length > 0 && !profiles.data?.some((p) => p.name === newName.trim());
-  const bundled = current.data ? BUNDLED_PROFILE_NAMES.has(current.data.name) : false;
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16 }}>
@@ -75,7 +83,8 @@ export default function Profiles() {
             <Button key={p.id} variant={p.id === selected ? "primary" : "default"} style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8 }}
               onClick={() => setSelected(p.id)} title={p.description || p.name}>
               {p.icon && <span>{p.icon}</span>}
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</span>
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+              <StatusDots customized={!!p.customized} updateAvailable={!!p.updateAvailable} />
               <span style={{ fontSize: 10, color: p.role ? tone[roleTone[p.role]] : color.textMuted, fontFamily: font.mono }}>{p.role ?? "plain"}</span>
             </Button>
           ))}
@@ -89,21 +98,44 @@ export default function Profiles() {
 
       <Panel style={{ minHeight: "72vh", padding: 12 }}>
         {selected && current.data ? (
-          <ProfileEditor key={`${selected}:${reloadNonce}`} profile={current.data} bundled={bundled}
+          <ProfileEditor key={`${selected}:${reloadNonce}`} profile={current.data}
             onSave={(patch) => save.mutate({ id: selected, patch })} saving={save.isPending}
             onDelete={() => remove.mutate(selected)} deleting={remove.isPending}
-            onRevert={() => revert.mutate(selected)} reverting={revert.isPending} />
+            onRevert={() => revert.mutate(selected)} reverting={revert.isPending}
+            onAdopt={(resolutions) => adopt.mutate(resolutions)} adopting={adopt.isPending} adoptError={adopt.error as Error | null} />
         ) : <p style={{ color: color.textMuted, padding: 12 }}>Select a profile to edit it, or create a new one.</p>}
       </Panel>
     </div>
   );
 }
 
-// Remounted per profile (key=id) so the fields reset on switch; after Save the query updates and
-// `dirty` clears against the new values. Mirrors the Skills / agent-preset editors.
-function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, onRevert, reverting }:
-  { profile: Profile; bundled: boolean; onSave: (patch: Partial<Omit<Profile, "id">>) => void; saving: boolean;
-    onDelete: () => void; deleting: boolean; onRevert: () => void; reverting: boolean }) {
+// Compact sidebar status: a cyan dot for "customized", an amber dot for "update available". Restrained —
+// the full-text badges live in the editor header; here it's a glanceable signal with a hover title.
+// Mirrors Skills.tsx StatusDots.
+function StatusDots({ customized, updateAvailable }: { customized: boolean; updateAvailable: boolean }) {
+  if (!customized && !updateAvailable) return null;
+  return (
+    <span style={{ display: "inline-flex", gap: 4, flexShrink: 0 }}>
+      {customized && <Dot tone="cyan" title="Customized — you edited this profile" />}
+      {updateAvailable && <Dot tone="amber" title="Update available — Loom shipped a newer version" />}
+    </span>
+  );
+}
+function Dot({ tone: t, title }: { tone: Tone; title: string }) {
+  const c = { cyan: color.cyan, amber: color.amber } as Record<string, string>;
+  return <span title={title} style={{ width: 7, height: 7, borderRadius: 7, background: c[t] ?? color.textMuted, display: "inline-block" }} />;
+}
+
+// Remounted per profile (key=id:nonce) so the fields reset on switch / revert / adopt; after Save the
+// query updates and `dirty` clears against the new values. Mirrors the Skills / agent-preset editors.
+function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, reverting, onAdopt, adopting, adoptError }:
+  { profile: ProfileSummary; onSave: (patch: Partial<Omit<Profile, "id">>) => void; saving: boolean;
+    onDelete: () => void; deleting: boolean; onRevert: () => void; reverting: boolean;
+    onAdopt: (resolutions?: Record<string, ProfileFieldResolution>) => void; adopting: boolean; adoptError: Error | null }) {
+  const bundled = profile.bundled;
+  const customized = !!profile.customized;
+  const updateAvailable = !!profile.updateAvailable;
+
   const [name, setName] = useState(profile.name);
   const [role, setRole] = useState<SessionRole | "">(profile.role ?? "");
   const [description, setDescription] = useState(profile.description);
@@ -116,6 +148,14 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
   const [skills, setSkills] = useState<string[]>(profile.skills ?? []);
   const [confirmDel, setConfirmDel] = useState(false);
   const [confirmRevert, setConfirmRevert] = useState(false);
+  const [resolver, setResolver] = useState<ProfileMergeResult | null>(null); // open ⇔ a conflicting adopt
+
+  // Adopt step 1 — dry-run the field-level merge. Clean → one-click adopt (no resolutions). Conflict → resolver.
+  const preview = useMutation({
+    mutationFn: () => api.profileMergePreview(profile.id),
+    onSuccess: (p) => { if (p.clean) onAdopt(undefined); else setResolver(p); },
+  });
+  const adoptBusy = preview.isPending || adopting;
 
   // The store's skill names — the menu of what a subset can pick from (same list the Skills page edits).
   const skillList = useQuery({ queryKey: ["skills"], queryFn: api.skills });
@@ -148,7 +188,9 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{profile.name}</strong>
         <RoleBadge role={role || null} />
-        {bundled && <Badge tone="cyan">bundled</Badge>}
+        {bundled && <Badge tone="muted">bundled</Badge>}
+        {customized && <Badge tone="cyan">customized</Badge>}
+        {updateAvailable && <Badge tone="amber">update available</Badge>}
         <span style={{ flex: 1 }} />
         {confirmDel ? (
           <>
@@ -158,6 +200,14 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
           </>
         ) : <Button variant="danger" onClick={() => setConfirmDel(true)}>Delete</Button>}
       </div>
+
+      {/* Update banner — only when Loom has shipped newer bundled fields. Groups the adopt affordance with
+          a "what shipped changed" expander (a field-by-field old→new table) so the user previews the
+          incoming change before adopting. */}
+      {updateAvailable && (
+        <UpdateBanner id={profile.id} onAdopt={() => preview.mutate()} adoptBusy={adoptBusy}
+          error={(preview.error as Error | null) ?? adoptError} />
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 160px 90px", gap: 10 }}>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -272,6 +322,176 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
           </>
         ) : <Button onClick={() => setConfirmRevert(true)} title="Discard edits and restore this profile to its shipped (bundled) fields">Revert to bundled</Button>)}
       </div>
+
+      {resolver && !resolver.clean && (
+        <ConflictResolver name={profile.name} conflicts={resolver.conflicts} applying={adopting} error={adoptError}
+          onApply={(resolutions) => onAdopt(resolutions)} onCancel={() => setResolver(null)} />
+      )}
     </div>
   );
+}
+
+// "Update available" banner: the adopt button + a collapsible base→shipped FIELD diff so the user previews
+// the incoming change before adopting. Amber hairline, not a filled block — restrained signal of state.
+function UpdateBanner({ id, onAdopt, adoptBusy, error }: { id: string; onAdopt: () => void; adoptBusy: boolean; error: Error | null }) {
+  const [showDiff, setShowDiff] = useState(false);
+  const diff = useQuery({
+    queryKey: ["profile", id, "update-diff"],
+    queryFn: () => api.profileUpdateDiff(id),
+    enabled: showDiff,
+  });
+  return (
+    <div style={{ border: `1px solid ${color.amber}`, borderRadius: radius.base, padding: "8px 10px",
+      background: color.panel2, display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ color: color.amber, fontFamily: font.mono, fontSize: 12 }}>
+          Loom shipped an update to this profile.
+        </span>
+        <span style={{ flex: 1 }} />
+        <Button onClick={() => setShowDiff((v) => !v)}>{showDiff ? "Hide changes" : "What changed"}</Button>
+        <Button variant="primary" disabled={adoptBusy} onClick={onAdopt} title="Merge the shipped update onto your edits">
+          {adoptBusy ? "Adopting…" : "Adopt update"}
+        </Button>
+      </div>
+      {error && <span style={{ color: color.red, fontFamily: font.mono, fontSize: 11 }}>{error.message}</span>}
+      {showDiff && (
+        diff.isLoading ? <span style={{ color: color.textMuted, fontSize: 12 }}>Loading diff…</span>
+        : diff.data ? <FieldDiff changed={diff.data.changed} />
+        : <span style={{ color: color.red, fontSize: 12 }}>Couldn't load the diff.</span>
+      )}
+    </div>
+  );
+}
+
+// "What shipped changed": a field-by-field old→new table (base → shipped). Each row names a field and
+// shows the shipped def's old value (dim) → the new value (phosphor). Profiles are small + structured, so
+// a compact grid reads better than a line diff.
+function FieldDiff({ changed }: { changed: ProfileFieldMerge[] }) {
+  if (changed.length === 0) {
+    return <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No field changed.</span>;
+  }
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto 1fr", gap: "6px 10px", alignItems: "start",
+      background: color.panel, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: 8,
+      fontFamily: font.mono, fontSize: 12, lineHeight: 1.5 }}>
+      {changed.map((c) => (
+        <div key={c.field} style={{ display: "contents" }}>
+          <span style={{ color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 11 }}>{fieldDisplayName(c.field)}</span>
+          <span style={{ color: color.textMuted, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{formatFieldValue(c.field, c.base)}</span>
+          <span style={{ color: color.textMuted }}>→</span>
+          <span style={{ color: color.phosphor, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{formatFieldValue(c.field, c.shipped)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Conflict resolver: a focused overlay. The field-level 3-way merge couldn't auto-apply because the user
+// AND Loom both changed the same field away from base — so per conflict field they keep theirs or take the
+// shipped value, wholesale. We POST the per-field resolutions map. (Much simpler than the skills per-hunk
+// text resolver — a short list of fields, each a mine-vs-shipped pick.)
+function ConflictResolver({
+  name, conflicts, onApply, onCancel, applying, error,
+}: { name: string; conflicts: ProfileFieldMerge[]; onApply: (resolutions: Record<string, ProfileFieldResolution>) => void; onCancel: () => void; applying: boolean; error: Error | null }) {
+  // Default every field to "mine" — preserve the user's edits unless they explicitly take the shipped side.
+  const [choices, setChoices] = useState<Record<string, ProfileFieldResolution>>(
+    () => Object.fromEntries(conflicts.map((c) => [c.field, "mine" as ProfileFieldResolution])),
+  );
+  const n = conflicts.length;
+
+  return (
+    <div role="dialog" aria-label={`Resolve update conflicts for ${name}`}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-start",
+        justifyContent: "center", paddingTop: "8vh", zIndex: 1000 }}
+      onClick={onCancel}>
+      <Panel style={{ width: "min(920px, 92vw)", maxHeight: "84vh", display: "flex", flexDirection: "column", padding: 0 }}>
+        <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", borderBottom: `1px solid ${color.border}` }}>
+            <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>Resolve update</strong>
+            <Badge tone="cyan">{name}</Badge>
+            <span style={{ color: color.textMuted, fontSize: 12 }}>
+              {n} conflicting {n === 1 ? "field" : "fields"} — keep yours or take shipped
+            </span>
+            <span style={{ flex: 1 }} />
+            <Button onClick={onCancel}>Cancel</Button>
+          </div>
+
+          <div style={{ overflow: "auto", padding: 14, display: "flex", flexDirection: "column", gap: 14, minHeight: 0 }}>
+            {conflicts.map((c) => {
+              const choice = choices[c.field] ?? "mine";
+              return (
+                <div key={c.field} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>{fieldDisplayName(c.field)}</span>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <FieldSide label="Your version" tone="cyan" active={choice === "mine"} value={formatFieldValue(c.field, c.mine)}
+                      onPick={() => setChoices((m) => ({ ...m, [c.field]: "mine" }))} />
+                    <FieldSide label="Shipped version" tone="amber" active={choice === "shipped"} value={formatFieldValue(c.field, c.shipped)}
+                      onPick={() => setChoices((m) => ({ ...m, [c.field]: "shipped" }))} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ borderTop: `1px solid ${color.border}`, padding: "10px 14px", display: "flex", alignItems: "center", gap: 8 }}>
+            {error && <span style={{ color: color.red, fontFamily: font.mono, fontSize: 11 }}>{error.message}</span>}
+            <span style={{ flex: 1 }} />
+            <Button variant="primary" disabled={applying} onClick={() => onApply(choices)}>
+              {applying ? "Adopting…" : "Adopt resolved"}
+            </Button>
+          </div>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+// One side of a conflict field — clickable to select. The active side gets a phosphor border; the other
+// reads dim, so the chosen resolution is obvious at a glance. Mirrors Skills.tsx HunkSide (value, not lines).
+function FieldSide({ label, tone: t, active, value, onPick }: { label: string; tone: Tone; active: boolean; value: string; onPick: () => void }) {
+  const accent = t === "cyan" ? color.cyan : color.amber;
+  return (
+    <button onClick={onPick} title={`Keep this version (${label})`}
+      style={{ textAlign: "left", cursor: "pointer", borderRadius: radius.sm, padding: 8,
+        background: active ? color.panel : color.panel2,
+        border: `1px solid ${active ? color.phosphor : color.border}`,
+        boxShadow: active ? `inset 0 0 0 1px ${color.phosphorDim}` : undefined }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+        <span style={{ width: 7, height: 7, borderRadius: 7, background: accent, display: "inline-block" }} />
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: active ? color.phosphor : color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+          {label}{active ? " ✓" : ""}
+        </span>
+      </div>
+      <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: font.mono, fontSize: 12,
+        lineHeight: 1.5, color: active ? color.text : color.textMuted }}>
+        {value}
+      </pre>
+    </button>
+  );
+}
+
+// --- field formatting helpers (pure) ------------------------------------------------------------
+
+// Human label for a mergeable profile field (keys mirror the daemon's MERGEABLE_PROFILE_FIELDS).
+const FIELD_DISPLAY: Record<string, string> = {
+  role: "Role", description: "Description", allowDelta: "Allow delta", skills: "Skills",
+  model: "Model", icon: "Icon", browserTesting: "Browser testing", documentConversion: "Document conversion",
+};
+function fieldDisplayName(field: string): string {
+  return FIELD_DISPLAY[field] ?? field;
+}
+
+// Render a field's value (typed `unknown` over the wire) as readable text — empties/nulls become the same
+// human phrasing the editor uses (e.g. skills null = all, model null = engine default).
+function formatFieldValue(field: string, value: unknown): string {
+  if (value === null || value === undefined) {
+    if (field === "skills") return "(all skills)";
+    if (field === "role") return "plain";
+    if (field === "model") return "engine default";
+    return "(none)";
+  }
+  if (Array.isArray(value)) return value.length ? value.join("\n") : (field === "skills" ? "(none → all skills)" : "(empty)");
+  if (typeof value === "boolean") return value ? "on" : "off";
+  if (value === "") return "(empty)";
+  return String(value);
 }

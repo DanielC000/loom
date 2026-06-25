@@ -1,4 +1,8 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion } from "@loom/shared";
+
+// Per-conflict resolution for a profile adopt-update: pick the user's value or the shipped value,
+// wholesale (the field-level analog of the skills resolver's per-hunk mine/shipped choice).
+export type ProfileFieldResolution = "mine" | "shipped";
 
 // One desired column in the atomic board-column layout PUT (card B). `prevKey` (when set) marks a KEY
 // RENAME — the server re-keys that column's cards old→new. A column omitted from the array is REMOVED;
@@ -393,13 +397,26 @@ export const api = {
   // injected prompt comes from the agent). HUMAN-managed only — there is no agent-writable MCP
   // surface, just this web client + REST. createProfile validates
   // → 201; updateProfile is a partial-merge (omitted fields are preserved server-side); resetProfile
-  // restores a bundled profile to its shipped fields. ---
-  profiles: () => get<Profile[]>("/api/profiles"),
-  profile: (id: string) => get<Profile>(`/api/profiles/${encodeURIComponent(id)}`),
+  // restores a bundled profile to its shipped fields. The list/get/reset/adopt responses carry the
+  // computed customization state (bundled + customized/updateAvailable for bundled-by-name rows). ---
+  profiles: () => get<ProfileSummary[]>("/api/profiles"),
+  profile: (id: string) => get<ProfileSummary>(`/api/profiles/${encodeURIComponent(id)}`),
   createProfile: (b: Omit<Profile, "id">) => post<Profile>("/api/profiles", b),
   updateProfile: (id: string, patch: Partial<Omit<Profile, "id">>) => put<Profile>(`/api/profiles/${encodeURIComponent(id)}`, patch),
   deleteProfile: (id: string) => del<{ ok: boolean }>(`/api/profiles/${encodeURIComponent(id)}`),
-  resetProfile: (id: string) => post<Profile>(`/api/profiles/${encodeURIComponent(id)}/reset`),
+  resetProfile: (id: string) => post<ProfileSummary>(`/api/profiles/${encodeURIComponent(id)}/reset`),
+  // --- Bundled-profile update adoption (field-level 3-way merge; only meaningful when a bundled-by-name
+  // profile reports updateAvailable). The profiles analog of the skill adoption routes, but FIELD-level
+  // (profiles are structured, not text). ---
+  // "What shipped changed" since last sync: the base→shipped field changes (each carries mine/base/shipped).
+  profileUpdateDiff: (id: string) => get<{ changed: ProfileFieldMerge[] }>(`/api/profiles/${encodeURIComponent(id)}/update-diff`),
+  // Dry-run the field-level 3-way merge: { clean } → one-click adopt; otherwise conflicts to resolve. 409 if no update.
+  profileMergePreview: (id: string) => get<ProfileMergeResult>(`/api/profiles/${encodeURIComponent(id)}/merge-preview`),
+  // Adopt the update: empty/absent resolutions one-clicks a clean auto-merge; a resolutions map (per
+  // conflict field → mine|shipped) lands a conflict resolution. Advances base=shipped, returns the updated
+  // profile + computed state. 409 (surfaced via postErr) if conflicts are left unresolved or there's no update.
+  adoptProfile: (id: string, resolutions?: Record<string, ProfileFieldResolution>) =>
+    postErr<ProfileSummary>(`/api/profiles/${encodeURIComponent(id)}/adopt`, resolutions ? { resolutions } : undefined),
 
   // --- Schedules (phase-2 Pillar B): cron triggers that boot a manager in `agentId` on each due
   // boundary. HUMAN-managed (this page + REST) — there is no agent-writable MCP surface. createSchedule
