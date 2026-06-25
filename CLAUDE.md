@@ -124,6 +124,9 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
   `documentConversion` spawns with its OWN per-session stdio markitdown MCP (Microsoft `markitdown-mcp`,
   resolved to an ABSOLUTE path) and its single tool `mcp__markitdown__convert_to_markdown` allowlisted —
   so a research/document rig can convert files (PDF/Office/images/HTML/…) to Markdown to save tokens.
+  **ffmpeg caveat:** AUDIO conversion needs `ffmpeg` on PATH; document formats (PDF/Office/images/HTML)
+  don't. Without ffmpeg, `markitdown[all]`'s `pydub` prints a harmless "Couldn't find ffmpeg or avconv"
+  to stderr on every invocation — documents convert fine. Loom does NOT install or suppress it.
   Structurally identical to `browserTesting`: default OFF + fully additive (every existing spawn
   byte-identical when off); pinned on the session row so resume/fork/recycle keep it. HUMAN-set only
   (Profiles UI/REST) — never an agent MCP tool (it launches a host process; same capability-gating posture
@@ -154,8 +157,12 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
   `python.interpreterPath` is a top-level human-only config (resolved by `resolveConfig`, carried to the
   daemon resolver via the session-env transport `pythonSessionEnv` → `LOOM_PYTHON_INTERPRETER`); it points
   at a host EXECUTABLE, so — exactly like `obsidian.path`/`gateCommand` — the agent-facing config validator
-  REJECTS it (human REST path only). *(Deferred cheap follow-up: warm the venv at daemon boot / on a profile
-  save with `documentConversion`, so the first session rarely hits the cold-skip window.)*
+  REJECTS it (human REST path only). The venv is PRE-WARMED off the hot path to close the cold-skip window
+  (`python/prewarm.ts`): at daemon boot if any profile sets `documentConversion`, and when a profile is
+  SAVED with it on — both reuse the SAME deduped async background kick (`prewarmMarkitdown`), so the first
+  documentConversion session usually finds the MCP already warm. The carried `python.interpreterPath` (a
+  per-project config with no platform-override layer) resolves to the first project that sets one, else PATH
+  discovery.
 - **Worktree dep-provisioning (`git/worktrees.ts`):** `createWorktree` best-effort-installs deps at
   creation so a worker boots build-ready. It picks the package manager by lockfile marker IN the worktree
   root — deterministic precedence pnpm (`pnpm-lock.yaml`) → npm (`package-lock.json`) → yarn (`yarn.lock`),

@@ -12,6 +12,7 @@ import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
 import { seedSetupHome, seedSetupAgentRename, seedSetupAuditorAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles } from "./tasks/columns.js";
+import { prewarmMarkitdownForProfilesAtBoot } from "./python/prewarm.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
 import { TaskMcpRouter } from "./mcp/server.js";
@@ -113,6 +114,15 @@ async function main(): Promise<void> {
   const platformOverride = db.getPlatformConfig();
   const resolved = resolveConfig(undefined, platformOverride);
   const { watchers, timeouts } = resolved.platform;
+  // Pre-warm the shared markitdown venv if any profile opts into documentConversion, so the FIRST such
+  // session usually finds the MCP already warm instead of hitting the provision-on-first-spawn cold-skip
+  // window. Best-effort + fully off the event loop (delegates to the async background kick) — must NEVER
+  // gate boot, so it's wrapped like the other one-shot boot side-effects above.
+  try {
+    if (prewarmMarkitdownForProfilesAtBoot(db)) console.log("[boot] pre-warming the markitdown venv (a profile opts into documentConversion)");
+  } catch (err) {
+    console.warn(`[boot] markitdown pre-warm kick failed (continuing boot): ${(err as Error).message}`);
+  }
   const recovered = db.recoverStaleSessions();
   if (recovered > 0) console.log(`[boot] reconciled ${recovered} stale session(s) -> exited`);
   const dead = sweepDeadSessions(db);

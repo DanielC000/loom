@@ -214,7 +214,8 @@ function ProfileEditor({ profile, bundled, onSave, saving, onDelete, deleting, o
           <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
             Inject a per-session markitdown MCP so this rig can convert files (PDF / Office / images / HTML)
             to Markdown to save tokens. Gated — needs a base Python (≥3.10) on the host; Loom provisions its
-            own venv on first use. Leave off unless this rig works with documents.
+            own venv on first use. Audio conversion needs ffmpeg on PATH; document formats (PDF / Office /
+            images / HTML) don't. Leave off unless this rig works with documents.
           </span>
         </span>
       </label>

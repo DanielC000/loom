@@ -411,6 +411,25 @@ export function __markitdownProvisionKicks(): number {
 }
 
 /**
+ * Pre-warm the shared markitdown venv AHEAD of the first documentConversion session — called OFF the spawn
+ * hot path (at daemon boot if any profile opts in, and when a profile is SAVED with documentConversion=true,
+ * see `python/prewarm.ts`). This closes the provision-on-first-spawn cold-skip window: today the FIRST
+ * documentConversion session kicks provisioning and spawns WITHOUT the MCP, and only a LATER spawn picks the
+ * tool up once the venv warms (~1.5 min). Pre-warming earlier means the venv is usually warm by the first
+ * spawn.
+ *
+ * Pure delegation to {@link resolveMarkitdownBin} — it REUSES the SAME gating (the `LOOM_MARKITDOWN_BIN`
+ * override + the venv-already-warm short-circuits, both of which simply return without kicking) and the SAME
+ * deduped, one-shot {@link kickMarkitdownProvision} the spawn path uses. So a pre-warm never double-provisions,
+ * never blocks (the heavy venv-create + pip runs in the EXISTING async background job — best-effort, off the
+ * event loop), and is safe to call before/independent of any spawn. The resolved path is discarded; the POINT
+ * is the background-kick side effect.
+ */
+export function prewarmMarkitdown(pythonInterpreterPath?: string): void {
+  resolveMarkitdownBin(pythonInterpreterPath);
+}
+
+/**
  * The stdio MCP-config entry for a documentConversion session, or null if markitdown can't be resolved
  * (no base Python / venv or pip failure). `markitdown-mcp` speaks STDIO by default and needs NO args (the
  * one tool, `convert_to_markdown(uri)`, accepts file:/http(s):/data: URIs) — the args difference from

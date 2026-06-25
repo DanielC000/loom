@@ -37,6 +37,7 @@ import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, pu
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
+import { prewarmMarkitdown, resolvePrewarmInterpreterPath } from "../python/prewarm.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
 
@@ -582,6 +583,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!v.ok) return reply.code(400).send({ error: `invalid profile: ${v.error}` });
     const profile = { id: randomUUID(), ...v.value };
     deps.db.insertProfile(profile);
+    // Pre-warm the shared markitdown venv NOW (off the event loop, best-effort) so the first session under
+    // this profile finds the MCP already warm instead of hitting the provision-on-first-spawn cold-skip
+    // window. Reuses the existing deduped async background kick — a no-op if the venv is already warm.
+    if (profile.documentConversion) prewarmMarkitdown(resolvePrewarmInterpreterPath(deps.db.listAllProjects()));
     return reply.code(201).send(profile);
   });
   app.put("/api/profiles/:id", async (req, reply) => {
@@ -596,6 +601,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const v = validateProfile({ ...base, ...patch });
     if (!v.ok) return reply.code(400).send({ error: `invalid profile: ${v.error}` });
     deps.db.updateProfile(id, v.value);
+    // Same cold-skip-window pre-warm as POST: if this save turns documentConversion ON, kick the shared
+    // markitdown venv now (deduped async background job; no-op when already warm).
+    if (v.value.documentConversion) prewarmMarkitdown(resolvePrewarmInterpreterPath(deps.db.listAllProjects()));
     return deps.db.getProfile(id);
   });
   // Delete is SAFE for assigned agents: a dangling profile_id resolves to the plain backstop (a
