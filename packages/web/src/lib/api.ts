@@ -13,6 +13,17 @@ export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
 // enqueued it: 'human' (the composer — adjustable) vs 'system' (worker reports / nudges — read-only).
 export interface QueuedMessage { id: string; text: string; source: "human" | "system"; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
+
+// Skill update adoption (end-user customization — card 295a50f9). `update-diff` is the raw base→shipped
+// pair (the UI computes the "what shipped changed" line diff); `merge-preview` is the 3-way auto-merge:
+// `clean` one-clicks, otherwise `merged` carries git-style conflict markers (<<<<<<< mine / ||||||| base
+// / ======= / >>>>>>> shipped) for a whole-file editor and `conflicts[]` enumerates each hunk for a
+// per-hunk resolver. POST adopt with the resolved full content (or none, for a clean auto-merge).
+export interface SkillUpdateDiff { base: string; shipped: string; }
+export interface SkillMergeConflict { mine: string; base: string; shipped: string; }
+export type SkillMergePreview =
+  | { clean: true; merged: string }
+  | { clean: false; merged: string; conflicts: SkillMergeConflict[] };
 // Epic 2c-2 — the daemon's npm "update available" status (GET /api/update-status). The banner shows ONLY
 // when `packaged && updateAvailable`; a from-source daemon reports packaged:false → no banner ever.
 export interface UpdateStatus {
@@ -367,6 +378,16 @@ export const api = {
   deleteSkill: (name: string) => del<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}`),
   resetSkill: (name: string) => post<{ name: string; content: string }>(`/api/skills/${encodeURIComponent(name)}/reset`),
   publishSkill: (name: string) => post<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}/publish`),
+  // --- Skill update adoption (3-way merge; only meaningful when a skill reports updateAvailable). ---
+  // The raw base→shipped pair; the UI renders the computed line diff ("what shipped changed").
+  skillUpdateDiff: (name: string) => get<SkillUpdateDiff>(`/api/skills/${encodeURIComponent(name)}/update-diff`),
+  // Dry-run the 3-way merge: { clean } → one-click adopt; otherwise conflicts to resolve. 409 if no update.
+  skillMergePreview: (name: string) => get<SkillMergePreview>(`/api/skills/${encodeURIComponent(name)}/merge-preview`),
+  // Adopt the update: empty content one-clicks the clean auto-merge; resolved full content lands a
+  // conflict resolution. Advances base=shipped. 409 (surfaced via postErr) if it isn't a clean auto-merge
+  // and no content was supplied, or there's no update to adopt.
+  adoptSkill: (name: string, content?: string) =>
+    postErr<{ name: string; content: string }>(`/api/skills/${encodeURIComponent(name)}/adopt`, content !== undefined ? { content } : undefined),
 
   // --- Profiles (platform-level rig: role + allow/skills/model/icon + a UI-only description; the
   // injected prompt comes from the agent). HUMAN-managed only — there is no agent-writable MCP
