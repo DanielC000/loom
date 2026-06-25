@@ -7,6 +7,21 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-06-25
+
+A **rebuilt Vault page** — browse your project's notes as a real folder tree and view images, graphics,
+and PDFs inline.
+
+### Added
+- **Vault folder tree.** The Vault browser now shows a proper **collapsible folder tree** (folders first,
+  file-type icons, indentation, active-file highlight) instead of a flat list of full paths, with a
+  **filter box** that auto-expands matching folders and a clickable **breadcrumb** of the open file's path.
+- **View images, graphics, and PDFs in the Vault.** Files now open in a **type-aware viewer**: Markdown
+  (now with **inline images** rendering, including Obsidian `![[image.png]]` embeds), images (PNG/JPG/GIF/
+  WebP/SVG/…), **PDFs** embedded inline, editable text/code, and a clean **download card** for other
+  binaries — instead of dumping non-text files as garbled text. Backed by a new read-only, binary-safe,
+  content-typed vault file endpoint (streamed, size-capped, path-traversal-guarded).
+
 ## [0.8.1] — 2026-06-25
 
 Document conversion no longer fails **silently**: when the converter can't install, Loom now shows you
