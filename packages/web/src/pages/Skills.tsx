@@ -415,17 +415,20 @@ function assemble(parts: Part[], choices: ("mine" | "shipped")[]): string {
 
 type DLine = { t: "+" | "-" | " "; text: string };
 // Line-level LCS diff. Backtracks a forward DP so equal lines are " ", base-only "-", shipped-only "+".
+// Comparison strips a trailing \r so a CRLF/LF skew between base and shipped doesn't read as whole-file
+// churn (mirrors the daemon's normalizeForCompare tolerance); display keeps the raw text (`text`).
 function diffLines(a: string, b: string): DLine[] {
   const A = a.split("\n"), B = b.split("\n");
+  const An = A.map((l) => l.replace(/\r$/, "")), Bn = B.map((l) => l.replace(/\r$/, ""));
   const n = A.length, m = B.length;
   const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
   for (let i = n - 1; i >= 0; i--)
     for (let j = m - 1; j >= 0; j--)
-      dp[i]![j] = A[i] === B[j] ? dp[i + 1]![j + 1]! + 1 : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
+      dp[i]![j] = An[i] === Bn[j] ? dp[i + 1]![j + 1]! + 1 : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
   const out: DLine[] = [];
   let i = 0, j = 0;
   while (i < n && j < m) {
-    if (A[i] === B[j]) { out.push({ t: " ", text: A[i]! }); i++; j++; }
+    if (An[i] === Bn[j]) { out.push({ t: " ", text: A[i]! }); i++; j++; }
     else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) { out.push({ t: "-", text: A[i]! }); i++; }
     else { out.push({ t: "+", text: B[j]! }); j++; }
   }
