@@ -4,6 +4,7 @@ import { execSync } from "node:child_process";
 import chokidar, { type FSWatcher } from "chokidar";
 import { simpleGit, type SimpleGit } from "simple-git";
 import type { Db } from "../db.js";
+import { LOOM_HOME } from "../paths.js";
 
 /**
  * Stage-all + commit a vault folder, honoring the same externally-managed backoff as the
@@ -96,7 +97,7 @@ export class VaultVersioner {
     }
     this.watcher = chokidar.watch(this.commitPath, {
       ignoreInitial: true,
-      ignored: /(^|[/\\])(\.git|\.obsidian)([/\\]|$)/,
+      ignored: /(^|[/\\])(\.git|\.obsidian|node_modules|worktrees)([/\\]|$)/,
     });
     this.watcher.on("all", () => this.schedule());
   }
@@ -146,6 +147,26 @@ export class VaultVersioner {
 }
 
 /**
+ * An OPERATIONAL/daemon-home directory is NOT a docs vault — it is Loom's own state dir (`LOOM_HOME`:
+ * `loom.db` + its -wal/-shm, `backups/`, `worktrees/` with node_modules, `logs/`, `tmp/`). The reserved
+ * "Loom Platform" home points its `vaultPath` AT this dir, so `startVaultVersioners` must NEVER watch it:
+ * a `git add -A` there would stage the LIVE SQLite DB (churn / bloat / commit-mid-write corruption) and
+ * chokidar walking `worktrees/`+node_modules thrashes. We detect it by CONTENT (a `loom.db` file or a
+ * `worktrees/` dir present — env-independent, the robust PRIMARY signal) with `LOOM_HOME`-equality as
+ * belt-and-suspenders. Checked against BOTH the raw vault dir and its resolved governing repo root.
+ */
+function isOperationalVaultDir(dir: string): boolean {
+  const norm = (p: string) => {
+    const r = path.resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
+    return process.platform === "win32" ? r.toLowerCase() : r;
+  };
+  if (norm(dir) === norm(LOOM_HOME)) return true; // belt-and-suspenders: equals the daemon home
+  if (fs.existsSync(path.join(dir, "loom.db"))) return true; // the live daemon DB lives here
+  if (fs.existsSync(path.join(dir, "worktrees"))) return true; // worker worktrees (node_modules churn)
+  return false;
+}
+
+/**
  * Boot wiring for the vault auto-committer: start ONE `VaultVersioner` per UNIQUE live project vault.
  * Factored out of index.ts so the boot wiring is itself testable (the gap this fixes existed precisely
  * because the class was unit-tested in isolation while NEVER wired). index.ts calls this at boot; the
@@ -180,6 +201,12 @@ export async function startVaultVersioners(db: Db, opts?: { debounceMs?: number 
       // Resolve to the governing repo root FIRST so the dedupe key + the back-off decision both key off
       // the root, collapsing sibling project-subfolders of one repo to a single watcher.
       const ctx = await resolveVaultRepoContext(vaultPath);
+      // SKIP operational/daemon-home vaults (a reserved/.loom-rooted home is NOT a docs vault) — checked
+      // against both the raw vault dir and the resolved governing repo root. BEFORE constructing/starting.
+      if (isOperationalVaultDir(vaultPath) || isOperationalVaultDir(ctx.commitPath)) {
+        console.warn(`[vault-versioner] project ${project.id} vault (${vaultPath}) is an operational/daemon-home dir (loom.db/worktrees/LOOM_HOME) — skipping; not a docs vault.`);
+        continue;
+      }
       const key = ctx.commitPath.replace(/\\/g, "/");
       if (seen.has(key)) continue; // already watching this repo root
       seen.add(key);

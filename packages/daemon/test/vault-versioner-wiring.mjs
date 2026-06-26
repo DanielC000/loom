@@ -73,6 +73,17 @@ plantObsidianGitMarker(obsRepo);
 const obsVault = path.join(obsRepo, "ObsProj");
 fs.mkdirSync(obsVault);
 
+// OPERATIONAL/daemon-home vaults: Loom's own state dir is NOT a docs vault — watching one would stage the
+// LIVE SQLite DB (loom.db) and thrash chokidar over worktrees/node_modules. startVaultVersioners must SKIP
+// a vault that (a) contains a `loom.db` file, (b) contains a `worktrees/` dir, or (c) IS the daemon home
+// (LOOM_HOME). Three projects, one per signal — all must be skipped (no watcher).
+const opDb = path.join(root, "opDb");        // (a) contains a loom.db file
+fs.mkdirSync(opDb);
+fs.writeFileSync(path.join(opDb, "loom.db"), "");
+const opWt = path.join(root, "opWt");        // (b) contains a worktrees/ dir
+fs.mkdirSync(path.join(opWt, "worktrees"), { recursive: true });
+const opHome = process.env.LOOM_HOME;        // (c) IS the daemon home (LOOM_HOME)
+
 const now = new Date().toISOString();
 const db = new Db();
 // p1 + p2 SHARE vaultA (dedupe target); p3 → vaultB; p4 has NO vaultPath (skip); p5 is archived (skip).
@@ -85,6 +96,10 @@ db.insertProject({ id: "p5", name: "P5", repoPath: vaultB, vaultPath: path.join(
 db.insertProject({ id: "p6", name: "P6", repoPath: plainProjA, vaultPath: plainProjA, config: {}, createdAt: now, archivedAt: null });
 db.insertProject({ id: "p7", name: "P7", repoPath: plainProjB, vaultPath: plainProjB, config: {}, createdAt: now, archivedAt: null });
 db.insertProject({ id: "p8", name: "P8", repoPath: obsVault, vaultPath: obsVault, config: {}, createdAt: now, archivedAt: null });
+// op1/op2/op3 → operational/daemon-home vaults: must be SKIPPED (no watcher) by the operational-vault guard.
+db.insertProject({ id: "op1", name: "Op1", repoPath: opDb, vaultPath: opDb, config: {}, createdAt: now, archivedAt: null });
+db.insertProject({ id: "op2", name: "Op2", repoPath: opWt, vaultPath: opWt, config: {}, createdAt: now, archivedAt: null });
+db.insertProject({ id: "op3", name: "Op3", repoPath: opHome, vaultPath: opHome, config: {}, createdAt: now, archivedAt: null });
 // ISOLATION (per-project guard): pBad's vaultPath points at a NON-EXISTENT dir, which makes
 // simpleGit() throw inside resolveVaultRepoContext — a deterministic throw on resolve. listAllProjects
 // is ORDER BY name, so naming pBad "ZZbad" < pGood "ZZgood" iterates the throwing project FIRST; the
@@ -103,8 +118,9 @@ try {
 
   // (a)+(c)+(e): exactly 4 watchers — vaultA (deduped p1+p2) + vaultB + plainRepo ROOT (deduped p6+p7
   // subfolders) + vaultD (pGood, started DESPITE the earlier-iterating pBad throwing). Empty (p4),
-  // archived (p5), Obsidian-Git-managed (p8), and the throwing pBad are skipped.
-  check("one watcher per UNIQUE repo root (dedupe + skip empty/archived/obsidian-git)", versioners.length === 4);
+  // archived (p5), Obsidian-Git-managed (p8), the operational/daemon-home vaults (op1 loom.db / op2
+  // worktrees/ / op3 == LOOM_HOME), and the throwing pBad are all skipped.
+  check("one watcher per UNIQUE repo root (dedupe + skip empty/archived/obsidian-git/operational)", versioners.length === 4);
   check("each started handle is a VaultVersioner", versioners.every((v) => v instanceof VaultVersioner));
 
   // (b): a filesystem edit to a vault doc auto-commits via the wired chokidar→debounce→commit path.
