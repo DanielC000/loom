@@ -671,6 +671,10 @@ interface Live {
                         // The PRECISE collision signal (supersedes the old keystroke time-grace). Tracked in writeStdin.
   pending: QueuedMessage[]; // FIFO of messages held while busy / while the human types — drained on Stop + reconcile. Each carries a stable id so the UI can delete/edit/reorder a specific entry safely (an id op is a no-op once that entry has drained).
   stopping: boolean;    // a Stop is in flight — SUPPRESS drain/submit so a queued turn can't re-arm busy past it
+  rateLimited: boolean; // §19c park: the turn died on a usage cap; the pty is alive but PARKED. SUPPRESS
+                        // drain/submit (mirror of `stopping`) so the ~10s reconcile drain can't submit pending
+                        // into the capped account and CLOBBER lastPrompt — the killed turn resumeAfterRateLimit
+                        // must replay. Set when the StopFailure is detected as rate_limit; cleared on resume.
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
   startupModeCycles: number; // Shift+Tab presses to inject once, after SessionStart, to reach the target mode
   startupCyclesDone: boolean; // guard so the cycle-inject fires at most once per session
@@ -944,6 +948,7 @@ export class PtyHost {
       composerLen: 0,
       pending: [],
       stopping: false,
+      rateLimited: false,
       // The startup-prompt turn runs from a CLI arg (not submit()), so seed lastPrompt with it —
       // a cap on the FIRST turn must still be re-submittable on resume (§19c-b).
       lastPrompt: opts.startupPrompt ?? null,
@@ -1066,7 +1071,7 @@ export class PtyHost {
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
       busy: false, ready: true, busySince: null,
       lastOutputAt: Date.now(), composerLen: 0,
-      pending: [], stopping: false, lastPrompt: null,
+      pending: [], stopping: false, rateLimited: false, lastPrompt: null,
       startupModeCycles: 0, startupCyclesDone: true,
       mcpPromptHandled: true, bootScan: "",
       resumeGateHandled: true, resumeGateScan: "",
@@ -1311,6 +1316,10 @@ export class PtyHost {
             const det = detectUsageLimit(hook);
             if (det.limited) {
               const until = rateLimitedUntil(det.resetsAtSeconds);
+              // PARK: suppress drain/submit until resume. Skipping the synchronous drain below is not enough —
+              // the ~10s reconcile timer (and any incoming enqueueStdin) would otherwise drain pending into the
+              // capped account and submit() would CLOBBER lastPrompt, losing the killed turn we must replay.
+              live.rateLimited = true;
               this.events.onRateLimited(sessionId, until, { resetsAtSeconds: det.resetsAtSeconds, message: `usage limit — resumes ${until}` });
               break;
             }
@@ -1349,7 +1358,7 @@ export class PtyHost {
     // `ready` gate: a freshly (re)spawned pty is not ready until SessionStart. Submitting before then
     // writes into a still-booting TUI — the Enter is swallowed and the text strands in the composer
     // (the 2026-06-03 restart bug). Hold it FIFO; markReady drains it once the engine is up.
-    if (live.ready && !live.busy && !live.stopping && !this.deferForHumanDraft(live)) {
+    if (live.ready && !live.busy && !live.stopping && !live.rateLimited && !this.deferForHumanDraft(live)) {
       // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
       // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
       // synchronous code this is unreachable — enqueueStdin runs as its own event-loop task, never
@@ -1370,7 +1379,7 @@ export class PtyHost {
       // also keeps the load-bearing M1/M2 window byte-identical: no extra work on the synchronous submit.
       return { delivered: true };
     }
-    // Held (busy / not-ready / composer-dirty). Carry the optional delivery callback so that when this
+    // Held (busy / not-ready / composer-dirty / rate-limit parked). Carry the optional delivery callback so that when this
     // entry is finally handed to the recipient (drainPending or consumePending), the durable queued
     // message can be marked delivered. Undefined for every existing (non-messaging) caller → a no-op.
     live.pending.push({ id: randomUUID(), text, source, onDeliver });
@@ -1576,6 +1585,11 @@ export class PtyHost {
     // each Ctrl-C just interrupts the freshly-drained turn, so it takes N escalating clicks to land).
     // stop() also clears the queue, so this is belt-and-suspenders for a late enqueue during the stop.
     if (live.stopping) return;
+    // PARKED on a usage cap → do NOT drain. The turn died on the rate limit and the pty is held alive for
+    // resumeAfterRateLimit to replay lastPrompt; draining here would submit() pending into the still-capped
+    // account and OVERWRITE lastPrompt, so the agent would resume with the wrong content and never finish
+    // the interrupted turn. The held queue is kept intact and drains normally on the post-resume Stop.
+    if (live.rateLimited) return;
     if (this.deferForHumanDraft(live)) return; // HOLD while the human's raw composer is dirty — never land on half-typed text
     const drained = live.pending.splice(0); // splice the WHOLE FIFO (mirror consumePending) — coalesce all into one turn
     this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR)); // one submit, one busy re-arm, FIFO order preserved
@@ -1639,6 +1653,9 @@ export class PtyHost {
   resumeAfterRateLimit(sessionId: string): boolean {
     const live = this.live.get(sessionId);
     if (!live?.alive) return false;
+    // UNPARK: drop the suppress flag FIRST so the re-submitted turn (and the post-resume Stop drain of the
+    // held queue) can proceed. submit() re-arms busy, so the reconcile drain stays no-op until that turn ends.
+    live.rateLimited = false;
     if (live.lastPrompt != null) this.submit(sessionId, live.lastPrompt);
     return true;
   }
