@@ -1155,7 +1155,7 @@ export class PtyHost {
     ensureTrusted(opts.cwd); // pre-accept the workspace-trust dialog so warmup never blocks
     // Mirror Loom's managed skills into <cwd>/.claude/skills (project-local; shadow personal). Never
     // let a skills hiccup block a spawn — a session must boot even if skill delivery fails.
-    try { injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
+    try { injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null, opts.role); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
     // Both managers AND workers get the orchestration MCP — but a role-gated surface: managers
     // get the full coordination tools, workers get only worker_report (resolved server-side). A
     // platform-lead instead gets the loom-platform MCP (project/agent creation, Pillar C). acceptEdits

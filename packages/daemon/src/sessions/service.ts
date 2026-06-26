@@ -689,6 +689,15 @@ export class SessionService {
     const project = this.db.getProject(session.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
+    // Re-resolve the agent's spawn so a resumed session keeps its profile's LAYERED allowlist (allowDelta),
+    // not the bare config.permission — a profile-pinned worker/manager loses its allow entries on every
+    // resume otherwise. The role is the row's locked role (NOT the profile's, so an explicit-role session
+    // resumes byte-identically). Model is DELIBERATELY omitted on resume — `--resume` inherits the
+    // transcript's model. Agent-missing (deleted) ⇒ fall back to bare config.permission so the resume still works.
+    const agent = this.db.getAgent(session.agentId);
+    const resumePermission = agent
+      ? this.resolveAgentSpawn(agent, config, session.role ?? undefined).permission
+      : config.permission;
 
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(session.id, "live");
@@ -707,7 +716,7 @@ export class SessionService {
       // (modeAfterCyclesFromAcceptEdits of the same startupModeCycles → auto by default), so a resumed
       // session matches a fresh one exactly. startupModeCycles is moot on this path (the feedback cycler,
       // not the blind count, moves the mode) — pin it 0 so the FRESH blind branch stays inert here.
-      permission: { ...config.permission, startupModeCycles: 0 },
+      permission: { ...resumePermission, startupModeCycles: 0 },
       resumeModeTarget: modeAfterCyclesFromAcceptEdits(config.permission.startupModeCycles ?? 0),
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
@@ -1647,7 +1656,7 @@ export class SessionService {
     this.pty.spawn({
       sessionId: worker.id,
       cwd: worktreePath,
-      permission: config.permission,
+      permission: workerSpawn.permission, // layered allowDelta from the worker profile (was bare config.permission — dropped the profile allowlist)
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
@@ -1658,6 +1667,7 @@ export class SessionService {
       role: "worker", // gives the worker the orchestration surface (worker_report only)
       browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
       documentConversion, // inject the per-session markitdown MCP iff this worker's profile opted in
+      model: workerSpawn.model, // profile-pinned model → `--model` (undefined ⇒ no `--model`); was dropped — workers never honored a profile model pin
       skills, // deliver only the worker profile's skill subset (null ⇒ all)
     });
     // Move the task into the `active` lane (role-resolved off the manager-project config, not the
@@ -2389,6 +2399,12 @@ export class SessionService {
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
     const agent = this.db.getAgent(old.agentId); // the worker's agent — for its base brief in the handoff opening
+    // Re-resolve the worker's spawn so the recycled successor keeps the profile's LAYERED allowlist +
+    // model pin (the fresh-spawn paths thread these; recycle used to drop them to bare config.permission /
+    // no model). Re-resolve from the agent rather than carrying old.* — the agent is already in scope and
+    // a profile edit between generations is picked up, no session-row schema migration needed. Agent-missing
+    // (deleted) ⇒ bare config.permission + no model, mirroring the resume fallback.
+    const workerSpawn = agent ? this.resolveAgentSpawn(agent, config, "worker") : undefined;
     const newGen = (old.gen ?? 0) + 1;
 
     this.db.appendEvent({
@@ -2447,7 +2463,7 @@ export class SessionService {
     this.pty.spawn({
       sessionId: fresh.id,
       cwd: worktreePath,
-      permission: config.permission,
+      permission: workerSpawn?.permission ?? config.permission, // re-resolved layered allowlist (was bare config.permission)
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
@@ -2457,6 +2473,7 @@ export class SessionService {
       role: "worker",
       browserTesting: old.browserTesting ?? false,
       documentConversion: old.documentConversion ?? false,
+      model: workerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
       skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
     });
     // Hand the carried queue + scheduled wakes to the successor: re-point the old worker's wakes (so a
@@ -2486,6 +2503,10 @@ export class SessionService {
     const project = this.db.getProject(old.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
+    // Re-resolve the manager's spawn so the recycled successor keeps the profile's LAYERED allowlist +
+    // model pin (mirrors recycleWorker; recycle used to drop them to bare config.permission / no model).
+    // Agent-missing ⇒ bare config.permission + no model.
+    const managerSpawn = agent ? this.resolveAgentSpawn(agent, config, "manager") : undefined;
     const newGen = (old.gen ?? 0) + 1;
 
     this.db.appendEvent({
@@ -2527,7 +2548,7 @@ export class SessionService {
     this.pty.spawn({
       sessionId: fresh.id,
       cwd: fresh.cwd,
-      permission: config.permission,
+      permission: managerSpawn?.permission ?? config.permission, // re-resolved layered allowlist (was bare config.permission)
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
@@ -2535,6 +2556,7 @@ export class SessionService {
       role: "manager", // successor keeps the orchestration surface
       browserTesting: old.browserTesting ?? false,
       documentConversion: old.documentConversion ?? false,
+      model: managerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
       skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
     });
 

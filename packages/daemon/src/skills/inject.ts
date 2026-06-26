@@ -1,8 +1,21 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { SessionRole } from "@loom/shared";
 import { SKILLS_DIR } from "../paths.js";
 
 const MANIFEST = ".loom-skills.json"; // records which skill names EACH session injected into a .claude/skills
+
+/** Map a Loom-DRIVEN session role to its operating-doctrine skill name in the store. A role here MUST get
+ *  its doctrine skill no matter what the profile's pinned subset says (a subset that omits "worker" must
+ *  still ship the worker doctrine). run/plain/null carry no doctrine ⇒ absent here. */
+const ROLE_DOCTRINE_SKILL: Partial<Record<SessionRole, string>> = {
+  worker: "worker",
+  manager: "orchestrate",
+  platform: "platform-lead",
+  auditor: "platform-audit",
+  "workspace-auditor": "workspace-audit",
+  setup: "setup-assistant",
+};
 
 /** Per-session injected-skill record for a shared `.claude/skills`: `{ "<sessionId>": ["worker", …] }`.
  *  Keyed by session so a concurrent session sharing the cwd never strips another's (or the repo's) skills. */
@@ -28,6 +41,11 @@ function readManifest(manifestPath: string, sessionId: string): Manifest {
  * ALL store skills (today's behavior — the regression-guarded default). A subset name not in the store is
  * dropped (a stale profile can't ask for a missing skill).
  *
+ * `role` (the session's resolved role): its operating-doctrine skill (worker→"worker", manager→
+ * "orchestrate", …) is FORCE-INCLUDED regardless of the subset — a profile whose subset omits its own
+ * role doctrine would otherwise ship a doctrine-less session. Only added if the doctrine skill is in the
+ * store (a missing one is still dropped, like any subset name). null/run/plain ⇒ no doctrine skill.
+ *
  * Shared-cwd safety (the load-bearing invariant): managers/platform/plain sessions SHARE project.repoPath
  * as cwd, so two sessions with DIFFERENT subsets write the SAME `.claude/skills`. The manifest is therefore
  * keyed PER SESSION, and this function only ever PRUNES a skill THIS session previously injected — and even
@@ -44,7 +62,7 @@ function readManifest(manifestPath: string, sessionId: string): Manifest {
  *    later session. A copy is deleted with the worktree without ever reaching the store.
  *  - Hides the injected skills from git via .git/info/exclude (local only; never edits a tracked .gitignore).
  */
-export function injectSkills(cwd: string, sessionId: string, subset?: string[] | null): void {
+export function injectSkills(cwd: string, sessionId: string, subset?: string[] | null, role?: SessionRole | null): void {
   let storeNames: string[];
   try {
     storeNames = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
@@ -54,6 +72,11 @@ export function injectSkills(cwd: string, sessionId: string, subset?: string[] |
 
   // What THIS session should have present: a non-empty subset ∩ the store, else ALL store skills.
   const want = subset && subset.length ? storeNames.filter((n) => subset.includes(n)) : storeNames;
+  // FORCE-INCLUDE the role's operating-doctrine skill regardless of the subset (a profile whose subset
+  // omits "worker"/"orchestrate"/… must still ship its role doctrine). Only when present in the store and
+  // not already wanted; a no-subset session already has every store skill, so this only bites under a subset.
+  const roleSkill = role ? ROLE_DOCTRINE_SKILL[role] : undefined;
+  if (roleSkill && storeNames.includes(roleSkill) && !want.includes(roleSkill)) want.push(roleSkill);
 
   const manifestPath = path.join(targetDir, MANIFEST);
   const manifest = readManifest(manifestPath, sessionId);
