@@ -480,7 +480,8 @@ export class OrchestrationMcpRouter {
           "profile supplies role/model/allowlist/skills/browser at the agent's next NEW session. You can " +
           "only ASSIGN a profile a human already created — you cannot create or edit one (profile authoring " +
           "is human-only). A non-existent profileId is rejected. Use this to provision a rig (e.g. assign the " +
-          "human-authored 'QA Tester' browser profile) without waiting on a human.",
+          "human-authored 'QA Tester' browser profile) without waiting on a human. The target agent must be in " +
+          "YOUR project (an agent outside it is REJECTED).",
         inputSchema: { agentId: z.string(), profileId: z.string().nullable() },
       },
       async ({ agentId, profileId }) => {
@@ -499,7 +500,8 @@ export class OrchestrationMcpRouter {
           "Update an agent's name (title) and/or startupPrompt (the project-specific brief that LEADS the " +
           "opening of its next NEW session — prepended ahead of any dynamic kickoff/handoff; an empty brief " +
           "leaves the opening as the dynamic part alone). Structural edit only — to change the agent's rig use " +
-          "agent_assign_profile. Omitted fields are left as-is.",
+          "agent_assign_profile. The target agent must be in YOUR project (an agent outside it is REJECTED). " +
+          "Omitted fields are left as-is.",
         inputSchema: { agentId: z.string(), name: z.string().optional(), startupPrompt: z.string().optional() },
       },
       async ({ agentId, name, startupPrompt }) => {
@@ -515,9 +517,10 @@ export class OrchestrationMcpRouter {
       "project_update",
       {
         description:
-          "Update a project's structural fields (name / vaultPath) and/or its config override. config is " +
-          "schema-validated on the AGENT path: orchestration.gateCommand (host-RCE) and unknown keys are " +
-          "REJECTED (that capability stays human-only). repoPath is not editable here. Omitted fields are " +
+          "Update a project's structural fields (name / vaultPath) and/or its config override — YOUR project " +
+          "only (a projectId outside your own is REJECTED; platform_escalate is your one cross-project write). " +
+          "config is schema-validated on the AGENT path: orchestration.gateCommand (host-RCE) and unknown keys " +
+          "are REJECTED (that capability stays human-only). repoPath is not editable here. Omitted fields are " +
           "left as-is.",
         inputSchema: {
           projectId: z.string(),
@@ -540,7 +543,8 @@ export class OrchestrationMcpRouter {
       {
         description:
           "Soft-archive a project: it disappears from the active project list, but its rows and sessions are " +
-          "retained (not deleted). Structural, reversible-by-a-human.",
+          "retained (not deleted). Structural, reversible-by-a-human. YOUR project only — a projectId outside " +
+          "your own (e.g. the reserved Loom Platform home) is REJECTED.",
         inputSchema: { projectId: z.string() },
       },
       async ({ projectId }) => {
@@ -558,7 +562,8 @@ export class OrchestrationMcpRouter {
         description:
           "Create a cron schedule that autonomously boots a manager session in an agent on each tick (5-field " +
           "cron). enabled defaults to true. An invalid cron expression is rejected. Low-risk autonomous wake — " +
-          "the same kind of self-scheduling agents already do via wake_me.",
+          "the same kind of self-scheduling agents already do via wake_me. The target agent must be in YOUR " +
+          "project (an agent outside it is REJECTED).",
         inputSchema: { agentId: z.string(), cron: z.string(), enabled: z.boolean().optional() },
       },
       async ({ agentId, cron, enabled }) => {
@@ -575,7 +580,8 @@ export class OrchestrationMcpRouter {
       {
         description:
           "Update a schedule's cron and/or enabled flag. A changed cron recomputes the next fire (rejected if " +
-          "invalid); enabled toggles the Scheduler on/off for this row. Omitted fields are left as-is.",
+          "invalid); enabled toggles the Scheduler on/off for this row. The schedule's agent must be in YOUR " +
+          "project (a schedule outside it is REJECTED). Omitted fields are left as-is.",
         inputSchema: { scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional() },
       },
       async ({ scheduleId, cron, enabled }) => {

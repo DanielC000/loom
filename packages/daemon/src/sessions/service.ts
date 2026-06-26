@@ -2103,14 +2103,16 @@ export class SessionService {
    */
   workspaceAuditHandoff(
     auditorSessionId: string,
-    input: { count?: number; note?: string },
+    input: { count?: number },
   ): { deliveryStatus: DeliveryStatus } | { error: string } {
     const caller = this.db.getSession(auditorSessionId);
     if (!caller || caller.role !== "workspace-auditor") return { error: "audit_handoff is a workspace-auditor-only surface" };
     const n = input.count !== undefined && Number.isFinite(input.count) && input.count > 0 ? Math.floor(input.count) : null;
-    const extra = (input.note ?? "").trim();
     const summary = n ? `${n} workspace suggestion${n === 1 ? "" : "s"} on your home board` : "workspace suggestions on your home board";
-    const note = `[loom:from-auditor] ${summary} — please review/apply${extra ? ` — ${extra}` : ""}`;
+    // 100% server-composed: count is a bounded integer only. NO caller-supplied free-form text reaches
+    // the home operator's stdin — the workspace-auditor ingests untrusted, prompt-injectable transcripts,
+    // so it is the LAST place to widen an injection path into another session's terminal.
+    const note = `[loom:from-auditor] ${summary} — please review/apply`;
     return { deliveryStatus: this.nudgeHomeOperator(note) };
   }
 
@@ -2698,6 +2700,21 @@ export class SessionService {
     if (session.role !== "manager") throw new Error(`${surface} is a manager-only surface`);
   }
 
+  /**
+   * The OWN-PROJECT containment boundary for every manager self-service write. A manager's self-service
+   * tools (project_update/_archive, agent_update/_assign_profile, schedule_create/_update) take a target
+   * id as a param; without this guard a prompt-injected/confused manager could reconfigure or archive ANY
+   * project — including the reserved Loom Platform home — breaking the documented invariant that
+   * platform_escalate is the manager's ONE cross-project write. Each method derives the target's project
+   * via this helper and REJECTS a target outside the caller's own project. Throws (→ the router's error
+   * envelope) on a session with no project, so a write can never escape its scope.
+   */
+  private requireOwnProject(managerSessionId: string, targetProjectId: string | undefined, surface: string): void {
+    const own = this.db.getSession(managerSessionId)?.projectId;
+    if (!own) throw new Error("no project for this session");
+    if (targetProjectId !== own) throw new Error(`${surface}: target is outside your project`);
+  }
+
   /** Audit one management action (single kind; detail.action discriminates). */
   private auditManage(managerSessionId: string, action: string, detail: Record<string, unknown>): void {
     this.db.appendEvent({
@@ -2716,6 +2733,7 @@ export class SessionService {
     this.requireManager(managerSessionId, "agent_assign_profile");
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
+    this.requireOwnProject(managerSessionId, agent.projectId, "agent_assign_profile");
     if (profileId != null && !this.db.getProfile(profileId)) throw new Error("profile not found");
     this.db.updateAgent(agentId, { profileId });
     this.auditManage(managerSessionId, "agent_assign_profile", { agentId, profileId });
@@ -2733,6 +2751,7 @@ export class SessionService {
     this.requireManager(managerSessionId, "agent_update");
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
+    this.requireOwnProject(managerSessionId, agent.projectId, "agent_update");
     this.db.updateAgent(agentId, { name: patch.name, startupPrompt: patch.startupPrompt });
     this.auditManage(managerSessionId, "agent_update", { agentId, fields: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined) });
     return this.db.getAgent(agentId)!;
@@ -2750,6 +2769,7 @@ export class SessionService {
     patch: { name?: string; vaultPath?: string; config?: unknown },
   ): { id: string; name: string; vaultPath: string } {
     this.requireManager(managerSessionId, "project_update");
+    this.requireOwnProject(managerSessionId, projectId, "project_update");
     const project = this.db.getProject(projectId);
     if (!project) throw new Error("project not found");
     if (patch.config !== undefined) {
@@ -2768,6 +2788,7 @@ export class SessionService {
   /** Soft-archive a project (hidden from listProjects; rows + sessions retained). Structural, low-risk. */
   archiveProjectAsManager(managerSessionId: string, projectId: string): { archived: true; projectId: string } {
     this.requireManager(managerSessionId, "project_archive");
+    this.requireOwnProject(managerSessionId, projectId, "project_archive");
     if (!this.db.getProject(projectId)) throw new Error("project not found");
     this.db.archiveProject(projectId);
     this.auditManage(managerSessionId, "project_archive", { projectId });
@@ -2783,7 +2804,9 @@ export class SessionService {
     managerSessionId: string, input: { agentId: string; cron: string; enabled?: boolean },
   ): Schedule {
     this.requireManager(managerSessionId, "schedule_create");
-    if (!this.db.getAgent(input.agentId)) throw new Error("agent not found");
+    const targetAgent = this.db.getAgent(input.agentId);
+    if (!targetAgent) throw new Error("agent not found");
+    this.requireOwnProject(managerSessionId, targetAgent.projectId, "schedule_create");
     let next: string;
     try { next = nextFireAt(input.cron, new Date()); } catch { throw new Error("invalid cron expression"); }
     const schedule: Schedule = {
@@ -2806,7 +2829,11 @@ export class SessionService {
     managerSessionId: string, scheduleId: string, patch: { cron?: string; enabled?: boolean },
   ): Schedule {
     this.requireManager(managerSessionId, "schedule_update");
-    if (!this.db.getSchedule(scheduleId)) throw new Error("schedule not found");
+    const schedule = this.db.getSchedule(scheduleId);
+    if (!schedule) throw new Error("schedule not found");
+    // Resolve the schedule → its agent → that agent's project; reject a schedule outside the caller's
+    // project (a missing agent can never match own, so it's rejected too).
+    this.requireOwnProject(managerSessionId, this.db.getAgent(schedule.agentId)?.projectId, "schedule_update");
     const dbPatch: { cron?: string; enabled?: boolean; nextFireAt?: string } = {};
     if (typeof patch.enabled === "boolean") dbPatch.enabled = patch.enabled;
     if (typeof patch.cron === "string") {

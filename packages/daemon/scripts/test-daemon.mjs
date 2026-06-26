@@ -29,7 +29,7 @@ const HERMETIC = [
   "agent-runs-keys", "agent-runs-primitive", "agent-runs-rest", "agent-runs-idempotency", "agent-runs-caps", "agent-runs-spend", "agent-runs-hardening", "agent-runs-audit",
   "tasks-filter", "tasks-priority", "task-delete", "column-lifecycle", "column-presets", "preset-prompts", "preset-prompt-suggestions", "config-bounds", "config-rewire", "project-config-patch", "kanban-defaults", "transcript-encode", "alert-webhook",
   "ensure-obsidian", // card ab67eba3: Obsidian auto-start — config plumbing + human-only path gating + the vault preflight's gate/probe/fallback/launch-command construction (no real GUI launch)
-  "session-archive", "session-list-summary", "all-archived-sessions", "periodic-snapshot", "shutdown-snapshot", "shutdown-endpoint", "mgmt-project-agent", "web-static-serve", "version", "cli-args", "cli-direct-invocation", "cli-service", "cli-channel", "update-check", "update-endpoint",
+  "session-archive", "session-list-summary", "all-archived-sessions", "periodic-snapshot", "shutdown-snapshot", "shutdown-endpoint", "mgmt-project-agent", "mgr-own-project-scope", "web-static-serve", "version", "cli-args", "cli-direct-invocation", "cli-service", "cli-channel", "update-check", "update-endpoint",
   "mcp-list-budget", // PL Auditor finding #5: default list_all_agents + audit list_sessions fit the token budget
 
   "claude-config", "trust-lock", "spawn-args", "disallow-prompt-tools",

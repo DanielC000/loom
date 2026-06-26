@@ -203,19 +203,18 @@ export class WorkspaceAuditMcpRouter {
           "nudge — call it ONCE after filing a batch of audit_suggest_improvement cards so the operator " +
           "knows to review/apply them. This is your ONLY way to reach an actor, and it is fully confined: " +
           "it can reach NOTHING but your home's live operator (you name no target), and it sends a fixed " +
-          "framed heads-up, not free-form text. Optional `count` (how many suggestions you filed — shown " +
-          "in the nudge) and `note` (a short one-line context, e.g. \"3 are about the same vague rule\"). " +
+          "framed heads-up, not free-form text — the forwarded text is 100% server-composed, you cannot " +
+          "inject any payload. Optional `count` (how many suggestions you filed — shown in the nudge). " +
           "Returns {deliveryStatus}: `delivered-live`/`queued` if the operator is live, else `boarded` (no " +
           "live operator — your cards already sit on the home board for them to find). The cards are the " +
           "durable record; this nudge never loses anything.",
         inputSchema: {
           count: z.number().int().positive().optional(),
-          note: z.string().optional(),
         },
       },
-      async ({ count, note }) => {
+      async ({ count }) => {
         try {
-          return ok(sessions.workspaceAuditHandoff(auditorSessionId, { count, note }));
+          return ok(sessions.workspaceAuditHandoff(auditorSessionId, { count }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
