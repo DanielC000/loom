@@ -104,6 +104,49 @@ const LIVE = {
   check("poll: LOAD-BEARING User-Agent claude-code/<version> sent", sentHeaders && sentHeaders["User-Agent"] === "claude-code/1.2.3");
 }
 
+// ── start-on-login seam: poller installs the loop with NO creds, recovers on a post-boot login ──
+// Regression for the gap where start() skipped the timer entirely when credentials were absent at
+// boot, leaving the usage strip permanently stale after a post-boot `claude` login until a restart.
+{
+  const settle = () => new Promise((r) => setImmediate(r)); // let the async prime pollOnce flush
+
+  // No credentials at boot: start() must still install the loop and degrade gracefully (no network).
+  let loginFetches = 0;
+  const lateCred = path.join(tmp, "late-login.json"); // deliberately absent at start()
+  const pLogin = new UsageStatusPoller({
+    credentialsPath: lateCred,
+    userAgentVersion: "9.9.9",
+    intervalMs: 3_600_000, // long — we drive the recovery tick manually
+    fetchImpl: async () => { loginFetches++; return { ok: true, status: 200, json: async () => LIVE }; },
+  });
+  pLogin.start();
+  await settle();
+  check("login: no creds at boot → available:false, no fetch (loop still installed)",
+    pLogin.getStatus().available === false && loginFetches === 0);
+
+  // The user signs in: `claude` writes the credentials file out-of-band. The next tick polls for real.
+  fs.writeFileSync(lateCred, JSON.stringify({ claudeAiOauth: { accessToken: "tok", expiresAt: Date.now() + 3_600_000 } }));
+  await pLogin.pollOnce(); // simulate the next interval tick
+  check("login: post-boot login recovers the strip (available:true, no restart)",
+    pLogin.getStatus().available === true && loginFetches === 1);
+  pLogin.stop();
+
+  // Idempotent: two start() calls install ONE loop (one prime fetch), never two pollers.
+  let primeFetches = 0;
+  const okIdem = credPath("idem-ok.json", { claudeAiOauth: { accessToken: "tok", expiresAt: Date.now() + 3_600_000 } });
+  const pIdem = new UsageStatusPoller({
+    credentialsPath: okIdem,
+    userAgentVersion: "9.9.9",
+    intervalMs: 3_600_000,
+    fetchImpl: async () => { primeFetches++; return { ok: true, status: 200, json: async () => LIVE }; },
+  });
+  pIdem.start();
+  pIdem.start(); // second call must be a no-op
+  await settle();
+  check("start: idempotent — two start() calls prime once (single poller)", primeFetches === 1);
+  pIdem.stop();
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 console.log(failures === 0

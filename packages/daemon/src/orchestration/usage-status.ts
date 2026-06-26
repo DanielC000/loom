@@ -191,15 +191,19 @@ export class UsageStatusPoller {
   }
 
   /**
-   * Begin polling. Skips entirely (no timer) when there's no credentials file — nothing to poll, and
-   * we don't churn a 60s loop against a missing file. The daemon restarts on deploy/login anyway.
+   * Begin polling (idempotent — a second call while already running is a no-op, never two pollers).
+   *
+   * The loop runs even when there's NO credentials file yet: `pollOnce` reads the token first and, when
+   * credentials are absent, degrades to `available:false` WITHOUT touching the network — so churning a
+   * missing file costs one `readFileSync` per tick (no rate-limited bucket hit). That cheap tick is what
+   * lets a POST-BOOT login recover the usage strip with no daemon restart: when the user signs in with
+   * `claude` (which writes the credentials file out-of-band), the next tick polls for real and the strip
+   * refreshes. (Previously `start` skipped the timer entirely when credentials were absent at boot, so a
+   * later login left the strip permanently stale until a restart.)
    */
   start(): void {
-    if (!fs.existsSync(this.credentialsPath)) {
-      this.cache = unavailable("no Claude credentials file (sign in with `claude`)");
-      return;
-    }
-    void this.pollOnce(); // prime the cache immediately
+    if (this.timer) return; // already running — never start a second poller
+    void this.pollOnce(); // prime immediately (no creds → available:false, no network call)
     this.timer = setInterval(() => {
       // pollOnce never throws, but guard the scheduling layer too — a bad tick must not kill the loop.
       void this.pollOnce().catch(() => { /* never let a bad poll kill the loop */ });
