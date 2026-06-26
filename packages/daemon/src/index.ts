@@ -441,12 +441,13 @@ async function main(): Promise<void> {
       : `[boot] db-backup ticker off (${backupCfg.enabled ? "interval 0" : "disabled"})`,
   );
 
-  // Vault auto-committer — start ONE VaultVersioner per UNIQUE live project vault so agent doc rewrites
+  // Vault auto-committer — start ONE VaultVersioner per UNIQUE governing repo root so agent doc rewrites
   // (the mandated rewrite-in-place doc-hygiene flow, done with the plain Write/Edit tool) accrue git
   // history and a destructive overwrite has a recovery path. Without this the class was dead code: only
-  // commitVault (the UI-write path) ever ran. Deduped by vaultPath (the daemon serves many projects that
-  // commonly SHARE one Obsidian vault root); start() honors the externally-managed backoff (a vault-wide
-  // Obsidian-Git repo owns its own history) and git-inits a bare vault folder. Best-effort: never gate boot.
+  // commitVault (the UI-write path) ever ran. Deduped by the resolved repo ROOT — the owner's real layout
+  // is ONE repo at the vault root with each project's vaultPath a SUBFOLDER, so sibling subfolders collapse
+  // to a single root watcher that commits the whole repo. An Obsidian-Git-managed repo is skipped (a real
+  // external auto-committer owns its history); a bare vault folder with no repo is git-inited. Best-effort.
   let vaultVersioners: VaultVersioner[] = [];
   try {
     vaultVersioners = await startVaultVersioners(db);

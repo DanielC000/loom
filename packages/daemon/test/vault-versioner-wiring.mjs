@@ -8,7 +8,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (b) a filesystem edit to a vault doc produces a git commit (the live chokidar→debounce→commit path);
 //   (c) DEDUPE — two projects sharing one vaultPath get ONE watcher; empty/archived vaults are skipped;
 //   (d) the SYNCHRONOUS flushSync (gracefulShutdown's path) commits a debounce-window edit; and respects
-//       the externally-managed backoff (a vault nested in a larger repo is NOT committed).
+//       the externally-managed backoff (an Obsidian-Git-managed repo is NOT committed).
+//   (e) ONE-REPO-MANY-SUBFOLDER layout: a project vault that is a SUBFOLDER of a PLAIN repo gets per-edit
+//       auto-commit AT THE REPO ROOT, deduped across sibling project subfolders (two projects → subfolders
+//       of one repo → ONE root watcher); and an Obsidian-Git-managed repo (marker present) backs off.
 // Run after build: node test/vault-versioner-wiring.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -34,6 +37,11 @@ function initVault(dir) {
   git(dir, "config user.email loom-test@example.com");
   git(dir, "config user.name loom-test");
 }
+// Plant the `.obsidian/plugins/obsidian-git` marker dir under a repo root — the deterministic signal that
+// a real external auto-committer (the Obsidian Git plugin) owns this repo's history, so loom must back off.
+function plantObsidianGitMarker(repoRoot) {
+  fs.mkdirSync(path.join(repoRoot, ".obsidian", "plugins", "obsidian-git"), { recursive: true });
+}
 // `git rev-list --all --count` is 0 (clean exit) on a fresh repo with no commits — unlike `git log`.
 const commitCount = (dir) => parseInt(git(dir, "rev-list --all --count").trim() || "0", 10);
 async function waitFor(fn, timeoutMs = 5000) {
@@ -47,6 +55,24 @@ const vaultB = path.join(root, "vaultB");
 initVault(vaultA);
 initVault(vaultB);
 
+// ONE-REPO-MANY-SUBFOLDER (the owner's real layout): a single PLAIN git repo at the vault root, with each
+// project's vaultPath a SUBFOLDER. plainProjA + plainProjB are sibling subfolders of `plainRepo` — they
+// must collapse to ONE watcher keyed to the repo ROOT and auto-commit there.
+const plainRepo = path.join(root, "plainRepo");
+initVault(plainRepo);
+const plainProjA = path.join(plainRepo, "ProjA");
+const plainProjB = path.join(plainRepo, "ProjB");
+fs.mkdirSync(plainProjA);
+fs.mkdirSync(plainProjB);
+
+// OBSIDIAN-GIT-MANAGED repo: a real external auto-committer owns history (marker present) → loom backs off
+// (no watcher, no commit). obsVault is a subfolder of the marked repo root.
+const obsRepo = path.join(root, "obsRepo");
+initVault(obsRepo);
+plantObsidianGitMarker(obsRepo);
+const obsVault = path.join(obsRepo, "ObsProj");
+fs.mkdirSync(obsVault);
+
 const now = new Date().toISOString();
 const db = new Db();
 // p1 + p2 SHARE vaultA (dedupe target); p3 → vaultB; p4 has NO vaultPath (skip); p5 is archived (skip).
@@ -55,20 +81,32 @@ db.insertProject({ id: "p2", name: "P2", repoPath: vaultA, vaultPath: vaultA, co
 db.insertProject({ id: "p3", name: "P3", repoPath: vaultB, vaultPath: vaultB, config: {}, createdAt: now, archivedAt: null });
 db.insertProject({ id: "p4", name: "P4", repoPath: root, vaultPath: "", config: {}, createdAt: now, archivedAt: null });
 db.insertProject({ id: "p5", name: "P5", repoPath: vaultB, vaultPath: path.join(root, "vaultArchived"), config: {}, createdAt: now, archivedAt: now });
+// p6 + p7 → sibling subfolders of plainRepo: dedupe to ONE root watcher. p8 → Obsidian-Git-managed: skip.
+db.insertProject({ id: "p6", name: "P6", repoPath: plainProjA, vaultPath: plainProjA, config: {}, createdAt: now, archivedAt: null });
+db.insertProject({ id: "p7", name: "P7", repoPath: plainProjB, vaultPath: plainProjB, config: {}, createdAt: now, archivedAt: null });
+db.insertProject({ id: "p8", name: "P8", repoPath: obsVault, vaultPath: obsVault, config: {}, createdAt: now, archivedAt: null });
 
 const versioners = [];
 try {
   // Short debounce so the live chokidar path commits quickly for (b).
   versioners.push(...await startVaultVersioners(db, { debounceMs: 150 }));
 
-  // (a)+(c): exactly 2 watchers — vaultA (deduped p1+p2) + vaultB; empty (p4) and archived (p5) skipped.
-  check("one watcher per UNIQUE vault (dedupe + skip empty/archived)", versioners.length === 2);
+  // (a)+(c)+(e): exactly 3 watchers — vaultA (deduped p1+p2) + vaultB + plainRepo ROOT (deduped p6+p7
+  // subfolders). Empty (p4), archived (p5), and Obsidian-Git-managed (p8) are skipped.
+  check("one watcher per UNIQUE repo root (dedupe + skip empty/archived/obsidian-git)", versioners.length === 3);
   check("each started handle is a VaultVersioner", versioners.every((v) => v instanceof VaultVersioner));
 
   // (b): a filesystem edit to a vault doc auto-commits via the wired chokidar→debounce→commit path.
   const beforeA = commitCount(vaultA);
   fs.writeFileSync(path.join(vaultA, "doc.md"), "# edited by an agent (rewrite-in-place)\n");
   check("a vault doc edit auto-commits via the live watcher", await waitFor(() => commitCount(vaultA) > beforeA));
+
+  // (e): an edit inside a SUBFOLDER of the plain repo auto-commits AT THE REPO ROOT (not the subfolder),
+  // proving the subfolder→root keying + dedupe of the one-repo-many-subfolder layout.
+  const beforePlain = commitCount(plainRepo);
+  fs.writeFileSync(path.join(plainProjA, "note.md"), "# edited inside a project subfolder of a plain repo\n");
+  check("a subfolder edit auto-commits at the PLAIN REPO ROOT", await waitFor(() => commitCount(plainRepo) > beforePlain));
+  check("plainRepo subfolder commit lands at the root, not a nested repo", !fs.existsSync(path.join(plainProjA, ".git")));
 
   // (d): SYNCHRONOUS flush on stop — an edit inside the debounce window (long debounce → the async timer
   // can't have fired) is still committed by flushSync, the path gracefulShutdown uses before process.exit.
@@ -82,19 +120,48 @@ try {
   check("flushSync is a no-op when nothing is staged", vc.flushSync() === false && commitCount(vaultC) === beforeC + 1);
   await vc.stop();
 
-  // (d, backoff): a vault nested inside a LARGER repo (root ABOVE the vault folder) is externally managed
-  // — flushSync must NOT commit it (no double-committing an Obsidian-Git-managed vault).
-  const outer = path.join(root, "outer");
-  initVault(outer);
-  const nested = path.join(outer, "vault");
-  fs.mkdirSync(nested);
-  const vn = new VaultVersioner(nested, 10_000);
+  // (d/e, subfolder of a PLAIN repo): a vault nested inside a LARGER plain repo (no Obsidian-Git marker)
+  // is NOT externally managed — flushSync commits it AT THE REPO ROOT (per-edit history for the
+  // one-repo-many-subfolder layout), not the subfolder.
+  const plainOuter = path.join(root, "plainOuter");
+  initVault(plainOuter);
+  const plainNested = path.join(plainOuter, "vault");
+  fs.mkdirSync(plainNested);
+  const vp = new VaultVersioner(plainNested, 10_000);
+  await vp.start();
+  fs.writeFileSync(path.join(plainNested, "note.md"), "committed at the plain repo root\n");
+  const beforePlainOuter = commitCount(plainOuter);
+  check("flushSync commits a plain-repo subfolder at the root", vp.flushSync() === true && commitCount(plainOuter) === beforePlainOuter + 1);
+  await vp.stop();
+
+  // (d, backoff): a vault inside an Obsidian-Git-managed repo (the `.obsidian/plugins/obsidian-git` marker
+  // is present at the root) is externally managed — flushSync must NOT commit it (a real external
+  // auto-committer owns history; no double-commit). Detected by the MARKER, not "subfolder ≠ root".
+  const obsOuter = path.join(root, "obsOuter");
+  initVault(obsOuter);
+  plantObsidianGitMarker(obsOuter);
+  const obsNested = path.join(obsOuter, "vault");
+  fs.mkdirSync(obsNested);
+  const vn = new VaultVersioner(obsNested, 10_000);
   await vn.start();
-  fs.writeFileSync(path.join(nested, "note.md"), "must NOT be committed by loom\n");
-  const beforeOuter = commitCount(outer);
-  check("flushSync skips an externally-managed vault", vn.flushSync() === false);
-  check("externally-managed vault got no loom commit", commitCount(outer) === beforeOuter);
+  fs.writeFileSync(path.join(obsNested, "note.md"), "must NOT be committed by loom\n");
+  const beforeObsOuter = commitCount(obsOuter);
+  check("flushSync skips an Obsidian-Git-managed vault", vn.flushSync() === false);
+  check("Obsidian-Git-managed vault got no loom commit", commitCount(obsOuter) === beforeObsOuter);
   await vn.stop();
+
+  // (d, backoff at root): an Obsidian-Git-managed vault that IS its own repo root (marker at the vault
+  // folder itself) also backs off — the marker, not the subfolder relationship, is what gates it.
+  const obsOwnRoot = path.join(root, "obsOwnRoot");
+  initVault(obsOwnRoot);
+  plantObsidianGitMarker(obsOwnRoot);
+  const vor = new VaultVersioner(obsOwnRoot, 10_000);
+  await vor.start();
+  fs.writeFileSync(path.join(obsOwnRoot, "note.md"), "must NOT be committed by loom\n");
+  const beforeObsOwn = commitCount(obsOwnRoot);
+  check("flushSync skips an Obsidian-Git-managed own-root vault", vor.flushSync() === false);
+  check("Obsidian-Git-managed own-root vault got no loom commit", commitCount(obsOwnRoot) === beforeObsOwn);
+  await vor.stop();
 } finally {
   for (const v of versioners) { try { await v.stop(); } catch { /* best-effort */ } }
   for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
