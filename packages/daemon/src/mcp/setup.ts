@@ -7,6 +7,7 @@ import type { Project, ProjectConfigOverride, Agent, Profile } from "@loom/share
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo } from "../git/reader.js";
+import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
@@ -48,7 +49,9 @@ export function setupRoleError(role: string | null | undefined): string | null {
  * ║ registers ONLY the curated subset below and reuses the EXISTING validators + Db/service handlers     ║
  * ║ (no re-implementation that could silently drop a guard):                                              ║
  * ║   reads     — list_all_projects / list_all_agents / list_all_sessions                                 ║
- * ║   structure — project_create / project_configure / project_update / agent_create                      ║
+ * ║   structure — project_create (bind existing) / project_init (NEW dir under the sanctioned base, the    ║
+ * ║               operator's ONLY host-write — confined to WORKSPACE_ROOT) / project_configure /           ║
+ * ║               project_update / agent_create                                                            ║
  * ║   rigs       — profile_create / profile_update / profile_assign                                       ║
  * ║   lifecycle  — session_spawn (manager|plain ONLY — never platform/auditor/worker/setup);              ║
  * ║                project_archive (SOFT, reversible — REFUSES a reserved/system home; rows retained)      ║
@@ -105,10 +108,10 @@ export class SetupMcpRouter {
     server.registerTool(
       "project_create",
       {
-        description: "Create a Loom project bound to an existing git repo. repoPath MUST exist and be a git repository (rejected otherwise). vaultPath defaults to repoPath. Optional config is validated against the AGENT project-config schema — orchestration.gateCommand (host-RCE) and alertWebhook (exfil) are REJECTED unknown keys, so the setup assistant can never set them.",
+        description: "Bind a Loom project to an EXISTING path (use project_init to create one from nothing). Give repoPath to bind a CODE project — it MUST exist and be a git repository (rejected otherwise); vaultPath defaults to repoPath. OMIT repoPath and give vaultPath to set up a VAULT-ONLY (research/notes) project whose folder need NOT be a git repo — vaultPath must be an existing directory, and repoPath binds to it too. Optional config is validated against the AGENT project-config schema — orchestration.gateCommand (host-RCE) and alertWebhook (exfil) are REJECTED unknown keys, so the setup assistant can never set them.",
         inputSchema: {
           name: z.string(),
-          repoPath: z.string(),
+          repoPath: z.string().optional(),
           vaultPath: z.string().optional(),
           config: z.object({}).passthrough().optional(),
         },
@@ -116,9 +119,56 @@ export class SetupMcpRouter {
       async ({ name, repoPath, vaultPath, config }) => {
         const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
-        if (!(await isGitRepo(repoPath))) return ok({ error: `repoPath is not an existing git repository: ${repoPath}` });
+        let repo: string;
+        let vault: string;
+        if (repoPath !== undefined) {
+          // CODE project (today's behavior): repoPath must be an existing git repository.
+          if (!(await isGitRepo(repoPath))) return ok({ error: `repoPath is not an existing git repository: ${repoPath}` });
+          repo = repoPath;
+          vault = vaultPath ?? repoPath;
+        } else {
+          // VAULT-ONLY project: no repo. vaultPath must be an existing directory (need NOT be a git repo) —
+          // a research/notes user whose vault isn't a code repo. The project's cwd binds to that folder too.
+          if (vaultPath === undefined) return ok({ error: "provide repoPath (an existing git repo) or vaultPath (an existing notes folder for a vault-only project)" });
+          if (!isExistingDir(vaultPath)) return ok({ error: `vaultPath is not an existing directory: ${vaultPath}` });
+          repo = vaultPath;
+          vault = vaultPath;
+        }
         const project: Project = {
-          id: randomUUID(), name, repoPath, vaultPath: vaultPath ?? repoPath,
+          id: randomUUID(), name, repoPath: repo, vaultPath: vault,
+          config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
+          reserved: false, // a setup-created project is NEVER a reserved/system one (boot-seed only)
+        };
+        db.insertProject(project);
+        return ok(project);
+      },
+    );
+
+    // project_init — the ONE host-write the ungated operator gains, fail-closed by construction: it creates
+    // a BRAND-NEW project directory ONLY under the SANCTIONED workspace base (WORKSPACE_ROOT, inside
+    // LOOM_HOME), so a fresh user with NO existing repo/folder can be onboarded end-to-end. The caller never
+    // supplies a host path — the dir is derived from `name` (or `dirName`), confined to the base, traversal/
+    // escape rejected (see bootstrapProjectDir). kind "git" (default) `git init`s a code repo; kind "vault"
+    // leaves a plain notes/research folder. This adds NO general host-writer/escalation surface — the write
+    // is bounded to one fixed base with hardcoded ops, exactly the least-privilege envelope the surface keeps.
+    server.registerTool(
+      "project_init",
+      {
+        description: "Create a BRAND-NEW project from scratch for a user with NO existing repo or folder. Loom creates a fresh directory under its sanctioned workspace base (inside LOOM_HOME) and binds the project to it — you canNOT point this at an arbitrary host path. The directory name is derived from `name` (or pass an explicit `dirName`); both are confined to the sanctioned base and traversal/escape is rejected. kind \"git\" (default) runs `git init` so the project is a code repo ready for workers; kind \"vault\" leaves it a plain notes/research folder (no git). repoPath and vaultPath both bind to the created directory. To bind an EXISTING repo or notes folder instead, use project_create. Optional config is validated against the AGENT schema (gateCommand/alertWebhook rejected).",
+        inputSchema: {
+          name: z.string(),
+          kind: z.enum(["git", "vault"]).optional(),
+          dirName: z.string().optional(),
+          config: z.object({}).passthrough().optional(),
+        },
+      },
+      async ({ name, kind, dirName, config }) => {
+        const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
+        if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
+        const boot = await bootstrapProjectDir({ name, dirName, git: (kind ?? "git") === "git" });
+        if (!boot.ok) return ok({ error: boot.error });
+        const project: Project = {
+          id: randomUUID(), name, repoPath: boot.dir, vaultPath: boot.dir,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // a setup-created project is NEVER a reserved/system one (boot-seed only)
         };

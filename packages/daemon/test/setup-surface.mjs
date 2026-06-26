@@ -12,12 +12,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       Symmetrically, the setup router returns NULL for every NON-setup role (manager/worker/plain/
 //       platform/auditor) — an agent/non-setup session can never reach /mcp-setup. buildMcpServers(setup)
 //       mounts loom-setup ONLY (+loom-tasks), never platform/orch/audit, with a ["mcp__loom-setup"] allow.
-//   (b) the surface is EXACTLY the curated subset of 18 (incl. project_archive, agent_update, and the
-//       agent_get/profile_get/project_get reads) — and NONE of the elevated/outward/self-improvement
+//   (b) the surface is EXACTLY the curated subset of 19 (incl. project_init, project_archive, agent_update,
+//       and the agent_get/profile_get/project_get reads) — and NONE of the elevated/outward/self-improvement
 //       tools (no git/vault/message/stop/schedule/escalate/audit).
 //   (c) the curated tools work end-to-end: project_create (real git repo), project_configure,
 //       project_update, project_archive (soft + reserved-guarded), agent_create,
 //       profile_create/update/assign, list_all_*, session_spawn(manager|plain).
+//   (j) project_init BOOTSTRAPS a brand-new project (no-repo onboarding): it creates a dir STRICTLY under
+//       the sanctioned WORKSPACE_ROOT and `git init`s it (kind:"git") or leaves a plain folder (kind:"vault");
+//       a traversal/absolute dirName is REJECTED and writes nothing outside the base; it won't clobber.
+//   (k) project_create is VAULT-ONLY capable: omit repoPath + give an existing non-git vaultPath → a
+//       research/notes project; omitting both, or a non-existent vaultPath, is rejected (fail-closed).
 //   (g) agent_update EDITS an existing agent (amend startupPrompt / rename / (re)assign-or-clear profile),
 //       404s an unknown id, and LEAST-PRIVILEGE rejects assigning an elevated-role (platform/auditor/
 //       workspace-auditor) rig — the gap that collapsed "action these cards for me" into "paste this text."
@@ -72,6 +77,8 @@ const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { AuditMcpRouter } = await import("../dist/mcp/audit.js");
 const { resolveConfig } = await import("@loom/shared");
+const { WORKSPACE_ROOT } = await import("../dist/paths.js");
+const { isGitRepo: isGitRepoReal } = await import("../dist/git/reader.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
@@ -157,10 +164,10 @@ try {
   const expected = [
     "agent_create", "agent_get", "agent_update", "list_all_agents", "list_all_projects", "list_all_sessions",
     "profile_assign", "profile_create", "profile_get", "profile_update",
-    "project_archive", "project_configure", "project_create", "project_get", "project_update", "session_spawn",
+    "project_archive", "project_configure", "project_create", "project_get", "project_init", "project_update", "session_spawn",
     "skill_list", "skill_write",
   ];
-  check(`(b) setup surface is EXACTLY the curated subset of 18 (got ${tools.length}: ${tools.join(",")})`,
+  check(`(b) setup surface is EXACTLY the curated subset of 19 (got ${tools.length}: ${tools.join(",")})`,
     JSON.stringify(tools) === JSON.stringify(expected));
   // The still-ABSENT trust boundary — project_archive is now INCLUDED (the ONE v1 widen), but the
   // outward/host/elevated/self-improvement set must stay unreachable.
@@ -405,6 +412,71 @@ try {
   check("(i) project_configure: the rejection lists valid top-level keys incl. kanbanColumns",
     Array.isArray(wrongKey.validTopLevelKeys) && wrongKey.validTopLevelKeys.includes("kanbanColumns") && wrongKey.validTopLevelKeys.includes("permission"));
 
+  // ============ (j) project_init — bootstrap a NEW project under the SANCTIONED base (no-repo onboarding) ===
+  // The headline gap: a fresh user with NO git repo can now be onboarded end-to-end. project_init creates a
+  // brand-new dir STRICTLY under WORKSPACE_ROOT (inside LOOM_HOME) and git-inits it — the operator's ONLY
+  // host-write, fail-closed (name-derived path, confined, traversal rejected). LOOM_HOME = tmpHome here.
+  const wsRootNorm = path.resolve(WORKSPACE_ROOT);
+  check("(j) precondition: WORKSPACE_ROOT is under the hermetic LOOM_HOME", wsRootNorm.startsWith(path.resolve(tmpHome)));
+
+  // kind "git" (default) → creates a dir under the sanctioned base + `git init` (isGitRepo would accept it).
+  const initGit = await call("project_init", { name: "Fresh Code" });
+  check("(j) project_init(git): returns a project with an id", !!initGit.id && !initGit.error);
+  check("(j) project_init(git): repoPath is CONFINED strictly under WORKSPACE_ROOT",
+    path.resolve(initGit.repoPath).startsWith(wsRootNorm + path.sep) && path.resolve(initGit.repoPath) !== wsRootNorm);
+  check("(j) project_init(git): vaultPath binds to the same created dir", initGit.vaultPath === initGit.repoPath);
+  check("(j) project_init(git): the dir exists and was `git init`ed (.git present)",
+    fs.existsSync(initGit.repoPath) && fs.existsSync(path.join(initGit.repoPath, ".git")));
+  check("(j) project_init(git): persisted as a NON-reserved project", db.getProject(initGit.id)?.reserved === false);
+  check("(j) project_init(git): the created repo passes a real isGitRepo check", await isGitRepoReal(initGit.repoPath));
+
+  // kind "vault" → creates a plain notes folder (NO git init) for a research/notes user.
+  const initVault = await call("project_init", { name: "My Notes", kind: "vault" });
+  check("(j) project_init(vault): returns a project confined under WORKSPACE_ROOT",
+    !!initVault.id && path.resolve(initVault.repoPath).startsWith(wsRootNorm + path.sep) && !initVault.error);
+  check("(j) project_init(vault): the dir exists but is NOT a git repo (no .git)",
+    fs.existsSync(initVault.repoPath) && !fs.existsSync(path.join(initVault.repoPath, ".git")));
+
+  // An explicit dirName is honored (and still confined).
+  const initNamed = await call("project_init", { name: "Anything", kind: "vault", dirName: "explicit-dir" });
+  check("(j) project_init: an explicit dirName lands under the sanctioned base as that leaf",
+    path.basename(initNamed.repoPath) === "explicit-dir" && path.resolve(initNamed.repoPath) === path.join(wsRootNorm, "explicit-dir"));
+
+  // NEGATIVE / TRAVERSAL CONTROL (load-bearing): a dirName that tries to escape the base is REJECTED and
+  // creates NOTHING — neither a project row nor any dir outside the sanctioned base.
+  const nBeforeTraversal = db.listAllProjects().length;
+  const escapeTarget = path.join(path.resolve(tmpHome), "escaped-project");
+  const traversalInit = await call("project_init", { name: "Evil", dirName: "../escaped-project" });
+  check("(j) project_init: a traversal dirName ('../…') is REJECTED", typeof traversalInit.error === "string" && !traversalInit.id);
+  check("(j) project_init: the rejected traversal created NO project row", db.listAllProjects().length === nBeforeTraversal);
+  check("(j) project_init: the rejected traversal wrote NOTHING outside the sanctioned base", !fs.existsSync(escapeTarget));
+  // An absolute dirName is rejected the same way.
+  const absInit = await call("project_init", { name: "Evil2", dirName: path.join(path.resolve(tmpHome), "abs-escape") });
+  check("(j) project_init: an absolute dirName is REJECTED", typeof absInit.error === "string" && !absInit.id);
+  // Refuse to clobber: re-initing the SAME name (→ same slug) fails (the dir already exists), nothing created.
+  const nBeforeDup = db.listAllProjects().length;
+  const dup = await call("project_init", { name: "Fresh Code" });
+  check("(j) project_init: refuses to clobber an existing dir (same name → same slug)", typeof dup.error === "string" && !dup.id);
+  check("(j) project_init: the refused clobber created NO project", db.listAllProjects().length === nBeforeDup);
+  // project_init still routes config through the AGENT validator (gateCommand rejected).
+  const initGate = await call("project_init", { name: "RceInit", config: { orchestration: { gateCommand: "pwn" } } });
+  check("(j) project_init REJECTS orchestration.gateCommand (AGENT validator)", typeof initGate.error === "string" && !initGate.id);
+
+  // ============ (k) project_create VAULT-ONLY — bind an EXISTING non-git notes folder (repoPath omitted) ===
+  // A research/notes user whose vault is NOT a git repo can be set up: omit repoPath, give an existing dir as
+  // vaultPath. `nonGit` is a real existing (non-git) dir from the fixtures above.
+  const vaultOnly = await call("project_create", { name: "Research Vault", vaultPath: nonGit });
+  check("(k) project_create(vault-only): a non-git existing vaultPath is ACCEPTED", !!vaultOnly.id && !vaultOnly.error);
+  check("(k) project_create(vault-only): both repoPath and vaultPath bind to the notes folder",
+    vaultOnly.repoPath === nonGit && vaultOnly.vaultPath === nonGit);
+  check("(k) project_create(vault-only): persisted as a non-reserved project", db.getProject(vaultOnly.id)?.reserved === false);
+  // A vault-only create with NO vaultPath (and no repoPath) is rejected — nothing to bind.
+  const noTarget = await call("project_create", { name: "Nothing" });
+  check("(k) project_create: omitting BOTH repoPath and vaultPath is rejected", typeof noTarget.error === "string" && !noTarget.id);
+  // A vaultPath that doesn't exist is rejected (fail-closed — don't bind a phantom folder).
+  const missingVault = await call("project_create", { name: "Ghost", vaultPath: path.join(path.resolve(tmpHome), "does-not-exist") });
+  check("(k) project_create: a non-existent vaultPath is rejected", typeof missingVault.error === "string" && !missingVault.id);
+
   await client.close();
 } finally {
   db.close();
@@ -414,6 +486,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Setup Assistant surface is the curated, fail-closed subset of 18 (project/agent/profile create+configure + agent_update (least-privilege, no elevated-rig assignment) + agent_get/profile_get/project_get reads + project_archive (soft, reserved-guarded) + manager|plain spawn + list_all_* + skill_list/skill_write), a setup session 404s on /mcp-platform, /mcp-orch AND /mcp-audit, a non-setup session can never reach /mcp-setup, every config path rejects gateCommand/alertWebhook, session_spawn refuses platform/auditor/worker/setup, a kanbanColumns layout is accepted by the AGENT validator, and skill_write is confirm-first + bounded to the USER store (never the bundled/dev set) — claude-free, network-free."
+  ? "\n✅ ALL PASS — the Setup Assistant surface is the curated, fail-closed subset of 19 (project_create (incl. VAULT-ONLY)/project_init (sanctioned-base bootstrap, traversal-rejected)/configure/update + agent_create + agent_update (least-privilege, no elevated-rig assignment) + agent_get/profile_get/project_get reads + project_archive (soft, reserved-guarded) + manager|plain spawn + list_all_* + skill_list/skill_write), project_init confines to WORKSPACE_ROOT and refuses traversal/escape/clobber, a setup session 404s on /mcp-platform, /mcp-orch AND /mcp-audit, a non-setup session can never reach /mcp-setup, every config path rejects gateCommand/alertWebhook, session_spawn refuses platform/auditor/worker/setup, a kanbanColumns layout is accepted by the AGENT validator, and skill_write is confirm-first + bounded to the USER store (never the bundled/dev set) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

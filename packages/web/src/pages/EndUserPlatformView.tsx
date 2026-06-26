@@ -10,10 +10,10 @@ import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../compon
 import { looksLikeCron } from "./Schedules";
 import { color, font } from "../theme";
 
-// Setup Assistant E1-7 / End-User Platform tier B5 — the SHIPPING-edition Platform surface (the
-// "Getting Started" home), rendered by the consolidated Platform page for shipping users (and as the
+// Setup Assistant E1-7 / End-User Platform tier B5 — the SHIPPING-edition Platform surface (the reserved
+// "Platform" home), rendered by the consolidated Platform page for shipping users (and as the
 // dev "View as: End-user" preview). SEPARATE from the project picker (mirrors DeveloperPlatformView).
-// The reserved "Getting Started" home is hidden from the ordinary project list (GET /api/projects
+// The reserved "Platform" home is hidden from the ordinary project list (GET /api/projects
 // excludes reserved); this view is its only way in — by design. The reserved home holds TWO agents:
 // the operator ("Platform") and the de-privileged Workspace Auditor (B4).
 //   • Discovery is read-only (api.setupHome) — the reserved home + its agent(s) + any live sessions.
@@ -32,7 +32,7 @@ export function EndUserPlatformView() {
 
   if (home.isLoading) return <p style={{ color: color.textMuted }}>Loading the Platform home…</p>;
   if (home.isError || !home.data) {
-    return <p style={{ color: color.red, fontFamily: font.mono }}>No reserved “Getting Started” project found — the home may not be seeded yet.</p>;
+    return <p style={{ color: color.red, fontFamily: font.mono }}>No reserved “Platform” project found — the home may not be seeded yet.</p>;
   }
   const { project, agents } = home.data;
 
@@ -70,8 +70,8 @@ export function EndUserPlatformView() {
         </SectionLabel>
         <p style={{ color: color.textMuted, fontSize: 11, margin: "4px 0 0", fontFamily: font.mono, lineHeight: 1.5, maxWidth: 760 }}>
           Platform is your friendly, user-facing workspace operator — creating and configuring your projects,
-          agents and profiles, picking default skills, and acting on your behalf (confirming big or irreversible
-          actions first). Start it below and tell it what you want to build. The Workspace Auditor is a
+          agents and profiles, choosing which skills each rig enables, and acting on your behalf (confirming big
+          or irreversible actions first). Start it below and tell it what you want to build. The Workspace Auditor is a
           read-only reviewer — run it any time and it files improvement suggestions onto your home board.
         </p>
       </div>

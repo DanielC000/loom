@@ -20,6 +20,18 @@ export const WORKTREES_DIR = path.join(LOOM_HOME, "worktrees");
  */
 export const RUNS_DIR = path.join(LOOM_HOME, "runs");
 /**
+ * The SANCTIONED base for projects the ungated Setup/Platform operator BOOTSTRAPS for a user who has no
+ * existing repo/folder (the `loom-setup` `project_init` tool). The operator can create a fresh project
+ * directory ONLY strictly under here — the dir name is derived from the project name (or an explicit
+ * `dirName`), confined to this base, with traversal/escape rejected. This is the operator's ENTIRE
+ * host-write envelope: it is the lower-privilege cousin of the dev Platform layer and holds no other
+ * host-writer surface, so a fresh-user "empty install → working setup" flow can `git init` a workspace
+ * without ever widening the trust boundary to arbitrary host paths. Lives under LOOM_HOME so it is
+ * always present + daemon-owned; an individual project dir here is NOT operational (no loom.db/worktrees
+ * inside it), so the vault versioner treats a vault-only project here as an ordinary docs vault.
+ */
+export const WORKSPACE_ROOT = path.join(LOOM_HOME, "workspaces");
+/**
  * Automatic DB backups. The auto-backup service writes + rotates rolling snapshots under `auto/`;
  * manual snapshots (e.g. `pre-*` dirs) live directly under `backups/` and are NEVER touched by
  * rotation. The dir is created lazily by the backup module (only when a snapshot is actually taken).
@@ -88,5 +100,5 @@ export function isLoomDev(): boolean {
 }
 
 export function ensureDirs(): void {
-  for (const d of [LOOM_HOME, SETTINGS_DIR, LOGS_DIR, WORKTREES_DIR, RUNS_DIR, SKILLS_DIR, SKILL_BASE_DIR]) fs.mkdirSync(d, { recursive: true });
+  for (const d of [LOOM_HOME, SETTINGS_DIR, LOGS_DIR, WORKTREES_DIR, RUNS_DIR, SKILLS_DIR, SKILL_BASE_DIR, WORKSPACE_ROOT]) fs.mkdirSync(d, { recursive: true });
 }

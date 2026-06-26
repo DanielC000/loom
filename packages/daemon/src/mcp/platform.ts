@@ -7,6 +7,7 @@ import type { Project, ProjectConfigOverride, PlatformConfigOverride, Agent, Pro
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo } from "../git/reader.js";
+import { bootstrapProjectDir } from "../setup/bootstrap.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { GitWriter } from "../git/writer.js";
 import { writeVaultFile } from "../vault/writer.js";
@@ -362,6 +363,38 @@ export class PlatformMcpRouter {
         if (!(await isGitRepo(repoPath))) return ok({ error: `repoPath is not an existing git repository: ${repoPath}` });
         const project: Project = {
           id: randomUUID(), name, repoPath, vaultPath: vaultPath ?? repoPath,
+          config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
+          reserved: false, // an agent-created project is NEVER a reserved/system one (boot-seed only)
+        };
+        db.insertProject(project);
+        return ok(project);
+      },
+    );
+
+    // project_init — mirror of the operator's bootstrap tool, kept on the Lead surface so the
+    // loom-setup ⊆ loom-platform invariant holds (every operator tool is mirrored to the Lead). Reuses the
+    // SAME sanctioned-base bootstrap (WORKSPACE_ROOT, confined + traversal-rejected): create a brand-new
+    // project dir + `git init` it (kind:"git") or leave a plain notes folder (kind:"vault"). The Lead is
+    // human-equivalent and already holds the elevated host writers, so this adds no new capability here — it
+    // is the structurally-bounded create-from-nothing path, identical to the one the operator uses.
+    server.registerTool(
+      "project_init",
+      {
+        description: "Create a BRAND-NEW project from scratch (for no existing repo/folder): Loom creates a fresh directory under its sanctioned workspace base (inside LOOM_HOME) — the name-derived (or explicit `dirName`) leaf is confined to that base, traversal/escape rejected — and binds the project to it. kind \"git\" (default) runs `git init`; kind \"vault\" leaves a plain notes/research folder. repoPath and vaultPath both bind to the created dir. To bind an EXISTING repo, use project_create. Optional config is validated against the AGENT schema (gateCommand/alertWebhook rejected on create — set those via project_configure).",
+        inputSchema: {
+          name: z.string(),
+          kind: z.enum(["git", "vault"]).optional(),
+          dirName: z.string().optional(),
+          config: z.object({}).passthrough().optional(),
+        },
+      },
+      async ({ name, kind, dirName, config }) => {
+        const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
+        if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
+        const boot = await bootstrapProjectDir({ name, dirName, git: (kind ?? "git") === "git" });
+        if (!boot.ok) return ok({ error: boot.error });
+        const project: Project = {
+          id: randomUUID(), name, repoPath: boot.dir, vaultPath: boot.dir,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // an agent-created project is NEVER a reserved/system one (boot-seed only)
         };

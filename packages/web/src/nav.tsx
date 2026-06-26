@@ -62,7 +62,7 @@ export const NAV_PAGES: NavPage[] = [
   // The single "Platform" section — ONE tab, ONE /platform route. The page itself picks which surface to
   // render by EDITION (the reserved "Loom Platform" home existing): dev gets the Loom Platform home
   // (Lead/Auditor + findings board) plus a client-only "View as" toggle previewing the end-user surface;
-  // shipping gets the end-user "Getting Started" operator + Workspace Auditor only. A top-level surface
+  // shipping gets the end-user "Platform" operator + Workspace Auditor only. A top-level surface
   // SEPARATE from the project picker (both reserved homes stay out of the ordinary list). Deliberately
   // `scoped` OFF. The edition logic lives IN Platform.tsx, so there is no nav-level gating anymore.
   // /setup redirects to /platform (App.tsx) for any lingering links.

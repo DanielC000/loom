@@ -36,9 +36,12 @@ orchestration (Orchestrator/Dev/Bugfix/QA/Web Designer + their skills) always se
 **Setup Assistant → "Platform" operator (ships to ALL users — the ungated, lower-priv cousin of the dev Platform layer):** a
 standing, user-facing operator agent — seeded and shown as **"Platform"** since 0.5.0 (legacy display name "Setup Assistant"
 retained for the rename migration), no longer just a one-time onboarding helper — on the `setup` SessionRole, served by a curated **fail-closed**
-`loom-setup` MCP router (`/mcp-setup/:sessionId`, role-gated, 18 tools — incl. the one safe lifecycle cap
+`loom-setup` MCP router (`/mcp-setup/:sessionId`, role-gated, 19 tools — incl. the one safe lifecycle cap
 `project_archive`: soft, reversible, and REFUSES a reserved/system home). It acts on the user's behalf —
-`project_create`/`configure`/`update` via the **AGENT validator** (rejects `gateCommand`/`alertWebhook`),
+`project_create` (bind an EXISTING repo, OR a **vault-only** project via `vaultPath` with `repoPath` omitted)
++ `project_init` (0.9.0 — the operator's ONLY host-write: create a BRAND-NEW project dir under the SANCTIONED
+`WORKSPACE_ROOT` base inside `LOOM_HOME` — name-derived + confined, traversal/escape rejected — and `git init`
+it, or `kind:"vault"` for a notes folder; so a no-repo user can be onboarded end-to-end) / `configure`/`update` via the **AGENT validator** (rejects `gateCommand`/`alertWebhook`),
 `agent_create` + `agent_update` (0.9.0 — edit an existing agent; least-priv: REJECTS assigning an
 elevated platform/auditor rig), `profile_create`/`update`/`assign`, the single-record `agent_get`/
 `profile_get`/`project_get` + `list_all_*` reads, and `session_spawn`

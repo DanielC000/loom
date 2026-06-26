@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { Agent, Project } from "@loom/shared";
+import type { Agent, Project, Task } from "@loom/shared";
+import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { LOOM_HOME } from "../paths.js";
 import type { Db } from "../db.js";
 
@@ -80,11 +81,40 @@ const LEGACY_SETUP_AGENT_NAME: string = "Setup Assistant";
  */
 const SETUP_ASSISTANT_PROMPT = `Load your **/setup-assistant** doctrine skill first — it is your operating manual (your operator identity, the curated loom-setup tool surface, the confirm-first posture, and what you are NOT). This prompt adds only the specifics on top of it.
 
-You are your workspace's **Platform** operator — the warm, always-available helper a Loom user meets first and returns to whenever they want to shape their workspace. Your job is to get someone from an empty install to a working setup and keep it tidy thereafter: their **projects** (create, configure, and archive ones they're done with), **agents**, **profiles**, a sensible set of **default skills**, and a **workflow** they understand. Explain how Loom fits together in plain language, then **act on the user's behalf** over your curated tools so they don't have to learn every screen before getting value.
+You are your workspace's **Platform** operator — the warm, always-available helper a Loom user meets first and returns to whenever they want to shape their workspace. Your job is to get someone from an empty install to a working setup and keep it tidy thereafter: their **projects** (create, configure, and archive ones they're done with), **agents**, **profiles**, a sensible set of **skills** on each rig, and a **workflow** they understand. Explain how Loom fits together in plain language, then **act on the user's behalf** over your curated tools so they don't have to learn every screen before getting value.
 
 Be warm, concrete, and brief — guide, don't lecture. Ask what the user is trying to build, propose a concrete first setup, and offer to do it for them. Confirm anything big or irreversible before acting (archiving a project is reversible but disruptive — confirm first). When a user wants their workspace reviewed for quality, point them at the on-demand **Workspace Auditor** (a separate, suggest-only reviewer) rather than doing it yourself.
 
 You help users shape and maintain their own workspace. If someone asks for something outside that, say so plainly and point them to the right place rather than improvising.`;
+
+/**
+ * The getting-started checklist seeded onto the Platform home board (the doctrine promises "a board for a
+ * setup checklist", so the seed must actually fulfil it). Mirrors the operator's operating loop: pick a
+ * goal → create a project → add agents → choose skills → spawn a manager. These are guidance cards the
+ * user (or the operator on their behalf) works through; they're plain board cards with no lifecycle magic.
+ */
+const SETUP_CHECKLIST: { title: string; body: string }[] = [
+  {
+    title: "Pick what you want to build",
+    body: "Tell Platform your goal — a code repo to work on, a research/notes vault, or a personal project. It will translate that into a concrete first setup.",
+  },
+  {
+    title: "Create your first project",
+    body: "Have an existing repo or notes folder? Platform binds it. Starting from nothing? Platform initializes a fresh project (a git repo, or a plain vault for research/notes) for you.",
+  },
+  {
+    title: "Add your agents",
+    body: "Define the agents that do the work — e.g. a manager that plans and delegates, and one or two workers. Platform writes each a substantive base prompt so they boot with their doctrine.",
+  },
+  {
+    title: "Choose your skills",
+    body: "Decide which skills each rig (profile) enables — a profile delivers all skills by default, or you can narrow it to a focused subset. Platform sets this on the profile for you.",
+  },
+  {
+    title: "Spawn a manager and go",
+    body: "Start a manager session on your project and hand it a goal. It runs the lead-manages-workers loop — planning, delegating to workers, reviewing, and merging.",
+  },
+];
 
 /**
  * Seed the reserved "Platform" home and its Setup Assistant agent IF ABSENT. UNGATED — runs for
@@ -122,7 +152,22 @@ export function seedSetupHome(db: Db): string[] {
   };
   db.insertAgent(agent);
 
-  return [`project:${project.name}`, `agent:${agent.name}`];
+  // Seed the getting-started checklist onto the home board so the doctrine's "board for a setup checklist"
+  // is real. Land the cards on the board's defaultLanding column resolved from the home's own config (the
+  // home config is {} ⇒ platform defaults ⇒ "Backlog") so we never hardcode a column key. Seeded exactly
+  // once with the home (this whole function is seed-if-absent), so a user who later clears/edits the board
+  // is never re-seeded.
+  const cols = resolveConfig(project.config).kanbanColumns;
+  const landing = columnKeyForRole(cols, "defaultLanding") ?? cols[0]?.key ?? "backlog";
+  SETUP_CHECKLIST.forEach((card, i) => {
+    const task: Task = {
+      id: randomUUID(), projectId: project.id, title: card.title, body: card.body,
+      columnKey: landing, position: i, priority: "p2", createdAt: now, updatedAt: now,
+    };
+    db.insertTask(task);
+  });
+
+  return [`project:${project.name}`, `agent:${agent.name}`, `checklist:${SETUP_CHECKLIST.length}`];
 }
 
 /**

@@ -72,7 +72,8 @@ try {
   let db = new Db(mainDbFile);
   seedDefaultProfiles(db);                 // so the bundled "Setup Assistant" profile exists to assign
   const seeded = seedSetupHome(db);        // the reserved "Platform" setup home + its Setup Assistant agent
-  check("(pre) seedSetupHome created the reserved home + agent", seeded.length === 2);
+  check("(pre) seedSetupHome created the reserved home + agent + checklist", seeded.length === 3
+    && seeded.some((s) => s.startsWith("project:")) && seeded.some((s) => s.startsWith("agent:")) && seeded.some((s) => s.startsWith("checklist:")));
   check("(pre) a fresh install reads as ZERO ordinary projects (reserved homes excluded)", db.listProjects().length === 0);
   check("(pre) the first-run marker is unset on a fresh install", db.getMeta(SETUP_FIRST_RUN_KEY) === undefined);
 

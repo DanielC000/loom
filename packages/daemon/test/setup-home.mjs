@@ -66,6 +66,18 @@ try {
   check("(1) the agent is bound to the bundled 'Setup Assistant' profile (role setup)",
     profById.get(assistant.profileId)?.name === "Setup Assistant" && profById.get(assistant.profileId)?.role === "setup");
 
+  // The getting-started checklist seeds onto the home board (the doctrine promises "a board for a setup
+  // checklist" — the seed must actually fulfil it). Cards land on the home's resolved defaultLanding column.
+  check("(1) seedSetupHome reports the seeded checklist in its summary", seededSetupA.some((s) => /^checklist:\d+$/.test(s)));
+  const checklistA = dbA.listTasks(setupProject.id);
+  check("(1) the checklist cards seeded onto the home board (≥5 cards)", checklistA.length >= 5);
+  const { resolveConfig, columnKeyForRole } = await import("@loom/shared");
+  const landingKey = columnKeyForRole(resolveConfig(setupProject.config).kanbanColumns, "defaultLanding");
+  check("(1) every checklist card lands on the home's resolved defaultLanding column (no orphan key)",
+    checklistA.every((c) => c.columnKey === landingKey));
+  check("(1) the checklist covers the operating loop (a 'create' + a 'manager' card both present)",
+    checklistA.some((c) => /create/i.test(c.title)) && checklistA.some((c) => /manager/i.test(c.title)));
+
   // Hidden from the picker, present in the inclusive admin feed.
   check("(1) listProjects() (the picker) EXCLUDES the reserved setup home",
     !dbA.listProjects().some((p) => p.name === SETUP_PROJECT_NAME));
