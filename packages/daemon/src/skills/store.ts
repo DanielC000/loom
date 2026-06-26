@@ -156,6 +156,16 @@ const toLf = (s: string): string => s.replace(/\r\n?/g, "\n");
  * `excludeFalseConflicts` collapses identical mine/shipped edits so they never read as conflicts.
  */
 export function mergeSkillContent(base: string, mine: string, shipped: string): SkillMergeResult {
+  // Clean fast-forward FIRST — when the user has made no SEMANTIC edit (mine == base under the SAME
+  // normalizer customizationState uses: CRLF/CR, trailing per-line whitespace, and trailing newlines all
+  // ignored), there is nothing to preserve, so adopt must take `shipped` VERBATIM. Routing this case
+  // through diff3 is not merely redundant, it's WRONG: diff3 below normalizes only with `toLf`, so a
+  // PHANTOM difference customizationState already discounts (a lone CRLF, a trailing space, a missing final
+  // newline) reads to diff3 as a user edit and can DROP or CONFLICT shipped's additions — advancing base to
+  // shipped while leaving `mine` stale (the adopt-staleness bug: a "not customized" skill that adopt left
+  // missing shipped lines). Comparing with normalizeForCompare here keeps "no user edit" meaning the same
+  // thing in the state model and the merge.
+  if (normalizeForCompare(mine) === normalizeForCompare(base)) return { clean: true, merged: shipped };
   const regions = diff3Merge(toLf(mine).split("\n"), toLf(base).split("\n"), toLf(shipped).split("\n"), { excludeFalseConflicts: true });
   const out: string[] = [];
   const conflicts: SkillConflictHunk[] = [];

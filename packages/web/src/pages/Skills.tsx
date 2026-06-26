@@ -182,6 +182,15 @@ function SkillEditor({
           error={(preview.error as Error | null) ?? adoptError} />
       )}
 
+      {/* Diverged banner — customized but NO shipped update pending (mine ≠ base, base == shipped). This
+          ALSO catches the "mine behind both" staleness state (board card dd940682), which is data-identical
+          to an ordinary customization: either way the served copy differs from the current shipped version.
+          adopt can't help (it's gated on updateAvailable), so we surface a compare + a clear sync-to-shipped
+          path instead of leaving the divergence invisible behind the "customized" badge alone. */}
+      {customized && !updateAvailable && (
+        <DivergedBanner name={name} mine={content} onSync={onReset} syncing={resetting} />
+      )}
+
       <textarea value={text} onChange={(e) => setText(e.target.value)} spellCheck={false}
         style={{
           flex: 1, minHeight: 360, width: "100%", boxSizing: "border-box", resize: "none",
@@ -244,6 +253,52 @@ function UpdateBanner({ name, onAdopt, adoptBusy, error }: { name: string; onAdo
       {showDiff && (
         diff.isLoading ? <span style={{ color: color.textMuted, fontSize: 12 }}>Loading diff…</span>
         : diff.data ? <LineDiff base={diff.data.base} shipped={diff.data.shipped} />
+        : <span style={{ color: color.red, fontSize: 12 }}>Couldn't load the diff.</span>
+      )}
+    </div>
+  );
+}
+
+// "Diverged from shipped" banner: shown when the store copy differs from the current shipped version but
+// NO Loom update is pending (customized · not update-available). Covers two indistinguishable cases — an
+// intentional user edit, and the adopt-staleness state where `mine` was left behind older than shipped
+// (card dd940682). Either way the user can preview the divergence (their copy vs shipped) and, if they
+// didn't mean to keep edits, sync to the current shipped content via reset (mine=base=shipped). Cyan
+// hairline (a neutral state signal), distinct from the amber "update available" banner.
+function DivergedBanner({ name, mine, onSync, syncing }: { name: string; mine: string; onSync: () => void; syncing: boolean }) {
+  const [showDiff, setShowDiff] = useState(false);
+  const [confirmSync, setConfirmSync] = useState(false);
+  // update-diff returns { base, shipped } for any bundled skill (no update-available guard), so it's the
+  // way to fetch the current shipped content here. We diff the SAVED store copy (`mine`) against shipped.
+  const diff = useQuery({
+    queryKey: ["skill", name, "update-diff"],
+    queryFn: () => api.skillUpdateDiff(name),
+    enabled: showDiff,
+  });
+  return (
+    <div style={{ border: `1px solid ${color.cyan}`, borderRadius: radius.base, padding: "8px 10px", marginBottom: 8,
+      background: color.panel2, display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ color: color.cyan, fontFamily: font.mono, fontSize: 12 }}>
+          Your saved copy differs from the current shipped version.
+        </span>
+        <span style={{ flex: 1 }} />
+        <Button onClick={() => setShowDiff((v) => !v)}>{showDiff ? "Hide differences" : "Compare with shipped"}</Button>
+        {confirmSync ? (
+          <>
+            <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>discard your copy & sync?</span>
+            <Button variant="danger" disabled={syncing} onClick={onSync}>Sync</Button>
+            <Button onClick={() => setConfirmSync(false)}>Cancel</Button>
+          </>
+        ) : (
+          <Button onClick={() => setConfirmSync(true)} title="Discard your copy and sync this skill to the current shipped version">
+            Sync to shipped
+          </Button>
+        )}
+      </div>
+      {showDiff && (
+        diff.isLoading ? <span style={{ color: color.textMuted, fontSize: 12 }}>Loading diff…</span>
+        : diff.data ? <LineDiff base={mine} shipped={diff.data.shipped} />
         : <span style={{ color: color.red, fontSize: 12 }}>Couldn't load the diff.</span>
       )}
     </div>
