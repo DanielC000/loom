@@ -440,6 +440,14 @@ export type OrchestrationEventKind =
   // branch merge_rejected.
   | "worker_report_rejected"
   | "wake_scheduled" | "wake_fired" | "wake_dropped" | "idle_report" | "idle_escalated"
+  // Context-recycle ESCALATION (ContextWatcher): a context-heavy manager (over `recycleAtContextRatio`)
+  // slept through `maxUnansweredRecycleNudges` consecutive recycle nudges without handing off → the
+  // watcher escalates to the human instead of nudging into the void. The context twin of `idle_escalated`:
+  // the human-facing signal attention.ts derives an alert from (there is no daemon-side notification).
+  // Filed under the MANAGER (managerSessionId = m.id); `detail` carries { reason, unanswered, pct }.
+  // Emitted EXACTLY ONCE per session — the manager's nudge policy flips 'watching'→'escalated', which the
+  // policy gate skips on the next tick; a recycled successor is a fresh row, so it re-arms naturally.
+  | "context_escalated"
   // Busy-worker stuck watchdog (BusyWorkerWatcher): a LIVE worker has been `busy` in a single
   // uninterrupted turn past the `stuckWorkerMinutes` window with no progress. Filed under the OWNING
   // MANAGER (managerSessionId) with workerSessionId/taskId set; `detail` carries minutesBusy + reason.

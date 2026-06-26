@@ -74,6 +74,16 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     }
   }
 
+  // Context-recycle escalation (ContextWatcher twin of idle_escalated): a context-heavy manager that
+  // ignored every recycle nudge → a human-facing alert. There's no "context_report" answer to clear it
+  // (a context nudge is answered by recycling, which makes the manager not-live → its events stop being
+  // fetched here), so the latest context_escalated per LIVE manager simply surfaces. Keyed per manager
+  // (at most one per session — escalate-once), mirroring latestIdle/latestMerge.
+  const latestContext = new Map<string, OrchestrationEvent>();
+  for (const e of sortedEvents) {
+    if (e.kind === "context_escalated") latestContext.set(e.managerSessionId, e);
+  }
+
   const items: AttentionItem[] = [];
   // A genuinely-pending review keeps its WORKER session alive on the worktree (the worker is only
   // hard-stopped at merge-confirm time). So a merge_request whose worker is gone (exited/dead/not in
@@ -112,6 +122,13 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
       });
     }
     // a latest idle_report of working/waiting falls through → no item (the alert is cleared).
+  }
+  for (const e of latestContext.values()) {
+    const detail = (e.detail ?? {}) as { unanswered?: number; pct?: number };
+    items.push({
+      key: `ce-${e.id}`, tone: "red", kind: "CONTEXT OVERFLOW", workerSessionId: e.managerSessionId,
+      text: `manager ${e.managerSessionId.slice(0, 8)} — ignored ${detail.unanswered ?? "?"} recycle nudges at ~${detail.pct ?? "?"}% context; will overflow without a handoff`,
+    });
   }
   // Defense-in-depth: only a LIVE session is actionably rate-limited. The durable fix clears
   // rate_limited_until on session EXIT, but an exited row that pre-dates that fix (or races a tick)

@@ -199,6 +199,21 @@ export interface OrchestrationConfig {
    */
   recycleAtContextRatio: number;
   /**
+   * Context-recycle re-nudge cadence: minutes between successive ContextWatcher recycle nudges to a
+   * manager that's over `recycleAtContextRatio` but hasn't handed off yet. The context analogue of the
+   * idle watchdog's `idleNudgeMinutes` — a fired nudge isn't repeated for another full window. The whole
+   * watcher is still gated by `recycleAtContextRatio` (0 there disables it); this only paces re-nudging.
+   * Default 20.
+   */
+  recycleNudgeIntervalMinutes: number;
+  /**
+   * Context-recycle escalation cap: after this many CONSECUTIVE context-recycle nudges go unanswered (the
+   * manager never recycles), the ContextWatcher escalates to the human (a `context_escalated` event the
+   * web attention surface alerts on) instead of nudging into the void. The context analogue of the idle
+   * watchdog's `maxUnansweredNudges`. Default 3.
+   */
+  maxUnansweredRecycleNudges: number;
+  /**
    * Asleep-at-the-Wheel idle-manager watchdog. Minutes a LIVE manager may sit idle (busy=false, no live
    * workers, not snoozed/suppressed) before the watcher nudges it once. Default 45; 0 disables the
    * watcher entirely. Env LOOM_IDLE_NUDGE_MINUTES sets the platform default here (a per-project
@@ -436,7 +451,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, stuckWorkerMinutes: 30, crashRecoveryMaxAttempts: 3 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, stuckWorkerMinutes: 30, crashRecoveryMaxAttempts: 3 },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -696,6 +711,10 @@ export function resolveConfig(
       maxConcurrentManagers: override.orchestration?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers,
       schedulerEnabled: override.orchestration?.schedulerEnabled ?? d.orchestration.schedulerEnabled,
       recycleAtContextRatio: override.orchestration?.recycleAtContextRatio ?? d.orchestration.recycleAtContextRatio,
+      // Context-recycle re-nudge cadence + escalation cap (per-project, no env layer). `??` so an explicit
+      // value (incl. 0) survives the merge — mirrors maxUnansweredNudges below.
+      recycleNudgeIntervalMinutes: override.orchestration?.recycleNudgeIntervalMinutes ?? d.orchestration.recycleNudgeIntervalMinutes,
+      maxUnansweredRecycleNudges: override.orchestration?.maxUnansweredRecycleNudges ?? d.orchestration.maxUnansweredRecycleNudges,
       // Precedence: per-project override > LOOM_IDLE_NUDGE_MINUTES env > hardcoded default. `??` (not
       // `||`) so an explicit 0 at any layer is preserved (0 disables the watcher).
       idleNudgeMinutes: override.orchestration?.idleNudgeMinutes ?? envIdle ?? d.orchestration.idleNudgeMinutes,

@@ -188,6 +188,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   idle_nudge_snooze_until TEXT,                        -- ISO ts | NULL (silent until this passes)
   last_idle_nudge_at TEXT,                             -- ISO ts | NULL (last nudge fired)
   idle_nudge_unanswered INTEGER NOT NULL DEFAULT 0,    -- consecutive unanswered nudges
+  -- ContextWatcher per-manager recycle-nudge state (parity with the idle-watchdog columns above): persist
+  -- the last context-nudge time + unanswered count so the re-nudge cadence + escalate-after-cap survive a
+  -- daemon restart. No snooze column (unlike idle): a context nudge is answered by RECYCLING, not snoozing.
+  context_nudge_policy TEXT NOT NULL DEFAULT 'watching', -- 'watching' | 'escalated'
+  last_context_nudge_at TEXT,                            -- ISO ts | NULL (last context-recycle nudge fired)
+  context_nudge_unanswered INTEGER NOT NULL DEFAULT 0,   -- consecutive unanswered context nudges
   -- Per-project session Archive (mirrors projects.archived_at): the ISO instant a dead/exited
   -- session was archived out of the rail. NULL = not archived. Excluded from the live lists.
   archived_at TEXT
@@ -332,6 +338,11 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   idle_nudge_snooze_until: "TEXT",
   last_idle_nudge_at: "TEXT",
   idle_nudge_unanswered: "INTEGER NOT NULL DEFAULT 0",
+  // ContextWatcher recycle-nudge state (parity with the idle columns above). NOT NULL + constant DEFAULT
+  // is legal on ALTER TABLE ADD COLUMN, so legacy rows backfill to 'watching' / 0.
+  context_nudge_policy: "TEXT NOT NULL DEFAULT 'watching'",
+  last_context_nudge_at: "TEXT",
+  context_nudge_unanswered: "INTEGER NOT NULL DEFAULT 0",
   // Per-project session Archive (nullable; legacy rows backfill to NULL = not archived).
   archived_at: "TEXT",
 };
@@ -411,6 +422,15 @@ export interface IdleNudgeState {
   policy: IdleNudgePolicy;
   snoozeUntil: string | null;
   lastIdleNudgeAt: string | null;
+  unanswered: number;
+}
+
+/** ContextWatcher recycle-nudge policy (twin of IdleNudgePolicy; no snooze state — see below). */
+export type ContextNudgePolicy = "watching" | "escalated";
+/** Per-manager context-recycle-nudge state read back from the sessions row (parity w/ IdleNudgeState). */
+export interface ContextNudgeState {
+  policy: ContextNudgePolicy;
+  lastContextNudgeAt: string | null;
   unanswered: number;
 }
 
@@ -1557,6 +1577,31 @@ export class Db {
   resetIdleNudgeState(id: string): void {
     this.db.prepare("UPDATE sessions SET idle_nudge_policy = 'watching', idle_nudge_snooze_until = NULL, idle_nudge_unanswered = 0 WHERE id = ?")
       .run(id);
+  }
+
+  // --- ContextWatcher recycle-nudge state (persisted per-manager, parity with the idle accessors above
+  // and the rate-limit accessors). No reset method: a context nudge is answered by RECYCLING (the manager
+  // goes not-live and its successor is a fresh row with default state), so there is no in-session re-arm. ---
+  /** Read the per-session context-recycle-nudge state; undefined when the session row is missing. */
+  getContextNudgeState(id: string): ContextNudgeState | undefined {
+    const r = this.db.prepare(
+      "SELECT context_nudge_policy, last_context_nudge_at, context_nudge_unanswered FROM sessions WHERE id = ?",
+    ).get(id) as Row | undefined;
+    if (!r) return undefined;
+    return {
+      policy: (r.context_nudge_policy as ContextNudgePolicy) ?? "watching",
+      lastContextNudgeAt: (r.last_context_nudge_at as string) ?? null,
+      unanswered: (r.context_nudge_unanswered as number) ?? 0,
+    };
+  }
+  /** Set the context-nudge policy. 'escalated' is the once-per-session gate that stops further nudges. */
+  setContextNudgePolicy(id: string, policy: ContextNudgePolicy): void {
+    this.db.prepare("UPDATE sessions SET context_nudge_policy = ? WHERE id = ?").run(policy, id);
+  }
+  /** Record that a context-recycle nudge fired: stamp last_context_nudge_at + increment the unanswered counter. */
+  recordContextNudge(id: string, atIso: string): void {
+    this.db.prepare("UPDATE sessions SET last_context_nudge_at = ?, context_nudge_unanswered = context_nudge_unanswered + 1 WHERE id = ?")
+      .run(atIso, id);
   }
   /** Register the post-write event listener (the alert-webhook emitter). At most one; replaces any prior. */
   setEventListener(fn: (evt: OrchestrationEvent) => void): void {

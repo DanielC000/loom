@@ -35,7 +35,7 @@ const HERMETIC = [
   "mcp-list-budget", // PL Auditor finding #5: default list_all_agents + audit list_sessions fit the token budget
 
   "claude-config", "trust-lock", "spawn-args", "disallow-prompt-tools",
-  "context-watcher", "context-stats", "recycle-handoff", "recycle-pending-carry", "spawn-allow-baseline", "wake", "worker-reported-state", "crash-recovery-watcher", "busy-worker-watcher",
+  "context-watcher", "context-watcher-escalate", "context-stats", "recycle-handoff", "recycle-pending-carry", "spawn-allow-baseline", "wake", "worker-reported-state", "crash-recovery-watcher", "busy-worker-watcher",
   "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull", "usage-status", "rate-limit-clear", "rate-limit-cascade", "usage-limit-spawn-wake",
   "skills-inject", "skills-inject-durability", "skills-subset-spawn", "respawn-profile-attrs", "skills-store-durability", "skills-publish-drift", "skills-customization", "skills-adopt-fastforward", "vault-lint", "vault-browser", "vault-raw", "vault-writer", "vault-versioner-wiring", "git-writer", "git-identity-warning",
   "worker-diff", "worktrees", "worktree-provision", "spawn-recut-stale-branch", "merge-finalize-resilient", "merge-confirm-idempotent", "merge-review-diffstat", "merge-stranded-backstop", "worker-report-precheck", "worker-report-pending-guard", "worker-report-orphan-wake", "worker-exited-without-report", "worker-spawn-agent-gate", "worker-spawn-task-gate", "worker-spawn-live-task-guard", "worker-spawn-humanhold-guard", "project-config-column-orphan",

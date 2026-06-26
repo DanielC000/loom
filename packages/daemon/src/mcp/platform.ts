@@ -96,6 +96,11 @@ const orchestrationOverride = z.object({
   // Fraction of the model context window (0 disables); a ratio >1 or <0 is meaningless and would
   // corrupt the ContextWatcher's recycle trigger.
   recycleAtContextRatio: z.number().min(0).max(1).optional(),
+  // ContextWatcher re-nudge cadence (whole minutes) + escalation cap (whole count). Both ≥0; benign
+  // tuning numbers (no host-launch / exfil capability), so they stay on the agent path too. A generous
+  // ceiling on the cap guards a fat-fingered value from authorizing an endless nudge loop.
+  recycleNudgeIntervalMinutes: z.number().int().min(0).optional(),
+  maxUnansweredRecycleNudges: z.number().int().min(0).max(100).optional(),
   // Whole-minute leashes/counters; 0 is honored as a real value (disables the watcher / escalates
   // without nudging), so the floor is 0, not 1. Negative values are nonsensical.
   idleNudgeMinutes: z.number().int().min(0).optional(),
