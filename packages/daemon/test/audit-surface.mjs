@@ -194,12 +194,15 @@ try {
   await client.connect(clientT);
   const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
 
-  // Surface: EXACTLY the read tools + the TWO inert daemon-local writes (audit_file_finding +
-  // preset_suggestion_suggest) — and NONE of the elevated/structural ones.
+  // Surface: EXACTLY the read tools (transcript reads + the THREE least-privilege repo reads) + the TWO
+  // inert daemon-local writes (audit_file_finding + preset_suggestion_suggest) — and NONE of the
+  // elevated/structural ones. The baseline is extended by EXACTLY the new repo reads (no surface creep);
+  // the `forbidden` negative control below proves nothing else (no write/host/outward) slipped in.
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-  check(`(b) audit surface is EXACTLY [audit_file_finding, list_sessions, preset_suggestion_suggest, transcript_read] (got: ${tools.join(",")})`,
-    JSON.stringify(tools) === JSON.stringify(["audit_file_finding", "list_sessions", "preset_suggestion_suggest", "transcript_read"]));
-  const forbidden = ["git_push", "git_commit", "vault_write", "project_configure", "session_spawn", "session_message", "session_stop", "worker_spawn"];
+  check(`(b) audit surface is EXACTLY [audit_file_finding, list_sessions, preset_suggestion_suggest, repo_glob, repo_grep, repo_read_file, transcript_read] (got: ${tools.join(",")})`,
+    JSON.stringify(tools) === JSON.stringify(["audit_file_finding", "list_sessions", "preset_suggestion_suggest", "repo_glob", "repo_grep", "repo_read_file", "transcript_read"]));
+  // Negative control: the repo tools are READ-only — no write/host/spawn/exec tool came with them.
+  const forbidden = ["git_push", "git_commit", "vault_write", "project_configure", "session_spawn", "session_message", "session_stop", "worker_spawn", "repo_write", "repo_exec", "shell"];
   check("(b) audit surface has NONE of the elevated/structural tools (no git/vault/config/spawn/message)",
     forbidden.every((t) => !tools.includes(t)));
 
@@ -354,6 +357,60 @@ try {
   check("(b2) the finding landed on pHome, and the setup home got NOTHING",
     db.getTask(fin2.taskId)?.projectId === "pHome" && db.listTasks("pSetup").length === setupTasksBefore);
 
+  // (b7) SERVER-SIDE DEDUPE — re-filing a finding whose NORMALIZED title already sits on the Platform board
+  // is a NO-OP (returns the existing card + deduped:true), so a looping/hostile transcript can't spam it.
+  const dupCountBefore = db.listTasks("pHome").length;
+  const dupA = await call("audit_file_finding", { title: "  Duplicate FINDING title  ", detail: "first occurrence", severity: "low" });
+  const dupB = await call("audit_file_finding", { title: "duplicate finding title", detail: "second — same title, different case/spacing", severity: "high" });
+  check("(b7) dedupe: the first file created a NOVEL task (no deduped flag)", !dupA.deduped && !!dupA.taskId);
+  check("(b7) dedupe: the second (same normalized title) is a NO-OP returning the SAME taskId + deduped:true",
+    dupB.deduped === true && dupB.taskId === dupA.taskId && dupB.projectId === "pHome");
+  check("(b7) dedupe: only ONE task was actually created across the two files", db.listTasks("pHome").length === dupCountBefore + 1);
+
+  // ============ (f) LEAST-PRIVILEGE READ-ONLY REPO TOOLS — code-awareness for the 7-lens gap-hunt ============
+  // A fixture "Loom source" tree the auditor reads; LOOM_REPO_ROOT points loomRepoRoot() at it (the test
+  // seam). The DoD: the reads work, SKIP node_modules, honour the glob filter, and are CONFINED to the root
+  // (a `..`/absolute escape to a sibling secret is refused — the Auditor can't read an arbitrary host file).
+  const fixtureRoot = path.join(os.tmpdir(), `loom-p5-src-${Date.now()}`);
+  fs.mkdirSync(path.join(fixtureRoot, "packages", "daemon", "src", "mcp"), { recursive: true });
+  fs.mkdirSync(path.join(fixtureRoot, "node_modules", "junk"), { recursive: true });
+  fs.writeFileSync(path.join(fixtureRoot, "packages", "daemon", "src", "mcp", "audit.ts"), "export const MARKER = 1;\n// second line\nconst x = 2;\n");
+  fs.writeFileSync(path.join(fixtureRoot, "README.md"), "# fixture\nNEEDLE_TOKEN here\n");
+  fs.writeFileSync(path.join(fixtureRoot, "node_modules", "junk", "skip.ts"), "NEEDLE_TOKEN and MARKER should be skipped\n");
+  const outsideSecret = path.join(os.tmpdir(), `loom-p5-secret-${Date.now()}.txt`);
+  fs.writeFileSync(outsideSecret, "TOPSECRET\n");
+  process.env.LOOM_REPO_ROOT = fixtureRoot; // loomRepoRoot() reads this at CALL time
+
+  const globRes = await call("repo_glob", { pattern: "packages/**/*.ts" });
+  check("(f) repo_glob: matches the source file under packages/**",
+    Array.isArray(globRes.matches) && globRes.matches.includes("packages/daemon/src/mcp/audit.ts"));
+  const globAll = await call("repo_glob", { pattern: "**/*.ts" });
+  check("(f) repo_glob: SKIPS node_modules", !globAll.matches.some((m) => m.startsWith("node_modules/")));
+
+  const readRes = await call("repo_read_file", { path: "packages/daemon/src/mcp/audit.ts" });
+  check("(f) repo_read_file: returns the file's lines + totalLines",
+    Array.isArray(readRes.lines) && /MARKER/.test(readRes.lines[0]) && readRes.totalLines >= 3 && readRes.path === "packages/daemon/src/mcp/audit.ts");
+  const escDots = await call("repo_read_file", { path: `../${path.basename(outsideSecret)}` });
+  check("(f) repo_read_file: REFUSES a ../ traversal escape (cannot read the sibling secret)",
+    typeof escDots.error === "string" && !escDots.lines);
+  const escAbs = await call("repo_read_file", { path: outsideSecret });
+  check("(f) repo_read_file: REFUSES an absolute path", typeof escAbs.error === "string" && !escAbs.lines);
+  const missing = await call("repo_read_file", { path: "packages/nope.ts" });
+  check("(f) repo_read_file: a missing file → {error:'file not found'}, not a crash", missing.error === "file not found");
+
+  const grep = await call("repo_grep", { pattern: "NEEDLE_TOKEN" });
+  check("(f) repo_grep: finds the token in a source file (with file:line)",
+    Array.isArray(grep.matches) && grep.matches.some((m) => m.file === "README.md" && m.line === 2 && /NEEDLE_TOKEN/.test(m.text)));
+  check("(f) repo_grep: does NOT match inside node_modules", !grep.matches.some((m) => m.file.startsWith("node_modules/")));
+  const grepGlob = await call("repo_grep", { pattern: "MARKER", glob: "packages/**/*.ts" });
+  check("(f) repo_grep: the glob filter narrows to matching paths",
+    grepGlob.matches.length > 0 && grepGlob.matches.every((m) => m.file.startsWith("packages/")));
+  const badRe = await call("repo_grep", { pattern: "(" });
+  check("(f) repo_grep: a bad regex → {error}, not a crash", typeof badRe.error === "string" && /invalid regex/.test(badRe.error));
+  delete process.env.LOOM_REPO_ROOT;
+  try { fs.rmSync(fixtureRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(outsideSecret, { force: true }); } catch { /* best-effort */ }
+
   await client.close();
 
   // ============ (c) session_spawn (platform tool) REFUSES role:"auditor" ============
@@ -383,7 +440,10 @@ try {
     db, control: new OrchestrationControl(),
     startManager: (agentId) => { sched.managers.push(agentId); return { id: `mgr-${agentId}` }; },
     startAuditor: (agentId) => { sched.auditors.push(agentId); return { id: `aud-${agentId}` }; },
-    maxConcurrentManagers: 10,
+    // Generous budgets: this case proves KIND ROUTING, not the caps. Auditors now draw from their OWN
+    // budget (separate from the manager cap), and prior sections left live auditor sessions on this shared
+    // db — so set the auditor budget high enough that the routing fires regardless of that residue.
+    maxConcurrentManagers: 10, maxConcurrentAuditors: 10,
   });
   const past = new Date(Date.now() - 60_000).toISOString();
   db.insertSchedule({ id: "schAud", agentId: "agentAud", cron: "* * * * *", enabled: true, nextFireAt: past, lastFiredAt: null, createdAt: now, kind: "auditor" });

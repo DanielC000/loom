@@ -6,6 +6,7 @@ import { TerminalPane } from "../components/Terminal";
 import { Composer } from "../components/Composer";
 import { PresetPromptsButton } from "../components/PresetPrompts";
 import { AgentPromptEditor } from "../components/AgentPromptEditor";
+import { RunHistory } from "../components/RunHistory";
 import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../components/ui";
 import { looksLikeCron } from "./Schedules";
 import { color, font } from "../theme";
@@ -101,6 +102,30 @@ export function EndUserPlatformView() {
           {liveAuditorSession && <StatusPill tone={liveAuditorSession.busy ? "amber" : "phosphor"} glow={liveAuditorSession.busy} label={liveAuditorSession.busy ? "busy" : "idle"} />}
         </SectionLabel>
         <AuditorSession session={liveAuditorSession} />
+      </section>
+
+      {/* --- Operator run history — every operator RUN (role:"setup" session), newest-first, live+exited+archived --- */}
+      <section>
+        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          Operator history
+          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
+            every operator run — when it ran, context cost, duration; expand to read the transcript
+          </span>
+        </SectionLabel>
+        <RunHistory reservedProjectId={project.id} sessions={homeSessions} role="setup"
+          emptyLabel="No operator runs yet — Platform hasn’t run." />
+      </section>
+
+      {/* --- Auditor run history — every Review RUN (workspace-auditor session), newest-first; each Review mints a fresh run --- */}
+      <section>
+        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          Auditor history
+          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
+            every workspace review — when it ran, context cost, duration; expand to read the transcript
+          </span>
+        </SectionLabel>
+        <RunHistory reservedProjectId={project.id} sessions={homeSessions} role="workspace-auditor"
+          emptyLabel="No reviews yet — click “Review my workspace” above to run one." />
       </section>
     </div>
   );

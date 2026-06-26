@@ -1999,7 +1999,7 @@ export class SessionService {
   auditFileFinding(
     auditorSessionId: string,
     input: { title: string; detail: string; severity?: string },
-  ): { taskId: string; projectId: string } {
+  ): { taskId: string; projectId: string; deduped?: boolean } {
     const caller = this.db.getSession(auditorSessionId);
     if (!caller || caller.role !== "auditor") throw new Error("audit_file_finding is an auditor-only surface");
     // HARDCODED target: the reserved Platform home — never an arbitrary projectId from the Auditor.
@@ -2007,6 +2007,15 @@ export class SessionService {
     // ("Getting Started") is also reserved now, so the name-agnostic lookup would mis-file the finding.
     const home = this.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
     if (!home) throw new Error("no reserved Loom Platform project exists — cannot file finding");
+
+    // SERVER-SIDE DEDUPE (makes the trust-boundary "dedupe-guarded" claim TRUE, mirrors suggestPresetPrompt):
+    // a finding whose NORMALIZED title already sits on the Platform board is a NO-OP — re-filing the same
+    // issue every scheduled run can't spam the backlog (a hostile/looping transcript can't either). The
+    // auditor doctrine still asks it to dedupe before filing; this is the structural backstop under it.
+    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+    const key = norm(input.title);
+    const dup = this.db.listTasks(home.id).find((t) => norm(t.title) === key);
+    if (dup) return { taskId: dup.id, projectId: home.id, deduped: true };
 
     const severity = (input.severity ?? "").trim() || "unspecified";
     const now = new Date().toISOString();

@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { registerTranscriptReadTools } from "./transcript-read.js";
+import { registerRepoReadTools } from "./repo-read.js";
 
 // Same envelope as the task / orchestration / platform MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -55,6 +56,13 @@ export class AuditMcpRouter {
     // loom-user-audit surface reuses the EXACT same two reads (mcp/transcript-read.ts) — behavior unchanged. ---
     registerTranscriptReadTools(server, db);
 
+    // --- least-privilege, READ-ONLY repo tools (repo_read_file / repo_grep / repo_glob) over the Loom SOURCE
+    // tree — code-awareness for the 7-lens gap-hunt (a transcript-only auditor is blind to silent code gaps).
+    // DEV-AUDITOR ONLY: deliberately NOT in the shared transcript-read helper, so the end-user Workspace
+    // Auditor never gains source-read tools (it audits the user's workspace, not Loom's dev — the dev↔user
+    // split). PURE READS, confined to the repo root, no host-process spawn — see repo-read.ts's header. ---
+    registerRepoReadTools(server);
+
     // --- the ONE write: file a structured finding onto the reserved Platform board (hardcoded target) ---
     server.registerTool(
       "audit_file_finding",
@@ -64,7 +72,9 @@ export class AuditMcpRouter {
           "triage inbox). This is the Auditor's ONLY write — there is no git/vault/config/spawn/message here. " +
           "The target board is FIXED server-side (you cannot pick a project). Give a sharp title; put the evidence " +
           "/ repro, the implicated skill/prompt/feature, and a concrete suggested improvement in detail; set a " +
-          "severity. File deduped — do not refile a finding already on the backlog. Returns the created task id.",
+          "severity. DEDUPED server-side by title: filing a finding whose title already sits on the Platform " +
+          "board is a no-op that returns {taskId, deduped:true} (the existing card) — still dedupe by judgement " +
+          "first, but you cannot spam the backlog by re-filing. Returns {taskId, projectId} on a novel finding.",
         inputSchema: {
           title: z.string(),
           detail: z.string(),

@@ -20,6 +20,7 @@ const TEST_DIR = path.join(__dirname, "..", "test");
 const HERMETIC = [
   "prod-guard",               // the guard itself
   "orch-model", "dead-id", "boot-reconcile", "boot-reconcile-keep-work", "merge-done-crash-recovery", "restart-intent", "restart-fleet", "build-gate-integrity",
+  "scheduler-auditor-budget", // auditors lifted out of the manager cap → their own small budget (hermetic, daemon-free)
   "restart-resume-coherence", // PL Auditor finding #11: resume nudges NOTE the file-read tracking reset + merge the engine's bare "Continue" into one coherent turn
 
   "manager-context-block", // PL Auditor finding #8: managers get the "Where things live" absolute repo+vault block; workers stay byte-identical

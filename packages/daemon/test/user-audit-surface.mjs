@@ -150,8 +150,10 @@ try {
   // home-operator handoff to the original 4 read+suggest tools).
   check(`(b) user-audit surface is EXACTLY [agent_prompt_read, audit_handoff, audit_suggest_improvement, list_sessions, preset_suggestion_suggest, skill_list, skill_read, transcript_read] (got: ${tools.join(",")})`,
     JSON.stringify(tools) === JSON.stringify(["agent_prompt_read", "audit_handoff", "audit_suggest_improvement", "list_sessions", "preset_suggestion_suggest", "skill_list", "skill_read", "transcript_read"]));
-  const forbidden = ["audit_file_finding", "git_push", "git_commit", "vault_write", "project_configure", "project_archive", "session_spawn", "session_message", "session_stop", "worker_spawn", "platform_escalate", "skill_write"];
-  check("(b) user-audit surface has NONE of the elevated/structural/dev-only tools",
+  // The repo_* reads are the DEV Auditor's code-awareness over the LOOM SOURCE — the end-user Workspace
+  // Auditor must NOT have them (it audits the user's WORKSPACE, never Loom's own dev: the dev↔user split).
+  const forbidden = ["audit_file_finding", "git_push", "git_commit", "vault_write", "project_configure", "project_archive", "session_spawn", "session_message", "session_stop", "worker_spawn", "platform_escalate", "skill_write", "repo_read_file", "repo_grep", "repo_glob"];
+  check("(b) user-audit surface has NONE of the elevated/structural/dev-only tools (incl. the dev repo reads)",
     forbidden.every((t) => !tools.includes(t)));
 
   // The shared reads work (factored from audit.ts).

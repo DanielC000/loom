@@ -52,7 +52,11 @@ function makeEnv(opts = {}) {
   const startWorkspaceAuditor = (tid) => {
     const id = `wsa-${calls.length}`; calls.push({ via: "workspace-auditor", agentId: tid, id }); return { id };
   };
-  const scheduler = new Scheduler({ db, control, startManager, startWorkspaceAuditor, maxConcurrentManagers: opts.cap });
+  // P5: a recording stub for the dev Platform Auditor spawn (the kind="auditor" route).
+  const startAuditor = (tid) => {
+    const id = `aud-${calls.length}`; calls.push({ via: "auditor", agentId: tid, id }); return { id };
+  };
+  const scheduler = new Scheduler({ db, control, startManager, startAuditor, startWorkspaceAuditor, maxConcurrentManagers: opts.cap, maxConcurrentAuditors: opts.auditorCap });
   return { dbFile, db, projId, agentId, control, calls, scheduler };
 }
 // Seed a live MANAGER session row directly (for the manager-cap DB-count axis).
@@ -60,6 +64,12 @@ const seedLiveManager = (e, id) => e.db.insertSession({
   id, projectId: e.projId, agentId: e.agentId, engineSessionId: null, title: null, cwd: e.projId,
   processState: "live", resumability: "unknown", busy: false,
   createdAt: new Date().toISOString(), lastActivity: new Date().toISOString(), lastError: null, role: "manager",
+});
+// Seed a live AUDITOR session row directly (for the auditor-budget DB-count axis).
+const seedLiveAuditor = (e, id, role = "auditor") => e.db.insertSession({
+  id, projectId: e.projId, agentId: e.agentId, engineSessionId: null, title: null, cwd: e.projId,
+  processState: "live", resumability: "unknown", busy: false,
+  createdAt: new Date().toISOString(), lastActivity: new Date().toISOString(), lastError: null, role,
 });
 function cleanupEnv(e) {
   try { e.db.close(); } catch { /* ignore */ }
@@ -231,6 +241,60 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
   check("Manager-cap (DB count): at the cap from existing live managers → a due schedule does NOT fire", e.calls.length === 0);
   check("Manager-cap (DB count): the deferred schedule is left due (not advanced, not disabled)",
     e.db.getSchedule("sch-capped").lastFiredAt === null && e.db.getSchedule("sch-capped").enabled === true);
+  cleanupEnv(e);
+}
+
+// === Auditor budget — auditors are LIFTED OUT of the manager cap (their own small budget) ===
+
+// Auditor NOT blocked by a full manager cap: with manager cap 1 AND a live manager already at the cap, an
+// "auditor"-kind schedule STILL fires (it draws from the separate auditor budget, not the manager slot).
+{
+  const e = makeEnv({ cap: 1, auditorCap: 2 });
+  seedLiveManager(e, "mgr-at-cap"); // managers already at cap 1
+  seedSchedule(e, "sch-aud", { kind: "auditor" });
+  await e.scheduler.tick(new Date());
+  check("Auditor budget: an auditor schedule fires even though the MANAGER cap is full",
+    e.calls.length === 1 && e.calls[0].via === "auditor" && e.calls[0].agentId === e.agentId);
+  cleanupEnv(e);
+}
+
+// Manager NOT blocked by full auditor budget (the converse): auditor budget 1 + a live auditor at the
+// budget, a due MANAGER schedule still fires (manager cap has room).
+{
+  const e = makeEnv({ cap: 3, auditorCap: 1 });
+  seedLiveAuditor(e, "aud-at-budget"); // auditors already at budget 1
+  seedSchedule(e, "sch-mgr-ok"); // a manager schedule (default kind)
+  await e.scheduler.tick(new Date());
+  check("Auditor budget: a manager schedule fires even though the AUDITOR budget is full",
+    e.calls.length === 1 && e.calls[0].via === "manager");
+  cleanupEnv(e);
+}
+
+// Auditor OWN budget bounds auditor spawns: budget 1, a burst of 3 due auditor schedules fires only 1
+// this tick; the other 2 are deferred (still due, like the manager-cap defer).
+{
+  const e = makeEnv({ cap: 5, auditorCap: 1 });
+  for (let i = 0; i < 3; i++) seedSchedule(e, `sch-aud-burst-${i}`, { kind: "auditor" });
+  await e.scheduler.tick(new Date());
+  check("Auditor budget: a 3-auditor burst with budget 1 fires only 1 this tick", e.calls.length === 1 && e.calls[0].via === "auditor");
+  const deferred = ["sch-aud-burst-0", "sch-aud-burst-1", "sch-aud-burst-2"].filter((id) => e.db.getSchedule(id).lastFiredAt === null).length;
+  check("Auditor budget: the other 2 are deferred (still unfired, next_fire_at left in the past)", deferred === 2);
+  cleanupEnv(e);
+}
+
+// Mixed tick: a full manager cap defers managers via `continue` (not `break`), so an auditor LATER in the
+// due list still fires (the bug the continue-vs-break change fixes).
+{
+  const e = makeEnv({ cap: 1, auditorCap: 2 });
+  seedLiveManager(e, "mgr-full"); // manager cap (1) already full
+  // Order the due list (ORDER BY next_fire_at) so the over-cap MANAGER is processed FIRST — proving the
+  // loop `continue`s past it instead of `break`ing (which would have starved the later auditor).
+  seedSchedule(e, "sch-mgr-deferred", { nextFireAt: new Date(Date.now() - 120_000).toISOString() }); // earlier → first
+  seedSchedule(e, "sch-aud-after", { kind: "auditor", nextFireAt: new Date(Date.now() - 60_000).toISOString() }); // later
+  await e.scheduler.tick(new Date());
+  check("Mixed tick: the over-cap manager is deferred but the later auditor STILL fires (continue, not break)",
+    e.calls.length === 1 && e.calls[0].via === "auditor" &&
+    e.db.getSchedule("sch-mgr-deferred").lastFiredAt === null);
   cleanupEnv(e);
 }
 

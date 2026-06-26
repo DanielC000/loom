@@ -40,10 +40,20 @@ export interface SchedulerDeps {
    * `orchestration.maxConcurrentManagers` in index.ts; defaults to DEFAULT_MAX_CONCURRENT_MANAGERS.
    */
   maxConcurrentManagers?: number;
+  /**
+   * SEPARATE small budget for concurrently-LIVE AUDITORS (the dev Platform Auditor + the end-user Workspace
+   * Auditor). Auditors are read-mostly and lightweight, so they are LIFTED OUT of the manager cap: a fired
+   * auditor never consumes a manager slot and is never blocked because the manager cap is full (and vice
+   * versa). Defaults to DEFAULT_MAX_CONCURRENT_AUDITORS — a constant default (not config-wired) keeps the
+   * surface small while still bounding scheduled audit spawns.
+   */
+  maxConcurrentAuditors?: number;
 }
 
 /** Fallback manager cap when none is injected (matches the config default). */
 const DEFAULT_MAX_CONCURRENT_MANAGERS = 3;
+/** Fallback auditor budget — small: auditors are read-mostly, so a couple concurrent is plenty. */
+const DEFAULT_MAX_CONCURRENT_AUDITORS = 2;
 
 /**
  * Cron Scheduler (phase-2 Pillar B): the trigger layer. On each minute tick it boots a manager
@@ -67,6 +77,10 @@ export class Scheduler {
    *    if startManager or appendEvent throws the slot is already consumed → no double-spawn next tick.
    *  - MANAGER CAP (finding 3): stop once `maxConcurrentManagers` live managers exist; the remaining
    *    due schedules are deferred to the next tick (next_fire_at untouched) — like the pause gate.
+   *  - AUDITOR BUDGET: auditor-kind schedules ('auditor' / 'workspace-auditor') draw from a SEPARATE small
+   *    budget, NOT the manager cap — a read-mostly audit run never burns a manager slot and is never blocked
+   *    by a full manager cap (and vice versa). An over-budget auditor is `continue`-skipped (left due),
+   *    NOT a `break`, so a manager later in the due list can still fire (and vice versa).
    */
   async tick(now: Date = new Date()): Promise<void> {
     const due = this.deps.db.listDueSchedules(now.toISOString());
@@ -81,15 +95,20 @@ export class Scheduler {
     if ((this.deps.isUsageLimited ?? isLikelyNearClaudeUsageLimit)(now, recencyWindowMs)) return;
 
     const cap = this.deps.maxConcurrentManagers ?? DEFAULT_MAX_CONCURRENT_MANAGERS;
+    const auditorCap = this.deps.maxConcurrentAuditors ?? DEFAULT_MAX_CONCURRENT_AUDITORS;
     let liveManagers = this.deps.db.countLiveManagers(); // managers persisting from prior ticks
+    let liveAuditors = this.deps.db.countLiveAuditors(); // auditors (both kinds) — their OWN budget
 
     for (const s of due) {
-      // Finding 3 — manager cap: defer the rest of this tick's due schedules (next_fire_at left in
-      // the past → they come back due next tick). DB count + in-tick increments cover both axes.
-      if (liveManagers >= cap) {
+      const isAuditor = s.kind === "auditor" || s.kind === "workspace-auditor";
+      // Budget gate (finding 3 + the auditor split): managers and auditors each defer against their OWN
+      // count. `continue` (not `break`) so hitting one budget never blocks the other kind later in the list;
+      // a deferred schedule keeps its past next_fire_at → it comes back due next tick. DB count + in-tick
+      // increments cover both axes (pre-existing live + already-fired-this-tick).
+      if (isAuditor ? liveAuditors >= auditorCap : liveManagers >= cap) {
         // eslint-disable-next-line no-console
-        console.error(`[scheduler] manager cap (${cap}) reached — deferring remaining due schedules to the next tick`);
-        break;
+        console.error(`[scheduler] ${isAuditor ? `auditor budget (${auditorCap})` : `manager cap (${cap})`} reached — deferring schedule ${s.id} to the next tick`);
+        continue;
       }
       // Finding 1 — deleted agent: never fireable → disable so it stops re-firing every tick.
       if (!this.deps.db.getAgent(s.agentId)) {
@@ -118,9 +137,8 @@ export class Scheduler {
           managerSessionId: spawned.id, kind: "schedule_fired",
           detail: { scheduleId: s.id, cron: s.cron, kind: s.kind },
         });
-        // Count every scheduler spawn (manager OR auditor) against the per-tick cap so a fired auditor
-        // can't let the loop exceed the bound (the cap is a general scheduler-spawn ceiling here).
-        liveManagers++;
+        // Count the spawn against the budget for ITS kind (auditors have their own; see above).
+        if (isAuditor) liveAuditors++; else liveManagers++;
       } catch (e) {
         // eslint-disable-next-line no-console
         console.error(`[scheduler] schedule ${s.id} (${s.cron}) failed to fire:`, (e as Error).message);

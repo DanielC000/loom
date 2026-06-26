@@ -1614,6 +1614,16 @@ export class Db {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE role = 'manager' AND process_state = 'live'")
       .get() as { c: number }).c;
   }
+  /**
+   * Count of currently-LIVE auditor sessions — BOTH the dev Platform Auditor ('auditor') and the end-user
+   * Workspace Auditor ('workspace-auditor'). The Scheduler counts these against their OWN small budget,
+   * SEPARATE from the manager cap, so a read-mostly scheduled auditor neither consumes a manager slot nor
+   * is blocked when the manager cap is full (and vice versa).
+   */
+  countLiveAuditors(): number {
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE role IN ('auditor', 'workspace-auditor') AND process_state = 'live'")
+      .get() as { c: number }).c;
+  }
   /** A manager's audit trail in chronological order (rowid breaks same-timestamp ties). */
   listEvents(managerSessionId: string): OrchestrationEvent[] {
     return (this.db.prepare("SELECT * FROM orchestration_events WHERE manager_session_id = ? ORDER BY ts, rowid")

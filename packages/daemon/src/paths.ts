@@ -88,6 +88,22 @@ export const ENSURE_OBSIDIAN_SCRIPT = path.join(__dirname, "..", "assets", "scri
 export const PORT = Number(process.env.LOOM_PORT || 4317);
 
 /**
+ * The Loom SOURCE repo root — the checkout whose code the DEV Platform Auditor reads for code-awareness
+ * (its least-privilege, read-only repo tools confine EVERY read to this tree — see mcp/repo-read.ts).
+ * Resolved from the built daemon's own location: `dist/paths.js` lives at `<repo>/packages/daemon/dist`,
+ * so three levels up is the monorepo root (the same monorepo layout `resolveWebDistDir` already relies
+ * on). A human-only `LOOM_REPO_ROOT` override takes precedence — the hermetic-test seam (point it at a
+ * temp fixture tree) and an ops escape hatch. Read at CALL time (like `isLoomDev` / `resolveWebDistDir`)
+ * so a test can set the override after import. The Auditor is LOOM_DEV-gated and runs from the self-host
+ * monorepo, so the three-up resolution is the real path in every shipping scenario.
+ */
+export function loomRepoRoot(): string {
+  const override = process.env.LOOM_REPO_ROOT;
+  if (override) return path.resolve(override);
+  return path.resolve(__dirname, "..", "..", ".."); // dist/paths.js → packages/daemon/dist → repo root
+}
+
+/**
  * Dev-only feature gate (`LOOM_DEV=1`, default OFF). The "Platform layer" — the reserved "Loom Platform"
  * project + its Platform Lead / Platform Auditor agents, the Platform-lead / Platform-audit profiles, and
  * the platform-lead / platform-audit skills — is gated behind this flag so it does NOT ship to regular
