@@ -7,6 +7,41 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-06-26
+
+Onboard from an **empty install** — the Platform operator can now create a brand-new project from
+scratch, with no existing repo — plus **automatic git history for your vault**, a tidier Platform
+home, and reliability fixes across sessions, skills, and the board.
+
+### Added
+- **Start from nothing.** The Platform operator can now **create a brand-new project** for you — a fresh
+  directory it `git init`s under a sanctioned workspace folder, or a **notes-only vault project** with no
+  repo at all — so a brand-new user with no code gets onboarded end to end. It also seeds a
+  **getting-started checklist** on your Platform home.
+- **Automatic version history for your vault.** Loom now **auto-commits your project's vault** as notes
+  change, so documentation edits accrue real git history instead of silently overwriting. It commits at the
+  vault's repo root (covering a one-vault-many-projects layout), isolates each project so one bad path can't
+  stop the others, and deliberately skips Loom's own operational state.
+
+### Changed
+- **The Platform home lives on its own page, not the project picker.** The reserved "Platform" home no
+  longer appears as a selectable project in the header picker; its board is now on the dedicated **Platform
+  page** alongside the operator and Workspace Auditor — keeping the picker a clean list of your real work
+  projects.
+
+### Fixed
+- **Adopting a skill update no longer leaves the served copy stale.** A line-ending/whitespace difference
+  could make "adopt" advance the baseline while keeping the older content — so a skill read "customized" you
+  never touched, and agents could run slightly outdated doctrine. Adopt now fast-forwards cleanly to the
+  shipped version, and a new **"your copy differs from shipped → Sync"** control surfaces and recovers any
+  lingering divergence.
+- **Resumed, forked, and recycled sessions keep their profile's settings.** Re-spawn paths could drop a
+  profile's model, permission tweaks, and role skill; they're now re-applied on every spawn path.
+- **Board column edits can't strand cards.** Several setup/board config writes now route through the safe
+  column updater, so changing a board's columns can't orphan tasks in a removed lane.
+- **Tighter trust boundaries (security).** A manager's self-service writes are now scoped to its own
+  project, an auditor hand-off path was corrected, and three bypassable spawn/config guards were closed.
+
 ## [0.9.0] — 2026-06-26
 
 Your **Platform home** is visible and properly named, the **Platform operator** can now act on your
