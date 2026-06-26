@@ -10,7 +10,7 @@ import {
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
-import type { PtyHost } from "../pty/host.js";
+import type { PtyHost, QueuedMessage } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
@@ -115,6 +115,32 @@ function nearestAgentName(agents: Agent[], ref: string): string | undefined {
  * profile; this is the spawn-side backstop and also covers the still-mintable "platform"/"setup".)
  */
 const PROFILE_SPAWNABLE_ROLES: ReadonlySet<SessionRole> = new Set<SessionRole>(["manager", "worker"]);
+
+/**
+ * The task-board MCP baseline a custom `permission.allow` must never be able to STRIP. Every
+ * resolveAgentSpawn-driven session (manager/worker/platform/auditor/workspace-auditor/setup/plain —
+ * all roles EXCEPT the run-only Agent Run, which never goes through resolveAgentSpawn) mounts the
+ * `loom-tasks` MCP, and acceptEdits does NOT auto-approve MCP tools (the §9 lesson), so without
+ * `mcp__loom-tasks` allowlisted the session HANGS on its first tasks_* call. The default config allow
+ * already carries it (config.ts), but a per-project `permission.allow` override REPLACES that array
+ * wholesale (resolveConfig: `override.permission?.allow ?? d.permission.allow`), so a custom allow that
+ * forgets the baseline silently strips a worker's ability to report/coordinate. We UNION it back so a
+ * custom allow can ADD to but never REMOVE the baseline. Server-level `mcp__loom-tasks` covers every
+ * tasks_* tool (matches the config default's single entry).
+ */
+const BASELINE_SESSION_ALLOW: readonly string[] = ["mcp__loom-tasks"];
+
+/**
+ * Return `permission` with every {@link BASELINE_SESSION_ALLOW} entry guaranteed present in `allow`.
+ * Byte-identical (SAME reference) when the baseline is already fully present — so the default-config and
+ * profile-delta paths are unchanged; only a custom allow that omitted the baseline gets a NEW object with
+ * the missing entries appended (a custom allow ADDS but never REMOVES the baseline).
+ */
+function withBaselineAllow(permission: PermissionPolicy): PermissionPolicy {
+  const missing = BASELINE_SESSION_ALLOW.filter((t) => !permission.allow.includes(t));
+  if (!missing.length) return permission;
+  return { ...permission, allow: [...permission.allow, ...missing] };
+}
 
 /** Agent Runs R2: defer a completed run's graceful-stop this long so the `submit_result` {ok:true} tool
  *  response flushes to the agent BEFORE its turn is interrupted (mirrors requestDaemonRestart's
@@ -234,9 +260,13 @@ export class SessionService {
     const resolved = resolveProfile(agent, profile);
     // Layer the profile's allowDelta onto the config allow; an empty delta keeps the SAME config
     // permission reference, so a profile-less spawn is byte-identical to today.
-    const permission = resolved.allow.length
+    const layered = resolved.allow.length
       ? { ...config.permission, allow: [...config.permission.allow, ...resolved.allow] }
       : config.permission;
+    // UNION the task-board baseline a custom allow must never strip (see BASELINE_SESSION_ALLOW). When the
+    // baseline is already present (the default config + every profile-delta on top of it), this returns the
+    // SAME reference, so the common path stays byte-identical; only a custom allow that dropped it is healed.
+    const permission = withBaselineAllow(layered);
     // LEAST-PRIVILEGE backstop: a profile may confer ONLY manager|worker (or no role). An elevated/locked
     // profile role (platform/auditor/setup/run) is dropped to undefined here, so a role-omitted "+New"
     // spawn yields a plain session, never a silent elevation. An EXPLICIT caller role is untouched and
@@ -1846,6 +1876,47 @@ export class SessionService {
   }
 
   /**
+   * Re-drive a recycled predecessor's held inbound queue onto its FRESH successor, preserving BOTH the
+   * source classification AND durable crash-survival. `flushed` is the predecessor's spliced FIFO (from
+   * pty.flushPending — onDeliver + source intact); `durableRecords` is a snapshot of its unresolved
+   * `session_message_queued` records taken BEFORE this runs (the durable inbox).
+   *
+   * Why not the old `getPending` + bare `enqueueStdin` (text only):
+   *  - SOURCE — a held 'human' turn re-enqueued with the default 'system' source would be silently
+   *    reclassified, so the human-only queue mutators could no longer touch it. We carry m.source.
+   *  - CRASH-SURVIVAL — a durable message's record still names the OLD recipient; on the next boot the
+   *    recovery scan RETIRES it as superseded (the predecessor hasSuccessor), so a bare carry that drops
+   *    the durable channel loses the message if the daemon restarts before the successor drains it.
+   *
+   * So, exactly like `redirectWorker`: SUPERSEDE each carried durable record (fire its onDeliver with
+   * "superseded" — resolves the old record so the boot scan + done-guard never re-drive it), then re-MINT
+   * it onto the successor via `enqueueDurableMessage` (a NEW record naming the successor as recipient,
+   * carrying the ORIGINAL sender/taskId so an undelivered re-mint still surfaces to its sender on boot).
+   * Non-durable entries (idle/resume nudges, raw human turns) carry across with their source preserved.
+   */
+  private carryPendingToSuccessor(
+    oldId: string, successorId: string, flushed: QueuedMessage[], durableRecords: OrchestrationEvent[],
+  ): void {
+    for (const m of flushed) {
+      if (m.onDeliver) {
+        // Durable entry — its record is re-minted from `durableRecords` below; resolve the OLD record now.
+        try { m.onDeliver("superseded"); } catch { /* a resolution fault must never block the recycle */ }
+      } else {
+        // Non-durable (nudge / raw human turn): carry the text AND its source so a 'human' entry stays human.
+        this.pty.enqueueStdin(successorId, m.text, m.source);
+      }
+    }
+    // Re-mint each unresolved durable record onto the successor (recipient ← successor), so crash-survival
+    // follows the recycle chain instead of dead-ending at the retired predecessor.
+    for (const rec of durableRecords) {
+      const text = typeof rec.detail?.text === "string" ? rec.detail.text : null;
+      if (text === null) continue; // malformed — nothing to re-drive
+      const sender = (typeof rec.detail?.sender === "string" && rec.detail.sender) ? rec.detail.sender : rec.managerSessionId;
+      this.enqueueDurableMessage(successorId, text, { sender, taskId: rec.taskId ?? null });
+    }
+  }
+
+  /**
    * Platform-Lead cross-project message delivery (loom-platform `session_message`, P4). UN-scoped: where
    * messageWorker is parent/child-gated, the Lead stands ABOVE the whole manager/worker tree and may
    * message ANY session in ANY project — no parentSessionId check. Reuses the SAME stdin-enqueue channel
@@ -2465,6 +2536,10 @@ export class SessionService {
   ): Promise<Session> {
     const old = this.db.getSession(workerSessionId);
     if (!old || old.parentSessionId !== managerSessionId) throw new Error("not your worker");
+    // FAIL SAFE before any teardown: a blank/whitespace handoff would close the predecessor (hard stop
+    // below) and seed an empty successor — destroying the only carrier of intent. Reject up front, so the
+    // old worker stays alive and the manager can re-issue a real handoff (mirrors recycleManager).
+    if (!handoffSummary || !handoffSummary.trim()) throw new Error("handoffSummary must not be blank");
     const worktreePath = old.worktreePath ?? old.cwd; // worker cwd === its worktree
     const branch = old.branch ?? null;
     const taskId = old.taskId ?? null;
@@ -2486,9 +2561,12 @@ export class SessionService {
     });
 
     // Carry the old worker's in-flight inbound queue (manager messages held while it was busy) onto
-    // the fresh worker — same task + worktree, so they're still valid. Grab it NOW, while the old pty
-    // is still alive (its live entry, and the queue with it, is dropped on exit). Wakes are moved below.
-    const carriedPending = this.pty.getPending(workerSessionId);
+    // the fresh worker — same task + worktree, so they're still valid. FLUSH it (not getPending) NOW,
+    // while the old pty is still alive, so each entry's source + durable onDeliver come with it (the old
+    // pty's queue, and any text-only snapshot of it, dies on exit). The durable records are re-driven onto
+    // the fresh worker below — see carryPendingToSuccessor. Wakes are moved below too.
+    const carried = this.pty.flushPending(workerSessionId);
+    const carriedDurable = this.db.listUnresolvedQueuedMessagesForWorker(workerSessionId);
     // Close the old worker HARD: reliable, and we spawn fresh (never resume) so a clean graceful
     // exit isn't needed. Wait until the pty is actually gone before reusing the worktree.
     this.pty.stop(workerSessionId, "hard");
@@ -2550,10 +2628,10 @@ export class SessionService {
       skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
     });
     // Hand the carried queue + scheduled wakes to the successor: re-point the old worker's wakes (so a
-    // due wake can't resurrect the retired worker) and re-enqueue the held messages (busy-gated; they
-    // drain on the fresh worker's first turn boundary, after its handoff turn).
+    // due wake can't resurrect the retired worker) and re-drive the held messages onto the fresh worker
+    // (busy-gated; they drain on its first turn boundary, after its handoff turn).
     this.db.reparentWakes(workerSessionId, fresh.id);
-    for (const m of carriedPending) this.pty.enqueueStdin(fresh.id, m);
+    this.carryPendingToSuccessor(workerSessionId, fresh.id, carried, carriedDurable);
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId: fresh.id, taskId, kind: "recycle_complete",
@@ -2572,6 +2650,10 @@ export class SessionService {
   async recycleManager(oldManagerId: string, continuationPrompt: string): Promise<Session> {
     const old = this.db.getSession(oldManagerId);
     if (!old || old.role !== "manager") throw new Error("not a manager session");
+    // FAIL SAFE before any teardown/spawn: a blank/whitespace continuation would seed an empty successor
+    // and (via the deferred stop below) retire the predecessor — losing the handoff entirely. Reject up
+    // front so the predecessor stays live and the manager can re-issue a real continuation.
+    if (!continuationPrompt || !continuationPrompt.trim()) throw new Error("continuationPrompt must not be blank");
     const agent = this.db.getAgent(old.agentId);
     const project = this.db.getProject(old.projectId);
     if (!project) throw new Error("project not found");
@@ -2637,11 +2719,15 @@ export class SessionService {
     // orphaned (worker_report routes by parent_session_id; the successor sees them via worker_list).
     const reparented = this.db.reparentLiveWorkers(oldManagerId, fresh.id);
     // Carry the old manager's scheduled wakes + its in-flight inbound queue (worker reports / human
-    // turns held while it was busy) onto the successor — it owns the fleet now, so these are its to
-    // handle. Re-pointing the wakes also guarantees nothing fires at the retired manager (which would
-    // zombie-resurrect it). Grab pending while the old pty is still alive (its 3s deferred stop is below).
+    // turns held while it was busy, plus any durable cross-tree platform message) onto the successor — it
+    // owns the fleet now, so these are its to handle. Re-pointing the wakes also guarantees nothing fires
+    // at the retired manager (which would zombie-resurrect it). FLUSH the queue (not getPending) while the
+    // old pty is still alive (its 3s deferred stop is below) so each entry's source + durable onDeliver
+    // come with it; durable records are re-minted onto the successor — see carryPendingToSuccessor.
     this.db.reparentWakes(oldManagerId, fresh.id);
-    for (const m of this.pty.getPending(oldManagerId)) this.pty.enqueueStdin(fresh.id, m);
+    const carried = this.pty.flushPending(oldManagerId);
+    const carriedDurable = this.db.listUnresolvedQueuedMessagesForWorker(oldManagerId);
+    this.carryPendingToSuccessor(oldManagerId, fresh.id, carried, carriedDurable);
 
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
