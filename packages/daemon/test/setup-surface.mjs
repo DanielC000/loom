@@ -192,7 +192,7 @@ try {
   check("(c) project_create: the rejected create made NO project", db.listAllProjects().length === nBefore);
 
   // project_configure with a valid override (AGENT validator) → applied; resolveConfig reflects it.
-  const cfg = { kanbanColumns: [{ key: "a", label: "A" }, { key: "b", label: "B" }] };
+  const cfg = { kanbanColumns: [{ key: "a", label: "A", role: "defaultLanding" }, { key: "b", label: "B", role: "terminal" }] };
   const configured = await call("project_configure", { projectId: created.id, config: cfg });
   check("(c) project_configure: accepted (no error)", configured.ok === true && !configured.error);
   check("(c) project_configure: resolveConfig reflects the override",
@@ -400,7 +400,7 @@ try {
   // rejection now names the valid top-level keys (so a future fat-finger converges).
   const renameCols = await call("project_configure", {
     projectId: created.id,
-    config: { kanbanColumns: [{ key: "todo", label: "To Do" }, { key: "doing", label: "Doing" }, { key: "done", label: "Done", role: "terminal" }] },
+    config: { kanbanColumns: [{ key: "todo", label: "To Do", role: "defaultLanding" }, { key: "doing", label: "Doing" }, { key: "done", label: "Done", role: "terminal" }] },
   });
   check("(i) project_configure: a kanbanColumns layout is ACCEPTED by the setup AGENT validator", renameCols.ok === true && !renameCols.error);
   check("(i) project_configure: the renamed columns are stored (resolveConfig reflects 3 columns)",

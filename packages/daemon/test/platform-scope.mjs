@@ -91,7 +91,7 @@ try {
   check("agent_create: the agent appears under the project", agents.some((t) => t.id === agent.id && t.startupPrompt === "go"));
 
   // 4) project_configure with a valid override → applied; resolveConfig reflects it (via /board).
-  const cfg = { kanbanColumns: [{ key: "a", label: "A" }, { key: "b", label: "B" }] };
+  const cfg = { kanbanColumns: [{ key: "a", label: "A", role: "defaultLanding" }, { key: "b", label: "B", role: "terminal" }] };
   const configured = await call(PL, "project_configure", { projectId: created.id, config: cfg });
   check("project_configure: accepted (no error)", configured.ok === true && !configured.error);
   const board = await get(`/api/projects/${created.id}/board`);

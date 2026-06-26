@@ -91,7 +91,7 @@ check("agent_update: a missing agent is rejected", (await call(M, "agent_update"
 // 3) project_update — structural (name/vaultPath) + a VALID config override.
 const pu = await call(M, "project_update", { projectId: "projM", name: "Mgmt-2", vaultPath: "C:/tmp/m2" });
 check("project_update: updates name + vaultPath", pu.name === "Mgmt-2" && pu.vaultPath === "C:/tmp/m2" && !pu.error);
-const okCfg = await call(M, "project_update", { projectId: "projM", config: { kanbanColumns: [{ key: "a", label: "A" }, { key: "b", label: "B" }] } });
+const okCfg = await call(M, "project_update", { projectId: "projM", config: { kanbanColumns: [{ key: "a", label: "A", role: "defaultLanding" }, { key: "b", label: "B", role: "terminal" }] } });
 check("project_update: a valid config override is accepted", !okCfg.error);
 const board = await get("/api/projects/projM/board");
 check("project_update: resolveConfig reflects the config override (board columns)", board.columns.length === 2);

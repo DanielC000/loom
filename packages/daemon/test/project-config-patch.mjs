@@ -85,7 +85,7 @@ try {
   // ============ (1) PLATFORM project_configure: single-key patch leaves OTHER overrides intact ============
   // Seed a multi-key override: board columns + an obsidian block (autoStart + the human-only path).
   const seedCfg = {
-    kanbanColumns: [{ key: "todo", label: "Todo" }, { key: "done", label: "Done" }],
+    kanbanColumns: [{ key: "todo", label: "Todo", role: "defaultLanding" }, { key: "done", label: "Done", role: "terminal" }],
     obsidian: { autoStart: true, path: "/opt/obsidian" },
   };
   const seeded = await platform("project_configure", { projectId: "pCfg", config: seedCfg });

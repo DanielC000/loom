@@ -91,11 +91,19 @@ export function getProjectTask(db: Db, projectId: string, taskId: string): Task 
 export function createProjectTask(
   db: Db, projectId: string,
   input: { title: string; body?: string; columnKey?: string; priority?: TaskPriority },
-): Task {
+): Task | { error: string } {
   const now = new Date().toISOString();
+  const cols = resolveConfig(db.getProject(projectId)?.config).kanbanColumns;
+  // Column guard (the create-side mirror of updateProjectTask's move guard): an EXPLICIT columnKey must name
+  // a column that EXISTS on this project's board, so a typo'd key can never store a card OFF-BOARD — apparent
+  // success but an invisible card (Board.tsx filters strictly). Applied in the SHARED backing function, so the
+  // in-project tasks_create and the cross-project project_task_create reject an unknown key identically.
+  if (input.columnKey !== undefined && !cols.some((c) => c.key === input.columnKey)) {
+    return { error: `unknown column "${input.columnKey}" on this project's board (valid: ${cols.map((c) => c.key).join(", ")})` };
+  }
   // New cards land in the project's `defaultLanding` column (role-resolved, not the hardcoded key) so a
   // renamed/reordered landing lane still receives them; "backlog" is a defensive backstop only.
-  const landing = columnKeyForRole(resolveConfig(db.getProject(projectId)?.config).kanbanColumns, "defaultLanding") ?? "backlog";
+  const landing = columnKeyForRole(cols, "defaultLanding") ?? "backlog";
   const task: Task = {
     id: randomUUID(),
     projectId,

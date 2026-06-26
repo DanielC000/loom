@@ -34,6 +34,35 @@ const columnRole = z.enum([
   "intake", "defaultLanding", "workReady", "active", "review", "parked", "humanHold", "terminal",
 ]);
 const kanbanColumn = z.object({ key: z.string(), label: z.string(), role: columnRole.optional() }).strict();
+// A board's column layout — the SAME well-formedness floor planColumnLayout enforces on the column-editor
+// PUT path, applied here so a config-PATCH surface (project_create/project_configure/project_update + the
+// REST PATCH) can't store a board the editor would reject: ≥1 column, unique keys, EXACTLY ONE column each
+// for the two required lifecycle roles (defaultLanding + terminal — the catch-all landing lane and the
+// terminal lane that columnKeyForRole resolves), and every other role at most once (a duplicate role is
+// ambiguous for columnKeyForRole). Closes the gap where a role-broken/empty/dup-key board passed validation
+// and then resolved its roles ambiguously or orphaned cards onto a non-existent landing lane.
+const kanbanColumnsSchema = z
+  .array(kanbanColumn)
+  .min(1, "a board must have at least one column")
+  .superRefine((cols, ctx) => {
+    const keys = cols.map((c) => c.key);
+    if (new Set(keys).size !== keys.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "column keys must be unique" });
+    }
+    const roleCounts = new Map<string, number>();
+    for (const c of cols) if (c.role) roleCounts.set(c.role, (roleCounts.get(c.role) ?? 0) + 1);
+    if ((roleCounts.get("defaultLanding") ?? 0) !== 1) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "the board must have exactly one default-landing column (role: defaultLanding)" });
+    }
+    if ((roleCounts.get("terminal") ?? 0) !== 1) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "the board must have exactly one terminal (done) column (role: terminal)" });
+    }
+    for (const [role, n] of roleCounts) {
+      if (n > 1 && role !== "defaultLanding" && role !== "terminal") {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `role '${role}' is assigned to more than one column` });
+      }
+    }
+  });
 const permissionOverride = z.object({
   mode: z.enum(["default", "acceptEdits", "plan", "bypassPermissions"]).optional(),
   allow: z.array(z.string()).optional(),
@@ -95,7 +124,7 @@ const pythonOverride = z.object({
   interpreterPath: z.string().min(1).optional(),
 }).strict();
 const projectConfigOverrideSchema = z.object({
-  kanbanColumns: z.array(kanbanColumn).optional(),
+  kanbanColumns: kanbanColumnsSchema.optional(),
   permission: permissionOverride.optional(),
   pty: ptyOverride.optional(),
   sessionEnv: z.record(z.string(), z.string()).optional(),
