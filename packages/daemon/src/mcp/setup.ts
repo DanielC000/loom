@@ -10,6 +10,7 @@ import { isGitRepo } from "../git/reader.js";
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
+import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData } from "./skillTools.js";
@@ -153,8 +154,13 @@ export class SetupMcpRouter {
         // operator can never INTRODUCE one through this path. The merged whole is not re-validated (see
         // mergeConfigOverride) — re-running the agent validator over a preserved human key would falsely reject.
         const merged = mergeConfigOverride(project.config, v.value);
-        db.setProjectConfig(projectId, merged);
-        return ok({ ok: true, projectId, config: merged });
+        // Route through the SAFE writer (not a blind setProjectConfig): a kanbanColumns change that drops/
+        // renames a column re-keys the affected cards to the landing lane instead of ORPHANING them on a
+        // non-existent column. A non-column / same-key-set patch stays byte-identical to the blind path.
+        // (tasks/columns.ts — mirrors the Lead's project_configure + the REST PATCH.)
+        const wrote = setProjectConfigSafe(db, projectId, merged);
+        if (!wrote.ok) return ok({ error: wrote.error });
+        return ok({ ok: true, projectId, config: db.getProject(projectId)?.config ?? merged });
       },
     );
 
@@ -174,7 +180,10 @@ export class SetupMcpRouter {
         if (config !== undefined) {
           const v = validateAgentProjectConfigOverride(config);
           if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
-          db.setProjectConfig(projectId, v.value);
+          // SAFE writer (not a blind setProjectConfig): a kanbanColumns key-set change re-keys orphaned
+          // cards to the landing lane; a non-column patch stays byte-identical to the blind path. (columns.ts.)
+          const wrote = setProjectConfigSafe(db, projectId, v.value);
+          if (!wrote.ok) return ok({ error: wrote.error });
         }
         if (name !== undefined || vaultPath !== undefined) db.updateProject(projectId, { name, vaultPath });
         return ok(db.getProject(projectId));

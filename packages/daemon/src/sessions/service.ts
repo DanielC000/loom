@@ -31,7 +31,7 @@ import { nextFireAt } from "../orchestration/cron.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
-import { planColumnLayout, type DesiredColumn } from "../tasks/columns.js";
+import { planColumnLayout, setProjectConfigSafe, type DesiredColumn } from "../tasks/columns.js";
 
 /** Floor (1s) for any threaded git-op timeout — a sub-second misconfig must never make every git op
  *  fail-fast (mirrors GitWriter's GIT_TIMEOUT_FLOOR_MS). Applied where the resolved value is threaded. */
@@ -2795,7 +2795,11 @@ export class SessionService {
     if (patch.config !== undefined) {
       const v = validateAgentProjectConfigOverride(patch.config);
       if (!v.ok) throw new Error(`invalid config: ${v.error}`);
-      this.db.setProjectConfig(projectId, v.value);
+      // SAFE writer (not a blind setProjectConfig): a kanbanColumns key-set change re-keys orphaned cards
+      // to the landing lane instead of orphaning them on a non-existent column; a non-column patch stays
+      // byte-identical to the blind path. (tasks/columns.ts — mirrors the platform/REST config-PATCH path.)
+      const wrote = setProjectConfigSafe(this.db, projectId, v.value);
+      if (!wrote.ok) throw new Error(wrote.error);
     }
     this.db.updateProject(projectId, { name: patch.name, vaultPath: patch.vaultPath });
     this.auditManage(managerSessionId, "project_update", {
