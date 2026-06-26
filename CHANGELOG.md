@@ -7,6 +7,39 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-06-26
+
+Your **Platform home** is visible and properly named, the **Platform operator** can now act on your
+behalf, the **Workspace Auditor** can hand its findings to an actor, and agents reliably get their
+instructions. Prompted by a real walkthrough of the operator/auditor experience.
+
+### Added
+- **The Platform home is visible and named "Platform."** The reserved home where the Workspace Auditor
+  and Platform operator file cards is renamed from "Getting Started" to **Platform** and now appears in
+  the project picker (pinned at the top with a ⌂), so you can finally see and act on its board. Existing
+  installs are migrated automatically.
+- **The Platform operator can act on your behalf — not just hand you text to paste.** It can now **edit an
+  existing agent** (its instructions, name, or rig), read records directly, and configure board columns
+  correctly — so "action these suggestions for me" actually happens. (It still can't elevate an agent to a
+  privileged rig — that stays human-only.)
+- **The Workspace Auditor can hand off its findings.** When it files an improvement suggestion it now
+  **nudges your Platform operator** so the suggestion reaches someone who can apply it (instead of
+  dead-ending on a board you couldn't see). It also reads the actual agent prompts/skills it critiques
+  (no more guessing) and now covers worker sessions in its review.
+
+### Fixed
+- **Workers now receive their agent's base instructions.** A spawned worker's opening now includes its
+  agent's base prompt (its role doctrine) ahead of the task — previously a manager-spawned worker got only
+  the task and silently skipped its standing instructions. Applies to both fresh spawns and recycles.
+- **Background agents can no longer block waiting on you.** Worker, operator, and auditor sessions are
+  Loom-driven, so they can no longer pop an interactive question to the human and wedge waiting on input
+  that never comes — the interactive-prompt tools are disabled for those roles at spawn.
+- **The Platform operator stops inventing things when it hits the edge of its tools.** Corrected its
+  guidance so it no longer fabricates a non-existent config "gate" (e.g. for document conversion), no
+  longer misdirects you on where a setting lives, and never improvises a raw-database workaround — it
+  tells you plainly when something is outside its scope. The Workspace Auditor's suggestions are sharper
+  too (it distinguishes a model slip from a genuinely unclear instruction instead of just piling on rules).
+
 ## [0.8.2] — 2026-06-25
 
 A **rebuilt Vault page** — browse your project's notes as a real folder tree and view images, graphics,
