@@ -1709,6 +1709,14 @@ export class Db {
   countLiveSessionsForTask(id: string): number {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE task_id = ? AND process_state = 'live'").get(id) as { c: number }).c;
   }
+  /** The id of a session still in processState 'live' bound to this task, if any — the BOARD-WIDE
+   * live-worker-on-task guard for worker_spawn (a SIBLING manager's worker on the same task must be visible,
+   * so this is deliberately NOT manager-scoped like listWorkers). Returns undefined when no live session
+   * holds the task — the legitimate re-spawn-after-rejected-merge case (the prior worker is DEAD, not live). */
+  liveSessionIdForTask(id: string): string | undefined {
+    const r = this.db.prepare("SELECT id FROM sessions WHERE task_id = ? AND process_state = 'live' ORDER BY created_at LIMIT 1").get(id) as { id: string } | undefined;
+    return r?.id;
+  }
 
   /**
    * Atomic safe board-column layout change (task B). In ONE transaction: (1) apply the planned card

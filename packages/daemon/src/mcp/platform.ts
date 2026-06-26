@@ -13,6 +13,7 @@ import { writeVaultFile } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
+import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData, skillWriteInputSchema } from "./skillTools.js";
@@ -459,8 +460,12 @@ export class PlatformMcpRouter {
         // UNSET: remove each named dot-path AFTER the merge so a misconfigured key is clearable from the Lead
         // surface (deleting an independent optional key can never invalidate the result — no re-validation).
         for (const p of unset ?? []) merged = unsetConfigPath(merged, p);
-        db.setProjectConfig(projectId, merged);
-        return ok({ ok: true, projectId, config: merged });
+        // Route through the SAFE writer (not a blind setProjectConfig): a kanbanColumns change that drops/
+        // renames a column re-keys the affected cards to the landing lane instead of ORPHANING them on a
+        // non-existent column. A non-column patch stays byte-identical to the blind path. (columns.ts.)
+        const wrote = setProjectConfigSafe(db, projectId, merged);
+        if (!wrote.ok) return ok({ error: wrote.error });
+        return ok({ ok: true, projectId, config: db.getProject(projectId)?.config ?? merged });
       },
     );
 

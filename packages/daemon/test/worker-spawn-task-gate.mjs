@@ -67,10 +67,13 @@ db.insertAgent({ id: "agentDev", projectId: "pP", name: "Dev", startupPrompt: "D
 db.insertSession({ id: "mgr1", projectId: "pP", agentId: "agentMgr", engineSessionId: null, title: null,
   cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
 // Tasks: a real non-terminal (backlog) one, a terminal (done) one in pP, and one in the OTHER project.
-const taskGood = randomUUID(), taskDone = randomUUID(), taskOther = randomUUID();
+// taskTrim is a second backlog task used to prove trailing-whitespace normalization on a FRESH spawn (the
+// live-worker-on-task guard now rejects a SECOND live worker on taskGood, so trim can't re-spawn onto it).
+const taskGood = randomUUID(), taskDone = randomUUID(), taskOther = randomUUID(), taskTrim = randomUUID();
 db.insertTask({ id: taskGood, projectId: "pP", title: "real", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 db.insertTask({ id: taskDone, projectId: "pP", title: "done", body: "", columnKey: "done", position: 2, priority: "p2", createdAt: now, updatedAt: now });
 db.insertTask({ id: taskOther, projectId: "pOther", title: "elsewhere", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
+db.insertTask({ id: taskTrim, projectId: "pP", title: "trim", body: "", columnKey: "backlog", position: 3, priority: "p2", createdAt: now, updatedAt: now });
 
 class SeamHost extends PtyHost {
   constructor(events) { super(events); this.capture = []; }
@@ -126,12 +129,13 @@ try {
   check("(6) the card moved OUT of backlog into the active lane (default config ⇒ in_progress)",
     db.getTask(taskGood).columnKey === "in_progress");
 
-  // A trailing-space on an OTHERWISE-VALID id is NORMALIZED by trim and accepted (robustness, not rejection):
-  // the worktree is deterministic per task, so this re-uses taskGood's worktree (idempotent re-spawn path).
-  const w2 = await svc.spawnWorker("mgr1", { taskId: `  ${taskGood}  `, agentId: "agentDev", kickoffPrompt: "GO" });
+  // A trailing-space on an OTHERWISE-VALID id is NORMALIZED by trim and accepted (robustness, not rejection).
+  // Use a FRESH task (taskTrim): the live-worker-on-task guard now rejects a second live worker on taskGood,
+  // so this proves trim normalization without colliding with that guard.
+  const w2 = await svc.spawnWorker("mgr1", { taskId: `  ${taskTrim}  `, agentId: "agentDev", kickoffPrompt: "GO" });
   worktrees.push(w2.worktreePath);
   check("(trim) surrounding whitespace on a valid id is trimmed and accepted (binds the real task)",
-    w2.role === "worker" && w2.taskId === taskGood);
+    w2.role === "worker" && w2.taskId === taskTrim);
 } finally {
   try {
     const { removeWorktree } = await import("../dist/git/worktrees.js");

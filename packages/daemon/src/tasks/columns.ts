@@ -1,4 +1,4 @@
-import { resolveConfig, type KanbanColumn, type ColumnRole } from "@loom/shared";
+import { resolveConfig, columnKeyForRole, type KanbanColumn, type ColumnRole, type ProjectConfigOverride } from "@loom/shared";
 import type { Db } from "../db.js";
 
 // Board-column lifecycle (task B): the ONE-TIME role backfill migration + the pure desired-vs-current
@@ -222,4 +222,56 @@ export function planColumnLayout(
  */
 export function currentColumns(db: Db, projectId: string): KanbanColumn[] {
   return resolveConfig(db.getProject(projectId)?.config).kanbanColumns;
+}
+
+/**
+ * Apply a project config override that MAY change the board's column layout, SAFELY — the shared writer
+ * behind the config-PATCH surfaces (the platform `project_configure` MCP tool + the REST
+ * `PATCH /api/projects/:id/config`). The blind `db.setProjectConfig` is a two-path asymmetry hazard: it
+ * writes the new columns with NO card re-key, so renaming/removing a column ORPHANS every card still on the
+ * old key (Board.tsx filters strictly → the card vanishes, no migration), violating columns.ts's hard
+ * invariant "no task references a non-existent column". The dedicated column editor (PUT /api/projects/:id/
+ * columns → planColumnLayout) re-keys cards; these config-PATCH surfaces bypassed it.
+ *
+ * When the override changes the column KEY SET (the only thing that can orphan a card), route the column
+ * change through the existing transactional safe WRITER `db.applyBoardColumnLayout`: every card on a
+ * removed/renamed-away key lands in the resolved defaultLanding lane, and the writer's backstop sweep +
+ * post-apply assertion guarantee ZERO orphans (or the whole thing rolls back). The columns are stored
+ * EXACTLY as supplied (roles preserved or absent as given — this path deliberately does NOT re-validate or
+ * normalize the layout, matching the blind path's tolerance of a roleless board via columnKeyForRole's
+ * first/last fallback, so it never rejects a layout the blind path would have accepted). A patch that does
+ * NOT change the key set (label/role/accent edits, or any non-column key) stays on the blind path,
+ * byte-identical to before.
+ *
+ * A blind config PATCH carries no `prevKey`, so a rename is indistinguishable from drop-old+add-new — cards
+ * follow to defaultLanding, NOT to the renamed column. The PUT /columns editor is the rename-FOLLOWING path;
+ * this surface only guarantees no orphan. Returns {ok:false} on an unknown project or an empty board, with
+ * the stored config left UNCHANGED.
+ */
+export function setProjectConfigSafe(
+  db: Db, projectId: string, next: ProjectConfigOverride,
+): { ok: true } | { ok: false; error: string } {
+  const project = db.getProject(projectId);
+  if (!project) return { ok: false, error: "project not found" };
+  const current = resolveConfig(project.config).kanbanColumns;
+  const desired = resolveConfig(next).kanbanColumns;
+  const curKeys = new Set(current.map((c) => c.key));
+  const nextKeys = new Set(desired.map((c) => c.key));
+  const keySetChanged = curKeys.size !== nextKeys.size || [...nextKeys].some((k) => !curKeys.has(k));
+  if (!keySetChanged) { db.setProjectConfig(projectId, next); return { ok: true }; } // no orphan possible → blind path
+  // An empty board would orphan EVERY card with no landing target — reject (the blind path would silently
+  // store it and break the board). Mirrors planColumnLayout's ≥1-column floor.
+  if (!desired.length) return { ok: false, error: "a board must keep at least one column" };
+  // The landing target for dropped cards: the desired board's resolved defaultLanding (first-column fallback
+  // when roleless), guaranteed to be one of `desired`'s keys — exactly what applyBoardColumnLayout requires.
+  const defaultLandingKey = columnKeyForRole(desired, "defaultLanding");
+  if (!defaultLandingKey) return { ok: false, error: "the board has no landing column" }; // defensive (≥1 col ⇒ defined)
+  const rekeys = [...curKeys].filter((k) => !nextKeys.has(k)).map((from) => ({ from, to: defaultLandingKey }));
+  // Persist the NON-column keys first so applyBoardColumnLayout (which writes {...config, kanbanColumns})
+  // lands the full override; it then stores the EXACT desired columns + sweeps every orphan to the landing lane.
+  const rest = { ...next };
+  delete rest.kanbanColumns;
+  db.setProjectConfig(projectId, rest);
+  db.applyBoardColumnLayout(projectId, desired, rekeys, defaultLandingKey);
+  return { ok: true };
 }

@@ -24,6 +24,7 @@ import type { WorkspaceAuditMcpRouter } from "../mcp/user-audit.js";
 import type { SetupMcpRouter } from "../mcp/setup.js";
 import type { RunMcpRouter } from "../mcp/run.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validateColumnLayout } from "../mcp/platform.js";
+import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
 import { clearClaudeRateLimit } from "../orchestration/usage-awareness.js";
@@ -948,7 +949,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
     const v = validateProjectConfigOverride((req.body as { config?: unknown })?.config ?? req.body);
     if (!v.ok) return reply.code(400).send({ error: `invalid config: ${v.error}` });
-    deps.db.setProjectConfig(id, v.value);
+    // Route through the SAFE writer (not a blind setProjectConfig): a kanbanColumns change that drops/renames
+    // a column re-keys the affected cards to the landing lane instead of ORPHANING them on a non-existent
+    // column. A non-column patch stays byte-identical to the blind path. (tasks/columns.ts.)
+    const wrote = setProjectConfigSafe(deps.db, id, v.value);
+    if (!wrote.ok) return reply.code(400).send({ error: wrote.error });
     return deps.db.getProject(id);
   });
 

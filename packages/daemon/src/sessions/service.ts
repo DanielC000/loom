@@ -1583,6 +1583,26 @@ export class SessionService {
     if (!task || task.projectId !== manager.projectId) throw new Error(`worker_spawn taskId '${taskId}' does not resolve to an existing task in this project`);
     const terminalKey = columnKeyForRole(config.kanbanColumns, "terminal");
     if (task.columnKey === terminalKey) throw new Error(`worker_spawn taskId '${taskId}' is in the terminal column ('${task.columnKey}') — pick a non-terminal task`);
+    // OWNER-BRAKE (structural): refuse to dispatch onto the human-hold lane (role `humanHold`, the `blocked`
+    // column by default) — the owner's SOLE brake on a card. Doctrine + owner memory treat it as never-dispatch,
+    // but nothing structurally enforced it: spawnWorker resolved only the terminal column (humanHold was consulted
+    // for convergence in hasPendingBoardWork, never on dispatch). A one-line sibling of the terminal rail, BEFORE
+    // any worktree/pty side effect. humanHold is optional — a board with no such lane resolves undefined and this
+    // is a no-op, never a false reject.
+    const humanHoldKey = columnKeyForRole(config.kanbanColumns, "humanHold");
+    if (humanHoldKey && task.columnKey === humanHoldKey) {
+      throw new Error(`worker_spawn taskId '${taskId}' is on the human-hold lane ('${task.columnKey}') — the owner's brake; clear the card off it before dispatching a worker`);
+    }
+    // DATA-LOSS guard (structural): refuse a SECOND live worker on a task already held by a live one. The
+    // worktree path is DETERMINISTIC per task and createWorktree REUSES an existing dir, recutting a 0-ahead
+    // branch with `reset --hard mainSha` — designed for re-spawn after a REJECTED merge (a DEAD worker). With a
+    // LIVE first worker mid-edit, a second spawn would share its checkout and the reset --hard would silently
+    // DESTROY the first's uncommitted work. The lookup is BOARD-WIDE (not the manager-scoped listWorkers — a
+    // sibling manager's worker on the same task must be visible), and runs BEFORE any worktree/pty side effect.
+    const liveHolder = this.db.liveSessionIdForTask(taskId);
+    if (liveHolder) {
+      throw new Error(`worker_spawn taskId '${taskId}' already has a live worker (${liveHolder}); stop or recycle it before re-spawning`);
+    }
     // Resolve THAT agent's profile for its browser-automation opt-in + skill subset — a manager spawns a
     // QA worker by pointing it at a browserTesting profile (e.g. the bundled "QA Tester"). Explicit role is
     // "worker"; we read browserTesting + skills (permission stays config.permission, byte-identical to
