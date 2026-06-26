@@ -140,6 +140,20 @@ export class Scheduler {
         // Count the spawn against the budget for ITS kind (auditors have their own; see above).
         if (isAuditor) liveAuditors++; else liveManagers++;
       } catch (e) {
+        // Durable failure record (mirror of the schedule_fired success event): a spawn that throws used to
+        // ONLY stderr-log, so a cadence could silently never run with no surfaced reason. Emit a queryable
+        // `schedule_fire_failed` event so the failure is visible (listEvents) like a successful fire — filed
+        // under the SCHEDULE id (no manager session was spawned, so there's nothing else to key it to). The
+        // slot is already claimed (markFired above) so this never double-spawns, and we deliberately do NOT
+        // disable: a transient spawn failure must not permanently kill a cadence (only the deleted-agent
+        // case disables). Best-effort: a failing audit write must never crash the per-schedule loop.
+        try {
+          this.deps.db.appendEvent({
+            id: randomUUID(), ts: now.toISOString(),
+            managerSessionId: s.id, kind: "schedule_fire_failed",
+            detail: { scheduleId: s.id, cron: s.cron, kind: s.kind, error: (e as Error).message },
+          });
+        } catch { /* never let the durable-record write itself crash the tick */ }
         // eslint-disable-next-line no-console
         console.error(`[scheduler] schedule ${s.id} (${s.cron}) failed to fire:`, (e as Error).message);
       }

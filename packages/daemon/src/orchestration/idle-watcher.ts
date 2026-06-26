@@ -141,13 +141,21 @@ export class IdleWatcher {
         continue;
       }
 
-      // Count cards in the project's `workReady` lane (role-resolved, not the hardcoded "todo" key) so a
-      // renamed work-ready column is still counted. No workReady lane → count 0 (the message degrades gracefully).
-      const workReadyKey = columnKeyForRole(resolveConfig(db.getProject(m.projectId)?.config).kanbanColumns, "workReady");
-      const openTodos = workReadyKey ? db.listTasks(m.projectId).filter((t) => t.columnKey === workReadyKey).length : 0;
+      // Count ALL actionable cards (role-resolved), not just the workReady lane: a task is actionable when
+      // its column is NEITHER the terminal lane NOR the humanHold (blocked) lane — every other lane
+      // (intake/defaultLanding/workReady/active/review/parked) is pending work a manager should be driving.
+      // Counting only workReady mis-told an idle manager "0 todo" while actionable cards sat in inbox/active/
+      // review. Mirrors resumeFleetOnBoot's "pending board work" definition (sessions/service.ts) so the two
+      // stay consistent. A missing terminal/humanHold key just means that lane doesn't exclude anything.
+      const cols = resolveConfig(project.config).kanbanColumns;
+      const terminalKey = columnKeyForRole(cols, "terminal");
+      const humanHoldKey = columnKeyForRole(cols, "humanHold");
+      const openTodos = db.listTasks(m.projectId).filter(
+        (t) => t.columnKey !== terminalKey && t.columnKey !== humanHoldKey,
+      ).length;
       const n = Math.round((nowMs - lastActivityMs) / 60_000);
       const msg =
-        `[loom:idle] You've been idle ~${n} min with no live workers and ${openTodos} open todo task(s). ` +
+        `[loom:idle] You've been idle ~${n} min with no live workers and ${openTodos} actionable task(s). ` +
         `Why are you idle? If you simply dropped the orchestration loop, pick up the next task NOW. ` +
         `Then call idle_report with your state: 'working' (back at it), 'waiting' (on a long worker or ` +
         `external thing — optionally pass minutes), 'blocked_human' (need a human decision/credential/access), ` +
@@ -155,7 +163,7 @@ export class IdleWatcher {
       try { pty.enqueueStdin(m.id, msg); } catch { /* manager not live */ }
       db.recordIdleNudge(m.id, nowIso); // stamp last_idle_nudge_at + increment idle_nudge_unanswered
       // eslint-disable-next-line no-console
-      console.log(`[idle-watcher] nudged idle manager ${m.id} (~${n}m idle, ${openTodos} todo, unanswered→${state.unanswered + 1})`);
+      console.log(`[idle-watcher] nudged idle manager ${m.id} (~${n}m idle, ${openTodos} actionable, unanswered→${state.unanswered + 1})`);
     }
   }
 

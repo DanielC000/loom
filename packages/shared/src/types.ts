@@ -426,6 +426,13 @@ export type OrchestrationEventKind =
   | "redirect_worker"
   | "recycle_begin" | "recycle_complete" | "merge_request" | "merge_done"
   | "merge_rejected" | "build_gate" | "kill_switch" | "schedule_fired"
+  // A scheduled fire FAILED to spawn (startManager/startAuditor threw). The durable mirror of
+  // `schedule_fired`: without it a spawn failure ONLY hit stderr, so a cadence could silently never run
+  // with no surfaced reason. Filed under the SCHEDULE id (managerSessionId = the schedule — no session was
+  // spawned to key it to); `detail` carries { scheduleId, cron, kind, error }. The slot is already claimed
+  // (claim-before-spawn), so this never re-fires; the schedule stays enabled (a transient spawn failure
+  // must not permanently disable a cadence — only the deleted-agent case disables).
+  | "schedule_fire_failed"
   // worker_report(done) PRE-CHECK refusal (board cards 907b9f50, dcb25bd9): a worker reported done but was
   // refused at the source — `detail.reason` discriminates: "uncommitted" (UNCOMMITTED work in its worktree,
   // + the named files) or "pending-direction" (UNRESOLVED manager direction still queued, + the queued

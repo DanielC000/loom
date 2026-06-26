@@ -66,6 +66,11 @@ function seedTodo(e, n) {
       title: `t${i}`, body: "", columnKey: "todo", position: i, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
   }
 }
+// Seed one card in an explicit column key (for the multi-lane actionable-count test).
+function seedCard(e, columnKey) {
+  e.db.insertTask({ id: `tk-${columnKey}-${Math.random().toString(36).slice(2, 6)}`, projectId: e.projId,
+    title: columnKey, body: "", columnKey, position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+}
 function cleanup(e) {
   try { e.db.close(); } catch { /* ignore */ }
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(e.dbFile + ext, { force: true }); } catch { /* ignore */ } }
@@ -79,9 +84,28 @@ function cleanup(e) {
   e.watcher.tick(NOW);
   check("(1) idle manager (no workers / watching / unpaused / under cap) IS nudged", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-idle");
   check("(1) nudge text asks WHY + steers to idle_report", e.enqueued[0]?.text.includes("idle_report") && /why are you idle/i.test(e.enqueued[0]?.text));
-  check("(1) nudge reports the open todo count", e.enqueued[0]?.text.includes("7 open todo"));
+  check("(1) nudge reports the actionable card count", e.enqueued[0]?.text.includes("7 actionable"));
   const s = e.db.getIdleNudgeState("mgr-idle");
   check("(1) recordIdleNudge incremented unanswered 0→1 + stamped last_idle_nudge_at", s?.unanswered === 1 && s?.lastIdleNudgeAt === NOW.toISOString());
+  cleanup(e);
+}
+
+// ===== (1b) the nudge counts ALL actionable lanes (not just workReady), excluding terminal + humanHold =====
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-multilane");
+  // Default board: actionable = every lane EXCEPT done (terminal) + blocked (humanHold).
+  seedCard(e, "inbox");        // intake      → actionable
+  seedCard(e, "backlog");      // defaultLanding → actionable
+  seedCard(e, "todo");         // workReady   → actionable
+  seedCard(e, "in_progress");  // active      → actionable
+  seedCard(e, "review");       // review      → actionable
+  seedCard(e, "waiting");      // parked      → actionable
+  seedCard(e, "blocked");      // humanHold   → EXCLUDED
+  seedCard(e, "done");         // terminal    → EXCLUDED
+  e.watcher.tick(NOW);
+  check("(1b) counts ALL actionable lanes (6), excluding the blocked + done lanes",
+    e.enqueued.length === 1 && e.enqueued[0].text.includes("6 actionable"));
   cleanup(e);
 }
 
