@@ -1125,7 +1125,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // daemon binds 127.0.0.1; this adds Bearer auth ON TOP — the human-only routes above stay unauthed-loopback,
   // unchanged). FAIL CLOSED: a missing/invalid key NEVER falls through to starting a run. A key reaches ONLY
   // its own project's allowlisted endpoint agents, and GET/cancel are own-run-scoped (another key's run → 404).
-  // Caps are STORED (R1) but NOT enforced here (R4); runs start immediately (no queue backpressure — R4). ---
+  // Caps ARE enforced here (R4a): the per-key concurrency / daily-token / daily-spend caps each gate the start
+  // below and return 429 (NO run starts), checked only when actually about to start a run (after idempotency
+  // replay). There is still no queue backpressure — a non-capped run starts immediately. ---
 
   /** Extract the Bearer token (the raw key plaintext); null when the header is absent/non-Bearer. */
   const bearerToken = (req: { headers: Record<string, unknown> }): string | null => {

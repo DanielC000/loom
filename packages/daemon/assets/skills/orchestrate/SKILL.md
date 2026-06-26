@@ -147,8 +147,10 @@ pending, recycle it (see the loop, step 7) rather than treating the nudge as idl
 Workers are yours to direct; their one channel up — `worker_report` — reaches **you**, never the
 human. When a worker reports a decision, ambiguity, or blocker up, you make the call and
 `worker_message` it back down. You don't have to write the escalate-up rule into each kickoff: the
-server prepends the worker's base brief — which already carries it, alongside the worker's `/worker`
-doctrine — ahead of your kickoff.
+server prepends the worker's base brief (its `startupPrompt`) — which should carry it, alongside the
+worker's `/worker` doctrine — ahead of your kickoff. (That holds only if the agent's brief is written to
+carry them; a blank or too-thin worker brief leaves the worker on the kickoff alone, and is itself worth
+fixing.)
 
 ## The loop
 
@@ -172,9 +174,11 @@ doctrine — ahead of your kickoff.
      generic — the scope *vocabulary* is per-project data that lives in each project's `CLAUDE.md`, never
      baked into this doctrine.
 3. **Write self-contained kickoff prompts** via `worker_spawn`. The SERVER prepends the worker's base
-   brief — its identity, the Step-0 `/worker` doctrine, the `CLAUDE.md` pointer, and the escalate-up
-   rule — ahead of your kickoff, so your kickoff carries ONLY the task-specific payload: context + the
-   task + its DoD. You don't restate `/worker`, where `CLAUDE.md` lives, or the escalate-up rule.
+   brief (its `startupPrompt`) — which should carry its identity, the Step-0 `/worker` doctrine, the
+   `CLAUDE.md` pointer, and the escalate-up rule — ahead of your kickoff, so your kickoff carries ONLY the
+   task-specific payload: context + the task + its DoD. You don't restate `/worker`, where `CLAUDE.md`
+   lives, or the escalate-up rule (provided the agent's brief actually carries them — a too-thin worker
+   brief is worth fixing).
 4. **Resolve forks decisively.** When a worker reports a decision up, make the call *with* reasoning —
    recommend, don't hand back a menu; name what you rejected and why. If genuinely uncertain, propose
    how to de-risk (a spike, a check) instead of guessing.

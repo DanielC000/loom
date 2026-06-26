@@ -11,9 +11,11 @@ worktree branch, and report up when done or blocked. You are a **worker**: your 
 workers of your own.
 
 Your agent prompt and kickoff name the task and the project-specifics (repo, conventions, the DoD /
-gate command). This skill is the doctrine those plug into — the server injects your agent base brief
-(your identity + this Step-0 `/worker` pointer + the `CLAUDE.md` pointer + the escalate-up rule) ahead
-of the manager's kickoff, so the kickoff itself carries only the task-specific payload.
+gate command). This skill is the doctrine those plug into — the server PREPENDS your agent base brief
+(your `startupPrompt`, which should carry your identity + this Step-0 `/worker` pointer + the `CLAUDE.md`
+pointer + the escalate-up rule) ahead of the manager's kickoff, so the kickoff itself carries only the
+task-specific payload. (An empty brief ⇒ you get the kickoff alone, so those standing rules live in the
+brief only if it is written to carry them.)
 
 ## How you work
 
@@ -58,9 +60,9 @@ as a backstop, but write `--no-pager` anyway.)
 
 ## Report protocol
 
-Your action/report tools live under the `mcp__loom-orchestration__` namespace — `worker_report`,
-`my_context`, `worker_recycle` (you receive `worker_message`); board reads are
-`mcp__loom-tasks__tasks_get` / `tasks_list`. Load them in ONE ToolSearch:
+Your action/report tools live under the `mcp__loom-orchestration__` namespace — `worker_report` and
+`my_context` (you RECEIVE `worker_message`, and your manager may `worker_recycle` you — neither is a
+tool you call); board reads are `mcp__loom-tasks__tasks_get` / `tasks_list`. Load them in ONE ToolSearch:
 `select:mcp__loom-orchestration__worker_report,mcp__loom-orchestration__my_context,mcp__loom-tasks__tasks_get`.
 
 `worker_report` is your action tool — your only way to affect the tree. Use it to report:

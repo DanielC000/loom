@@ -23,7 +23,7 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * ║ mcp/transcript-read.ts — plus the agent-prompt / skill-text READS it critiques against) + a small,   ║
  * ║ fully-confined set of INERT, DEDUPE/SERVER-RESOLVED daemon-local writes + ONE confined outward nudge ║
  * ║ — and is fail-closed by construction (a tool not registered here cannot be reached):                 ║
- * ║   1. audit_suggest_improvement   → a board card onto the USER'S OWN reserved "Getting Started" home  ║
+ * ║   1. audit_suggest_improvement   → a board card onto the USER'S OWN reserved "Platform" home         ║
  * ║      `inbox` (target resolved SERVER-SIDE; the caller passes NO projectId — NEVER the dev "Loom       ║
  * ║      Platform" home, NEVER an arbitrary id). A suggestion to the user, never an auto-applied change.  ║
  * ║      It ALSO fires the same confined operator nudge as audit_handoff (below) so a suggestion reaches  ║
@@ -135,9 +135,10 @@ export class WorkspaceAuditMcpRouter {
       "audit_suggest_improvement",
       {
         description:
-          "Suggest a workspace improvement as a DURABLE board card on the user's OWN \"Getting Started\" home " +
+          "Suggest a workspace improvement as a DURABLE board card on the user's OWN \"Platform\" home " +
           "(the inbox where they already triage). This is a SUGGESTION for the user — never an auto-applied " +
-          "change — and one of your only two writes (there is no git/vault/config/spawn/message here). The " +
+          "change — and one of your only two writes (no git/vault/config/spawn here — just this card and the " +
+          "confined home-operator nudge it fires, below). The " +
           "target board is FIXED server-side (you cannot pick a project — your suggestion always lands in the " +
           "user's own home). Give a sharp title; put the evidence/repro, the impact, the implicated " +
           "skill/prompt/feature, and a concrete suggested fix in detail; set a severity. It ALSO fires a " +

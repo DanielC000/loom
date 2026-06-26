@@ -1157,7 +1157,8 @@ export class PtyHost {
     // let a skills hiccup block a spawn — a session must boot even if skill delivery fails.
     try { injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null, opts.role); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
     // Both managers AND workers get the orchestration MCP — but a role-gated surface: managers
-    // get the full coordination tools, workers get only worker_report (resolved server-side). A
+    // get the full coordination tools, workers get only worker_report + the read-only my_context
+    // (resolved server-side). A
     // platform-lead instead gets the loom-platform MCP (project/agent creation, Pillar C). acceptEdits
     // does NOT auto-approve MCP tools (the §9 lesson — why mcp__loom-tasks is in the default allow),
     // so allowlist the role's MCP server too, else the agent hangs on a prompt.

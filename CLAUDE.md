@@ -58,7 +58,8 @@ packaged-only loopback `POST /internal/update` + a UI "update available" banner.
 NO supervisor** — `daemon-supervisor.mjs` is dev/self-host-only and not in the npm `files` set; the OS
 service manager owns keep-alive (it runs `loom start --no-open` foreground). `/internal/shutdown` and
 `/internal/update` are **loopback-only, human-only, NOT agent MCP tools** (same trust posture as the
-vault/git writers below). loomctl@0.3.0 is published via npm **trusted publishing** (OIDC, no `NPM_TOKEN`,
+human-only REST vault/git writers below — the one agent-facing exception there is the `LOOM_DEV`
+Platform Lead surface, which `/internal/*` has no equivalent of). loomctl@0.3.0 is published via npm **trusted publishing** (OIDC, no `NPM_TOKEN`,
 auto-provenance — see `docs/releasing.md`).
 
 **Self-hosting (orchestrating Loom WITH Loom):** use `pnpm daemon:stable`, not `pnpm daemon`.
@@ -132,7 +133,8 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
   (every existing spawn byte-identical when off); pinned on the session row so resume/fork/recycle
   keep the browser. HUMAN-set only (Profiles UI/REST) — never an agent MCP tool (same capability-gating
   posture as gateCommand/shell). The MCP launches Chromium lazily on first use; needs a one-time
-  `npx playwright install chromium`. The bundled "QA Tester" profile is the browser-capable rig.
+  `npx playwright install chromium`. The bundled browser-capable rigs are "QA Tester" (test/verify) and
+  "Web Designer" (UI/frontend build) — both spawn the per-session Playwright MCP.
 - **Opt-in document conversion (`documentConversion`):** a session whose resolved Profile sets
   `documentConversion` spawns with its OWN per-session stdio markitdown MCP (Microsoft `markitdown-mcp`,
   resolved to an ABSOLUTE path) and its single tool `mcp__markitdown__convert_to_markdown` allowlisted —
@@ -226,6 +228,10 @@ a project with no documented list gets one derived from its structure at intake,
 no meaningful code subdivisions may go scopeless.
 - Vault + git writes are enabled via a HUMAN-only REST surface (vault: `vault/writer.ts`; git:
   `git/writer.ts` — checkout/commit/push/create-branch). These are trust-boundary surfaces like
-  gateCommand: NO agent MCP tool exposes them; an agent can never write/commit/push from a session.
-  Every git write is bounded + non-interactive (`GIT_TERMINAL_PROMPT=0` + timeout) so a hung push
-  can't wedge the daemon. The read-only log/branches view is unchanged.
+  gateCommand: NO **core / project-session** MCP tool exposes them; an agent in an ordinary project
+  session can never write/commit/push. The one deliberate exception is the `LOOM_DEV`-gated **Platform
+  Lead** surface (`mcp/platform.ts`), which is itself human-driven and ABOVE all projects: it registers
+  `git_checkout`/`git_create_branch`/`git_commit`/`git_push` + `vault_write` as agent tools (each reusing
+  the same bounded writer code by explicit `projectId`). Every git write is bounded + non-interactive
+  (`GIT_TERMINAL_PROMPT=0` + timeout) so a hung push can't wedge the daemon. The read-only log/branches
+  view is unchanged.

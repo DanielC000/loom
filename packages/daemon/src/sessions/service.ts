@@ -2051,7 +2051,7 @@ export class SessionService {
     // "Loom Platform" home and NEVER an arbitrary caller-supplied id. Absent home ⇒ no-op safely (the
     // surface stays alive; the suggestion is simply not filed).
     const home = this.db.getReservedProjectByName(SETUP_PROJECT_NAME);
-    if (!home) return { error: "no reserved \"Getting Started\" home exists — cannot file the suggestion" };
+    if (!home) return { error: "no reserved \"Platform\" home exists — cannot file the suggestion" };
 
     const severity = (input.severity ?? "").trim() || "unspecified";
     const now = new Date().toISOString();

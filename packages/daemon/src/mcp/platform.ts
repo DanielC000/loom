@@ -344,7 +344,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_create",
       {
-        description: "Create a Loom project bound to an existing git repo. repoPath MUST exist and be a git repository (rejected otherwise). vaultPath defaults to repoPath. Optional config is validated against the project-config schema.",
+        description: "Create a Loom project bound to an existing git repo. repoPath MUST exist and be a git repository (rejected otherwise). vaultPath defaults to repoPath. Optional config is validated against the RESTRICTED agent project-config validator — orchestration.gateCommand and alertWebhook (and unknown keys) are REJECTED on create; set those via the elevated project_configure path instead.",
         inputSchema: {
           name: z.string(),
           repoPath: z.string(),
@@ -505,7 +505,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_sessions",
       {
-        description: "List sessions across the platform (archived excluded), each enriched with its project + agent name. state (default \"live\") filters by PROCESS lifecycle: \"live\" = non-exited sessions only (the bounded default — finished sessions that have NOT been archived are dropped, so the feed doesn't grow without limit); \"exited\" = terminated sessions only (history); \"all\" = both. Optional projectId narrows to one project. DEFAULT returns a lightweight SUMMARY per session (id, projectId, projectName, agentName, role, processState, busy, archivedAt, createdAt, lastActivity, model, ctxInputTokens, ctxTurns) so the list stays bounded; heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. Pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first); summary reads are capped at " + DEFAULT_SESSION_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
+        description: "List sessions across the platform (archived excluded), each enriched with its project + agent name. state (default \"live\") filters by PROCESS lifecycle: \"live\" = non-exited sessions only (the bounded default — finished sessions that have NOT been archived are dropped, so the feed doesn't grow without limit); \"exited\" = terminated sessions only (history); \"all\" = both. Optional projectId narrows to one project. DEFAULT returns a lightweight SUMMARY per session (id, projectId, projectName, agentId, agentName, role, processState, busy, archivedAt, createdAt, lastActivity, model, ctxInputTokens, ctxTurns) so the list stays bounded; heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. Pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first); summary reads are capped at " + DEFAULT_SESSION_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
         inputSchema: {
           projectId: z.string().optional(),
           state: z.enum(["live", "exited", "all"]).optional(),

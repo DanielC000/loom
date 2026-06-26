@@ -15,8 +15,8 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * Orchestration MCP server (phase-2 §A2/§A3) — a ROLE-BASED surface, keyed by the URL-path
  * session id and resolved SERVER-SIDE (the agent never names "which session"):
  *   - manager → the full coordination surface (list/status/transcript/spawn/stop/message);
- *   - worker  → ONLY worker_report (so a worker CANNOT spawn/list/stop — the depth-1 tree holds
- *               at the tool surface, not just the role gate);
+ *   - worker  → worker_report + the read-only my_context ONLY (so a worker CANNOT spawn/list/stop —
+ *               the depth-1 tree holds at the tool surface, not just the role gate);
  *   - plain/unknown → 404 (no surface).
  * Stateless: a fresh McpServer+transport per request (the URL-path session id supplies the role
  * binding). No cached transport, so a dropped stream can't wedge the surface mid-session.
