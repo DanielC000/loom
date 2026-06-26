@@ -171,16 +171,25 @@ export async function startVaultVersioners(db: Db, opts?: { debounceMs?: number 
     if (project.archivedAt) continue;
     const vaultPath = project.vaultPath?.trim();
     if (!vaultPath) continue;
-    // Resolve to the governing repo root FIRST so the dedupe key + the back-off decision both key off
-    // the root, collapsing sibling project-subfolders of one repo to a single watcher.
-    const ctx = await resolveVaultRepoContext(vaultPath);
-    const key = ctx.commitPath.replace(/\\/g, "/");
-    if (seen.has(key)) continue; // already watching this repo root
-    seen.add(key);
-    if (ctx.externallyManaged) continue; // Obsidian-Git owns this history — no loom watcher/commit
-    const versioner = new VaultVersioner(vaultPath, opts?.debounceMs);
-    await versioner.start();
-    started.push(versioner);
+    // Per-project isolation: resolve+construct+start() can THROW on a bad/inaccessible vaultPath
+    // (simpleGit construction or start()'s git calls). Guard each project so ONE bad vaultPath is
+    // logged + skipped and the rest still start — best-effort, mirroring the boot-watcher /
+    // worktree-provision posture (the boot caller wraps the WHOLE call, so an unguarded throw here
+    // would poison every subsequent project).
+    try {
+      // Resolve to the governing repo root FIRST so the dedupe key + the back-off decision both key off
+      // the root, collapsing sibling project-subfolders of one repo to a single watcher.
+      const ctx = await resolveVaultRepoContext(vaultPath);
+      const key = ctx.commitPath.replace(/\\/g, "/");
+      if (seen.has(key)) continue; // already watching this repo root
+      seen.add(key);
+      if (ctx.externallyManaged) continue; // Obsidian-Git owns this history — no loom watcher/commit
+      const versioner = new VaultVersioner(vaultPath, opts?.debounceMs);
+      await versioner.start();
+      started.push(versioner);
+    } catch (err) {
+      console.warn(`[vault-versioner] project ${project.id} vault (${vaultPath}) failed to start (${(err as Error).message}); skipping — other projects' versioners still start.`);
+    }
   }
   return started;
 }

@@ -85,21 +85,41 @@ db.insertProject({ id: "p5", name: "P5", repoPath: vaultB, vaultPath: path.join(
 db.insertProject({ id: "p6", name: "P6", repoPath: plainProjA, vaultPath: plainProjA, config: {}, createdAt: now, archivedAt: null });
 db.insertProject({ id: "p7", name: "P7", repoPath: plainProjB, vaultPath: plainProjB, config: {}, createdAt: now, archivedAt: null });
 db.insertProject({ id: "p8", name: "P8", repoPath: obsVault, vaultPath: obsVault, config: {}, createdAt: now, archivedAt: null });
+// ISOLATION (per-project guard): pBad's vaultPath points at a NON-EXISTENT dir, which makes
+// simpleGit() throw inside resolveVaultRepoContext — a deterministic throw on resolve. listAllProjects
+// is ORDER BY name, so naming pBad "ZZbad" < pGood "ZZgood" iterates the throwing project FIRST; the
+// guard must isolate it so pGood's good vault (vaultD) STILL gets a watcher (one bad project must not
+// poison the batch). vaultD is a fresh good repo.
+const vaultD = path.join(root, "vaultD");
+initVault(vaultD);
+const badPath = path.join(root, "does-not-exist-throws-on-resolve");
+db.insertProject({ id: "pBad", name: "ZZbad", repoPath: root, vaultPath: badPath, config: {}, createdAt: now, archivedAt: null });
+db.insertProject({ id: "pGood", name: "ZZgood", repoPath: vaultD, vaultPath: vaultD, config: {}, createdAt: now, archivedAt: null });
 
 const versioners = [];
 try {
   // Short debounce so the live chokidar path commits quickly for (b).
   versioners.push(...await startVaultVersioners(db, { debounceMs: 150 }));
 
-  // (a)+(c)+(e): exactly 3 watchers — vaultA (deduped p1+p2) + vaultB + plainRepo ROOT (deduped p6+p7
-  // subfolders). Empty (p4), archived (p5), and Obsidian-Git-managed (p8) are skipped.
-  check("one watcher per UNIQUE repo root (dedupe + skip empty/archived/obsidian-git)", versioners.length === 3);
+  // (a)+(c)+(e): exactly 4 watchers — vaultA (deduped p1+p2) + vaultB + plainRepo ROOT (deduped p6+p7
+  // subfolders) + vaultD (pGood, started DESPITE the earlier-iterating pBad throwing). Empty (p4),
+  // archived (p5), Obsidian-Git-managed (p8), and the throwing pBad are skipped.
+  check("one watcher per UNIQUE repo root (dedupe + skip empty/archived/obsidian-git)", versioners.length === 4);
   check("each started handle is a VaultVersioner", versioners.every((v) => v instanceof VaultVersioner));
 
   // (b): a filesystem edit to a vault doc auto-commits via the wired chokidar→debounce→commit path.
   const beforeA = commitCount(vaultA);
   fs.writeFileSync(path.join(vaultA, "doc.md"), "# edited by an agent (rewrite-in-place)\n");
   check("a vault doc edit auto-commits via the live watcher", await waitFor(() => commitCount(vaultA) > beforeA));
+
+  // ISOLATION: pBad (a throwing vaultPath) iterates BEFORE pGood (names sort ZZbad < ZZgood) — the
+  // per-project guard isolates the throw so pGood's good vault still gets a LIVE watcher. Prove it via
+  // the live chokidar→commit path: an edit to vaultD auto-commits, which only happens if its watcher
+  // started despite the earlier throw. (count === 4 above already proves construction+start; this proves
+  // the watcher is live.)
+  const beforeD = commitCount(vaultD);
+  fs.writeFileSync(path.join(vaultD, "doc.md"), "# good sibling after a throwing project\n");
+  check("a throwing project does NOT poison the batch — the good sibling's watcher still started", await waitFor(() => commitCount(vaultD) > beforeD));
 
   // (e): an edit inside a SUBFOLDER of the plain repo auto-commits AT THE REPO ROOT (not the subfolder),
   // proving the subfolder→root keying + dedupe of the one-repo-many-subfolder layout.
