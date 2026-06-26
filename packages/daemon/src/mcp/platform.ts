@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import type { Project, ProjectConfigOverride, PlatformConfigOverride, Agent, Profile, Schedule } from "@loom/shared";
+import type { Project, ProjectConfigOverride, PlatformConfigOverride, Agent, Profile, Schedule, Task } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo } from "../git/reader.js";
@@ -16,7 +16,7 @@ import { validateAgentPatch } from "../agents/validate.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData, skillWriteInputSchema } from "./skillTools.js";
-import { createProjectTask } from "./tasks.js";
+import { createProjectTask, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP } from "./tasks.js";
 import { prioritySchema } from "./server.js";
 
 // Same envelope as the task / orchestration MCP servers.
@@ -200,6 +200,30 @@ export function mergeConfigOverride(
     (existing ?? {}) as Record<string, unknown>,
     (patch ?? {}) as Record<string, unknown>,
   ) as ProjectConfigOverride;
+}
+
+/**
+ * Delete a dot-path key from a stored config override — the UNSET half of project_configure (the deep-merge
+ * patch can SET/REPLACE a key but never REMOVE one, so a misconfigured key was previously only clearable via
+ * the human REST whole-object PATCH). Returns a NEW object; an absent path (or one whose parent isn't an
+ * object) is a harmless no-op, never a throw. Top-level ("obsidian") or nested ("orchestration.gateCommand").
+ * Validation is unnecessary: removing any (independent, all-optional) config key can never make the result
+ * invalid — the inverse of the merge note's "two valid configs merge to a valid config".
+ */
+export function unsetConfigPath(
+  config: ProjectConfigOverride, dotPath: string,
+): ProjectConfigOverride {
+  const parts = dotPath.split(".").filter(Boolean);
+  if (!parts.length) return config;
+  const out = structuredClone(config ?? {}) as Record<string, unknown>;
+  let cur: Record<string, unknown> = out;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const next = cur[parts[i] as string];
+    if (!isPlainObject(next)) return out as ProjectConfigOverride; // path doesn't exist — no-op
+    cur = next;
+  }
+  delete cur[parts[parts.length - 1] as string];
+  return out as ProjectConfigOverride;
 }
 
 /**
@@ -405,13 +429,15 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, obsidian, python. As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–1800000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). To RESET/unset a key, use the human REST PATCH /api/projects/:id/config (whole-object replace).",
+        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, obsidian, python. As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–1800000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). UNSET/REPLACE: pass unset:[\"orchestration.gateCommand\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset.",
         inputSchema: {
           projectId: z.string(),
-          config: z.object({}).passthrough(),
+          config: z.object({}).passthrough().optional(),
+          unset: z.array(z.string().min(1)).optional(),
+          replace: z.boolean().optional(),
         },
       },
-      async ({ projectId, config }) => {
+      async ({ projectId, config, unset, replace }) => {
         const project = db.getProject(projectId);
         if (!project) return ok({ error: "project not found" });
         // P3 ELEVATION (trust boundary): the platform role is HUMAN-EQUIVALENT, so config-set on THIS
@@ -421,14 +447,18 @@ export class PlatformMcpRouter {
         // keys are rejected and the stored config is left unchanged. This bypass is keyed STRICTLY to this
         // platform route (resolveRole 404s non-platform); the manager/worker orchestration MCP keeps using
         // validateAgentProjectConfigOverride, which still REJECTS gateCommand/alertWebhook (unchanged).
-        const v = validateProjectConfigOverride(config);
+        const v = validateProjectConfigOverride(config ?? {});
         // List the valid top-level keys on rejection so a fat-fingered key (e.g. "columns" instead of
         // kanbanColumns) converges instead of giving up — mirrors the setup router's project_configure.
         if (!v.ok) return ok({ error: `invalid config: ${v.error}`, validTopLevelKeys: CONFIG_TOP_LEVEL_KEYS });
-        // PATCH/MERGE (card 28c21fe1): deep-merge the VALIDATED partial into the existing override instead
-        // of replacing it, so setting one key never clobbers a board's kanbanColumns (or any other key).
-        // The partial is validated ABOVE; the merged whole is not re-validated (see mergeConfigOverride).
-        const merged = mergeConfigOverride(project.config, v.value);
+        // BASE: deep-merge onto the existing override (card 28c21fe1) so setting one key never clobbers
+        // another — UNLESS replace:true, where `config` becomes the whole override (clear keys by omission,
+        // the agent-reachable analogue of the human REST whole-object PATCH). The partial is validated ABOVE;
+        // the merged whole is not re-validated (see mergeConfigOverride).
+        let merged = replace ? v.value : mergeConfigOverride(project.config, v.value);
+        // UNSET: remove each named dot-path AFTER the merge so a misconfigured key is clearable from the Lead
+        // surface (deleting an independent optional key can never invalidate the result — no re-validation).
+        for (const p of unset ?? []) merged = unsetConfigPath(merged, p);
         db.setProjectConfig(projectId, merged);
         return ok({ ok: true, projectId, config: merged });
       },
@@ -490,6 +520,29 @@ export class PlatformMcpRouter {
         // Backstop the summary feed so an `all`/`exited` history read can't overflow with no explicit limit.
         const effLimit = limit ?? (full ? undefined : DEFAULT_SESSION_SUMMARY_CAP);
         return ok(projectSessionList(filtered, { full, limit: effLimit, offset }));
+      },
+    );
+
+    server.registerTool(
+      "list_all_profiles",
+      {
+        description: "List every Profile (rig) on the platform. Profiles are cross-project by nature (a rig is not bound to one project), so this is the whole set — each a FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion). Read-only. Use to discover a profileId before agent_create/profile_assign/profile_update.",
+        inputSchema: {},
+      },
+      async () => ok(db.listProfiles()),
+    );
+
+    server.registerTool(
+      "list_all_schedules",
+      {
+        description: "List cron schedules across the platform (each {id, agentId, cron, enabled, nextFireAt, lastFiredAt, kind}). Optional projectId narrows to schedules whose agent lives in that project (unknown id => []). With no filter, returns every schedule. Read-only. Use to discover a scheduleId before schedule_update/schedule_delete.",
+        inputSchema: { projectId: z.string().optional() },
+      },
+      async ({ projectId }) => {
+        const all = db.listSchedules();
+        if (projectId === undefined) return ok(all);
+        // Schedules are keyed by agentId; a project filter resolves each schedule's agent → its project.
+        return ok(all.filter((s) => db.getAgent(s.agentId)?.projectId === projectId));
       },
     );
 
@@ -684,6 +737,80 @@ export class PlatformMcpRouter {
       },
     );
 
+    server.registerTool(
+      "project_task_get",
+      {
+        description:
+          "Read ONE full task (title + body) by id on ANOTHER project's board, by explicit projectId + taskId. " +
+          "Reuses the SAME project-scoped read the in-project loom-tasks tasks_get uses, so a taskId that " +
+          "doesn't belong to the named project resolves to not-found. Read-only. Error if unknown.",
+        inputSchema: { projectId: z.string(), taskId: z.string() },
+      },
+      async ({ projectId, taskId }) => {
+        if (!db.getProject(projectId)) return ok({ error: "project not found" });
+        return ok(getProjectTask(db, projectId, taskId));
+      },
+    );
+
+    server.registerTool(
+      "project_task_update",
+      {
+        description:
+          "Update a card on ANOTHER project's board by explicit projectId + taskId — the Lead's cross-project " +
+          "move/edit/re-prioritize (PATCH: only the keys you pass are applied). title?, body?, columnKey? (a " +
+          "MOVE — validated to be an EXISTING column on that project's board, rejected otherwise so a move can " +
+          "never orphan the card), position?, priority? (p0|p1|p2|p3). Reuses the SAME backing path + column " +
+          "validation as the in-project loom-tasks tasks_update. A taskId not on the named project resolves to " +
+          "not-found. Returns the updated Task row. 404 if the project is unknown.",
+        inputSchema: {
+          projectId: z.string(),
+          taskId: z.string(),
+          title: z.string().optional(),
+          body: z.string().optional(),
+          columnKey: z.string().optional(),
+          position: z.number().optional(),
+          priority: prioritySchema.optional(),
+        },
+      },
+      // Spread only the keys the caller PROVIDED (zod omits absent optionals) — mirrors the in-project
+      // tasks_update `{ id, ...patch }`, so an undefined value never clobbers an unspecified field.
+      async ({ projectId, taskId, ...patch }) => {
+        if (!db.getProject(projectId)) return ok({ error: "project not found" });
+        return ok(updateProjectTask(db, projectId, taskId, patch));
+      },
+    );
+
+    server.registerTool(
+      "list_all_tasks",
+      {
+        description:
+          "List board tasks across the platform — the cross-project aggregate mirroring list_all_agents. " +
+          "Optional projectId narrows to one project (unknown id => []). With no filter, aggregates the non-" +
+          "terminal cards of every live project (incl. the reserved home). DEFAULT returns a lightweight " +
+          "SUMMARY per card (id, title, columnKey, position, priority, updatedAt) so the aggregate stays " +
+          "bounded; the unbounded body is DROPPED. Pass includeBody:true for full Task rows (use sparingly — " +
+          "page it). Terminal/done cards are excluded. Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP +
+          " rows by default — page with limit/offset for more.",
+        inputSchema: {
+          projectId: z.string().optional(),
+          includeBody: z.boolean().optional(),
+          limit: z.number().int().positive().optional(),
+          offset: z.number().int().nonnegative().optional(),
+        },
+      },
+      async ({ projectId, includeBody, limit, offset }) => {
+        // Per-project FULL filtered rows (excludeDone applied by listProjectTasks), concatenated, then
+        // projected + paginated at the AGGREGATE level — so the cap bounds the whole feed, not each project.
+        const projectIds = projectId !== undefined
+          ? (db.getProject(projectId) ? [projectId] : [])
+          : db.listAllProjects().map((p) => p.id);
+        let page = projectIds.flatMap((pid) => listProjectTasks(db, pid, { includeBody: true }) as Task[]);
+        if (offset !== undefined) page = page.slice(offset);
+        page = page.slice(0, limit ?? DEFAULT_TASK_SUMMARY_CAP);
+        return ok(includeBody ? page : page.map(toTaskSummary));
+      },
+    );
+
     // --- schedules (cross-project; explicit agentId — the platform analogue of the manager self-service
     // schedule tools). Mirrors POST /api/schedules: validate agent, compute next_fire_at, persist. ---
     server.registerTool(
@@ -726,6 +853,28 @@ export class PlatformMcpRouter {
       },
     );
 
+    server.registerTool(
+      "schedule_get",
+      {
+        description: "Read ONE schedule by id — the FULL record ({id, agentId, cron, enabled, nextFireAt, lastFiredAt, kind}). Read-only. Error if the id is unknown.",
+        inputSchema: { scheduleId: z.string() },
+      },
+      async ({ scheduleId }) => ok(db.getSchedule(scheduleId) ?? { error: "schedule not found" }),
+    );
+
+    server.registerTool(
+      "schedule_delete",
+      {
+        description: "Permanently delete a schedule by id (retire it so it never fires again). Mirrors the human DELETE /api/schedules/:id. 404 if the schedule is unknown (no-op write avoided). Returns { deleted:true, scheduleId }.",
+        inputSchema: { scheduleId: z.string() },
+      },
+      async ({ scheduleId }) => {
+        if (!db.getSchedule(scheduleId)) return ok({ error: "schedule not found" });
+        db.deleteSchedule(scheduleId);
+        return ok({ deleted: true, scheduleId });
+      },
+    );
+
     // === P4 — cross-project messaging (the Lead's side). session_message lets the Lead — which stands
     // ABOVE the manager/worker tree — deliver a message to ANY live session in ANY project, with NO
     // parent/child scoping (the deliberate widening over the manager's parent-gated worker_message). It is
@@ -735,10 +884,13 @@ export class PlatformMcpRouter {
       "session_message",
       {
         description:
-          "Message ANY live session by id, cross-project (the Lead is above the manager/worker tree, so " +
-          "there is NO parent/child scoping). Submitted as a turn if the target is idle; queued FIFO and " +
-          "delivered on its next turn boundary if it's mid-turn. Framed [loom:from-platform] so the receiver " +
-          "knows the source. DELIVERY ONLY — this never spawns anything. 404 if the session is unknown or not live.",
+          "Message ANY session by id, cross-project (the Lead is above the manager/worker tree, so there is " +
+          "NO parent/child scoping). Returns a deliveryStatus so you get an HONEST outcome: a LIVE target gets " +
+          "the message submitted as a turn if idle (delivered-live) or queued FIFO + delivered on its next turn " +
+          "boundary if mid-turn (queued); a NOT-LIVE target has no session to receive a turn, so the message is " +
+          "BOARDED as a durable card on that target's project board (boarded) — never silently dropped — and " +
+          "the returned taskId names it. Framed [loom:from-platform] so a live receiver knows the source. " +
+          "DELIVERY ONLY — this never spawns anything. 404 only if the session id is unknown.",
         inputSchema: { sessionId: z.string(), text: z.string() },
       },
       async ({ sessionId, text }) => {

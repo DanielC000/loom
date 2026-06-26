@@ -1831,24 +1831,66 @@ export class SessionService {
    * message ANY session in ANY project — no parentSessionId check. Reuses the SAME stdin-enqueue channel
    * (submitted as a turn when idle, queued FIFO and drained on the next turn boundary when busy). Framed
    * `[loom:from-platform]` so the receiver knows the source is the platform operator, not its own manager.
-   * DELIVERY ONLY — it never spawns anything. Throws (→ the router's error envelope) if the target session
-   * is unknown or not live.
+   * DELIVERY ONLY — it never spawns anything. Throws (→ the router's error envelope) ONLY if the target
+   * session is UNKNOWN.
+   *
+   * Returns a `deliveryStatus` (delivered-live | queued | boarded) so the Lead gets an HONEST outcome:
+   *  - LIVE target → the durable stdin-enqueue channel (submitted as a turn if idle = delivered-live;
+   *    held FIFO if busy = queued).
+   *  - NOT-LIVE target → it has no PTY to take a turn, so instead of THROWING (which silently dropped the
+   *    Lead's message), we BOARD a durable note onto the target's OWN project board — the same durable-board
+   *    fallback platformEscalate uses for an offline Lead — and return `boarded`. The message is never lost.
    */
-  messageSessionAsPlatform(sessionId: string, text: string, senderSessionId?: string): { delivered: boolean; position?: number } {
+  messageSessionAsPlatform(
+    sessionId: string, text: string, senderSessionId?: string,
+  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string } {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
-    if (session.processState !== "live") throw new Error("session is not live");
     const framed = `[loom:from-platform]\n${text}`;
-    // Durable-tracked (card 2ca18433): a busy recipient holds it FIFO + we persist it, so the Lead's
-    // cross-project dispatch survives a sender death / daemon restart before the recipient's next turn.
-    // The sender is the Lead's own session id (threaded from the router) so an undelivered dispatch can be
-    // surfaced back to it on resume; "platform" is a sentinel fallback if no caller id was provided.
-    const r = this.enqueueDurableMessage(sessionId, framed, { sender: senderSessionId ?? "platform", taskId: session.taskId ?? null });
+    if (session.processState === "live") {
+      // Durable-tracked (card 2ca18433): a busy recipient holds it FIFO + we persist it, so the Lead's
+      // cross-project dispatch survives a sender death / daemon restart before the recipient's next turn.
+      // The sender is the Lead's own session id (threaded from the router) so an undelivered dispatch can be
+      // surfaced back to it on resume; "platform" is a sentinel fallback if no caller id was provided.
+      const r = this.enqueueDurableMessage(sessionId, framed, { sender: senderSessionId ?? "platform", taskId: session.taskId ?? null });
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: "", workerSessionId: sessionId, taskId: session.taskId ?? null, kind: "session_message",
+      });
+      return { deliveryStatus: this.deliveryStatusFor(r), position: r.position };
+    }
+    // NOT LIVE: board a durable note onto the target's project board (mirrors platformEscalate's structured
+    // board task). The card is the durable source of truth, so the message survives until someone reads it.
+    const now = new Date().toISOString();
+    const body = [
+      "**Message from the Platform Lead** (boarded because the target session was not live).",
+      "",
+      `- **Target session:** \`${sessionId}\``,
+      senderSessionId ? `- **From (Lead session):** \`${senderSessionId}\`` : "- **From:** Platform Lead",
+      "",
+      "## Message",
+      "",
+      text,
+    ].join("\n");
+    const task: Task = {
+      id: randomUUID(),
+      projectId: session.projectId,
+      title: `[Platform message] for session ${sessionId.slice(0, 8)}`,
+      body,
+      // The target project's default-landing lane (role-resolved, matches platformEscalate's landing).
+      columnKey: this.columnKeyForProjectRole(session.projectId, "defaultLanding") ?? "backlog",
+      position: Date.now(),
+      priority: DEFAULT_TASK_PRIORITY,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.db.insertTask(task);
     this.db.appendEvent({
-      id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId: "", workerSessionId: sessionId, taskId: session.taskId ?? null, kind: "session_message",
+      id: randomUUID(), ts: now,
+      managerSessionId: senderSessionId ?? "", workerSessionId: sessionId, taskId: task.id, kind: "session_message",
+      detail: { boarded: true, projectId: session.projectId },
     });
-    return r;
+    return { deliveryStatus: "boarded", taskId: task.id };
   }
 
   /**

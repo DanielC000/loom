@@ -4,7 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import type { Db } from "../db.js";
 import type { WakeService } from "../orchestration/wake.js";
-import { listProjectTasks, getProjectTask, createProjectTask, updateProjectTask } from "./tasks.js";
+import { listProjectTasks, getProjectTask, createProjectTask, updateProjectTask, DEFAULT_TASK_SUMMARY_CAP } from "./tasks.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -37,15 +37,19 @@ export class TaskMcpRouter {
       "tasks_list",
       {
         description:
-          "List this project's board tasks. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt}) — task bodies are OMITTED and terminal/done cards are EXCLUDED, so repeated calls stay bounded. Pass includeBody:true for full bodies, or tasks_get(id) to read one card in full. Filter with columns:[...] (only those column keys), excludeDone:false (include done cards), and/or minPriority:p0|p1|p2|p3 (only tasks at or above that priority; lower number = higher priority).",
+          "List this project's board tasks. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt}) — task bodies are OMITTED and terminal/done cards are EXCLUDED, so repeated calls stay bounded. Pass includeBody:true for full bodies, or tasks_get(id) to read one card in full. Filter with columns:[...] (only those column keys), excludeDone:false (include done cards), and/or minPriority:p0|p1|p2|p3 (only tasks at or above that priority; lower number = higher priority). Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default (so includeBody on a big board can't overflow) — page with limit/offset for more.",
         inputSchema: {
           columns: z.array(z.string()).optional(),
           excludeDone: z.boolean().optional(),
           includeBody: z.boolean().optional(),
           minPriority: prioritySchema.optional(),
+          limit: z.number().int().positive().optional(),
+          offset: z.number().int().nonnegative().optional(),
         },
       },
-      async (args) => ok(listProjectTasks(db, projectId, args)),
+      // Backstop the read with a default cap (caller-applied, the agentView/sessionView pattern) so an
+      // includeBody read on a board with hundreds of cards can't overflow the tool-result cap.
+      async (args) => ok(listProjectTasks(db, projectId, { ...args, limit: args.limit ?? DEFAULT_TASK_SUMMARY_CAP })),
     );
     server.registerTool(
       "tasks_get",

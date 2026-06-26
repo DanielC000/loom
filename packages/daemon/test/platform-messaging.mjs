@@ -8,7 +8,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Proves the DoD:
 //   (a) session_message is PLATFORM-gated — present on the platform surface, absent from the manager
 //       surface; manager/worker sessions get NO platform surface at all (resolveRole null); it DELIVERS a
-//       framed message to a live session cross-project, and 404s an unknown / not-live target.
+//       framed message to a live session cross-project (deliveryStatus delivered-live), 404s ONLY an unknown
+//       id, and for a NOT-LIVE target BOARDS a durable card on the target's project board (deliveryStatus
+//       boarded + taskId) instead of throwing — so the Lead's message is never silently dropped.
 //   (b) platform_escalate is MANAGER-gated — present on the manager surface, absent from the platform and
 //       worker surfaces; it creates a structured task on the RESERVED Platform board (NOT the caller's
 //       project), capturing origin project+session, title, detail, severity; returns the task id; and
@@ -120,15 +122,28 @@ try {
   // Delivers to a live session cross-project (TARGET is a live pOrd session; the Lead is in pHome).
   const beforeEnq = host.enqueued.length;
   const msg = await pCall("session_message", { sessionId: "TARGET", text: "stand by for a platform-wide restart" });
-  check("(a) session_message delivers to a live session (no error, delivered)", msg.delivered === true && !msg.error);
+  check("(a) session_message delivers to a LIVE session (deliveryStatus delivered-live, no error)",
+    msg.deliveryStatus === "delivered-live" && !msg.error);
   const lastEnq = host.enqueued[host.enqueued.length - 1];
   check("(a) session_message routed to the TARGET session, framed [loom:from-platform]",
     host.enqueued.length === beforeEnq + 1 && lastEnq.id === "TARGET" &&
     lastEnq.text.startsWith("[loom:from-platform]\n") && lastEnq.text.includes("stand by for a platform-wide restart"));
-  // 404s.
+  // 404 ONLY for a truly unknown id.
   check("(a) session_message 404s an unknown session", (await pCall("session_message", { sessionId: "ghost", text: "x" })).error === "session not found");
-  check("(a) session_message 404s a not-live session", /not live/.test((await pCall("session_message", { sessionId: "DEAD", text: "x" })).error));
-  // An audit event was recorded for the successful delivery (filed under the target as workerSessionId).
+  // A NOT-LIVE target no longer throws — it BOARDS a durable card on the target's project board (pOrd) and
+  // returns deliveryStatus "boarded" + the taskId, so the Lead's message is never silently dropped.
+  const ordTasksBefore = db.listTasks("pOrd").length;
+  const enqBeforeDead = host.enqueued.length;
+  const boarded = await pCall("session_message", { sessionId: "DEAD", text: "read this when you resume" });
+  check("(a) session_message to a NOT-LIVE target returns deliveryStatus 'boarded' + a taskId (no error)",
+    boarded.deliveryStatus === "boarded" && !!boarded.taskId && !boarded.error);
+  const boardedTask = db.getTask(boarded.taskId);
+  check("(a) the boarded note landed on the TARGET's project board (pOrd), capturing the message + session",
+    !!boardedTask && boardedTask.projectId === "pOrd" && db.listTasks("pOrd").length === ordTasksBefore + 1 &&
+    boardedTask.body.includes("read this when you resume") && boardedTask.body.includes("DEAD"));
+  check("(a) boarding a not-live target enqueues NOTHING (no live PTY to receive a turn)",
+    host.enqueued.length === enqBeforeDead);
+  // An audit event was recorded for the successful LIVE delivery (filed under the target as workerSessionId).
   check("(a) a session_message audit event was recorded for TARGET",
     db.listEventsForWorker("TARGET").some((e) => e.kind === "session_message"));
 
@@ -215,6 +230,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — session_message is platform-gated and delivers a framed message to any live session cross-project (404 on unknown/not-live); platform_escalate is manager-gated, files a structured escalation task on the RESERVED Platform board (not the caller's), returns its id, nudges a live Lead best-effort, and refuses gracefully with no reserved project; a worker cannot call it; the two tools stay on their separate surfaces — claude-free, network-free."
+  ? "\n✅ ALL PASS — session_message is platform-gated and delivers a framed message to any live session cross-project (deliveryStatus delivered-live; 404 only on an unknown id; a NOT-LIVE target BOARDS a durable card on its project board → boarded + taskId, never dropped); platform_escalate is manager-gated, files a structured escalation task on the RESERVED Platform board (not the caller's), returns its id, nudges a live Lead best-effort, and refuses gracefully with no reserved project; a worker cannot call it; the two tools stay on their separate surfaces — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
