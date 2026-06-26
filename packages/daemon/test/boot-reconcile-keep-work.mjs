@@ -138,6 +138,20 @@ try {
   check("(e) parser: tracked modification → work", worktreeStatusHasWork(" M packages/daemon/src/x.ts\n") === true);
   check("(e) parser: mixed .claude noise + real product → work", worktreeStatusHasWork("?? .claude/skills/foo\n?? src/new.txt\n") === true);
   check("(e) parser: empty status → NOT work", worktreeStatusHasWork("") === false);
+  // Card fed15845 (C): the daemon-injected `.claude/skills/` subtree is noise at ANY status — a re-copy
+  // over a repo that TRACKS a colliding skill name surfaces as a TRACKED modification (not `??`), which
+  // the untracked-only rule used to miss → boot-reconcile Pass B falsely read it as "has work".
+  check("(C) parser: TRACKED-modified injected skill → NOT work (the false-has-work leak, now closed)",
+    worktreeStatusHasWork(" M .claude/skills/worker/SKILL.md\n") === false);
+  check("(C) parser: STAGED injected skill → NOT work",
+    worktreeStatusHasWork("A  .claude/skills/orchestrate/SKILL.md\n") === false);
+  // The broad untracked-`.claude/` swallow is RETAINED so Claude Code's own permission churn
+  // (`.claude/settings.local.json`, written under acceptEdits) keeps being ignored — NOT phantom work.
+  check("(C) parser: untracked Claude settings.local.json → NOT work (churn still swallowed)",
+    worktreeStatusHasWork("?? .claude/settings.local.json\n") === false);
+  // …but a TRACKED non-skills `.claude/` edit (a worker deliberately changing project config) IS work.
+  check("(C) parser: tracked non-skills .claude/ edit → work",
+    worktreeStatusHasWork(" M .claude/settings.json\n") === true);
 
   // Sanity on the routing pre-conditions (under SQUASH, Pass A keys on the Loom-Worker-Branch trailer,
   // NOT `git branch --merged`). (a)/(b) never landed → NO trailer in main → Pass A skips → Pass B decides

@@ -21,10 +21,24 @@ import { execSync } from "node:child_process";
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-recut-home-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
-const { createWorktree } = await import("../dist/git/worktrees.js");
+const { createWorktree, mayRecutOntoMain } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+
+// ============================================================================================
+// (D) FAIL-SAFE gate for the DESTRUCTIVE re-cut (card fed15845): mayRecutOntoMain decides whether
+// recutStaleReusedBranch may run `reset --hard`. Re-cut is allowed ONLY on a provably-empty branch
+// (rev-list --count == "0"). A recovery branch (>0) OR a malformed/unparseable count (NaN) must NOT
+// reset — the prior `parseInt(...) || 0` collapsed NaN→0 and would have DESTROYED recovery work.
+check("(D) '0' (empty branch) → may re-cut (true)", mayRecutOntoMain("0") === true);
+check("(D) '0\\n' (trailing newline from git.raw) → may re-cut (true)", mayRecutOntoMain("0\n") === true);
+check("(D) '  0  ' (padded) → may re-cut (true)", mayRecutOntoMain("  0  ") === true);
+check("(D) '1' (recovery, 1 ahead) → MUST NOT re-cut (false)", mayRecutOntoMain("1") === false);
+check("(D) '42' (recovery) → MUST NOT re-cut (false)", mayRecutOntoMain("42") === false);
+check("(D) '' (empty/no output) → NaN → FAIL SAFE, MUST NOT re-cut (false)", mayRecutOntoMain("") === false);
+check("(D) 'garbage' (unparseable) → NaN → FAIL SAFE, MUST NOT re-cut (false)", mayRecutOntoMain("garbage") === false);
+check("(D) 'fatal: bad revision' (git error text) → NaN → FAIL SAFE (false)", mayRecutOntoMain("fatal: bad revision") === false);
 const GIT_ID = "-c user.email=recut@loom -c user.name=recut";
 const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 const head = (cwd) => git(cwd, "rev-parse HEAD");

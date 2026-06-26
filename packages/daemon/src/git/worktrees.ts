@@ -260,6 +260,20 @@ export async function provisionWorktreeDeps(worktreePath: string, deps: Provisio
 }
 
 /**
+ * Decide whether {@link recutStaleReusedBranch} may run its DESTRUCTIVE `reset --hard`, from the raw
+ * `git rev-list --count <mainSha>..<branch>` output. Re-cut is safe ONLY when the branch is provably 0
+ * commits ahead of current main (an empty/stale branch). FAIL SAFE: an unparseable / non-finite count
+ * (NaN) — OR any positive count — means the branch MAY carry real unmerged recovery work, so we must NOT
+ * reset. The prior `parseInt(...) || 0` collapsed a NaN to 0 and then reset anyway, so a single malformed
+ * count would DESTROY a recovery branch's work (the recovery invariant is load-bearing). PURE (no I/O) so
+ * the fail-safe gate is unit-testable without git.
+ */
+export function mayRecutOntoMain(aheadRaw: string): boolean {
+  const ahead = parseInt(aheadRaw.trim(), 10);
+  return Number.isFinite(ahead) && ahead === 0;
+}
+
+/**
  * For a REUSED branch (either reuse path of {@link createWorktree}), re-cut an EMPTY/STALE branch onto
  * the canonical main BEFORE handing the worktree to the worker — the fix for the stale-base bug
  * (2026-06-04): a task whose worktree/branch survives from a PRIOR attempt was re-attached at its OLD
@@ -274,16 +288,20 @@ export async function provisionWorktreeDeps(worktreePath: string, deps: Provisio
  *
  * "Commits ahead" = `git rev-list --count <mainSha>..<branch>` (0 ⇒ safe to re-cut): commits reachable
  * from the branch but not from current main, which for an empty stale branch (tip is an ancestor of
- * main) is 0, and for a recovery branch is its real prior commit(s). We reset to a SHA, never a branch
- * name — a worktree can't check out a branch that's checked out elsewhere (canonical main lives in
- * repoPath). Plain `git.raw` to match createWorktree's existing (unbounded) style; on the spawn hot
- * path these are sub-second ref ops.
+ * main) is 0, and for a recovery branch is its real prior commit(s). The 0-check is delegated to the
+ * FAIL-SAFE {@link mayRecutOntoMain} so a malformed count can never fall through to the reset. We reset
+ * to a SHA, never a branch name — a worktree can't check out a branch that's checked out elsewhere
+ * (canonical main lives in repoPath). Plain `git.raw` to match createWorktree's existing (unbounded)
+ * style; on the spawn hot path these are sub-second ref ops.
  */
 async function recutStaleReusedBranch(repoPath: string, worktreePath: string, branch: string): Promise<void> {
   const git = simpleGit(repoPath);
   const mainSha = (await git.raw(["rev-parse", "HEAD"])).trim();
-  const ahead = parseInt((await git.raw(["rev-list", "--count", `${mainSha}..${branch}`])).trim(), 10) || 0;
-  if (ahead > 0) return; // RECOVERY: real unmerged work → leave the branch EXACTLY as-is (load-bearing).
+  const aheadRaw = await git.raw(["rev-list", "--count", `${mainSha}..${branch}`]);
+  // FAIL SAFE: only re-cut a PROVABLY-empty branch (0 ahead). A recovery branch (>0 ahead) OR a malformed/
+  // unparseable count (NaN) → leave the branch EXACTLY as-is; never let a bad count fall through to the
+  // DESTRUCTIVE reset below (the `|| 0`-treats-NaN-as-0 data-loss footgun). See {@link mayRecutOntoMain}.
+  if (!mayRecutOntoMain(aheadRaw)) return;
   // Empty/stale branch → re-cut its pointer + checkout onto current main (SHA, never a branch name).
   await simpleGit(worktreePath).raw(["reset", "--hard", mainSha]);
 }
@@ -459,8 +477,11 @@ export async function isBranchMerged(repoPath: string, branch: string, base = "H
  * worktree those untracked files are hidden only via the SHARED main `.git/info/exclude` (hideFromGit
  * no-ops in a worktree, where `.git` is a file), so a skill name not yet in that shared exclude
  * surfaces as `?? .claude/…`. That is NEVER the worker's product — the product is src/, package files,
- * tests, anything OUTSIDE `.claude/` — so an UNTRACKED path under `.claude/` is ignored. Everything
- * else counts as work: tracked modifications ANYWHERE (incl. a tracked file under `.claude/`),
+ * tests, anything OUTSIDE the injected `.claude/` churn — so two daemon-noise classes are dropped:
+ * (a) ANY UNTRACKED `.claude/` path (skill injection + Claude's own `.claude/settings.local.json`
+ * permission writes), and (b) the daemon-injected `.claude/skills/` subtree at ANY status (a re-copy
+ * over a repo that tracks a colliding skill name shows as a TRACKED modification, not `??`). Everything
+ * else counts as work: tracked modifications elsewhere (incl. a tracked non-skills file under `.claude/`),
  * staged/unstaged changes, and untracked paths OUTSIDE `.claude/`. Without this discriminator the
  * injected noise would make a genuinely-merged worktree read dirty and block its legitimate cleanup
  * (the merge-recovery regression). Exported so the guard's behavior is unit-testable in isolation.
@@ -471,20 +492,34 @@ export function worktreeStatusHasWork(porcelain: string): boolean {
 
 /**
  * The REAL-work paths in a `git status --porcelain` output — the list form of {@link worktreeStatusHasWork}
- * (which is now just `length > 0`), so the two share one filter and can't drift. Same discriminator: an
- * UNTRACKED (`??`) path under `.claude/` is daemon-injected noise and dropped; everything else — tracked
- * modifications anywhere (incl. a tracked file under `.claude/`), staged/unstaged changes, untracked paths
- * OUTSIDE `.claude/` — is the worker's product and kept. Exported so the worker_report(done) pre-check can
- * NAME the uncommitted files in its refusal. Paths are de-quoted (git quotes paths with special chars).
+ * (which is now just `length > 0`), so the two share one filter and can't drift. Two daemon-noise classes
+ * are dropped: an UNTRACKED (`??`) path under `.claude/` (skill injection + Claude's own `.claude/
+ * settings.local.json` permission writes), AND the daemon-injected `.claude/skills/` subtree at ANY status
+ * (a re-copy over a tracked colliding skill name surfaces as a tracked modification, not `??`). Everything
+ * else — tracked modifications elsewhere (incl. a tracked non-skills file under `.claude/`), staged/unstaged
+ * changes, untracked paths OUTSIDE `.claude/` — is the worker's product and kept. Exported so the
+ * worker_report(done) pre-check can NAME the uncommitted files in its refusal. Paths are de-quoted (git
+ * quotes paths with special chars).
  */
 export function uncommittedWorkFiles(porcelain: string): string[] {
   const files: string[] = [];
   for (const line of porcelain.split(/\r?\n/)) {
     if (line.trim() === "") continue;
     // porcelain v1 line: 2 status chars, a space, then the path. `??` = untracked.
+    const status = line.slice(0, 2);
     let p = line.slice(3);
     if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1); // git quotes paths with special chars
-    if (line.slice(0, 2) === "??" && p.startsWith(".claude/")) continue; // daemon-injected untracked noise
+    // Daemon/Claude-injected `.claude/` churn that is NEVER the worker's committable product:
+    //  (a) ANY UNTRACKED `.claude/` entry — the skills injection AND Claude Code's own per-session writes
+    //      (e.g. `.claude/settings.local.json` from acceptEdits permission persistence). Kept broad so that
+    //      churn keeps being swallowed; narrowing this prefix would surface it as phantom "work".
+    //  (b) the daemon-injected SKILLS subtree at ANY status. injectSkills re-copies `~/.loom/skills/<name>`
+    //      into `.claude/skills/<name>` on every spawn; in a repo that TRACKS a colliding skill name the
+    //      re-copy surfaces as a TRACKED modification (` M …`/`A  …`), not `??`, so the untracked-only rule
+    //      (a) misses it and boot-reconcile Pass B reads a genuinely-clean worktree as "has work". This drop
+    //      closes that leak. (Loom never commits `.claude/skills/`; it is injected per-session + git-excluded.)
+    if (status === "??" && p.startsWith(".claude/")) continue;
+    if (p.startsWith(".claude/skills/")) continue;
     files.push(p);
   }
   return files;
@@ -919,7 +954,8 @@ export function toConventionalSubject(raw: string): string {
  * CONFLICT handling differs from `--no-ff`: `git merge --squash` leaves NO MERGE_HEAD, so `git merge
  * --abort` won't work. simple-git's `raw(["merge", …])` ALSO does NOT reliably reject on a conflict, so we
  * detect one EXPLICITLY via unmerged index entries and clean up with `git reset --hard HEAD`, leaving the
- * canonical repo UNTOUCHED.
+ * canonical repo UNTOUCHED — and if that cleanup reset ITSELF fails, we SURFACE it in `reason` rather than
+ * asserting a clean conflict over a swallowed error (the repo may be left with unmerged residue).
  *
  * IDEMPOTENT (board card 2eddf573). The staged set is RE-DERIVED here, at merge time, from a clean index —
  * never trusted from a snapshot taken at the preceding review. A stale in-progress-merge residue (a
@@ -965,7 +1001,15 @@ export async function mergeBranch(
   // `git reset --hard HEAD` (NOT `merge --abort`) restores the canonical repo to its pre-merge state.
   const conflicted = (await git.raw(["ls-files", "--unmerged"])).trim() !== "";
   if (conflicted) {
-    try { await git.raw(["reset", "--hard", "HEAD"]); } catch { /* nothing to reset */ }
+    // The cleanup that's supposed to leave the canonical repo UNTOUCHED can ITSELF fail (busy index lock,
+    // read-only tree); swallowing it would assert a clean "conflict" while the repo is left with unmerged/
+    // partial-index residue. SURFACE it via `reason` so the caller knows the canonical repo needs recovery
+    // rather than trusting the (now false) "untouched" guarantee.
+    try {
+      await git.raw(["reset", "--hard", "HEAD"]);
+    } catch (e) {
+      return { ok: false, conflict: true, reason: `conflict cleanup (reset --hard HEAD) failed — canonical repo may have unmerged residue: ${(e as Error).message}` };
+    }
     return { ok: false, conflict: true };
   }
   // No conflict. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code handling is
