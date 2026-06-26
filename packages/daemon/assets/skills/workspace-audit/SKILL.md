@@ -72,7 +72,10 @@ improve the user's workflow:
   avoidable rework. Name the implicated agent prompt or skill specifically, and propose the concrete
   wording or structure that would have prevented it. This is the primary board-card category. (Where an
   agent fought its instructions or got stuck, read it as evidence that an instruction needs sharpening —
-  not as a Loom defect to report.)
+  not as a Loom defect to report.) One explicit case: a **WORKER-role agent with an empty, whitespace, or
+  too-thin `startupPrompt`** — the server injects that base brief ahead of every kickoff, so a blank or
+  doctrine-less brief leaves the worker running on the kickoff alone; flag it and propose a substantive
+  base prompt (who it is, how it works, its Step-0 `/worker`).
 - **Recurring prompts worth a preset** — a prompt the user types the **same** (or near-same) way
   repeatedly across sessions, worth saving as a one-click preset. Unlike the category above, this is
   **not** a board card — you emit it through `preset_suggestion_suggest`; see below.

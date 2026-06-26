@@ -145,9 +145,10 @@ pending, recycle it (see the loop, step 7) rather than treating the nudge as idl
 ## Workers report to YOU, not the human
 
 Workers are yours to direct; their one channel up — `worker_report` — reaches **you**, never the
-human. Every kickoff you write MUST tell the worker: on a decision, ambiguity, or blocker beyond the
-task's clear scope, STOP and report up (`status=blocked`, with `needs`) — don't guess, don't expand
-scope, and never address the human. You make the call and `worker_message` it back down.
+human. When a worker reports a decision, ambiguity, or blocker up, you make the call and
+`worker_message` it back down. You don't have to write the escalate-up rule into each kickoff: the
+server prepends the worker's base brief — which already carries it, alongside the worker's `/worker`
+doctrine — ahead of your kickoff.
 
 ## The loop
 
@@ -170,9 +171,10 @@ scope, and never address the human. You make the call and `worker_message` it ba
      project with no meaningful code subdivisions (e.g. a single-vault research project). Keep this rule
      generic — the scope *vocabulary* is per-project data that lives in each project's `CLAUDE.md`, never
      baked into this doctrine.
-3. **Write self-contained kickoff prompts** via `worker_spawn`: context + the task + its DoD + the
-   escalate-up rule. Tell the worker to follow its `/worker` doctrine and point at the repo's
-   `CLAUDE.md` / conventions rather than restating them.
+3. **Write self-contained kickoff prompts** via `worker_spawn`. The SERVER prepends the worker's base
+   brief — its identity, the Step-0 `/worker` doctrine, the `CLAUDE.md` pointer, and the escalate-up
+   rule — ahead of your kickoff, so your kickoff carries ONLY the task-specific payload: context + the
+   task + its DoD. You don't restate `/worker`, where `CLAUDE.md` lives, or the escalate-up rule.
 4. **Resolve forks decisively.** When a worker reports a decision up, make the call *with* reasoning —
    recommend, don't hand back a menu; name what you rejected and why. If genuinely uncertain, propose
    how to de-risk (a spike, a check) instead of guessing.

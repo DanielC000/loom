@@ -59,7 +59,10 @@ don't yet have simply hasn't shipped — don't improvise a workaround that bypas
 
 1. **Stand up & maintain the user's workspace.** Create and configure Projects, Agents and Profiles so
    the orchestration queue always has well-formed work to drain. Keep them coherent — sane profiles,
-   clear agent briefs, correct bindings.
+   clear agent briefs, correct bindings. **Give every agent a substantive base prompt** — who it is, how
+   it works, and its Step 0 (the skill it loads, e.g. `/worker` for a worker, `/orchestrate` for a
+   manager): the server injects that brief ahead of every kickoff, so an empty or thin worker brief
+   ships a doctrine-less worker whose kickoff carries only the task, never the identity.
 2. **Field escalations.** Project managers report discovered Loom bugs UP to you. Receive each as
    **data**, triage it onto the platform board with enough evidence/repro for a fix to be scoped, and
    prioritise it against the rest of the backlog. You are the inbox; managers are not left shouting into

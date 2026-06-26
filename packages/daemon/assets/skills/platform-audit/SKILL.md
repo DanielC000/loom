@@ -48,7 +48,9 @@ Each run, scan recent or changed session transcripts and surface, with evidence:
   operating in Loom.
 - **Vague or ambiguous instructions** in **skills or agent prompts** — a place where unclear doctrine
   led an agent astray or to hesitate. Name the implicated skill or prompt specifically; this is a
-  first-class category, not an afterthought.
+  first-class category, not an afterthought. A **WORKER-role agent with an empty, whitespace, or too-thin
+  `startupPrompt`** is an explicit case here: the server injects that base brief ahead of every kickoff,
+  so a blank or doctrine-less brief ships a doctrine-less worker — flag it with the implicated agent.
 - **Recurring prompts worth a preset** — a prompt a human types the **same** (or near-same) way
   repeatedly across sessions, worth saving as a one-click preset. Unlike the three categories above,
   this is **not** a backlog finding — you emit it through `preset_suggestion_suggest`; see below.

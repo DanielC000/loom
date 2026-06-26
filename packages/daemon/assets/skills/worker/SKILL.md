@@ -11,7 +11,9 @@ worktree branch, and report up when done or blocked. You are a **worker**: your 
 workers of your own.
 
 Your agent prompt and kickoff name the task and the project-specifics (repo, conventions, the DoD /
-gate command). This skill is the doctrine those plug into.
+gate command). This skill is the doctrine those plug into — the server injects your agent base brief
+(your identity + this Step-0 `/worker` pointer + the `CLAUDE.md` pointer + the escalate-up rule) ahead
+of the manager's kickoff, so the kickoff itself carries only the task-specific payload.
 
 ## How you work
 
