@@ -54,31 +54,17 @@ function Bell() {
 // — hence the quiet tooltip rather than hiding the control per route. Lives on the LEFT, right
 // after the logo, so the active scope reads before the destinations it scopes.
 function ActiveProjectControl() {
-  const { projectId, setProjectId, projects, home } = useActiveProject();
-  // Something is selectable when there's a work project OR the reserved Platform home. The home is
-  // pinned at the top in its own optgroup (with a ⌂ glyph) so it reads as the workspace home, not as
-  // one work project among the rest — a native <select> can't host a chip, so the group + glyph carry
-  // the distinction. Work projects keep their own group only when a home is present (so a home-less
-  // install renders the flat list exactly as before — no regression).
-  const hasOptions = projects.length > 0 || !!home;
+  const { projectId, setProjectId, projects } = useActiveProject();
+  // Only work projects are selectable here — the reserved "Platform" home is excluded (it's reached via
+  // the Platform page, which renders its board directly), so the picker is a flat list of work projects.
+  const hasOptions = projects.length > 0;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
       <span style={{ fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>Project</span>
       <Select value={hasOptions ? projectId : ""} onChange={(e) => setProjectId(e.target.value)}
         title="Scopes the project-scoped pages (marked with a dot). God-eye pages ignore this.">
         {!hasOptions && <option value="">— none —</option>}
-        {home && (
-          <optgroup label="Home">
-            <option value={home.id}>⌂ {home.name}</option>
-          </optgroup>
-        )}
-        {home
-          ? projects.length > 0 && (
-              <optgroup label="Projects">
-                {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </optgroup>
-            )
-          : projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
       </Select>
     </span>
   );

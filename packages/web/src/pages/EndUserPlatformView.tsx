@@ -2,6 +2,7 @@ import { type CSSProperties, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Agent, SessionListItem, SessionRole, Schedule } from "@loom/shared";
 import { api } from "../lib/api";
+import Board from "./Board";
 import { TerminalPane } from "../components/Terminal";
 import { Composer } from "../components/Composer";
 import { PresetPromptsButton } from "../components/PresetPrompts";
@@ -126,6 +127,17 @@ export function EndUserPlatformView() {
         </SectionLabel>
         <RunHistory reservedProjectId={project.id} sessions={homeSessions} role="workspace-auditor"
           emptyLabel="No reviews yet — click “Review my workspace” above to run one." />
+      </section>
+
+      {/* --- Your board — the setup checklist + the Workspace Auditor's suggestions (reused Board component) --- */}
+      <section>
+        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          Your board
+          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
+            your setup checklist + Auditor suggestions — triage by dragging cards
+          </span>
+        </SectionLabel>
+        <Board projectId={project.id} />
       </section>
     </div>
   );
