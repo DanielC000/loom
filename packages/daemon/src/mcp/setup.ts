@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { Project, ProjectConfigOverride, Agent, Profile } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
-import { isGitRepo } from "../git/reader.js";
+import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
@@ -121,11 +121,13 @@ export class SetupMcpRouter {
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
         let repo: string;
         let vault: string;
+        let isCodeRepo = false;
         if (repoPath !== undefined) {
           // CODE project (today's behavior): repoPath must be an existing git repository.
           if (!(await isGitRepo(repoPath))) return ok({ error: `repoPath is not an existing git repository: ${repoPath}` });
           repo = repoPath;
           vault = vaultPath ?? repoPath;
+          isCodeRepo = true;
         } else {
           // VAULT-ONLY project: no repo. vaultPath must be an existing directory (need NOT be a git repo) —
           // a research/notes user whose vault isn't a code repo. The project's cwd binds to that folder too.
@@ -140,6 +142,14 @@ export class SetupMcpRouter {
           reserved: false, // a setup-created project is NEVER a reserved/system one (boot-seed only)
         };
         db.insertProject(project);
+        // Bind-time commit-identity assert (CODE repos only — a vault-only notes folder takes no commits):
+        // surface a NON-blocking advisory if no resolvable identity (a later worker/merge commit would
+        // FAIL) or one inappropriate for the origin host (the GitHub-vs-Forgejo rule, reused from the git
+        // helper). It never blocks the bind — the project is already persisted; the warning rides the result.
+        if (isCodeRepo) {
+          const identity = await checkCommitIdentity(repo);
+          if (identity.warning) return ok({ ...project, identityWarning: identity.warning });
+        }
         return ok(project);
       },
     );
@@ -165,7 +175,8 @@ export class SetupMcpRouter {
       async ({ name, kind, dirName, config }) => {
         const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
-        const boot = await bootstrapProjectDir({ name, dirName, git: (kind ?? "git") === "git" });
+        const isGit = (kind ?? "git") === "git";
+        const boot = await bootstrapProjectDir({ name, dirName, git: isGit });
         if (!boot.ok) return ok({ error: boot.error });
         const project: Project = {
           id: randomUUID(), name, repoPath: boot.dir, vaultPath: boot.dir,
@@ -173,6 +184,13 @@ export class SetupMcpRouter {
           reserved: false, // a setup-created project is NEVER a reserved/system one (boot-seed only)
         };
         db.insertProject(project);
+        // Same bind-time identity assert as project_create, for the git kind (a vault folder takes no
+        // commits). A fresh `git init` repo usually has no LOCAL identity, so this surfaces (non-blocking)
+        // whether a global identity is even resolvable before a worker ever tries to commit here.
+        if (isGit) {
+          const identity = await checkCommitIdentity(boot.dir);
+          if (identity.warning) return ok({ ...project, identityWarning: identity.warning });
+        }
         return ok(project);
       },
     );
@@ -226,13 +244,20 @@ export class SetupMcpRouter {
         },
       },
       async ({ projectId, name, vaultPath, config }) => {
-        if (!db.getProject(projectId)) return ok({ error: "project not found" });
+        const project = db.getProject(projectId);
+        if (!project) return ok({ error: "project not found" });
         if (config !== undefined) {
           const v = validateAgentProjectConfigOverride(config);
           if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
-          // SAFE writer (not a blind setProjectConfig): a kanbanColumns key-set change re-keys orphaned
-          // cards to the landing lane; a non-column patch stays byte-identical to the blind path. (columns.ts.)
-          const wrote = setProjectConfigSafe(db, projectId, v.value);
+          // PATCH/MERGE — match project_configure: deep-merge the VALIDATED partial into the project's
+          // EXISTING override instead of whole-replacing it, so editing one key (e.g. a rename via name/
+          // vaultPath alongside a single config key) never CLOBBERS a board's other config overrides.
+          // setProjectConfigSafe writes the WHOLE object it's handed (it only re-keys orphaned cards on a
+          // column-set change, it does NOT merge), so the merge must happen here. The trust boundary is
+          // unchanged: a human-only key is a rejected unknown above and never reaches the merge; the merged
+          // whole isn't re-validated (a preserved pre-existing human key would falsely fail the agent validator).
+          const merged = mergeConfigOverride(project.config, v.value);
+          const wrote = setProjectConfigSafe(db, projectId, merged);
           if (!wrote.ok) return ok({ error: wrote.error });
         }
         if (name !== undefined || vaultPath !== undefined) db.updateProject(projectId, { name, vaultPath });
