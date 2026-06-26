@@ -36,6 +36,7 @@ import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline, rateLimitedUntil } from "./orchestration/usage-limit.js";
 import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent } from "./orchestration/restart.js";
+import { startVaultVersioners, type VaultVersioner } from "./vault/versioner.js";
 import { buildServer } from "./gateway/server.js";
 import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
@@ -440,6 +441,20 @@ async function main(): Promise<void> {
       : `[boot] db-backup ticker off (${backupCfg.enabled ? "interval 0" : "disabled"})`,
   );
 
+  // Vault auto-committer — start ONE VaultVersioner per UNIQUE live project vault so agent doc rewrites
+  // (the mandated rewrite-in-place doc-hygiene flow, done with the plain Write/Edit tool) accrue git
+  // history and a destructive overwrite has a recovery path. Without this the class was dead code: only
+  // commitVault (the UI-write path) ever ran. Deduped by vaultPath (the daemon serves many projects that
+  // commonly SHARE one Obsidian vault root); start() honors the externally-managed backoff (a vault-wide
+  // Obsidian-Git repo owns its own history) and git-inits a bare vault folder. Best-effort: never gate boot.
+  let vaultVersioners: VaultVersioner[] = [];
+  try {
+    vaultVersioners = await startVaultVersioners(db);
+    console.log(`[boot] vault auto-committer on (${vaultVersioners.length} unique vault(s))`);
+  } catch (err) {
+    console.warn(`[boot] vault auto-committer start failed (continuing boot): ${(err as Error).message}`);
+  }
+
   // Outbound alert-webhook (external delivery): a passive listener on the orchestration event
   // chokepoint that POSTs to a HUMAN-configured `orchestration.alertWebhook` URL on matching event
   // kinds — best-effort + bounded, never blocks/breaks the event path. Registered AFTER the boot
@@ -503,6 +518,15 @@ async function main(): Promise<void> {
     // without this a long-lived session loses its transcript when Claude later prunes the JSONL.
     // Best-effort + never-throws (snapshotAllLive swallows per-session failures); must not block exit.
     try { const n = sessions.snapshotAllLive(); if (n > 0) console.log(`[shutdown] snapshotted ${n} live transcript(s)`); } catch { /* never block the exit */ }
+    // Vault auto-commit final flush: this path is SYNCHRONOUS and exits immediately, so the versioners'
+    // async debounced commit would be dropped (a doc edit inside the 5s debounce window never reaching
+    // git). flushSync synchronously stages+commits each pending vault (externally-managed backoff honored,
+    // no-op when nothing's staged). Best-effort + never-throws; must not block exit (mirrors the snapshot above).
+    try {
+      let flushed = 0;
+      for (const v of vaultVersioners) { if (v.flushSync()) flushed++; }
+      if (flushed > 0) console.log(`[shutdown] flushed ${flushed} pending vault commit(s)`);
+    } catch { /* never block the exit */ }
     scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop();
     console.log(`[shutdown] graceful stop (${reason})`);
     process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)

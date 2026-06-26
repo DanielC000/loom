@@ -100,7 +100,7 @@ try {
   // function's definition and assert it calls snapshotAllLive BEFORE process.exit(0) — the shutdown
   // backstop must run on every graceful stop (signal OR endpoint).
   const gsIdx = indexJs.indexOf("gracefulShutdown = (");
-  const region = gsIdx >= 0 ? indexJs.slice(gsIdx, gsIdx + 1200) : "";
+  const region = gsIdx >= 0 ? indexJs.slice(gsIdx, gsIdx + 2200) : ""; // window covers the vault flushSync block now added before exit
   check("(5) built daemon references snapshotAllLive", /snapshotAllLive\s*\(/.test(indexJs));
   check("(5) the graceful-shutdown path invokes snapshotAllLive before exit",
     /snapshotAllLive\s*\(/.test(region) && region.indexOf("snapshotAllLive") < region.indexOf("process.exit(0)"));

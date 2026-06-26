@@ -101,7 +101,7 @@ try {
   // (invoked by the SIGINT/SIGTERM handler AND the POST /internal/shutdown control hook) — anchor there
   // and assert it clears TWO intervals.
   const sigIdx = indexJs.indexOf("gracefulShutdown = (");
-  const region = sigIdx >= 0 ? indexJs.slice(sigIdx, sigIdx + 1400) : "";
+  const region = sigIdx >= 0 ? indexJs.slice(sigIdx, sigIdx + 2200) : ""; // window covers the vault flushSync block now added before the timer teardown
   check("(3) shutdown clears the periodic snapshot timer (≥2 clearInterval calls)",
     (region.match(/clearInterval\(/g) || []).length >= 2);
 } finally {

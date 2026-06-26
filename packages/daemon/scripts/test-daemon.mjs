@@ -35,7 +35,7 @@ const HERMETIC = [
   "claude-config", "trust-lock", "spawn-args", "disallow-prompt-tools",
   "context-watcher", "context-stats", "recycle-handoff", "wake", "worker-reported-state", "crash-recovery-watcher", "busy-worker-watcher",
   "idle-watch-foundation", "idle-watcher", "idle-report", "inbox-pull", "usage-status", "rate-limit-clear", "rate-limit-cascade", "usage-limit-spawn-wake",
-  "skills-inject", "skills-subset-spawn", "respawn-profile-attrs", "skills-store-durability", "skills-publish-drift", "skills-customization", "vault-lint", "vault-browser", "vault-raw", "vault-writer", "git-writer", "git-identity-warning",
+  "skills-inject", "skills-subset-spawn", "respawn-profile-attrs", "skills-store-durability", "skills-publish-drift", "skills-customization", "vault-lint", "vault-browser", "vault-raw", "vault-writer", "vault-versioner-wiring", "git-writer", "git-identity-warning",
   "worker-diff", "worktrees", "worktree-provision", "spawn-recut-stale-branch", "merge-finalize-resilient", "merge-confirm-idempotent", "merge-review-diffstat", "merge-stranded-backstop", "worker-report-precheck", "worker-report-pending-guard", "worker-report-orphan-wake", "worker-exited-without-report", "worker-spawn-agent-gate", "worker-spawn-task-gate",
   "worker-spawn-agent-name", // PL Auditor finding #10 (card 03615ee0): worker_spawn agentId by NAME/slug + "did you mean" nearest-match + lowest-position collision rule
   "worker-report-delivery-status", // card fc9a27d5: worker_report/platform_escalate DeliveryStatus enum + parked-parent wake
