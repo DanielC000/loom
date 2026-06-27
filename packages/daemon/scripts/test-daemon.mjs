@@ -22,7 +22,8 @@ const HERMETIC = [
   "orch-model", "dead-id", "boot-reconcile", "boot-reconcile-keep-work", "merge-done-crash-recovery", "restart-intent", "restart-fleet", "build-gate-integrity",
   "scheduler-auditor-budget", // auditors lifted out of the manager cap → their own small budget (hermetic, daemon-free)
   "scheduler-fire-failed",    // a thrown scheduled spawn records a durable schedule_fire_failed event (not just stderr)
-  "restart-resume-coherence", // PL Auditor finding #11: resume nudges NOTE the file-read tracking reset + merge the engine's bare "Continue" into one coherent turn
+  "restart-resume-coherence", // PL Auditor finding #11: resume nudges NOTE the file-read tracking reset; ONE coherent resume turn, no bare-"Continue" disclaimer (card 5d8dea5f)
+  "restart-wake-classification", // card 5907b71e: cheap no-op wake for an unaffected bystander + completion-escalation de-dup (one completion = one turn)
 
   "manager-context-block", // PL Auditor finding #8: managers get the "Where things live" absolute repo+vault block; workers stay byte-identical
   "worker-prompt", // card af902717: workers get their agent base brief composed ahead of the kickoff (spawn) / handoff (recycle); empty brief degrades to dynamic-only

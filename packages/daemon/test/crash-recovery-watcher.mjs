@@ -132,7 +132,9 @@ function cleanup(e) {
   const nudge = e.enqueued[0].text;
   check("(2) the auto-resume nudge carries the shared RESUME_NUDGE_TAIL (DRY — one source)", nudge.includes(RESUME_NUDGE_TAIL));
   check("(2) the tail's file-read-reset note is present (re-Read before Edit)", /reset your file-read tracking/.test(nudge) && /Read a file again before you Edit/.test(nudge));
-  check("(2) the tail's bare-continue-merge clause is present (treat as a single turn)", /Continue from where you left off/.test(nudge) && /treat them as a single turn/.test(nudge));
+  // card 5d8dea5f: the bare-"Continue" disclaimer paragraph was REMOVED from the tail — the daemon's single
+  // nudge IS the authoritative resume turn, so it no longer spends a sentence reconciling an engine artifact.
+  check("(2) the tail has NO bare-continue disclaimer (card 5d8dea5f removed it)", !/Continue from where you left off/.test(nudge) && !/treat them as a single turn/.test(nudge));
   cleanup(e);
 }
 

@@ -13,8 +13,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     where you left off." turn is an engine artifact (auto-continue of an interrupted transcript) — it is
 //     NOT a Loom string and the daemon never enqueues it. We prove the DAEMON contributes EXACTLY ONE
 //     coherent resume turn per session (the [loom:daemon-restarted] nudge), never a separate bare-continue
-//     turn, and that single nudge MERGES/absorbs the engine's bare continue (telling the agent to treat any
-//     preceding bare "continue" as the same turn).
+//     turn. Card 5d8dea5f REMOVED the old bare-"Continue" disclaimer paragraph: the single nudge IS the
+//     authoritative resume context, so it no longer carries a sentence reconciling the engine artifact — we
+//     assert that disclaimer is GONE from every resume turn.
 //
 // Run: 1) build daemon, 2) node test/restart-resume-coherence.mjs
 import fs from "node:fs";
@@ -112,9 +113,10 @@ try {
     // PART 1 — the file-read tracking reset NOTE rides on the single turn.
     check(`(1) ${n.who}: nudge NOTEs the file-read tracking reset (re-Read before Edit)`,
       /file-read tracking/i.test(msg) && /Read a file again before you Edit/i.test(msg));
-    // PART 2 (merge) — the single turn ABSORBS the engine's bare continue into itself.
-    check(`(2) ${n.who}: nudge MERGES the bare 'Continue from where you left off.' into one resume turn`,
-      /Continue from where you left off\./.test(msg) && /resume context/i.test(msg) && /single turn/i.test(msg));
+    // PART 2 (card 5d8dea5f) — the bare-"Continue" disclaimer paragraph is GONE; the single turn no longer
+    // mentions the engine artifact at all (no "Continue from where you left off." / "single turn" sentence).
+    check(`(2) ${n.who}: the resume turn has NO bare-continue disclaimer (card 5d8dea5f removed it)`,
+      !/Continue from where you left off/.test(msg) && !/treat them as a single turn/.test(msg));
   }
 
   // The plain (role-null) session: resumed but gets NO nudge — so it sees NO daemon turn at all (the
@@ -126,6 +128,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a daemon_restart resume delivers ONE coherent turn per session: each nudge NOTEs the file-read tracking reset and absorbs the engine's bare 'Continue from where you left off.' artifact; the daemon never enqueues a standalone bare-continue no-op."
+  ? "\n✅ ALL PASS — a daemon_restart resume delivers ONE coherent turn per session: each nudge NOTEs the file-read tracking reset and carries NO bare-'Continue' disclaimer (card 5d8dea5f); the daemon never enqueues a standalone bare-continue no-op."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

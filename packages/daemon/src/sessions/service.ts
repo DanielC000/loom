@@ -23,7 +23,7 @@ import { composeWorkerStartupPrompt } from "./worker-prompt.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
-import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
+import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport } from "../orchestration/crash-recovery-watcher.js";
 import { RESUME_NUDGE_TAIL } from "../orchestration/resume-nudge.js";
@@ -209,6 +209,17 @@ export class SessionService {
    * double-tears-down. A run absent from the map has no pending timer (already terminal or never armed).
    */
   private readonly runTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * Completion-escalation de-dup window (card 5907b71e part 2): sessionId → the deploy SHAs a
+   * `[loom:daemon-restarted]` wake already delivered to that session (in the restart `reason`), with the
+   * delivery time. A later "X COMPLETE + DEPLOYED" `platform_escalate` that names the SAME SHA is then a
+   * duplicate of a turn the session already saw — its LIVE nudge is suppressed (the durable board task is
+   * still filed). In-memory by design: the deliver (resume on boot) and the read (escalation) both happen
+   * in the SAME post-restart daemon process, and a missed dedup is harmless (one extra turn). Pruned by
+   * {@link SHA_DEDUP_TTL_MS} so a stale SHA can't suppress a genuinely new, unrelated escalation later.
+   */
+  private readonly deployShaWindow = new Map<string, { shas: Set<string>; atMs: number }>();
+  private static readonly SHA_DEDUP_TTL_MS = 30 * 60_000;
   constructor(
     private db: Db, private pty: PtyHost, private control: OrchestrationControl,
     opts?: { gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number; runTimeoutMs?: number },
@@ -896,14 +907,17 @@ export class SessionService {
    * startup prompt, so without a nudge a worker/manager would sit idle — the stranded-worker hook can't
    * catch a resume's direct setBusy(false)):
    *   - the REQUESTING manager gets its "merged code is now live — continue/verify" re-prompt;
-   *   - every other manager/platform gets a neutral "you were resumed, continue orchestrating" note;
-   *   - a CONVERGED bystander manager/platform — 0 live workers in the resume set AND an EMPTY board (no
-   *     pending/actionable task: every column except the terminal + humanHold lanes counts as pending) —
-   *     gets a lightweight "no action needed" FYI instead of the full re-check nudge. The stale idle-nudge
-   *     policy ALONE is no longer sufficient (a manager that deploys mid-queue sits at 0 live workers by
-   *     design yet still has pending cards), so convergence is gated on the board. The deploy REQUESTER is
-   *     NEVER short-circuited — initiating a deploy is active work, so it always gets the full "code is
-   *     live — continue/verify" nudge;
+   *   - an AFFECTED manager/platform (workers resumed alongside it, queued I/O replayed to it, or pending
+   *     board work) gets the full "re-check your workers" re-orient, prefixed with a one-line classification
+   *     of WHAT this restart touched;
+   *   - an UNAFFECTED bystander manager/platform (card 5907b71e part 1 — isNoOpManagerWake: non-causal,
+   *     0 live workers in the resume set, no queued I/O replayed, AND an empty board) gets a lightweight
+   *     "no action needed" FYI instead of the full re-check, so a routine non-causal deploy doesn't burn a
+   *     turn to confirm "nothing for me". Pending board work FORCES the full nudge (the idle-watcher skips a
+   *     snoozed/suppressed manager, so the restart re-check is its only re-engagement — a no-op would strand
+   *     the queue). Impact, not the stale idle-policy, decides (supersedes the board-AND-policy "converged"
+   *     gate of card 90058589). The deploy REQUESTER is NEVER short-circuited — it always gets the full
+   *     "code is live — continue/verify" nudge;
    *   - every worker gets the "your worktree WIP is intact, continue your task" nudge;
    *   - a standing reviewer (auditor/workspace-auditor/setup) gets a generic "you were resumed — continue
    *     your work" nudge (it too resumes with no startup prompt, so it would otherwise sit idle);
@@ -911,11 +925,13 @@ export class SessionService {
    *   - a PARKED (rate-limited) session is resumed live so the rate-limit watcher can recover it, but
    *     its nudge + pending replay are WITHHELD — we never push a held turn back into the cap (honors
    *     the park; a staggered resume via the watcher at reset). Its DB park state is left intact.
-   * EVERY continuation nudge above (worker / re-check / converged-FYI / reviewer / requester) carries the
-   * shared {@link RESUME_NUDGE_TAIL} (PL Auditor #11): it NOTEs the engine's file-read tracking was reset by
-   * the restart (not preservable from the daemon — re-Read before Edit) and MERGES the engine's bare
-   * "Continue from where you left off." auto-resume turn into this one authoritative nudge, so the agent gets
-   * a single coherent resume turn instead of a no-op then the real one.
+   * Each reason-bearing wake (requester + manager/platform) also records the deploy SHA(s) named in the
+   * reason against its session (recordDeployShasDelivered), so a later "X COMPLETE + DEPLOYED" completion
+   * escalation for the same SHA is recognized as a duplicate turn and its live nudge suppressed (part 2).
+   * EVERY continuation nudge carries the shared {@link RESUME_NUDGE_TAIL} (PL Auditor #11): it NOTEs the
+   * engine's file-read tracking was reset by the restart (not preservable from the daemon — re-Read before
+   * Edit). It is the daemon's ONE coherent resume turn per session (card 5d8dea5f removed the old bare-
+   * "Continue" disclaimer; the daemon never enqueues a standalone bare-continue).
    * Best-effort per session: an unresumable one (dead transcript / gone worktree) is skipped + counted.
    * `resumeOne` is injectable for hermetic tests (default drives this.resume); `now` likewise for tests.
    */
@@ -944,23 +960,16 @@ export class SessionService {
       const s = this.db.getSession(id);
       return !!s?.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > now.getTime();
     };
-    // #7 + card 90058589 (converged-manager short-circuit): how many of THIS manager's live workers are
-    // in the resume set, did it last self-report done/waiting, AND is its board actually empty? The
-    // idle_report disposition is persisted on the durable idle-nudge policy column (recordIdleReport):
-    // waiting → "snoozed", done/blocked_human → "suppressed", working → "watching" (also the un-reported
-    // default). So "last reported done/waiting" == policy is snoozed or suppressed. But that policy can be
-    // STALE: a manager that deploys mid-queue sits at 0 live workers (normal at deploy time) while still
-    // carrying a suppressed/snoozed policy from an earlier idle_report — classifying it as converged would
-    // stall it with pending work. So convergence ALSO requires an EMPTY board: a task is PENDING/actionable
-    // when its column is NEITHER the terminal lane NOR the humanHold (blocked) lane — every other lane
-    // (intake/defaultLanding/workReady/active/review/parked) counts as pending. (idle_report is
-    // manager-only, so a platform target's policy is always "watching" and it correctly never short-circuits.)
+    // card 5907b71e part 1 (wake cause/impact classification, superseding the older #7 + 90058589
+    // "converged" gate): a manager/platform wake is classified by what THIS restart actually touched —
+    // workers resumed, queued I/O replayed, the board — not by a (stale) idle-policy. An unaffected
+    // bystander no-ops cheaply (isNoOpManagerWake) instead of burning a full re-check turn.
     const liveWorkerCount = (managerId: string): number =>
       entries.filter((e) => e.role === "worker" && e.parentSessionId === managerId).length;
-    const lastReportedDoneOrWaiting = (id: string): boolean => {
-      const policy = this.db.getIdleNudgeState(id)?.policy;
-      return policy === "snoozed" || policy === "suppressed";
-    };
+    // Actionable board work: a task whose column is NEITHER the terminal lane NOR the humanHold (blocked)
+    // lane (every other lane — intake/defaultLanding/workReady/active/review/parked — is pending work a
+    // manager should drive). It FORCES the full nudge: the idle-watcher skips a snoozed/suppressed manager,
+    // so the restart re-check is its only re-engagement — a cheap no-op would silently strand the queue.
     const hasPendingBoardWork = (id: string): boolean => {
       try {
         const projectId = this.db.getSession(id)?.projectId;
@@ -974,11 +983,22 @@ export class SessionService {
           (t) => t.columnKey !== terminalKey && t.columnKey !== humanHoldKey,
         );
       } catch {
-        return true; // defensive: a board-read fault must never produce a false "converged" stall
+        return true; // defensive: a board-read fault must never produce a false "no-op" stall
       }
     };
-    const isConverged = (id: string): boolean =>
-      liveWorkerCount(id) === 0 && lastReportedDoneOrWaiting(id) && !hasPendingBoardWork(id);
+    // Per-session restart impact, used by isNoOpManagerWake (restart.ts) to pick the cheap FYI vs the full
+    // re-check, AND by the classification clause in the nudge text.
+    const wakeImpact = (id: string) => ({
+      causal: id === reqId,
+      liveWorkersResumed: liveWorkerCount(id),
+      queuedIoReplayed: (intent.pending?.[id] ?? []).length,
+      pendingBoardWork: hasPendingBoardWork(id),
+    });
+
+    // Deploy SHAs named in the restart reason — a manager typically stamps the deployed SHA into it. Every
+    // reason-bearing wake (requester + manager/platform) records these against its session so a later
+    // "X COMPLETE + DEPLOYED" escalation for the same SHA can be de-duped (card 5907b71e part 2).
+    const reasonShas = extractCommitShas(intent.reason);
 
     const reqWorkers = entries.filter((e) => e.role === "worker" && e.parentSessionId === reqId).map((e) => e.sessionId);
 
@@ -998,21 +1018,34 @@ export class SessionService {
           `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL,
         );
       } else if (e.role === "manager" || e.role === "platform") {
-        if (isConverged(e.sessionId)) {
-          // #7: a parked/converged manager (0 live workers in the restart set + last reported
-          // done/waiting) needs no re-orient cycle — a lightweight FYI, not the full re-check nudge.
+        const impact = wakeImpact(e.sessionId);
+        // The reason names the SHA — record it so a later completion escalation for the same SHA is a
+        // recognized duplicate (part 2). Done for BOTH wake kinds: an unaffected bystander still "saw" it.
+        this.recordDeployShasDelivered(e.sessionId, reasonShas);
+        if (isNoOpManagerWake(impact)) {
+          // part 1: a non-causal bystander this restart did NOT touch (no workers resumed, no queued I/O,
+          // empty board) gets a lightweight FYI, not the full re-check — instead of burning a turn to
+          // confirm "nothing for me" on a routine deploy another session triggered.
           this.pty.enqueueStdin(
             e.sessionId,
             `[loom:daemon-restarted] The daemon was restarted (reason: ${intent.reason}) and you were ` +
-            `resumed. You had no live workers and had last reported done/waiting, so no action is needed — ` +
-            `your state is intact.` + RESUME_NUDGE_TAIL,
+            `resumed. This restart was triggered by another session and did not affect you — none of your ` +
+            `workers were running, no queued messages were waiting, and your board has no pending work, so ` +
+            `no action is needed; your state is intact.` + RESUME_NUDGE_TAIL,
           );
         } else {
+          // Affected (workers resumed, queued I/O replayed, or pending board work) → the full re-orient,
+          // with a one-line classification of WHAT this restart touched so the manager re-checks precisely.
+          const affected = [
+            impact.liveWorkersResumed > 0 ? `${impact.liveWorkersResumed} of your live workers were resumed` : null,
+            impact.queuedIoReplayed > 0 ? `${impact.queuedIoReplayed} queued message(s) were replayed to you` : null,
+            impact.pendingBoardWork ? `your board has pending work` : null,
+          ].filter(Boolean).join("; ");
           this.pty.enqueueStdin(
             e.sessionId,
-            `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you + ` +
-            `your live workers were resumed — your worktrees are intact. Resume orchestrating from where you ` +
-            `left off (re-check your workers' state; some may have just been resumed too).` + RESUME_NUDGE_TAIL,
+            `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
+            `were resumed — your worktrees are intact (${affected}). Resume orchestrating from where you left ` +
+            `off (re-check your workers' state; some may have just been resumed too).` + RESUME_NUDGE_TAIL,
           );
         }
       } else if (e.role === "auditor" || e.role === "workspace-auditor" || e.role === "setup") {
@@ -1035,6 +1068,9 @@ export class SessionService {
         skippedParked.push(reqId);
       } else {
         replayPending(reqId);
+        // The requester's "code is live" nudge names the deployed SHA (in the reason) — record it so its
+        // own "X COMPLETE + DEPLOYED" completion escalation for that SHA is de-duped (card 5907b71e part 2).
+        this.recordDeployShasDelivered(reqId, reasonShas);
         const reqWorkersResumed = reqWorkers.filter((id) => resumed.includes(id)).length;
         // card 90058589: the deploy REQUESTER is NEVER FYI-short-circuited — initiating a deploy is active
         // work, so it always gets the full "code is live — continue/verify" nudge (even at 0 live workers
@@ -2051,8 +2087,19 @@ export class SessionService {
     let deliveryStatus: DeliveryStatus = "boarded";
     const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live");
     if (liveLead) {
-      const note = `[loom:escalation] ${originName} manager escalated a Loom issue → Platform board task ${task.id}: ${input.title} (severity: ${severity})`;
-      try { deliveryStatus = this.deliveryStatusFor(this.pty.enqueueStdin(liveLead.id, note)); } catch { /* Lead not live/ready — `boarded` stands */ }
+      // Completion-escalation de-dup (card 5907b71e part 2): a "X COMPLETE + DEPLOYED" escalation naming a
+      // SHA the Lead already saw via a recent `[loom:daemon-restarted]` deploy wake is a duplicate turn —
+      // suppress the LIVE nudge (one completion = one turn). The durable board task above is ALWAYS filed,
+      // so nothing is lost; deliveryStatus stays `boarded` (the Lead reads it as a board task). A SHA the
+      // Lead has NOT seen is a legitimate, un-suppressed escalation (no regression).
+      const escShas = extractCommitShas(`${input.title} ${input.detail}`);
+      if (this.deployShaAlreadyDelivered(liveLead.id, escShas)) {
+        // eslint-disable-next-line no-console
+        console.log(`[escalation] suppressed live completion nudge to Lead ${liveLead.id} — SHA already delivered by a deploy restart (task ${task.id} still filed)`);
+      } else {
+        const note = `[loom:escalation] ${originName} manager escalated a Loom issue → Platform board task ${task.id}: ${input.title} (severity: ${severity})`;
+        try { deliveryStatus = this.deliveryStatusFor(this.pty.enqueueStdin(liveLead.id, note)); } catch { /* Lead not live/ready — `boarded` stands */ }
+      }
     }
     return { taskId: task.id, projectId: home.id, deliveryStatus };
   }
@@ -2286,6 +2333,38 @@ export class SessionService {
     if (r.delivered) return "delivered-live";
     if (r.position !== undefined) return "queued";
     return "boarded";
+  }
+
+  /**
+   * Record that a `[loom:daemon-restarted]` wake delivered these deploy SHAs to a session (card 5907b71e
+   * part 2). Called from resumeFleetOnBoot for every reason-bearing nudge, so a later completion escalation
+   * naming the same SHA can be recognized as a turn the session already saw. Merges into an existing
+   * non-stale window for the session; otherwise starts a fresh one. No-op for an empty SHA set. `nowMs`
+   * is injectable for the hermetic test.
+   */
+  recordDeployShasDelivered(sessionId: string, shas: string[], nowMs: number = Date.now()): void {
+    if (shas.length === 0) return;
+    const entry = this.deployShaWindow.get(sessionId);
+    if (entry && nowMs - entry.atMs < SessionService.SHA_DEDUP_TTL_MS) {
+      for (const s of shas) entry.shas.add(s);
+      entry.atMs = nowMs;
+    } else {
+      this.deployShaWindow.set(sessionId, { shas: new Set(shas), atMs: nowMs });
+    }
+  }
+
+  /**
+   * True iff a still-fresh `[loom:daemon-restarted]` wake already delivered ANY of these SHAs to the
+   * session — i.e. a completion escalation for one of them would be a duplicate turn. Prunes (and reports
+   * false for) a window past the TTL, so an old deploy can never suppress a genuinely new escalation.
+   * `nowMs` is injectable for the hermetic test.
+   */
+  private deployShaAlreadyDelivered(sessionId: string, shas: string[], nowMs: number = Date.now()): boolean {
+    if (shas.length === 0) return false;
+    const entry = this.deployShaWindow.get(sessionId);
+    if (!entry) return false;
+    if (nowMs - entry.atMs >= SessionService.SHA_DEDUP_TTL_MS) { this.deployShaWindow.delete(sessionId); return false; }
+    return shas.some((s) => entry.shas.has(s));
   }
 
   /**

@@ -114,6 +114,56 @@ export function isSupervised(): boolean {
   return process.env.LOOM_SUPERVISED === "1";
 }
 
+/**
+ * Cause/impact of a `[loom:daemon-restarted]` wake, for ONE resumed session (card 5907b71e part 1). A
+ * single self-hosting session takes ~10 restart wakes, most for routine deploys/version-syncs another
+ * session triggered — and each currently burns a FULL re-check turn confirming "nothing for me". This
+ * classification lets an UNAFFECTED bystander no-op cheaply instead: it answers, per session, the two
+ * questions the wake should — did THIS session cause the restart, and did the restart touch anything of
+ * its (its workers, its queued I/O, its board)?
+ */
+export interface RestartWakeImpact {
+  /** This session REQUESTED the restart (the deploying manager) — never short-circuited; always full. */
+  causal: boolean;
+  /** How many of this manager's/platform's workers were resumed alongside it (their worktrees are live). */
+  liveWorkersResumed: number;
+  /** How many queued inbound messages were replayed onto this session by the restart (real work waiting). */
+  queuedIoReplayed: number;
+  /** This session still has actionable board work (a no-op would STRAND it — the idle-watcher skips a
+   *  snoozed/suppressed manager, so the restart re-check is its only re-engagement). */
+  pendingBoardWork: boolean;
+}
+
+/**
+ * A non-causal manager/platform whose restart touched NOTHING of its own — no workers resumed, no queued
+ * I/O replayed, and an empty board — has nothing to re-check this restart, so it gets the lightweight
+ * "no action needed" FYI instead of the full "re-check your workers" re-orient. PURE + exported for the
+ * hermetic test. Pending board work FORCES the full nudge (safety: a snoozed/suppressed manager isn't
+ * re-engaged by the idle-watcher, so the restart re-check must not silently drop its queue). Supersedes
+ * the older board-AND-stale-idle-policy "converged" gate (card 90058589): impact, not idle-policy, decides.
+ */
+export function isNoOpManagerWake(impact: RestartWakeImpact): boolean {
+  return !impact.causal
+    && impact.liveWorkersResumed === 0
+    && impact.queuedIoReplayed === 0
+    && !impact.pendingBoardWork;
+}
+
+/**
+ * Extract candidate git commit SHAs (7–40 hex chars on a word boundary) from free text (card 5907b71e
+ * part 2). Used to correlate a deploy restart's `reason` (which a manager typically stamps with the
+ * deployed SHA) against a later "X COMPLETE + DEPLOYED" completion escalation that names the SAME SHA —
+ * so the second turn can be suppressed once the restart wake already delivered that SHA. Lower-cased +
+ * de-duped. PURE + exported for the hermetic test. False positives are mild (the de-dup only fires when
+ * the SAME token appears in BOTH the deploy reason and the escalation, and the durable board task is
+ * always still filed), so a permissive hex match is the right trade.
+ */
+export function extractCommitShas(text: string): string[] {
+  const out = new Set<string>();
+  for (const m of (text ?? "").matchAll(/\b[0-9a-f]{7,40}\b/gi)) out.add(m[0].toLowerCase());
+  return [...out];
+}
+
 export function writeRestartIntent(intent: RestartIntent): void {
   writeJsonAtomic(INTENT_PATH, intent);
 }
