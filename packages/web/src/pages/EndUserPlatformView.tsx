@@ -1,11 +1,9 @@
-import { type CSSProperties, useState } from "react";
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Agent, SessionListItem, SessionRole, Schedule } from "@loom/shared";
 import { api } from "../lib/api";
 import Board from "./Board";
-import { TerminalPane } from "../components/Terminal";
-import { Composer } from "../components/Composer";
-import { PresetPromptsButton } from "../components/PresetPrompts";
+import { PlatformSessionTile } from "../components/PlatformSessionTile";
 import { AgentPromptEditor } from "../components/AgentPromptEditor";
 import { RunHistory } from "../components/RunHistory";
 import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../components/ui";
@@ -305,62 +303,19 @@ function AuditorScheduleForm({ agentId, existing }: { agentId: string; existing?
   );
 }
 
-// The live operator terminal (one singleton session). Hand-rolled like Platform's session tile — NO Fork
+// The live operator terminal (one singleton session). Uses the shared PlatformSessionTile — NO Fork
 // (forking would mint a second setup session and break the singleton). Empty state prompts Start above.
 function SetupSession({ session }: { session?: SessionListItem }) {
-  const qc = useQueryClient();
-  const stop = useMutation({
-    mutationFn: (id: string) => api.stopSession(id, "graceful"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
-  });
   if (!session) return <p style={{ color: color.textMuted, marginTop: 0 }}>No Platform session running. Start Platform above.</p>;
-  const tile: CSSProperties = { height: 480, padding: 6, display: "flex", flexDirection: "column", maxWidth: 920 };
-  return (
-    <Panel style={tile}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
-          <StatusPill tone={session.busy ? "amber" : "phosphor"} glow={session.busy} label={session.busy ? "busy" : "idle"} />
-          <span>{session.agentName}{session.role ? ` · ${session.role}` : ""} · {session.id.slice(0, 8)}</span>
-        </span>
-        <div style={{ display: "flex", gap: 4 }}>
-          <PresetPromptsButton sessionId={session.id} />
-          <Button style={{ padding: "0 8px" }} disabled={stop.isPending}
-            title="Stop this session — graceful Ctrl-C, clean and resumable"
-            onClick={() => stop.mutate(session.id)}>Stop</Button>
-        </div>
-      </div>
-      <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={session.id} /></div>
-      <Composer sessionId={session.id} />
-    </Panel>
-  );
+  return <PlatformSessionTile session={session} height={480} maxWidth={920} />;
 }
 
 // The live Auditor terminal — a fresh ephemeral run per "Review my workspace" click (CREATE-ONLY, no
-// singleton). Mirrors SetupSession but with Auditor copy; NO Fork (a Review click is the spawn path).
+// singleton). Mirrors SetupSession with Auditor stop copy; the shared tile carries the maximize control.
 function AuditorSession({ session }: { session?: SessionListItem }) {
-  const qc = useQueryClient();
-  const stop = useMutation({
-    mutationFn: (id: string) => api.stopSession(id, "graceful"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
-  });
   if (!session) return <p style={{ color: color.textMuted, marginTop: 0 }}>No Auditor run active. Click “Review my workspace” above to start one.</p>;
-  const tile: CSSProperties = { height: 480, padding: 6, display: "flex", flexDirection: "column", maxWidth: 920 };
   return (
-    <Panel style={tile}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
-          <StatusPill tone={session.busy ? "amber" : "phosphor"} glow={session.busy} label={session.busy ? "busy" : "idle"} />
-          <span>{session.agentName}{session.role ? ` · ${session.role}` : ""} · {session.id.slice(0, 8)}</span>
-        </span>
-        <div style={{ display: "flex", gap: 4 }}>
-          <PresetPromptsButton sessionId={session.id} />
-          <Button style={{ padding: "0 8px" }} disabled={stop.isPending}
-            title="Stop this Auditor run — graceful Ctrl-C, clean and resumable"
-            onClick={() => stop.mutate(session.id)}>Stop</Button>
-        </div>
-      </div>
-      <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={session.id} /></div>
-      <Composer sessionId={session.id} />
-    </Panel>
+    <PlatformSessionTile session={session} height={480} maxWidth={920}
+      stopTitle="Stop this Auditor run — graceful Ctrl-C, clean and resumable" />
   );
 }

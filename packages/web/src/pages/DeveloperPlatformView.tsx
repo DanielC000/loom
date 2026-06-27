@@ -3,9 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Agent, SessionListItem, SessionRole, Schedule } from "@loom/shared";
 import { api } from "../lib/api";
 import Board from "./Board";
-import { TerminalPane } from "../components/Terminal";
-import { Composer } from "../components/Composer";
-import { PresetPromptsButton } from "../components/PresetPrompts";
+import { PlatformSessionTile } from "../components/PlatformSessionTile";
 import { AgentPromptEditor } from "../components/AgentPromptEditor";
 import { RunHistory } from "../components/RunHistory";
 import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../components/ui";
@@ -173,39 +171,17 @@ function AgentControl({ agent, role, session, missingLabel }:
   );
 }
 
-// The live platform-session terminals (Lead/Auditor), tiled with a graceful-stop control. Dead/exited
-// rows are dropped (the live set only) — mirrors the Terminals grid, scoped to the reserved project.
+// The live platform-session terminals (Lead/Auditor), tiled with a graceful-stop + maximize control.
+// Dead/exited rows are dropped (the live set only) — mirrors the Terminals grid, scoped to the reserved
+// project. Each tile is the shared PlatformSessionTile (status + PresetPrompts + Stop + maximize, NO
+// Fork — these are singletons), so the dev/end-user platform tiles can't drift.
 function PlatformSessions({ sessions }: { sessions: SessionListItem[] }) {
-  const qc = useQueryClient();
-  const stop = useMutation({
-    mutationFn: (id: string) => api.stopSession(id, "graceful"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
-  });
   const live = sessions.filter((s) => s.processState === "live");
   if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>No platform sessions running. Spawn the Lead or Auditor above.</p>;
   const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12 };
   return (
     <div style={grid}>
-      {live.map((s) => (
-        <Panel key={s.id} style={{ height: 440, padding: 6, display: "flex", flexDirection: "column" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
-              <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} />
-              <span>{s.agentName}{s.role ? ` · ${s.role}` : ""} · {s.id.slice(0, 8)}</span>
-            </span>
-            <div style={{ display: "flex", gap: 4 }}>
-              <PresetPromptsButton sessionId={s.id} />
-              {/* No Fork on platform sessions — forking would mint a second Lead/Auditor and break
-                  the singleton invariant (the reason this tile is hand-rolled, not TerminalTile). */}
-              <Button style={{ padding: "0 8px" }} disabled={stop.isPending}
-                title="Stop this session — graceful Ctrl-C, clean and resumable"
-                onClick={() => stop.mutate(s.id)}>Stop</Button>
-            </div>
-          </div>
-          <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={s.id} /></div>
-          <Composer sessionId={s.id} />
-        </Panel>
-      ))}
+      {live.map((s) => <PlatformSessionTile key={s.id} session={s} height={440} />)}
     </div>
   );
 }
