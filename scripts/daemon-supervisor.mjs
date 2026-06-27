@@ -13,12 +13,31 @@
 // is exactly what burned us on 2026-06-03 (ELIFECYCLE 255, repeated).
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const RESTART_EXIT_CODE = 75; // must match packages/daemon/src/orchestration/restart.ts
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..");
 const daemonDir = path.join(repoRoot, "packages", "daemon");
+
+// Mirrors packages/daemon/src/crashlog.ts CRASHLOG_PATH (LOOM_HOME/crash.log). The daemon's fatal-exit
+// handler writes the crashlog here; a freshly launched daemon would overwrite it on its next crash. So
+// before each launch, rotate any existing crash.log to crash.log.prev — keeping the last two — so a
+// restart (or a human re-run after a crash) never clobbers the previous crash signature. Best-effort.
+const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
+const CRASHLOG = path.join(LOOM_HOME, "crash.log");
+function rotateCrashlog() {
+  try {
+    if (!fs.existsSync(CRASHLOG)) return;
+    const prev = `${CRASHLOG}.prev`;
+    fs.rmSync(prev, { force: true }); // Windows renameSync fails if the destination exists — clear it first
+    fs.renameSync(CRASHLOG, prev);
+  } catch (err) {
+    console.error(`[supervisor] crashlog rotate failed (continuing): ${err.message}`);
+  }
+}
 
 /** Run a shell command to completion, inheriting stdio. Returns its exit code (null → 1). */
 function sh(command, cwd, extraEnv) {
@@ -46,6 +65,8 @@ for (;;) {
   if (webBuildCode !== 0) {
     console.error("[supervisor] WARNING: web build failed — booting with the previous packages/web/dist (UI may be stale)");
   }
+  // Preserve any prior crashlog before the daemon (re)launches and possibly overwrites it.
+  rotateCrashlog();
   // LOOM_SUPERVISED tells the daemon a supervisor is present, so `daemon_restart` is allowed (without
   // it the manager would kill the daemon with nothing to bring it back).
   // LOOM_DEV defaults ON here: `daemon:stable` is the SELF-HOSTING / dogfooding entry point (regular

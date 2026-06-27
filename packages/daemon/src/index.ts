@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { resolveConfig } from "@loom/shared";
 import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR } from "./paths.js";
+import { installCrashHandlers } from "./crashlog.js";
 import { Db } from "./db.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
@@ -42,6 +43,10 @@ import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 
 async function main(): Promise<void> {
+  // Top-level fatal-exit crash handler FIRST — so an uncaught exception / unhandled rejection / stray
+  // non-zero exit at any point past here leaves a diagnosable crashlog under .loom (a real crash once
+  // left no log signature at all). Idempotent + fail-safe; never throws.
+  installCrashHandlers();
   ensureDirs();
   const seeded = seedGlobalSkills();
   if (seeded.length) console.log(`[boot] seeded global skill(s): ${seeded.join(", ")}`);
