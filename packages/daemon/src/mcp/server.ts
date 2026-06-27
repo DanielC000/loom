@@ -37,7 +37,7 @@ export class TaskMcpRouter {
       "tasks_list",
       {
         description:
-          "List this project's board tasks. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt}) — task bodies are OMITTED and terminal/done cards are EXCLUDED, so repeated calls stay bounded. Pass includeBody:true for full bodies, or tasks_get(id) to read one card in full. Filter with columns:[...] (only those column keys), excludeDone:false (include done cards), and/or minPriority:p0|p1|p2|p3 (only tasks at or above that priority; lower number = higher priority). Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default (so includeBody on a big board can't overflow) — page with limit/offset for more.",
+          "List this project's board tasks. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt}) — bodies OMITTED, terminal/done cards EXCLUDED. Pass includeBody:true for full bodies, or tasks_get(id) for one card. Filters: columns:[...] (only those column keys), excludeDone:false (include done), minPriority:p0|p1|p2|p3 (only tasks at or above it; lower number = higher priority). Capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default — page with limit/offset.",
         inputSchema: {
           columns: z.array(z.string()).optional(),
           excludeDone: z.boolean().optional(),
@@ -54,7 +54,7 @@ export class TaskMcpRouter {
     server.registerTool(
       "tasks_get",
       {
-        description: "Read ONE full task (title + body) by id, within the current project.",
+        description: "Read ONE full task (title + body) by id; project-scoped.",
         inputSchema: { id: z.string() },
       },
       async ({ id }) => ok(getProjectTask(db, projectId, id)),
@@ -62,7 +62,7 @@ export class TaskMcpRouter {
     server.registerTool(
       "tasks_create",
       {
-        description: "Create a task on the current project's board. priority is p0|p1|p2|p3 (low number = higher priority), default p2.",
+        description: "Create a task on this project's board. priority p0|p1|p2|p3 (low number = higher priority), default p2.",
         inputSchema: { title: z.string(), body: z.string().optional(), columnKey: z.string().optional(), priority: prioritySchema.optional() },
       },
       async (args) => ok(createProjectTask(db, projectId, args)),
@@ -70,7 +70,7 @@ export class TaskMcpRouter {
     server.registerTool(
       "tasks_update",
       {
-        description: "Update a task by id, within the current project. priority is p0|p1|p2|p3 (low number = higher priority).",
+        description: "Update a task by id; project-scoped. priority p0|p1|p2|p3 (low number = higher priority).",
         inputSchema: {
           id: z.string(),
           title: z.string().optional(),
@@ -88,7 +88,7 @@ export class TaskMcpRouter {
       "wake_me",
       {
         description:
-          "Schedule a one-shot wake-up: end your turn and go idle, and you'll be re-prompted with `note` when it fires (it re-submits as a fresh turn; you're auto-resumed if you were stopped). Give exactly one of delaySeconds or wakeAt (ISO). Use this to WAIT for a known external process/condition — a build, a render, a deploy — instead of busy-polling. Min 30s out, max 24h.",
+          "Schedule a one-shot wake-up: end your turn and go idle; you'll be re-prompted with `note` when it fires (re-submits as a fresh turn; auto-resumed if stopped). Give exactly one of delaySeconds or wakeAt (ISO). Use to WAIT for a known external process/condition — a build, render, deploy — instead of busy-polling. Min 30s, max 24h.",
         inputSchema: {
           delaySeconds: z.number().optional(),
           wakeAt: z.string().optional(),
