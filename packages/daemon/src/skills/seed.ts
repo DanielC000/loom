@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SKILLS_DIR } from "../paths.js";
-import { seedBaseSnapshots } from "./store.js";
+import { seedBaseSnapshots, autoFastForwardPristineSkills } from "./store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // dist/skills -> dist -> daemon root -> assets/skills
@@ -39,5 +39,10 @@ export function seedGlobalSkills(): string[] {
   // customized / updateAvailable state and the adopt-update 3-way merge has a common ancestor. Lives
   // OUTSIDE SKILLS_DIR (never injected); store.ts owns the asset-path resolution (LOOM_ASSET_SKILLS-aware).
   seedBaseSnapshots();
+  // AFTER the base backfill (base must exist for the equality to mean anything): auto-fast-forward only
+  // bundled skills that are customized:false (mine == base) and have a shipped update — lossless, since
+  // there are no user edits to preserve. This deploys self-host doctrine changes on restart like code.
+  // customized:true skills are NEVER auto-advanced — they wait for manual adopt exactly as today.
+  autoFastForwardPristineSkills();
   return seeded;
 }

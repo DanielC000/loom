@@ -139,6 +139,38 @@ export function seedBaseSnapshots(): string[] {
   return seeded;
 }
 
+/**
+ * Boot-only auto-fast-forward of PRISTINE bundled skills (called from seedGlobalSkills() AFTER
+ * seedBaseSnapshots() — base must be backfilled first so the equality below is meaningful). For each
+ * bundled skill that has a store copy, advance `mine` to the shipped asset ONLY when it is LOSSLESS:
+ *   customized:false  — normalizeForCompare(mine) === normalizeForCompare(base): the user has made NO
+ *                       semantic edit, so taking shipped discards nothing (this IS the clean fast-forward
+ *                       of mergeSkillContent line 168 and the `customized` flag of customizationState).
+ *   updateAvailable:true — normalizeForCompare(base) !== normalizeForCompare(shipped): Loom shipped a
+ *                       newer doctrine since the last sync; nothing to do otherwise.
+ * When both hold, adopt shipped VERBATIM (adoptSkillUpdate advances base := shipped, clearing
+ * updateAvailable). This makes self-host doctrine changes go live on restart like code does, WITHOUT
+ * weakening the by-design protection of user edits: any customized:true skill is left for manual adopt
+ * exactly as today — it is NEVER auto-advanced. The equality is the SAME merge-engine normalizeForCompare
+ * used everywhere (customizationState / mergeSkillContent), never a new heuristic.
+ * Best-effort + boot-safe: each skill is wrapped in try/catch and this NEVER throws (mirrors
+ * seedBaseSnapshots' tolerance). Returns the names advanced.
+ */
+export function autoFastForwardPristineSkills(): string[] {
+  const advanced: string[] = [];
+  for (const name of bundledNames()) {
+    try {
+      const v = threeVersions(name);
+      if (!v) continue; // not bundled / no store copy
+      const customized = normalizeForCompare(v.mine) !== normalizeForCompare(v.base);
+      const updateAvailable = normalizeForCompare(v.base) !== normalizeForCompare(v.shipped);
+      if (customized || !updateAvailable) continue; // protect user edits; skip when nothing to advance
+      if (adoptSkillUpdate(name, v.shipped)) advanced.push(name); // clean FF == take shipped verbatim
+    } catch { /* best-effort per skill — a bad skill must never break boot */ }
+  }
+  return advanced;
+}
+
 // --- 3-way adopt-update merge ----------------------------------------------------------------------
 export interface SkillConflictHunk { mine: string; base: string; shipped: string; }
 export interface SkillMergeResult { clean: boolean; merged: string; conflicts?: SkillConflictHunk[]; }
