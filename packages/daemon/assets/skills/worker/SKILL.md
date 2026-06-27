@@ -69,6 +69,8 @@ tool you call); board reads are `mcp__loom-tasks__tasks_get` / `tasks_list`. Loa
 - **`done`** — stage + **commit** your verified work *first*, then report `done` with the **commit
   SHA** plus a one-line summary of what you did + your key decisions / anything the reviewer should
   check. Your worktree is **already checked out on your assigned branch** — commit straight to it.
+  You're on an isolated worktree at your cwd — make ALL edits there. If your context names the main repo
+  path, that's for reference, not where you edit.
   **Never commit to `main`; commit ONLY to your assigned branch `loom/<id>`** — never `git checkout`/
   `git switch` to `main` (or any other branch) and never `git checkout -b` a new one. The merge gate keys
   off your assigned branch, so commits on any other branch are invisible to your manager and **silently

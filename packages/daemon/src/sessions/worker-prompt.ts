@@ -7,15 +7,32 @@
  * orchestrated flow. The manager path already composed its brief (`composeManagerStartupPrompt`); this
  * is the worker mirror.
  *
- * Order: the agent BASE BRIEF FIRST, then the dynamic part (kickoff / handoff) — the brief is the
- * standing doctrine, the dynamic part is the specific task to act on. An empty/whitespace brief ⇒ return
- * the dynamic part ALONE (today's behavior, preserved byte-for-byte — e.g. the QA agent ships
- * `startupPrompt:""`). PURE + exported so the hermetic test can assert the composition.
+ * Order: a worktree LOCATION block FIRST, then the agent BASE BRIEF, then the dynamic part (kickoff /
+ * handoff) — the location block names the worker's edit dir, the brief is the standing doctrine, the
+ * dynamic part is the specific task to act on. An empty/whitespace brief ⇒ the block leads the dynamic
+ * part ALONE. PURE + exported so the hermetic test can assert the composition.
+ *
+ * The location block mirrors `composeManagerStartupPrompt`'s shape and exists for the same class of bug:
+ * nothing in a worker's context names its WORKTREE, so an absolute main-repo path elsewhere in its
+ * context (e.g. an agent brief) out-prioritizes the actual worktree cwd and the worker leaks edits into
+ * the main checkout. Naming the worktree as the edit dir, present even on an empty brief, is the guard.
+ *
+ * `cwd` is OPTIONAL and backward-compatible: when it's falsy/omitted, the OLD output is returned verbatim
+ * (no block) — so the pure-function callers/tests that pass only `(brief, dynamicPart)` stay byte-stable.
  */
 export function composeWorkerStartupPrompt(
   brief: string | undefined,
   dynamicPart: string,
+  cwd?: string,
 ): string {
   const base = brief?.trim();
-  return base ? `${base}\n\n---\n\n${dynamicPart}` : dynamicPart;
+  const body = base ? `${base}\n\n---\n\n${dynamicPart}` : dynamicPart;
+  const location = cwd?.trim();
+  if (!location) return body;
+  const block =
+    "## Where you edit (your isolated git worktree)\n" +
+    `- **Your worktree (make ALL edits here, never the main checkout):** \`${location}\`\n\n` +
+    "This worktree IS your cwd. If anything else in your context names the main repo path, that's for " +
+    "reference, not where you edit — make every change here, on your assigned branch.";
+  return `${block}\n\n${body}`;
 }

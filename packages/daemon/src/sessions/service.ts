@@ -1710,10 +1710,11 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      // Compose the worker's opening: its agent BASE BRIEF first (Dev/Bugfix/etc. doctrine — run
-      // `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief degrades to the
-      // kickoff alone (today's behavior). Without this, the agent brief was dead config for workers.
-      startupPrompt: composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt),
+      // Compose the worker's opening: a worktree LOCATION block first (names this worktree as the edit
+      // dir so the worker can't leak edits into the main checkout), then its agent BASE BRIEF (Dev/Bugfix/
+      // etc. doctrine — run `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief
+      // degrades to the block + kickoff. Without this, the agent brief was dead config for workers.
+      startupPrompt: composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath),
       role: "worker", // gives the worker the orchestration surface (worker_report only)
       browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
       documentConversion, // inject the per-session markitdown MCP iff this worker's profile opted in
@@ -2618,9 +2619,10 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      // Lead with the worker's agent base brief, then the handoff (mirrors spawnWorker + the manager
-      // recycle warm-up). Empty brief ⇒ the handoff alone (today's behavior).
-      startupPrompt: composeWorkerStartupPrompt(agent?.startupPrompt, framed),
+      // Lead with the worktree LOCATION block (same worktree — a recycled worker is equally at risk of
+      // leaking edits to the main checkout), then the worker's agent base brief, then the handoff
+      // (mirrors spawnWorker + the manager recycle warm-up). Empty brief ⇒ the block + handoff.
+      startupPrompt: composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath),
       role: "worker",
       browserTesting: old.browserTesting ?? false,
       documentConversion: old.documentConversion ?? false,

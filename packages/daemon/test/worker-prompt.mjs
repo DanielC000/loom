@@ -90,27 +90,38 @@ try {
   check("(1) pure: undefined brief ⇒ dynamic-only", composeWorkerStartupPrompt(undefined, "DYNAMIC") === "DYNAMIC");
   check("(1) pure: whitespace brief ⇒ dynamic-only (trimmed away)", composeWorkerStartupPrompt("   \n  ", "DYNAMIC") === "DYNAMIC");
   check("(1) pure: empty brief ⇒ dynamic-only", composeWorkerStartupPrompt("", "DYNAMIC") === "DYNAMIC");
+  // 2-arg form (no cwd) stays byte-identical — backward-compat for the pure callers/tests.
+  check("(1) pure: 2-arg form (no cwd) is byte-unchanged — no location block", composeWorkerStartupPrompt("BRIEF", "DYNAMIC") === "BRIEF\n\n---\n\nDYNAMIC");
+  // 3-arg form prepends the worktree location block ahead of the brief, naming the cwd as the edit dir.
+  const composedCwd = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path");
+  check("(1) pure: cwd ⇒ worktree block leads, then brief, then dynamic", order(composedCwd, "/wt/path", "BRIEF") && order(composedCwd, "BRIEF", "DYNAMIC"));
+  check("(1) pure: cwd ⇒ block names the worktree as the edit dir", composedCwd.includes("make ALL edits here") && composedCwd.includes("`/wt/path`"));
+  // Block is present even with an EMPTY brief (the QA startupPrompt:"" case) — block then dynamic.
+  const composedEmptyCwd = composeWorkerStartupPrompt("", "DYNAMIC", "/wt/path");
+  check("(1) pure: empty brief + cwd ⇒ block still present, leads the dynamic part", composedEmptyCwd.includes("`/wt/path`") && order(composedEmptyCwd, "/wt/path", "DYNAMIC"));
 
-  // ===================== (2) SPAWN composes the brief ahead of the kickoff =====================
+  // ===================== (2) SPAWN composes the worktree block + brief ahead of the kickoff =====================
   const wA = await svc.spawnWorker("mgr1", { taskId: taskA, agentId: "agentDev", kickoffPrompt: "KICKOFF_A" });
   worktrees.push(wA.worktreePath);
   const oWA = optsFor(wA.id);
   check("(2) spawn (brief): startupPrompt carries the agent brief THEN the kickoff", order(oWA?.startupPrompt ?? "", "DEV_BRIEF", "KICKOFF_A"));
+  check("(2) spawn (brief): startupPrompt names the worktree cwd as the edit dir, ahead of the brief", (oWA?.startupPrompt ?? "").includes(wA.worktreePath) && (oWA?.startupPrompt ?? "").includes("make ALL edits here") && order(oWA?.startupPrompt ?? "", wA.worktreePath, "DEV_BRIEF"));
 
   const wQ = await svc.spawnWorker("mgr1", { taskId: taskB, agentId: "agentQA", kickoffPrompt: "KICKOFF_B" });
   worktrees.push(wQ.worktreePath);
   const oWQ = optsFor(wQ.id);
-  check("(2) spawn (empty brief): startupPrompt degrades to EXACTLY the kickoff", oWQ?.startupPrompt === "KICKOFF_B");
+  check("(2) spawn (empty brief): startupPrompt is the worktree block THEN the kickoff (block present even with empty brief)", (oWQ?.startupPrompt ?? "").includes(wQ.worktreePath) && (oWQ?.startupPrompt ?? "").includes("KICKOFF_B") && order(oWQ?.startupPrompt ?? "", wQ.worktreePath, "KICKOFF_B"));
 
-  // ===================== (3) RECYCLE composes the brief ahead of the handoff =====================
+  // ===================== (3) RECYCLE composes the worktree block + brief ahead of the handoff =====================
   const rA = await svc.recycleWorker("mgr1", wA.id, "HANDOFF_A");
   const oRA = optsFor(rA.id);
   check("(3) recycle (brief): successor startupPrompt carries the agent brief THEN the handoff", order(oRA?.startupPrompt ?? "", "DEV_BRIEF", "HANDOFF_A"));
   check("(3) recycle (brief): the handoff frame is preserved after the brief", (oRA?.startupPrompt ?? "").includes("[loom:handoff]"));
+  check("(3) recycle (brief): successor startupPrompt names the SAME worktree cwd as the edit dir, ahead of the brief", (oRA?.startupPrompt ?? "").includes(rA.worktreePath) && (oRA?.startupPrompt ?? "").includes("make ALL edits here") && order(oRA?.startupPrompt ?? "", rA.worktreePath, "DEV_BRIEF"));
 
   const rQ = await svc.recycleWorker("mgr1", wQ.id, "HANDOFF_B");
   const oRQ = optsFor(rQ.id);
-  check("(3) recycle (empty brief): successor startupPrompt is the handoff ALONE (no brief prefix)", (oRQ?.startupPrompt ?? "").startsWith("[loom:handoff]") && (oRQ?.startupPrompt ?? "").includes("HANDOFF_B"));
+  check("(3) recycle (empty brief): successor startupPrompt is the worktree block THEN the handoff (block present, no brief prefix)", (oRQ?.startupPrompt ?? "").includes(rQ.worktreePath) && (oRQ?.startupPrompt ?? "").includes("[loom:handoff]") && (oRQ?.startupPrompt ?? "").includes("HANDOFF_B") && order(oRQ?.startupPrompt ?? "", rQ.worktreePath, "[loom:handoff]"));
 } finally {
   for (const wt of worktrees) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } }
   db.close(); // free the WAL handle before removing the temp dir (Windows)
