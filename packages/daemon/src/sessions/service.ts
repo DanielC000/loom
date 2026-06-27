@@ -2745,6 +2745,141 @@ export class SessionService {
   }
 
   /**
+   * Recycle the PLATFORM LEAD near its context limit (the platform-surface `recycle_me` flow) — the
+   * SINGLETON analogue of recycleManager. The Lead has already run /session-end and written
+   * `continuationPrompt`; Loom boots a FRESH successor Lead seeded with the agent warm-up + that
+   * continuation (NOT --resume — fresh context, intent carried), carries the predecessor's wakes +
+   * in-flight inbound queue onto it, then closes the predecessor (deferred, so this call's tool
+   * response flushes first). gen+1; recycledFrom = old. There is NO worker re-parenting: the Lead's
+   * spawned sessions are independent (not parented to it), unlike a manager's workers.
+   *
+   * SINGLETON GUARD — NEVER TWO LIVE LEADS (the trust boundary, load-bearing). The predecessor is
+   * ITSELF a LIVE platform session, so — unlike recycleManager (no singleton: it spawns the successor
+   * while the old manager stays live for 3s) — we must RETIRE THE PREDECESSOR IN THE DB *BEFORE* the
+   * successor is marked live. The retire → insert → flip-live transition runs SYNCHRONOUSLY with NO
+   * await between, so on Node's single-threaded loop no concurrent startPlatformLead / watcher tick
+   * can ever observe two live platform rows: at the DB level there are either ZERO live Leads
+   * (mid-transition) or exactly ONE. The SAME chokepoint startPlatformLead's guard uses
+   * (db.liveSessions(...).find(role === "platform")) therefore can never be raced into a second live
+   * Lead — a post-recycle Spawn finds the live successor and reuses it. The predecessor's pty is then
+   * hard-stopped on a 3s defer (response-flush); because the successor carries `recycledFrom = old.id`,
+   * `hasSuccessor(old.id)` is true, so the crash-recovery watchdog never resurrects the retired
+   * predecessor (recordUnexpectedExit + the tick both skip a superseded session) — no orphan, no
+   * zombie second Lead.
+   *
+   * This is the ONLY sanctioned path that spawns a platform session besides the human REST
+   * startPlatformLead: it is reachable ONLY by an existing platform Lead (the platform MCP router gates
+   * role === "platform", and this method re-asserts old.role === "platform"), and it mints exactly one
+   * successor of the same role. session_spawn still refuses role "platform" — no general agent-facing
+   * platform-spawn path is opened.
+   */
+  async recyclePlatformLead(oldLeadId: string, continuationPrompt: string): Promise<Session> {
+    const old = this.db.getSession(oldLeadId);
+    if (!old || old.role !== "platform") throw new Error("not a platform session");
+    // FAIL SAFE before any teardown/spawn: a blank/whitespace continuation would seed an empty
+    // successor and (via the deferred stop below) retire the predecessor — losing the handoff. Reject
+    // up front so the predecessor stays live and the Lead can re-issue a real continuation (mirrors
+    // recycleManager).
+    if (!continuationPrompt || !continuationPrompt.trim()) throw new Error("continuationPrompt must not be blank");
+    // IDEMPOTENCY / anti-double-recycle (SINGLETON-CRITICAL): a Lead may be recycled at MOST once. A
+    // SECOND recycle_me on the same predecessor (e.g. a double tool-call in one turn) would retire the
+    // already-exited predecessor again and spawn a SECOND live successor → TWO live Leads. Refuse if a
+    // successor already exists (mirrors resume()'s superseded-session refusal). The whole pre-spawn block
+    // runs synchronously, so this check + the retire/spawn below are one atomic guard on the event loop.
+    if (this.db.hasSuccessor(oldLeadId)) throw new Error("this Lead has already been recycled — its successor is live");
+    const agent = this.db.getAgent(old.agentId);
+    const project = this.db.getProject(old.projectId);
+    if (!project) throw new Error("project not found");
+    const config = resolveConfig(project.config);
+    // Re-resolve the Lead's spawn so the successor keeps the profile's LAYERED allowlist + model pin
+    // (mirrors recycleManager). Agent-missing ⇒ bare config.permission + no model.
+    const leadSpawn = agent ? this.resolveAgentSpawn(agent, config, "platform") : undefined;
+    const newGen = (old.gen ?? 0) + 1;
+
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: oldLeadId, kind: "recycle_begin", detail: { kind: "platform", gen: newGen },
+    });
+
+    const warmup = agent?.startupPrompt?.trim();
+    const startupPrompt =
+      (warmup ? warmup + "\n\n---\n" : "") +
+      `[loom:continuation] You are the successor to a previous Platform Lead session that recycled as it neared its ` +
+      `context limit. Continue its cross-project work from this handoff — read your living resume doc + the platform ` +
+      `board to re-orient (a normal pickup). Predecessor's handoff:\n\n${continuationPrompt}`;
+
+    const now = new Date().toISOString();
+    const fresh: Session = {
+      id: randomUUID(),
+      projectId: old.projectId,
+      agentId: old.agentId,
+      engineSessionId: null,
+      title: null,
+      cwd: old.cwd, // the Lead works in the platform-home repo (same cwd)
+      processState: "starting",
+      resumability: "unknown",
+      busy: false,
+      createdAt: now,
+      lastActivity: now,
+      lastError: null,
+      role: "platform", // successor keeps the elevated platform surface
+      browserTesting: old.browserTesting ?? false,
+      documentConversion: old.documentConversion ?? false,
+      skills: old.skills ?? null, // carry the pinned skill subset forward (null ⇒ all)
+      gen: newGen,
+      recycledFrom: old.id,
+    };
+
+    // === SINGLETON-CRITICAL SECTION (synchronous — NO await) — never two live Leads. ===============
+    // Retire the predecessor in the DB FIRST so the live-Lead guard (db.liveSessions(...).find(role ===
+    // "platform")) sees ZERO live Leads, THEN insert + flip the successor live. With no await between,
+    // no concurrent spawn/watcher tick can interleave to observe two live platform rows.
+    this.db.setProcessState(old.id, "exited");
+    this.db.insertSession(fresh);
+    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
+    this.db.setProcessState(fresh.id, "live");
+    this.pty.spawn({
+      sessionId: fresh.id,
+      cwd: fresh.cwd,
+      permission: leadSpawn?.permission ?? config.permission, // re-resolved layered allowlist
+      geometry: config.pty,
+      sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      startupPrompt,
+      role: "platform", // successor keeps the platform surface
+      browserTesting: old.browserTesting ?? false,
+      documentConversion: old.documentConversion ?? false,
+      model: leadSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`)
+      skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
+    });
+    // === END SINGLETON-CRITICAL SECTION ===========================================================
+
+    // Carry the predecessor's scheduled wakes + in-flight inbound queue (durable cross-tree platform
+    // messages + held human turns) onto the successor — it owns the platform now. Re-pointing the wakes
+    // also guarantees nothing fires at the retired predecessor (which would zombie-resurrect it). FLUSH
+    // the queue while the old pty is still alive (its 3s deferred stop is below) so each entry's source
+    // + durable onDeliver come with it; durable records are re-minted onto the successor — see
+    // carryPendingToSuccessor. Mirrors recycleManager, minus the worker re-parent (the Lead has none).
+    this.db.reparentWakes(oldLeadId, fresh.id);
+    const carried = this.pty.flushPending(oldLeadId);
+    const carriedDurable = this.db.listUnresolvedQueuedMessagesForWorker(oldLeadId);
+    this.carryPendingToSuccessor(oldLeadId, fresh.id, carried, carriedDurable);
+
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: fresh.id, kind: "recycle_complete",
+      detail: { kind: "platform", recycledFrom: old.id, gen: newGen },
+    });
+
+    // Close the predecessor AFTER a short delay so the recycle_me tool response (the old Lead's own MCP
+    // call) flushes before its pty is killed. Its row is already `exited` (above), so this only tears
+    // down the lingering pty; hasSuccessor(old.id) keeps crash-recovery from resurrecting it.
+    setTimeout(() => { try { this.pty.stop(oldLeadId, "hard"); } catch { /* already gone */ } }, 3000);
+
+    return { ...fresh, processState: "live" };
+  }
+
+  /**
    * The manager-surface `idle_report` handler (Asleep-at-the-Wheel watchdog, §3 state→action table).
    * A manager self-reports its idle disposition so the watchdog stops nudging it (or, later, knows to
    * alert the human). Maps the reported state to a nudge policy on the P1 idle_nudge_* columns and, in

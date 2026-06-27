@@ -123,7 +123,9 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    headings, which break the exact-string match an in-place Edit relies on.
 6. **Run your own lifecycle.** When your context grows large, recycle at a clean seam (a milestone done,
    the inbox drained) rather than riding the window to the limit — your resume doc carries the state
-   forward. Don't put your own recycle-vs-continue choice to the human as a menu; decide and do it.
+   forward. Self-recycle with the platform **`recycle_me`** tool (continuationPrompt = your handoff): it
+   atomically retires you and boots your successor Lead, preserving the never-two-live-Leads singleton.
+   Don't put your own recycle-vs-continue choice to the human as a menu; decide and do it.
 
 ## Autonomy
 
