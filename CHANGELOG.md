@@ -7,6 +7,37 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-06-27
+
+**Maximize any terminal to a full-screen overlay**, get **context-overflow warnings** for long-running
+agents, and have **un-customized skill updates apply automatically** — plus reliability fixes across
+sessions, the board, skills, git, and orchestration.
+
+### Added
+- **Maximize any live terminal to a full-viewport overlay.** Click ⤢ on a session terminal — on the
+  Terminals page, the project Overview, or the Platform page — to expand it to a large, dimmed-backdrop
+  overlay you can keep working in, then press Esc or click outside to restore. The same interaction now
+  works consistently everywhere instead of each page doing its own thing.
+- **Context-overflow warnings for long-running agents.** Loom now tracks when a manager session nears its
+  context limit, re-reminds on a steady cadence, and raises a clear alert if the reminders go unanswered —
+  so a session that should hand off doesn't silently run past its window.
+- **Skill updates you haven't customized apply automatically.** When Loom ships an updated built-in skill,
+  any skill you've left unedited now fast-forwards to the new version on restart. Skills you've customized
+  are never touched — they still wait for you to adopt the update yourself.
+
+### Fixed
+- **Cards can't land on a non-existent board column.** Creating or moving a task to an unknown column key
+  is now rejected, so a typo can't hide a card off-board.
+- **Usage / rate-limit status refreshes after you log in.** The usage poller now (re)starts on a post-boot
+  login instead of staying blank until the next restart.
+- **Sessions survive restarts and rate-limit pauses more reliably.** Queued messages persist across a
+  recycle, a rate-limit "parked" resume prompt is no longer clobbered by the reconcile pass, and binding a
+  project verifies a usable git commit identity up front.
+- **Reliability hardening across skills, git, the scheduler, and orchestration.** Skill injection retries
+  and surfaces failures (with an atomic manifest write), branch-merge cleanup problems are surfaced,
+  scheduler spawn failures emit a durable event, and orchestration workers are reliably pointed at their
+  own worktree for edits.
+
 ## [0.10.0] — 2026-06-26
 
 Onboard from an **empty install** — the Platform operator can now create a brand-new project from
