@@ -167,9 +167,8 @@ function VoiceStatusLine({ speech }: { speech: SpeechRecognitionApi }) {
     node = <span style={{ color: color.red }}>{error ?? "voice error"} — click Voice to retry</span>;
   }
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 4, fontFamily: font.mono, fontSize: 10, minHeight: 18 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, fontFamily: font.mono, fontSize: 10, minHeight: 18 }}>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{node}</span>
-      <span style={{ color: color.textMuted, whiteSpace: "nowrap" }}>uses browser speech recognition</span>
     </div>
   );
 }
