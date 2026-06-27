@@ -20,15 +20,14 @@ type SessionRow = { key: string; kind: "manager" | "orphans" | "standalone"; lis
 // Also reachable per-project by pre-selecting the filter.
 export default function Terminals() {
   const [filter, setFilter] = useState<string>("");      // projectName filter ("" = all)
-  const [maximized, setMaximized] = useState<string | null>(null);
 
   const qc = useQueryClient();
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 4000 });
   // Manual graceful stop (Ctrl-C ×2 — clean + resumable). On success the session leaves the live set,
-  // so its tile drops out; refetch confirms. Stopping the maximized one falls back to the grid.
+  // so its tile drops out (and its overlay, if maximized, closes with it); refetch confirms.
   const stop = useMutation({
     mutationFn: (id: string) => api.stopSession(id, "graceful"),
-    onSuccess: (_r, id) => { if (maximized === id) setMaximized(null); qc.invalidateQueries({ queryKey: ["allSessions"] }); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
   });
   // Fork an idle session: branch its conversation into a fresh divergent session (appears as a new
   // tile). Idle-only — the button is disabled while the source is busy.
@@ -96,28 +95,9 @@ export default function Terminals() {
       <TerminalTile key={s.id} s={s} height={540} showProject
         onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
         onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
-        onMaximize={() => setMaximized(s.id)}
         taskCard={task && <SessionTaskCard task={task} />} />
     );
   };
-
-  if (maximized) {
-    const s = live.find((x) => x.id === maximized);
-    const task = s?.taskId ? tasksById.get(s.taskId) : undefined;
-    return (
-      <div>
-        <Button onClick={() => setMaximized(null)}>← back to grid</Button>
-        {s && (
-          <div style={{ marginTop: 8 }}>
-            <TerminalTile s={s} height="84vh" showProject
-              onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
-              onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
-              taskCard={task && <SessionTaskCard task={task} />} />
-          </div>
-        )}
-      </div>
-    );
-  }
 
   return (
     <div>

@@ -383,15 +383,14 @@ function SessionCockpit({ sessionId }: { sessionId: string }) {
 
 // The project's live-session terminals, tiled with Fork (idle-only) + ⤢ maximize + graceful Stop —
 // at parity with the dedicated Terminals page via the shared TerminalTile component (so the two can't
-// drift). Only the live set renders (dead/exited rows drop out). Maximize swaps the grid for a single
-// full-size terminal with a "← back to grid" button; project-scoped, so the tile title omits the
-// project name (showProject left off).
+// drift). Only the live set renders (dead/exited rows drop out). Maximize is self-contained in the
+// tile (a full-viewport overlay), so this grid carries no maximize state. Project-scoped, so the tile
+// title omits the project name (showProject left off).
 function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
   const qc = useQueryClient();
-  const [maximized, setMaximized] = useState<string | null>(null);
   const stop = useMutation({
     mutationFn: (id: string) => api.stopSession(id, "graceful"),
-    onSuccess: (_r, id) => { if (maximized === id) setMaximized(null); qc.invalidateQueries({ queryKey: ["allSessions"] }); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
   });
   // Fork an idle session: branch its conversation into a fresh divergent session (appears as a new
   // tile). Idle-only — the button is disabled while the source is busy.
@@ -405,30 +404,13 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
   const live = sessions.filter((s) => s.processState === "live").slice().sort(byManagerThenCreated);
   if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>No live sessions in this project. Spawn the manager above.</p>;
 
-  if (maximized) {
-    const s = live.find((x) => x.id === maximized);
-    return (
-      <div>
-        <Button onClick={() => setMaximized(null)}>← back to grid</Button>
-        {s && (
-          <div style={{ marginTop: 8 }}>
-            <TerminalTile s={s} height="84vh"
-              onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
-              onStop={() => stop.mutate(s.id)} stopPending={stop.isPending} />
-          </div>
-        )}
-      </div>
-    );
-  }
-
   const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12 };
   return (
     <div style={grid}>
       {live.map((s) => (
         <TerminalTile key={s.id} s={s} height={520}
           onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
-          onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
-          onMaximize={() => setMaximized(s.id)} />
+          onStop={() => stop.mutate(s.id)} stopPending={stop.isPending} />
       ))}
     </div>
   );
