@@ -6,7 +6,7 @@
 
 ## North star
 
-Loom is a **local-first developer cockpit for orchestrating live AI coding sessions**. The UI should read
+Loom is a **cockpit for orchestrating a fleet of real Claude Code sessions on your own subscription**. The UI should read
 like an **instrument panel / mission control**, not a consumer SaaS app. Dense, calm, alive. Every color is a
 *signal*, not decoration. It must serve two moods at once: the high-signal real-time **cockpit** (Orchestration,
 Terminals, Workspace) and a genuinely readable **document** surface (Vault).
