@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { SessionListItem, ShellTerminal, Task } from "@loom/shared";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import type { SessionListItem, ShellTerminal } from "@loom/shared";
 import { api } from "../lib/api";
 import { byCreatedStable, byManagerThenCreated } from "../lib/sessions";
 import { TerminalPane } from "../components/Terminal";
-import { SessionTaskCard } from "../components/SessionTaskCard";
 import { TerminalTile } from "../components/TerminalTile";
 import { Panel, Button, Select, Input, StatusPill, SectionLabel } from "../components/ui";
 import { color, font } from "../theme";
@@ -37,19 +36,6 @@ export default function Terminals() {
   });
   const live = (sessions.data ?? []).filter((s) => s.processState === "live");
   const projectNames = useMemo(() => [...new Set(live.map((s) => s.projectName))].sort(), [live]);
-  // Resolve the board task each BOUND session is working on (web-only, no daemon change → HMR-live):
-  // fetch tasks for each distinct project that owns a bound session via the existing api.tasks, then
-  // index by id. A tile reads its thin card from this map; an id that doesn't resolve (deleted task,
-  // or tasks not yet loaded) is simply absent → that tile renders no card (graceful).
-  const boundProjectIds = useMemo(
-    () => [...new Set(live.filter((s) => s.taskId).map((s) => s.projectId))],
-    [live],
-  );
-  const taskQueries = useQueries({
-    queries: boundProjectIds.map((pid) => ({ queryKey: ["tasks", pid], queryFn: () => api.tasks(pid), staleTime: 4000 })),
-  });
-  const tasksById = new Map<string, Task>();
-  for (const q of taskQueries) for (const t of q.data ?? []) tasksById.set(t.id, t);
   // Tile order: the STABLE shared key (lib/sessions.ts byManagerThenCreated) — managers first, then
   // createdAt DESC (newest first), tiebreak by id within each bucket. A session keeps its slot whether
   // it's busy or idle, so the grid never reshuffles on a poll (the old activity sort made rows jump).
@@ -89,15 +75,13 @@ export default function Terminals() {
     return [...managerRows, ...trailing];
   }, [shown]);
 
-  const renderTile = (s: SessionListItem) => {
-    const task = s.taskId ? tasksById.get(s.taskId) : undefined;
-    return (
-      <TerminalTile key={s.id} s={s} height={540} showProject
-        onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
-        onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
-        taskCard={task && <SessionTaskCard task={task} />} />
-    );
-  };
+  // The slim bound-task bar is fetched + rendered by TerminalTile itself (per-session), so no task
+  // lookup or prop pass is needed here — every tile shows it automatically, identically to Overview.
+  const renderTile = (s: SessionListItem) => (
+    <TerminalTile key={s.id} s={s} height={540} showProject
+      onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
+      onStop={() => stop.mutate(s.id)} stopPending={stop.isPending} />
+  );
 
   return (
     <div>

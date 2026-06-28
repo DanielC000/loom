@@ -1,9 +1,12 @@
-import { type ReactNode, type CSSProperties, useEffect, useState } from "react";
+import { type CSSProperties, useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
+import { api } from "../lib/api";
 import { TerminalPane } from "./Terminal";
 import { Composer } from "./Composer";
 import { SessionQueue } from "./SessionQueue";
 import { SessionWakes } from "./SessionWakes";
+import { SessionTaskCard } from "./SessionTaskCard";
 import { PresetPromptsButton } from "./PresetPrompts";
 import { Panel, Button, StatusPill } from "./ui";
 import { font, color } from "../theme";
@@ -12,8 +15,11 @@ import { font, color } from "../theme";
 // and the project Overview's ProjectTerminals grid, so the two header control surfaces can't drift
 // (same rationale as the byCreatedStable comparator extraction). Header controls: Fork (idle-only),
 // Stop, and maximize ⤢. `showProject` toggles the project name in the title (Terminals lists all
-// projects; Overview is project-scoped). The `taskCard` slot (above the terminal) lets each surface
-// add its own extras without forking the tile. ALL the per-session chrome below the terminal —
+// projects; Overview is project-scoped). The slim bound-task bar above the terminal (which board card
+// the session is on) is fetched HERE for the tile's own session, so EVERY surface that renders a tile
+// (Terminals AND the Overview grid) shows it automatically — it can't be dropped at a call site the way
+// it was when Overview migrated onto the shared tile without re-wiring the old `taskCard` prop. ALL the
+// per-session chrome below the terminal —
 // SessionWakes, the QUEUED-messages panel (SessionQueue) and the Composer — lives INSIDE the tile, so
 // EVERY surface that renders a tile (the Terminals page AND the Overview grid) shows the identical set
 // and a page can't drift. (Wakes + the queue both used to ride a per-page `footer` prop; the Overview
@@ -53,7 +59,7 @@ export function TileTitle({ s, showProject }: { s: SessionListItem; showProject?
 }
 
 export function TerminalTile({
-  s, height, showProject, onFork, forkPending, onStop, stopPending, taskCard,
+  s, height, showProject, onFork, forkPending, onStop, stopPending,
 }: {
   s: SessionListItem;
   height: number | string;
@@ -62,9 +68,21 @@ export function TerminalTile({
   forkPending: boolean;
   onStop: () => void;
   stopPending: boolean;
-  taskCard?: ReactNode;      // slot rendered above the terminal
 }) {
   const [maximized, setMaximized] = useState(false);
+
+  // Resolve the board task this session is bound to and render the slim bar HERE, so every call site
+  // shows it without re-wiring (Overview used to pass nothing → blank). Same query as the Terminals page
+  // (keyed ["tasks", projectId], staleTime 4000), so React Query DEDUPES it across the project's tiles —
+  // one fetch per project, not one per tile. Only fetch for a bound session; an id that doesn't resolve
+  // (deleted task, not yet loaded) leaves `task` undefined → no bar (graceful, byte-identical to before).
+  const tasks = useQuery({
+    queryKey: ["tasks", s.projectId],
+    queryFn: () => api.tasks(s.projectId),
+    staleTime: 4000,
+    enabled: !!s.taskId,
+  });
+  const task = s.taskId ? tasks.data?.find((t) => t.id === s.taskId) : undefined;
 
   // Esc restores from the maximized overlay (mirrors the backdrop click + the ⤡ toggle). Bound only
   // while maximized so a stray Esc never fires when no overlay is open.
@@ -89,7 +107,7 @@ export function TerminalTile({
   );
   const body = (
     <>
-      {taskCard}
+      {task && <SessionTaskCard task={task} />}
       {/* overflow:hidden clips xterm's canvas to the pane box — when a Composer state change (e.g.
           toggling Voice) resizes the pane, the font rescale can momentarily overflow; this guarantees
           the terminal can NEVER paint over the composer below. xterm scrolls via its own .xterm-viewport. */}
