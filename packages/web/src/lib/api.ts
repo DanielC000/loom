@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope } from "@loom/shared";
 
 // Per-conflict resolution for a profile adopt-update: pick the user's value or the shipped value,
 // wholesale (the field-level analog of the skills resolver's per-hunk mine/shipped choice).
@@ -56,6 +56,18 @@ export interface PythonProvisioning {
 async function get<T>(url: string): Promise<T> {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return r.json() as Promise<T>;
+}
+// GET that surfaces the server's JSON `{ error }` body as the thrown message — for the audit diff
+// reader, whose EXPECTED 400 ("no predecessor — pass an explicit 'b'") carries a reason the replay
+// panel shows verbatim instead of an opaque "-> 400".
+async function getErr<T>(url: string): Promise<T> {
+  const r = await fetch(url);
+  if (!r.ok) {
+    let msg = `${url} -> ${r.status}`;
+    try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON */ }
+    throw new Error(msg);
+  }
   return r.json() as Promise<T>;
 }
 async function post<T>(url: string, body?: unknown): Promise<T> {
@@ -374,6 +386,20 @@ export const api = {
   // merges (manager derived from the worker's parentSessionId server-side).
   mergeWorker: (sessionId: string) => post<{ merged: boolean; reason?: string }>(`/api/sessions/${sessionId}/merge`),
   orchestrationStatus: () => get<{ pausedScopes: string[] }>("/api/orchestration/status"),
+
+  // --- Session/run AUDIT LOG (replayable timeline + run-vs-run diff). READ-ONLY, HUMAN-only loopback
+  // readers over the existing `orchestration_events` record — NEVER an agent MCP tool (mirrors
+  // orchestrationEvents). `auditSession` = every event where the session is the manager OR worker;
+  // `auditWave` = a manager + all its workers, de-duped. `auditDiff` aligns two timelines (scope applies
+  // to both sides); omit `b` to compare A against its recycledFrom predecessor — that case 400s with a
+  // readable reason when A has none, surfaced via getErr. ---
+  auditSession: (id: string) => get<AuditTimeline>(`/api/audit/session/${encodeURIComponent(id)}`),
+  auditWave: (managerId: string) => get<AuditTimeline>(`/api/audit/wave/${encodeURIComponent(managerId)}`),
+  auditDiff: (a: string, b: string | undefined, scope: AuditScope) => {
+    const params = new URLSearchParams({ a, scope });
+    if (b) params.set("b", b);
+    return getErr<AuditDiff>(`/api/audit/diff?${params.toString()}`);
+  },
   // Releases v1 Part 3 — the daemon's `loom` package version, surfaced unobtrusively in the header.
   version: () => get<{ version: string }>("/api/version"),
   // Epic 2c-2 — the daemon's npm "update available" status (read-only, polled into the banner).

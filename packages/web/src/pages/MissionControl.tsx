@@ -7,8 +7,24 @@ import { useAttention } from "../lib/attention";
 import { useState } from "react";
 import { Panel, SectionLabel, Badge, Button } from "../components/ui";
 import { color, font } from "../theme";
-import { Stat, PlanUsageStrip, AttentionRow, FleetRow, FleetCard, EventRow } from "../components/fleet";
+import { Stat, PlanUsageStrip, AttentionRow, FleetRow, FleetCard, EventRow, WaveConsumption } from "../components/fleet";
 import { ReviewQueue } from "../components/reviewQueue";
+import { AuditReplayPanel } from "../components/auditReplay";
+
+// Attention severity ranking — surfaces the REVIEW/decision bottleneck at the top of the queue. Merge
+// requests already live in the dedicated Review queue above; among the rest, a needed human DECISION or a
+// stalled manager (red, blocking the wave) outranks the recoverable amber states (rate-limit/stuck). The
+// parallel ceiling is human review, so what needs a human first must read first.
+const ATTN_RANK: Record<string, number> = {
+  "NEEDS A HUMAN": 0,
+  "MANAGER ASLEEP": 1,
+  "CONTEXT OVERFLOW": 2,
+  "CRASH-LOOPED": 3,
+  "RATE-LIMITED": 4,
+  "STUCK-BUSY": 5,
+  "QUEUE DRAINED": 6,
+};
+const attnRank = (kind: string, tone: string) => ATTN_RANK[kind] ?? (tone === "red" ? 3.5 : 7);
 
 // Phase 3 — MISSION CONTROL: a god-eye view of every orchestration at once, so you don't have to
 // pick a single manager. Three regions: a global status strip, an ATTENTION QUEUE (shared with the
@@ -34,7 +50,9 @@ export default function MissionControl() {
   // the dedicated Review queue centerpiece below (so they aren't shown twice). Verification is the
   // bottleneck, so these diffs-awaiting-a-decision sit at the top of the page.
   const reviewWorkerIds = attention.filter((i) => i.kind === "MERGE REQUEST" && i.workerSessionId).map((i) => i.workerSessionId!);
-  const otherAttention = attention.filter((i) => i.kind !== "MERGE REQUEST");
+  const otherAttention = attention
+    .filter((i) => i.kind !== "MERGE REQUEST")
+    .sort((a, b) => attnRank(a.kind, a.tone) - attnRank(b.kind, b.tone));
 
   // Each manager's event timeline → the activity feed.
   const eventQueries = useQueries({
@@ -78,6 +96,14 @@ export default function MissionControl() {
     const s = item.workerSessionId ? all.find((x) => x.id === item.workerSessionId) : undefined;
     if (s) attnByProject.set(s.projectName, (attnByProject.get(s.projectName) ?? 0) + 1);
   }
+
+  // Replay roots: every manager, live ones first (the wave you're driving), then by recent activity — so
+  // the panel defaults to the current wave but can replay any past run too.
+  const replayRoots = [...managers].sort((a, b) => {
+    const liveA = a.processState === "live" ? 1 : 0, liveB = b.processState === "live" ? 1 : 0;
+    if (liveA !== liveB) return liveB - liveA;
+    return mostRecentActivity([b]) - mostRecentActivity([a]);
+  });
 
   const refreshStatus = () => qc.invalidateQueries({ queryKey: ["orchStatus"] });
   const refreshSessions = () => qc.invalidateQueries({ queryKey: ["allSessions"] });
@@ -146,9 +172,10 @@ export default function MissionControl() {
               }
               return (
                 <Panel key={pn} style={{ gridColumn: "1 / -1" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
                     <span style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{pn}</span>
                     <span style={{ flex: 1 }} />
+                    <WaveConsumption sessions={[...projManagers, ...projWorkers]} />
                     <Button variant="ghost" style={{ padding: "0 6px" }} title="Collapse" onClick={() => toggleExpanded(pn)}>⤡</Button>
                   </div>
                   {projManagers.map((m) => (
@@ -177,6 +204,11 @@ export default function MissionControl() {
           </Panel>
         </div>
       </div>
+
+      {/* Run replay — scrub a wave/session's durable audit timeline + diff it against another run. The
+          observability surface for "what actually happened" once a wave is several agents deep. Roots are
+          managers, live first then by recency, so the default subject is the wave you're driving now. */}
+      <AuditReplayPanel managers={replayRoots} />
     </div>
   );
 }

@@ -151,6 +151,7 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
   const st = sessionStatus(s);
   const ctx = s.ctxInputTokens ?? 0;
   const window = contextWindowForModel(s.model);
+  const hot = ctx > window * CONTEXT_WARN_RATIO;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "3px 0", flexWrap: "wrap" }}>
       <span style={{ fontFamily: font.mono, fontSize: 12, color: star ? color.phosphor : color.text, fontWeight: star ? 700 : 400 }}>
@@ -160,12 +161,47 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
       {s.taskId && <Chip label="task" value={s.taskId.slice(0, 8)} />}
       {s.branch && <Chip label="branch" value={s.branch} tone="cyan" />}
       {ctx > 0 && (
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "amber" : "phosphor"} width={60} />
+        // Context consumption: occupancy of the model's window. Loom drives the subscription CLI, so this
+        // is token CONSUMPTION (% of context window), never a dollar bill — the figure that signals
+        // "this agent needs recycling soon", with the absolute token count for scale.
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }} title={`${ctx.toLocaleString()} input tokens · ${Math.round((ctx / window) * 100)}% of the ${(window / 1000).toFixed(0)}k window`}>
+          <Meter value={ctx} max={window} tone={hot ? "amber" : "phosphor"} width={60} />
+          <span style={{ fontFamily: font.mono, fontSize: 11, color: hot ? color.amber : color.textMuted }}>{Math.round((ctx / window) * 100)}%</span>
           <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{(ctx / 1000).toFixed(1)}k</span>
         </span>
       )}
     </div>
+  );
+}
+
+// Wave/fleet CONSUMPTION roll-up — total context tokens across a session set + the worst-case occupancy.
+// Framed as usage/consumption (tokens, % of window), deliberately NOT a $ API bill: Loom runs the
+// subscription CLI, so there is no per-call dollar cost — the honest signal is how much context the wave
+// is burning and who is closest to overflow. Rendered inline in the expanded fleet panel header.
+export function totalContext(sessions: SessionListItem[]): { tokens: number; reporting: number } {
+  let tokens = 0, reporting = 0;
+  for (const s of sessions) {
+    const c = s.ctxInputTokens ?? 0;
+    if (c > 0) { tokens += c; reporting++; }
+  }
+  return { tokens, reporting };
+}
+
+export function WaveConsumption({ sessions }: { sessions: SessionListItem[] }) {
+  const total = totalContext(sessions);
+  const wc = worstContext(sessions);
+  const hot = wc.ratio > CONTEXT_WARN_RATIO;
+  if (total.reporting === 0) return null;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 11 }}
+      title={`${total.tokens.toLocaleString()} input tokens in context across ${total.reporting} reporting session${total.reporting === 1 ? "" : "s"} (subscription usage, not an API $ bill)`}>
+      <span style={{ color: color.textMuted }}>consumption</span>
+      <span style={{ color: color.text }}>{(total.tokens / 1000).toFixed(0)}k ctx</span>
+      <span style={{ color: color.textMuted }}>·</span>
+      <span style={{ color: color.textMuted }}>peak</span>
+      <Meter value={wc.ctx} max={wc.window || 1} tone={hot ? "amber" : "phosphor"} width={70} />
+      <span style={{ color: hot ? color.amber : color.textMuted }}>{wc.ctx > 0 ? `${Math.round(wc.ratio * 100)}%` : "—"}</span>
+    </span>
   );
 }
 
