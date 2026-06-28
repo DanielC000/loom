@@ -8,6 +8,7 @@ import { useState } from "react";
 import { Panel, SectionLabel, Badge, Button } from "../components/ui";
 import { color, font } from "../theme";
 import { Stat, PlanUsageStrip, AttentionRow, FleetRow, FleetCard, EventRow } from "../components/fleet";
+import { ReviewQueue } from "../components/reviewQueue";
 
 // Phase 3 — MISSION CONTROL: a god-eye view of every orchestration at once, so you don't have to
 // pick a single manager. Three regions: a global status strip, an ATTENTION QUEUE (shared with the
@@ -28,6 +29,12 @@ export default function MissionControl() {
   const managers = all.filter((s) => s.role === "manager");
   const workers = all.filter((s) => s.role === "worker");
   const globalPaused = (status.data?.pausedScopes ?? []).includes("global");
+
+  // Pending merges are the review/merge gate's queue — pulled OUT of the generic attention list into
+  // the dedicated Review queue centerpiece below (so they aren't shown twice). Verification is the
+  // bottleneck, so these diffs-awaiting-a-decision sit at the top of the page.
+  const reviewWorkerIds = attention.filter((i) => i.kind === "MERGE REQUEST" && i.workerSessionId).map((i) => i.workerSessionId!);
+  const otherAttention = attention.filter((i) => i.kind !== "MERGE REQUEST");
 
   // Each manager's event timeline → the activity feed.
   const eventQueries = useQueries({
@@ -100,11 +107,15 @@ export default function MissionControl() {
         <Button variant="danger" disabled={kill.isPending} onClick={() => kill.mutate()}>Kill all</Button>
       </div>
 
-      {/* Attention queue */}
+      {/* Review queue — the merge gate as the fast-triage centerpiece (this card's surface). Shown
+          above the generic attention queue because diff verification is the orchestration bottleneck. */}
+      {reviewWorkerIds.length > 0 && <ReviewQueue workerIds={reviewWorkerIds} />}
+
+      {/* Attention queue — everything else needing a human (merge requests live in the Review queue). */}
       <div>
-        <SectionLabel>Attention queue ({attention.length})</SectionLabel>
-        {attention.length === 0 && <Panel><span style={{ color: color.textMuted }}>Nothing needs you right now.</span></Panel>}
-        {attention.map((item) => (
+        <SectionLabel>Attention queue ({otherAttention.length})</SectionLabel>
+        {otherAttention.length === 0 && <Panel><span style={{ color: color.textMuted }}>Nothing needs you right now.</span></Panel>}
+        {otherAttention.map((item) => (
           <AttentionRow key={item.key} item={item}
             onOpen={item.workerSessionId ? () => navigate(`/review/${item.workerSessionId}`) : undefined} />
         ))}
