@@ -1,8 +1,9 @@
 # Contributing to Loom
 
-Thanks for your interest in Loom — a local-first AI project workspace that weaves real Claude Code
-sessions, Obsidian docs, and tasks into one fabric. This guide covers getting set up, the repo
-layout, the test/build gates a change must pass, and the branch/PR conventions.
+Thanks for your interest in Loom — orchestrate a fleet of real Claude Code agents on your Claude
+subscription (Pro/Max), not per-token API bills, all local-first on your own machine. This guide
+covers getting set up, the repo layout, the test/build gates a change must pass, and the branch/PR
+conventions.
 
 > `CLAUDE.md` at the repo root is the authoritative, checked-in summary of architecture, the validated
 > `claude` spawn recipe, and the load-bearing invariants — **read it before changing daemon behavior.**

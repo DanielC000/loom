@@ -2,7 +2,7 @@
   "name": "loom",
   "private": true,
   "version": "0.11.0",
-  "description": "Local-first AI project workspace — weaves Claude Code sessions, Obsidian docs, and tasks into one fabric.",
+  "description": "Orchestrate a fleet of real Claude Code agents on your Claude subscription (Pro/Max), not per-token API bills — durable sessions, multi-agent orchestration, all local-first on your own machine.",
   "license": "MIT",
   "packageManager": "pnpm@10.6.4",
   "engines": {

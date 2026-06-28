@@ -3,19 +3,19 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Loom · a local-first cockpit for Claude Code</title>
+    <title>Loom · orchestrate real Claude Code agents on your subscription</title>
     <meta
       name="description"
-      content="Loom is a local-first AI project workspace that weaves real interactive Claude Code sessions, Obsidian docs, and tasks into one fabric, with multi-agent orchestration where a lead manages workers."
+      content="Loom orchestrates a fleet of real interactive Claude Code agents on your Claude subscription (Pro/Max) — not per-token API bills. Durable sessions, multi-agent orchestration, and your data on your own machine. (Agents still consume your subscription's usage and obey its rate limits.)"
     />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <meta name="color-scheme" content="dark" />
 
     <!-- Open Graph / social -->
-    <meta property="og:title" content="Loom · a local-first cockpit for Claude Code" />
+    <meta property="og:title" content="Loom · orchestrate real Claude Code agents on your subscription" />
     <meta
       property="og:description"
-      content="Drive real interactive Claude Code sessions, orchestrate a fleet of agents, and weave docs and tasks into one fabric, all on your own machine."
+      content="Drive a fleet of real interactive Claude Code sessions on the Claude subscription you already pay for — no per-token API bill for the orchestration — with a lead agent delegating to workers, all on your own machine."
     />
     <meta property="og:type" content="website" />
 
@@ -67,15 +67,19 @@
       <section class="hero loom-grid" id="top">
         <div class="wrap hero-inner">
           <div class="hero-copy">
-            <p class="kicker">Local-first · runs on your machine</p>
+            <p class="kicker">On your Claude subscription · not metered API</p>
             <h1 class="hero-title">
-              A cockpit for
-              <span class="accent">real</span> Claude&nbsp;Code sessions.
+              Orchestrate a fleet of
+              <span class="accent">real</span> Claude&nbsp;Code agents on your
+              subscription.
             </h1>
             <p class="hero-lede">
-              Loom weaves real interactive Claude Code sessions, Obsidian docs,
-              and tasks into one fabric, then lets a lead agent orchestrate a
-              fleet of workers, all on your own machine.
+              Every agent is the genuine interactive <code>claude</code> driven
+              over a PTY, so a whole fleet runs on the Claude subscription
+              (Pro/Max) you already pay for — no per-token API bill for the
+              orchestration. A lead agent decomposes a goal and delegates to
+              workers on isolated branches, all on your own machine. (Agents
+              still consume your subscription's usage and obey its rate limits.)
             </p>
             <div class="hero-cta">
               <a
@@ -88,9 +92,9 @@
               <a class="btn btn-ghost" href="#how">See how it works</a>
             </div>
             <ul class="hero-meta" aria-label="At a glance">
-              <li><span class="dot dot-phosphor"></span> Loopback-only daemon</li>
-              <li><span class="dot dot-cyan"></span> SQLite-backed, no cloud</li>
-              <li><span class="dot dot-amber"></span> Sessions outlive viewers</li>
+              <li><span class="dot dot-phosphor"></span> Runs on your Pro/Max plan</li>
+              <li><span class="dot dot-cyan"></span> No per-token API bill</li>
+              <li><span class="dot dot-amber"></span> Your data, on your hardware</li>
             </ul>
           </div>
 
@@ -142,14 +146,17 @@
             One fabric for the work, the agents, and the knowledge.
           </h2>
           <p class="prose">
-            Loom is a local-first AI project workspace. It drives the
-            <strong>real interactive <code>claude</code></strong>, the same
-            terminal session you'd run by hand rather than a headless one-shot,
-            and keeps it durable: sessions are owned by a daemon on your machine, so
-            closing the window never kills the work. Around those sessions it
-            binds your Obsidian vault and a task board into a single view, and
-            lets one lead agent decompose a goal, delegate to workers on
-            isolated branches, review their diffs, and merge.
+            Loom drives the <strong>real interactive <code>claude</code></strong>,
+            the same terminal session you'd run by hand rather than a headless
+            one-shot or an API-key agent loop. Because every agent is a genuine
+            <code>claude</code> session, a whole fleet of them runs on your
+            <strong>existing Claude subscription (Pro/Max)</strong> — there's no
+            separate per-token API bill for the orchestration. Those sessions are
+            durable: they're owned by a daemon on your own machine, so closing the
+            window never kills the work, and your code, transcripts, and vault stay
+            on your hardware. Around them, one lead agent decomposes a goal,
+            delegates to workers on isolated branches, reviews their diffs, and
+            merges.
           </p>
         </div>
       </section>
@@ -161,12 +168,15 @@
           <h2 class="section-title" id="features-h">Built like an instrument.</h2>
           <ul class="features-grid">
             <li class="card">
-              <span class="card-icon" aria-hidden="true">⌘</span>
-              <h3 class="card-title">Local-first by design</h3>
+              <span class="card-icon" aria-hidden="true">↻</span>
+              <h3 class="card-title">Runs on your subscription</h3>
               <p class="card-body">
-                Everything durable lives on your machine: a daemon bound to
-                loopback, an SQLite store, your git checkouts and vault. No cloud
-                service sits between you and your work.
+                Every agent is the genuine interactive <code>claude</code> driven
+                over a PTY — never <code>claude -p</code> / headless, never an
+                API-key agent loop — so a whole fleet runs on the Claude
+                subscription (Pro/Max) you already pay for, with no per-token API
+                bill for the orchestration. Agents still consume your
+                subscription's usage and obey its rate limits.
               </p>
             </li>
             <li class="card">
@@ -194,6 +204,16 @@
                 A stateless web viewport attaches over WebSockets: Mission
                 Control, a task board, live terminals, runs and git, all in one
                 phosphor-on-dark instrument panel.
+              </p>
+            </li>
+            <li class="card">
+              <span class="card-icon" aria-hidden="true">⌂</span>
+              <h3 class="card-title">Your data, on your hardware</h3>
+              <p class="card-body">
+                Everything durable lives on your machine: a daemon bound to
+                loopback, an SQLite store, your git checkouts, transcripts, and
+                vault. No cloud service sits between you and your work, and you
+                can run fully offline.
               </p>
             </li>
             <li class="card">
@@ -270,8 +290,9 @@
           <div>
             <h2 class="section-title" id="cta-h">Read the source.</h2>
             <p class="prose prose-tight">
-              Loom is an in-progress, local-first project. The code, the
-              architecture, and the design decisions live in the repository.
+              Loom is an in-progress project that runs on your own machine. The
+              code, the architecture, and the design decisions live in the
+              repository.
             </p>
           </div>
           <a class="btn btn-primary" href="https://github.com/DanielC000/loom">
@@ -299,7 +320,8 @@
           <span class="brand-word">loom</span>
         </a>
         <p class="footer-note">
-          A local-first cockpit for Claude Code. Runs on your machine.
+          Orchestrate real Claude Code agents on your Claude subscription, not
+          per-token API bills. Runs on your own machine.
         </p>
         <a class="footer-link" href="https://github.com/DanielC000/loom"
           >github.com/DanielC000/loom</a
