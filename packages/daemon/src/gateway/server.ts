@@ -12,6 +12,7 @@ import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, engineTranscriptExists, deleteArchivedTranscript, deleteProjectArchives } from "../sessions/transcript.js";
+import { buildTimeline, diffTimelines } from "../sessions/audit.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell } from "../pty/host.js";
@@ -277,6 +278,48 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/api/orchestration/events", async (req) => {
     const { managerId } = req.query as { managerId?: string };
     return managerId ? deps.db.listEvents(managerId) : [];
+  });
+
+  // --- Session/run AUDIT LOG: a replayable, ordered event timeline + a diff primitive, served over Loom's
+  // EXISTING durable record (the `orchestration_events` table + `sessions` metadata — no new capture). These
+  // are READ-ONLY, HUMAN-only loopback readers (same trust posture as /api/orchestration/events and the run
+  // audit reader — NEVER an agent MCP tool). Source of the protocol contract the web "fleet observability +
+  // audit-replay" sibling card consumes. ---
+  // The replayable timeline for ONE session (every event where it's the manager OR worker).
+  app.get("/api/audit/session/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const timeline = buildTimeline(deps.db, "session", id);
+    if (!timeline) return reply.code(404).send({ error: "session not found" });
+    return timeline;
+  });
+  // The replayable timeline for a whole orchestration WAVE (a manager session + all its workers).
+  app.get("/api/audit/wave/:managerId", async (req, reply) => {
+    const managerId = (req.params as { managerId: string }).managerId;
+    const timeline = buildTimeline(deps.db, "wave", managerId);
+    if (!timeline) return reply.code(404).send({ error: "session not found" });
+    return timeline;
+  });
+  // A structured diff of two timelines: ?a=<id>&b=<id>&scope=session|wave (scope applies to both sides,
+  // default "session"). When `b` is omitted, it resolves to A's PREDECESSOR (the recycledFrom of the root
+  // session) — the "run vs its predecessor" comparison; 400 when A has none. 400 on a missing `a`, 404 on an
+  // unknown a/b root session.
+  app.get("/api/audit/diff", async (req, reply) => {
+    const q = req.query as { a?: string; b?: string; scope?: string };
+    const scope = q.scope === "wave" ? "wave" : "session";
+    if (!q.a) return reply.code(400).send({ error: "query param 'a' (session id) is required" });
+    const aTimeline = buildTimeline(deps.db, scope, q.a);
+    if (!aTimeline) return reply.code(404).send({ error: "session 'a' not found" });
+    let bId = q.b;
+    if (!bId) {
+      const root = deps.db.getSession(q.a);
+      if (!root?.recycledFrom) {
+        return reply.code(400).send({ error: "no predecessor: 'a' was not recycled from a prior session — pass an explicit 'b'" });
+      }
+      bId = root.recycledFrom;
+    }
+    const bTimeline = buildTimeline(deps.db, scope, bId);
+    if (!bTimeline) return reply.code(404).send({ error: "session 'b' not found" });
+    return diffTimelines(aTimeline, bTimeline);
   });
 
   // --- Schedules (phase-2 Pillar B): cron triggers. next_fire_at is computed here on

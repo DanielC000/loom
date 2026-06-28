@@ -1,3 +1,5 @@
+import type { OrchestrationEventKind, SessionRole } from "./types.js";
+
 // Wire protocol shared by daemon and web.
 //
 // Terminal WebSocket  (/ws/term/:sessionId):
@@ -94,3 +96,106 @@ export type UsageLimitsStatus =
       reason: string;
       fetchedAt: string | null; // ISO of the last attempt, null if never tried
     };
+
+// ── Session/run AUDIT LOG (the replayable + diffable timeline) ──────────────────────────────────
+// A read model over Loom's EXISTING durable record — the `orchestration_events` table (the manager↔
+// worker timeline: spawns, messages, redirects, merges, restarts, reports, completion/board events)
+// joined with `sessions` metadata. No new capture pipeline: this exposes what is already persisted as
+// a first-class, ordered, replayable + diffable surface. Served by the human-only loopback REST readers
+// GET /api/audit/session/:id, /api/audit/wave/:managerId, and /api/audit/diff (NOT an agent MCP tool).
+
+/** Whether an {@link AuditTimeline} is keyed on ONE session or a whole orchestration WAVE (a manager + its
+ *  workers). The diff endpoint applies the same scope to both sides. */
+export type AuditScope = "session" | "wave";
+
+/**
+ * One normalized entry on an {@link AuditTimeline} — a single `orchestration_events` row plus a `seq`
+ * ordinal (0-based, its position in THIS timeline) for stable replay addressing. Mirrors the durable
+ * {@link OrchestrationEventKind} record verbatim (no synthesized fields): `ts` is the recorded instant,
+ * `detail` the kind-specific JSON already stored. The web replay scrubs by `seq`; `id` is the durable row id.
+ */
+export interface AuditEvent {
+  id: string;
+  /** 0-based ordinal of this event within its timeline (stable replay index). */
+  seq: number;
+  /** ISO instant the event was recorded. */
+  ts: string;
+  kind: OrchestrationEventKind;
+  /** The owning manager session (a wave/tree event is filed under its manager). */
+  managerSessionId: string;
+  /** The worker/target session the event concerns, when applicable (null for manager-only events). */
+  workerSessionId: string | null;
+  /** The board task the event relates to, when applicable. */
+  taskId: string | null;
+  /** Kind-specific durable detail JSON (e.g. `worker_report` → `{ status, summary }`); null when none. */
+  detail: Record<string, unknown> | null;
+}
+
+/** Lightweight session metadata for every session referenced by a timeline's events — so a consumer can
+ *  resolve an event's actor (role/title/lineage) without a second round-trip. Drawn from the `sessions` row. */
+export interface AuditSessionRef {
+  id: string;
+  projectId: string;
+  agentId: string;
+  role: SessionRole | null;
+  title: string | null;
+  parentSessionId: string | null;
+  taskId: string | null;
+  /** Recycle generation (0 = original) + the prior-generation id this was recycled from (the "predecessor"). */
+  gen: number;
+  recycledFrom: string | null;
+  createdAt: string;
+}
+
+/**
+ * An ordered, replayable audit timeline for one session (`scope:"session"` — every event where the session
+ * is the manager OR the worker) or a whole orchestration wave (`scope:"wave"` — the manager plus all its
+ * workers, de-duplicated). Built strictly over `orchestration_events` + `sessions`. `events` is in
+ * chronological order (`ts`, then `id` as a stable tiebreaker); `seq` numbers them 0..n-1.
+ */
+export interface AuditTimeline {
+  scope: AuditScope;
+  /** The session id (`scope:"session"`) or manager session id (`scope:"wave"`) this timeline is keyed on. */
+  rootId: string;
+  /** Metadata for every session id referenced by an event here (`id` → ref) — the actor lookup. */
+  sessions: Record<string, AuditSessionRef>;
+  events: AuditEvent[];
+  eventCount: number;
+  /** ISO instant of the first / last event (null when the timeline is empty) — the timeline span. */
+  firstTs: string | null;
+  lastTs: string | null;
+}
+
+/** One step in an {@link AuditDiff}'s sequence alignment. `same` = present in both (a & b set); `added` =
+ *  only in B (b set, a null); `removed` = only in A (a set, b null). Steps are in replay order. */
+export interface AuditDiffStep {
+  op: "same" | "added" | "removed";
+  /** The compared event signature (`kind` + an outcome discriminator like `:done`/`:blocked`). */
+  signature: string;
+  a: AuditEvent | null;
+  b: AuditEvent | null;
+}
+
+/** Per-kind count comparison between two timelines (the "outcomes changed" view). `delta` is `b - a`. */
+export interface AuditKindDelta {
+  kind: OrchestrationEventKind;
+  a: number;
+  b: number;
+  delta: number;
+}
+
+/**
+ * A pragmatic structured diff of two audit timelines (two sessions, or a run vs its predecessor) — what
+ * changed in the SEQUENCE (an LCS alignment of the event streams by signature) and in the OUTCOMES
+ * (`kindDeltas`, per-kind counts). NOT a bespoke VCS; an event's `signature` is its `kind` plus a small
+ * outcome discriminator, so e.g. a `worker_report:done` vs `worker_report:blocked` shows as removed+added.
+ */
+export interface AuditDiff {
+  a: { rootId: string; scope: AuditScope; eventCount: number };
+  b: { rootId: string; scope: AuditScope; eventCount: number };
+  /** Ordered LCS alignment of the two event streams (same / added / removed, in replay order). */
+  steps: AuditDiffStep[];
+  /** Per-kind count comparison, sorted by kind. */
+  kindDeltas: AuditKindDelta[];
+  summary: { sameCount: number; addedCount: number; removedCount: number; changed: boolean };
+}

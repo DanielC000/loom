@@ -1684,6 +1684,26 @@ export class Db {
       .all(workerSessionId) as Row[]).map(toOrchestrationEvent);
   }
   /**
+   * EVERY orchestration event that TOUCHES a session — it appears as the manager OR the worker. The
+   * union of listEvents + listEventsForWorker in one ordered pass; the audit-log read model (sessions/
+   * audit.ts) builds a session's replayable timeline from this. Chronological (ts, rowid breaks same-ts
+   * ties — true insertion order within this single query).
+   */
+  listEventsForSession(sessionId: string): OrchestrationEvent[] {
+    return (this.db.prepare(
+      "SELECT * FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ? ORDER BY ts, rowid",
+    ).all(sessionId, sessionId) as Row[]).map(toOrchestrationEvent);
+  }
+  /**
+   * ALL direct child sessions of a parent (workers a manager spawned), INCLUDING archived ones — the
+   * audit-log wave assembly needs the complete tree, not the rail feed. Mirrors listWorkers but without
+   * the archived_at filter (an archived worker still belongs to the wave's history). Ordered by creation.
+   */
+  listChildSessions(parentSessionId: string): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at")
+      .all(parentSessionId) as Row[]).map(toSession);
+  }
+  /**
    * Durable queued-message inbox (card 2ca18433): every `session_message_queued` event with NO matching
    * `session_message_delivered` marker (paired by `detail.msgId`) — i.e. a held message that was NEVER
    * handed to its recipient. This is the boot scan's work set (recoverUndeliveredMessagesOnBoot): the ones
