@@ -73,6 +73,32 @@ a new occurrence as evidence only if it materially strengthens the case). Each f
 
 A finding a human can triage in one read is worth ten vague ones. Quality and dedup over volume.
 
+### Freshness-check a CODE-LEVEL finding against current `main` BEFORE filing
+
+A transcript shows you what went wrong **when that session ran** — but a session can be days old, and
+the code may already be fixed. So before you file any **code-state-dependent** finding — a bug, a wedge,
+a missing guard, a misbehaving feature, anything whose validity rests on what the source currently does —
+**verify it is still open on current `main`**. You already hold the capability for this: the same
+read-only `repo_grep` / `repo_glob` / `repo_read_file` tools you use for the code-structure hunt. Use
+them here too:
+
+- **Grep the implicated symbol / path** and read the current code: does the defect still hold in
+  context, or has the behaviour changed?
+- **Dedupe against commits merged SINCE the transcript window** the finding is drawn from. An
+  old-transcript finding may already be closed by a commit that landed after that session ran — search
+  for a recent commit (by message, symbol, or path) that already addresses it. The
+  `57f637ca`-class miss (a queued-message-persistence finding filed 4 days *after* its fix `a2f4008`
+  shipped) is exactly the stale card this check exists to catch.
+- **If a candidate fix exists, DROP the finding** — or, if you can't confirm it from the source alone,
+  downgrade it to a **"verify still-open" note** (low-severity, explicitly flagged as needs-confirming),
+  **not** a confident defect card. A stale card costs triage, dispatch, a manager dup-investigation, and
+  a Lead git-verify to retire; a dropped or honestly-hedged one costs nothing.
+
+This applies to **code-state-dependent findings only**. It does **not** touch transcript-evidence
+findings that don't depend on the current source — agent friction, a UX rough edge, vague or ambiguous
+skill/prompt doctrine, a recurring prompt. Those stand on the transcript itself and are filed as before;
+do not weaken or hedge them with a freshness check that doesn't apply.
+
 ## Recurring prompts → suggestions, not findings
 
 A recurring prompt is the one observation you do **not** file as a backlog finding. Emit it through
