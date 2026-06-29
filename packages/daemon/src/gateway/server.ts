@@ -107,6 +107,50 @@ const isReservedDaemonPath = (pathname: string): boolean =>
 
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+
+  // --- CSRF / DNS-rebind backstop (one onRequest hook, registered FIRST so it is inherited by EVERY plugin
+  //     + route — the websocket and static plugins below included — i.e. UNIFORM coverage with no per-route
+  //     N-1 gap; Fastify only inherits a parent hook into children registered AFTER it). The daemon binds
+  //     127.0.0.1 only, but a loopback bind ALONE does not stop two browser-borne attacks:
+  //       (a) CSRF — any cross-origin page the user visits can fire `mode:'no-cors'` side-effect POSTs
+  //           (/api/orchestration/kill, /api/usage/clear-hold, /api/sessions/:id/stop); a no-cors request
+  //           still carries the page's Origin header.
+  //       (b) DNS-rebind — a page on attacker.com that rebinds its DNS to 127.0.0.1 can reach the host-RCE
+  //           POST /api/terminals; the rebinding page still sends its OWN (attacker) Host header.
+  //     The hook closes both:
+  //       • Origin (anti-CSRF): if PRESENT, its hostname must be loopback (127.0.0.1 / localhost) — every
+  //         external/rebind origin is refused 403. An ABSENT Origin is ALLOWED (fail-safe): the CLI,
+  //         Run-API-key clients and server-to-server callers send none and MUST keep working.
+  //       • Host (anti-DNS-rebind): the Host hostname must be loopback — a rebinding page still presents its
+  //         attacker Host (evil.com[:port]) → 403. The hostname is the tell.
+  //     We match the loopback HOSTNAME, not a single bound-port pin, deliberately: (1) the dev `pnpm web`
+  //     proxy serves the UI from :5317 and forwards to the daemon, so the browser's Origin stays
+  //     `http://localhost:5317` (changeOrigin rewrites Host, not Origin) — a bound-port-only Origin pin would
+  //     sever the dev WebSocket + POSTs; (2) the in-process test suite injects with Host `localhost:80`, so a
+  //     bound-port-only Host pin would 403 it; (3) the port adds no security here — both threats are external
+  //     hostnames, and a loopback-port origin already implies local code execution. The bound-port loopback
+  //     origin/host (paths.ts PORT = LOOM_PORT||4317, the same constant index.ts listens on) is of course a
+  //     subset of "loopback hostname" and stays allowed. ADDITIVE: the /internal/* loopback (req.ip) gate
+  //     below is untouched — defence in depth.
+  const isLoopbackHostname = (h: string | null): boolean => h === "127.0.0.1" || h === "localhost";
+  const hostnameOf = (raw: string, withScheme = false): string | null => {
+    try { return new URL(withScheme ? raw : `http://${raw}`).hostname; } catch { return null; }
+  };
+  app.addHook("onRequest", async (req, reply) => {
+    const origin = req.headers.origin;
+    // PRESENT Origin must be loopback; ABSENT (incl. the literal "null" origin, which fails to parse) is the
+    // fail-safe ALLOW path for non-browser clients. A malformed/non-loopback Origin → reject.
+    if (typeof origin === "string" && origin.length > 0 && !isLoopbackHostname(hostnameOf(origin, true))) {
+      return reply.code(403).send({ error: "cross-origin request refused" });
+    }
+    // Host must be present and loopback (DNS-rebind defence). Real HTTP clients always send Host; a
+    // missing/non-loopback Host → reject.
+    const host = req.headers.host;
+    if (!isLoopbackHostname(typeof host === "string" && host.length > 0 ? hostnameOf(host) : null)) {
+      return reply.code(403).send({ error: "host header not allowed" });
+    }
+  });
+
   await app.register(websocket);
 
   // --- Single-process mode (Releases v1, Part 1): serve the PREBUILT web viewport from the daemon's own
