@@ -7,6 +7,70 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-06-29
+
+A **session & run audit log** with a replayable, diffable timeline; the **review/merge gate** becomes the
+diff-triage centerpiece; **sessions auto-archive** into a project-scoped Archive with Run Replay; a
+**roomier composer**; and a broad **security + reliability hardening** pass (a CSRF/DNS-rebind backstop,
+capability-leak closures, and orchestration race fixes).
+
+### Added
+- **Session & run audit log — replay and diff any run.** Loom now records a durable, replayable timeline of
+  what each session/run did, and Mission Control gains a **fleet-observability + audit-replay** view: scrub a
+  run's events and transcript, and compare one run against another (or its predecessor). **Run Replay** can
+  now focus a single agent — the previously-inert wave/session toggle works — and lists past runs, not just
+  the live one.
+- **The review/merge gate is the diff-triage centerpiece.** Reviewing a worker's branch is now a fast,
+  per-file collapsible diff (risk-sorted, high/medium files open by default) with one-step **Approve & merge**
+  / **Request changes** wired to the existing fail-closed build gate.
+- **Sessions auto-archive on exit (and clear on resume).** Exited sessions move to a **project-scoped Archive
+  page** with a manager→worker fold-out tree, instead of a manual archive action; pre-existing exited sessions
+  are backfilled so your past runs appear. The redundant Workspace "Sessions" card and manual-archive UI are
+  removed.
+- **A roomier composer.** The message box is now **fixed-height** (it can no longer be dragged to eat the
+  terminal pane) with an **expand-to-large-editor** overlay that round-trips your draft losslessly — voice
+  dictation available in both the inline box and the overlay.
+- **A diagnosable crash log.** A top-level fatal-exit handler writes a crash log (rotated at boot), so a
+  daemon that dies leaves a diagnosable record even when run without the supervisor.
+
+### Changed
+- **Repositioned around the real-terminal, subscription-not-API value.** The README, landing site, npm
+  description, and in-app copy now lead with what Loom actually is: orchestrate a fleet of **real Claude Code
+  terminals on your Claude subscription**, local-first — not per-token API bills.
+- **Platform page history sections are collapsible** (collapsed by default) so the Lead/Auditor view stays
+  scannable.
+
+### Fixed
+- **Run Replay and Mission Control reflect archived runs.** After auto-archive, Run Replay now includes
+  archived managers (not only live ones), and the Mission Control counts are labeled **"active"** so the
+  number reads as correct-scope rather than broken. (Owner-reported regressions from the archive change.)
+- **Merge-gate diffs render correctly.** Fixed a parser collision where a content line beginning with
+  `+++`/`---` was mistaken for a file header, and its **renderer twin** where a deleted `---`/`--`-prefixed
+  line painted **gray (as unchanged) instead of red** — so a reviewer can no longer overlook a removed line.
+  The headline diffstat is now single-sourced from the backend so the summary and the chip can't disagree.
+- **The bound-task bar shows on Overview terminal tiles** — the tile now owns its task lookup, so no caller
+  can drop it.
+- **Broad reliability hardening** across sessions, orchestration, git, runs, and pty: forked sessions keep
+  their baseline + profile permissions; a run inherits its profile's pinned model + skills; concurrent worker
+  spawns can't overshoot the configured concurrency cap; `resume()` can't orphan a live terminal; boot
+  reconcile is bounded; the document-converter status can't be flipped stale by an in-flight install; and
+  several boot-migration / index-rebuild edge cases were corrected.
+
+### Security
+- **Closed an auditor transcript path-traversal.** The archived-transcript read now confines caller-supplied
+  ids to the archive root (rejecting `../`, absolute paths, and symlink escapes), so a prompt-injected
+  auditor/workspace-auditor session can't read files outside the archive store.
+- **Added a CSRF / DNS-rebind backstop on the loopback API.** A single request hook rejects cross-origin
+  requests and non-loopback `Host` headers (while still allowing the CLI, Run-API clients, and the local UI),
+  so a web page you visit can't drive your local daemon.
+- **Closed agent config-override capability leaks.** The agent-facing config validator no longer accepts raw
+  session env (which could smuggle a host-executable interpreter or launch path), and a custom permission
+  allowlist no longer drops the load-bearing baseline.
+- **Tightened least-privilege & lifecycle guards.** The Platform operator's profile-assign can no longer bind
+  an agent to an elevated rig, a reserved project refuses a repo-path rebind, autonomous `run` sessions can no
+  longer wedge on an interactive-prompt tool, a task can't be stranded on a non-existent board column, and a
+  worker-spawn race that could double-create on one task was closed.
+
 ## [0.11.0] — 2026-06-27
 
 **Maximize any terminal to a full-screen overlay**, get **context-overflow warnings** for long-running
