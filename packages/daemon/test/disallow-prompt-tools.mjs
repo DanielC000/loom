@@ -1,6 +1,6 @@
 // Role-scoped interactive-prompt-tool disallow test (board card 8dd1dd1c). Deterministic, no daemon,
-// no claude — asserts that a Loom-driven role (worker/setup/auditor/workspace-auditor) spawns with the
-// human-prompt tools forbidden via `--disallowedTools`, while every out-of-scope role's argv stays
+// no claude — asserts that a Loom-driven role (worker/setup/auditor/workspace-auditor/run) spawns with
+// the human-prompt tools forbidden via `--disallowedTools`, while every out-of-scope role's argv stays
 // BYTE-IDENTICAL. A worker that called AskUserQuestion blocked itself waiting on input that can never
 // come from the human; this makes the prompt tools structurally un-callable for those roles.
 // Run: node test/disallow-prompt-tools.mjs
@@ -17,13 +17,14 @@ check("HUMAN_PROMPT_TOOLS = AskUserQuestion + the two plan-mode prompts",
 
 // --- Per-role mapping (disallowedToolsForRole) -------------------------------------------------
 // IN scope: every Loom-driven, never-blocks-on-a-human role gets the full prompt-tool list.
-for (const role of ["worker", "setup", "auditor", "workspace-auditor"]) {
+// `run` is human-LESS (fully autonomous) — nobody can answer a prompt, so it joins the disallow class.
+for (const role of ["worker", "setup", "auditor", "workspace-auditor", "run"]) {
   check(`role '${role}': all human-prompt tools disallowed`,
     JSON.stringify(disallowedToolsForRole(role)) === JSON.stringify([...HUMAN_PROMPT_TOOLS]));
 }
-// OUT of scope: manager/orchestrator + the human-driven platform lead, plus run + plain (null/undefined)
+// OUT of scope: manager/orchestrator + the human-driven platform lead, plus plain (null/undefined)
 // — no disallow at all (a manager legitimately surfaces decisions to the human).
-for (const role of ["manager", "platform", "run", null, undefined]) {
+for (const role of ["manager", "platform", null, undefined]) {
   check(`role '${String(role)}': NO disallow (left byte-identical)`,
     disallowedToolsForRole(role).length === 0);
 }
@@ -87,6 +88,6 @@ for (const role of ["manager", "platform", "run", null, undefined]) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker/setup/auditor/workspace-auditor spawn with AskUserQuestion + Exit/EnterPlanMode disallowed; manager/platform/run/plain stay byte-identical."
+  ? "\n✅ ALL PASS — worker/setup/auditor/workspace-auditor/run spawn with AskUserQuestion + Exit/EnterPlanMode disallowed; manager/platform/plain stay byte-identical."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

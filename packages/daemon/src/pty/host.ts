@@ -803,10 +803,13 @@ export const HUMAN_PROMPT_TOOLS: readonly string[] = ["AskUserQuestion", "ExitPl
  *   - `setup`             — the user-facing "Platform" operator; acts on the user's behalf, never blocks.
  *   - `auditor`           — the Platform Auditor (scheduled, read-mostly transcript reviewer).
  *   - `workspace-auditor` — the Workspace Auditor (read-mostly reviewer of the user's own workspace).
+ *   - `run`               — a fully autonomous, human-LESS, Loom-driven session; nobody can answer a
+ *                           prompt, so a model that called one would block until the hard run-timeout
+ *                           reaped it (a wasted full-timeout window + a `timed_out` run).
  * DELIBERATELY EXCLUDED (left byte-identical): `manager`/orchestrator + `platform` (the human-driven
- * Platform Lead) legitimately surface decisions to the human; a `run` and a plain (role-less) session are
- * out of this fix's scope. Pure + exported so the spawn-args test asserts the per-role mapping with no
- * real claude. (board card 8dd1dd1c)
+ * Platform Lead) legitimately surface decisions to the human; a plain (role-less) session is out of
+ * scope. Pure + exported so the spawn-args test asserts the per-role mapping with no real claude.
+ * (board card 8dd1dd1c)
  */
 export function disallowedToolsForRole(role?: SessionRole | null): string[] {
   switch (role) {
@@ -814,9 +817,10 @@ export function disallowedToolsForRole(role?: SessionRole | null): string[] {
     case "setup":
     case "auditor":
     case "workspace-auditor":
+    case "run":
       return [...HUMAN_PROMPT_TOOLS];
     default:
-      return []; // manager / platform / run / plain — unchanged, no disallow
+      return []; // manager / platform / plain — unchanged, no disallow
   }
 }
 
