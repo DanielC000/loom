@@ -122,13 +122,21 @@ export function parseDiff(patch: string): FileDiff[] {
       else if (ln.startsWith("rename from ")) { renamed = true; oldPath = ln.slice("rename from ".length); }
       else if (ln.startsWith("rename to ")) { renamed = true; newPath = ln.slice("rename to ".length); }
       else if (ln.startsWith("Binary files") || ln.startsWith("GIT binary patch")) binary = true;
-      else if (ln.startsWith("--- ")) { const p = ln.slice(4); if (p !== "/dev/null" && p.startsWith("a/")) oldPath = p.slice(2); }
-      else if (ln.startsWith("+++ ")) { const p = ln.slice(4); if (p !== "/dev/null" && p.startsWith("b/")) newPath = p.slice(2); }
+      // The ---/+++ file headers always precede the first @@, so gate them on !cur: once a hunk is
+      // open every line is content, including an in-hunk line that happens to start with "--- "/"+++ "
+      // (e.g. a deleted `-- comment` rendering as `--- comment`). Without the guard such a content line
+      // was mis-read as a header and silently vanished from the rendered diff AND the ± counts.
+      else if (!cur && ln.startsWith("--- ")) { const p = ln.slice(4); if (p !== "/dev/null" && p.startsWith("a/")) oldPath = p.slice(2); }
+      else if (!cur && ln.startsWith("+++ ")) { const p = ln.slice(4); if (p !== "/dev/null" && p.startsWith("b/")) newPath = p.slice(2); }
       else if (ln.startsWith("@@")) { cur = { header: ln, lines: [] }; hunks.push(cur); }
       else if (cur) {
+        // Inside a hunk the first char alone classifies the line — '+' added, '-' removed, ' ' context,
+        // '\' the no-newline marker. The old `!startsWith("+++"/"---")` guards were there to skip the
+        // file headers, but those are now gated above on !cur, so the guards only mis-dropped real
+        // content lines (a `+++ x` add / `--- x` delete) from the counts.
         cur.lines.push(ln);
-        if (ln.startsWith("+") && !ln.startsWith("+++")) insertions++;
-        else if (ln.startsWith("-") && !ln.startsWith("---")) deletions++;
+        if (ln.startsWith("+")) insertions++;
+        else if (ln.startsWith("-")) deletions++;
       }
     }
 
