@@ -42,6 +42,8 @@ export function DeveloperPlatformView() {
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const liveFor = (agentId?: string) =>
     agentId ? platformSessions.find((s) => s.agentId === agentId && s.processState === "live") : undefined;
+  const liveCountFor = (agentId?: string) =>
+    agentId ? platformSessions.filter((s) => s.agentId === agentId && s.processState === "live").length : 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -55,8 +57,9 @@ export function DeveloperPlatformView() {
         </SectionLabel>
         <p style={{ color: color.textMuted, fontSize: 11, margin: "4px 0 0", fontFamily: font.mono, lineHeight: 1.5, maxWidth: 760 }}>
           The Platform Lead is the always-available, human-driven operator above all projects; the Auditor is the
-          scheduled, read-and-file-only transcript reviewer. Spawning either is a human go-live action — there is
-          exactly one Lead. Findings + manager escalations land on the board below for you to triage.
+          scheduled, read-and-file-only transcript reviewer. Spawning either is a human go-live action — you may run
+          several Leads concurrently (they coordinate via the board). Findings + manager escalations land on the
+          board below for you to triage.
         </p>
       </div>
 
@@ -64,8 +67,8 @@ export function DeveloperPlatformView() {
       <section>
         <SectionLabel>Agents</SectionLabel>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))", gap: 12 }}>
-          <AgentControl agent={lead} role="platform" session={liveFor(lead?.id)} missingLabel="Platform Lead agent not seeded" />
-          <AgentControl agent={auditor} role="auditor" session={liveFor(auditor?.id)} missingLabel="Platform Auditor agent not seeded" />
+          <AgentControl agent={lead} role="platform" session={liveFor(lead?.id)} liveCount={liveCountFor(lead?.id)} missingLabel="Platform Lead agent not seeded" />
+          <AgentControl agent={auditor} role="auditor" session={liveFor(auditor?.id)} liveCount={liveCountFor(auditor?.id)} missingLabel="Platform Auditor agent not seeded" />
         </div>
       </section>
 
@@ -139,11 +142,13 @@ function CollapsibleHistory({ title, hint, children }: { title: string; hint: st
   );
 }
 
-// One agent's go-live card: live status + a spawn button (disabled while a session is live) and a stop
-// button (graceful, when live). Spawn role is the agent's platform role — "platform" (Lead) spawns the
-// human-equivalent operator; "auditor" spawns the read-and-file-only Auditor. Both are HUMAN-only REST.
-function AgentControl({ agent, role, session, missingLabel }:
-  { agent?: Agent; role: "platform" | "auditor"; session?: SessionListItem; missingLabel: string }) {
+// One agent's go-live card: live status + a spawn button and a stop button (graceful, when live). Spawn
+// role is the agent's platform role — "platform" (Lead) spawns the human-equivalent operator; "auditor"
+// spawns the read-and-file-only Auditor. Both are HUMAN-only REST. The Lead is NOT a singleton: its Spawn
+// button stays enabled while a Lead is live, so the human can mint additional concurrent Leads (they
+// coordinate via the board). The Auditor keeps its disabled-while-live gate unchanged.
+function AgentControl({ agent, role, session, liveCount, missingLabel }:
+  { agent?: Agent; role: "platform" | "auditor"; session?: SessionListItem; liveCount: number; missingLabel: string }) {
   const qc = useQueryClient();
   const spawn = useMutation({
     mutationFn: () => api.startSession(agent!.id, role),
@@ -154,26 +159,35 @@ function AgentControl({ agent, role, session, missingLabel }:
     onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
   });
   const roleLabel = role === "platform" ? "Lead" : "Auditor";
+  const isPlatform = role === "platform";
 
   if (!agent) {
     return <Panel style={{ padding: 12 }}><span style={{ color: color.amber, fontFamily: font.mono, fontSize: 12 }}>{missingLabel}</span></Panel>;
   }
   const live = session?.processState === "live";
+  // Platform Lead: never gated on live (multiple concurrent Leads allowed). Auditor: keep the create-only
+  // UX where Spawn is disabled while a run is live.
+  const spawnDisabled = spawn.isPending || (!isPlatform && live);
   return (
     <Panel style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Badge tone={role === "platform" ? "phosphor" : "cyan"}>{roleLabel}</Badge>
         <strong style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{agent.name}</strong>
         <span style={{ flex: 1 }} />
+        {isPlatform && liveCount > 0 && (
+          <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11 }}>{liveCount} live</span>
+        )}
         {live
           ? <StatusPill tone={session!.busy ? "amber" : "phosphor"} glow={session!.busy} label={session!.busy ? "busy" : "idle"} />
           : <StatusPill tone="muted" label="offline" />}
       </div>
       <div style={{ display: "flex", gap: 8 }}>
-        <Button variant="primary" disabled={live || spawn.isPending}
-          title={live ? `${roleLabel} is already live` : `Spawn the ${roleLabel} (human go-live)`}
+        <Button variant="primary" disabled={spawnDisabled}
+          title={isPlatform
+            ? (live ? `Spawn another ${roleLabel} — multiple may run concurrently` : `Spawn the ${roleLabel} (human go-live)`)
+            : (live ? `${roleLabel} is already live` : `Spawn the ${roleLabel} (human go-live)`)}
           onClick={() => spawn.mutate()}>
-          {spawn.isPending ? "Spawning…" : live ? "Live" : `Spawn ${roleLabel}`}
+          {spawn.isPending ? "Spawning…" : isPlatform ? `Spawn ${roleLabel}` : live ? "Live" : `Spawn ${roleLabel}`}
         </Button>
         {live && (
           <Button variant="danger" disabled={stop.isPending}
@@ -191,7 +205,9 @@ function AgentControl({ agent, role, session, missingLabel }:
 // The live platform-session terminals (Lead/Auditor), tiled with a graceful-stop + maximize control.
 // Dead/exited rows are dropped (the live set only) — mirrors the Terminals grid, scoped to the reserved
 // project. Each tile is the shared PlatformSessionTile (status + PresetPrompts + Stop + maximize, NO
-// Fork — these are singletons), so the dev/end-user platform tiles can't drift.
+// Fork — these are elevated platform sessions, so forking is withheld to avoid minting an unaudited
+// elevated session off-screen; spawn fresh Leads from the Agents controls above instead). Multiple live
+// Leads may be tiled here at once.
 function PlatformSessions({ sessions }: { sessions: SessionListItem[] }) {
   const live = sessions.filter((s) => s.processState === "live");
   if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>No platform sessions running. Spawn the Lead or Auditor above.</p>;

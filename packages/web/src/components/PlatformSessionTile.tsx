@@ -13,9 +13,12 @@ import { color, font } from "../theme";
 // header controls (status + PresetPrompts + Stop + maximize) and the maximize behavior can't drift
 // across the dev/end-user editions (same rationale as TerminalTile's own extraction).
 //
-// DELIBERATELY NOT TerminalTile: the platform sessions are SINGLETONS (Lead / Auditor / operator), so
-// they must NOT expose Fork — forking would mint a second one and break the singleton invariant (the
-// reason these tiles are hand-rolled in the first place). The per-spot differences are props: tile
+// DELIBERATELY NOT TerminalTile: these are ELEVATED platform/operator sessions (Lead / Auditor /
+// operator), so they must NOT expose Fork — forking would mint a second ELEVATED session off-screen,
+// bypassing the deliberate human go-live action (the reason these tiles are hand-rolled in the first
+// place). Spawning is always an explicit control on the Platform page, never an incidental Fork. (The
+// Lead is no longer a singleton — the human may run several — but a fresh Lead is spawned from the
+// Agents controls, not forked from a tile.) The per-spot differences are props: tile
 // `height`, an optional `maxWidth` (the single-session end-user tiles cap their width), and the Stop
 // button's `title` (the Auditor names "this Auditor run").
 //
@@ -57,7 +60,7 @@ export function PlatformSessionTile({
       </span>
       <div style={{ display: "flex", gap: 4 }}>
         <PresetPromptsButton sessionId={session.id} />
-        {/* No Fork on platform sessions — forking would mint a second singleton (Lead/Auditor/operator). */}
+        {/* No Fork on platform sessions — forking would mint a second ELEVATED session (Lead/Auditor/operator) off-screen, bypassing the human go-live action. Spawn a fresh Lead from the Agents controls instead. */}
         <Button style={{ padding: "0 8px" }} disabled={stop.isPending} title={stopTitle}
           onClick={() => stop.mutate(session.id)}>Stop</Button>
         <Button style={{ padding: "0 6px" }} title={maximized ? "Restore terminal (Esc)" : "Maximize terminal"}

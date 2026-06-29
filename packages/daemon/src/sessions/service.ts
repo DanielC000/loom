@@ -436,40 +436,26 @@ export class SessionService {
    * Start a NEW PLATFORM-LEAD session in an agent (phase-2 Pillar C). Mirrors startManager, but
    * role 'platform' (so it gets the loom-platform MCP + allowlist at spawn, NOT orchestration).
    * A platform-lead creates/configures projects + agents; it runs in its host project's repo.
+   *
+   * CREATE-ONLY (multiple concurrent Leads allowed): a manual Spawn ALWAYS mints a FRESH platform
+   * session — exactly like startAuditor below. The owner may run several live Leads at once; they
+   * coordinate via the shared Platform board. (The old "never two LIVE Leads" singleton short-circuit
+   * — reuse an already-live platform session instead of spawning a second — has been removed.)
+   *
+   * This is NOT the trust boundary. Platform-spawn is HUMAN-REST only: gateway POST
+   * /api/agents/:id/sessions {role:"platform"} reaches here, and an existing Lead's self-recycle
+   * (recyclePlatformLead) is the only other spawn surface — session_spawn REFUSES role:"platform", so
+   * no agent/MCP path can mint one. The singleton was an operational guarantee, never the boundary.
+   *
+   * On-demand RESUME of an EXITED Lead stays an explicit human action (the Lead/Auditor History
+   * "Resume" button → resumeSession); this path never resumes — it always INSERT+spawns. Restart-resume
+   * is independent: index.ts → resumeFleetOnBoot resumes captured live sessions by id on a daemon_restart.
    */
   startPlatformLead(agentId: string): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
     if (!project) throw new Error("project not found");
-
-    // SINGLETON GUARANTEE = "never two LIVE Leads" (NOT "one row ever"). A manual Spawn always gets a
-    // FRESH session; the only thing we refuse is minting a SECOND live Lead while one is already running.
-    // (Earlier this was RESUME-OR-CREATE — it silently resumed the latest EXITED Lead on a manual Spawn,
-    // which the owner reported as "Spawn resumes the old session instead of starting a new one". On-demand
-    // resume is now an explicit human action: the Lead/Auditor History "Resume" button → resumeSession.)
-    //
-    // So: if a platform session is already LIVE, reuse it as-is (its pty outlived the viewer — closing a
-    // ws never kills it — so there is nothing to re-spawn, and we must not spawn a duplicate). This is the
-    // load-bearing live-precedence guard (the P1 0e40dde fix). Otherwise (none live) FALL THROUGH and
-    // INSERT+spawn a brand-new Lead — never resume an exited one here.
-    //
-    // LIVE-PRECEDENCE (load-bearing): listSessions is ordered by last_activity DESC, so a recently-STOPPED
-    // Lead (frozen last_activity) can sort AHEAD of an idle-but-LIVE Lead. We therefore scan for ANY live
-    // platform session rather than just inspecting platforms[0] (there should be ≤1; if legacy
-    // accumulation left >1, the most-recently-active live one wins).
-    //
-    // Restart-resume is INDEPENDENT of this path: index.ts → resumeFleetOnBoot resumes captured sessions
-    // by id, so a daemon_restart still brings the Lead back. Changing this function does not affect it.
-    //
-    // Scope: this is the HUMAN platform route only (gateway POST /api/agents/:id/sessions {role:
-    // "platform"}); no agent/MCP path reaches here, so "platform sessions are human-created only"
-    // stands. The Auditor (startAuditor) is deliberately LEFT create-only — each scheduled fire spawns
-    // a fresh ephemeral read-and-file audit session, where a singleton would be wrong.
-    // db.liveSessions is the canonical live-over-recency query (filters to LIVE before any .find, so a
-    // recently-STOPPED Lead can't sort ahead of an idle-but-LIVE one — see its note + 0e40dde).
-    const live = this.db.liveSessions(agentId).find((s) => s.role === "platform");
-    if (live) return live; // already attached — reuse, no new row, no spawn (never two LIVE Leads)
 
     const config = resolveConfig(project.config);
     // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
@@ -642,17 +628,17 @@ export class SessionService {
   }
 
   /**
-   * Start a NEW SETUP-ASSISTANT session in an agent (Setup Assistant E1-5). Mirrors startPlatformLead
-   * EXACTLY — incl. its liveness-not-recency SINGLETON guard — but passes callerRole "setup" so the
-   * session is LOCKED to the curated, ungated loom-setup MCP surface (E1-3). Because an EXPLICIT caller
-   * role ALWAYS wins in resolveAgentSpawn, the session role is "setup" regardless of the agent's profile
-   * role — the gate is keyed off the SESSION role, never the profile role.
+   * Start a NEW SETUP-ASSISTANT session in an agent (Setup Assistant E1-5). Shaped like startManager but
+   * passes callerRole "setup" so the session is LOCKED to the curated, ungated loom-setup MCP surface
+   * (E1-3). Because an EXPLICIT caller role ALWAYS wins in resolveAgentSpawn, the session role is "setup"
+   * regardless of the agent's profile role — the gate is keyed off the SESSION role, never the profile role.
    *
-   * SINGLETON GUARANTEE = "never two LIVE setup sessions" (NOT "one row ever"), identical to the Lead.
-   * If a setup session is already LIVE, reuse it as-is (its pty outlived the viewer) — never mint a 2nd.
-   * Otherwise FALL THROUGH and INSERT+spawn a brand-new setup session (never resume an exited one here).
-   * Uses db.liveSessions (the canonical live-over-recency query — filters to LIVE before any .find, so a
-   * recently-STOPPED setup session can't sort ahead of an idle-but-LIVE one; see its note + 0e40dde).
+   * SINGLETON GUARANTEE = "never two LIVE setup sessions" (NOT "one row ever"). UNLIKE the Platform Lead
+   * (startPlatformLead is now create-only — multiple live Leads may coexist), the Setup operator stays a
+   * singleton: if a setup session is already LIVE, reuse it as-is (its pty outlived the viewer) — never
+   * mint a 2nd. Otherwise FALL THROUGH and INSERT+spawn a brand-new setup session (never resume an exited
+   * one here). Uses db.liveSessions (the canonical live-over-recency query — filters to LIVE before any
+   * .find, so a recently-STOPPED setup session can't sort ahead of an idle-but-LIVE one; see its note + 0e40dde).
    *
    * HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"setup"}) — no agent/MCP path mints one
    * (session_spawn on the setup surface itself REFUSES role "setup", so a setup session can't self-clone).
@@ -2896,29 +2882,26 @@ export class SessionService {
 
   /**
    * Recycle the PLATFORM LEAD near its context limit (the platform-surface `recycle_me` flow) — the
-   * SINGLETON analogue of recycleManager. The Lead has already run /session-end and written
+   * platform analogue of recycleManager. The Lead has already run /session-end and written
    * `continuationPrompt`; Loom boots a FRESH successor Lead seeded with the agent warm-up + that
    * continuation (NOT --resume — fresh context, intent carried), carries the predecessor's wakes +
    * in-flight inbound queue onto it, then closes the predecessor (deferred, so this call's tool
    * response flushes first). gen+1; recycledFrom = old. There is NO worker re-parenting: the Lead's
    * spawned sessions are independent (not parented to it), unlike a manager's workers.
    *
-   * SINGLETON GUARD — NEVER TWO LIVE LEADS (the trust boundary, load-bearing). The predecessor is
-   * ITSELF a LIVE platform session, so — unlike recycleManager (no singleton: it spawns the successor
-   * while the old manager stays live for 3s) — we must RETIRE THE PREDECESSOR IN THE DB *BEFORE* the
-   * successor is marked live. The retire → insert → flip-live transition runs SYNCHRONOUSLY with NO
-   * await between, so on Node's single-threaded loop no concurrent startPlatformLead / watcher tick
-   * can ever observe two live platform rows: at the DB level there are either ZERO live Leads
-   * (mid-transition) or exactly ONE. The SAME chokepoint startPlatformLead's guard uses
-   * (db.liveSessions(...).find(role === "platform")) therefore can never be raced into a second live
-   * Lead — a post-recycle Spawn finds the live successor and reuses it. The predecessor's pty is then
-   * hard-stopped on a 3s defer (response-flush); because the successor carries `recycledFrom = old.id`,
-   * `hasSuccessor(old.id)` is true, so the crash-recovery watchdog never resurrects the retired
-   * predecessor (recordUnexpectedExit + the tick both skip a superseded session) — no orphan, no
-   * zombie second Lead.
+   * PER-LINEAGE REPLACEMENT (1 recycle → 1 successor, NOT a global singleton). Multiple live Leads may
+   * coexist (startPlatformLead is create-only); recycle replaces ONLY the calling Lead's lineage. The
+   * predecessor is ITSELF a LIVE platform session, so we retire it in the DB *BEFORE* the successor is
+   * marked live and run retire → insert → flip-live SYNCHRONOUSLY with NO await between. This keeps the
+   * transition atomic on Node's single-threaded loop — the predecessor and its successor are never both
+   * live at once (no double-counted lineage, no zombie) — even though OTHER unrelated Leads stay live
+   * throughout. The predecessor's pty is then hard-stopped on a 3s defer (response-flush); because the
+   * successor carries `recycledFrom = old.id`, `hasSuccessor(old.id)` is true, so the crash-recovery
+   * watchdog never resurrects the retired predecessor (recordUnexpectedExit + the tick both skip a
+   * superseded session) — no orphan, no zombie.
    *
-   * This is the ONLY sanctioned path that spawns a platform session besides the human REST
-   * startPlatformLead: it is reachable ONLY by an existing platform Lead (the platform MCP router gates
+   * This is one of two sanctioned paths that spawn a platform session (the other is the human-REST
+   * startPlatformLead): it is reachable ONLY by an existing platform Lead (the platform MCP router gates
    * role === "platform", and this method re-asserts old.role === "platform"), and it mints exactly one
    * successor of the same role. session_spawn still refuses role "platform" — no general agent-facing
    * platform-spawn path is opened.
@@ -2931,11 +2914,11 @@ export class SessionService {
     // up front so the predecessor stays live and the Lead can re-issue a real continuation (mirrors
     // recycleManager).
     if (!continuationPrompt || !continuationPrompt.trim()) throw new Error("continuationPrompt must not be blank");
-    // IDEMPOTENCY / anti-double-recycle (SINGLETON-CRITICAL): a Lead may be recycled at MOST once. A
-    // SECOND recycle_me on the same predecessor (e.g. a double tool-call in one turn) would retire the
-    // already-exited predecessor again and spawn a SECOND live successor → TWO live Leads. Refuse if a
-    // successor already exists (mirrors resume()'s superseded-session refusal). The whole pre-spawn block
-    // runs synchronously, so this check + the retire/spawn below are one atomic guard on the event loop.
+    // IDEMPOTENCY / anti-double-recycle: a Lead may be recycled at MOST once. A SECOND recycle_me on the
+    // same predecessor (e.g. a double tool-call in one turn) would retire the already-exited predecessor
+    // again and spawn a SECOND successor for the SAME lineage (a duplicate, not just another Lead). Refuse
+    // if a successor already exists (mirrors resume()'s superseded-session refusal). The whole pre-spawn
+    // block runs synchronously, so this check + the retire/spawn below are one atomic guard on the event loop.
     if (this.db.hasSuccessor(oldLeadId)) throw new Error("this Lead has already been recycled — its successor is live");
     const agent = this.db.getAgent(old.agentId);
     const project = this.db.getProject(old.projectId);
@@ -2980,10 +2963,11 @@ export class SessionService {
       recycledFrom: old.id,
     };
 
-    // === SINGLETON-CRITICAL SECTION (synchronous — NO await) — never two live Leads. ===============
-    // Retire the predecessor in the DB FIRST so the live-Lead guard (db.liveSessions(...).find(role ===
-    // "platform")) sees ZERO live Leads, THEN insert + flip the successor live. With no await between,
-    // no concurrent spawn/watcher tick can interleave to observe two live platform rows.
+    // === ATOMIC LINEAGE HANDOFF (synchronous — NO await) — predecessor + successor never both live. ===
+    // Retire the predecessor in the DB FIRST, THEN insert + flip the successor live. With no await between,
+    // no concurrent watcher tick can interleave to observe BOTH rows of this lineage live at once (the
+    // crash-recovery/superseded checks key off this). Other unrelated Leads stay live throughout — this is
+    // a per-lineage replacement, not a global singleton.
     this.db.setProcessState(old.id, "exited");
     this.db.insertSession(fresh);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
@@ -3002,7 +2986,7 @@ export class SessionService {
       model: leadSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`)
       skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
     });
-    // === END SINGLETON-CRITICAL SECTION ===========================================================
+    // === END ATOMIC LINEAGE HANDOFF ===============================================================
 
     // Carry the predecessor's scheduled wakes + in-flight inbound queue (durable cross-tree platform
     // messages + held human turns) onto the successor — it owns the platform now. Re-pointing the wakes

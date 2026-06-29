@@ -1,8 +1,8 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Setup Assistant E1-5 — SessionService.startSetup: a SINGLETON live setup session on the curated
-// loom-setup surface (E1-3). Mirrors platform-lead-singleton.mjs EXACTLY (startSetup mirrors
-// startPlatformLead's liveness-not-recency guard): startSetup reuses an already-LIVE setup session (so a
-// manual Spawn can never mint a SECOND live setup session) but otherwise CREATES A FRESH session.
+// loom-setup surface (E1-3). The Setup operator is deliberately a singleton (unlike the Platform Lead,
+// which is now create-only — multiple Leads may coexist): startSetup reuses an already-LIVE setup session
+// (so a manual Spawn can never mint a SECOND live setup session) but otherwise CREATES A FRESH session.
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic: a REAL Db + SessionService driven against a FAKE
 // pty (createPty/stop seam). A real temp git repo backs the spawn cwd; the only thing faked is the claude
 // pty. A real (stub) transcript file is written under the sandboxed HOME so an exited setup session would

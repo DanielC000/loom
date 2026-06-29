@@ -756,13 +756,15 @@ export class PlatformMcpRouter {
     // --- self-recycle / handoff (the Lead's OWN lifecycle). The doctrine (/platform-lead) mandates the
     //     Lead self-recycle at a clean seam, but a platform session has no manager surface to call
     //     recycle_me on — and the skill forbids the workaround (spawning a platform session). This tool
-    //     closes that gap: it is the SINGLETON analogue of the manager's recycle_me. SECURITY: it is the
-    //     ONLY sanctioned platform-spawn path besides the human REST startPlatformLead — reachable ONLY by
-    //     an existing Lead (this router is role==="platform"-gated AND recyclePlatformLead re-asserts the
-    //     caller is a platform session), it mints exactly one same-role successor, and session_spawn still
-    //     REFUSES role "platform" (no general agent-facing platform-spawn path is opened). The never-two-
-    //     live-Leads singleton is preserved IN recyclePlatformLead (predecessor retired BEFORE the successor
-    //     goes live, atomically on the single-threaded loop). ---
+    //     closes that gap: it is the platform analogue of the manager's recycle_me. Multiple live Leads
+    //     may coexist; recycle replaces ONLY the calling Lead's lineage (1 recycle → 1 successor).
+    //     SECURITY: it is one of two sanctioned platform-spawn paths (the other is the human REST
+    //     startPlatformLead) — reachable ONLY by an existing Lead (this router is role==="platform"-gated
+    //     AND recyclePlatformLead re-asserts the caller is a platform session), it mints exactly one
+    //     same-role successor, and session_spawn still REFUSES role "platform" (no general agent-facing
+    //     platform-spawn path is opened). The per-lineage atomic handoff is preserved IN
+    //     recyclePlatformLead (predecessor retired BEFORE its successor goes live, atomically on the
+    //     single-threaded loop — so a lineage never has two live rows + double-recycle is refused). ---
     server.registerTool(
       "recycle_me",
       {
@@ -773,8 +775,9 @@ export class PlatformMcpRouter {
           "continuationPrompt for your successor — current cross-project state, what's in flight, the next steps, and " +
           "key decisions. Loom retires YOU and boots a FRESH successor Lead (your same identity/agent + warm-up) seeded " +
           "with your continuationPrompt; the successor boots into a normal pickup (reads its resume doc + the platform " +
-          "board to re-orient). The never-two-live-Leads singleton holds: you are retired BEFORE the successor goes " +
-          "live (atomic), so there is never a second live Lead and no orphaned session. continuationPrompt must not be blank.",
+          "board to re-orient). Per-lineage atomic handoff: YOU are retired BEFORE your successor goes " +
+          "live (atomic), so this lineage never has two live rows and no session is orphaned — other live Leads, " +
+          "if any, are unaffected. continuationPrompt must not be blank.",
         inputSchema: { continuationPrompt: z.string() },
       },
       async ({ continuationPrompt }) => {

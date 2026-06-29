@@ -1,10 +1,10 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Platform Lead SELF-RECYCLE (card 5bb91d07) — the SINGLETON analogue of the manager's recycle_me.
-// recyclePlatformLead finalises the current Lead and boots its successor in ONE operation. This test is
-// the make-or-break proof of the TRUST-BOUNDARY guarantee: it is IMPOSSIBLE to end up with two LIVE
-// platform (Lead) sessions via this op or any race.
+// Platform Lead SELF-RECYCLE (card 5bb91d07) — the platform analogue of the manager's recycle_me.
+// recyclePlatformLead finalises the current Lead and boots its successor in ONE operation. Recycle is a
+// PER-LINEAGE 1→1 replacement (NOT a global singleton — multiple live Leads may coexist via Spawn): this
+// test proves a recycle never leaves a lineage with two live rows, and double-recycle is refused.
 //
-// DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic like platform-lead-singleton.mjs: a REAL Db +
+// DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic like platform-lead-multi.mjs: a REAL Db +
 // SessionService driven against a FAKE pty (createPty/stop seam). A real temp git repo backs the spawn
 // cwd; the only thing faked is the claude pty.
 //
@@ -14,18 +14,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the agent warm-up + the continuation (a normal pickup); hasSuccessor(predecessor) === true so
 //       crash-recovery can never resurrect it.
 //   (2) NO ORPHAN — the predecessor's pty is hard-stopped on the deferred (3s) teardown.
-//   (3) SINGLETON CANNOT BE RACED INTO TWO-LIVE:
-//         (3a) at NO observable point does the live-platform count exceed 1 (before/after the synchronous
+//   (3) LINEAGE HANDOFF IS ATOMIC + IDEMPOTENT:
+//         (3a) at NO observable point does this lineage have two live rows (before/after the synchronous
 //              critical section there are exactly 1 / 1; mid-transition is unobservable on the single-
 //              threaded loop, which is the whole point of the no-await retire->spawn).
-//         (3b) a post-recycle startPlatformLead (a human Spawn) finds the LIVE successor and REUSES it —
-//              same id, no new row, no new spawn (the SAME never-two-live guard the recycle relies on).
+//         (3b) a post-recycle startPlatformLead (a human Spawn) is CREATE-ONLY — it mints a NEW live Lead
+//              (NO reuse of the successor), so two live Leads coexist. The live-reuse short-circuit is gone.
 //         (3c) a DOUBLE recycle_me on the same predecessor (a double tool-call) is REFUSED — it would
-//              otherwise spawn a SECOND live successor; hasSuccessor makes the second call throw.
+//              otherwise spawn a SECOND successor for that lineage; hasSuccessor makes the second call throw.
 //   (4) FAIL-SAFE GUARDS — a blank continuation and a non-platform caller are both refused BEFORE any
 //       teardown (predecessor untouched, no successor, no recycle_begin), so a bad call never destroys
 //       the live Lead.
-//   (5) CHAIN — recycling the successor again yields gen+2 and still EXACTLY ONE live Lead.
+//   (5) CHAIN — recycling the successor again yields gen+2 and still EXACTLY ONE live Lead in that lineage.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-lead-recycle.mjs
 import fs from "node:fs";
@@ -126,14 +126,19 @@ try {
   check("(3c) double recycle spawned NOTHING (no second successor)", host.spawned.length === spawnsBeforeDouble);
   check("(3c) STILL exactly one live Lead after the refused double recycle", liveLeads("agentLead").length === 1 && liveLeads("agentLead")[0]?.id === succ.id);
 
-  // ============================ (3b) post-recycle Spawn REUSES the live successor =====================
-  // The SAME never-two-live guard the recycle relies on: a human Spawn (startPlatformLead) now finds the
-  // LIVE successor and reuses it — same id, NO new row, NO new spawn. Can't be raced into two-live.
-  const spawnsBeforeReuse = host.spawned.length;
-  const reuse = svc.startPlatformLead("agentLead");
-  check("(3b) post-recycle Spawn REUSES the live successor (same id)", reuse.id === succ.id);
-  check("(3b) post-recycle Spawn created NO new row + NO new spawn", platformRows("agentLead").length === 2 && host.spawned.length === spawnsBeforeReuse);
-  check("(3b) STILL exactly one live Lead", liveLeads("agentLead").length === 1);
+  // ============================ (3b) post-recycle Spawn is CREATE-ONLY (no reuse) =====================
+  // The live-reuse short-circuit is GONE: a human Spawn (startPlatformLead) now ALWAYS mints a FRESH Lead,
+  // even with a live successor present — so multiple live Leads may coexist. (Recycle stays per-lineage
+  // 1→1; this Spawn opens a NEW lineage and does not touch the successor's.)
+  const spawnsBeforeSpawn = host.spawned.length;
+  const extra = svc.startPlatformLead("agentLead");
+  check("(3b) post-recycle Spawn mints a NEW Lead (NO reuse of the live successor)", extra.id !== succ.id && extra.processState === "live");
+  check("(3b) post-recycle Spawn created a NEW row + a fresh spawn", platformRows("agentLead").length === 3 && host.spawned.length === spawnsBeforeSpawn + 1);
+  check("(3b) TWO live Leads now coexist (the successor + the freshly-spawned Lead)", liveLeads("agentLead").length === 2);
+  // Retire the extra Lead so the lineage-chain assertions below operate on the successor's single lineage.
+  db.setProcessState(extra.id, "exited");
+  check("(3b) after retiring the extra Lead, exactly one live Lead remains (the successor)",
+    liveLeads("agentLead").length === 1 && liveLeads("agentLead")[0]?.id === succ.id);
 
   // ============================ (5) CHAIN — recycle the successor again ===============================
   const succ2 = await svc.recyclePlatformLead(succ.id, "SECOND HANDOFF: continue from here");
@@ -181,6 +186,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — recyclePlatformLead: atomic retire-then-spawn keeps EXACTLY ONE live Lead (never two), successor inherits identity + a normal pickup, predecessor cleanly retired (no orphan), and the singleton cannot be raced into two-live (double-recycle refused, post-recycle Spawn reuses)."
+  ? "\n✅ ALL PASS — recyclePlatformLead: atomic retire-then-spawn keeps EXACTLY ONE live Lead PER LINEAGE, successor inherits identity + a normal pickup, predecessor cleanly retired (no orphan), double-recycle refused; a post-recycle Spawn is create-only (mints a NEW Lead — multiple live Leads may coexist)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

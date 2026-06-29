@@ -548,11 +548,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const project = deps.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
     if (!project) return reply.code(404).send({ error: "no reserved Loom Platform project" });
     const agents = deps.db.listAgents(project.id);
-    // LIVE-SESSION INFO (duplicate-singleton guard): surface each platform agent's currently-LIVE
-    // sessions so a spawn decision sees an existing live Lead/Auditor before minting a SECOND (a manager
-    // once spawned a duplicate Lead because this endpoint omitted liveness). Sourced from db.liveSessions
-    // — the canonical live-over-recency query — so a recently-STOPPED Lead can NEVER mask an idle-but-LIVE
-    // one. Each entry is a light summary (no transcript/cwd/branch); `role` is the singleton key
+    // LIVE-SESSION INFO: surface each platform agent's currently-LIVE sessions as a per-agent LIST, so the
+    // UI can show how many Leads/Auditors are live and offer Resume/Attach. Multiple live Leads may coexist
+    // (Spawn is create-only), so this is an informational roll-up, NOT a duplicate-Lead guard. Sourced from
+    // db.liveSessions — the canonical live-over-recency query — so a recently-STOPPED session can NEVER mask
+    // an idle-but-LIVE one. Each entry is a light summary (no transcript/cwd/branch); `role` distinguishes
     // ("platform" = Lead, "auditor" = Auditor) and `agentId` lets a consumer roll up per-agent counts.
     const liveSessions = agents.flatMap((a) =>
       deps.db.liveSessions(a.id).map((s) => ({
