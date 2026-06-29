@@ -138,8 +138,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   };
   app.addHook("onRequest", async (req, reply) => {
     const origin = req.headers.origin;
-    // PRESENT Origin must be loopback; ABSENT (incl. the literal "null" origin, which fails to parse) is the
-    // fail-safe ALLOW path for non-browser clients. A malformed/non-loopback Origin → reject.
+    // PRESENT Origin must be loopback. An ABSENT Origin is the fail-safe ALLOW path for non-browser
+    // clients (CLI / Run-API-key / server-to-server). A present-but-malformed Origin — including the
+    // literal "null" origin (a sandboxed-iframe CSRF sends `Origin: null`), which fails to parse → not
+    // loopback → 403 — is REJECTED (the safer behavior).
     if (typeof origin === "string" && origin.length > 0 && !isLoopbackHostname(hostnameOf(origin, true))) {
       return reply.code(403).send({ error: "cross-origin request refused" });
     }
@@ -955,7 +957,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // validated machine config). Allowed on a reserved project (metadata only — not a removal).
   app.patch("/api/projects/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    const p = deps.db.getProject(id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
     const b = (req.body ?? {}) as { name?: unknown; vaultPath?: unknown; repoPath?: unknown };
     if (b.name !== undefined && (typeof b.name !== "string" || !b.name.trim()))
       return reply.code(400).send({ error: "name must be a non-empty string" });
@@ -967,6 +970,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // the elevated platform MCP project_update. A non-repo or a live worktree session blocks the write.
     const repoPath = b.repoPath === undefined ? undefined : (b.repoPath as string).trim();
     if (repoPath !== undefined) {
+      // A repoPath REBIND repoints the project's git — more than metadata; REFUSE it on the reserved
+      // Platform home (mirroring the DELETE/archive reserved refusals below). Benign metadata edits
+      // (name / vaultPath) stay allowed on a reserved project.
+      if (p.reserved) return reply.code(400).send({ error: "cannot rebind the repoPath of the reserved Loom Platform project" });
       const check = await checkRepoRebind(deps.db, id, repoPath);
       if (!check.ok) return reply.code(400).send({ error: check.error, ...(check.liveSessions ? { liveSessions: check.liveSessions } : {}) });
     }
@@ -1413,10 +1420,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const now = new Date().toISOString();
     // Role-resolved default landing (not the hardcoded "backlog" key) so a renamed lane still receives
     // new cards; "backlog" is a defensive backstop only.
-    const landing = columnKeyForRole(resolveConfig(deps.db.getProject(projectId)?.config).kanbanColumns, "defaultLanding") ?? "backlog";
+    const cols = resolveConfig(deps.db.getProject(projectId)?.config).kanbanColumns;
+    const landing = columnKeyForRole(cols, "defaultLanding") ?? "backlog";
+    // Validate an EXPLICIT columnKey against the resolved board; an unknown key falls back to the landing
+    // lane (same as omitting it) so a bogus key can never strand the card on a phantom lane — invisible in
+    // the board GET grouping and bypassing the orphan-safe re-keying setProjectConfigSafe/updateBoardColumns
+    // provide. (The agent-facing MCP create/update hard-error instead; this REST path is human/UI-facing.)
+    const columnKey = b.columnKey !== undefined && cols.some((c) => c.key === b.columnKey) ? b.columnKey : landing;
     const task: Task = {
       id: randomUUID(), projectId, title: b.title, body: b.body ?? "",
-      columnKey: b.columnKey ?? landing, position: Date.now(),
+      columnKey, position: Date.now(),
       priority: b.priority ?? "p2", createdAt: now, updatedAt: now,
     };
     deps.db.insertTask(task);
@@ -1429,6 +1442,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const id = (req.params as { id: string }).id;
     const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority">>;
     if (b.priority !== undefined && !isTaskPriority(b.priority)) return reply.code(400).send({ error: "priority must be one of p0|p1|p2|p3" });
+    // Validate a columnKey MOVE against the task's project board; an unknown key falls back to the landing
+    // lane instead of writing blind → no card stranded on a phantom lane (invisible to the board GET).
+    if (b.columnKey !== undefined) {
+      const cols = resolveConfig(deps.db.getProject(deps.db.getTask(id)?.projectId ?? "")?.config).kanbanColumns;
+      if (!cols.some((c) => c.key === b.columnKey)) b.columnKey = columnKeyForRole(cols, "defaultLanding") ?? "backlog";
+    }
     deps.db.updateTask(id, b);
     return { ok: true };
   });
