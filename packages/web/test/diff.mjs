@@ -9,7 +9,7 @@
 // CI (which runs `pnpm build`). Run it standalone with:
 //   node --experimental-strip-types packages/web/test/diff.mjs
 import assert from "node:assert/strict";
-import { parseDiff, analyzeDiff } from "../src/lib/diff.ts";
+import { parseDiff, analyzeDiff, hunkLineKind, rawPatchLineKind } from "../src/lib/diff.ts";
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
@@ -183,6 +183,60 @@ check("empty and non-diff patches yield no files", () => {
   assert.deepEqual(parseDiff("   \n  "), []);
   assert.deepEqual(parseDiff("not a diff at all"), []);
   assert.equal(analyzeDiff("").headline, "No file changes vs main.");
+});
+
+// 9) THE RENDER REGRESSION (Major #2 — the render twin of #1). The merge-gate per-file diff (FileHunks)
+//    colors each hunk CONTENT line via hunkLineKind (→ Diff.tsx KIND_COLOR: del=red, add=green, meta=
+//    muted gray). parseDiff strips the real `+++ b/`/`--- a/` file headers, so a deleted line whose
+//    CONTENT starts with `---`/`--`/`+++` (a markdown thematic break, a YAML front-matter delimiter, a
+//    SQL/CLI `-- comment`) arrives as a content line like `----`/`--- x`/`+++x`. The OLD shared lineColor
+//    classified those as the muted "meta" file-header gray → a deletion read as unchanged context, so a
+//    human approver could overlook a removed line. hunkLineKind keys on the FIRST CHAR ONLY and has NO
+//    meta case, so they classify as del/add (→ red/green). This asserts the kind a human's color follows.
+check("hunkLineKind: deleted ---/-- and added +++ content lines are del/add, never the muted meta header", () => {
+  // The exact hunk content lines a parsed merge-gate diff would feed FileHunks (no real file headers).
+  const [f] = parseDiff(patch(
+    "diff --git a/notes.md b/notes.md",
+    "index 0000001..0000002 100644",
+    "--- a/notes.md",
+    "+++ b/notes.md",
+    "@@ -1,4 +1,2 @@",
+    " intro paragraph",
+    "----",                     // a deleted markdown thematic break `---`
+    "--- a YAML/CLI delimiter", // a deleted `-- a YAML/CLI delimiter`
+    "+++added section",         // an added `++added section`
+  ));
+  const byContent = Object.fromEntries(f.hunks[0].lines.map((ln) => [ln, hunkLineKind(ln)]));
+  assert.equal(byContent["----"], "del", "deleted `---` (rendered ----) is a deletion → RED");
+  assert.equal(byContent["--- a YAML/CLI delimiter"], "del", "deleted `-- …` (rendered --- …) is a deletion → RED");
+  assert.equal(byContent["+++added section"], "add", "added `++…` (rendered +++…) is an addition → GREEN");
+  assert.equal(byContent[" intro paragraph"], "context", "context line stays dim");
+  // critically, NONE of the changed lines is classified as the muted meta header (the bug)
+  for (const ln of ["----", "--- a YAML/CLI delimiter", "+++added section"]) {
+    assert.notEqual(byContent[ln], "meta", `${JSON.stringify(ln)} must not be muted header gray`);
+  }
+});
+
+// hunkLineKind classifies a plain hunk by first char: + add, - del, @@ hunk, context.
+check("hunkLineKind classifies a plain hunk by first char (no meta case)", () => {
+  assert.equal(hunkLineKind("+new"), "add");
+  assert.equal(hunkLineKind("-old"), "del");
+  assert.equal(hunkLineKind("@@ -1 +1 @@"), "hunk");
+  assert.equal(hunkLineKind(" context"), "context");
+});
+
+// 10) DiffView's raw whole-patch classifier (rawPatchLineKind) STILL marks a real `+++ b/`/`--- a/` (and
+//     `diff `/`index `) file header as "meta" (→ dimmed) — the header-dimming variant kept ONLY for the
+//     raw render. This is the opposite need to hunkLineKind and must not regress in the split.
+check("rawPatchLineKind marks real file headers as meta in the raw whole-patch render", () => {
+  assert.equal(rawPatchLineKind("+++ b/src/file.ts"), "meta", "+++ b/ header is meta");
+  assert.equal(rawPatchLineKind("--- a/src/file.ts"), "meta", "--- a/ header is meta");
+  assert.equal(rawPatchLineKind("diff --git a/x b/x"), "meta", "diff --git header is meta");
+  assert.equal(rawPatchLineKind("index 0000001..0000002 100644"), "meta", "index header is meta");
+  // but real +/- content and the hunk header still classify normally
+  assert.equal(rawPatchLineKind("@@ -1 +1 @@"), "hunk");
+  assert.equal(rawPatchLineKind("+added"), "add");
+  assert.equal(rawPatchLineKind("-removed"), "del");
 });
 
 console.log(`\n${pass} passed`);

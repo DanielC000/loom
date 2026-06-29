@@ -206,3 +206,38 @@ export const riskTone = (r: RiskLevel): "red" | "amber" | "muted" =>
 // Status → a compact single-letter glyph for the file overview (A/D/R/M).
 export const statusGlyph = (s: FileDiff["status"]): string =>
   s === "added" ? "A" : s === "deleted" ? "D" : s === "renamed" ? "R" : "M";
+
+// ── Diff line classification (drives per-line color) ───────────────────────────────
+// The semantic kind of a single rendered diff line. Kept pure here (the lib is dependency-free and
+// node-testable); the UI maps each kind to a theme color in one place (Diff.tsx › KIND_COLOR).
+//   add → green · del → red · hunk → cyan @@ band · context → dim · meta → muted file header
+export type DiffLineKind = "add" | "del" | "hunk" | "context" | "meta";
+
+// Classifier for the lines INSIDE a parsed hunk (FileDiff.hunks[].lines), the merge-gate per-file diff.
+// Keyed on the FIRST CHAR ONLY: '+' add, '-' del, '@' hunk header, anything else context. parseDiff
+// strips the real `+++ b/` / `--- a/` file headers, so a hunk content line NEVER begins with a true file
+// header — a deleted line whose CONTENT starts with `---`/`--`/`+++` (a markdown thematic break, a YAML
+// front-matter delimiter, a SQL/CLI `-- comment`) is a genuine deletion and must read as "del" (RED),
+// NOT the muted "meta" header gray that a shared colorizer wrongly gave it. There is deliberately NO
+// "meta" case here; do NOT special-case `+++`/`---`. (rawPatchLineKind below DOES see real headers.)
+export function hunkLineKind(ln: string): DiffLineKind {
+  switch (ln[0]) {
+    case "@": return "hunk";
+    case "+": return "add";
+    case "-": return "del";
+    default: return "context";
+  }
+}
+
+// Classifier for a RAW unified patch rendered line-by-line (the Orchestration view's whole-patch
+// DiffView), which legitimately CONTAINS the `diff --git`/`index `/`+++ b/`/`--- a/` file headers and
+// dims them as "meta". This header-dimming is WRONG for FileHunks (header-stripped content), which uses
+// hunkLineKind — the two callers have opposite needs and must stay separate (the merge-gate render-bug
+// split). Header check precedes +/- so `--- a/`/`+++ b/` dim before the +/- fallthrough.
+export function rawPatchLineKind(ln: string): DiffLineKind {
+  if (ln.startsWith("@@")) return "hunk";
+  if (ln.startsWith("+++") || ln.startsWith("---") || ln.startsWith("diff ") || ln.startsWith("index ")) return "meta";
+  if (ln.startsWith("+")) return "add";
+  if (ln.startsWith("-")) return "del";
+  return "context";
+}

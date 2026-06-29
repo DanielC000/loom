@@ -1,15 +1,18 @@
 import { color, font, radius, tone } from "../theme";
-import { type FileDiff, riskTone, statusGlyph } from "../lib/diff";
+import { type DiffLineKind, type FileDiff, hunkLineKind, rawPatchLineKind, riskTone, statusGlyph } from "../lib/diff";
 import { Dot } from "./ui";
 
-// Per-line color for a unified diff: green additions / red deletions / cyan hunk headers.
-function lineColor(ln: string): string {
-  if (ln.startsWith("@@")) return color.cyan;
-  if (ln.startsWith("+++") || ln.startsWith("---") || ln.startsWith("diff ") || ln.startsWith("index ")) return color.textMuted;
-  if (ln.startsWith("+")) return color.phosphor;
-  if (ln.startsWith("-")) return color.red;
-  return color.textDim;
-}
+// The ONE place a classified diff line kind (from lib/diff) maps to a theme color, so DiffView and
+// FileHunks agree on the palette: green adds / red deletions / cyan hunk headers / dim context / muted
+// file headers. The classifier differs per caller (FileHunks: hunkLineKind, header-stripped content;
+// DiffView: rawPatchLineKind, raw patch with real headers) — this map does not.
+const KIND_COLOR: Record<DiffLineKind, string> = {
+  add: color.phosphor,
+  del: color.red,
+  hunk: color.cyan,
+  context: color.textDim,
+  meta: color.textMuted,
+};
 
 // Unified diff with green additions / red deletions / cyan hunk headers. Kept for the Orchestration
 // view's raw whole-patch render; the review pane uses the per-file FileDiffBlock below.
@@ -18,7 +21,7 @@ export function DiffView({ patch }: { patch: string }) {
   return (
     <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: 12, lineHeight: 1.5 }}>
       {lines.map((ln, i) => (
-        <div key={i} style={{ color: lineColor(ln) }}>{ln || " "}</div>
+        <div key={i} style={{ color: KIND_COLOR[rawPatchLineKind(ln)] }}>{ln || " "}</div>
       ))}
     </pre>
   );
@@ -35,7 +38,7 @@ function FileHunks({ file }: { file: FileDiff }) {
         <div key={hi}>
           <div style={{ color: color.cyan, background: "rgba(91,200,255,0.06)", margin: "4px -10px 2px", padding: "1px 10px" }}>{h.header}</div>
           {h.lines.map((ln, i) => (
-            <div key={i} style={{ color: lineColor(ln) }}>{ln || " "}</div>
+            <div key={i} style={{ color: KIND_COLOR[hunkLineKind(ln)] }}>{ln || " "}</div>
           ))}
         </div>
       ))}
