@@ -42,7 +42,10 @@ brief only if it is written to carry them.)
    check. Say what you actually ran. For UI/visual work: if your session is browser-capable
    (Playwright/`browserTesting` provisioned + allowlisted — the QA / Web Designer rigs), **self-verify**
    by driving Playwright to the running app and confirming the change renders and behaves before
-   reporting done; otherwise report the UI work **up** for your manager to verify. When you self-verify,
+   reporting done. For a NEW interactive control (toggle, button, input, menu), a render-only check is
+   not enough: **EXERCISE it** and confirm an **observable state change** — DOM/network/text differs
+   before vs. after — not just that the page renders without console errors. Otherwise report the UI
+   work **up** for your manager to verify. When you self-verify,
    point Playwright at the dev server's **actual bound URL** — read the port from vite's startup line
    (`Local: http://…:PORT`); never assume the default :5317. If that port is already held (the owner's
    main-checkout dev server or the live daemon), vite binds a different one or fails — verifying the

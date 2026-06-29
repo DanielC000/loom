@@ -28,8 +28,10 @@ the project repo.
 **These tools all live under the `mcp__loom-orchestration__` namespace** (board reads/writes under
 `mcp__loom-tasks__`), and they're **deferred** — only their names surface until you load their schemas,
 so a first BARE call (`worker_spawn`, `inbox_pull`, `my_context`, `recycle_me`, …) eats a failed
-round-trip. **Preload the lifecycle set in ONE ToolSearch at orchestrator start:**
-`select:mcp__loom-orchestration__idle_report,mcp__loom-orchestration__inbox_pull,mcp__loom-orchestration__my_context,mcp__loom-orchestration__worker_spawn,mcp__loom-orchestration__worker_merge,mcp__loom-orchestration__worker_merge_confirm,mcp__loom-orchestration__worker_recycle,mcp__loom-orchestration__worker_stop,mcp__loom-orchestration__recycle_me`
+round-trip. **Preload the lifecycle set in ONE ToolSearch at orchestrator start** — include the
+orientation reads (`worker_list` is your standard first call) and the direction tools, so even your
+first bare call lands:
+`select:mcp__loom-orchestration__idle_report,mcp__loom-orchestration__inbox_pull,mcp__loom-orchestration__my_context,mcp__loom-orchestration__worker_spawn,mcp__loom-orchestration__worker_list,mcp__loom-orchestration__worker_status,mcp__loom-orchestration__worker_transcript,mcp__loom-orchestration__worker_message,mcp__loom-orchestration__worker_merge,mcp__loom-orchestration__worker_merge_confirm,mcp__loom-orchestration__worker_recycle,mcp__loom-orchestration__worker_stop,mcp__loom-orchestration__recycle_me`
 (add `mcp__loom-tasks__tasks_list,mcp__loom-tasks__tasks_create,mcp__loom-tasks__tasks_update` for the board).
 
 ## Standing goal — never idle
@@ -227,6 +229,14 @@ fixing.)
    verify another checkout's STALE server and report a false pass — workers must read the dev server's
    actual bound URL from vite's startup line, never assume the default. Hold both when you review a
    browser-capable worker's "verified live."
+
+   **A render-only eyeball is necessary but not sufficient for an interactive control.** For every NEW
+   interactive control (toggle, button, input, menu) the verification must **EXERCISE it** and confirm
+   an **observable state change** — the DOM/network/text differs before vs. after the interaction — not
+   merely that the page renders without console errors. "Renders clean / 0 console errors" only proves
+   the page *drew*; it never proves the control *did* anything, so an inert control can pass that eyeball
+   indefinitely. Whether you verify it yourself or a browser-capable worker self-verifies, require the
+   before/after diff as the acceptance evidence.
 
    **Run-shaped features need a REAL-agent smoke run — hermetic gates alone are insufficient.** When a
    feature's *runtime IS an agent turn* — agent runs, dispatch, tool-IO, anything where a live model
