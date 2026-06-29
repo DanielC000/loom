@@ -227,6 +227,48 @@ try {
   const noEng = await call("transcript_read", { projectId: "pOrd", sessionId: "M" });
   check("(b) transcript_read: a session with no engine transcript → [] (not an error)", Array.isArray(noEng) && noEng.length === 0);
 
+  // (b8) PATH-CONFINEMENT (security) — the archived branch reads by (projectId, sessionId), both
+  // CALLER-CONTROLLED. A hostile id must NOT escape <LOOM_HOME>/archives and read an arbitrary host *.jsonl
+  // (Claude's own session transcripts, secrets). Confined at the SOURCE (archivedTranscriptPath), so this
+  // protects BOTH auditor surfaces (the auditor + workspace-auditor routers share registerTranscriptReadTools).
+  // Mirrors repo_read_file's confinement test, exercising all THREE escape classes + a legit read.
+  const secretJsonl = path.join(tmpHome, "SECRET-transcript.jsonl"); // sits in LOOM_HOME, one level ABOVE archives/
+  fs.writeFileSync(secretJsonl, JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "TOPSECRET_TRANSCRIPT" }] } }) + "\n");
+  const leaked = (r) => JSON.stringify(r).includes("TOPSECRET_TRANSCRIPT");
+  const refused = (r) => !Array.isArray(r) && typeof r.error === "string" && /escapes the archives root/.test(r.error);
+
+  // (1) `../` TRAVERSAL — via the sessionId AND via the projectId.
+  const travSession = await call("transcript_read", { projectId: "pOrd", sessionId: "../../SECRET-transcript", archived: true });
+  check("(b8) `../` traversal in sessionId is REFUSED with {error} (no read outside archives)", refused(travSession) && !leaked(travSession));
+  const travProject = await call("transcript_read", { projectId: "..", sessionId: "SECRET-transcript", archived: true });
+  check("(b8) `../` traversal in projectId is REFUSED with {error} (no read outside archives)", refused(travProject) && !leaked(travProject));
+
+  // (2) ABSOLUTE path — an absolute projectId discards the root under path.resolve; must be refused.
+  const absProject = await call("transcript_read", { projectId: tmpHome, sessionId: "SECRET-transcript", archived: true });
+  check("(b8) an ABSOLUTE projectId is REFUSED with {error} (path.resolve discards the root)", refused(absProject) && !leaked(absProject));
+
+  // (3) SYMLINK escape — plant a symlink INSIDE the archives store whose name resolves OUTSIDE it; the
+  // realpath re-check must reject it. Symlink creation can need privilege on Windows — tolerate that and
+  // skip the assertion if the link can't be made (still proven on POSIX / elevated Windows + CI).
+  let symlinkPlanted = false;
+  const linkDir = path.join(tmpHome, "archives", "pLink");
+  fs.mkdirSync(linkDir, { recursive: true });
+  try {
+    fs.symlinkSync(secretJsonl, path.join(linkDir, "leak.jsonl"));
+    symlinkPlanted = true;
+  } catch { /* no symlink privilege on this host — skip the symlink assertion */ }
+  if (symlinkPlanted) {
+    const symRead = await call("transcript_read", { projectId: "pLink", sessionId: "leak", archived: true });
+    check("(b8) a SYMLINK inside the store that points OUT is REFUSED (realpath re-check)", refused(symRead) && !leaked(symRead));
+  } else {
+    console.log("SKIP  (b8) symlink-escape case (no symlink privilege on this host)");
+  }
+
+  // (4) a LEGIT archived id STILL reads fine (confinement didn't break the happy path).
+  const legitArch = await call("transcript_read", { projectId: "pOrd", sessionId: "ARCH1", archived: true });
+  check("(b8) a LEGIT archived id still reads its snapshot turns (happy path intact)",
+    Array.isArray(legitArch) && legitArch.length === 2 && /vague skill instruction/.test(legitArch[0].text));
+
   // (b5) RENDER-COLLAPSE FIX — transcript_read surfaces tool_result BODIES (capped), not bare placeholders.
   const trTurns = await call("transcript_read", { projectId: "pOrd", sessionId: "TR1" });
   check("(b5) transcript_read: tool_result turns are present", Array.isArray(trTurns) && trTurns.length === 4);

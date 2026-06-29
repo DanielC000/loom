@@ -118,7 +118,13 @@ export function registerTranscriptReadTools(server: McpServer, db: Db): void {
         const explicit = offset !== undefined || limit !== undefined || turnRange !== undefined;
         return ok(!explicit && page.offset === 0 && page.nextOffset === null ? page.turns : page);
       };
-      if (archived) return paged(readArchivedTranscript(projectId, sessionId));
+      // archived snapshot read by (projectId, sessionId). Both are CALLER-CONTROLLED, so the path is
+      // confined to <LOOM_HOME>/archives at the source (archivedTranscriptPath); a `../` escape throws —
+      // surface it as a clean {error} (the repo-read envelope) rather than reading an arbitrary host file.
+      if (archived) {
+        try { return paged(readArchivedTranscript(projectId, sessionId)); }
+        catch (e) { return ok({ error: (e as Error).message }); }
+      }
       // Resolve a full id OR a unique id-PREFIX (the 8-char short ids Loom shows are convenient to paste);
       // a too-short/ambiguous prefix returns a DISTINCT error rather than a misleading "session not found".
       let s = db.getSession(sessionId);

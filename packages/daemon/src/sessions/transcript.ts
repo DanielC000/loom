@@ -204,14 +204,40 @@ export function pageTranscript(
 // by (projectId, sessionId) — NOT the engine id — so it survives even if the engine id is reused.
 // ──────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Absolute path to a session's archived transcript snapshot under LOOM_HOME. */
+/**
+ * Absolute path to a session's archived transcript snapshot under LOOM_HOME, CONFINED to the archive
+ * store. SECURITY: `projectId`/`sessionId` are CALLER-CONTROLLED on the auditor read path
+ * (transcript_read archived, registered on BOTH the auditor + workspace-auditor routers), so a hostile id
+ * must NOT escape `<LOOM_HOME>/archives` and read an arbitrary host `*.jsonl` (Claude's own session
+ * transcripts, secrets). Confining HERE — at the single source every caller funnels through — protects
+ * EVERY caller (read + write) and BOTH router surfaces, not just one tool. Mirrors repo-read's
+ * `resolveWithin` gate and rejects all THREE escape classes: a `..` TRAVERSAL (`path.resolve` would walk
+ * out of the root), an ABSOLUTE id (`path.resolve` discards the root), and a SYMLINK inside the store that
+ * points OUT (realpath re-check). A legitimate id resolves byte-identically. */
 export function archivedTranscriptPath(projectId: string, sessionId: string): string {
-  return path.join(LOOM_HOME, "archives", projectId, `${sessionId}.jsonl`);
+  // Realpath the archives root so a symlinked LOOM_HOME (e.g. macOS /tmp -> /private/tmp) still compares
+  // correctly; fall back to the lexical resolve when the dir doesn't exist yet (no snapshot captured).
+  const rawRoot = path.resolve(LOOM_HOME, "archives");
+  let root: string;
+  try { root = fs.realpathSync(rawRoot); } catch { root = rawRoot; }
+  const within = (p: string) => p === root || p.startsWith(root + path.sep);
+  const abs = path.resolve(root, projectId, `${sessionId}.jsonl`);
+  if (!within(abs)) throw new Error("archived transcript path escapes the archives root");
+  // Defeat a symlink inside the store that resolves OUTSIDE it: realpath the (existing) target and
+  // re-check. ENOENT just means no snapshot yet — the lexical check above already confines it.
+  try {
+    const real = fs.realpathSync(abs);
+    if (!within(real)) throw new Error("archived transcript path escapes the archives root (symlink)");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e;
+  }
+  return abs;
 }
 
-/** Whether a transcript snapshot was captured for this session. */
+/** Whether a transcript snapshot was captured for this session. False on a confinement escape (never throws). */
 export function archivedTranscriptExists(projectId: string, sessionId: string): boolean {
-  return fs.existsSync(archivedTranscriptPath(projectId, sessionId));
+  try { return fs.existsSync(archivedTranscriptPath(projectId, sessionId)); }
+  catch { return false; }
 }
 
 /**
