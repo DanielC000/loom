@@ -1689,7 +1689,8 @@ export class SessionService {
     const skills = workerSpawn.skills;
 
     // Safety rails (§17a) — refuse NEW work before any side effect (worktree/pty). In-flight
-    // workers are untouched. Pause is global-or-this-manager; the cap counts LIVE children only.
+    // workers are untouched. Pause is global-or-this-manager. (The concurrency cap is admitted
+    // atomically with the per-taskId claim below — see that block.)
     if (this.control.isPaused(managerSessionId)) throw new Error("orchestration paused");
     // §19c: don't spawn a worker into a known usage-limited account (whole-queue awareness). The recency
     // window is the daemon-global `platform.rateLimit.recencyWindowMs`, resolved LIVE here (db in scope).
@@ -1717,9 +1718,6 @@ export class SessionService {
       }
       throw new UsageLimitError(retryAfter);
     }
-    const liveWorkers = this.db.listWorkers(managerSessionId).filter((w) => w.processState === "live").length;
-    const cap = config.orchestration.maxConcurrentWorkers;
-    if (liveWorkers >= cap) throw new Error(`concurrency cap reached (${cap})`);
 
     // ATOMIC per-taskId spawn claim (the real fix — NOT merely a narrowed TOCTOU window). liveSessionIdForTask
     // is a single NON-atomic SELECT taken BEFORE the `await createWorktree` below, and the row is inserted only
@@ -1745,6 +1743,22 @@ export class SessionService {
     if (this.inFlightSpawnTaskIds.has(taskId)) {
       throw new Error(`worker_spawn taskId '${taskId}' already has a spawn in flight; wait for it to finish before re-spawning`);
     }
+    // ATOMIC concurrency-cap admit — co-located with the per-taskId claim so the cap decision and the
+    // reservation share ONE no-await window (same TOCTOU class as the per-taskId race above, on the cap axis).
+    // The old check `liveWorkers >= cap` counted only LIVE DB rows and ran BEFORE `await createWorktree`, but a
+    // worker row is inserted only AFTER that await. So N concurrent worker_spawn calls for DIFFERENT taskIds each
+    // observed liveWorkers unchanged (none had inserted yet) and all admitted → the fleet overshot
+    // maxConcurrentWorkers by up to N-1. Counting the in-flight claims (each WILL become a live worker) closes
+    // it: by the same ATOMICITY PROOF above, each racing call runs its synchronous prefix to completion — through
+    // this admit AND the `.add()` — before the next call's prefix is scheduled (the first await is createWorktree,
+    // BELOW), so call K observes the (K-1) prior claims already in the set. Checked BEFORE `.add()`, so `size`
+    // excludes self: with cap C and L live workers, exactly C-L calls admit and the rest are rejected with the
+    // existing message — each BEFORE createWorktree, so a rejected spawn leaves no orphan worktree/branch.
+    // (Conservative across managers: inFlightSpawnTaskIds is daemon-global while the live count is THIS manager's,
+    // so a sibling manager's in-flight spawn can only make this check reject EARLIER — never let the fleet overshoot.)
+    const liveWorkers = this.db.listWorkers(managerSessionId).filter((w) => w.processState === "live").length;
+    const cap = config.orchestration.maxConcurrentWorkers;
+    if (liveWorkers + this.inFlightSpawnTaskIds.size >= cap) throw new Error(`concurrency cap reached (${cap})`);
     this.inFlightSpawnTaskIds.add(taskId);
     try {
       const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, taskId, { timeoutMs: this.provisionMs });
