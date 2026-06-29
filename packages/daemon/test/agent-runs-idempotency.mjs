@@ -10,6 +10,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   • PART B — the DB-level invariant directly: a terminal-failure UPDATE frees the pair for re-insert,
 //     while a non-failed (queued/starting/running/completed) run still holds it; and the migration
 //     CONVERTS an existing DB carrying the OLD key-only index in place (drop-then-create).
+//   • PART C — CONVERT-ONCE: migrate must not re-index on every boot. Spying on better-sqlite3 `exec`:
+//     fresh→create; already-current→no DROP+CREATE (no-op); old→convert once, then next boot is a no-op.
 // Run: 1) build (turbo builds shared first), 2) node test/agent-runs-idempotency.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -176,6 +178,69 @@ try {
   dbR = new Db(legacyFile);
   check("B re-opening the converted DB does not throw and keeps the live run", dbR.getRun("rNewRetry3")?.status === "running");
   dbR.close();
+
+  // =====================================================================================================
+  // PART C — CONVERT-ONCE: migrate must not DROP+CREATE the idempotency index on EVERY boot. It rebuilt
+  // the whole runs table on every daemon start; the fix reads the stored definition from sqlite_master and
+  // only DROP+CREATEs when it differs (old predicate) or is absent (fresh). Spy on better-sqlite3 `exec`
+  // to observe whether a given Db construction rebuilt the index.
+  // =====================================================================================================
+  const realExec = Database.prototype.exec;
+  let execLog = [];
+  Database.prototype.exec = function (sql) { execLog.push(String(sql)); return realExec.call(this, sql); };
+  const droppedIdx = () => execLog.some((s) => /DROP INDEX IF EXISTS idx_runs_idempotency/.test(s));
+  const createdIdx = () => execLog.some((s) => /CREATE UNIQUE INDEX idx_runs_idempotency/.test(s));
+  const idxSqlOf = (file) => {
+    const raw = new Database(file, { readonly: true });
+    const row = raw.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_runs_idempotency'").get();
+    raw.close();
+    return row?.sql;
+  };
+  try {
+    // ---- (1) FRESH DB → the index is CREATEd (no prior index to drop, but DROP IF EXISTS is harmless) ----
+    const freshFile = path.join(tmpHome, "fresh.db");
+    execLog = [];
+    const dbF = new Db(freshFile);
+    check("C(1) fresh DB → idempotency index created", createdIdx());
+    check("C(1) fresh DB → index has the current status predicate",
+      /status NOT IN \('failed','timed_out','cancelled'\)/.test(idxSqlOf(freshFile) ?? ""));
+    dbF.close();
+
+    // ---- (2) RE-OPEN an already-current DB → migrate does NOT DROP+CREATE (the convert-once no-op) ----
+    execLog = [];
+    const dbF2 = new Db(freshFile);
+    check("C(2) already-current DB → NOT dropped on boot (no re-index)", !droppedIdx());
+    check("C(2) already-current DB → NOT recreated on boot (no re-index)", !createdIdx());
+    dbF2.close();
+
+    // ---- (3) OLD key-only index → converts ONCE (DROP+CREATE); the next boot is a no-op ----
+    const oldFile = path.join(tmpHome, "old-once.db");
+    {
+      const raw = new Database(oldFile);
+      raw.exec(`
+        CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_path TEXT NOT NULL,
+          vault_path TEXT NOT NULL, config_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, archived_at TEXT);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT 'p', agent_id TEXT NOT NULL DEFAULT 'a',
+          session_id TEXT, key_id TEXT, status TEXT NOT NULL DEFAULT 'queued', input_json TEXT NOT NULL DEFAULT 'null',
+          schema_json TEXT, result_json TEXT, usage_json TEXT, transcript_ref TEXT, error TEXT,
+          webhook_url TEXT, idempotency_key TEXT, created_at TEXT NOT NULL DEFAULT '', started_at TEXT, ended_at TEXT);
+        CREATE UNIQUE INDEX idx_runs_idempotency ON runs(key_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+      `);
+      raw.close();
+    }
+    execLog = [];
+    const dbO = new Db(oldFile);
+    check("C(3) old index DB → converted once (DROP+CREATE)", droppedIdx() && createdIdx());
+    check("C(3) converted index now carries the status predicate",
+      /status NOT IN \('failed','timed_out','cancelled'\)/.test(idxSqlOf(oldFile) ?? ""));
+    dbO.close();
+    execLog = [];
+    const dbO2 = new Db(oldFile);
+    check("C(3) converted DB next boot → NOT rebuilt again (convert-once)", !droppedIdx() && !createdIdx());
+    dbO2.close();
+  } finally {
+    Database.prototype.exec = realExec;
+  }
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { await sleep(50); } }
 }

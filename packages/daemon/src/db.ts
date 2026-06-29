@@ -611,12 +611,25 @@ export class Db {
     // Idempotency-on-failure (Agent Runs #4): the unique index is partial on STATUS too, so a
     // terminal-FAILURE run leaves the index (SQLite re-evaluates the partial predicate on UPDATE —
     // verified) and frees the (key_id, idempotency_key) pair for a retry, while at most one
-    // non-failed run (queued/starting/running/completed) per pair still holds. DROP-then-CREATE so an
-    // existing DB carrying the old key-only predicate converts in place; both statements idempotent.
-    this.db.exec("DROP INDEX IF EXISTS idx_runs_idempotency");
-    this.db.exec(
-      "CREATE UNIQUE INDEX idx_runs_idempotency ON runs(key_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND status NOT IN ('failed','timed_out','cancelled')",
-    );
+    // non-failed run (queued/starting/running/completed) per pair still holds.
+    //
+    // Convert-ONCE, not every boot: a DROP+CREATE re-indexes the whole runs table, an unbounded-with-
+    // growth boot cost long after every DB has converted. So read the stored definition from
+    // sqlite_master and only DROP+CREATE when it differs from the desired one (an existing DB carrying
+    // the old key-only predicate). When it already matches we skip; when it's absent (fresh DB) we just
+    // CREATE. SQLite stores the CREATE statement verbatim, so a byte-equal `sql` means already-current.
+    const desiredIndexSql =
+      "CREATE UNIQUE INDEX idx_runs_idempotency ON runs(key_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND status NOT IN ('failed','timed_out','cancelled')";
+    const existingIndexSql = (
+      this.db
+        .prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_runs_idempotency'")
+        .get() as { sql: string } | undefined
+    )?.sql;
+    if (existingIndexSql !== desiredIndexSql) {
+      // Differs (old predicate) or absent (fresh DB) — (re)build to the desired shape.
+      this.db.exec("DROP INDEX IF EXISTS idx_runs_idempotency");
+      this.db.exec(desiredIndexSql);
+    }
   }
 
   /** Release the SQLite handle (used by hermetic tests to free the file before cleanup). */
