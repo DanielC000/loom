@@ -7,6 +7,7 @@ import { installCrashHandlers } from "./crashlog.js";
 import { Db } from "./db.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
+import { snapshotAndArchiveRecovered } from "./sessions/boot-backstop.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
 import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
@@ -148,7 +149,11 @@ async function main(): Promise<void> {
     console.warn(`[boot] markitdown pre-warm kick failed (continuing boot): ${(err as Error).message}`);
   }
   const recovered = db.recoverStaleSessions();
-  if (recovered > 0) console.log(`[boot] reconciled ${recovered} stale session(s) -> exited`);
+  if (recovered.length > 0) console.log(`[boot] reconciled ${recovered.length} stale session(s) -> exited`);
+  // Crash-path backstop (card b37750a4): a daemon crash fires no onExit, so snapshot the transcript +
+  // auto-archive each recovered session HERE, while the JSONL still exists (before sweepDeadSessions can
+  // mark it dead / Claude can prune it). The ONLY snapshot+archive point on the crash path. See module.
+  snapshotAndArchiveRecovered(db, recovered);
   const dead = sweepDeadSessions(db);
   if (dead > 0) console.log(`[boot] marked ${dead} session(s) dead (engine transcript gone)`);
   // Keep dead-ID state fresh as Claude's transcripts come and go.
@@ -181,6 +186,20 @@ async function main(): Promise<void> {
     onExit: (sessionId, _code, info) => {
       db.setProcessState(sessionId, "exited");
       db.setBusy(sessionId, false);
+      // Read the exited row ONCE (null for non-DB shell terminals) — reused by the auto-archive
+      // decision AND the transcript snapshot below. Best-effort: never disturb the exit path.
+      let exited;
+      try { exited = db.getSession(sessionId); } catch { /* never disturb the exit path */ }
+      // Auto-archive on exit (card b37750a4): every STOPPED session leaves the live rail and surfaces
+      // in Archive automatically — reuses the existing archived_at field (stamp = now); resume() clears
+      // it to bring the session back. Per-session, no cascade (each worker auto-archives as it exits).
+      // Recycled predecessors archive too: nothing requires a predecessor on the live rail (lineage
+      // renders from the successor's gen; resume(allowSuperseded) / reparentWakes / Run-Replay all use
+      // UNFILTERED getSession; crash-recovery + message-routing gate on hasSuccessor, not rail membership)
+      // — so archiving them is consistent with "ALL stopped sessions in Archive". EXCEPTION: role==='run'
+      // — Agent Run sessions are ephemeral (finalized + GC'd via onRunSessionExit) and must never clutter
+      // the project Archive tab; a null row (non-DB shell terminal) is skipped too.
+      if (exited && exited.role !== "run") db.archiveSession(sessionId);
       // Clear any rate-limit park on EXIT: an exited session can never auto-resume, so a lingering
       // rate_limited_until (whose timestamp is still in the future) would keep showing RATE-LIMITED in
       // the Attention queue for hours after the session is gone. Clears ONLY the two park columns
@@ -193,11 +212,8 @@ async function main(): Promise<void> {
       try { recordUnexpectedExit(db, sessionId, info.intended); } catch { /* never disturb the exit path */ }
       // Auto-snapshot the engine transcript on exit, while the JSONL still exists — so an archived
       // session keeps a readable transcript even after Claude later prunes the original (a session
-      // goes 'dead' BECAUSE its JSONL was deleted). Best-effort: snapshotTranscript never throws, and
-      // getSession is null for shell terminals (not DB sessions) → skipped.
-      let exited;
+      // goes 'dead' BECAUSE its JSONL was deleted). Best-effort: snapshotTranscript never throws.
       try {
-        exited = db.getSession(sessionId);
         if (exited?.engineSessionId) snapshotTranscript(exited.cwd, exited.engineSessionId, exited.projectId, exited.id);
       } catch { /* never disturb the exit path */ }
       // Agent Runs R2: finalize the run row + GC its disposable snapshot cwd (the pty is now gone, so

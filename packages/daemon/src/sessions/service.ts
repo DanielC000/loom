@@ -742,6 +742,11 @@ export class SessionService {
 
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(session.id, "live");
+    // Auto-archive model (card b37750a4): resuming a stopped session CLEARS archived_at, returning it
+    // to the live rail (the inverse of auto-archive-on-exit). Cleared HERE, before pty.spawn — so a
+    // fast-failing spawn's onExit re-archives it (the M5 ordering above) rather than this clearing a
+    // dead session. restoreSession is the existing archived_at clear (it subsumes the old manual restore).
+    this.db.restoreSession(session.id);
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd, // SAME cwd — Claude keys sessions to the project dir
@@ -1535,41 +1540,12 @@ export class SessionService {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // Per-project session Archive (HUMAN-only REST surface, like stop/fork — NEVER an MCP tool). A UI
-  // tidy action that moves a dead/exited session (and, for a manager, its workers) out of the
-  // Workspace rail + the god-eye views. Snapshot-on-exit (index.ts onExit) already preserved the
-  // transcript; these methods only flip the archived_at state + permanent delete.
+  // Per-project session Archive (HUMAN-only REST surface, like stop/fork — NEVER an MCP tool).
+  // Archiving is now AUTOMATIC (card b37750a4): a session is auto-archived when its pty exits
+  // (index.ts onExit) and auto-restored when it resumes (resume() clears archived_at). There is NO
+  // manual "archive a session" action anymore. What remains here is restore (subsumed by resume but
+  // kept for the Archive UI's view-only/dead path) + permanent delete (drop the row + snapshot).
   // ---------------------------------------------------------------------------------------------
-
-  /**
-   * Archive a session out of the rail. EXITED-only (a live session must be stopped first — the UI
-   * hides the button while live, and this re-checks server-side). A manager CASCADES to its workers;
-   * if ANY group member is still LIVE the whole archive is BLOCKED ("stop the fleet first").
-   * Snapshot-on-exit (index.ts onExit) is the primary preservation path, but onExit can be missed
-   * (hard-kill / daemon crash) — so re-snapshot each group member here as a backstop BEFORE flipping
-   * state, while the JSONL may still exist. snapshotTranscript is idempotent + best-effort + atomic
-   * and a no-op when a current snapshot exists or the JSONL is already gone, so this can't regress the
-   * happy path; it's pure insurance against a lost transcript. Idempotent: an already-archived session
-   * returns { archived: [] }.
-   */
-  archiveSession(sessionId: string): { archived: string[] } {
-    const s = this.db.getSession(sessionId);
-    if (!s) throw new Error("session not found");
-    if (s.archivedAt) return { archived: [] }; // already archived — idempotent no-op
-    // A manager carries its (non-archived) workers; any other session archives alone.
-    const group = [s, ...(s.role === "manager" ? this.db.listWorkers(s.id) : [])];
-    const live = group.filter((g) => g.processState === "live");
-    if (live.length > 0) {
-      throw new Error(`cannot archive a live session — stop the fleet first (${live.length} still live)`);
-    }
-    // Backstop the on-exit snapshot: if onExit never fired, this is the last chance to preserve the
-    // transcript before Claude prunes the JSONL. Best-effort + idempotent — never blocks the archive.
-    for (const g of group) {
-      if (g.engineSessionId) snapshotTranscript(g.cwd, g.engineSessionId, g.projectId, g.id);
-    }
-    for (const g of group) this.db.archiveSession(g.id);
-    return { archived: group.map((g) => g.id) };
-  }
 
   /** Restore an archived session back to the rail (single row — not a cascade). */
   restoreSession(sessionId: string): { restored: string } {

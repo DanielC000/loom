@@ -1534,16 +1534,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // --- Per-project session Archive (HUMAN/REST only — like stop/fork/merge, NEVER an MCP tool).
-  // Archive moves a dead/exited session (a manager cascades to its workers) out of the rail + god-eye
-  // views; the snapshot was already captured on exit. Restore brings one back (view-only if dead);
-  // Delete is permanent (row(s) + snapshot). An EXPECTED failure (live group / not archived) comes
-  // back 400 with the reason so the UI shows it. ---
-  app.post("/api/sessions/:id/archive", async (req, reply) => {
-    const id = (req.params as { id: string }).id;
-    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
-    try { return reply.send(deps.sessions.archiveSession(id)); }
-    catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
-  });
+  // Archiving is AUTOMATIC now (card b37750a4): a session auto-archives when its pty exits and
+  // auto-restores when it resumes — there is NO manual archive endpoint. Restore brings an archived
+  // session back to the rail (view-only if dead); Delete is permanent (row(s) + snapshot). An
+  // EXPECTED failure (not archived) comes back 400 with the reason so the UI shows it. ---
   app.post("/api/sessions/:id/restore", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });

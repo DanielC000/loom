@@ -1457,11 +1457,17 @@ export class Db {
   /**
    * On daemon boot, no pty from a previous run survives — reconcile any session still
    * marked live/starting to exited (it stays resumable if it captured an engine id).
+   * Returns the recovered rows (read BEFORE the flip) so boot can run the crash-path
+   * backstop on each — snapshot the transcript + auto-archive — work the missed onExit never did.
    */
-  recoverStaleSessions(): number {
-    return this.db.prepare(
+  recoverStaleSessions(): Session[] {
+    const stale = (this.db.prepare(
+      "SELECT * FROM sessions WHERE process_state IN ('live','starting')",
+    ).all() as Row[]).map(toSession);
+    this.db.prepare(
       "UPDATE sessions SET process_state = 'exited', busy = 0 WHERE process_state IN ('live','starting')",
-    ).run().changes;
+    ).run();
+    return stale;
   }
   /** Sessions that have a captured engine id and aren't already marked dead. */
   listResumeCandidates(): Session[] {

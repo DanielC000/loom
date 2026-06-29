@@ -1,15 +1,23 @@
-// Per-project session Archive test (Task 13abd3ba). HERMETIC like dead-id.mjs / tasks-filter.mjs:
-// no daemon, no real claude — drives the built Db + SessionService archive logic and the transcript
-// snapshot helpers against a throwaway SQLite Db + an isolated LOOM_HOME. Covers:
+// Session Archive model test. Originally Task 13abd3ba (manual archive); REWRITTEN for card b37750a4,
+// which makes archiving AUTOMATIC: a session auto-archives when its pty exits and auto-restores when it
+// resumes (reusing the archived_at field — the live rail = archived_at IS NULL, Archive = NOT NULL).
+// HERMETIC like dead-id.mjs / tasks-filter.mjs: no daemon, no real claude — drives the built Db +
+// SessionService against a throwaway SQLite Db + isolated LOOM_HOME. Covers:
 //   A. migration adds sessions.archived_at without disturbing rows (idempotent).
-//   B. archive cascades a manager → its workers; archived rows are EXCLUDED from the live lists
-//      (listSessions/listAllSessions/listWorkers) and surface via listArchivedSessions.
-//   C. a LIVE group member BLOCKS the archive ("stop the fleet first").
+//   B. AUTO-ARCHIVE ON EXIT (mirrors index.ts onExit): an exited session gets archived_at set + leaves
+//      the live lists (listSessions/listAllSessions/listWorkers) + appears in listArchivedSessions.
+//      role==='run' is EXCLUDED. Recycled predecessors archive TOO (no hasSuccessor guard): the test
+//      drives the REAL recycleWorker ordering (exit FIRST, successor inserted AFTER) → predecessor archived.
+//   B2. CRASH-PATH BACKSTOP: recoverStaleSessions() returns the recovered rows; snapshotAndArchiveRecovered
+//      (the real boot helper) snapshots + archives each non-'run' session (the only snapshot point on the
+//      crash path); a 'run' session is recovered (exited) but not archived/snapshotted.
+//   C. CLEAR ON RESUME: resume() clears archived_at + returns the session to the live rail; a FAST-FAILING
+//      resume (clear-before-spawn) ends re-archived because the spawn's onExit wins.
 //   D. snapshotTranscript copies the engine JSONL (idempotent), readArchivedTranscript renders it,
 //      an already-dead session (no JSONL) snapshots nothing, deleteArchivedTranscript removes it.
-//   E. restore brings one row back; permanent delete cascades + drops the snapshot.
-//   F. archive-time backstop: an exited session WITH a JSONL but NO prior snapshot (onExit missed)
-//      gets one at archive time; the already-snapshotted path is a mtime-guard no-op (no double-work).
+//   E. restore brings one row back; permanent delete cascades to ARCHIVED workers + drops the snapshot.
+//   F. the MANUAL archive surface is GONE: service.archiveSession() removed (no cascade) + the
+//      POST /api/sessions/:id/archive route removed from the compiled gateway (restore + delete kept).
 // Run: 1) build the daemon, 2) node test/session-archive.mjs
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 import fs from "node:fs";
@@ -24,6 +32,7 @@ requireHermeticEnv(); // confirm LOOM_HOME is the throwaway temp dir, never the 
 const Database = (await import("better-sqlite3")).default;
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
+const { snapshotAndArchiveRecovered } = await import("../dist/sessions/boot-backstop.js");
 const {
   encodeProjectDir, snapshotTranscript, readArchivedTranscript,
   archivedTranscriptPath, archivedTranscriptExists, deleteArchivedTranscript,
@@ -40,7 +49,20 @@ const mkSession = (id, over = {}) => ({
   createdAt: now, lastActivity: now, lastError: null, ...over,
 });
 
-// ── ~/.claude transcript fixtures for the snapshot test (unique cwd → unique encoded dir) ──
+// Mirror of index.ts onExit's auto-archive (card b37750a4): mark exited, read the row ONCE, then
+// archive UNLESS it's an ephemeral 'run' session (or a non-DB shell-terminal row). NO hasSuccessor
+// guard — recycled predecessors archive too (the guard was ineffective on the recycleWorker ordering
+// and inconsistent with "ALL stopped sessions in Archive"). Kept in lockstep with index.ts onExit.
+const driveExit = (db, id) => {
+  db.setProcessState(id, "exited");
+  db.setBusy(id, false);
+  const row = db.getSession(id);
+  if (row && row.role !== "run") db.archiveSession(id);
+};
+
+// ── ~/.claude transcript fixtures (unique cwd → unique encoded dir). Shared by the resume test (C)
+// (engineTranscriptExists must be true) and the snapshot tests (D). fakeCwd must exist on disk too —
+// resume() guards on fs.existsSync(cwd). ──
 const fakeCwd = path.join(os.tmpdir(), `loom-arch-cwd-${Date.now()}`);
 const engineId = `arch-engine-${Date.now()}`;
 const claudeDir = path.join(os.homedir(), ".claude", "projects", encodeProjectDir(fakeCwd));
@@ -71,48 +93,112 @@ try {
   db = new Db(dbFile); // reopen again — migration is idempotent (no throw)
   check("A: migration is idempotent (second open ok)", !!db.getSession("sMig"));
 
-  const sessions = new SessionService(db, {}, {});
+  // A minimal PTY stub so resume() (section C) can spawn without a real claude. resume() only calls
+  // pty.spawn (no-op here); the other archive/restore/delete paths never touch the pty. `_onSpawn`, when
+  // set, simulates a spawn firing onExit synchronously — used by the fast-failing-resume re-archive test.
+  const ptyStub = { spawn(opts) { if (ptyStub._onSpawn) ptyStub._onSpawn(opts); }, enqueueStdin() { return { delivered: false }; }, stop() {}, kill() {}, getPending() { return []; }, _onSpawn: null };
+  const sessions = new SessionService(db, ptyStub, {});
 
-  // ════════ B. cascade archive + exclusion + listArchivedSessions ════════
-  db.insertSession(mkSession("mgr", { role: "manager" }));
-  db.insertSession(mkSession("w1", { role: "worker", parentSessionId: "mgr", taskId: "t1", branch: "loom/w1" }));
-  db.insertSession(mkSession("w2", { role: "worker", parentSessionId: "mgr", taskId: "t2", branch: "loom/w2" }));
-  db.insertSession(mkSession("plain")); // unrelated exited session — must stay in the rail
-
-  check("B: listWorkers(mgr) sees both workers pre-archive", db.listWorkers("mgr").length === 2);
-  check("B: listAllSessions includes the group pre-archive",
-    db.listAllSessions().filter((s) => ["mgr", "w1", "w2"].includes(s.id)).length === 3);
-
-  const res = sessions.archiveSession("mgr");
-  check("B: archiveSession(mgr) cascades to its workers (3 archived)",
-    res.archived.length === 3 && ["mgr", "w1", "w2"].every((id) => res.archived.includes(id)));
-  check("B: archived group EXCLUDED from listAllSessions (only 'plain' + 'sMig' remain of ours)",
-    db.listAllSessions().every((s) => !["mgr", "w1", "w2"].includes(s.id)));
-  check("B: 'plain' still visible in the rail", db.listAllSessions().some((s) => s.id === "plain"));
-  check("B: listSessions(agent) excludes archived", db.listSessions("aA").every((s) => !["mgr", "w1", "w2"].includes(s.id)));
-  check("B: listWorkers(mgr) now empty (workers archived)", db.listWorkers("mgr").length === 0);
-  const arch = db.listArchivedSessions("pA");
-  check("B: listArchivedSessions returns the 3 archived (with agent name)",
-    arch.length === 3 && arch.every((s) => s.agentName === "agentA") && arch.every((s) => !!s.archivedAt));
-  check("B: idempotent — re-archiving an archived session is a no-op", sessions.archiveSession("mgr").archived.length === 0);
-
-  // ════════ C. live group BLOCKS the archive ════════
-  db.insertSession(mkSession("mgrLive", { role: "manager" }));
-  db.insertSession(mkSession("wLive", { role: "worker", parentSessionId: "mgrLive", processState: "live" }));
-  let blocked = false;
-  try { sessions.archiveSession("mgrLive"); } catch (e) { blocked = /stop the fleet first/.test(e.message); }
-  check("C: archiving a manager with a LIVE worker is blocked", blocked);
-  check("C: nothing was archived (manager still in the rail)", db.listAllSessions().some((s) => s.id === "mgrLive"));
-  let liveBlocked = false;
-  try { sessions.archiveSession("wLive"); } catch (e) { liveBlocked = /stop the fleet first/.test(e.message); }
-  check("C: archiving a LIVE session directly is blocked", liveBlocked);
-
-  // ════════ D. snapshot helpers ════════
+  // Prepare the shared transcript fixture + a real cwd (used by C resume + D snapshot).
+  fs.mkdirSync(fakeCwd, { recursive: true });
   fs.mkdirSync(claudeDir, { recursive: true });
   fs.writeFileSync(claudeFile,
     '{"type":"user","message":{"content":"hello"}}\n' +
     '{"type":"system","message":{"content":"ignored"}}\n' +
     '{"type":"assistant","message":{"content":[{"type":"text","text":"hi there"}]}}\n');
+
+  // ════════ B. AUTO-ARCHIVE ON EXIT + exclusion + recycled guard ════════
+  db.insertSession(mkSession("exitMgr", { role: "manager", processState: "live" }));
+  db.insertSession(mkSession("exitW1", { role: "worker", parentSessionId: "exitMgr", taskId: "t1", branch: "loom/w1", processState: "live" }));
+  db.insertSession(mkSession("plain", { processState: "live" })); // unrelated session that stays live
+
+  check("B: pre-exit, the live session is on the rail (archived_at NULL)",
+    db.getSession("exitW1").archivedAt === null && db.listAllSessions().some((s) => s.id === "exitW1"));
+
+  // Each session auto-archives independently as its pty exits (per-session, no cascade).
+  driveExit(db, "exitW1");
+  check("B: exited session gets archived_at set automatically",
+    typeof db.getSession("exitW1").archivedAt === "string" && db.getSession("exitW1").processState === "exited");
+  check("B: archived session EXCLUDED from listAllSessions (left the live rail)",
+    db.listAllSessions().every((s) => s.id !== "exitW1"));
+  check("B: archived session EXCLUDED from listSessions(agent)",
+    db.listSessions("aA").every((s) => s.id !== "exitW1"));
+  check("B: archived worker EXCLUDED from listWorkers(manager)",
+    db.listWorkers("exitMgr").every((w) => w.id !== "exitW1"));
+  const arch = db.listArchivedSessions("pA");
+  check("B: exited session APPEARS in listArchivedSessions (with agent name + archivedAt)",
+    arch.some((s) => s.id === "exitW1" && s.agentName === "agentA" && !!s.archivedAt));
+  check("B: the still-live 'plain' session stays on the rail", db.listAllSessions().some((s) => s.id === "plain"));
+
+  // RUN-role EXCLUSION: an ephemeral Agent Run session (finalized + GC'd via onRunSessionExit) must
+  // NOT be auto-archived on exit — it would clutter the project Archive tab.
+  db.insertSession(mkSession("runSess", { role: "run", processState: "live" }));
+  driveExit(db, "runSess");
+  check("B: a 'run' session is NOT auto-archived on exit (archived_at stays NULL)",
+    db.getSession("runSess").archivedAt === null && db.getSession("runSess").processState === "exited");
+
+  // RECYCLED-PREDECESSOR ordering (the guard is GONE): recycleWorker pty.stop()s + AWAITS the old
+  // worker's death (→ its onExit, which auto-archives) BEFORE inserting the successor row. So at the
+  // predecessor's exit there is NO successor yet → it archives. Drive that REAL ordering (exit FIRST,
+  // THEN insert the successor) and assert the predecessor IS archived — and is still addressable via
+  // the UNFILTERED getSession (lineage/resume(allowSuperseded) never need it on the rail).
+  db.insertSession(mkSession("recOld", { processState: "live" }));
+  driveExit(db, "recOld"); // predecessor exits BEFORE the successor exists (recycleWorker order)
+  check("B: at the predecessor's exit there is no successor yet", db.hasSuccessor("recOld") === false);
+  check("B: recycled predecessor IS auto-archived on exit (guard removed)",
+    typeof db.getSession("recOld").archivedAt === "string");
+  db.insertSession(mkSession("recNew", { processState: "live", recycledFrom: "recOld" })); // successor lands after
+  check("B: the now-superseded predecessor stays addressable via unfiltered getSession",
+    !!db.getSession("recOld") && db.hasSuccessor("recOld") === true);
+  check("B: archived predecessor is excluded from the live rail", db.listAllSessions().every((s) => s.id !== "recOld"));
+
+  // ════════ B2. CRASH-PATH BACKSTOP (recoverStaleSessions → snapshotAndArchiveRecovered) ════════
+  // A daemon crash fires no onExit, so recoverStaleSessions() blanket-marks live/starting → exited and
+  // the boot helper snapshots + archives each (the REAL index.ts boot path, invoked here). A live
+  // session with a resumable engine transcript must come back archived WITH a snapshot; a 'run' session
+  // is recovered (exited) but NOT archived/snapshotted.
+  db.insertSession(mkSession("crashSess", { engineSessionId: engineId, cwd: fakeCwd, processState: "live" }));
+  db.insertSession(mkSession("crashRun", { role: "run", engineSessionId: engineId, cwd: fakeCwd, processState: "live" }));
+  const recovered = db.recoverStaleSessions();
+  check("B2: recoverStaleSessions returns the recovered rows (incl. crashSess + crashRun)",
+    recovered.some((s) => s.id === "crashSess") && recovered.some((s) => s.id === "crashRun"));
+  check("B2: recoverStaleSessions flips them to exited", db.getSession("crashSess").processState === "exited");
+  snapshotAndArchiveRecovered(db, recovered);
+  check("B2: a crash-recovered session is auto-archived (archived_at set)",
+    typeof db.getSession("crashSess").archivedAt === "string" && db.listArchivedSessions("pA").some((s) => s.id === "crashSess"));
+  check("B2: its transcript was snapshotted on the crash path", archivedTranscriptExists("pA", "crashSess"));
+  check("B2: a 'run' session is recovered (exited) but NOT archived",
+    db.getSession("crashRun").processState === "exited" && db.getSession("crashRun").archivedAt === null);
+  check("B2: a 'run' session is NOT snapshotted on the crash path", !archivedTranscriptExists("pA", "crashRun"));
+  deleteArchivedTranscript("pA", "crashSess"); // clean the snapshot so section D/E ids stay independent
+
+  // ════════ C. CLEAR ON RESUME ════════
+  // An archived (stopped) session with a resumable engine transcript returns to the rail on resume,
+  // with archived_at cleared. Reuse the shared fixture (engineId @ fakeCwd) so the resumability guards pass.
+  db.insertSession(mkSession("resSess", { engineSessionId: engineId, cwd: fakeCwd }));
+  db.archiveSession("resSess"); // it's currently stopped/archived
+  check("C: resSess starts archived (off the rail)",
+    !!db.getSession("resSess").archivedAt && db.listArchivedSessions("pA").some((s) => s.id === "resSess"));
+  const resumed = sessions.resume("resSess");
+  check("C: resume() returns the session live", resumed.processState === "live");
+  check("C: resume CLEARED archived_at", db.getSession("resSess").archivedAt === null);
+  check("C: resumed session is BACK on the live rail",
+    db.listAllSessions().some((s) => s.id === "resSess") && db.listSessions("aA").some((s) => s.id === "resSess"));
+  check("C: resumed session no longer in listArchivedSessions",
+    db.listArchivedSessions("pA").every((s) => s.id !== "resSess"));
+
+  // FAST-FAILING RESUME re-archives: resume() clears archived_at BEFORE pty.spawn, so if the spawn
+  // immediately fails (its onExit fires), the onExit auto-archive WINS — the session ends archived, not
+  // wrongly un-archived. Simulate by having the stub spawn fire the onExit logic (driveExit) synchronously.
+  db.insertSession(mkSession("failSess", { engineSessionId: engineId, cwd: fakeCwd }));
+  db.archiveSession("failSess");
+  ptyStub._onSpawn = (opts) => driveExit(db, opts.sessionId); // spawn fast-fails → onExit
+  try { sessions.resume("failSess"); } finally { ptyStub._onSpawn = null; }
+  check("C: a fast-failing resume ends EXITED (onExit won)", db.getSession("failSess").processState === "exited");
+  check("C: a fast-failing resume ends RE-ARCHIVED (clear-before-spawn ordering holds)",
+    typeof db.getSession("failSess").archivedAt === "string" && db.listAllSessions().every((s) => s.id !== "failSess"));
+
+  // ════════ D. snapshot helpers ════════
   const okSnap = snapshotTranscript(fakeCwd, engineId, "pA", "snapSess");
   check("D: snapshotTranscript returns true when the JSONL exists", okSnap === true);
   check("D: snapshot file written under LOOM_HOME/archives", fs.existsSync(archivedTranscriptPath("pA", "snapSess")));
@@ -126,11 +212,18 @@ try {
   deleteArchivedTranscript("pA", "snapSess");
   check("D: deleteArchivedTranscript removes the snapshot", !archivedTranscriptExists("pA", "snapSess"));
 
-  // ════════ E. restore + permanent delete (cascade, snapshot dropped) ════════
-  // Give the manager + w2 real snapshots so delete proves it removes them.
+  // ════════ E. restore + permanent delete (cascade to ARCHIVED workers, snapshot dropped) ════════
+  // Build a stopped (auto-archived) manager + 2 workers, give mgr + w2 real snapshots so delete proves
+  // it removes them, then exercise restore (single row) + cascade delete.
+  db.insertSession(mkSession("mgr", { role: "manager" }));
+  db.insertSession(mkSession("w1", { role: "worker", parentSessionId: "mgr", taskId: "t1", branch: "loom/w1" }));
+  db.insertSession(mkSession("w2", { role: "worker", parentSessionId: "mgr", taskId: "t2", branch: "loom/w2" }));
+  for (const id of ["mgr", "w1", "w2"]) db.archiveSession(id); // each auto-archived on its own exit
   snapshotTranscript(fakeCwd, engineId, "pA", "mgr");
   snapshotTranscript(fakeCwd, engineId, "pA", "w2");
-  check("E: seeded snapshots for mgr + w2", archivedTranscriptExists("pA", "mgr") && archivedTranscriptExists("pA", "w2"));
+  check("E: seeded archived group + snapshots for mgr + w2",
+    db.listArchivedSessions("pA").filter((s) => ["mgr", "w1", "w2"].includes(s.id)).length === 3 &&
+    archivedTranscriptExists("pA", "mgr") && archivedTranscriptExists("pA", "w2"));
 
   sessions.restoreSession("w1");
   check("E: restore brings w1 back to the rail", db.getSession("w1").archivedAt === null && db.listWorkers("mgr").some((w) => w.id === "w1"));
@@ -146,39 +239,20 @@ try {
   check("E: restored w1 row survives the manager delete", !!db.getSession("w1"));
   check("E: deleted snapshots removed", !archivedTranscriptExists("pA", "mgr") && !archivedTranscriptExists("pA", "w2"));
 
-  // ════════ F. archive-time backstop re-snapshot (onExit missed: hard-kill / crash) ════════
-  // The source JSONL from section D still exists on disk. An exited session that has an engineSessionId
-  // but NO prior snapshot (onExit never fired) must get one AT ARCHIVE TIME, before state flips.
-  db.insertSession(mkSession("bsExit", { engineSessionId: engineId, cwd: fakeCwd }));
-  check("F: no snapshot for bsExit before archive", !archivedTranscriptExists("pA", "bsExit"));
-  const bsRes = sessions.archiveSession("bsExit");
-  check("F: archiveSession still archives the row", bsRes.archived.length === 1 && bsRes.archived[0] === "bsExit");
-  check("F: archive produced the backstop snapshot", archivedTranscriptExists("pA", "bsExit"));
-  const bsTurns = readArchivedTranscript("pA", "bsExit");
-  check("F: backstop snapshot renders the transcript (2 turns)",
-    bsTurns.length === 2 && bsTurns[0].text === "hello" && bsTurns[1].text === "hi there");
-
-  // The already-snapshotted path is UNAFFECTED: pre-seed a current snapshot, archive, and confirm the
-  // mtime guard made it a no-op (dest unchanged — no double-copy) while still archiving the row.
-  db.insertSession(mkSession("bsPre", { engineSessionId: engineId, cwd: fakeCwd }));
-  snapshotTranscript(fakeCwd, engineId, "pA", "bsPre"); // pre-existing current snapshot
-  const preMtime = fs.statSync(archivedTranscriptPath("pA", "bsPre")).mtimeMs;
-  const preRes = sessions.archiveSession("bsPre");
-  check("F: already-snapshotted session still archives", preRes.archived.length === 1 && preRes.archived[0] === "bsPre");
-  check("F: pre-existing snapshot untouched (mtime-guard no-op, no double-work)",
-    archivedTranscriptExists("pA", "bsPre") && fs.statSync(archivedTranscriptPath("pA", "bsPre")).mtimeMs === preMtime);
-
-  // A session with no engineSessionId is skipped (no snapshot, archives cleanly — no throw).
-  db.insertSession(mkSession("bsNoEngine"));
-  const neRes = sessions.archiveSession("bsNoEngine");
-  check("F: session without an engineSessionId archives with no snapshot",
-    neRes.archived.length === 1 && !archivedTranscriptExists("pA", "bsNoEngine"));
+  // ════════ F. manual archive surface removed ════════
+  check("F: service.archiveSession() is gone (no manual archive / cascade)", typeof sessions.archiveSession === "undefined");
+  const gatewaySrc = fs.readFileSync(new URL("../dist/gateway/server.js", import.meta.url), "utf8");
+  check("F: POST /api/sessions/:id/archive route removed from the compiled gateway",
+    !gatewaySrc.includes('app.post("/api/sessions/:id/archive"') && !gatewaySrc.includes("sessions.archiveSession("));
+  check("F: restore route kept", gatewaySrc.includes('app.post("/api/sessions/:id/restore"'));
+  check("F: delete-archived route kept", gatewaySrc.includes('app.delete("/api/sessions/:id/archive"'));
 } finally {
   try { fs.rmSync(claudeDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  try { fs.rmSync(fakeCwd, { recursive: true, force: true }); } catch { /* ignore */ }
   try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — sessions.archived_at migrates cleanly; archive cascades + excludes from the live lists; a live group is blocked; transcript snapshots copy/render/delete; restore + cascade delete work."
+  ? "\n✅ ALL PASS — auto-archive on exit (run-excluded; recycled predecessors archive too); crash-path backstop snapshots + archives recovered sessions; resume clears archived_at + restores to the rail (fast-fail re-archives); snapshots copy/render/delete; restore + cascade delete work; the manual archive endpoint + cascade are gone."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
