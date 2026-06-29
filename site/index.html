@@ -175,17 +175,9 @@
                 over a PTY — never <code>claude -p</code> / headless, never an
                 API-key agent loop — so a whole fleet runs on the Claude
                 subscription (Pro/Max) you already pay for, with no per-token API
-                bill for the orchestration. Agents still consume your
-                subscription's usage and obey its rate limits.
-              </p>
-            </li>
-            <li class="card">
-              <span class="card-icon" aria-hidden="true">❯</span>
-              <h3 class="card-title">Real Claude Code sessions</h3>
-              <p class="card-body">
-                Loom drives the genuine interactive <code>claude</code> over a
-                PTY, never headless. Sessions are resumable and outlive any
-                viewer, so a closed tab or a reboot doesn't lose the thread.
+                bill for the orchestration. Sessions are resumable and outlive any
+                viewer, so a closed tab or a reboot doesn't lose the thread (agents
+                still consume your subscription's usage and obey its rate limits).
               </p>
             </li>
             <li class="card">
@@ -210,10 +202,10 @@
               <span class="card-icon" aria-hidden="true">⌂</span>
               <h3 class="card-title">Your data, on your hardware</h3>
               <p class="card-body">
-                Everything durable lives on your machine: a daemon bound to
-                loopback, an SQLite store, your git checkouts, transcripts, and
-                vault. No cloud service sits between you and your work, and you
-                can run fully offline.
+                Everything Loom keeps is local: a loopback-bound daemon, an
+                SQLite store, your git checkouts, transcripts, and vault. Loom
+                adds no cloud service of its own, so your code and history stay
+                on your machine.
               </p>
             </li>
             <li class="card">

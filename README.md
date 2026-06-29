@@ -42,11 +42,11 @@ branches, review their diffs, and merge. It even self-hosts: Loom is built using
 - **⛓️ Multi-agent orchestration.** A lead session plans, delegates to worker sessions on isolated
   git **worktree branches**, reviews each diff, and merges through a gate. Workers report up; the lead
   holds the whole picture. Loom even orchestrates its own development with this loop.
-- **🏠 Your data, on your hardware.** Everything durable lives on your machine — an **SQLite** store,
-  your git checkouts, your transcripts, and your vault. No cloud service sits between you and your work,
-  and you can run fully offline. The daemon binds to **loopback only** (`127.0.0.1`) as its security
-  boundary; to reach it from another device, put a tunnel in front (see
-  [Reach Loom from another device](#reach-loom-from-another-device)).
+- **🏠 Your data, on your hardware.** Everything Loom keeps lives on your machine — an **SQLite** store,
+  your git checkouts, your transcripts, and your vault. Loom adds **no cloud service of its own**, so your
+  code and history never leave your machine through Loom, and the daemon binds to **loopback only**
+  (`127.0.0.1`) as its security boundary. To reach the daemon from another device, put a tunnel in front
+  (see [Reach Loom from another device](#reach-loom-from-another-device)).
 - **✦ Vault-backed knowledge.** Design notes, decisions, and session logs live in an Obsidian vault
   woven alongside the code, and Loom auto-commits vault writes so the knowledge layer stays versioned
   with the work.
