@@ -136,6 +136,15 @@ function sleepSync(ms: number): void {
  *   Worst case degrades to exactly the pre-lock behavior (a possible clobber) — never a hang.
  * - `fn` ALWAYS runs, and the lock (if held) is ALWAYS released in `finally`. We never throw a
  *   new error that would abort the spawn.
+ *
+ * Why the synchronous sleepSync wait is acceptable on the spawn hot path (NOT the markitdown
+ * blocking-the-event-loop class): the caller (ensureTrusted → host.ts createPty) is fully
+ * synchronous and JS is single-threaded, so two IN-PROCESS spawns can never interleave — each
+ * acquire+`fn`+release completes within one synchronous call stack before the event loop starts the
+ * next spawn. The lock is therefore NEVER contended by this daemon's own (even fan-out) spawns, so
+ * the sleepSync retry loop is unreachable in-process; it fires ONLY when another PROCESS holds the
+ * lock (a second Loom daemon sharing ~/.claude.json — the cross-process clobber this lock exists to
+ * prevent), and there it is bounded by trustLockMs() and degrades best-effort rather than hanging.
  */
 function withTrustLock(lockPath: string, fn: () => void): void {
   const timeout = trustLockMs();

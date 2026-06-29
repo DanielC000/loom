@@ -1173,7 +1173,22 @@ export class PtyHost {
    */
   protected createPty(opts: SpawnOpts): IPty {
     const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
-    ensureTrusted(opts.cwd); // pre-accept the workspace-trust dialog so warmup never blocks
+    // Pre-accept the workspace-trust dialog so warmup never blocks. SYNCHRONOUS on the hot path BY
+    // DESIGN — the trust flags MUST be persisted to ~/.claude.json before the pty spawns, else the
+    // unattended `claude` blocks on the trust prompt and never reaches SessionStart (the load-bearing
+    // trust-before-spawn invariant). This cannot move off the hot path à la markitdown.
+    // Why the bounded cross-process lock inside (claude-config withTrustLock) does NOT freeze the event
+    // loop on an orchestration fan-out: spawn()→createPty()→ensureTrusted() is a fully synchronous call
+    // chain (no await), and JS is single-threaded — so two in-process spawns CANNOT interleave. Each
+    // ensureTrusted acquires the O_EXCL lock and releases it (in finally) within one synchronous call
+    // stack before the event loop can start the next spawn, so the lock is NEVER contended in-process
+    // and the sleepSync wait loop is unreachable from a single daemon's own fan-out. A burst of N
+    // first-spawns is N sequential synchronous read-modify-writes (the lock adds only an uncontended
+    // openSync(wx)+rmSync each). The contended path (sleepSync up to trustLockMs) is reachable ONLY
+    // across processes — a second Loom daemon sharing this home — which is exactly the cross-process
+    // clobber the lock exists to prevent; there the bounded 5s best-effort degrade is correct. The
+    // already-trusted fast path is lock-free and covers the steady state.
+    ensureTrusted(opts.cwd);
     // Mirror Loom's managed skills into <cwd>/.claude/skills (project-local; shadow personal). Never
     // let a skills hiccup block a spawn — a session must boot even if skill delivery fails.
     try { injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null, opts.role); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
