@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem, AuditTimeline, AuditEvent, AuditSessionRef, AuditScope } from "@loom/shared";
 import { api } from "../lib/api";
+import { bySessionActivity } from "../lib/sessions";
 import { Panel, SectionLabel, Button, Chip, Dot, Select } from "./ui";
 import { color, font, radius, tone, type Tone } from "../theme";
 
@@ -157,8 +158,20 @@ function RunDiff({ rootId, scope, compareTo, onClose }: {
   );
 }
 
+// Wave-scope subject label: the manager wave head, matching the project · mgr id8 (live) form.
+function managerLabel(m: SessionListItem): string {
+  return `${m.projectName} · mgr ${m.id.slice(0, 8)}${m.processState === "live" ? " (live)" : ""}`;
+}
+// Session-scope subject label for a focused agent: role + short id + a branch/agent hint.
+function subjectLabel(s: SessionListItem): string {
+  const role = s.role ?? "session";
+  const hint = s.branch ?? s.agentName ?? "";
+  return `${role} ${s.id.slice(0, 8)}${hint ? ` · ${hint}` : ""}${s.processState === "live" ? " (live)" : ""}`;
+}
+
 export function AuditReplayPanel({ managers }: { managers: SessionListItem[] }) {
-  // The replay roots are managers (wave heads). Default to the most-recently-active one.
+  // The selected replay SUBJECT. In `wave` scope it's always a manager (the wave head); in `session`
+  // scope it's the anchored manager OR one of its workers (so you can focus a single agent's slice).
   const [rootId, setRootId] = useState<string>(managers[0]?.id ?? "");
   const [scope, setScope] = useState<AuditScope>("wave");
   // null = follow the live edge (show the whole timeline); a number = an explicit scrub position.
@@ -166,12 +179,55 @@ export function AuditReplayPanel({ managers }: { managers: SessionListItem[] }) 
   const [playing, setPlaying] = useState(false);
   const [compareTo, setCompareTo] = useState<string>(""); // "" = closed; "predecessor" or a session id
 
-  // If the root went away (wave ended) or none was chosen yet, adopt the current top candidate.
+  // The full session set drives `session` scope: a manager's workers are sessions whose parent is it.
+  // Reuse the shared ["allSessions"] cache the rest of Mission Control already polls (no new prop).
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 5000 });
+  const allSessions = sessionsQ.data ?? [];
+
+  // Climb a subject to its anchoring MANAGER: a worker → its parent; a manager (or unknown) → itself.
+  // In `wave` scope rootId is already a manager, so this is identity there.
+  const managerOf = (id: string): string => {
+    const s = allSessions.find((x) => x.id === id);
+    return s?.role === "worker" && s.parentSessionId ? s.parentSessionId : id;
+  };
+  const anchorManagerId = managerOf(rootId);
+  // The anchored manager (from the live managers prop if present, else any known session row).
+  const anchorManager = managers.find((m) => m.id === anchorManagerId)
+    ?? allSessions.find((s) => s.id === anchorManagerId);
+  // A manager's workers, live-then-recency ordered — the agents you can focus in `session` scope.
+  const anchorWorkers = allSessions
+    .filter((s) => s.role === "worker" && s.parentSessionId === anchorManagerId)
+    .sort(bySessionActivity);
+
+  // The dropdown subjects: managers in `wave` scope; the anchored manager + its workers in `session`.
+  const subjectOptions: { id: string; label: string }[] =
+    scope === "wave"
+      ? managers.map((m) => ({ id: m.id, label: managerLabel(m) }))
+      : [
+          ...(anchorManager ? [{ id: anchorManager.id, label: `manager ${anchorManager.id.slice(0, 8)} · all agents` }] : []),
+          ...anchorWorkers.map((w) => ({ id: w.id, label: subjectLabel(w) })),
+        ];
+
+  // If the selected subject went away, fall back to a valid root. Scope-aware: `wave` validates against
+  // managers; `session` validates against any known session (manager or worker) so focusing a worker
+  // isn't clobbered back to a manager. Wait for the session list before judging session validity.
   useEffect(() => {
-    if ((!rootId || !managers.some((m) => m.id === rootId)) && managers[0]) setRootId(managers[0].id);
-  }, [managers, rootId]);
-  // Reset the scrub + any open diff when the subject changes.
+    if (scope === "wave") {
+      if ((!rootId || !managers.some((m) => m.id === rootId)) && managers[0]) setRootId(managers[0].id);
+    } else if (sessionsQ.data) {
+      if (!allSessions.some((s) => s.id === rootId) && managers[0]) setRootId(managers[0].id);
+    }
+  }, [managers, rootId, scope, sessionsQ.data]);
+  // Reset the scrub + any open diff when the subject or scope changes.
   useEffect(() => { setSeq(null); setPlaying(false); setCompareTo(""); }, [rootId, scope]);
+
+  // Flip scope, reconciling the subject: → wave climbs a focused worker back to its manager (wave needs
+  // a manager root); → session keeps the manager as the anchor so you can then focus one of its workers.
+  const flipScope = (sc: AuditScope) => {
+    if (sc === scope) return;
+    if (sc === "wave") setRootId((id) => managerOf(id));
+    setScope(sc);
+  };
 
   const q = useQuery({
     queryKey: ["audit", scope, rootId],
@@ -218,16 +274,15 @@ export function AuditReplayPanel({ managers }: { managers: SessionListItem[] }) 
       <Panel style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {/* Subject + scope + compare controls */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <Select value={rootId} onChange={(e) => setRootId(e.target.value)} style={{ minWidth: 220 }}>
-            {managers.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.projectName} · mgr {m.id.slice(0, 8)}{m.processState === "live" ? " (live)" : ""}
-              </option>
+          <Select value={rootId} onChange={(e) => setRootId(e.target.value)} style={{ minWidth: 240 }}>
+            {subjectOptions.map((o) => (
+              <option key={o.id} value={o.id}>{o.label}</option>
             ))}
           </Select>
           <div style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden" }}>
             {(["wave", "session"] as const).map((sc) => (
-              <button key={sc} onClick={() => setScope(sc)} className="loom-btn"
+              <button key={sc} onClick={() => flipScope(sc)} className="loom-btn"
+                title={sc === "wave" ? "The whole manager wave (every agent)" : "Focus one agent — the manager or one of its workers"}
                 style={{
                   background: scope === sc ? color.panel2 : "transparent", border: "none",
                   color: scope === sc ? color.phosphor : color.textMuted,
@@ -236,11 +291,13 @@ export function AuditReplayPanel({ managers }: { managers: SessionListItem[] }) 
             ))}
           </div>
           <span style={{ flex: 1 }} />
+          {/* Compare against another run in the SAME scope so the diff isn't mismatched (RunDiff passes
+              the current scope to both sides). Session-scope subjects are agents; wave-scope are managers. */}
           <Select value={compareTo} onChange={(e) => setCompareTo(e.target.value)} style={{ minWidth: 170 }}>
             <option value="">compare run…</option>
             <option value="predecessor">vs predecessor</option>
-            {managers.filter((m) => m.id !== rootId).map((m) => (
-              <option key={m.id} value={m.id}>vs mgr {m.id.slice(0, 8)}</option>
+            {subjectOptions.filter((o) => o.id !== rootId).map((o) => (
+              <option key={o.id} value={o.id}>vs {o.label}</option>
             ))}
           </Select>
         </div>
