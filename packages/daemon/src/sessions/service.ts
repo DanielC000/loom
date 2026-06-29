@@ -422,7 +422,7 @@ export class SessionService {
       // vaultPath is passed here UNGATED by docLint — the orchestrator needs the location regardless of
       // whether the vault-lint hook is on. Additive to the manager prompt only; every other spawn path
       // is untouched (byte-identical).
-      startupPrompt: composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath }),
+      startupPrompt: composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name }),
       role,
       browserTesting,
       documentConversion,
