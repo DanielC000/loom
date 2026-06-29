@@ -30,8 +30,24 @@ export interface AttentionItem {
   tone: Tone;
   kind: string;
   text: string;
-  workerSessionId?: string | null; // when set, the item is openable in the review panel
+  // STRICTLY a merge-review worker — set ONLY on MERGE REQUEST, whose branch diff opens in the review
+  // panel (/review/:workerSessionId). Do NOT overload it as a generic session pointer (it once routed
+  // every non-merge alert to a "No diff" merge page — card a16dfafb); use `sessionId` for those.
+  workerSessionId?: string | null;
+  // The session this NON-merge alert is ABOUT — STUCK-BUSY / CRASH-LOOPED (the session itself) or
+  // MANAGER ASLEEP / NEEDS A HUMAN / QUEUE DRAINED / CONTEXT OVERFLOW (the manager session). Its "Open"
+  // affordance deep-links to that session's view (/session/:sessionId), NOT the merge panel.
+  sessionId?: string | null;
   rateLimitSessionId?: string | null; // when set, the row offers a "clear / retry now" action (POST .../rate-limit/clear)
+}
+
+// The deep-link an attention item's "Open" affordance targets, or null if it has none. A MERGE REQUEST
+// opens the merge-review panel (its worker branch diff); every other openable kind opens the SESSION the
+// alert is about (its live terminal, or an exited-session panel). Single-sourced so the Mission Control /
+// Overview rows, the toast, and the command palette can't drift on where "Open" goes (card a16dfafb).
+export function attentionOpenTarget(item: AttentionItem): string | null {
+  if (item.kind === "MERGE REQUEST") return item.workerSessionId ? `/review/${item.workerSessionId}` : null;
+  return item.sessionId ? `/session/${item.sessionId}` : null;
 }
 
 export function useAttention(): { items: AttentionItem[]; count: number } {
@@ -107,17 +123,17 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     const detail = (e.detail ?? {}) as { state?: string; detail?: string; unanswered?: number };
     if (e.kind === "idle_escalated") {
       items.push({
-        key: `ie-${e.id}`, tone: "red", kind: "MANAGER ASLEEP", workerSessionId: e.managerSessionId,
+        key: `ie-${e.id}`, tone: "red", kind: "MANAGER ASLEEP", sessionId: e.managerSessionId,
         text: `manager ${e.managerSessionId.slice(0, 8)} — ${detail.unanswered ?? "?"} unanswered idle nudges, escalated`,
       });
     } else if (detail.state === "blocked_human") {
       items.push({
-        key: `ib-${e.id}`, tone: "red", kind: "NEEDS A HUMAN", workerSessionId: e.managerSessionId,
+        key: `ib-${e.id}`, tone: "red", kind: "NEEDS A HUMAN", sessionId: e.managerSessionId,
         text: `manager ${e.managerSessionId.slice(0, 8)} — needs a human decision${detail.detail ? `: ${detail.detail}` : ""}`,
       });
     } else if (detail.state === "done") {
       items.push({
-        key: `id-${e.id}`, tone: "amber", kind: "QUEUE DRAINED", workerSessionId: e.managerSessionId,
+        key: `id-${e.id}`, tone: "amber", kind: "QUEUE DRAINED", sessionId: e.managerSessionId,
         text: `manager ${e.managerSessionId.slice(0, 8)} — queue drained; reclaim/close the session${detail.detail ? ` (${detail.detail})` : ""}`,
       });
     }
@@ -126,7 +142,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   for (const e of latestContext.values()) {
     const detail = (e.detail ?? {}) as { unanswered?: number; pct?: number };
     items.push({
-      key: `ce-${e.id}`, tone: "red", kind: "CONTEXT OVERFLOW", workerSessionId: e.managerSessionId,
+      key: `ce-${e.id}`, tone: "red", kind: "CONTEXT OVERFLOW", sessionId: e.managerSessionId,
       text: `manager ${e.managerSessionId.slice(0, 8)} — ignored ${detail.unanswered ?? "?"} recycle nudges at ~${detail.pct ?? "?"}% context; will overflow without a handoff`,
     });
   }
@@ -141,13 +157,13 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   }
   for (const s of all.filter(isStuckBusy)) {
     items.push({
-      key: `s-${s.id}`, tone: "amber", kind: "STUCK-BUSY", workerSessionId: s.id,
+      key: `s-${s.id}`, tone: "amber", kind: "STUCK-BUSY", sessionId: s.id,
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — busy, no activity since ${new Date(s.lastActivity).toLocaleTimeString()} (heuristic)`,
     });
   }
   for (const s of all.filter(isCrashLooped)) {
     items.push({
-      key: `cl-${s.id}`, tone: "red", kind: "CRASH-LOOPED", workerSessionId: s.id,
+      key: `cl-${s.id}`, tone: "red", kind: "CRASH-LOOPED", sessionId: s.id,
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — died repeatedly after auto-resume; auto-resume STOPPED. Inspect the log + resume manually.`,
     });
   }

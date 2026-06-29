@@ -4,7 +4,7 @@ import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/rea
 import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { useAttention } from "../lib/attention";
+import { useAttention, attentionOpenTarget } from "../lib/attention";
 import { bySessionActivity, byCreatedStable, byManagerThenCreated } from "../lib/sessions";
 import Board from "./Board";
 import { TerminalPane } from "../components/Terminal";
@@ -65,11 +65,13 @@ export default function Overview() {
     .flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? [])
     .sort((a, b) => +new Date(b.ts) - +new Date(a.ts));
 
-  // Attention items that resolve (via their session id) to THIS project — same workerSessionId→session
-  // resolution Mission Control's per-project count uses (rate-limit items carry no session id and so
-  // surface globally, not here; their sessions still show red in the fleet rows below).
+  // Attention items that resolve (via their session id) to THIS project — same item→session resolution
+  // Mission Control's per-project count uses (sessionId for non-merge alerts, workerSessionId for a merge
+  // request; rate-limit items carry neither and so surface globally, not here; their sessions still show
+  // red in the fleet rows below).
   const projAttention = attention.filter((item) => {
-    const s = item.workerSessionId ? all.find((x) => x.id === item.workerSessionId) : undefined;
+    const sid = item.sessionId ?? item.workerSessionId;
+    const s = sid ? all.find((x) => x.id === sid) : undefined;
     return !!s;
   });
 
@@ -192,7 +194,7 @@ export default function Overview() {
           {projAttention.length === 0 && <Panel><span style={{ color: color.textMuted }}>Nothing in this project needs you right now.</span></Panel>}
           {projAttention.map((item) => (
             <AttentionRow key={item.key} item={item}
-              onOpen={item.workerSessionId ? () => navigate(`/review/${item.workerSessionId}`) : undefined} />
+              onOpen={(() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()} />
           ))}
         </section>
         <section>

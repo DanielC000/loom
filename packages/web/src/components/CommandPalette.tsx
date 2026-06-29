@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAttention } from "../lib/attention";
+import { useAttention, attentionOpenTarget } from "../lib/attention";
 import { useVisibleNavPages } from "../nav";
 import { color, font } from "../theme";
 
-// Ctrl/Cmd-K fuzzy launcher: jump to any page or open the review panel for a pending attention item.
+// Ctrl/Cmd-K fuzzy launcher: jump to any page, or open the target of a pending attention item — a merge
+// request opens the review panel, every other alert opens the session it concerns (attentionOpenTarget).
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
@@ -26,9 +27,12 @@ export function CommandPalette() {
 
   const commands = [
     ...navPages.map((p) => ({ label: p.label, hint: "page", run: () => navigate(p.to) })),
-    ...attention.filter((a) => a.workerSessionId).map((a) => ({
-      label: `Review · ${a.kind} ${a.text}`, hint: "review", run: () => navigate(`/review/${a.workerSessionId}`),
-    })),
+    ...attention.flatMap((a) => {
+      const target = attentionOpenTarget(a);
+      if (!target) return [];
+      const merge = a.kind === "MERGE REQUEST";
+      return [{ label: `${merge ? "Review" : "Open"} · ${a.kind} ${a.text}`, hint: merge ? "review" : "session", run: () => navigate(target) }];
+    }),
   ].filter((c) => c.label.toLowerCase().includes(q.toLowerCase()));
 
   const go = (run: () => void) => { run(); setOpen(false); setQ(""); };

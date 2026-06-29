@@ -2,12 +2,13 @@ import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReviewPanel from "./pages/ReviewPanel";
+import SessionView from "./pages/SessionView";
 import { NAV_PAGES, useVisibleNavPages, type NavGroup } from "./nav";
 import { NavTab, Badge, Select, Button } from "./components/ui";
 import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
 import { api } from "./lib/api";
-import { useAttention, useNewAttention, type AttentionItem } from "./lib/attention";
+import { useAttention, useNewAttention, attentionOpenTarget, type AttentionItem } from "./lib/attention";
 import { useDismissable } from "./lib/useDismissable";
 import { ActiveProjectProvider, useActiveProject } from "./lib/activeProject";
 import { color, font, radius, tone } from "./theme";
@@ -233,7 +234,9 @@ function ToastContainer() {
         <Toast key={id} item={item}
           onDismiss={() => dismiss(id)}
           onOpen={() => {
-            navigate(item.workerSessionId ? `/review/${item.workerSessionId}` : "/");
+            // MERGE REQUEST → review panel; every other openable kind → its session view; else no-op.
+            const target = attentionOpenTarget(item);
+            if (target) navigate(target);
             dismiss(id);
           }} />
       ))}
@@ -249,13 +252,14 @@ function Toast({ item, onDismiss, onOpen }: { item: AttentionItem; onDismiss: ()
     return () => { cancelAnimationFrame(raf); clearTimeout(ttl); };
   }, []); // run once: a re-rendered onDismiss closure must not reset the timer
   const c = tone[item.tone];
+  const openable = attentionOpenTarget(item) !== null;
   return (
-    <div onClick={onOpen} title={item.workerSessionId ? "open" : undefined}
+    <div onClick={openable ? onOpen : undefined} title={openable ? "open" : undefined}
       style={{
         display: "flex", alignItems: "flex-start", gap: 10, width: 360,
         background: color.panel, border: `1px solid ${color.borderStrong}`, borderLeft: `3px solid ${c}`,
         borderRadius: radius.base, padding: "10px 12px", boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
-        cursor: item.workerSessionId ? "pointer" : "default",
+        cursor: openable ? "pointer" : "default",
         opacity: shown ? 1 : 0, transform: shown ? "translateY(0)" : "translateY(8px)",
         transition: "opacity 160ms ease, transform 160ms ease",
       }}>
@@ -350,6 +354,7 @@ export default function App() {
                 lingering links/bookmarks (and the first-run welcome's historical target). */}
             <Route path="/setup" element={<Navigate to="/platform" replace />} />
             <Route path="/review/:workerId" element={<ReviewPanel />} />
+            <Route path="/session/:id" element={<SessionView />} />
           </Routes>
         </main>
       </div>
