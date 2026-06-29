@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Agent, SessionListItem, SessionRole, Schedule } from "@loom/shared";
 import { api } from "../lib/api";
@@ -84,29 +84,21 @@ export function DeveloperPlatformView() {
         <AuditorSchedules auditorId={auditor?.id} />
       </section>
 
-      {/* --- 5a. Lead history — every Lead RUN (role:"platform" session), newest-first, live+exited+archived --- */}
-      <section>
-        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          Lead history
-          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
-            every Lead run — when it ran, context cost, duration; expand to read the transcript
-          </span>
-        </SectionLabel>
+      {/* --- 5a. Lead history — every Lead RUN (role:"platform" session), newest-first, live+exited+archived.
+              Collapsed by default (history runs long; tuck it away until the human wants it). --- */}
+      <CollapsibleHistory title="Lead history"
+        hint="every Lead run — when it ran, context cost, duration; expand to read the transcript">
         <RunHistory reservedProjectId={project.id} sessions={platformSessions} role="platform"
           emptyLabel="No Lead runs yet — the Platform Lead hasn’t run." />
-      </section>
+      </CollapsibleHistory>
 
-      {/* --- 5b. Auditor history — every audit RUN (auditor session), newest-first, live+exited+archived --- */}
-      <section>
-        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          Auditor history
-          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
-            every audit run — trigger, context cost, findings filed; expand to read the transcript
-          </span>
-        </SectionLabel>
+      {/* --- 5b. Auditor history — every audit RUN (auditor session), newest-first, live+exited+archived.
+              Collapsed by default (same as Lead history). --- */}
+      <CollapsibleHistory title="Auditor history"
+        hint="every audit run — trigger, context cost, findings filed; expand to read the transcript">
         <RunHistory reservedProjectId={project.id} sessions={platformSessions} role="auditor"
           emptyLabel="No audit runs yet — the Auditor hasn’t run." showFindings />
-      </section>
+      </CollapsibleHistory>
 
       {/* --- 3. The Platform board — findings + escalations backlog (reused Board component) --- */}
       <section>
@@ -119,6 +111,31 @@ export function DeveloperPlatformView() {
         <Board projectId={project.id} />
       </section>
     </div>
+  );
+}
+
+// A history section that's collapsed by default — the Lead/Auditor run logs get long, so tuck them
+// away until the human asks. Reuses the AgentPromptEditor disclosure idiom (▾/▸ chevron, phosphor when
+// open) fused with SectionLabel's header typography, so the affordance reads identically to the rest of
+// the cockpit. Session-only state (a reload re-collapses — acceptable; persistence is optional here).
+function CollapsibleHistory({ title, hint, children }: { title: string; hint: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section>
+      <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
+        title={open ? `Collapse ${title}` : `Expand ${title}`}
+        style={{ display: "flex", alignItems: "center", gap: 8, background: "none", border: "none",
+          padding: 0, margin: "4px 0 8px", cursor: "pointer", textAlign: "left", width: "100%" }}>
+        <span aria-hidden style={{ color: open ? color.phosphor : color.textDim, fontFamily: font.mono, fontSize: 12, width: 10 }}>{open ? "▾" : "▸"}</span>
+        <span style={{ fontFamily: font.head, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>
+          {title}
+        </span>
+        <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
+          {hint}
+        </span>
+      </button>
+      {open && children}
+    </section>
   );
 }
 
