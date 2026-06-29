@@ -32,6 +32,7 @@ import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
 import { planColumnLayout, setProjectConfigSafe, type DesiredColumn } from "../tasks/columns.js";
+import { resolveIdPrefix, looksLikeId, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 
 /** Floor (1s) for any threaded git-op timeout — a sub-second misconfig must never make every git op
  *  fail-fast (mirrors GitWriter's GIT_TIMEOUT_FLOOR_MS). Applied where the resolved value is threaded. */
@@ -46,25 +47,39 @@ function slugifyAgentName(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
+/** worker_spawn agentId resolution outcome: a unique hit, an ambiguous id-PREFIX (the candidate ids), or none. */
+type WorkerAgentResolution =
+  | { kind: "found"; agent: Agent }
+  | { kind: "ambiguous"; ids: string[] }
+  | { kind: "none" };
+
 /**
- * PL Auditor finding #10: resolve a worker_spawn `agentId` that may be EITHER a real agent id OR a stable
- * agent NAME/SLUG within the manager's project (the project is derived server-side; a client never passes a
- * projectId). Resolution order is deterministic:
- *   1. exact agent id (the historical contract — preserved byte-for-byte);
+ * PL Auditor finding #10 (+ card f9412b5e): resolve a worker_spawn `agentId` that may be a real agent id, an
+ * unambiguous id-PREFIX (the 8-char short id Loom DISPLAYS as the paste-able id — mirrors transcript_read),
+ * or a stable agent NAME/SLUG within the manager's project (the project is derived server-side; a client never
+ * passes a projectId). Resolution order is deterministic:
+ *   1. exact agent id (the historical contract — preserved byte-for-byte, global like db.getAgent);
  *   2. case-insensitive exact NAME within the project;
- *   3. SLUG (slugifyAgentName) within the project.
- * COLLISION RULE: a name/slug matching multiple agents resolves to the LOWEST-position agent — `listAgents`
- * is `ORDER BY position`, so the first match is the lowest position. Deterministic, never a random pick.
+ *   3. SLUG (slugifyAgentName) within the project;
+ *   4. unambiguous id-PREFIX within the project (resolveIdPrefix; exact id already tried, so only the
+ *      >=8-char prefix path can match here) — a prefix matching >1 agent returns `ambiguous`, never a pick.
+ * COLLISION RULE (name/slug): a name/slug matching multiple agents resolves to the LOWEST-position agent —
+ * `listAgents` is `ORDER BY position`, so the first match is the lowest position. Deterministic.
  */
-function resolveWorkerAgentRef(db: Db, projectId: string, ref: string): Agent | undefined {
+function resolveWorkerAgentRef(db: Db, projectId: string, ref: string): WorkerAgentResolution {
   const byId = db.getAgent(ref);
-  if (byId) return byId;
+  if (byId) return { kind: "found", agent: byId };
   const agents = db.listAgents(projectId); // ORDER BY position ⇒ index 0 is the lowest position
   const lower = ref.toLowerCase();
   const byName = agents.find((a) => a.name.toLowerCase() === lower);
-  if (byName) return byName;
+  if (byName) return { kind: "found", agent: byName };
   const slug = slugifyAgentName(ref);
-  return slug ? agents.find((a) => slugifyAgentName(a.name) === slug) : undefined;
+  const bySlug = slug ? agents.find((a) => slugifyAgentName(a.name) === slug) : undefined;
+  if (bySlug) return { kind: "found", agent: bySlug };
+  const pref = resolveIdPrefix(agents, ref);
+  if (pref.kind === "found") return { kind: "found", agent: pref.record };
+  if (pref.kind === "ambiguous") return { kind: "ambiguous", ids: pref.ids };
+  return { kind: "none" };
 }
 
 /** Case-insensitive Levenshtein edit distance — dependency-free, deterministic, for the "did you mean" hint. */
@@ -101,6 +116,37 @@ function nearestAgentName(agents: Agent[], ref: string): string | undefined {
     if (d < bestDist) { bestDist = d; best = a.name; }
   }
   return best;
+}
+
+/** Max edit distance for an id-SHAPED "did you mean" — an id miss is a typo/truncation (distance 1-2), so a
+ *  far "nearest" is no match at all (⇒ NO hint), never a confidently-wrong suggestion of an unrelated agent. */
+const ID_SUGGEST_MAX_DIST = 2;
+
+/**
+ * card f9412b5e: the NEAREST agent's DISPLAYED 8-char id-PREFIX to an id-SHAPED bad `agentId`, by edit distance
+ * to the closer of each agent's full id or its 8-char prefix — but ONLY within ID_SUGGEST_MAX_DIST. Beyond
+ * that, returns undefined (⇒ no hint). Deterministic (position order, strict `<`). This replaces the NAME-based
+ * hint for id misses: a hex prefix has an arbitrary "nearest" NAME, so the old name hint confidently named an
+ * UNRELATED agent for an id typo.
+ */
+function nearestAgentIdPrefix(agents: Agent[], ref: string): string | undefined {
+  let best: string | undefined;
+  let bestDist = Infinity;
+  for (const a of agents) {
+    const prefix = a.id.slice(0, MIN_ID_PREFIX_LEN);
+    const d = Math.min(editDistance(ref, a.id), editDistance(ref, prefix));
+    if (d < bestDist) { bestDist = d; best = prefix; }
+  }
+  return bestDist <= ID_SUGGEST_MAX_DIST ? best : undefined;
+}
+
+/**
+ * card f9412b5e: the "did you mean" hint for a worker_spawn agentId miss, routed by SHAPE — an id-shaped ref
+ * (looksLikeId: hex/hyphen, >=8 chars) gets an id-PREFIX hint (or none), a name-shaped ref keeps the NAME hint.
+ * Never names an unrelated agent for an id miss.
+ */
+function suggestAgentRef(agents: Agent[], ref: string): string | undefined {
+  return looksLikeId(ref) ? nearestAgentIdPrefix(agents, ref) : nearestAgentName(agents, ref);
 }
 
 /**
@@ -1650,16 +1696,22 @@ export class SessionService {
     // caller (the MCP schema also marks it required).
     const agentRef = (opts.agentId ?? "").trim();
     if (!agentRef) throw new Error("worker_spawn requires an explicit worker agentId (a Dev/Bugfix/QA/Docs agent) — never the manager's own agent");
-    // PL Auditor finding #10 (the agentId UX cousin of the taskId guard #1): accept EITHER a real agent id OR a
-    // stable agent NAME/SLUG, resolved SERVER-SIDE within this manager's project (the project is derived from
-    // the manager; a client never passes a projectId). A hand-copied 36-char UUID with a one-char typo no longer
-    // just 404s — it resolves by name, and failing that the error carries a deterministic "did you mean" hint.
+    // PL Auditor finding #10 + card f9412b5e (the agentId UX cousin of the taskId guard #1): accept a real agent
+    // id, an unambiguous id-PREFIX (the 8-char short id Loom DISPLAYS — mirrors transcript_read), OR a stable
+    // agent NAME/SLUG, resolved SERVER-SIDE within this manager's project (the project is derived from the
+    // manager; a client never passes a projectId). A hand-copied id with a one-char typo no longer just 404s —
+    // it resolves by prefix/name, and failing that the error carries a SHAPE-routed "did you mean" hint (an
+    // id-shaped miss never names an unrelated agent). An AMBIGUOUS prefix names the candidate ids, never a pick.
     // Name/slug collisions resolve to the lowest-position agent (see resolveWorkerAgentRef).
-    const workerAgent = resolveWorkerAgentRef(this.db, manager.projectId, agentRef);
-    if (!workerAgent) {
-      const suggestion = nearestAgentName(this.db.listAgents(manager.projectId), agentRef);
+    const resolvedAgent = resolveWorkerAgentRef(this.db, manager.projectId, agentRef);
+    if (resolvedAgent.kind === "ambiguous") {
+      throw new Error(`worker_spawn agentId '${agentRef}' is an ambiguous id-prefix — it matches ${resolvedAgent.ids.join(", ")}; pass more characters or the full id`);
+    }
+    if (resolvedAgent.kind === "none") {
+      const suggestion = suggestAgentRef(this.db.listAgents(manager.projectId), agentRef);
       throw new Error(`worker_spawn agentId '${agentRef}' does not resolve to an existing agent${suggestion ? ` — did you mean '${suggestion}'?` : ""}`);
     }
+    const workerAgent = resolvedAgent.agent;
     // Reject a manager/platform-role rig: a worker must run under a worker (or plain) agent, never a
     // coordination agent. The role is the agent's resolved PROFILE role (resolveProfile — the canonical
     // mechanism); a profile-less agent (Dev/Bugfix/Docs/QA today) resolves to null and is allowed.

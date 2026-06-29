@@ -20,6 +20,7 @@ import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData, skillWriteInputSchema } from "./skillTools.js";
 import { createProjectTask, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP } from "./tasks.js";
 import { prioritySchema } from "./server.js";
+import { getByIdPrefix } from "../id-prefix.js";
 
 // Same envelope as the task / orchestration MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -638,28 +639,31 @@ export class PlatformMcpRouter {
     server.registerTool(
       "agent_get",
       {
-        description: "Read ONE agent by id — the FULL record incl. its startupPrompt and profileId (the list_all_agents summary drops startupPrompt). Read-only. Error if the id is unknown.",
+        description: "Read ONE agent by id — the FULL record incl. its startupPrompt and profileId (the list_all_agents summary drops startupPrompt). Accepts the full id OR an unambiguous 8-char id-prefix (the short id shown in the UI). Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
         inputSchema: { agentId: z.string() },
       },
-      async ({ agentId }) => ok(db.getAgent(agentId) ?? { error: "agent not found" }),
+      async ({ agentId }) =>
+        ok(getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent")),
     );
 
     server.registerTool(
       "profile_get",
       {
-        description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, noCommit). Read-only. Error if the id is unknown.",
+        description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, noCommit). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
         inputSchema: { profileId: z.string() },
       },
-      async ({ profileId }) => ok(db.getProfile(profileId) ?? { error: "profile not found" }),
+      async ({ profileId }) =>
+        ok(getByIdPrefix(profileId, (id) => db.getProfile(id), () => db.listProfiles(), "profile")),
     );
 
     server.registerTool(
       "project_get",
       {
-        description: "Read ONE project by id — the FULL record incl. its config override (so you can see what's set before a project_configure PATCH). Read-only. Error if the id is unknown.",
+        description: "Read ONE project by id — the FULL record incl. its config override (so you can see what's set before a project_configure PATCH). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
         inputSchema: { projectId: z.string() },
       },
-      async ({ projectId }) => ok(db.getProject(projectId) ?? { error: "project not found" }),
+      async ({ projectId }) =>
+        ok(getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project")),
     );
 
     // --- profiles (cross-project rigs). HUMAN-EQUIVALENT ops — gated to the platform role only; the
