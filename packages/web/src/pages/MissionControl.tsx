@@ -39,6 +39,11 @@ export default function MissionControl() {
 
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 2000 });
   const status = useQuery({ queryKey: ["orchStatus"], queryFn: api.orchestrationStatus, refetchInterval: 2000 });
+  // Archived (now-exited) sessions across all projects, newest-archived first — the live feed above
+  // EXCLUDES archived rows, and sessions auto-archive on exit, so past runs only live here. Used to
+  // restore history access to Run Replay (a god-eye view of LIVE orchestration otherwise loses every
+  // finished wave). Polled lazily (15s) — archived rows don't change second-to-second.
+  const archived = useQuery({ queryKey: ["allArchivedSessions"], queryFn: api.allArchivedSessions, refetchInterval: 15000 });
   const { items: attention } = useAttention();
 
   const all = sessions.data ?? [];
@@ -97,13 +102,21 @@ export default function MissionControl() {
     if (s) attnByProject.set(s.projectName, (attnByProject.get(s.projectName) ?? 0) + 1);
   }
 
-  // Replay roots: every manager, live ones first (the wave you're driving), then by recent activity — so
-  // the panel defaults to the current wave but can replay any past run too.
-  const replayRoots = [...managers].sort((a, b) => {
-    const liveA = a.processState === "live" ? 1 : 0, liveB = b.processState === "live" ? 1 : 0;
-    if (liveA !== liveB) return liveB - liveA;
-    return mostRecentActivity([b]) - mostRecentActivity([a]);
-  });
+  // Replay roots: every manager you can replay — LIVE managers first (the wave you're driving, ordered
+  // live-then-recency), then the ARCHIVED managers of past/exited runs (newest-archived first, as the
+  // feed already returns them). Since sessions auto-archive on exit, a finished run's manager is gone
+  // from the live feed and lives only in `archived` — without this merge the panel would show only the
+  // current wave and "replay any past run too" (above) would be a lie. Dedup by id, live row wins.
+  const liveManagerIds = new Set(managers.map((m) => m.id));
+  const archivedManagers = (archived.data ?? []).filter((s) => s.role === "manager" && !liveManagerIds.has(s.id));
+  const replayRoots: SessionListItem[] = [
+    ...[...managers].sort((a, b) => {
+      const liveA = a.processState === "live" ? 1 : 0, liveB = b.processState === "live" ? 1 : 0;
+      if (liveA !== liveB) return liveB - liveA;
+      return mostRecentActivity([b]) - mostRecentActivity([a]);
+    }),
+    ...archivedManagers,
+  ];
 
   const refreshStatus = () => qc.invalidateQueries({ queryKey: ["orchStatus"] });
   const refreshSessions = () => qc.invalidateQueries({ queryKey: ["allSessions"] });
@@ -120,10 +133,13 @@ export default function MissionControl() {
       {/* Global status strip */}
       <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
         <Badge tone={globalPaused ? "red" : "phosphor"}>{globalPaused ? "orchestration: paused" : "orchestration: running"}</Badge>
+        {/* These counts derive from the LIVE session feed (api.allSessions excludes archived rows, and
+            sessions auto-archive on exit), so they read ACTIVE orchestration only — labelled as such so
+            the number reads as correct-scope, not broken. Finished runs stay reachable via Run Replay. */}
         <div style={{ display: "flex", gap: 10 }}>
-          <Stat label="projects" value={projectNames.length} />
-          <Stat label="managers" value={managers.length} />
-          <Stat label="workers" value={workers.length} />
+          <Stat label="active projects" value={projectNames.length} />
+          <Stat label="active managers" value={managers.length} />
+          <Stat label="active workers" value={workers.length} />
           <Stat label="attention" value={attention.length} tone={attention.length ? "amber" : "muted"} />
         </div>
         <span style={{ flex: 1 }} />
