@@ -3713,7 +3713,7 @@ export class SessionService {
         worktreesPruned++;
         continue;
       }
-      if (await worktreeHasWork(project.repoPath, worktreePath, s.branch ?? null)) {
+      if (await worktreeHasWork(project.repoPath, worktreePath, s.branch ?? null, "HEAD", { timeoutMs: this.gitOpMs })) {
         // eslint-disable-next-line no-console
         console.warn(`[reconcile] kept worktree ${worktreePath} — holds unmerged/uncommitted work (Pass B)`);
         worktreesKept++;
