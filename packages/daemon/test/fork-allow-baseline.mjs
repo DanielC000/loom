@@ -62,9 +62,11 @@ db.insertProfile({ id: "profMgr", name: "Orchestrator", role: "manager", descrip
 db.insertAgent({ id: "agCustom", projectId: "pCustom", name: "Mgr", startupPrompt: "P", position: 0, profileId: "profMgr" });
 db.insertAgent({ id: "agDefault", projectId: "pDefault", name: "Plain", startupPrompt: "P", position: 0, profileId: null });
 
-// Sanity: the CUSTOM resolved config really did drop the baseline (so the fix is what restores it).
-check("setup: the custom project's resolved config.permission.allow OMITS the baseline (wholesale override)",
-  !resolveConfig(customConfig).permission.allow.includes(BASELINE) && resolveConfig(customConfig).permission.allow.includes(CUSTOM_EXTRA));
+// Sanity: resolveConfig now UNIONS the baseline onto a custom allow (the allow-baseline fix moved into the
+// single resolution mechanism), while keeping the custom entry. This guard exercises the fork spawn capture
+// end-to-end regardless of where the baseline is restored.
+check("setup: the custom project's resolved config.permission.allow UNIONS the baseline and keeps the custom entry",
+  resolveConfig(customConfig).permission.allow.includes(BASELINE) && resolveConfig(customConfig).permission.allow.includes(CUSTOM_EXTRA));
 
 class SeamHost extends PtyHost {
   constructor(events) { super(events); this.capture = []; }

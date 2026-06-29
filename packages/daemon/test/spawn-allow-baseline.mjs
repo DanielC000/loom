@@ -52,9 +52,11 @@ db.insertSession({ id: "mgrCustom", projectId: "pCustom", agentId: "agCustom", e
 const taskW = "44444444-4444-4444-8444-444444444444";
 db.insertTask({ id: taskW, projectId: "pCustom", title: "WORK", body: "", columnKey: "todo", position: 1, createdAt: now, updatedAt: now });
 
-// Sanity: the CUSTOM resolved config really did drop the baseline (so the fix is what restores it).
-check("setup: the custom project's resolved config.permission.allow OMITS the baseline (wholesale override)",
-  !resolveConfig(customConfig).permission.allow.includes(BASELINE) && resolveConfig(customConfig).permission.allow.includes(CUSTOM_EXTRA));
+// Sanity: resolveConfig now UNIONS the baseline onto a custom allow (the allow-baseline fix moved into the
+// single resolution mechanism), while keeping the custom entry. The spawn-site withBaselineAllow is now a
+// redundant backstop; this guard exercises the spawn capture end-to-end regardless.
+check("setup: the custom project's resolved config.permission.allow UNIONS the baseline and keeps the custom entry",
+  resolveConfig(customConfig).permission.allow.includes(BASELINE) && resolveConfig(customConfig).permission.allow.includes(CUSTOM_EXTRA));
 
 class SeamHost extends PtyHost {
   constructor(events) { super(events); this.capture = []; }

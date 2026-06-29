@@ -163,7 +163,15 @@ const agentObsidianOverride = obsidianOverride.omit({ path: true }).strict();
 // Agent-facing python shape: `interpreterPath` is omitted (host-launch capable, human-only), leaving an
 // EMPTY strict object, so `.strict()` REJECTS an agent's `python.interpreterPath`. Mirrors obsidian.path.
 const agentPythonOverride = pythonOverride.omit({ interpreterPath: true }).strict();
+// `sessionEnv` is HUMAN-only too and DROPPED from the agent shape (so `.strict()` REJECTS an agent's
+// `sessionEnv`). It's an INTERNAL transport for human-only host-launch fields — the named rejections
+// above (python.interpreterPath / obsidian.path) carry to the daemon AS env vars (LOOM_PYTHON_INTERPRETER
+// → spawn(override) = host RCE; LOOM_OBSIDIAN_PATH/LOOM_OBSIDIAN_AUTOSTART → preflight launches the exe),
+// and the default merge (config.ts) lets an agent-set raw value survive. Allowing raw `sessionEnv` would
+// re-open exactly the host-exec/exfil capability those field rejections close (NODE_OPTIONS=--require,
+// PATH, etc.). Agents have no business setting raw session env; the human/REST path keeps it.
 const agentProjectConfigOverrideSchema = projectConfigOverrideSchema
+  .omit({ sessionEnv: true })
   .extend({ orchestration: agentOrchestrationOverride.optional(), obsidian: agentObsidianOverride.optional(), python: agentPythonOverride.optional() })
   .strict();
 

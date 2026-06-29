@@ -688,7 +688,12 @@ export function resolveConfig(
     kanbanColumns: override.kanbanColumns ?? structuredClone(d.kanbanColumns),
     permission: {
       mode: override.permission?.mode ?? d.permission.mode,
-      allow: override.permission?.allow ?? [...d.permission.allow],
+      // UNION (not replace) the override allowlist onto the baseline, deduped + order-preserving. The
+      // baseline allow (mcp__loom-tasks + git globs) is LOAD-BEARING — it stops the unattended
+      // permission-prompt hang, and the spawn path does NOT re-add it. A project that customizes `allow`
+      // to add one glob must keep the baseline, so we merge instead of substituting. When the override
+      // sets no allow this is a deduped copy of the (duplicate-free) baseline = byte-identical to before.
+      allow: [...new Set([...d.permission.allow, ...(override.permission?.allow ?? [])])],
       deny: override.permission?.deny ?? [...d.permission.deny],
       startupModeCycles: override.permission?.startupModeCycles ?? d.permission.startupModeCycles,
     },

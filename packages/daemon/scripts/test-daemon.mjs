@@ -31,7 +31,7 @@ const HERMETIC = [
   "platform-prompt-migration",
   "agent-runs-keys", "agent-runs-primitive", "agent-runs-profile-attrs", "agent-runs-rest", "agent-runs-idempotency", "agent-runs-caps", "agent-runs-spend", "agent-runs-hardening", "agent-runs-audit",
   "audit-log", // replayable + diffable session/run audit log over the existing orchestration_events + sessions store (timeline + LCS/kind-delta diff + human-only REST)
-  "tasks-filter", "tasks-priority", "task-delete", "task-column-guard", "kanban-columns-schema", "column-lifecycle", "column-presets", "preset-prompts", "preset-prompt-suggestions", "config-bounds", "config-rewire", "project-config-patch", "kanban-defaults", "transcript-encode", "alert-webhook",
+  "tasks-filter", "tasks-priority", "task-delete", "task-column-guard", "kanban-columns-schema", "column-lifecycle", "column-presets", "preset-prompts", "preset-prompt-suggestions", "config-bounds", "config-rewire", "project-config-patch", "agent-override-host-exec-guard", "kanban-defaults", "transcript-encode", "alert-webhook",
   "ensure-obsidian", // card ab67eba3: Obsidian auto-start — config plumbing + human-only path gating + the vault preflight's gate/probe/fallback/launch-command construction (no real GUI launch)
   "session-archive", "session-list-summary", "all-archived-sessions", "periodic-snapshot", "shutdown-snapshot", "shutdown-endpoint", "csrf-rebind", "gateway-hardening", "mgmt-project-agent", "mgr-own-project-scope", "web-static-serve", "version", "cli-args", "cli-direct-invocation", "cli-service", "cli-channel", "update-check", "update-endpoint",
   "mcp-list-budget", // PL Auditor finding #5: default list_all_agents + audit list_sessions fit the token budget

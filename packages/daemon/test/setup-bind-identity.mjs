@@ -115,17 +115,18 @@ try {
   // Set the FIRST config key (docLint) via project_configure.
   const cfgA = await call("project_configure", { projectId: proj.id, config: { docLint: true } });
   check("(1) project_configure: docLint set", cfgA.ok === true && resolveConfig(db.getProject(proj.id).config).docLint === true);
-  // project_update a DIFFERENT key (sessionEnv) — the sibling docLint must SURVIVE (the clobber bug).
-  const upd = await call("project_update", { projectId: proj.id, config: { sessionEnv: { FOO: "bar" } } });
+  // project_update a DIFFERENT key (obsidian.autoStart — an agent-settable nested key; sessionEnv is now
+  // HUMAN-only) — the sibling docLint must SURVIVE (the clobber bug).
+  const upd = await call("project_update", { projectId: proj.id, config: { obsidian: { autoStart: true } } });
   check("(1) project_update: returns the project (no error)", !!upd.id && !upd.error);
   const merged = resolveConfig(db.getProject(proj.id).config);
-  check("(1) project_update: the NEW key applied (sessionEnv.FOO)", merged.sessionEnv?.FOO === "bar");
+  check("(1) project_update: the NEW key applied (obsidian.autoStart)", merged.obsidian?.autoStart === true);
   check("(1) project_update: the SIBLING key PRESERVED (docLint still true — not clobbered)", merged.docLint === true);
   // And a project_update that ALSO renames (name + a config key together) still preserves siblings.
   const upd2 = await call("project_update", { projectId: proj.id, name: "MergeProj v2", config: { docLint: false } });
   const merged2 = resolveConfig(db.getProject(proj.id).config);
   check("(1) project_update: rename applied alongside config", upd2.name === "MergeProj v2" && !upd2.error);
-  check("(1) project_update: updating docLint kept the sibling sessionEnv.FOO", merged2.sessionEnv?.FOO === "bar");
+  check("(1) project_update: updating docLint kept the sibling obsidian.autoStart", merged2.obsidian?.autoStart === true);
   check("(1) project_update: the updated key took effect (docLint now false)", merged2.docLint === false);
 
   // ============ ITEM 2 — resolvable-commit-identity assert at bind (direct helper) ============
