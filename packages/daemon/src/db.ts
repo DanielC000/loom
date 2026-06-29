@@ -1840,6 +1840,14 @@ export class Db {
     const r = this.db.prepare("SELECT id FROM sessions WHERE task_id = ? AND process_state = 'live' ORDER BY created_at LIMIT 1").get(id) as { id: string } | undefined;
     return r?.id;
   }
+  /** ALL sessions still in processState 'live' bound to this task — the sibling-retirement sweep set used by
+   * confirmWorkerMerge/recycleWorker to graceful-stop any live session OTHER than the one being merged/recycled
+   * BEFORE the shared worktree is deleted, so no zombie is left bound to a removed cwd (incident 35fc823f). The
+   * single-id {@link liveSessionIdForTask} returns only the first; this returns the whole set. */
+  listLiveSessionsForTask(id: string): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE task_id = ? AND process_state = 'live' ORDER BY created_at")
+      .all(id) as Row[]).map(toSession);
+  }
 
   /**
    * Atomic safe board-column layout change (task B). In ONE transaction: (1) apply the planned card

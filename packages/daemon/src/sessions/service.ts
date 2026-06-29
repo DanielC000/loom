@@ -2677,6 +2677,11 @@ export class SessionService {
       // eslint-disable-next-line no-console
       console.warn(`[recycle] old worker ${workerSessionId} still alive after ~5s; proceeding`);
     }
+    // SIBLING SWEEP (incident 35fc823f): the fresh successor reuses this SAME worktree, so retire any OTHER
+    // live session bound to the task before respawning — else a stray sibling would run concurrently with
+    // the successor on the shared worktree/branch (the zombie end of the 2-workers-on-one-branch bug). The
+    // keep is the old worker being recycled (just hard-stopped above). No-op when there are no siblings.
+    await this.retireSiblingSessionsForTask(taskId, workerSessionId);
 
     const now = new Date().toISOString();
     const fresh: Session = {
@@ -3439,6 +3444,39 @@ export class SessionService {
   }
 
   /**
+   * Sibling-retirement sweep — the DEFENSIVE guard at the OTHER end of the 2-workers-on-one-branch
+   * incident (35fc823f). The spawn-race that could CREATE a second live session on one task/worktree is
+   * fixed UPSTREAM (the atomic per-taskId claim in spawnWorker); this is belt-and-suspenders at retirement
+   * time. Before a task's shared worktree is REMOVED (confirmWorkerMerge → finalizeMerge) or REUSED
+   * (recycleWorker), graceful-stop and retire EVERY OTHER live session bound to the task, so none is left
+   * running ("zombie") in a now-deleted / repurposed cwd.
+   *
+   * `keepSessionId` is the session being merged/recycled — it is EXCLUDED (its own hard-stop handles it).
+   * For each sibling: graceful-stop the pty AND retire its DB row IMMEDIATELY (setProcessState exited +
+   * clear busy) — mirroring recycleManager's explicit predecessor retirement, so the row never lingers
+   * 'live' pointing at a path that's about to vanish, independent of the async onExit. Then wait (bounded,
+   * mirroring the primary worker hard-stop wait) for any live sibling pty to actually die, so the caller's
+   * removeWorktree isn't blocked by a live process's cwd handle on Windows. Best-effort + idempotent:
+   * a no-op when the task has no siblings (the normal single-worker case), pty.stop is a no-op on a row
+   * with no live pty, and setProcessState/setBusy are idempotent. taskId null ⇒ nothing to enumerate.
+   */
+  private async retireSiblingSessionsForTask(taskId: string | null, keepSessionId: string): Promise<void> {
+    if (!taskId) return;
+    const siblings = this.db.listLiveSessionsForTask(taskId).filter((s) => s.id !== keepSessionId);
+    if (siblings.length === 0) return;
+    for (const sib of siblings) {
+      // eslint-disable-next-line no-console
+      console.warn(`[sibling-sweep] retiring stray live session ${sib.id} bound to task ${taskId} (keeping ${keepSessionId}) before its shared worktree is removed/reused — zombie guard (incident 35fc823f)`);
+      this.pty.stop(sib.id, "graceful");
+      this.db.setProcessState(sib.id, "exited");
+      this.db.setBusy(sib.id, false);
+    }
+    for (let i = 0; i < 50 && siblings.some((s) => this.pty.isAlive(s.id)); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  /**
    * The post-merge bookkeeping shared by confirmWorkerMerge (the interactive merge path) and
    * reconcileOrchestrationOnBoot (orphaned-merge recovery): retire the worktree, finish the task,
    * record `merge_done`, then delete the now-merged branch. Factored out so the two callers can't
@@ -3469,6 +3507,12 @@ export class SessionService {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
     worktreePath: string; branch: string; repoPath: string;
   }): Promise<void> {
+    // SIBLING SWEEP first (incident 35fc823f): retire any OTHER live session bound to this task before the
+    // worktree is removed, so no zombie is left running in the about-to-be-deleted cwd. The keep is the
+    // worker being merged (already hard-stopped by the caller). Covers BOTH confirmWorkerMerge paths
+    // (ALREADY_MERGED + Green) here once, so they can't drift; at boot-reconcile it's a no-op (recoverStale-
+    // Sessions has already marked prior-run ptys exited, so the task has no live siblings).
+    await this.retireSiblingSessionsForTask(args.taskId, args.workerSessionId);
     try {
       await removeWorktree(args.repoPath, args.worktreePath, { timeoutMs: this.gitOpMs });
     } catch (e) {
