@@ -591,6 +591,26 @@ export interface Task {
 }
 
 /**
+ * Owner-gated / HOLD marker convention for a task TITLE — the explicit, single-source-of-truth contract
+ * the idle watchdog uses to DISCOUNT a parked owner product-decision from its "actionable" count.
+ *
+ * A card that is really an owner decision (HOLD / "confirm intent first") is sometimes parked in an
+ * actionable lane (e.g. `todo`) rather than `blocked` — and `blocked` is the SOLE owner-controlled brake,
+ * so the manager cannot move it there itself to silence the watchdog. Such a card is conventionally
+ * titled with an explicit UPPERCASE `HOLD` or `CONFIRM` marker, e.g.
+ *   "[HOLD — owner go required] …"   "fix(pty): … — CONFIRM run-role intent first".
+ * The manager cannot action or clear it, so it is NOT actionable for idle-watchdog purposes.
+ *
+ * UPPERCASE + word-boundary on purpose: this is an explicit gate signal the OWNER writes, NOT lowercase
+ * prose ("confirm the dialog renders", "hold the connection open") which must NOT trip it. This is a
+ * defined convention, not free-text guessing — keep it the one place the marker is decided.
+ */
+const OWNER_HELD_TITLE_RE = /\b(HOLD|CONFIRM)\b/;
+export function isOwnerHeldTaskTitle(title: string): boolean {
+  return OWNER_HELD_TITLE_RE.test(title);
+}
+
+/**
  * A global "preset prompt" — a programmable terminal action-button (a short `label` + the `prompt`
  * text it sends to a session on click). GLOBAL / daemon-wide: a single shared list with NO project or
  * session scoping. Human/UI-managed over the loopback REST surface (there is intentionally NO MCP path

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { resolveConfig, contextWindowForModel, columnKeyForRole } from "@loom/shared";
+import { resolveConfig, contextWindowForModel, columnKeyForRole, isOwnerHeldTaskTitle } from "@loom/shared";
 import type { OrchestrationEventKind } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
@@ -150,9 +150,19 @@ export class IdleWatcher {
       const cols = resolveConfig(project.config).kanbanColumns;
       const terminalKey = columnKeyForRole(cols, "terminal");
       const humanHoldKey = columnKeyForRole(cols, "humanHold");
-      const openTodos = db.listTasks(m.projectId).filter(
+      const openCards = db.listTasks(m.projectId).filter(
         (t) => t.columnKey !== terminalKey && t.columnKey !== humanHoldKey,
-      ).length;
+      );
+      // DISCOUNT owner-gated/HOLD/CONFIRM-first cards: a product-decision parked in an actionable lane
+      // (the owner left it in `todo`, not `blocked`) is NOT something the manager can drive — and it
+      // can't move it to `blocked` itself (the sole owner brake). Counting it kept nagging the manager to
+      // "pick up the next task NOW" on a card it's forbidden to touch (structural deadlock, card f8f1c1d5).
+      const heldCount = openCards.filter((t) => isOwnerHeldTaskTitle(t.title)).length;
+      const openTodos = openCards.length - heldCount;
+      // If EVERY open card is an owner-held gate (≥1 held, 0 genuinely-actionable), the manager has
+      // nothing it can action and no way to clear the gate → skip silently instead of deadlock-nudging.
+      // A truly empty board (no held cards either) still nudges — the manager should `idle_report 'done'`.
+      if (heldCount > 0 && openTodos === 0) continue;
       const n = Math.round((nowMs - lastActivityMs) / 60_000);
       const msg =
         `[loom:idle] You've been idle ~${n} min with no live workers and ${openTodos} actionable task(s). ` +

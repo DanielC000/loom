@@ -71,6 +71,11 @@ function seedCard(e, columnKey) {
   e.db.insertTask({ id: `tk-${columnKey}-${Math.random().toString(36).slice(2, 6)}`, projectId: e.projId,
     title: columnKey, body: "", columnKey, position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
 }
+// Seed one card with an explicit title (for the owner-held/HOLD discount test).
+function seedTitled(e, columnKey, title) {
+  e.db.insertTask({ id: `tk-${columnKey}-${Math.random().toString(36).slice(2, 6)}`, projectId: e.projId,
+    title, body: "", columnKey, position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+}
 function cleanup(e) {
   try { e.db.close(); } catch { /* ignore */ }
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(e.dbFile + ext, { force: true }); } catch { /* ignore */ } }
@@ -106,6 +111,55 @@ function cleanup(e) {
   e.watcher.tick(NOW);
   check("(1b) counts ALL actionable lanes (6), excluding the blocked + done lanes",
     e.enqueued.length === 1 && e.enqueued[0].text.includes("6 actionable"));
+  cleanup(e);
+}
+
+// ===== (1c) owner-gated/HOLD cards are DISCOUNTED from the actionable count (card f8f1c1d5) =====
+// A held card as the SOLE open card → NO nudge (the manager can't action or clear it; it's parked on an
+// owner decision and `blocked` is the sole owner brake). A genuinely-actionable card still nudges.
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-held-only");
+  seedTitled(e, "todo", "[HOLD — owner go required] fix(pty): confirm run-role intent first");
+  e.watcher.tick(NOW);
+  check("(1c) a HELD card as the sole todo → NO idle nudge (discounted, not a deadlock-nag)", e.enqueued.length === 0);
+  cleanup(e);
+}
+{
+  // CONFIRM marker (mid-title, uppercase) is also discounted.
+  const e = makeEnv();
+  seedManager(e, "mgr-confirm-only");
+  seedTitled(e, "todo", "fix(pty): wire run-role — CONFIRM run-role intent first");
+  e.watcher.tick(NOW);
+  check("(1c) a sole CONFIRM-first card → NO idle nudge", e.enqueued.length === 0);
+  cleanup(e);
+}
+{
+  // A genuinely-actionable card alongside a held one → STILL nudges, and the count EXCLUDES the held card.
+  const e = makeEnv();
+  seedManager(e, "mgr-mixed");
+  seedTitled(e, "todo", "[HOLD — owner go required] big decision");
+  seedTitled(e, "todo", "fix(web): real actionable task");
+  e.watcher.tick(NOW);
+  check("(1c) a held + a genuine card → STILL nudged (genuine work exists)", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-mixed");
+  check("(1c) the reported actionable count EXCLUDES the held card (1, not 2)", e.enqueued[0]?.text.includes("1 actionable"));
+  cleanup(e);
+}
+{
+  // Lowercase prose must NOT trip the marker (it's an explicit UPPERCASE owner gate, not free-text).
+  const e = makeEnv();
+  seedManager(e, "mgr-lowercase");
+  seedTitled(e, "todo", "fix(web): confirm dialog renders wrong + hold-to-save button");
+  e.watcher.tick(NOW);
+  check("(1c) lowercase 'confirm'/'hold' prose is NOT discounted (still actionable → nudged)", e.enqueued.length === 1 && e.enqueued[0].text.includes("1 actionable"));
+  cleanup(e);
+}
+{
+  // A truly EMPTY board (no held cards either) still nudges — the manager should idle_report 'done'.
+  const e = makeEnv();
+  seedManager(e, "mgr-empty-board");
+  e.watcher.tick(NOW);
+  check("(1c) an empty board (0 cards, none held) STILL nudges (report 'done' path unchanged)", e.enqueued.length === 1 && e.enqueued[0].text.includes("0 actionable"));
   cleanup(e);
 }
 
