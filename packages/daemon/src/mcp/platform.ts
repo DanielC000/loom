@@ -33,6 +33,11 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
 const columnRole = z.enum([
   "intake", "defaultLanding", "workReady", "active", "review", "parked", "humanHold", "terminal",
 ]);
+// `.strict()` deliberately drops accentColor/wipLimit (both present on the shared KanbanColumn type,
+// config.ts) on the GENERIC config-override path: board columns are owned by the dedicated atomic
+// PUT /api/projects/:id/columns endpoint (updateBoardColumns), NOT the generic config patch. Omitting
+// them here keeps the config path minimal and rejects a config-override that smuggles board styling —
+// this rejection is by design, not a type-vs-validator drift.
 const kanbanColumn = z.object({ key: z.string(), label: z.string(), role: columnRole.optional() }).strict();
 // A board's column layout — the SAME well-formedness floor planColumnLayout enforces on the column-editor
 // PUT path, applied here so a config-PATCH surface (project_create/project_configure/project_update + the

@@ -24,9 +24,13 @@ export interface KanbanColumn {
   label: string;
   /** Semantic lifecycle role (see ColumnRole). Optional: stored configs may lack it. */
   role?: ColumnRole;
-  /** CSS color for the column header accent (e.g. "#6b8afd"). Optional; absent = today's look. */
+  /**
+   * CSS color for the column header accent (e.g. "#6b8afd"). Optional; absent = today's look.
+   * accentColor/wipLimit are set ONLY via the atomic PUT /api/projects/:id/columns endpoint
+   * (updateBoardColumns); the generic config-override schema (mcp/platform.ts) deliberately omits them.
+   */
   accentColor?: string;
-  /** SOFT (advisory, non-blocking) work-in-progress limit. Optional; absent = no limit. */
+  /** SOFT (advisory, non-blocking) work-in-progress limit. Optional; absent = no limit. See accentColor. */
   wipLimit?: number;
 }
 
