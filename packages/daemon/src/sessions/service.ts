@@ -1280,6 +1280,13 @@ export class SessionService {
     const project = this.db.getProject(agent.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
+    // Resolve the agent's profile capabilities through the SAME helper every other fresh spawn uses, so a
+    // run honors the agent's profile-pinned model + skills — the asymmetry this method had: it hand-rolled
+    // its SpawnOpts and DROPPED both (a model-pinned agent ran on the engine default; a skills-pinned agent
+    // got ALL store skills). We thread ONLY model + skills; the run's deliberate differences stay: role is
+    // hardcoded "run" below (not the profile role), permission is the VERBATIM boot recipe (config.permission,
+    // no allowDelta), browserTesting/documentConversion stay false, and buildMcpServers mounts ONLY loom-run.
+    const { model, skills } = this.resolveAgentSpawn(agent, config, "run");
 
     const now = new Date().toISOString();
     const sessionId = randomUUID();
@@ -1319,6 +1326,7 @@ export class SessionService {
       processState: "starting", resumability: "unknown", busy: false,
       createdAt: now, lastActivity: now, lastError: null,
       role: "run", browserTesting: false, documentConversion: false,
+      skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
@@ -1336,6 +1344,8 @@ export class SessionService {
       role: "run", // buildMcpServers mounts ONLY loom-run; createPty allowlists mcp__loom-run
       browserTesting: false,
       documentConversion: false,
+      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
     });
     this.db.setRunStatus(runId, "running"); // the startup-prompt turn is in flight
     // Arm the hard run-timeout (capstone BUG 2): if the agent finishes WITHOUT submit_result, nothing
