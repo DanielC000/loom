@@ -60,8 +60,10 @@ function mkSession(o) {
 }
 
 try {
-  // Project P: a requester manager, a worker under it, a standing reviewer (auditor), a TRULY-converged
-  // bystander manager (empty board + snoozed idle-policy → the lightweight FYI branch), and a plain session.
+  // Project P: a requester manager, a worker under it, a BUSY-at-capture standing reviewer (auditor — busy
+  // so it still gets the continuation nudge, per card b5664b5b Problem B), a TRULY-converged no-op bystander
+  // manager (empty board + snoozed idle-policy → now the SILENT no-op branch, card b5664b5b A+C1), and a
+  // plain session.
   const P = { proj: `rrc-P-${sfx}`, agent: `rrc-P-ag-${sfx}` };
   mkProject(P.proj, "/tmp/rrc-P"); mkAgent(P.agent, P.proj);
   const id = {
@@ -72,7 +74,7 @@ try {
   mkSession({ id: id.worker, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id.reqMgr });
   mkSession({ id: id.auditor, projId: P.proj, agentId: P.agent, role: "auditor" });
   mkSession({ id: id.convMgr, projId: P.proj, agentId: P.agent, role: "manager" });
-  db.setIdleNudgePolicy(id.convMgr, "snoozed", future); // 0 workers + empty board ⇒ converged FYI branch
+  db.setIdleNudgePolicy(id.convMgr, "snoozed", future); // 0 workers + empty board ⇒ silent no-op branch
   mkSession({ id: id.plain, projId: P.proj, agentId: P.agent, role: null });
 
   const intent = {
@@ -80,7 +82,7 @@ try {
     resume: [
       { sessionId: id.reqMgr, role: "manager", parentSessionId: null },
       { sessionId: id.worker, role: "worker", parentSessionId: id.reqMgr },
-      { sessionId: id.auditor, role: "auditor", parentSessionId: null },
+      { sessionId: id.auditor, role: "auditor", parentSessionId: null, busy: true }, // mid-run ⇒ nudged
       { sessionId: id.convMgr, role: "manager", parentSessionId: null },
       { sessionId: id.plain, role: null, parentSessionId: null },
     ],
@@ -88,13 +90,12 @@ try {
   const result = sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
   check("(0) all 5 sessions resumed, none failed", result.resumed.length === 5 && result.failed.length === 0);
 
-  // The four NUDGED roles (requester, worker, reviewer, converged manager). The plain session is resumed
-  // but never nudged (no orchestration loop) — verified separately below.
+  // The three NUDGED roles (requester, worker, busy-at-capture reviewer). The converged no-op manager and
+  // the plain session are resumed SILENTLY (no orchestration loop / no-op restart) — verified separately.
   const nudged = [
     { who: "requester manager", id: id.reqMgr, extra: /now LIVE/ },
     { who: "worker", id: id.worker, extra: /Continue your assigned task/ },
-    { who: "auditor (reviewer)", id: id.auditor, extra: /continue your work/i },
-    { who: "converged manager FYI", id: id.convMgr, extra: /no action is needed/i },
+    { who: "busy auditor (reviewer)", id: id.auditor, extra: /continue your work/i },
   ];
 
   for (const n of nudged) {
@@ -122,6 +123,9 @@ try {
   // The plain (role-null) session: resumed but gets NO nudge — so it sees NO daemon turn at all (the
   // single-coherent-turn property is vacuously honoured; the daemon never injects a bare continue here).
   check("(2) plain session received NO daemon turn (no nudge, no bare continue)", pty.getPending(id.plain).length === 0);
+  // The truly-converged no-op bystander manager now resumes SILENTLY (card b5664b5b A+C1) — the old
+  // "no action needed" FYI was itself a wasted turn, so it gets ZERO daemon turns.
+  check("(2) converged no-op manager received NO daemon turn (silent resume, card b5664b5b)", pty.getPending(id.convMgr).length === 0);
 } finally {
   db.close();
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });

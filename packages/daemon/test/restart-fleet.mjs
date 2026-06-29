@@ -69,6 +69,7 @@ function mkSession(o) {
   });
   if (o.archived) db.archiveSession(o.id);
   if (o.parkedUntil) db.setRateLimitedUntil(o.id, o.parkedUntil, "usage limit — parked");
+  if (o.busy) db.setBusy(o.id, true); // busy-at-capture (card b5664b5b Problem B)
 }
 
 const repoRoots = [];
@@ -87,7 +88,7 @@ try {
     exitedW: `rf-exited-${sfx}`, archivedW: `rf-archived-${sfx}`,
   };
   mkSession({ id: id.mgrA, projId: A.proj, agentId: A.agent, role: "manager" });
-  mkSession({ id: id.wkrA1, projId: A.proj, agentId: A.agent, role: "worker", parentSessionId: id.mgrA });
+  mkSession({ id: id.wkrA1, projId: A.proj, agentId: A.agent, role: "worker", parentSessionId: id.mgrA, busy: true });
   mkSession({ id: id.wkrA2, projId: A.proj, agentId: A.agent, role: "worker", parentSessionId: id.mgrA, parkedUntil: future });
   mkSession({ id: id.plainA, projId: A.proj, agentId: A.agent, role: null }); // plain phase-1 session
   mkSession({ id: id.mgrB, projId: B.proj, agentId: B.agent, role: "manager" });
@@ -100,6 +101,8 @@ try {
   check("(1) capture returns exactly the 6 LIVE sessions across both projects", fleet.length === 6);
   check("(1) captures managerA (role manager, no parent)", byId.get(id.mgrA)?.role === "manager" && byId.get(id.mgrA)?.parentSessionId === null);
   check("(1) captures workerA1 with manager linkage", byId.get(id.wkrA1)?.role === "worker" && byId.get(id.wkrA1)?.parentSessionId === id.mgrA);
+  check("(1) captures the busy-at-capture flag (workerA1 busy, managerA idle) — card b5664b5b Problem B",
+    byId.get(id.wkrA1)?.busy === true && byId.get(id.mgrA)?.busy === false);
   check("(1) captures the PARKED workerA2 too (still live)", byId.has(id.wkrA2) && byId.get(id.wkrA2)?.parentSessionId === id.mgrA);
   check("(1) captures the plain (role-null) session", byId.has(id.plainA) && byId.get(id.plainA)?.role === null);
   check("(1) captures the OTHER project's managerB + workerB1", byId.get(id.mgrB)?.role === "manager" && byId.get(id.wkrB1)?.parentSessionId === id.mgrB);
@@ -249,13 +252,15 @@ try {
   check("(5b) resume() spawned NO pty (no doomed --resume)", recPty.spawns.length === 0);
 
   // ============================ (6) NUDGE COVERAGE — reviewer roles, run-exclusion, converged mgr ====
-  // P1 + folded #7 + card 90058589. Standing reviewers (auditor/workspace-auditor/setup) resume with NO
-  // startup prompt, so without a continuation nudge they sit idle until a human types "continue" — each
-  // must get a generic [loom:daemon-restarted] nudge. A `run` (runs don't resume — see shared/types.ts
-  // SessionRole) gets NONE. And the converged short-circuit is gated on the BOARD, not the stale idle-policy
-  // alone: a manager/platform with 0 live workers in the resume set AND an EMPTY board gets the lightweight
-  // FYI; one with a PENDING board card (even with a stale suppressed/snoozed idle-policy) gets the full
-  // "re-check your workers" re-orient; and the deploy REQUESTER is NEVER FYI-short-circuited.
+  // P1 + folded #7 + card 90058589 + card b5664b5b. Standing reviewers (auditor/workspace-auditor/setup)
+  // resume with NO startup prompt; a reviewer that was MID-RUN (busy) at capture would otherwise sit idle
+  // until a human types "continue", so it gets a [loom:daemon-restarted] nudge — but an already-IDLE reviewer
+  // resumes SILENTLY (card b5664b5b Problem B: its next due wake/schedule re-engages it, so a nudge only
+  // burned a turn). A `run` (runs don't resume — see shared/types.ts SessionRole) gets NONE. And a non-causal
+  // bystander manager/platform with 0 live workers AND an EMPTY board now resumes SILENTLY too (card b5664b5b
+  // A+C1 — the old "lightweight FYI" was itself a wasted turn); one with a PENDING board card (even with a
+  // stale suppressed/snoozed idle-policy) still gets the full "re-check your workers" re-orient; and the
+  // deploy REQUESTER is NEVER short-circuited.
   // C.proj is an EMPTY board (no tasks) — its 0-worker managers are GENUINELY converged.
   // C2.proj has ≥1 PENDING card (mkTask lands at "in_progress" = the `active` lane, neither terminal
   // nor humanHold) — its 0-worker managers are NOT converged despite a stale suppressed idle-policy
@@ -295,9 +300,9 @@ try {
   const intent6 = {
     reason: "deploy", managerSessionId: cid.reqMgr, requestedAt: now,
     resume: [
-      { sessionId: cid.auditor, role: "auditor", parentSessionId: null },
-      { sessionId: cid.wsAuditor, role: "workspace-auditor", parentSessionId: null },
-      { sessionId: cid.setup, role: "setup", parentSessionId: null },
+      { sessionId: cid.auditor, role: "auditor", parentSessionId: null, busy: true }, // mid-run ⇒ nudged
+      { sessionId: cid.wsAuditor, role: "workspace-auditor", parentSessionId: null }, // idle ⇒ silent
+      { sessionId: cid.setup, role: "setup", parentSessionId: null }, // idle ⇒ silent
       { sessionId: cid.run, role: "run", parentSessionId: null },
       { sessionId: cid.reqMgr, role: "manager", parentSessionId: null },
       { sessionId: cid.convMgr, role: "manager", parentSessionId: null },
@@ -309,12 +314,12 @@ try {
   sessions6.resumeFleetOnBoot(intent6, { resumeOne: () => true });
   const n6 = (i) => pty6.getPending(i);
 
-  check("(6a) auditor gets a [loom:daemon-restarted] continue nudge",
+  check("(6a) a BUSY-at-capture auditor gets a [loom:daemon-restarted] continue nudge",
     n6(cid.auditor).length === 1 && n6(cid.auditor)[0].includes("[loom:daemon-restarted]") && /continue your work/i.test(n6(cid.auditor)[0]));
-  check("(6a) workspace-auditor gets the continue nudge",
-    n6(cid.wsAuditor).length === 1 && n6(cid.wsAuditor)[0].includes("[loom:daemon-restarted]") && /continue your work/i.test(n6(cid.wsAuditor)[0]));
-  check("(6a) setup gets the continue nudge",
-    n6(cid.setup).length === 1 && n6(cid.setup)[0].includes("[loom:daemon-restarted]") && /continue your work/i.test(n6(cid.setup)[0]));
+  check("(6a) an IDLE-at-capture workspace-auditor resumes SILENTLY (card b5664b5b Problem B)",
+    n6(cid.wsAuditor).length === 0);
+  check("(6a) an IDLE-at-capture setup reviewer resumes SILENTLY (card b5664b5b Problem B)",
+    n6(cid.setup).length === 0);
   check("(6b) a `run` session gets NO nudge (runs don't resume)", n6(cid.run).length === 0);
   // (6c) convergence is gated on the BOARD, not the stale idle-policy alone (card 90058589).
   // The REQUESTER is never FYI-short-circuited — it always gets the full "code is live, verify + continue".
@@ -326,10 +331,11 @@ try {
   const pendMsg = n6(cid.pendMgr);
   check("(6c) a non-requesting manager with a PENDING board (stale suppressed policy) gets the FULL re-check nudge",
     pendMsg.length === 1 && /re-check your workers/i.test(pendMsg[0]) && !/no action is needed/i.test(pendMsg[0]));
-  // PRESERVED: a NON-requesting manager that is TRULY converged (empty board + 0 workers) still gets the FYI.
+  // card b5664b5b A+C1: a NON-requesting manager that is TRULY converged (empty board + 0 workers) now
+  // resumes SILENTLY — the old "lightweight FYI" was itself a wasted turn it claimed to save.
   const convMsg = n6(cid.convMgr);
-  check("(6c) a truly-converged NON-requesting manager (empty board) still gets the lightweight FYI",
-    convMsg.length === 1 && /no action is needed/i.test(convMsg[0]) && !/re-check/i.test(convMsg[0]));
+  check("(6c) a truly-converged NON-requesting manager (empty board) resumes SILENTLY (no FYI turn)",
+    convMsg.length === 0);
   // Control: an active manager (still has a live worker) gets the FULL re-check nudge — gate is precise.
   const activeMsg = n6(cid.activeMgr);
   check("(6c) an active manager (live worker) still gets the FULL re-check nudge",
@@ -346,6 +352,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a daemon_restart captures the WHOLE live cross-project fleet, resumes every session (requester re-prompted, others nudged, standing reviewers [auditor/workspace-auditor/setup] nudged, `run` excluded, converged 0-worker managers get the lightweight FYI not the full re-check, plain/parked honored, dead skipped), protects every project's worktree, tolerates an old-format intent, and refuses a ghost resume whose worktree/cwd was removed (no doomed --resume spawn)."
+  ? "\n✅ ALL PASS — a daemon_restart captures the WHOLE live cross-project fleet, resumes every session (requester re-prompted, affected managers re-checked, busy-at-capture standing reviewers nudged while idle ones + converged 0-worker managers resume SILENTLY, `run` excluded, plain/parked honored, dead skipped), protects every project's worktree, tolerates an old-format intent, and refuses a ghost resume whose worktree/cwd was removed (no doomed --resume spawn)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

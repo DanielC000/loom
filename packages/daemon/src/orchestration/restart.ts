@@ -48,6 +48,16 @@ export interface RestartResumeEntry {
   role: SessionRole | null;
   /** For a worker, the manager that spawned it (preserves manager↔worker linkage across the restart). */
   parentSessionId: string | null;
+  /**
+   * Whether the session was BUSY (mid-turn / mid-run) at capture time (card b5664b5b, Problem B). Used by
+   * resumeFleetOnBoot to gate the standing-reviewer (auditor/workspace-auditor/setup) resume nudge: a
+   * reviewer that was mid-run when the restart hit is nudged to continue (it has no startup prompt and its
+   * in-flight turn would otherwise strand), but an already-IDLE reviewer between scheduled runs resumes
+   * SILENTLY — its next due wake/schedule re-engages it via the durable WakeService/Scheduler tickers, so a
+   * "continue your work" nudge to it only burned a wasted turn. Optional + defaults falsy so an OLD on-disk
+   * intent (pre-this-field) degrades to the silent path for reviewers, never crashes.
+   */
+  busy?: boolean;
 }
 
 export interface RestartIntent {

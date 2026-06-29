@@ -3,10 +3,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // NO claude, NO live daemon — drives SessionService.resumeFleetOnBoot + platformEscalate directly against
 // an isolated LOOM_HOME with a claude-free PtyStub. Proves:
 //
-//   PART 1 — CHEAP NO-OP WAKE. A non-causal routine deploy (triggered by ANOTHER session) that touched
+//   PART 1 — SILENT NO-OP WAKE. A non-causal routine deploy (triggered by ANOTHER session) that touched
 //     nothing of a bystander manager/platform — no workers resumed, no queued I/O replayed, empty board —
-//     gets the lightweight "no action needed" FYI, NOT the full "re-check your workers" re-orient. An
-//     AFFECTED bystander (live worker / queued I/O / pending board) still gets the full re-check.
+//     resumes SILENTLY with ZERO enqueued turns (card b5664b5b Problems A + C1; an enqueue to an idle
+//     session is itself a wasted turn). An AFFECTED bystander (live worker / queued I/O / pending board)
+//     still gets the full re-check, and the deploy requester its "code is live" nudge. A standing reviewer
+//     (auditor) is gated on busy-at-capture (card b5664b5b Problem B): idle → silent, busy → nudged.
 //
 //   PART 2 — ONE COMPLETION = ONE TURN. When a deploy restart already delivered a SHA to the Lead (in the
 //     restart reason), a SEPARATE "X COMPLETE + DEPLOYED" platform_escalate for the SAME SHA suppresses its
@@ -90,6 +92,7 @@ try {
     lead: `rwc-lead-${sfx}`, deployer: `rwc-deployer-${sfx}`,
     bystander: `rwc-bystander-${sfx}`, affMgr: `rwc-affMgr-${sfx}`, affWkr: `rwc-affWkr-${sfx}`,
     pendMgr: `rwc-pendMgr-${sfx}`,
+    idleReviewer: `rwc-idleRev-${sfx}`, busyReviewer: `rwc-busyRev-${sfx}`,
   };
   mkSession({ id: id.lead, projId: home, agentId: homeAg, role: "platform" });
   mkSession({ id: id.deployer, projId: projX, agentId: xAg, role: "manager" });   // the requester (causal)
@@ -97,6 +100,10 @@ try {
   mkSession({ id: id.affMgr, projId: projX, agentId: xAg, role: "manager" });     // has a live worker
   mkSession({ id: id.affWkr, projId: projX, agentId: xAg, role: "worker", parentSessionId: id.affMgr });
   mkSession({ id: id.pendMgr, projId: projY, agentId: yAg, role: "manager" });    // 0 workers, PENDING board
+  // Two standing reviewers (Platform Auditors) — one IDLE at capture, one BUSY at capture (card b5664b5b
+  // Problem B): the idle one must resume SILENTLY (its schedule/wake re-engages it), the busy one is nudged.
+  mkSession({ id: id.idleReviewer, projId: home, agentId: homeAg, role: "auditor" });
+  mkSession({ id: id.busyReviewer, projId: home, agentId: homeAg, role: "auditor" });
 
   const SHA = "abc1234f";
   const intent = {
@@ -108,16 +115,20 @@ try {
       { sessionId: id.affMgr, role: "manager", parentSessionId: null },
       { sessionId: id.affWkr, role: "worker", parentSessionId: id.affMgr },
       { sessionId: id.pendMgr, role: "manager", parentSessionId: null },
+      // busy flag mirrors liveFleetResumeSet's capture (omitted ⇒ falsy ⇒ idle).
+      { sessionId: id.idleReviewer, role: "auditor", parentSessionId: null, busy: false },
+      { sessionId: id.busyReviewer, role: "auditor", parentSessionId: null, busy: true },
     ],
   };
   sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
   const q = (i) => pty.getPending(i);
 
-  // The Lead: non-causal, 0 workers, no queued I/O, empty home board → cheap no-op FYI (PART 1).
-  check("(1) the Lead (unaffected bystander platform) gets ONE [loom:daemon-restarted] no-op FYI, not a re-check",
-    q(id.lead).length === 1 && q(id.lead)[0].includes("[loom:daemon-restarted]") && /no action is needed/i.test(q(id.lead)[0]) && !/re-check your workers/i.test(q(id.lead)[0]));
-  check("(1) the bystander manager (empty board, 0 workers) also gets the cheap no-op FYI",
-    q(id.bystander).length === 1 && /no action is needed/i.test(q(id.bystander)[0]) && !/re-check your workers/i.test(q(id.bystander)[0]));
+  // The Lead: non-causal, 0 workers, no queued I/O, empty home board → SILENT resume, ZERO enqueued turns
+  // (card b5664b5b Problems A + C1 — the old "lightweight FYI" enqueue was itself a wasted turn).
+  check("(1) the Lead (unaffected bystander platform) resumes SILENTLY — NO enqueued [loom:daemon-restarted] turn",
+    q(id.lead).length === 0);
+  check("(1) the bystander manager (empty board, 0 workers) also resumes SILENTLY — NO enqueued turn",
+    q(id.bystander).length === 0);
   // The affected manager (live worker resumed) → full re-check, with the impact classification.
   check("(1) the affected manager (live worker) gets the FULL re-check nudge with the impact clause",
     q(id.affMgr).length === 1 && /re-check your workers/i.test(q(id.affMgr)[0]) && /live workers were resumed/i.test(q(id.affMgr)[0]) && !/no action is needed/i.test(q(id.affMgr)[0]));
@@ -128,6 +139,11 @@ try {
   // The deploy requester is NEVER short-circuited.
   check("(1) the deploy requester gets the full 'code is live' nudge",
     q(id.deployer).length === 1 && q(id.deployer)[0].includes("now LIVE") && !/no action is needed/i.test(q(id.deployer)[0]));
+  // Standing-reviewer gate (card b5664b5b Problem B): idle-at-capture → silent; busy-at-capture → nudged.
+  check("(1) an IDLE-at-capture standing reviewer resumes SILENTLY — NO enqueued turn",
+    q(id.idleReviewer).length === 0);
+  check("(1) a BUSY-at-capture standing reviewer still gets the 'continue your work' continuation nudge",
+    q(id.busyReviewer).length === 1 && q(id.busyReviewer)[0].includes("[loom:daemon-restarted]") && /continue your/i.test(q(id.busyReviewer)[0]));
 
   // ============================ (2) COMPLETION-ESCALATION DE-DUP ============================
   // The deploy wake already delivered SHA to the Lead. A "COMPLETE + DEPLOYED" escalation for that SAME
@@ -150,6 +166,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a non-causal routine deploy gives unaffected bystanders a cheap no-op wake (affected/requester still get the full re-check), and a completion escalation for a SHA the deploy wake already delivered is suppressed live yet still durably boarded — one completion = one turn."
+  ? "\n✅ ALL PASS — a non-causal routine deploy resumes unaffected bystanders SILENTLY (no wasted turn; affected/requester still get the full re-check, an idle standing reviewer is silent while a busy one is nudged), and a completion escalation for a SHA the deploy wake already delivered is suppressed live yet still durably boarded — one completion = one turn."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

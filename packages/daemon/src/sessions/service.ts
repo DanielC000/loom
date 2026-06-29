@@ -887,7 +887,9 @@ export class SessionService {
       // Belt-and-suspenders for the ghost-resume guard in resume(): also skip a session whose worktree/cwd
       // is already gone at capture time, so a dead-worktree row never even enters the restart intent.
       .filter((s) => s.processState === "live" && s.role !== "run" && fs.existsSync(s.cwd))
-      .map((s) => ({ sessionId: s.id, role: s.role ?? null, parentSessionId: s.parentSessionId ?? null }));
+      // `busy` snapshots whether the session was mid-turn/mid-run at capture — used by resumeFleetOnBoot to
+      // gate the standing-reviewer resume nudge (card b5664b5b, Problem B).
+      .map((s) => ({ sessionId: s.id, role: s.role ?? null, parentSessionId: s.parentSessionId ?? null, busy: !!s.busy }));
   }
 
   /**
@@ -924,16 +926,20 @@ export class SessionService {
    *     board work) gets the full "re-check your workers" re-orient, prefixed with a one-line classification
    *     of WHAT this restart touched;
    *   - an UNAFFECTED bystander manager/platform (card 5907b71e part 1 — isNoOpManagerWake: non-causal,
-   *     0 live workers in the resume set, no queued I/O replayed, AND an empty board) gets a lightweight
-   *     "no action needed" FYI instead of the full re-check, so a routine non-causal deploy doesn't burn a
-   *     turn to confirm "nothing for me". Pending board work FORCES the full nudge (the idle-watcher skips a
-   *     snoozed/suppressed manager, so the restart re-check is its only re-engagement — a no-op would strand
-   *     the queue). Impact, not the stale idle-policy, decides (supersedes the board-AND-policy "converged"
-   *     gate of card 90058589). The deploy REQUESTER is NEVER short-circuited — it always gets the full
-   *     "code is live — continue/verify" nudge;
+   *     0 live workers in the resume set, no queued I/O replayed, AND an empty board) resumes SILENTLY —
+   *     NO enqueue at all (card b5664b5b Problems A + C1). The old "lightweight FYI" was still an
+   *     enqueueStdin, and an enqueue to an idle session submits as a full TURN, so the FYI burned the very
+   *     turn it claimed to save (the Lead, which flows through this same branch, took ~10 such wakes in one
+   *     session). Pending board work FORCES the full nudge (the idle-watcher skips a snoozed/suppressed
+   *     manager, so the restart re-check is its only re-engagement — a no-op would strand the queue). Impact,
+   *     not the stale idle-policy, decides (supersedes the board-AND-policy "converged" gate of card
+   *     90058589). The deploy REQUESTER is NEVER short-circuited — it always gets the full "code is live —
+   *     continue/verify" nudge;
    *   - every worker gets the "your worktree WIP is intact, continue your task" nudge;
-   *   - a standing reviewer (auditor/workspace-auditor/setup) gets a generic "you were resumed — continue
-   *     your work" nudge (it too resumes with no startup prompt, so it would otherwise sit idle);
+   *   - a standing reviewer (auditor/workspace-auditor/setup) gets a "you were resumed — continue your work"
+   *     nudge ONLY if it was BUSY (mid-run) at capture (card b5664b5b Problem B); an already-IDLE reviewer
+   *     between scheduled runs resumes SILENTLY (its next due wake/schedule re-engages it via the durable
+   *     WakeService/Scheduler tickers, so a nudge to it only burned a wasted turn);
    *   - a plain (role-null) or "run" session is resumed but not nudged (no orchestration loop to re-engage);
    *   - a PARKED (rate-limited) session is resumed live so the rate-limit watcher can recover it, but
    *     its nudge + pending replay are WITHHELD — we never push a held turn back into the cap (honors
@@ -1036,16 +1042,15 @@ export class SessionService {
         // recognized duplicate (part 2). Done for BOTH wake kinds: an unaffected bystander still "saw" it.
         this.recordDeployShasDelivered(e.sessionId, reasonShas);
         if (isNoOpManagerWake(impact)) {
-          // part 1: a non-causal bystander this restart did NOT touch (no workers resumed, no queued I/O,
-          // empty board) gets a lightweight FYI, not the full re-check — instead of burning a turn to
-          // confirm "nothing for me" on a routine deploy another session triggered.
-          this.pty.enqueueStdin(
-            e.sessionId,
-            `[loom:daemon-restarted] The daemon was restarted (reason: ${intent.reason}) and you were ` +
-            `resumed. This restart was triggered by another session and did not affect you — none of your ` +
-            `workers were running, no queued messages were waiting, and your board has no pending work, so ` +
-            `no action is needed; your state is intact.` + RESUME_NUDGE_TAIL,
-          );
+          // card b5664b5b (Problems A + C1): a non-causal bystander this restart did NOT touch (no workers
+          // resumed, no queued I/O, empty board) resumes SILENTLY — NO enqueue. The old "lightweight FYI"
+          // was still an enqueueStdin, and an enqueue to an idle session is submitted as a full TURN, so the
+          // FYI burned the very turn it claimed to save (the Lead took ~10 such wakes in one session). The
+          // `!pendingBoardWork` precondition guarantees there's no queue to strand; if actionable work
+          // appears later the idle-watcher re-engages normally. This mirrors the plain/run silent-resume
+          // path below — and the platform (Lead) flows through this same branch, so a deploy-restart that
+          // resumes the Lead with no new causal input (incl. a merely pending owner AskUserQuestion, which
+          // is not board work) no longer forces a turn either.
         } else {
           // Affected (workers resumed, queued I/O replayed, or pending board work) → the full re-orient,
           // with a one-line classification of WHAT this restart touched so the manager re-checks precisely.
@@ -1063,12 +1068,21 @@ export class SessionService {
         }
       } else if (e.role === "auditor" || e.role === "workspace-auditor" || e.role === "setup") {
         // A scheduled/standing reviewer (Platform Auditor, Workspace Auditor, Setup Assistant) gets no
-        // startup prompt on resume, so without a nudge it sits idle until a human types "continue".
-        this.pty.enqueueStdin(
-          e.sessionId,
-          `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — continue your ` +
-          `work from where you left off.` + RESUME_NUDGE_TAIL,
-        );
+        // startup prompt on resume, so a reviewer that was MID-RUN at the restart would otherwise sit idle
+        // until a human types "continue" — it gets the continuation nudge.
+        // card b5664b5b (Problem B): but gate it on busy-at-capture. An already-IDLE reviewer (e.g. an
+        // Auditor that finished its bounded run between scheduled fires) does NOT need a nudge — its next
+        // due wake/schedule re-engages it on its own via the durable WakeService/Scheduler tickers (which
+        // fire past-due entries on boot and auto-resume a non-live session), so the old UNCONDITIONAL nudge
+        // only burned a wasted turn every restart. Silencing blindly would strand a genuinely mid-run one,
+        // so nudge ONLY the busy-at-capture case; the idle case falls through to a silent resume.
+        if (e.busy) {
+          this.pty.enqueueStdin(
+            e.sessionId,
+            `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — continue your ` +
+            `work from where you left off.` + RESUME_NUDGE_TAIL,
+          );
+        }
       }
       // role null (plain session) or "run" (runs don't resume — see shared/types.ts SessionRole):
       // resumed, but no orchestration loop to re-engage → no nudge.
