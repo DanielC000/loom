@@ -277,7 +277,7 @@ export class SessionService {
    */
   private resolveAgentSpawn(
     agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false,
-  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; model: string | undefined; skills: string[] | null } {
+  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null } {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
     const profile = (forcePlain || !agent.profileId) ? undefined : this.db.getProfile(agent.profileId);
@@ -308,6 +308,9 @@ export class SessionService {
       browserTesting: resolved.browserTesting,
       // Opt-in document-conversion capability from the resolved profile (backstop false under forcePlain / no profile).
       documentConversion: resolved.documentConversion,
+      // Declared no-commit role from the resolved profile (lifecycle-only; backstop false). Pinned on the
+      // session row so the worker_report path can key off it across resume/fork/recycle.
+      noCommit: resolved.noCommit,
       // Profile-pinned model → `--model` at spawn; null/absent ⇒ undefined ⇒ no `--model` (byte-identical).
       // `|| undefined` so an empty-string model is treated as "engine default", same coercion as the prompt.
       model: resolved.model || undefined,
@@ -331,7 +334,7 @@ export class SessionService {
     // prompt is always the agent's own). No caller role here (plain "+New"), so the profile's role
     // applies when present. No profile ⇒ role undefined, the config permission unchanged — today's session.
     // forcePlain (P3) pins role to undefined even on a profile agent (see resolveAgentSpawn).
-    const { role, startupPrompt, permission, browserTesting, documentConversion, model, skills } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false);
+    const { role, startupPrompt, permission, browserTesting, documentConversion, noCommit, model, skills } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false);
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -350,6 +353,7 @@ export class SessionService {
       role, // phase-2: profile-conferred role (undefined ⇒ today's plain, role-null session)
       browserTesting, // profile-conferred browser opt-in (false ⇒ today's plain spawn)
       documentConversion, // profile-conferred document-conversion opt-in (false ⇒ today's plain spawn)
+      noCommit, // profile-conferred no-commit role, pinned (lifecycle-only; false ⇒ today's behavior)
       skills, // profile-conferred skill subset, pinned (null ⇒ deliver all — today's behavior)
     };
     this.db.insertSession(session);
@@ -386,7 +390,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'manager' role from the caller (scheduler/REST) ALWAYS wins; the profile (if any) only
     // layers its prompt + allowDelta. No profile ⇒ byte-identical to today's manager spawn.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, model, skills } = this.resolveAgentSpawn(agent, config, "manager");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, noCommit, model, skills } = this.resolveAgentSpawn(agent, config, "manager");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -405,6 +409,7 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
+      noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
     };
     this.db.insertSession(session);
@@ -460,7 +465,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. No profile ⇒ byte-identical to today's platform-lead spawn.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, model, skills } = this.resolveAgentSpawn(agent, config, "platform");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, noCommit, model, skills } = this.resolveAgentSpawn(agent, config, "platform");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -479,6 +484,7 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
+      noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
     };
     this.db.insertSession(session);
@@ -520,7 +526,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'auditor' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the restricted loom-audit surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, model, skills } = this.resolveAgentSpawn(agent, config, "auditor");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, noCommit, model, skills } = this.resolveAgentSpawn(agent, config, "auditor");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -539,6 +545,7 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
+      noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
     };
     this.db.insertSession(session);
@@ -586,7 +593,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'workspace-auditor' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. The locked role — NOT the profile role — drives the loom-user-audit surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, model, skills } = this.resolveAgentSpawn(agent, config, "workspace-auditor");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, noCommit, model, skills } = this.resolveAgentSpawn(agent, config, "workspace-auditor");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -605,6 +612,7 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
+      noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
     };
     this.db.insertSession(session);
@@ -658,7 +666,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'setup' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the curated loom-setup surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, model, skills } = this.resolveAgentSpawn(agent, config, "setup");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, noCommit, model, skills } = this.resolveAgentSpawn(agent, config, "setup");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -677,6 +685,7 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
+      noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
     };
     this.db.insertSession(session);
@@ -1227,6 +1236,7 @@ export class SessionService {
       role: src.role ?? undefined, // a forked manager stays a manager (keeps its MCP surface)
       browserTesting: src.browserTesting ?? false, // a fork inherits the source's browser capability
       documentConversion: src.documentConversion ?? false, // a fork inherits the source's document-conversion capability
+      noCommit: src.noCommit ?? false, // a fork inherits the source's declared no-commit role
       skills: src.skills ?? null, // a fork inherits the source's pinned skill subset (null ⇒ all)
     };
     this.db.insertSession(session);
@@ -1334,7 +1344,7 @@ export class SessionService {
       cwd: snapshotDir, // the disposable snapshot — NEVER the live repoPath
       processState: "starting", resumability: "unknown", busy: false,
       createdAt: now, lastActivity: now, lastError: null,
-      role: "run", browserTesting: false, documentConversion: false,
+      role: "run", browserTesting: false, documentConversion: false, noCommit: false,
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
     };
     this.db.insertSession(session);
@@ -1697,6 +1707,7 @@ export class SessionService {
     const workerSpawn = this.resolveAgentSpawn(workerAgent, config, "worker");
     const browserTesting = workerSpawn.browserTesting;
     const documentConversion = workerSpawn.documentConversion;
+    const noCommit = workerSpawn.noCommit; // declared no-commit role (e.g. a Code Reviewer rig) — lifecycle-only
     const skills = workerSpawn.skills;
 
     // Safety rails (§17a) — refuse NEW work before any side effect (worktree/pty). In-flight
@@ -1791,6 +1802,7 @@ export class SessionService {
         role: "worker",
         browserTesting, // QA worker (profile opt-in) ⇒ per-session Playwright MCP; else false (plain)
         documentConversion, // document worker (profile opt-in) ⇒ per-session markitdown MCP; else false (plain)
+        noCommit, // declared no-commit role (e.g. Code Reviewer) ⇒ 0-commit done auto-retires + skips the warning
         skills, // profile-pinned skill subset for the worker (null ⇒ all); pinned so resume/recycle honor it
         parentSessionId: managerSessionId,
         taskId,
@@ -2465,7 +2477,7 @@ export class SessionService {
   async workerReport(
     workerSessionId: string,
     report: { status: "done" | "blocked" | "progress"; summary: string; prUrl?: string; needs?: string },
-  ): Promise<{ reported: boolean; deliveryStatus: DeliveryStatus; refused?: boolean; error?: string; uncommittedFiles?: string[]; warning?: string }> {
+  ): Promise<{ reported: boolean; deliveryStatus: DeliveryStatus; refused?: boolean; error?: string; uncommittedFiles?: string[]; warning?: string; autoRetired?: boolean }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker) throw new Error("unknown worker session");
     const managerSessionId = worker.parentSessionId ?? null;
@@ -2478,6 +2490,14 @@ export class SessionService {
     // confirmWorkerMerge). FAILS SAFE: precheckWorkerDone degrades to ALLOW on any git error, so a flaky
     // check can never wedge a legitimate done. Only the AFFIRMATIVE uncommitted signal refuses.
     let warning: string | undefined;
+    // AUTO-RETIRE a declared no-commit worker (card 14434d6b): a read-only / no-commit worker (e.g. the
+    // Code Reviewer rig, profile noCommit=true → pinned on the row) has NO merge step, so unlike a normal
+    // worker — whose concurrency slot frees via worker_merge_confirm — its slot would only free on a manual
+    // worker_stop. Set when this is a DECLARED no-commit role reporting done with 0 commits ahead (its
+    // CORRECT contract), so we free its cap slot below + suppress the forgot-to-commit warning. Keyed
+    // STRICTLY off the pinned noCommit flag (NOT name-matching, NOT "0 commits" alone): a NORMAL 0-commit
+    // worker still gets the warning and is NEVER auto-retired — the forgot-to-commit safety net is intact.
+    let autoRetireNoCommit = false;
     if (report.status === "done") {
       // PENDING-DIRECTION PRE-CHECK (board card dcb25bd9): REFUSE a done-report while the worker still has
       // UNRESOLVED manager direction queued. The real incident: a worker raced to `done` on a SUPERSEDED
@@ -2527,12 +2547,23 @@ export class SessionService {
           return { reported: false, refused: true, error, uncommittedFiles: precheck.files, deliveryStatus: "dropped" };
         }
         if (precheck.zeroAhead) {
-          // WARN only: a clean worktree on an assigned branch with 0 commits ahead of base. A genuine
-          // no-op task can legitimately report done, so this never refuses — it surfaces the warning in
-          // the result, the worker_report event, and the manager notification.
-          warning =
-            `your assigned branch '${worker.branch}' is 0 commits ahead of base — nothing to merge. ` +
-            `Allowing the done (a real no-op task can legitimately report done), but if you intended to produce changes you likely forgot to commit them.`;
+          if (worker.noCommit) {
+            // DECLARED no-commit role (e.g. the Code Reviewer rig): 0 commits ahead is its CORRECT
+            // contract (filesChanged:0), NOT a forgot-to-commit mistake. So (a) SUPPRESS the warning
+            // entirely, and (b) flag the session for AUTO-RETIRE below — a read-only worker has no merge
+            // step to free its concurrency slot, so without this its slot frees only on a manual
+            // worker_stop. Conjoined with zeroAhead on purpose: a "no-commit" worker that DID produce
+            // commits is treated like any normal worker (real work to merge — never auto-retired here).
+            autoRetireNoCommit = true;
+          } else {
+            // WARN only: a clean worktree on an assigned branch with 0 commits ahead of base. A genuine
+            // no-op task can legitimately report done, so this never refuses — it surfaces the warning in
+            // the result, the worker_report event, and the manager notification. (The forgot-to-commit
+            // safety net for a NORMAL worker — unchanged.)
+            warning =
+              `your assigned branch '${worker.branch}' is 0 commits ahead of base — nothing to merge. ` +
+              `Allowing the done (a real no-op task can legitimately report done), but if you intended to produce changes you likely forgot to commit them.`;
+          }
         }
       }
     }
@@ -2561,6 +2592,7 @@ export class SessionService {
       if (report.prUrl) framed += ` | PR: ${report.prUrl}`;
       if (report.needs) framed += ` | needs: ${report.needs}`;
       if (warning) framed += ` | warning: ${warning}`;
+      if (autoRetireNoCommit) framed += ` | auto-retired (declared no-commit role, 0 commits ahead — its concurrency slot is freed, no worker_stop needed)`;
       const r = this.pty.enqueueStdin(managerSessionId, framed);
       deliveryStatus = this.deliveryStatusFor(r);
       // STRAND BACKSTOP (incident 22a44352, broadened by card fc9a27d5): if the report reached no LIVE
@@ -2584,7 +2616,34 @@ export class SessionService {
       // to review the work it now has waiting — instead of only flipping its derived awaitingReview flag.
       this.wakeParkedManagerOnReport(managerSessionId);
     }
-    return warning ? { reported: true, deliveryStatus, warning } : { reported: true, deliveryStatus };
+
+    // AUTO-RETIRE the declared no-commit worker (card 14434d6b) — AFTER the report is durably recorded +
+    // the manager notified, so none of that is lost. Free its concurrency slot the way a manual worker_stop
+    // would: graceful-stop the pty AND immediately retire the DB row (processState exited + clear busy), so
+    // the maxConcurrentWorkers count (which reads processState === "live") drops NOW, deterministically,
+    // independent of the async onExit — exactly the sibling-retirement shape (retireSiblingSessionsForTask).
+    // A stop_worker event records it (reason discriminates the auto-retire from a manual stop). The worktree
+    // is RETAINED (identical to a manual worker_stop; boot-reconcile GCs a leaked one) — scope stays minimal.
+    // Best-effort + never throws: the report above already stands; auto-retire must not disturb it.
+    if (autoRetireNoCommit) {
+      try {
+        // Free the slot in the DB FIRST (the deterministic, cap-relevant retire — the cap reads
+        // processState === "live"), record the event, THEN best-effort graceful-stop the pty. DB-first
+        // ordering so a pty-stop hiccup can never leave the row stuck "live" with its slot still claimed.
+        this.db.setProcessState(workerSessionId, "exited");
+        this.db.setBusy(workerSessionId, false);
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "stop_worker",
+          detail: { reason: "no-commit-auto-retire" },
+        });
+        this.pty.stop(workerSessionId, "graceful");
+      } catch { /* never let auto-retire disturb the already-recorded report */ }
+    }
+
+    if (warning) return { reported: true, deliveryStatus, warning };
+    if (autoRetireNoCommit) return { reported: true, deliveryStatus, autoRetired: true };
+    return { reported: true, deliveryStatus };
   }
 
   /**
@@ -2746,6 +2805,7 @@ export class SessionService {
       role: "worker",
       browserTesting: old.browserTesting ?? false, // a recycled QA worker keeps its browser capability
       documentConversion: old.documentConversion ?? false, // a recycled document worker keeps its conversion capability
+      noCommit: old.noCommit ?? false, // a recycled reviewer keeps its declared no-commit role
       skills: old.skills ?? null, // a recycled worker keeps its pinned skill subset (null ⇒ all)
       parentSessionId: managerSessionId,
       taskId,
@@ -2845,6 +2905,7 @@ export class SessionService {
       role: "manager",
       browserTesting: old.browserTesting ?? false, // carry the capability forward (managers rarely set it)
       documentConversion: old.documentConversion ?? false, // carry the capability forward (managers rarely set it)
+      noCommit: old.noCommit ?? false, // carry the declared no-commit role forward
       skills: old.skills ?? null, // carry the pinned skill subset forward (null ⇒ all)
       gen: newGen,
       recycledFrom: old.id,
@@ -2972,6 +3033,7 @@ export class SessionService {
       role: "platform", // successor keeps the elevated platform surface
       browserTesting: old.browserTesting ?? false,
       documentConversion: old.documentConversion ?? false,
+      noCommit: old.noCommit ?? false, // carry the declared no-commit role forward
       skills: old.skills ?? null, // carry the pinned skill subset forward (null ⇒ all)
       gen: newGen,
       recycledFrom: old.id,

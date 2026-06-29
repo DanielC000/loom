@@ -526,6 +526,9 @@ export interface ResolvedProfile {
   browserTesting: boolean;
   /** Opt-in document-conversion: inject a per-session markitdown MCP at spawn. Backstops to false. */
   documentConversion: boolean;
+  /** Declared no-commit role: a read-only worker whose 0-commit done auto-retires + skips the
+   *  forgot-to-commit warning. NO spawn-time effect (lifecycle-only). Backstops to false. */
+  noCommit: boolean;
 }
 
 /**
@@ -546,7 +549,7 @@ export function resolveProfile(
   const startupPrompt = agent.startupPrompt ?? "";
   if (!profile) {
     // The backstop: a null/absent profile confers NO browser/document capability (false) — today's behavior.
-    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false };
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, noCommit: false };
   }
   return {
     role: profile.role ?? null,
@@ -558,6 +561,8 @@ export function resolveProfile(
     // Pass the flag through when the profile sets it; backstop false for an unset/absent flag.
     browserTesting: profile.browserTesting ?? false,
     documentConversion: profile.documentConversion ?? false,
+    // Declared no-commit role (lifecycle-only; no spawn-time effect). Backstop false.
+    noCommit: profile.noCommit ?? false,
   };
 }
 

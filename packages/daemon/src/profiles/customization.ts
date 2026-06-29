@@ -23,6 +23,7 @@ export const MERGEABLE_PROFILE_FIELDS = [
   "icon",
   "browserTesting",
   "documentConversion",
+  "noCommit",
 ] as const;
 type MergeableField = (typeof MERGEABLE_PROFILE_FIELDS)[number];
 
@@ -62,6 +63,7 @@ function normalizeFields(p: Partial<Profile>): Record<MergeableField, unknown> {
     icon: p.icon ?? null,
     browserTesting: p.browserTesting ?? false,
     documentConversion: p.documentConversion ?? false,
+    noCommit: p.noCommit ?? false,
   };
 }
 

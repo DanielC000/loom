@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   icon TEXT,                              -- UI icon | NULL
   browser_testing INTEGER NOT NULL DEFAULT 0, -- opt-in: inject a per-session Playwright MCP at spawn
   document_conversion INTEGER NOT NULL DEFAULT 0, -- opt-in: inject a per-session markitdown MCP at spawn
+  no_commit INTEGER NOT NULL DEFAULT 0, -- declared no-commit role: 0-commit done auto-retires + skips the forgot-to-commit warning (lifecycle-only)
   -- bundled-profile customization base snapshot: JSON of the shipped def (sans id) at the user's last
   -- sync. NULL = unset (falls back to shipped at read time, like a missing skill base). Backfilled at boot
   -- by seedProfileBaseSnapshots for bundled-by-name rows; advanced on adopt/reset. Computed state only.
@@ -167,6 +168,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- opt-in document-conversion, pinned at spawn from the session's Profile (mirrors browser_testing): a
   -- per-session markitdown MCP is injected iff 1. Carried across every respawn (resume/fork/recycle).
   document_conversion INTEGER NOT NULL DEFAULT 0,
+  -- declared no-commit role, pinned at spawn from the session's Profile (mirrors browser_testing): NO
+  -- spawn-time effect — read by the worker_report lifecycle (0-commit done auto-retires + skips the
+  -- forgot-to-commit warning). Carried across every respawn (resume/fork/recycle).
+  no_commit INTEGER NOT NULL DEFAULT 0,
   -- profile-resolved skill subset pinned at fresh spawn (JSON array of skill names); NULL = deliver all
   -- skills (today's behavior). Carried verbatim across every respawn (resume/fork/recycle) like role.
   skills TEXT,
@@ -323,6 +328,8 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   browser_testing: "INTEGER NOT NULL DEFAULT 0",
   // opt-in document-conversion (pinned at spawn from the Profile; carried across respawns); legacy rows ⇒ 0.
   document_conversion: "INTEGER NOT NULL DEFAULT 0",
+  // declared no-commit role (pinned at spawn from the Profile; lifecycle-only); legacy rows ⇒ 0 (off).
+  no_commit: "INTEGER NOT NULL DEFAULT 0",
   // profile-resolved skill subset pinned at spawn (JSON array). Nullable; legacy rows backfill to NULL
   // = deliver all skills (today's behavior — the regression-guarded default).
   skills: "TEXT",
@@ -375,6 +382,8 @@ const PROFILE_ADDED_COLUMNS: Record<string, string> = {
   browser_testing: "INTEGER NOT NULL DEFAULT 0",
   // opt-in document-conversion flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
   document_conversion: "INTEGER NOT NULL DEFAULT 0",
+  // declared no-commit role flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
+  no_commit: "INTEGER NOT NULL DEFAULT 0",
   // bundled-profile customization `base` snapshot (JSON of the shipped def, sans id). Nullable; legacy
   // rows backfill to NULL and seedProfileBaseSnapshots fills bundled-by-name rows at boot (safe direction).
   base_snapshot: "TEXT",
@@ -1257,8 +1266,8 @@ export class Db {
   }
   insertProfile(p: Profile): void {
     this.db.prepare(
-      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion)
-       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion)`,
+      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,no_commit)
+       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@noCommit)`,
     ).run({
       id: p.id, name: p.name, role: p.role ?? null, description: p.description,
       // string[] columns persist as JSON text; skills NULL means "deliver all".
@@ -1267,6 +1276,7 @@ export class Db {
       model: p.model ?? null, icon: p.icon ?? null,
       browserTesting: p.browserTesting ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       documentConversion: p.documentConversion ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
+      noCommit: p.noCommit ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
     });
   }
   /** Partial edit of a profile. Provided fields are written (null clears); omitted are left as-is. */
@@ -1281,6 +1291,7 @@ export class Db {
       icon: patch.icon,
       browser_testing: patch.browserTesting === undefined ? undefined : patch.browserTesting ? 1 : 0,
       document_conversion: patch.documentConversion === undefined ? undefined : patch.documentConversion ? 1 : 0,
+      no_commit: patch.noCommit === undefined ? undefined : patch.noCommit ? 1 : 0,
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
@@ -1450,12 +1461,12 @@ export class Db {
       `INSERT INTO sessions (
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
-         role,browser_testing,document_conversion,skills,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
+         role,browser_testing,document_conversion,no_commit,skills,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
          ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
-         @role,@browserTesting,@documentConversion,@skills,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
+         @role,@browserTesting,@documentConversion,@noCommit,@skills,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
          @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline)`,
     ).run({
       ...s,
@@ -1465,6 +1476,7 @@ export class Db {
       role: s.role ?? null,
       browserTesting: s.browserTesting ? 1 : 0, // off (0) on every plain session literal
       documentConversion: s.documentConversion ? 1 : 0, // off (0) on every plain session literal
+      noCommit: s.noCommit ? 1 : 0, // off (0) on every plain session literal
       // skill subset → JSON text; null/absent ⇒ NULL = deliver all (today's behavior). An empty array is
       // also stored as NULL ("no subset ⇒ all") so the read side never has to special-case [].
       skills: s.skills && s.skills.length ? JSON.stringify(s.skills) : null,
@@ -2059,6 +2071,7 @@ function toProfile(r0: unknown): Profile {
     icon: (r.icon as string) ?? null,
     browserTesting: (r.browser_testing as number) === 1,
     documentConversion: (r.document_conversion as number) === 1,
+    noCommit: (r.no_commit as number) === 1,
   };
 }
 function toSession(r0: unknown): Session {
@@ -2075,6 +2088,7 @@ function toSession(r0: unknown): Session {
     role: (r.role as SessionRole) ?? null,
     browserTesting: (r.browser_testing as number) === 1,
     documentConversion: (r.document_conversion as number) === 1,
+    noCommit: (r.no_commit as number) === 1,
     // pinned skill subset; NULL ⇒ null = deliver all. Defensive parse: a malformed value degrades to
     // null (deliver all), never throws toSession.
     skills: r.skills == null ? null : (() => { try { return JSON.parse(r.skills as string) as string[]; } catch { return null; } })(),

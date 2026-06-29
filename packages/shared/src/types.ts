@@ -112,6 +112,19 @@ export interface Profile {
    * same capability-gating posture as browserTesting/gateCommand).
    */
   documentConversion?: boolean;
+  /**
+   * Opt-in "no-commit role" declaration: when true, a worker under this rig is a READ-ONLY / no-commit
+   * worker (e.g. a Code Reviewer) whose CORRECT contract is to produce NO commit (`filesChanged:0`).
+   * Default OFF (absent/false) and fully additive — a rig without it behaves byte-identically to today.
+   * Unlike browserTesting/documentConversion this confers NO spawn-time host capability (no MCP is
+   * injected); it is a pure LIFECYCLE flag the worker_report path keys off: a no-commit worker that
+   * reports done with 0 commits ahead of base is AUTO-RETIRED (its concurrency slot freed without a
+   * manual worker_stop — a read-only worker has no merge step to free it), and the "forgot to commit"
+   * guard is SUPPRESSED for it. HUMAN-set only (Profiles UI / REST), like role/browserTesting — it gates
+   * orchestration behavior, never an agent MCP write surface. A NORMAL (noCommit-false) 0-commit worker
+   * still gets the warning and is NEVER auto-retired (the forgot-to-commit safety net stays intact).
+   */
+  noCommit?: boolean;
 }
 
 // --- Bundled-profile customization (the profiles analog of skill customization) -------------------
@@ -383,6 +396,15 @@ export interface Session {
    * Absent/false on every existing session ⇒ no markitdown MCP, byte-identical spawn.
    */
   documentConversion?: boolean;
+  /**
+   * Declared no-commit role, resolved from the session's Profile at spawn and PINNED here (mirrors
+   * `browserTesting`): when true, this is a READ-ONLY / no-commit worker. Confers NO spawn-time
+   * capability — it is read by the worker_report lifecycle: a 0-commit done auto-retires the session
+   * (freeing the concurrency slot) and suppresses the "forgot to commit" warning. Persisted so every
+   * respawn path (resume/fork/recycle) carries it. Absent/false on every existing session ⇒ today's
+   * behavior (a 0-commit done warns + is not auto-retired).
+   */
+  noCommit?: boolean;
   /**
    * Profile-resolved skill-name SUBSET to deliver to this session, PINNED here at fresh spawn (mirrors
    * `role`/`browserTesting`): `injectSkills` mirrors ONLY these skills into the session's `.claude/skills`.

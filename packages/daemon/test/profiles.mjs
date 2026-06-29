@@ -146,6 +146,20 @@ check("(c) only the two browser rigs opt in — all other bundled profiles are b
   BUNDLED_PROFILES.filter((b) => b.browserTesting === true).map((b) => b.name).sort().join(",") === "QA Tester,Web Designer" &&
   [...byName.values()].filter((p) => p.browserTesting === true).length === 2);
 
+// The bundled no-commit rig (Code Reviewer) is a worker that seeds with noCommit=true; every OTHER
+// bundled profile omits it (backstops to false) — the additive opt-in invariant at the seed layer
+// (mirrors the browserTesting check above). Round-trips the no_commit column through toProfile.
+check("(c) Code Reviewer is a no-commit worker rig (role=worker, noCommit=true)",
+  byName.get("Code Reviewer")?.role === "worker" && byName.get("Code Reviewer")?.noCommit === true);
+check("(c) only Code Reviewer opts into noCommit — all other bundled profiles are noCommit=false",
+  BUNDLED_PROFILES.filter((b) => b.noCommit === true).map((b) => b.name).sort().join(",") === "Code Reviewer" &&
+  [...byName.values()].filter((p) => p.noCommit === true).length === 1);
+// resolveProfile surfaces noCommit (lifecycle-only; backstops false for a null/non-noCommit profile).
+check("(c) resolveProfile surfaces noCommit (true for the rig, false for the backstop)",
+  resolveProfile({ startupPrompt: "" }, byName.get("Code Reviewer")).noCommit === true &&
+  resolveProfile({ startupPrompt: "" }, byName.get("Dev")).noCommit === false &&
+  resolveProfile({ startupPrompt: "" }, null).noCommit === false);
+
 // A seeded profile round-trips its JSON columns (allowDelta [] / skills null) through toProfile.
 const dev = byName.get("Dev");
 check("(c) seeded profile round-trips JSON columns (allowDelta=[], skills=null)",
@@ -164,6 +178,11 @@ check("(validator) accepts a minimal writable shape + fills defaults", (() => {
 })());
 check("(validator) rejects an unknown key (.strict typo guard)", validateProfile({ name: "X", bogus: 1 }).ok === false);
 check("(validator) rejects a bad role enum", validateProfile({ name: "X", role: "boss" }).ok === false);
+check("(validator) accepts noCommit + normalizes the default to false", (() => {
+  const on = validateProfile({ name: "X", noCommit: true });
+  const off = validateProfile({ name: "X" });
+  return on.ok && on.value.noCommit === true && off.ok && off.value.noCommit === false;
+})());
 
 db3.close(); // free the WAL file handle before removing the temp dir (Windows)
 try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort */ }

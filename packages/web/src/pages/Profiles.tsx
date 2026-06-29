@@ -247,6 +247,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
   const [model, setModel] = useState(profile.model ?? "");
   const [browserTesting, setBrowserTesting] = useState(profile.browserTesting ?? false);
   const [documentConversion, setDocumentConversion] = useState(profile.documentConversion ?? false);
+  const [noCommit, setNoCommit] = useState(profile.noCommit ?? false);
   // Skill subset (empty = deliver ALL, the default — null and [] are equivalent, matching the daemon).
   const [skills, setSkills] = useState<string[]>(profile.skills ?? []);
   const [confirmDel, setConfirmDel] = useState(false);
@@ -276,6 +277,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
     (model.trim() || null) !== profile.model ||
     browserTesting !== (profile.browserTesting ?? false) ||
     documentConversion !== (profile.documentConversion ?? false) ||
+    noCommit !== (profile.noCommit ?? false) ||
     sortedJson(skills) !== sortedJson(profile.skills ?? []);
 
   const fieldLabel = { fontFamily: font.head as string, fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: color.textDim };
@@ -284,7 +286,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
     background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
   };
 
-  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setSkills(profile.skills ?? []); };
+  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setNoCommit(profile.noCommit ?? false); setSkills(profile.skills ?? []); };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
@@ -378,6 +380,21 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
           can silently lack the markitdown MCP only because the venv is still installing or failed to. */}
       {documentConversion && <MarkitdownProvisioning />}
 
+      {/* Declared no-commit role: a read-only worker (e.g. a code reviewer) whose correct contract is to
+          produce NO commit. Lifecycle-only — confers no spawn capability; human-set here only. */}
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+        <input type="checkbox" checked={noCommit} onChange={(e) => setNoCommit(e.target.checked)} style={{ marginTop: 2 }} />
+        <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <span style={fieldLabel}>No-commit role</span>
+          <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+            Mark this rig a READ-ONLY / no-commit worker (e.g. a code reviewer) whose correct contract is 0
+            files changed. A worker under it that reports done with no commit is auto-retired — its
+            concurrency slot freed with no manual stop — and the "forgot to commit" warning is suppressed.
+            Leave off for any rig that produces commits (a normal 0-commit done still warns).
+          </span>
+        </span>
+      </label>
+
       {/* Model emits `--model <id>` at spawn (blank = engine default). Skills is a SUBSET filter: pick the
           skills a session under this rig may see; pick NONE to deliver ALL (the default). Pinned on the
           session row at spawn so resume/fork/recycle honor the same subset. */}
@@ -415,7 +432,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
       <span style={{ flex: 1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || !name.trim() || saving}
-          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, skills: skills.length ? skills : null })}>
+          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, noCommit, skills: skills.length ? skills : null })}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {dirty
@@ -584,6 +601,7 @@ function FieldSide({ label, tone: t, active, value, onPick }: { label: string; t
 const FIELD_DISPLAY: Record<string, string> = {
   role: "Role", description: "Description", allowDelta: "Allow delta", skills: "Skills",
   model: "Model", icon: "Icon", browserTesting: "Browser testing", documentConversion: "Document conversion",
+  noCommit: "No-commit role",
 };
 function fieldDisplayName(field: string): string {
   return FIELD_DISPLAY[field] ?? field;

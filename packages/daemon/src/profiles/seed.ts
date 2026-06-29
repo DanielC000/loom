@@ -80,6 +80,23 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
     browserTesting: true, // browser-capable, like QA Tester — injects the per-session Playwright MCP at spawn
   },
   {
+    // CORE product, UNGATED (role "worker", not platform-exclusive) — the no-commit demonstration rig, the
+    // noCommit analog of how QA Tester/Web Designer carry browserTesting. A read-only reviewer: it reviews an
+    // assigned change on its worktree branch and reports findings WITHOUT committing (its CORRECT contract is
+    // 0 files changed). Because `noCommit` is set, a worker under it that reports done with 0 commits is
+    // AUTO-RETIRED — its concurrency slot freed with no manual worker_stop (a read-only worker has no merge
+    // step to free it) — and the "forgot to commit" warning is suppressed.
+    name: "Code Reviewer",
+    role: "worker",
+    description:
+      "Read-only reviewer rig: reviews an assigned change on an isolated worktree branch and reports findings WITHOUT committing — its correct contract is 0 files changed. Declared no-commit (noCommit), so reporting done with no commit auto-retires the session and frees the manager's concurrency slot (no manual stop), and the forgot-to-commit guard is suppressed. The no-commit analog of the browser-capable QA Tester / Web Designer rigs.",
+    allowDelta: [],
+    skills: null,
+    model: null,
+    icon: "🧐",
+    noCommit: true,
+  },
+  {
     name: "Content Strategy",
     role: null,
     description: "Plain rig for content and strategy work, grounded in the project's vault notes.",

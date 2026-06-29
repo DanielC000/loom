@@ -611,7 +611,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_profiles",
       {
-        description: "List every Profile (rig) on the platform. Profiles are cross-project by nature (a rig is not bound to one project), so this is the whole set — each a FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion). Read-only. Use to discover a profileId before agent_create/profile_assign/profile_update.",
+        description: "List every Profile (rig) on the platform. Profiles are cross-project by nature (a rig is not bound to one project), so this is the whole set — each a FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, noCommit). Read-only. Use to discover a profileId before agent_create/profile_assign/profile_update.",
         inputSchema: {},
       },
       async () => ok(db.listProfiles()),
@@ -647,7 +647,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_get",
       {
-        description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion). Read-only. Error if the id is unknown.",
+        description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, noCommit). Read-only. Error if the id is unknown.",
         inputSchema: { profileId: z.string() },
       },
       async ({ profileId }) => ok(db.getProfile(profileId) ?? { error: "profile not found" }),
@@ -668,7 +668,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_create",
       {
-        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion). Validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
+        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + noCommit). Validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
         inputSchema: { profile: z.object({}).passthrough() },
       },
       async ({ profile }) => {

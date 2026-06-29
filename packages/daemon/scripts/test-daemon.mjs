@@ -43,6 +43,7 @@ const HERMETIC = [
   "worker-diff", "worktrees", "worktree-provision", "spawn-recut-stale-branch", "merge-finalize-resilient", "merge-confirm-idempotent", "merge-review-diffstat", "merge-stranded-backstop", "worker-report-precheck", "worker-report-pending-guard", "worker-report-orphan-wake", "worker-exited-without-report", "worker-spawn-agent-gate", "worker-spawn-task-gate", "worker-spawn-live-task-guard", "worker-spawn-toctou-race", "worker-spawn-cap-toctou-race", "worker-spawn-humanhold-guard", "sibling-session-sweep", "project-config-column-orphan",
   "worker-spawn-agent-name", // PL Auditor finding #10 (card 03615ee0): worker_spawn agentId by NAME/slug + "did you mean" nearest-match + lowest-position collision rule
   "worker-report-delivery-status", // card fc9a27d5: worker_report/platform_escalate DeliveryStatus enum + parked-parent wake
+  "no-commit-reviewer", // card 14434d6b: a declared no-commit worker (Profile noCommit) auto-retires on 0-commit done (frees the cap slot, no worker_stop) + the forgot-to-commit warning is suppressed; a normal 0-commit worker still warns + stays live
   "merge-orphaned-to-main",
 
   "pty-busy-drain", "pty-coalesce-drain", "pty-rate-limit-park-drain", "pty-composer-dirty", "pty-queue-mutations", "pty-queue-rest", "pty-resume-readiness", "pty-stop-queue", "pty-interrupt-redirect", "redirect-worker", "spawn-env", "queued-message-durability", "graceful-stop", "resume-mode-cycles", "resume-mode-detect", "resume-mode-feedback", "resume-already-live-guard", "shell-terminal",
