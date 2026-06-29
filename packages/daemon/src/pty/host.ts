@@ -11,7 +11,7 @@ import { ensureTrusted } from "./claude-config.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { detectUsageLimit, rateLimitedUntil } from "../orchestration/usage-limit.js";
-import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT } from "../paths.js";
+import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 
@@ -306,6 +306,15 @@ const REDIRECT_SETTLE_MS = Number(process.env.LOOM_REDIRECT_SETTLE_MS) || 1_500;
  * binaries are absent the FIRST tool call fails inside the MCP with Playwright's own actionable
  * "run `npx playwright install chromium`" message (the one-time host provisioning step).
  *
+ * `--output-dir <outputDir>` (when supplied) sets where the MCP writes capture artifacts —
+ * `browser_take_screenshot`, traces, downloads. Loom passes a repo-EXTERNAL per-session scratch dir
+ * (`sessionScratchDir`) so a screenshot taken with NO explicit path can NEVER land inside the project
+ * working tree: without it the MCP defaults output to `<cwd>/.playwright-mcp`, and cwd IS the project
+ * repo root — a stray-PNG-commit footgun in a self-hosting repo. An explicit (absolute) caller filename
+ * is unaffected (playwright-core resolves it with `path.resolve(outputDir, fileName)`, so an absolute
+ * path bypasses the base). Omit `outputDir` and the flag is absent (byte-identical to the pre-output-dir
+ * spawn) — the caller (`buildMcpServers`) always supplies the per-session dir.
+ *
  * Returns null if the package can't be resolved (it's a pinned daemon dependency, so this is a
  * should-never-happen guard) — the caller then simply omits the server, leaving the spawn otherwise
  * intact rather than crashing it.
@@ -323,11 +332,17 @@ function resolvePlaywrightCli(): string | null {
   return playwrightCliPathCache;
 }
 
-/** The stdio MCP-config entry for a browserTesting session, or null if the package is unresolvable. */
-export function playwrightMcpServer(): { type: "stdio"; command: string; args: string[] } | null {
+/**
+ * The stdio MCP-config entry for a browserTesting session, or null if the package is unresolvable.
+ * `outputDir` (when given) is wired as `--output-dir` so captures default OUTSIDE the repo working tree;
+ * omitted ⇒ no flag (byte-identical to the pre-output-dir spawn).
+ */
+export function playwrightMcpServer(outputDir?: string): { type: "stdio"; command: string; args: string[] } | null {
   const cli = resolvePlaywrightCli();
   if (!cli) return null;
-  return { type: "stdio", command: process.execPath, args: [cli, "--headless", "--isolated"] };
+  const args = [cli, "--headless", "--isolated"];
+  if (outputDir) args.push("--output-dir", outputDir);
+  return { type: "stdio", command: process.execPath, args };
 }
 
 /**
@@ -596,7 +611,9 @@ export function buildMcpServers(o: {
   // non-browser spawn, so the map is byte-identical to today when the flag is off. A null (unresolvable
   // package) is logged + skipped rather than crashing the spawn.
   if (o.browserTesting) {
-    const pw = playwrightMcpServer();
+    // Default capture output to a repo-EXTERNAL per-session scratch dir, so a screenshot taken with no
+    // explicit path can never land inside the project working tree (an absolute caller path still wins).
+    const pw = playwrightMcpServer(sessionScratchDir(o.sessionId));
     if (pw) {
       mcpServers["playwright"] = pw;
     } else {

@@ -10,6 +10,20 @@ export const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom
 export const DB_PATH = path.join(LOOM_HOME, "loom.db");
 export const SETTINGS_DIR = path.join(LOOM_HOME, "tmp", "settings");
 export const LOGS_DIR = path.join(LOOM_HOME, "logs");
+/**
+ * A repo-EXTERNAL, per-session scratch directory under LOOM_HOME (sibling of the per-session settings
+ * convention `tmp/settings/<id>.json`). It is the default output base for a browser session's
+ * Playwright captures (`--output-dir`), so a `browser_take_screenshot` taken with NO explicit path can
+ * NEVER land inside the project working tree — without it, the Playwright MCP defaults output to
+ * `<cwd>/.playwright-mcp` and cwd IS the project repo root, a stray-PNG-commit footgun in a self-hosting
+ * repo (a missed cleanup stages a verification screenshot). An explicit (absolute) caller path is
+ * unaffected: playwright-core resolves an output filename with `path.resolve(outputDir, fileName)`, so an
+ * absolute filename bypasses this base entirely. NOT created here (the Playwright MCP mkdir-recursive's it
+ * lazily on first write) — a pure path derivation, safe on the synchronous spawn hot path.
+ */
+export function sessionScratchDir(sessionId: string): string {
+  return path.join(LOOM_HOME, "tmp", "scratch", sessionId);
+}
 /** Per-worker git worktrees live outside the repo (share its object store; don't clutter it). */
 export const WORKTREES_DIR = path.join(LOOM_HOME, "worktrees");
 /**

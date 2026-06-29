@@ -37,6 +37,7 @@ process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, buildMcpServers, playwrightMcpServer } = await import("../dist/pty/host.js");
+const { sessionScratchDir } = await import("../dist/paths.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
@@ -75,9 +76,33 @@ check("(a) args[0] is an ABSOLUTE path to the @playwright/mcp cli.js",
 check("(a) the resolved cli.js exists on disk (pinned daemon dependency)", fs.existsSync(pw.args[0]));
 check("(a) headless + isolated flags are passed (unattended, per-worker isolation)",
   pw.args.includes("--headless") && pw.args.includes("--isolated"));
-// playwrightMcpServer() (the exported builder) agrees with what buildMcpServers embedded.
-check("(a) playwrightMcpServer() returns the same absolute-path stdio entry",
-  JSON.stringify(playwrightMcpServer()) === JSON.stringify(pw));
+// playwrightMcpServer(dir) (the exported builder) agrees with what buildMcpServers embedded — and
+// buildMcpServers wires the per-session scratch dir, so the no-output-dir builder is NOT equal.
+check("(a) playwrightMcpServer(scratchDir) returns the same absolute-path stdio entry",
+  JSON.stringify(playwrightMcpServer(sessionScratchDir("s1"))) === JSON.stringify(pw));
+
+// ===================== screenshot output defaults OUTSIDE the repo working tree (card 2218530e) =====================
+// The footgun: with no --output-dir, the Playwright MCP defaults captures to `<cwd>/.playwright-mcp`,
+// and cwd IS the project repo root — a stray-PNG-commit risk in a self-hosting repo. buildMcpServers
+// must wire --output-dir to a repo-EXTERNAL per-session scratch dir.
+const oi = pw.args.indexOf("--output-dir");
+check("(out) the spawn passes --output-dir", oi !== -1);
+const outDir = pw.args[oi + 1];
+check("(out) --output-dir is an ABSOLUTE path", typeof outDir === "string" && path.isAbsolute(outDir));
+check("(out) --output-dir is the per-session scratch dir (deterministic, under LOOM_HOME)",
+  outDir === sessionScratchDir("s1"));
+check("(out) the scratch dir lives under LOOM_HOME/tmp (repo-external, daemon-owned)",
+  outDir.startsWith(path.join(tmpHome, "tmp")));
+// An EXPLICIT caller-provided output dir is honored verbatim (the seam still threads a chosen path) —
+// and an absolute screenshot FILENAME bypasses --output-dir via playwright-core's path.resolve, so an
+// explicit caller path always lands where asked.
+const explicit = path.join(tmpHome, "explicit-shots");
+check("(out) an explicit output dir passed to playwrightMcpServer is honored verbatim",
+  playwrightMcpServer(explicit).args.includes("--output-dir")
+  && playwrightMcpServer(explicit).args[playwrightMcpServer(explicit).args.indexOf("--output-dir") + 1] === explicit);
+// omitting the dir ⇒ NO --output-dir flag (byte-identical to the pre-output-dir spawn shape).
+check("(out) playwrightMcpServer() with no dir omits --output-dir (additive)",
+  !playwrightMcpServer().args.includes("--output-dir"));
 
 // a plain (role-null) browser session still gets the server (browser is orthogonal to role).
 const plainBrowser = buildMcpServers({ sessionId: "s2", port: 4317, browserTesting: true });
@@ -137,8 +162,14 @@ try {
   check("(e2e) QA agent: spawn opts.browserTesting === true", oQA?.browserTesting === true);
   check("(e2e) QA agent: returned session.browserTesting === true", sQA.browserTesting === true);
   check("(e2e) QA agent: DB persists browser_testing=1 (pins it for respawns)", db.getSession(sQA.id).browserTesting === true);
-  check("(e2e) QA agent: the spawn's mcp-config includes the playwright server",
-    "playwright" in buildMcpServers({ sessionId: sQA.id, port: 4317, role: oQA.role, browserTesting: oQA.browserTesting }));
+  const qaMcp = buildMcpServers({ sessionId: sQA.id, port: 4317, role: oQA.role, browserTesting: oQA.browserTesting });
+  check("(e2e) QA agent: the spawn's mcp-config includes the playwright server", "playwright" in qaMcp);
+  // DoD: the resolved default capture output dir is OUTSIDE the project repo working tree (repoPath).
+  const qaArgs = qaMcp.playwright.args;
+  const qaOut = qaArgs[qaArgs.indexOf("--output-dir") + 1];
+  const rel = path.relative(repo, qaOut);
+  check("(e2e) QA agent: default screenshot output dir is OUTSIDE repoPath (no stray-PNG-in-repo)",
+    path.isAbsolute(qaOut) && (rel.startsWith("..") || path.isAbsolute(rel)));
 
   // startNew on a plain agent → false, byte-identical (no browser).
   const sPlain = svc.startNew("agentPlain");
