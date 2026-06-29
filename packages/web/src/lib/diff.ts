@@ -159,14 +159,24 @@ export function parseDiff(patch: string): FileDiff[] {
   return files;
 }
 
+// The authoritative diffstat git already computed (a BranchDiff numstat from git/worktrees.ts). When
+// supplied, the HEADLINE totals (file / insertion / deletion counts shown to the approver) are
+// single-sourced from it rather than re-derived from the client parse. The two agree today, but a
+// client-parse undercount must never surface two disagreeing totals on one approver panel — the chip
+// reads the numstat, so the summary must too. The per-file overview still uses the parsed files (it
+// needs the hunks); only the headline numbers are reconciled to the backend source.
+export interface DiffNumstat { filesChanged: number; insertions: number; deletions: number; }
+
 // ── Auto-summary ─────────────────────────────────────────────────────────────────
 // A cheap derived headline + the touched-area roll-up. No model call: the "intent" is inferred from
 // change shape (mostly-added → "Adds", mostly-removed → "Removes", else "Updates") and the dominant
-// subsystem(s). Labelled as auto-derived in the UI so it reads as a hint, not ground truth.
-export function analyzeDiff(patch: string): DiffAnalysis {
+// subsystem(s). Labelled as auto-derived in the UI so it reads as a hint, not ground truth. Pass the
+// authoritative `numstat` to single-source the headline file/±totals from git (see DiffNumstat above).
+export function analyzeDiff(patch: string, numstat?: DiffNumstat): DiffAnalysis {
   const files = parseDiff(patch);
-  const totalInsertions = files.reduce((a, f) => a + f.insertions, 0);
-  const totalDeletions = files.reduce((a, f) => a + f.deletions, 0);
+  const totalInsertions = numstat?.insertions ?? files.reduce((a, f) => a + f.insertions, 0);
+  const totalDeletions = numstat?.deletions ?? files.reduce((a, f) => a + f.deletions, 0);
+  const fileCount = numstat?.filesChanged ?? files.length;
   const highRisk = files.filter((f) => f.risk === "high").length;
   const mediumRisk = files.filter((f) => f.risk === "medium").length;
 
@@ -192,9 +202,9 @@ export function analyzeDiff(patch: string): DiffAnalysis {
   if (deleted) extras.push(`${deleted} deleted`);
   if (renamed) extras.push(`${renamed} moved`);
 
-  const headline = files.length === 0
+  const headline = fileCount === 0
     ? "No file changes vs main."
-    : `${verb} ${files.length} file${files.length === 1 ? "" : "s"} in ${areaPhrase}${extras.length ? ` (${extras.join(", ")})` : ""}.`;
+    : `${verb} ${fileCount} file${fileCount === 1 ? "" : "s"} in ${areaPhrase}${extras.length ? ` (${extras.join(", ")})` : ""}.`;
 
   return { files, totalInsertions, totalDeletions, highRisk, mediumRisk, areas, headline };
 }

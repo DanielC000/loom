@@ -239,4 +239,28 @@ check("rawPatchLineKind marks real file headers as meta in the raw whole-patch r
   assert.equal(rawPatchLineKind("-removed"), "del");
 });
 
+// 11) HEADLINE SINGLE-SOURCING (card dc97b111). The approver panel shows two diffstats: the header chip
+//     (backend numstat) and the summary headline. They must read the SAME source so a client-parse
+//     undercount can't surface two disagreeing totals. analyzeDiff(patch, numstat) drives the headline
+//     file/±totals from the authoritative numstat when given; the per-file overview still uses the parse.
+check("analyzeDiff headline file/±totals come from the backend numstat when supplied, not the parse", () => {
+  // A patch the client parses as ONE file; the backend numstat reports THREE (a deliberate disagreement).
+  const oneFilePatch = oneLineBlock("packages/web/src/lib/diff.ts");
+  const parsed = analyzeDiff(oneFilePatch); // no numstat → parse-derived (the existing default)
+  assert.equal(parsed.files.length, 1);
+  assert.ok(parsed.headline.includes(" 1 file in"), `parse default headline: ${parsed.headline}`);
+
+  const reconciled = analyzeDiff(oneFilePatch, { filesChanged: 3, insertions: 42, deletions: 7 });
+  assert.ok(reconciled.headline.includes(" 3 files in"), `numstat headline: ${reconciled.headline}`);
+  assert.equal(reconciled.totalInsertions, 42, "totalInsertions single-sourced from numstat");
+  assert.equal(reconciled.totalDeletions, 7, "totalDeletions single-sourced from numstat");
+  // the per-file overview is untouched — still the parsed file
+  assert.equal(reconciled.files.length, 1, "parsed per-file overview unchanged");
+});
+
+// A numstat reporting zero files yields the no-change headline even if the parse somehow saw none.
+check("analyzeDiff with a zero-file numstat reads 'No file changes vs main.'", () => {
+  assert.equal(analyzeDiff("", { filesChanged: 0, insertions: 0, deletions: 0 }).headline, "No file changes vs main.");
+});
+
 console.log(`\n${pass} passed`);

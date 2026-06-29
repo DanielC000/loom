@@ -13,8 +13,16 @@ import { color, font, tone } from "../theme";
 // per-file collapsible hunks, with one-step Approve & merge / Request-changes wired to the EXISTING
 // daemon merge gate (fail-closed build gate → squash-merge) and the sendInput turn surface. Reached
 // from Mission Control's review queue. The merge logic itself is unchanged — this only surfaces it.
+// Remount per worker so result / note / openFiles never carry across a review→review navigation
+// (latent stale-banner / lost-open-by-default guard — card 496fe90e). No such navigation exists today
+// (the panel always unmounts between reviews, so it doesn't bite yet), but keying on workerId makes the
+// clean slate structural rather than incidental, ahead of any future in-place review switch.
 export default function ReviewPanel() {
   const { workerId = "" } = useParams();
+  return <ReviewPanelInner key={workerId} workerId={workerId} />;
+}
+
+function ReviewPanelInner({ workerId }: { workerId: string }) {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [note, setNote] = useState("");
@@ -41,7 +49,10 @@ export default function ReviewPanel() {
   // so the load-bearing changes sit at the top; the DIFF blocks below keep git's original file order
   // (so a reviewer reading top-to-bottom sees a coherent change), but high/medium files open by
   // default and low-risk ones fold away.
-  const analysis = useMemo(() => (diff.data ? analyzeDiff(diff.data.patch) : null), [diff.data]);
+  // Headline file/±totals are single-sourced from the backend numstat (diff.data) — the SAME source the
+  // header chip reads — so the summary and chip can never disagree on a parse undercount (card dc97b111).
+  // The per-file overview below still uses the parsed hunks.
+  const analysis = useMemo(() => (diff.data ? analyzeDiff(diff.data.patch, diff.data) : null), [diff.data]);
   const overview = useMemo(() => {
     if (!analysis) return [];
     return [...analysis.files].sort((a, b) =>
