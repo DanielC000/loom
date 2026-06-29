@@ -1147,7 +1147,7 @@ export class SessionService {
       if (recipient.processState === "live") {
         // Re-enqueue with the SAME msgId so its drain resolves THIS queued event (no duplicate record).
         // Ready-gated in host.ts: a freshly-resumed pty holds it until its TUI boots, then drains.
-        const r = this.pty.enqueueStdin(recipientId, text, "system", () => this.resolveQueuedMessage(msgId, { recipientId }));
+        const r = this.pty.enqueueStdin(recipientId, text, "system", (reason?: string) => this.resolveQueuedMessage(msgId, { recipientId, reason }));
         if (r.delivered || r.position !== undefined) { reEnqueued++; continue; }
         // delivered:false with no position ⇒ the host has no live pty for it (DB/host skew) → treat as stuck.
       }

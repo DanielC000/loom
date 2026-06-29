@@ -112,6 +112,9 @@ try {
       return { delivered: false, position: a.length };
     }
     drainOne(id) { const a = this.q.get(id) ?? []; const m = a.shift(); if (m?.onDeliver) m.onDeliver(); return m?.text; }
+    // SUPERSEDE the head (as a redirectWorker flush does): pop it and fire its onDeliver WITH a reason,
+    // so the durable record resolves annotated (e.g. "superseded") rather than as a plain delivery.
+    supersedeHead(id, reason) { const a = this.q.get(id) ?? []; const m = a.shift(); if (m?.onDeliver) m.onDeliver(reason); return m?.text; }
     getPending(id) { return (this.q.get(id) ?? []).map((m) => m.text); }
     getPersistablePending(id) { return (this.q.get(id) ?? []).filter((m) => !m.onDeliver).map((m) => m.text); }
   }
@@ -191,6 +194,37 @@ try {
     do { drained = ptyPost.drainOne(wkr); guard++; } while (drained !== undefined && !drained.includes("RESTART DISPATCH") && guard < 10);
     check("(B-b) the re-enqueued dispatch delivers on the recipient's next turn", typeof drained === "string" && drained.includes("RESTART DISPATCH"));
     check("(B-b) delivery RESOLVED the durable record (zero undelivered for this message)", !db.listUndeliveredQueuedMessages().some((e) => e.detail.text.includes("RESTART DISPATCH")));
+  }
+
+  // ---- (B-d) a POST-RESTART re-enqueued durable message records the supersede REASON when flushed ----
+  // Proves the boot re-enqueue's onDeliver FORWARDS the supersede reason (matches enqueueDurableMessage).
+  // Correctness (the record IS resolved, so the done-guard won't falsely refuse) was always fine — this
+  // guards the AUDIT annotation: a redirectWorker flush of a re-enqueued message must record
+  // reason "superseded", not a plain delivered marker (the boot-path two-path-asymmetry NIT).
+  {
+    const ptyPre = new PtyStub();
+    const sessionsPre = new SessionService(db, ptyPre, new OrchestrationControl());
+    const mgr = `qmd-d-mgr-${sfx}`, wkr = `qmd-d-wkr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
+    ptyPre.setLive(mgr); ptyPre.setLive(wkr); ptyPre.setBusy(wkr);
+    sessionsPre.messageWorker(mgr, wkr, "SUPERSEDE DISPATCH");
+    const rec = db.listUndeliveredQueuedMessages().find((e) => e.detail.text.includes("SUPERSEDE DISPATCH"));
+    const msgId = rec?.detail?.msgId;
+    check("(B-d) the held message recorded a durable msgId", typeof msgId === "string");
+
+    // Daemon restart: NEW pty, SAME db. Recipient resumes not-ready (queues). The boot scan re-enqueues it.
+    const ptyPost = new PtyStub();
+    const sessionsPost = new SessionService(db, ptyPost, new OrchestrationControl());
+    ptyPost.setLive(wkr); ptyPost.setBusy(wkr); // resumed, not-ready ⇒ the re-enqueue is HELD (keeps onDeliver)
+    const m = sessionsPost.recoverUndeliveredMessagesOnBoot();
+    check("(B-d) boot scan re-enqueued the durable message", m.reEnqueued === 1);
+
+    // A redirectWorker flush SUPERSEDES the re-enqueued held message → fires its onDeliver("superseded").
+    ptyPost.supersedeHead(wkr, "superseded");
+    check("(B-d) the superseded message is resolved (zero undelivered for it)", !db.listUndeliveredQueuedMessages().some((e) => e.detail.text.includes("SUPERSEDE DISPATCH")));
+    const marker = db.listEventsForWorker(wkr).find((e) => e.kind === "session_message_delivered" && e.detail?.msgId === msgId);
+    check("(B-d) the resolution records reason \"superseded\" (boot re-enqueue FORWARDS the reason, not a plain marker)", marker?.detail?.reason === "superseded");
   }
 
   // ---- (B-c) UNDELIVERED OUTBOUND surfaced to a resumed sender; recycled recipient RETIRED ----
