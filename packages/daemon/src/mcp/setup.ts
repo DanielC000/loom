@@ -404,7 +404,13 @@ export class SetupMcpRouter {
       },
       async ({ agentId, profileId }) => {
         if (!db.getAgent(agentId)) return ok({ error: "agent not found" });
-        if (!db.getProfile(profileId)) return ok({ error: "profile not found" });
+        const assigned = db.getProfile(profileId);
+        if (!assigned) return ok({ error: "profile not found" });
+        // LEAST-PRIVILEGE (setup-only): mirror agent_update — reject binding an agent to a profile whose
+        // RESOLVED role is elevated (platform/auditor/workspace-auditor), so the ungated setup surface can
+        // never plant a latent elevation by this back door. A manager/null/plain rig still assigns fine.
+        const roleErr = setupRoleError(assigned.role);
+        if (roleErr) return ok({ error: roleErr });
         db.updateAgent(agentId, { profileId });
         return ok(db.getAgent(agentId));
       },

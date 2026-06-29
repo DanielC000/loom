@@ -382,6 +382,16 @@ try {
   check("(g) agent_update REJECTS assigning an elevated-role (platform) profile", typeof editElev.error === "string" && /platform|elevat|cannot/i.test(editElev.error));
   check("(g) agent_update: the rejected elevate left the agent's assignment UNCHANGED", (db.getAgent(agent.id)?.profileId ?? null) === assignBefore);
 
+  // The SIBLING profile_assign must enforce the SAME bound (it previously skipped the guard — the latent
+  // elevation back door). Reuse the "elevatedRig" platform profile: profile_assign of it is REJECTED and
+  // leaves the agent's assignment unchanged; the allowed-role (worker) profile_assign success path holds in (c).
+  const paBefore = db.getAgent(agent.id)?.profileId ?? null;
+  const paElev = await call("profile_assign", { agentId: agent.id, profileId: "elevatedRig" });
+  check("(g) profile_assign REJECTS assigning an elevated-role (platform) profile", typeof paElev.error === "string" && /platform|elevat|cannot/i.test(paElev.error));
+  check("(g) profile_assign: the rejected elevate left the agent's assignment UNCHANGED", (db.getAgent(agent.id)?.profileId ?? null) === paBefore);
+  const paOk = await call("profile_assign", { agentId: agent.id, profileId: prof.id });
+  check("(g) profile_assign: an allowed-role (worker) profile still assigns fine", paOk.profileId === prof.id && !paOk.error);
+
   // ============ (h) single-record READ tools — stop reading via empty-payload mutators ============
   const gotAgent = await call("agent_get", { agentId: agent.id });
   check("(h) agent_get: returns the FULL agent record incl. startupPrompt",
