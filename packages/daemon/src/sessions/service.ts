@@ -220,6 +220,19 @@ export class SessionService {
    */
   private readonly deployShaWindow = new Map<string, { shas: Set<string>; atMs: number }>();
   private static readonly SHA_DEDUP_TTL_MS = 30 * 60_000;
+  /**
+   * TOCTOU spawn-claim (worker_spawn double-create race): the per-taskId set of worker spawns currently
+   * IN FLIGHT — past the liveHolder check but not yet past insertSession + setProcessState('live'). The
+   * existing liveHolder guard ({@link Db.liveSessionIdForTask}) is a single NON-atomic SELECT taken
+   * synchronously BEFORE the first `await createWorktree`, so two CONCURRENT or RETRIED worker_spawn calls
+   * for one taskId both observe liveHolder=null across that await window and both create a worktree+session
+   * → TWO live workers sharing ONE branch/worktree (silent work-loss). This in-memory claim closes that
+   * window: the winner adds its taskId SYNCHRONOUSLY (before any await), so a racing call's synchronous
+   * prefix sees the claim and is rejected before it can createWorktree. The daemon is a SINGLE process and
+   * spawnWorker is the only worker-spawn path, so an in-memory Set is sufficient and simplest. Released in a
+   * finally once the row is live (the liveHolder guard then owns exclusion) or on any failure.
+   */
+  private readonly inFlightSpawnTaskIds = new Set<string>();
   constructor(
     private db: Db, private pty: PtyHost, private control: OrchestrationControl,
     opts?: { gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number; runTimeoutMs?: number },
@@ -1687,62 +1700,93 @@ export class SessionService {
     const cap = config.orchestration.maxConcurrentWorkers;
     if (liveWorkers >= cap) throw new Error(`concurrency cap reached (${cap})`);
 
-    const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, taskId, { timeoutMs: this.provisionMs });
+    // ATOMIC per-taskId spawn claim (the real fix — NOT merely a narrowed TOCTOU window). liveSessionIdForTask
+    // is a single NON-atomic SELECT taken BEFORE the `await createWorktree` below, and the row is inserted only
+    // AFTER it; so two CONCURRENT or RETRIED worker_spawn calls for one taskId both observe liveHolder=null
+    // across that await gap and both create a worktree+session → TWO live workers sharing ONE branch (silent
+    // work-loss). The claim below is a TRUE MUTEX, not just a tighter check:
+    //
+    //   ATOMICITY PROOF. Node runs each turn to completion on a single thread; a turn yields ONLY at an `await`
+    //   (or return). The test-and-set here — `if (has(taskId)) throw; add(taskId)` — contains NO `await`
+    //   between the .has() and the .add(), so it executes as one INDIVISIBLE step: no other call can be
+    //   scheduled in between. Calling `spawnWorker(...)` runs its synchronous prefix immediately up to the
+    //   FIRST await (this method's first await is `createWorktree`, BELOW this claim). Therefore for two
+    //   racing calls A and B on one taskId, whichever's synchronous prefix runs first reaches `.add(taskId)`
+    //   and only THEN yields at createWorktree; the other's prefix then runs with the claim already present
+    //   and is rejected before it can createWorktree. They cannot interleave inside the check-and-claim, so
+    //   at most one ever proceeds. (Single-process-sufficient: the daemon is ONE process and spawnWorker is
+    //   the only worker-spawn path — boot-resume resumes by id, never inserts — so an in-memory Set needs no
+    //   cross-process lock; a DB unique index would be equivalently strong but would have to thread the
+    //   legitimate multi-row-per-task history of exited/recycled rows, which this avoids.)
+    //
+    // We claim BEFORE createWorktree, so the LOSER never creates an orphan worktree/branch at all — nothing to
+    // clean up. Released in the finally once the row is live (the liveHolder guard then owns exclusion) or on failure.
+    if (this.inFlightSpawnTaskIds.has(taskId)) {
+      throw new Error(`worker_spawn taskId '${taskId}' already has a spawn in flight; wait for it to finish before re-spawning`);
+    }
+    this.inFlightSpawnTaskIds.add(taskId);
+    try {
+      const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, taskId, { timeoutMs: this.provisionMs });
 
-    const now = new Date().toISOString();
-    const worker: Session = {
-      id: randomUUID(),
-      projectId: manager.projectId,
-      agentId: workerAgent.id, // the RESOLVED agent (opts.agentId may have been a name/slug — bind to the real id)
-      engineSessionId: null,
-      title: null,
-      cwd: worktreePath, // worker runs IN its worktree (parallel-worker isolation)
-      processState: "starting",
-      resumability: "unknown",
-      busy: false,
-      createdAt: now,
-      lastActivity: now,
-      lastError: null,
-      role: "worker",
-      browserTesting, // QA worker (profile opt-in) ⇒ per-session Playwright MCP; else false (plain)
-      documentConversion, // document worker (profile opt-in) ⇒ per-session markitdown MCP; else false (plain)
-      skills, // profile-pinned skill subset for the worker (null ⇒ all); pinned so resume/recycle honor it
-      parentSessionId: managerSessionId,
-      taskId,
-      worktreePath,
-      branch,
-    };
-    this.db.insertSession(worker);
-    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
-    this.db.setProcessState(worker.id, "live");
-    this.pty.spawn({
-      sessionId: worker.id,
-      cwd: worktreePath,
-      permission: workerSpawn.permission, // layered allowDelta from the worker profile (was bare config.permission — dropped the profile allowlist)
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      // Compose the worker's opening: a worktree LOCATION block first (names this worktree as the edit
-      // dir so the worker can't leak edits into the main checkout), then its agent BASE BRIEF (Dev/Bugfix/
-      // etc. doctrine — run `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief
-      // degrades to the block + kickoff. Without this, the agent brief was dead config for workers.
-      startupPrompt: composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath),
-      role: "worker", // gives the worker the orchestration surface (worker_report only)
-      browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
-      documentConversion, // inject the per-session markitdown MCP iff this worker's profile opted in
-      model: workerSpawn.model, // profile-pinned model → `--model` (undefined ⇒ no `--model`); was dropped — workers never honored a profile model pin
-      skills, // deliver only the worker profile's skill subset (null ⇒ all)
-    });
-    // Move the task into the `active` lane (role-resolved off the manager-project config, not the
-    // hardcoded "in_progress" key). If the board has no active lane, leave the card where it is rather
-    // than inventing a key — the invariant: a move never points a task at a non-existent column.
-    const activeKey = columnKeyForRole(config.kanbanColumns, "active");
-    if (activeKey) this.db.updateTask(taskId, { columnKey: activeKey });
-    this.db.appendEvent({
-      id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId, workerSessionId: worker.id, taskId, kind: "spawn_worker",
-    });
-    return { ...worker, processState: "live" };
+      const now = new Date().toISOString();
+      const worker: Session = {
+        id: randomUUID(),
+        projectId: manager.projectId,
+        agentId: workerAgent.id, // the RESOLVED agent (opts.agentId may have been a name/slug — bind to the real id)
+        engineSessionId: null,
+        title: null,
+        cwd: worktreePath, // worker runs IN its worktree (parallel-worker isolation)
+        processState: "starting",
+        resumability: "unknown",
+        busy: false,
+        createdAt: now,
+        lastActivity: now,
+        lastError: null,
+        role: "worker",
+        browserTesting, // QA worker (profile opt-in) ⇒ per-session Playwright MCP; else false (plain)
+        documentConversion, // document worker (profile opt-in) ⇒ per-session markitdown MCP; else false (plain)
+        skills, // profile-pinned skill subset for the worker (null ⇒ all); pinned so resume/recycle honor it
+        parentSessionId: managerSessionId,
+        taskId,
+        worktreePath,
+        branch,
+      };
+      this.db.insertSession(worker);
+      // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
+      this.db.setProcessState(worker.id, "live");
+      this.pty.spawn({
+        sessionId: worker.id,
+        cwd: worktreePath,
+        permission: workerSpawn.permission, // layered allowDelta from the worker profile (was bare config.permission — dropped the profile allowlist)
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        // Compose the worker's opening: a worktree LOCATION block first (names this worktree as the edit
+        // dir so the worker can't leak edits into the main checkout), then its agent BASE BRIEF (Dev/Bugfix/
+        // etc. doctrine — run `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief
+        // degrades to the block + kickoff. Without this, the agent brief was dead config for workers.
+        startupPrompt: composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath),
+        role: "worker", // gives the worker the orchestration surface (worker_report only)
+        browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
+        documentConversion, // inject the per-session markitdown MCP iff this worker's profile opted in
+        model: workerSpawn.model, // profile-pinned model → `--model` (undefined ⇒ no `--model`); was dropped — workers never honored a profile model pin
+        skills, // deliver only the worker profile's skill subset (null ⇒ all)
+      });
+      // Move the task into the `active` lane (role-resolved off the manager-project config, not the
+      // hardcoded "in_progress" key). If the board has no active lane, leave the card where it is rather
+      // than inventing a key — the invariant: a move never points a task at a non-existent column.
+      const activeKey = columnKeyForRole(config.kanbanColumns, "active");
+      if (activeKey) this.db.updateTask(taskId, { columnKey: activeKey });
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId, workerSessionId: worker.id, taskId, kind: "spawn_worker",
+      });
+      return { ...worker, processState: "live" };
+    } finally {
+      // Release the per-taskId claim. By here the row is either live (liveHolder now rejects re-spawns) or
+      // the spawn threw before any persistent state — either way the next spawn must be free to proceed.
+      this.inFlightSpawnTaskIds.delete(taskId);
+    }
   }
 
   /** Stop one of a manager's workers (parent-scoped). Worktree is RETAINED (merge/recycle own it). */
