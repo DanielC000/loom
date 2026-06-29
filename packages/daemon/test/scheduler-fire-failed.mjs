@@ -5,7 +5,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // HERMETIC + CLAUDE-FREE + DAEMON-FREE (in-process Scheduler + Db with a THROWING injected start-fn; no
 // HTTP, no real claude) so it runs in the gate (unlike scheduler.mjs, whose PART 2 needs a live daemon).
 // Proves:
-//   (1) a thrown spawn emits exactly ONE schedule_fire_failed event, keyed by the schedule id;
+//   (1) a thrown spawn emits exactly ONE schedule_fire_failed event with an EMPTY managerSessionId (NOT the
+//       schedule id — a session-less event must not overload the session field, or consumers treating
+//       managerSessionId as a session foreign key mis-join);
 //   (2) its detail carries scheduleId/cron/kind + the error message (the surfaced reason);
 //   (3) NO schedule_fired event is recorded (the spawn never succeeded) and the slot is still claimed;
 //   (4) the schedule stays ENABLED — a transient spawn failure must not permanently disable a cadence;
@@ -65,9 +67,13 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
   seedSchedule(e, "sch-failevt"); // default kind "manager" → routed to startManager → throws this tick
   const now = new Date();
   await e.scheduler.tick(now);
-  const evs = e.db.listEvents("sch-failevt"); // failure event is keyed by the SCHEDULE id (no session spawned)
-  check("(1) a thrown spawn emits exactly one schedule_fire_failed event (keyed by the schedule id)",
-    evs.length === 1 && evs[0].kind === "schedule_fire_failed");
+  // The failure event is session-LESS (no manager session spawned), so it populates managerSessionId with
+  // the empty-string sentinel — NOT the schedule id (which would mis-join a session-foreign-key consumer).
+  const evs = e.db.listEvents(""); // session-less events key off the empty-string managerSessionId
+  check("(1) a thrown spawn emits exactly one schedule_fire_failed event with an EMPTY managerSessionId",
+    evs.length === 1 && evs[0].kind === "schedule_fire_failed" && evs[0].managerSessionId === "");
+  check("(1b) the schedule id is NOT placed in the session-id field (no event keyed by the schedule id)",
+    e.db.listEvents("sch-failevt").length === 0);
   check("(2) detail carries scheduleId + cron + kind + the error message (the surfaced reason)",
     evs[0]?.detail?.scheduleId === "sch-failevt" && evs[0]?.detail?.cron === "*/5 * * * *" &&
     evs[0]?.detail?.kind === "manager" && typeof evs[0]?.detail?.error === "string" && evs[0].detail.error.length > 0);
@@ -85,9 +91,10 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
   const e = makeEnv({ throwAuditor: true });
   seedSchedule(e, "sch-aud-fail", { kind: "auditor" });
   await e.scheduler.tick(new Date());
-  const evs = e.db.listEvents("sch-aud-fail");
-  check("(5) a thrown auditor spawn ALSO records schedule_fire_failed (kind=auditor in detail)",
-    evs.length === 1 && evs[0].kind === "schedule_fire_failed" && evs[0]?.detail?.kind === "auditor");
+  const evs = e.db.listEvents(""); // session-less, keyed off the empty-string managerSessionId
+  check("(5) a thrown auditor spawn ALSO records schedule_fire_failed (kind=auditor in detail), session-less",
+    evs.length === 1 && evs[0].kind === "schedule_fire_failed" && evs[0].managerSessionId === "" &&
+    evs[0]?.detail?.kind === "auditor" && evs[0]?.detail?.scheduleId === "sch-aud-fail");
   cleanupEnv(e);
 }
 
@@ -102,6 +109,6 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a thrown scheduled spawn (manager OR auditor) records a durable, queryable schedule_fire_failed event (keyed by the schedule id, detail carries the surfaced error), claims the slot, leaves the schedule enabled, and a successful fire records none."
+  ? "\n✅ ALL PASS — a thrown scheduled spawn (manager OR auditor) records a durable, queryable schedule_fire_failed event (session-LESS: empty managerSessionId, NOT the schedule id; detail carries the scheduleId + surfaced error), claims the slot, leaves the schedule enabled, and a successful fire records none."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
