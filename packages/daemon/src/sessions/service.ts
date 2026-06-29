@@ -1591,8 +1591,10 @@ export class SessionService {
 
   /**
    * Permanently delete an archived session: drop its row + transcript snapshot. A manager CASCADES
-   * to its archived workers (by the time a manager is archived, archiving already cascaded its
-   * workers, so they're archived too). Refuses a non-archived session (archive it first).
+   * to its archived workers — and ONLY those: the cascade set is `listArchivedWorkers` (archived_at
+   * NOT NULL), which excludes any still-live worker, so under per-session archiving (no archive-time
+   * cascade) deleting an archived manager never reaches a worker that's still running. Refuses a
+   * non-archived session (archive it first).
    */
   deleteArchivedSession(sessionId: string): { deleted: string[] } {
     const s = this.db.getSession(sessionId);

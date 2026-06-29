@@ -191,6 +191,10 @@ export interface ApiKey {
 }
 
 // --- Session FSM (explicit; replaces the predecessor's loose status enum) ---
+// 'none' has no TS producer (every insert path stamps "starting"), but it stays: it's the SQL column
+// default (`process_state TEXT NOT NULL DEFAULT 'none'` in db.ts) — the structural placeholder for any
+// row that lands without an explicit state — and the read-path cast (`r.process_state as ProcessState`)
+// plus the backfill/ordering logic (db.ts archived-backfill, web livenessRank) reason about 'none' rows.
 export type ProcessState = "none" | "starting" | "live" | "exited";
 export type Resumability = "unknown" | "resumable" | "dead";
 
@@ -389,11 +393,13 @@ export interface Session {
    */
   skills?: string[] | null;
   /**
-   * Per-project session Archive: the ISO instant a session was archived (a UI tidy action that moves
-   * a dead/exited session out of the Workspace rail). null = not archived (every live/normal session).
-   * Archived sessions are EXCLUDED from the rail/god-eye lists and surface only in the Archive tab.
-   * Mirrors the project soft-archive pattern (`Project.archivedAt`). Only an EXITED session is
-   * archivable; archiving a manager cascades to its workers.
+   * Per-project session Archive: the ISO instant a session was archived (moving a stopped session out
+   * of the Workspace rail). null = not archived (every live/normal session). Archived sessions are
+   * EXCLUDED from the rail/god-eye lists and surface only in the Archive tab. Mirrors the project
+   * soft-archive pattern (`Project.archivedAt`). Set AUTOMATICALLY when a session's pty EXITS
+   * (auto-archive-on-exit, index.ts onExit; role==='run' excluded) and cleared on resume(). Per-session,
+   * NO cascade — each worker auto-archives independently as it exits (a manager can be archived while a
+   * worker is still live).
    */
   archivedAt?: string | null;
 }
