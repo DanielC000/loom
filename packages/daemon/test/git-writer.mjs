@@ -6,10 +6,29 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { GitWriter } from "../dist/git/writer.js";
+import { GitWriter, nonInteractiveEnv } from "../dist/git/writer.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+
+// 0. The git-writer's non-interactive env must pin a stable C locale so we can MACHINE-READ git's stderr
+//    (the no-upstream `push -u` retry below keys on English substrings). LC_ALL=C must win regardless of
+//    the host locale, and the existing fail-fast guards must stay intact.
+{
+  const env = nonInteractiveEnv();
+  check("non-interactive env pins LC_ALL=C", env.LC_ALL === "C");
+  check("non-interactive env pins LANG=C", env.LANG === "C");
+  check("non-interactive env keeps GIT_TERMINAL_PROMPT=0", env.GIT_TERMINAL_PROMPT === "0");
+  check("non-interactive env keeps GCM_INTERACTIVE=never", env.GCM_INTERACTIVE === "never");
+  // LC_ALL/LANG must OVERRIDE an inherited non-English locale, not be shadowed by it.
+  const savedLcAll = process.env.LC_ALL, savedLang = process.env.LANG;
+  process.env.LC_ALL = "de_DE.UTF-8"; process.env.LANG = "de_DE.UTF-8";
+  const overridden = nonInteractiveEnv();
+  check("LC_ALL=C overrides an inherited non-English LC_ALL", overridden.LC_ALL === "C");
+  check("LANG=C overrides an inherited non-English LANG", overridden.LANG === "C");
+  if (savedLcAll === undefined) delete process.env.LC_ALL; else process.env.LC_ALL = savedLcAll;
+  if (savedLang === undefined) delete process.env.LANG; else process.env.LANG = savedLang;
+}
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "loom-git-writer-")));
 const repo = path.join(root, "repo");

@@ -33,6 +33,11 @@ const GIT_TIMEOUT_FLOOR_MS = 1_000;
  *    auth-required remote sits forever waiting for a username/password on stdin we don't have).
  *  - GCM_INTERACTIVE=never — Git Credential Manager (the common Windows prompt source) never opens a
  *    dialog; it fails closed.
+ *  - LC_ALL=C / LANG=C — pin git's locale so its stderr is stable ENGLISH. We MACHINE-READ git's error
+ *    text ({@link isNoUpstreamError} matches "no upstream"/"no configured push destination") to decide
+ *    the no-upstream `push -u` retry; on a host with a non-English git locale git emits localized text,
+ *    the substring match misses, and the UI "+ Branch" first push fails confusingly. LC_ALL wins over
+ *    any inherited LANG/LC_* so the detection holds regardless of the host locale.
  * We deliberately do NOT set GIT_ASKPASS/SSH_ASKPASS: simple-git's injection guard refuses to run with
  * those in a supplied env (they're an arbitrary-command vector) and disabling that guard is the wrong
  * trade for a trust-boundary surface. The residual GUI-askpass hang risk is covered by the
@@ -42,6 +47,8 @@ const GIT_TIMEOUT_FLOOR_MS = 1_000;
 const NONINTERACTIVE_ENV: Record<string, string> = {
   GIT_TERMINAL_PROMPT: "0",
   GCM_INTERACTIVE: "never",
+  LC_ALL: "C",
+  LANG: "C",
 };
 
 /**
@@ -51,7 +58,7 @@ const NONINTERACTIVE_ENV: Record<string, string> = {
  * here is non-interactive by construction (commit uses `-m`, checkout never edits), so no editor should
  * ever be invoked — a leftover `GIT_EDITOR` could only cause a hang/prompt we explicitly forbid.
  */
-function nonInteractiveEnv(): Record<string, string | undefined> {
+export function nonInteractiveEnv(): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env };
   delete env.GIT_EDITOR;
   delete env.GIT_SEQUENCE_EDITOR;
