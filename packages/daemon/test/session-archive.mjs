@@ -98,10 +98,11 @@ try {
   db = new Db(dbFile); // reopen again — migration is idempotent (no throw)
   check("A: migration is idempotent (second open ok)", !!db.getSession("sMig"));
 
-  // A minimal PTY stub so resume() (section C) can spawn without a real claude. resume() only calls
-  // pty.spawn (no-op here); the other archive/restore/delete paths never touch the pty. `_onSpawn`, when
-  // set, simulates a spawn firing onExit synchronously — used by the fast-failing-resume re-archive test.
-  const ptyStub = { spawn(opts) { if (ptyStub._onSpawn) ptyStub._onSpawn(opts); }, enqueueStdin() { return { delivered: false }; }, stop() {}, kill() {}, getPending() { return []; }, _onSpawn: null };
+  // A minimal PTY stub so resume() (section C) can spawn without a real claude. resume() calls pty.isAlive
+  // (its already-live short-circuit) then pty.spawn; isAlive:false (these rows are stopped/archived, not
+  // live) makes resume fall through to spawn. The other archive/restore/delete paths never touch the pty.
+  // `_onSpawn`, when set, simulates a spawn firing onExit synchronously — used by the fast-failing-resume re-archive test.
+  const ptyStub = { isAlive() { return false; }, spawn(opts) { if (ptyStub._onSpawn) ptyStub._onSpawn(opts); }, enqueueStdin() { return { delivered: false }; }, stop() {}, kill() {}, getPending() { return []; }, _onSpawn: null };
   const sessions = new SessionService(db, ptyStub, {});
 
   // Prepare the shared transcript fixture + a real cwd (used by C resume + D snapshot).

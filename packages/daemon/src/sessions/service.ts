@@ -717,6 +717,15 @@ export class SessionService {
   resume(sessionId: string, opts: { allowSuperseded?: boolean } = {}): Session {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
+    // Already-live short-circuit (latent orphan-pty guard): every automatic caller pre-checks liveness
+    // today (WakeService gates on !pty.isAlive, crash-recovery only targets exited rows, boot-resume runs
+    // post-reconcile) and the manual REST /resume is UI-gated — but resume() itself has no structural
+    // backstop. host.spawn() does this.live.set(sessionId, live) and OVERWRITES any existing live entry
+    // WITHOUT .kill()-ing the prior pty, so a resume() of an already-live session would orphan the running
+    // node-pty (leaked process, no onExit). Short-circuit here: if the pty is already alive, return the
+    // current row WITHOUT re-spawning — a no-op that can't double-spawn or clobber the live map. A
+    // genuinely exited/dead session (isAlive=false) falls through and resumes normally.
+    if (this.pty.isAlive(session.id)) return session;
     if (!session.engineSessionId) throw new Error("session has no engine id to resume");
     // Backstop dead-ID detection: if the engine transcript is gone, this id is unresumable.
     if (!engineTranscriptExists(session.cwd, session.engineSessionId)) {

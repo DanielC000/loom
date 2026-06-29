@@ -70,6 +70,9 @@ db.insertAgent({ id: "agentMgr", projectId: "pP", name: "Mgr", startupPrompt: "M
 class SeamHost extends PtyHost {
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) { this.capture.push(opts); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  // resume()'s already-live short-circuit consults pty.isAlive: this capture seam drives NO live OS pty,
+  // so report not-live — the test resumes a (notionally stopped) session to inspect its resume spawn args.
+  isAlive() { return false; }
 }
 const events = {
   onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },

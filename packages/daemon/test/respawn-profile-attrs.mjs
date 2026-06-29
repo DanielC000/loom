@@ -133,6 +133,9 @@ class SeamHost extends PtyHost {
       resize() {},
     };
   }
+  // resume()'s already-live short-circuit consults pty.isAlive: this capture seam drives NO live OS pty, so
+  // report not-live — the test resumes/recycles a (notionally stopped) worker to inspect its respawn args.
+  isAlive() { return false; }
 }
 const events = {
   onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },

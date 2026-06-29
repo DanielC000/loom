@@ -59,7 +59,9 @@ try {
 
   // --- (3) resume() refuses a recycled (superseded) session, from any path; a normal one passes the guard ---
   const spawned = [];
-  const pty = { spawn: (o) => spawned.push(o.sessionId) }; // stub: resume only reaches it past the guard
+  // isAlive:false — these rows are processState:"exited" (not-live), so resume()'s already-live
+  // short-circuit must fall through to the superseded/spawn path this test exercises.
+  const pty = { isAlive: () => false, spawn: (o) => spawned.push(o.sessionId) }; // stub: resume only reaches it past the guard
   const sessions = new SessionService(db, pty, {});
 
   let threw = false, msg = "";

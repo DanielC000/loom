@@ -44,6 +44,7 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 // path) and getPending returns a copy — exactly what the boot resume + replay rely on. Claude-free.
 class PtyStub {
   constructor() { this.q = new Map(); }
+  isAlive() { return false; } // resumed rows are not-live; let resume()'s already-live short-circuit fall through to spawn/guards
   enqueueStdin(id, text) { const a = this.q.get(id) ?? []; a.push(text); this.q.set(id, a); return { delivered: false, position: a.length }; }
   getPending(id) { return [...(this.q.get(id) ?? [])]; }
 }
@@ -234,6 +235,7 @@ try {
   // A spawn-recording pty so we can prove resume() never reached pty.spawn for the missing cwd.
   class SpawnRecPty {
     constructor() { this.spawns = []; this.q = new Map(); }
+    isAlive() { return false; } // the ghost row is not-live; let resume()'s already-live short-circuit fall through to the cwd-missing guard
     spawn(o) { this.spawns.push(o); }
     enqueueStdin(i, t) { const a = this.q.get(i) ?? []; a.push(t); this.q.set(i, a); return { delivered: false, position: a.length }; }
     getPending(i) { return [...(this.q.get(i) ?? [])]; }

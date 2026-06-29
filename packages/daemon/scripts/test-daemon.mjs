@@ -45,7 +45,7 @@ const HERMETIC = [
   "worker-report-delivery-status", // card fc9a27d5: worker_report/platform_escalate DeliveryStatus enum + parked-parent wake
   "merge-orphaned-to-main",
 
-  "pty-busy-drain", "pty-coalesce-drain", "pty-rate-limit-park-drain", "pty-composer-dirty", "pty-queue-mutations", "pty-queue-rest", "pty-resume-readiness", "pty-stop-queue", "pty-interrupt-redirect", "redirect-worker", "spawn-env", "queued-message-durability", "graceful-stop", "resume-mode-cycles", "resume-mode-detect", "resume-mode-feedback", "shell-terminal",
+  "pty-busy-drain", "pty-coalesce-drain", "pty-rate-limit-park-drain", "pty-composer-dirty", "pty-queue-mutations", "pty-queue-rest", "pty-resume-readiness", "pty-stop-queue", "pty-interrupt-redirect", "redirect-worker", "spawn-env", "queued-message-durability", "graceful-stop", "resume-mode-cycles", "resume-mode-detect", "resume-mode-feedback", "resume-already-live-guard", "shell-terminal",
   "db-backup",
   "crashlog", // card c00be6e8: top-level fatal-exit handler writes a diagnosable crashlog under .loom; clean/restart exits don't
   "my-context-gate", // PL Auditor finding #9: my_context folds in the RESOLVED project gateCommand, READ-ONLY (no set/propose surface)
