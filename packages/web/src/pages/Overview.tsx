@@ -285,27 +285,15 @@ function FleetAccordion({ managers, workers, looseWorkers }: {
     mutationFn: (id: string) => api.clearSessionRateLimit(id),
     onSuccess: invalidate, onError: (e) => window.alert((e as Error).message),
   });
-  const archive = useMutation({
-    mutationFn: (id: string) => api.archiveSession(id),
-    onSuccess: invalidate, onError: (e) => window.alert((e as Error).message),
-  });
 
-  // Build the SessionActions props for a row. For a manager, the archive handler confirms the
-  // worker-count cascade first (byte-identical to Workspace's renderRow).
-  const actionsFor = (s: SessionListItem) => {
-    const workerCount = s.role === "manager" ? workers.filter((w) => w.parentSessionId === s.id).length : 0;
-    const onArchive = () => {
-      if (workerCount > 0 && !window.confirm(`Archive this manager and its ${workerCount} worker${workerCount === 1 ? "" : "s"}? They'll move to the Archive tab.`)) return;
-      archive.mutate(s.id);
-    };
-    return {
-      onResume: () => resume.mutate(s.id), resuming: resume.isPending,
-      onStop: () => stop.mutate(s.id), stopping: stop.isPending,
-      onFork: () => fork.mutate(s.id), forking: fork.isPending,
-      onClearRateLimit: () => clearRl.mutate(s.id), clearingRateLimit: clearRl.isPending,
-      onArchive, archiving: archive.isPending,
-    };
-  };
+  // Build the SessionActions props for a row. Manual archive was removed (archiving is automatic on
+  // session exit — Card A); stopped sessions live on the Archive page.
+  const actionsFor = (s: SessionListItem) => ({
+    onResume: () => resume.mutate(s.id), resuming: resume.isPending,
+    onStop: () => stop.mutate(s.id), stopping: stop.isPending,
+    onFork: () => fork.mutate(s.id), forking: fork.isPending,
+    onClearRateLimit: () => clearRl.mutate(s.id), clearingRateLimit: clearRl.isPending,
+  });
 
   return (
     <Panel>

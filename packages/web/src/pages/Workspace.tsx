@@ -1,18 +1,9 @@
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { COLUMN_PRESETS, DEFAULT_COLUMN_PRESET_ID, presetById, presetToDesired, type Agent, type Project, type Session, type SessionRole } from "@loom/shared";
+import { COLUMN_PRESETS, DEFAULT_COLUMN_PRESET_ID, presetById, presetToDesired, type Agent, type Project, type SessionRole } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { bySessionActivity, byCreatedStable } from "../lib/sessions";
-import { TerminalPane } from "../components/Terminal";
-import { TranscriptPane } from "../components/TranscriptPane";
-import { Composer } from "../components/Composer";
-import { PresetPromptsButton } from "../components/PresetPrompts";
-import { SessionWakes } from "../components/SessionWakes";
-import { SessionQueue } from "../components/SessionQueue";
-import { SessionActions } from "../components/SessionActions";
-import { SpawnControls } from "../components/SpawnControls";
-import { Panel, Button, Input, Select, SectionLabel, StatusPill, PresetAccentDots } from "../components/ui";
+import { Panel, Button, Input, Select, SectionLabel, PresetAccentDots } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
 
 const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", "workspace-auditor": "muted", run: "muted" };
@@ -27,7 +18,9 @@ const TEMPLATE_AGENTS: { name: string; startupPrompt: string }[] = [
   { name: "Content Strategy", startupPrompt: "Work on content and strategy for this project, grounded in the vault notes." },
 ];
 
-// Per-project working view: create project/agent, spawn or resume sessions, attach a terminal.
+// Per-project working view: create/manage projects and agents, and edit each agent's startup prompt.
+// Live-session interaction (spawn / resume / fork / stop, terminals + transcripts) lives on the
+// Terminals and Overview pages; stopped sessions live on the Archive page (archiving is automatic).
 export default function Workspace() {
   const qc = useQueryClient();
   // The active project is the shared, header-persisted selection (see lib/activeProject) — the
@@ -43,15 +36,12 @@ export default function Workspace() {
     if (legacy !== null) { localStorage.setItem("loom.agentId", legacy); localStorage.removeItem("loom.topicId"); }
     return legacy;
   });
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [rightTab, setRightTab] = useState<"terminal" | "transcript">("terminal");
   useEffect(() => { agentId ? localStorage.setItem("loom.agentId", agentId) : localStorage.removeItem("loom.agentId"); }, [agentId]);
 
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const agents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
   // Profiles are platform-level (cross-project), so this is a single global query, not project-scoped.
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
-  const sessions = useQuery({ queryKey: ["sessions", agentId], queryFn: () => api.sessions(agentId!), enabled: !!agentId });
   // Cross-project live sessions — the source for the "stop the fleet first" guard on destructive
   // project/agent ops (archive/delete disable while a related session is live). Archived projects feed
   // the restore / permanent-delete section. Both are cheap loopback reads, invalidated by the mutations.
@@ -80,7 +70,7 @@ export default function Workspace() {
     onSuccess: (project) => {
       qc.invalidateQueries({ queryKey: ["projects"] });
       qc.invalidateQueries({ queryKey: ["agents", project.id] });
-      setProjectId(project.id); setAgentId(null); setSessionId(null);
+      setProjectId(project.id); setAgentId(null);
     },
   });
   const createAgent = useMutation({
@@ -92,49 +82,6 @@ export default function Workspace() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["agents", projectId] }),
   });
   const selectedAgent = agents.data?.find((t) => t.id === agentId) ?? null;
-  const selectedProfile = selectedAgent?.profileId ? profiles.data?.find((p) => p.id === selectedAgent.profileId) ?? null : null;
-  // role omitted = auto (the agent's profile role applies, server-side); "manager"/"plain" = per-spawn override.
-  const spawn = useMutation({
-    mutationFn: (role?: "manager" | "plain") => api.startSession(agentId!, role),
-    onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", agentId] }); },
-  });
-  const resume = useMutation({
-    mutationFn: (id: string) => api.resumeSession(id),
-    onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", agentId] }); },
-  });
-  // Manual graceful stop (Ctrl-C ×2 — clean + resumable) for a live/idle session.
-  const stop = useMutation({
-    mutationFn: (id: string) => api.stopSession(id, "graceful"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["sessions", agentId] }),
-  });
-  // Manual rate-limit override + retry-now: clears the park + global latch and re-submits the held
-  // turn (server mirrors RateLimitWatcher.resume). On success the parked pill clears via refetch; the
-  // global RATE-LIMITED attention toast/item self-clears too. Errors surface like archive (alert).
-  const clearRl = useMutation({
-    mutationFn: (id: string) => api.clearSessionRateLimit(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["sessions", agentId] });
-      qc.invalidateQueries({ queryKey: ["allSessions"] });
-    },
-    onError: (e) => window.alert((e as Error).message),
-  });
-  // Fork an idle session: branch its conversation into a fresh divergent session, then attach to it.
-  const fork = useMutation({
-    mutationFn: (id: string) => api.forkSession(id),
-    onSuccess: (s) => { setSessionId(s.id); qc.invalidateQueries({ queryKey: ["sessions", agentId] }); },
-  });
-  // Archive an EXITED session (a manager cascades to its workers) out of the rail. Clears the local
-  // selection if it pointed at an archived session, and invalidates the rail + god-eye queries so the
-  // session vanishes from Workspace/Terminals/Mission Control. A live group is rejected server-side.
-  const archive = useMutation({
-    mutationFn: (id: string) => api.archiveSession(id),
-    onSuccess: (r) => {
-      if (sessionId && r.archived.includes(sessionId)) setSessionId(null);
-      qc.invalidateQueries({ queryKey: ["sessions", agentId] });
-      qc.invalidateQueries({ queryKey: ["allSessions"] });
-    },
-    onError: (e) => window.alert((e as Error).message),
-  });
   // --- HUMAN-only project/agent management (rename / archive / restore / PERMANENT delete + agent
   // delete). All DESTRUCTIVE ops invalidate the relevant react-query keys; the server enforces the
   // reserved-home + live-session guards and returns the reason, surfaced verbatim via the *Err clients. ---
@@ -146,7 +93,7 @@ export default function Workspace() {
   const archiveProject = useMutation({
     mutationFn: (id: string) => api.archiveProject(id),
     onSuccess: (_r, id) => {
-      if (projectId === id) { setProjectId(""); setAgentId(null); setSessionId(null); }
+      if (projectId === id) { setProjectId(""); setAgentId(null); }
       qc.invalidateQueries({ queryKey: ["projects"] });
       qc.invalidateQueries({ queryKey: ["archivedProjects"] });
     },
@@ -163,7 +110,7 @@ export default function Workspace() {
   const deleteProject = useMutation({
     mutationFn: (id: string) => api.deleteProjectPermanent(id),
     onSuccess: (_r, id) => {
-      if (projectId === id) { setProjectId(""); setAgentId(null); setSessionId(null); }
+      if (projectId === id) { setProjectId(""); setAgentId(null); }
       qc.invalidateQueries({ queryKey: ["projects"] });
       qc.invalidateQueries({ queryKey: ["archivedProjects"] });
     },
@@ -172,65 +119,13 @@ export default function Workspace() {
   const deleteAgent = useMutation({
     mutationFn: (id: string) => api.deleteAgent(id),
     onSuccess: (_r, id) => {
-      if (agentId === id) { setAgentId(null); setSessionId(null); }
+      if (agentId === id) setAgentId(null);
       qc.invalidateQueries({ queryKey: ["agents", projectId] });
       qc.invalidateQueries({ queryKey: ["allSessions"] });
     },
     onError: (e) => window.alert((e as Error).message),
   });
   const selectedProject = projects.data?.find((p) => p.id === projectId) ?? null;
-  // Manager first, then platform, then workers — so the orchestrator isn't lost among its workers.
-  const roleRank = (r?: string | null) => (r === "manager" ? 0 : r === "platform" ? 1 : r === "worker" ? 2 : 3);
-  // Fold each manager's workers into a collapsible group under it, so a manager with many workers
-  // doesn't blow out the Sessions box. Workers live under SEPARATE worker-agents (Dev/Bugfix/Docs), so
-  // they're absent from this agent-scoped list — nest them from the GLOBAL feed by parentSessionId, the
-  // way Overview.tsx/MissionControl.tsx already read parentage. (SessionListItem extends Session, so the
-  // global rows render through the same SessionRow.) Old workers spawned under the Orchestrator agent
-  // itself appear in BOTH feeds — they nest exactly once and are dropped from the top level (dedupe).
-  const agentSessions = sessions.data ?? [];
-  // Managers in THIS agent's list anchor the nested groups. Selecting a worker-agent (no managers in
-  // its list) leaves managerIds empty → nothing nests → its workers stay top-level (view unchanged).
-  const managerIds = new Set(agentSessions.filter((s) => s.role === "manager").map((s) => s.id));
-  const workersByManager = new Map<string, Session[]>();
-  for (const w of globalSessions.data ?? []) {
-    if (w.role === "worker" && w.parentSessionId && managerIds.has(w.parentSessionId)) {
-      (workersByManager.get(w.parentSessionId) ?? workersByManager.set(w.parentSessionId, []).get(w.parentSessionId)!).push(w);
-    }
-  }
-  // Top level = this agent's own sessions, minus any same-agent workers that now nest under a manager in
-  // this list (they're also in the global feed above — exclude here so each shows exactly once, nested).
-  const topLevel: Session[] = agentSessions.filter(
-    (s) => !(s.role === "worker" && s.parentSessionId && managerIds.has(s.parentSessionId)),
-  );
-  // Top level: role rank stays the PRIMARY key so the orchestrator isn't lost among plain/orphan
-  // sessions; the shared activity comparator (live-first → most-recent → spawn-order) orders within a
-  // role. Nested workers, by contrast, use the STABLE newest-first key (byCreatedStable — createdAt
-  // DESC, tiebreak id) so a worker holds its slot under its manager through busy↔idle flips and the
-  // rail never reshuffles on a poll — matching the Overview/Terminal manager→worker nesting.
-  for (const ws of workersByManager.values()) ws.sort(byCreatedStable);
-  const orderedTop = topLevel.sort((a, b) => roleRank(a.role) - roleRank(b.role) || bySessionActivity(a, b));
-  // Collapsed by default (to keep the box small); a group auto-expands while one of its workers is selected.
-  const [expandedManagers, setExpandedManagers] = useState<Set<string>>(new Set());
-  const toggleManager = (id: string) =>
-    setExpandedManagers((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
-
-  const renderRow = (s: Session) => {
-    // A manager with nested (cross-agent) workers confirms before archiving the whole group. The count
-    // matches the server's parentSessionId-based archive cascade, so the confirm reflects what it archives.
-    const workerCount = s.role === "manager" ? (workersByManager.get(s.id)?.length ?? 0) : 0;
-    const onArchive = () => {
-      if (workerCount > 0 && !window.confirm(`Archive this manager and its ${workerCount} worker${workerCount === 1 ? "" : "s"}? They'll move to the Archive tab.`)) return;
-      archive.mutate(s.id);
-    };
-    return (
-      <SessionRow key={s.id} s={s} selected={s.id === sessionId}
-        onSelect={() => setSessionId(s.id)} onResume={() => resume.mutate(s.id)} resuming={resume.isPending}
-        onStop={() => stop.mutate(s.id)} stopping={stop.isPending}
-        onFork={() => fork.mutate(s.id)} forking={fork.isPending}
-        onClearRateLimit={() => clearRl.mutate(s.id)} clearingRateLimit={clearRl.isPending}
-        onArchive={onArchive} archiving={archive.isPending} />
-    );
-  };
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 16 }}>
@@ -240,7 +135,7 @@ export default function Workspace() {
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {projects.data?.map((p) => (
               <Button key={p.id} variant={p.id === projectId ? "primary" : "default"} style={{ textAlign: "left" }}
-                onClick={() => { setProjectId(p.id); setAgentId(null); setSessionId(null); }}>{p.name}</Button>
+                onClick={() => { setProjectId(p.id); setAgentId(null); }}>{p.name}</Button>
             ))}
           </div>
           {selectedProject && (
@@ -267,7 +162,7 @@ export default function Workspace() {
                 const prof = t.profileId ? profiles.data?.find((p) => p.id === t.profileId) ?? null : null;
                 return (
                   <Button key={t.id} variant={t.id === agentId ? "primary" : "default"} style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8 }}
-                    onClick={() => { setAgentId(t.id); setSessionId(null); }}
+                    onClick={() => setAgentId(t.id)}
                     title={prof ? `profile: ${prof.name}${prof.role ? ` · ${prof.role}` : ""}` : "no profile"}>
                     <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</span>
                     {prof?.icon && <span>{prof.icon}</span>}
@@ -305,122 +200,15 @@ export default function Workspace() {
             <AgentForm onCreate={(b) => createAgent.mutate(b)} />
           </Panel>
         )}
-
-        {agentId && (
-          <Panel>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <SectionLabel style={{ margin: 0, flex: 1 }}>Sessions</SectionLabel>
-              <SpawnControls profileRole={selectedProfile?.role ?? null} onSpawn={(role) => spawn.mutate(role)} pending={spawn.isPending} />
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {orderedTop.map((s) => {
-                const workers = workersByManager.get(s.id);
-                return (
-                  <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {renderRow(s)}
-                    {workers && workers.length > 0 && (
-                      <WorkerGroup workers={workers} renderRow={renderRow}
-                        open={expandedManagers.has(s.id) || workers.some((w) => w.id === sessionId)}
-                        onToggle={() => toggleManager(s.id)} />
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </Panel>
-        )}
       </div>
 
       <Panel style={{ height: "72vh", padding: 6, display: "flex", flexDirection: "column" }}>
-        {sessionId ? (
-          <>
-            <div style={{ marginBottom: 6, display: "flex", gap: 6, alignItems: "center" }}>
-              {(["terminal", "transcript"] as const).map((t) => (
-                <Button key={t} variant={rightTab === t ? "primary" : "default"} onClick={() => setRightTab(t)}>
-                  {t === "terminal" ? "Terminal" : "Transcript"}
-                </Button>
-              ))}
-              <div style={{ marginLeft: "auto" }}><PresetPromptsButton sessionId={sessionId} /></div>
-            </div>
-            <div style={{ flex: 1, minHeight: 0 }}>
-              {rightTab === "terminal"
-                ? <TerminalPane sessionId={sessionId} />
-                : <TranscriptPane sessionId={sessionId} />}
-            </div>
-            <SessionWakes sessionId={sessionId} />
-            <SessionQueue sessionId={sessionId} />
-            <Composer sessionId={sessionId} />
-          </>
-        ) : selectedAgent ? (
+        {selectedAgent ? (
           <AgentPresetEditor key={selectedAgent.id} agent={selectedAgent}
             onSave={(startupPrompt) => updateAgent.mutate({ id: selectedAgent.id, patch: { startupPrompt } })}
             saving={updateAgent.isPending} />
-        ) : <p style={{ color: color.textMuted, padding: 12 }}>Select an agent to view/edit its startup prompt, or spawn a session to attach a live terminal.</p>}
+        ) : <p style={{ color: color.textMuted, padding: 12 }}>Select an agent to view and edit its startup prompt. Live sessions are managed on the Terminals and Overview pages.</p>}
       </Panel>
-    </div>
-  );
-}
-
-function SessionRow({ s, selected, onSelect, onResume, resuming, onStop, stopping, onFork, forking, onClearRateLimit, clearingRateLimit, onArchive, archiving }:
-  { s: Session; selected: boolean; onSelect: () => void; onResume: () => void; resuming: boolean;
-    onStop: () => void; stopping: boolean; onFork: () => void; forking: boolean;
-    onClearRateLimit: () => void; clearingRateLimit: boolean;
-    onArchive: () => void; archiving: boolean }) {
-  const isManager = s.role === "manager";
-  const live = s.processState === "live";
-  // §19c park: a usage cap parked this session until rateLimitedUntil. Surface it instead of the
-  // live/busy pill, with the reset time + a one-line "transient? clear & retry" hint and the override.
-  const rateLimited = !!s.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > Date.now();
-  const st = rateLimited
-    ? { tone: "red" as const, label: `rate-limited · ${new Date(s.rateLimitedUntil!).toLocaleTimeString()}` }
-    : live
-      ? (s.busy ? { tone: "amber" as const, label: "busy", glow: true } : { tone: "phosphor" as const, label: "live" })
-      : { tone: "muted" as const, label: s.processState };
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-      <Panel selected={selected} onClick={onSelect}
-        style={{ flex: 1, padding: "6px 8px", ...(isManager && !selected ? { border: `1px solid ${color.phosphor}` } : null) }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontFamily: font.mono, fontSize: 12, color: isManager ? color.phosphor : color.text, fontWeight: isManager ? 700 : 400 }}>
-            {isManager ? "★ " : ""}{s.id.slice(0, 8)} · {s.role ?? "session"}
-          </span>
-          <span style={{ flex: 1 }} />
-          <StatusPill tone={st.tone} label={st.label} glow={"glow" in st ? st.glow : undefined} />
-        </div>
-        {rateLimited && (
-          <div style={{ marginTop: 4, fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>
-            transient overload? clear &amp; retry now — re-submits the held turn.
-          </div>
-        )}
-      </Panel>
-      <SessionActions s={s}
-        onResume={onResume} resuming={resuming}
-        onStop={onStop} stopping={stopping}
-        onFork={onFork} forking={forking}
-        onClearRateLimit={onClearRateLimit} clearingRateLimit={clearingRateLimit}
-        onArchive={onArchive} archiving={archiving} />
-    </div>
-  );
-}
-
-// Collapsible block of a manager's workers, indented under its row with a phosphor rail. The toggle
-// summarises the worker count + how many are currently busy, so a collapsed group still signals activity.
-function WorkerGroup({ workers, open, onToggle, renderRow }:
-  { workers: Session[]; open: boolean; onToggle: () => void; renderRow: (s: Session) => ReactNode }) {
-  const busy = workers.filter((w) => w.processState === "live" && w.busy).length;
-  return (
-    <div style={{ marginLeft: 10, paddingLeft: 8, borderLeft: `1px solid ${color.border}`, display: "flex", flexDirection: "column", gap: 6 }}>
-      <button onClick={onToggle}
-        style={{
-          display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
-          background: "transparent", border: "none", padding: "2px 0",
-          fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim,
-        }}>
-        <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>
-        {workers.length} worker{workers.length === 1 ? "" : "s"}
-        {busy > 0 && <span style={{ color: color.amber }}>· {busy} busy</span>}
-      </button>
-      {open && workers.map(renderRow)}
     </div>
   );
 }

@@ -262,15 +262,14 @@ export const api = {
   clearSessionRateLimit: (id: string) => post<Session>(`/api/sessions/${id}/rate-limit/clear`),
   allSessions: () => get<SessionListItem[]>("/api/sessions"),
 
-  // --- Per-project session Archive (HUMAN-only; mirrors stop/fork — no agent MCP surface). archive
-  // cascades a manager to its workers and 400s (with reason) if any group member is still live;
-  // restore brings one back to the rail (view-only if dead); deleteArchived is permanent (row(s) +
-  // snapshot). archivedSessions feeds the Archive tab (each row tagged snapshotExists). ---
+  // --- Per-project session Archive (HUMAN-only; mirrors stop/fork — no agent MCP surface). Archiving
+  // is now AUTOMATIC on session exit (the manual archive endpoint was removed), so there is no
+  // archiveSession client. restore brings one back to the rail (view-only if dead); deleteArchived is
+  // permanent (row(s) + snapshot). archivedSessions feeds the Archive tab (each row tagged snapshotExists). ---
   archivedSessions: (projectId: string) => get<ArchivedSessionListItem[]>(`/api/projects/${projectId}/archive`),
   // Cross-project (god-eye) archive: archived sessions across ALL projects, each enriched with
   // projectId/projectName + snapshotExists — feeds the grouped Project → Agent Archive page.
   allArchivedSessions: () => get<ArchivedSessionListItem[]>("/api/archived-sessions"),
-  archiveSession: (id: string) => postErr<{ archived: string[] }>(`/api/sessions/${id}/archive`),
   restoreSession: (id: string) => postErr<{ restored: string }>(`/api/sessions/${id}/restore`),
   deleteArchivedSession: (id: string) => delErr<{ deleted: string[] }>(`/api/sessions/${id}/archive`),
   vaultTree: (projectId: string) => get<VaultEntry[]>(`/api/projects/${projectId}/vault`),
