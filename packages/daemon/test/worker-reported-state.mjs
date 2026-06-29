@@ -143,6 +143,17 @@ check("worker_status(w-resumed) → reportedState null + awaitingReview false", 
 const denied = await status("w-other");
 check("worker_status(w-other) cross-manager → 'not your worker'", denied.error === "not your worker");
 
+// ============================ worker_status with NO arg → fleet view (card 44ffc09b) ============================
+// A manager's reflexive worker_status({}) must NOT throw an MCP schema-validation error; it aliases the
+// fleet view (worker_list) so the no-arg call "just works" instead of forcing a worker_list fallback.
+const noArg = parse(await client.callTool({ name: "worker_status", arguments: {} }));
+check("worker_status({}) returns a structured fleet array (not an MCP validation throw)",
+  Array.isArray(noArg) && !("error" in noArg));
+check("worker_status({}) fleet view matches worker_list (same MGR-scoped children)",
+  noArg.length === list.length &&
+  noArg.every((w) => byId[w.workerSessionId]?.reportedState === w.reportedState) &&
+  !noArg.some((w) => w.workerSessionId === "w-other"));
+
 await client.close();
 try { db.close(); } catch { /* ignore */ }
 for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }

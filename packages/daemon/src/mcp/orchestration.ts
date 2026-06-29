@@ -164,29 +164,36 @@ export class OrchestrationMcpRouter {
         : { reportedState: null, awaitingReview: false };
     };
 
+    // The fleet view — the manager's direct children as a compact list. Shared by worker_list and the
+    // no-arg worker_status call (a manager's reflexive `worker_status({})` aliases to this rather than
+    // throwing a schema-validation error).
+    const fleetView = () => db.listWorkers(managerSessionId).map((w) => ({
+      workerSessionId: w.id,
+      taskId: w.taskId ?? null,
+      processState: w.processState,
+      busy: w.busy,
+      branch: w.branch ?? null,
+      ctxInputTokens: w.ctxInputTokens ?? null,
+      model: w.model ?? null,
+      lastActivity: w.lastActivity,
+      ...reportedProjection(w.id),
+    }));
+
     server.registerTool(
       "worker_list",
       { description: "List the workers you (this manager) have spawned — your direct children. `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged).", inputSchema: {} },
-      async () => ok(db.listWorkers(managerSessionId).map((w) => ({
-        workerSessionId: w.id,
-        taskId: w.taskId ?? null,
-        processState: w.processState,
-        busy: w.busy,
-        branch: w.branch ?? null,
-        ctxInputTokens: w.ctxInputTokens ?? null,
-        model: w.model ?? null,
-        lastActivity: w.lastActivity,
-        ...reportedProjection(w.id),
-      }))),
+      async () => ok(fleetView()),
     );
 
     server.registerTool(
       "worker_status",
       {
-        description: "Get the full session record for one of your workers, by workerSessionId. Includes the derived `reportedState` (done|blocked|null) + `awaitingReview` flag — set when the worker has called worker_report and is idle awaiting your review, cleared once it resumes a turn / is merged.",
-        inputSchema: { workerSessionId: z.string() },
+        description: "Get the full session record for one of your workers, by workerSessionId. Includes the derived `reportedState` (done|blocked|null) + `awaitingReview` flag — set when the worker has called worker_report and is idle awaiting your review, cleared once it resumes a turn / is merged. Called with NO workerSessionId, it returns the fleet view (same as worker_list) so a reflexive no-arg call just works.",
+        inputSchema: { workerSessionId: z.string().optional() },
       },
       async ({ workerSessionId }) => {
+        // No id → fleet view (alias worker_list), so worker_status({}) never throws a schema error.
+        if (!workerSessionId) return ok(fleetView());
         const w = db.getSession(workerSessionId);
         if (!w || w.parentSessionId !== managerSessionId) return ok({ error: "not your worker" });
         return ok({ ...w, ...reportedProjection(w.id) });
