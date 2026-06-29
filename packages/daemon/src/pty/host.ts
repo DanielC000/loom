@@ -364,6 +364,20 @@ function markMarkitdownReady(bin: string): void {
   markitdownBin = bin;
   markitdownProvisionStatus = { state: "ready", binary: bin, lastAttemptAt: Date.now() };
 }
+/**
+ * Apply a TERMINAL `failed` provisioning outcome — but NEVER downgrade an already-`ready` status. `ready` is a
+ * positive terminal that means the venv binary genuinely exists on disk (set by this job's own success, or by a
+ * CONCURRENT documentConversion spawn that found the binary already present and called {@link markMarkitdownReady}).
+ * A STALE in-flight job that resolves `failed` AFTER such a `ready` must NOT flip the status back to failed — the
+ * binary is there and conversion actually works; only GET /api/python/provisioning reads the state, and it must
+ * not falsely show "not ready". Returns true when the failure was applied, false when a prior `ready` superseded
+ * this (stale) job — so the caller can log honestly. All other transitions (idle/installing → failed) are intact.
+ */
+function applyMarkitdownFailure(reason: ProvisionOutcome, errorTail: string | undefined, lastAttemptAt: number): boolean {
+  if (markitdownProvisionStatus.state === "ready") return false;
+  markitdownProvisionStatus = { state: "failed", reason, errorTail, lastAttemptAt };
+  return true;
+}
 function resolveMarkitdownBin(pythonInterpreterPath?: string): string | null {
   if (markitdownBin) return markitdownBin;
   const override = process.env.LOOM_MARKITDOWN_BIN;
@@ -459,15 +473,17 @@ function kickMarkitdownProvision(pythonInterpreterPath?: string): void {
         markitdownProvisionStatus = { state: "ready", binary: res.binary, lastAttemptAt: attemptAt };
         // eslint-disable-next-line no-console
         console.warn(`[pty] markitdown venv ready (${res.binary}) — documentConversion sessions now spawn with the MCP.`);
-      } else {
-        markitdownProvisionStatus = { state: "failed", reason: res.outcome, errorTail: res.errorTail, lastAttemptAt: attemptAt };
+      } else if (applyMarkitdownFailure(res.outcome, res.errorTail, attemptAt)) {
         // eslint-disable-next-line no-console
         console.warn(`[pty] markitdown background provisioning FAILED (${res.outcome}) — documentConversion sessions spawn WITHOUT the markitdown MCP. Retryable: re-save the profile or POST /api/python/provisioning/retry (no daemon restart needed).${res.errorTail ? `\n  captured output tail:\n${res.errorTail}` : ""}`);
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(`[pty] markitdown background provisioning resolved ${res.outcome}, but the venv binary is already present (a concurrent spawn proved it on disk) — status stays 'ready'; this stale job did NOT downgrade it.`);
       }
     })
     .catch(() => {
       // ensurePythonPackageAsync never throws; belt-and-suspenders for an injected test provisioner that might.
-      markitdownProvisionStatus = { state: "failed", reason: "pip-failed", lastAttemptAt: attemptAt };
+      applyMarkitdownFailure("pip-failed", undefined, attemptAt);
     })
     .finally(() => { markitdownProvisionInFlight = null; });
 }

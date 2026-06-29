@@ -153,6 +153,30 @@ check("(c2) ready exposes the resolved binary even though no kick ran", warm.bin
 check("(c2) the warm resolve did NOT kick background provisioning", __markitdownProvisionKicks() === 0);
 delete process.env.LOOM_MARKITDOWN_BIN; // keep the env clean for the remaining checks
 
+// ===================== (c3) A STALE in-flight `failed` MUST NOT downgrade a later `ready` =====================
+// Sequence: a provision job is IN-FLIGHT (installing) → a CONCURRENT spawn finds the venv binary already on
+// disk and marks status 'ready' → the now-stale in-flight job THEN resolves terminal 'failed'. The failed
+// resolution must NOT flip the proven-ready status back to failed: the binary exists and conversion works;
+// only GET /api/python/provisioning reads the state, and it must not falsely show "not ready".
+__setMarkitdownProvisionerForTest(gated); // reset → idle, memo cleared, kicks 0; provisioner = gated
+newGate();
+delete process.env.LOOM_MARKITDOWN_BIN;
+markitdownMcpServer();                      // cold resolve → kicks the gated job → installing
+check("(c3) an in-flight provision job is 'installing'", getMarkitdownProvisionStatus().state === "installing");
+// Model the concurrent "binary already present on disk" spawn via the warm LOOM_MARKITDOWN_BIN override path,
+// which marks status 'ready' through the SAME markMarkitdownReady the on-disk-venv branch uses.
+process.env.LOOM_MARKITDOWN_BIN = process.execPath;
+markitdownMcpServer();
+delete process.env.LOOM_MARKITDOWN_BIN;
+check("(c3) a concurrent warm-resolve flips status to 'ready' mid-flight", getMarkitdownProvisionStatus().state === "ready");
+// The STALE in-flight job now resolves terminal 'failed' — must NOT override the proven 'ready'.
+gate.resolve({ binary: null, outcome: "pip-failed", errorTail: "stale: SSLError CERTIFICATE_VERIFY_FAILED" });
+await flush();
+const afterStale = getMarkitdownProvisionStatus();
+check("(c3) a stale in-flight 'failed' does NOT downgrade a proven 'ready' (status stays ready)", afterStale.state === "ready");
+check("(c3) the ready binary is preserved and no stale failure fields leak in",
+  afterStale.binary === process.execPath && afterStale.reason === undefined && afterStale.errorTail === undefined);
+
 // ===================== (d-ish) the OFF map stays byte-identical even with the new status surface =====================
 const off = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", documentConversion: false });
 const noFlag = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker" });
