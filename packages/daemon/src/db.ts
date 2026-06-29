@@ -309,6 +309,12 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, column_key, po
 CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_session_id, ts);
 `;
 
+/**
+ * app_meta marker for the one-time `archived_at` backfill (backfillArchivedAtOnce) — sessions that exited
+ * BEFORE auto-archive-on-exit shipped. Daemon-GLOBAL (app_meta is not project-scoped); set once per LOOM_HOME.
+ */
+const ARCHIVED_AT_BACKFILL_KEY = "archived_at_backfill_done";
+
 /** Columns added to `sessions` after phase-1; applied to existing DBs by migrateSessions(). */
 const SESSION_ADDED_COLUMNS: Record<string, string> = {
   role: "TEXT",
@@ -1384,6 +1390,42 @@ export class Db {
   /** Restore an archived session back to the rail (clear archived_at). */
   restoreSession(id: string): void {
     this.db.prepare("UPDATE sessions SET archived_at = NULL WHERE id = ?").run(id);
+  }
+  /**
+   * One-time boot backfill: sessions that EXITED before auto-archive-on-exit (card b37750a4) shipped never
+   * got `archived_at` stamped, so they're invisible in BOTH the live rail (exited rows are pruned) AND the
+   * project Archive tab (listArchivedSessions filters `archived_at IS NOT NULL`). Stamp `archived_at` on
+   * every such legacy row so the trees appear.
+   *
+   * Uses each row's REAL end-time — `COALESCE(last_activity, created_at)`, NOT `now()` — so the Archive's
+   * `archived_at DESC` ordering keeps these in chronological position rather than collapsing them all to the
+   * migration instant at the top. (Both columns are NOT NULL; last_activity is the session's last observed
+   * activity, the closest proxy for when it stopped. COALESCE is a belt-and-suspenders fallback.)
+   *
+   * Predicate `process_state = 'exited'` ONLY: the ProcessState union is `none|starting|live|exited` — there
+   * is NO 'dead' (that's a Resumability value), so 'exited' is the whole terminal set. 'none' is EXCLUDED —
+   * it's a shell / non-engine placeholder row, never a real stopped session (mirrors onExit, which archives
+   * only real DB engine rows). `role='run'` is EXCLUDED — ephemeral Agent Run sessions must never clutter
+   * the Archive (same exclusion as onExit). Already-archived rows (archived_at NOT NULL) are untouched, so
+   * the 6.5/6.6 auto-archived sessions keep their original archived_at.
+   *
+   * One-shot via an app_meta marker (same fire-exactly-once pattern as the first-run setup flag / column-role
+   * backfill): marker checked FIRST, stamped LAST — a second invocation is a clean no-op (returns 0). SAFE
+   * re: resumeFleetOnBoot — a session it resumes is un-archived by restoreSession regardless, and this matches
+   * only already-'exited' rows (a crashed session about to be recovered+resumed is still 'live'/'starting' at
+   * this point, so it isn't touched here). Returns the count of rows stamped (0 if the marker was already set).
+   */
+  backfillArchivedAtOnce(): number {
+    if (this.getMeta(ARCHIVED_AT_BACKFILL_KEY) !== undefined) return 0; // guard: already run (one-shot)
+    const res = this.db.prepare(
+      `UPDATE sessions
+          SET archived_at = COALESCE(last_activity, created_at)
+        WHERE archived_at IS NULL
+          AND process_state = 'exited'
+          AND (role IS NULL OR role <> 'run')`,
+    ).run();
+    this.setMeta(ARCHIVED_AT_BACKFILL_KEY, new Date().toISOString()); // stamp last — the one-shot guarantee
+    return res.changes;
   }
   /** Permanently delete a session row (the Archive tab's Delete). Also drops its pending wakes. */
   deleteSession(id: string): void {

@@ -148,6 +148,19 @@ async function main(): Promise<void> {
   } catch (err) {
     console.warn(`[boot] markitdown pre-warm kick failed (continuing boot): ${(err as Error).message}`);
   }
+  // One-time backfill: sessions that EXITED before auto-archive-on-exit (card b37750a4) shipped never got
+  // archived_at stamped, so they're invisible in BOTH the live rail (exited) and the Archive tab (filters
+  // NOT NULL). Stamp archived_at = COALESCE(last_activity, created_at) on every such legacy row so the
+  // manager→worker trees appear in Archive. One-shot (app_meta marker); idempotent. Placed BEFORE
+  // recoverStaleSessions so it only ever touches already-'exited' rows — a crashed session about to be
+  // recovered+resumed is still 'live'/'starting' here, so it's not matched; and resumeFleetOnBoot's
+  // restoreSession un-archives anything it resumes regardless. Best-effort: never gate boot.
+  try {
+    const backfilled = db.backfillArchivedAtOnce();
+    if (backfilled > 0) console.log(`[boot] backfilled archived_at on ${backfilled} pre-feature exited session(s)`);
+  } catch (err) {
+    console.warn(`[boot] archived_at backfill failed (continuing boot): ${(err as Error).message}`);
+  }
   const recovered = db.recoverStaleSessions();
   if (recovered.length > 0) console.log(`[boot] reconciled ${recovered.length} stale session(s) -> exited`);
   // Crash-path backstop (card b37750a4): a daemon crash fires no onExit, so snapshot the transcript +

@@ -18,6 +18,11 @@
 //   E. restore brings one row back; permanent delete cascades to ARCHIVED workers + drops the snapshot.
 //   F. the MANUAL archive surface is GONE: service.archiveSession() removed (no cascade) + the
 //      POST /api/sessions/:id/archive route removed from the compiled gateway (restore + delete kept).
+//   G. ONE-TIME archived_at BACKFILL (db.backfillArchivedAtOnce): sessions that exited BEFORE auto-archive
+//      shipped (archived_at NULL) get stamped to their REAL end-time (COALESCE(last_activity, created_at),
+//      NOT now()) so they appear in Archive in chronological order. process_state='exited' only ('none'
+//      shell rows + role='run' excluded); already-archived rows preserved; marker-guarded one-shot (second
+//      run is a no-op); a backfilled manager + worker assemble the tree (listArchivedSessions/Workers).
 // Run: 1) build the daemon, 2) node test/session-archive.mjs
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 import fs from "node:fs";
@@ -246,6 +251,63 @@ try {
     !gatewaySrc.includes('app.post("/api/sessions/:id/archive"') && !gatewaySrc.includes("sessions.archiveSession("));
   check("F: restore route kept", gatewaySrc.includes('app.post("/api/sessions/:id/restore"'));
   check("F: delete-archived route kept", gatewaySrc.includes('app.delete("/api/sessions/:id/archive"'));
+
+  // ════════ G. ONE-TIME archived_at BACKFILL (db.backfillArchivedAtOnce) ════════
+  // Sessions that EXITED before auto-archive-on-exit shipped never got archived_at stamped → invisible in
+  // BOTH the live rail (exited) and the Archive tab (filters NOT NULL). The one-shot boot migration stamps
+  // archived_at = COALESCE(last_activity, created_at) (each row's REAL end-time, NOT now() — so Archive's
+  // archived_at DESC keeps chronological order). Predicate: process_state='exited' ('none' shell rows and
+  // role='run' excluded); already-archived rows untouched. Marker-guarded (fires exactly once).
+  const la = (iso) => ({ lastActivity: iso, createdAt: iso }); // a distinct, real end-time
+  // (a) pre-feature exited NON-run plain session — archived_at NULL, a distinct real last_activity.
+  db.insertSession(mkSession("bfPlain", { ...la("2025-03-03T03:03:03.000Z") }));
+  // (b) role='run' exited session — must STAY NULL (ephemeral; never clutters Archive).
+  db.insertSession(mkSession("bfRun", { role: "run", ...la("2025-03-04T04:04:04.000Z") }));
+  // (c) a LIVE session — must STAY NULL (not a stopped session).
+  db.insertSession(mkSession("bfLive", { processState: "live", ...la("2025-03-05T05:05:05.000Z") }));
+  // (d) an ALREADY-archived exited session — its original archived_at must be PRESERVED, not overwritten.
+  db.insertSession(mkSession("bfAlready", { ...la("2025-03-06T06:06:06.000Z") }));
+  db.archiveSession("bfAlready");
+  const bfAlreadyOrig = db.getSession("bfAlready").archivedAt;
+  // a pre-feature exited MANAGER + its exited WORKER (distinct end-times) — the tree must assemble.
+  db.insertSession(mkSession("bfMgr", { role: "manager", ...la("2025-03-07T07:07:07.000Z") }));
+  db.insertSession(mkSession("bfWorker", { role: "worker", parentSessionId: "bfMgr", taskId: "tBF", branch: "loom/bf", ...la("2025-03-08T08:08:08.000Z") }));
+
+  check("G: pre-feature rows start with archived_at NULL (invisible in Archive)",
+    db.getSession("bfPlain").archivedAt === null && db.getSession("bfMgr").archivedAt === null &&
+    db.getSession("bfWorker").archivedAt === null && db.listArchivedSessions("pA").every((s) => s.id === "bfAlready" || !["bfPlain", "bfMgr", "bfWorker"].includes(s.id)));
+  check("G: marker is unset before the backfill runs", db.getMeta("archived_at_backfill_done") === undefined);
+
+  const stamped = db.backfillArchivedAtOnce();
+  check("G: backfill reports it stamped at least the seeded pre-feature rows (bfPlain+bfMgr+bfWorker)", stamped >= 3);
+  // (a) stamped to its REAL end-time (last_activity), NOT now() → chronological ordering preserved.
+  check("G(a): pre-feature exited session stamped archived_at === its last_activity",
+    db.getSession("bfPlain").archivedAt === "2025-03-03T03:03:03.000Z");
+  // (b) run-role stays NULL.
+  check("G(b): a 'run' session is NOT backfilled (archived_at stays NULL)", db.getSession("bfRun").archivedAt === null);
+  // (c) live stays NULL.
+  check("G(c): a live session is NOT backfilled (archived_at stays NULL)", db.getSession("bfLive").archivedAt === null);
+  // (d) already-archived is untouched.
+  check("G(d): an already-archived session keeps its ORIGINAL archived_at (not overwritten)",
+    db.getSession("bfAlready").archivedAt === bfAlreadyOrig && typeof bfAlreadyOrig === "string");
+  check("G: marker is set after the backfill", typeof db.getMeta("archived_at_backfill_done") === "string");
+
+  // The backfilled manager + worker both surface, and the tree assembles (listArchivedSessions feeds the
+  // top level; listArchivedWorkers(mgr) nests the worker) — no web change needed.
+  const bfArch = db.listArchivedSessions("pA");
+  check("G: backfilled manager APPEARS in listArchivedSessions",
+    bfArch.some((s) => s.id === "bfMgr" && s.archivedAt === "2025-03-07T07:07:07.000Z"));
+  check("G: backfilled worker APPEARS in listArchivedSessions",
+    bfArch.some((s) => s.id === "bfWorker" && s.archivedAt === "2025-03-08T08:08:08.000Z"));
+  check("G: backfilled worker nests under its manager via listArchivedWorkers (tree assembles)",
+    db.listArchivedWorkers("bfMgr").some((w) => w.id === "bfWorker"));
+
+  // SECOND invocation is a clean no-op (marker guard). Seed a fresh pre-feature exited row AFTER the first
+  // run; the second call must NOT touch it (returns 0) — proving fire-exactly-once.
+  db.insertSession(mkSession("bfLate", { ...la("2025-03-09T09:09:09.000Z") }));
+  const stamped2 = db.backfillArchivedAtOnce();
+  check("G: second backfill is a clean no-op (returns 0)", stamped2 === 0);
+  check("G: second backfill left the post-marker row untouched (archived_at still NULL)", db.getSession("bfLate").archivedAt === null);
 } finally {
   try { fs.rmSync(claudeDir, { recursive: true, force: true }); } catch { /* ignore */ }
   try { fs.rmSync(fakeCwd, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -253,6 +315,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — auto-archive on exit (run-excluded; recycled predecessors archive too); crash-path backstop snapshots + archives recovered sessions; resume clears archived_at + restores to the rail (fast-fail re-archives); snapshots copy/render/delete; restore + cascade delete work; the manual archive endpoint + cascade are gone."
+  ? "\n✅ ALL PASS — auto-archive on exit (run-excluded; recycled predecessors archive too); crash-path backstop snapshots + archives recovered sessions; resume clears archived_at + restores to the rail (fast-fail re-archives); snapshots copy/render/delete; restore + cascade delete work; the manual archive endpoint + cascade are gone; the one-time archived_at backfill stamps pre-feature exited sessions to their real end-time (run/live/already-archived untouched), marker-guarded one-shot, tree assembles."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
