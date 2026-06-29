@@ -15,6 +15,9 @@ import { LOOM_HOME } from "./paths.js";
  */
 export const CRASHLOG_PATH = path.join(LOOM_HOME, "crash.log");
 
+/** The rotated previous-crash slot. Kept alongside {@link CRASHLOG_PATH}; holds the last-but-one crash. */
+export const CRASHLOG_PREV_PATH = `${CRASHLOG_PATH}.prev`;
+
 // Must match RESTART_EXIT_CODE in orchestration/restart.ts (and scripts/daemon-supervisor.mjs): the
 // daemon exits 75 to ASK the supervisor for a restart. That is an intentional, healthy exit — NOT a
 // crash — so the exit-hook backstop below must never mistake it for one and write a spurious crashlog.
@@ -108,6 +111,33 @@ export function writeCrashlog(input: CrashlogInput): void {
 }
 
 /**
+ * Rotate an existing {@link CRASHLOG_PATH} to {@link CRASHLOG_PREV_PATH} (overwriting any older `.prev`),
+ * so the SHIPPED end-user daemon — which runs under the OS service manager, NOT the dev/self-host
+ * supervisor — preserves the prior crash signature across a crash→auto-restart. Without this, the
+ * restarted daemon would overwrite `crash.log` on its next crash and the user would keep only the most
+ * recent signature — exactly the crash-loop case the crashlog exists to diagnose.
+ *
+ * Called once at boot from {@link installCrashHandlers}, BEFORE the handlers are installed, so it runs
+ * before `writeCrashlog` can lay down a fresh record. We rotate ONLY a crash.log that exists at boot,
+ * which makes the supervisor interaction safe: under the dev supervisor, `rotateCrashlog` in
+ * scripts/daemon-supervisor.mjs already moved crash.log→.prev PRE-LAUNCH, so at daemon boot there is no
+ * crash.log to re-rotate (harmless no-op — no double-rotation, the just-preserved `.prev` is untouched).
+ * On the shipped path this daemon-side rotation is the ONLY one and does the job.
+ *
+ * Idempotent (no crash.log ⇒ no-op), best-effort, and NEVER throws.
+ */
+export function rotateCrashlog(): void {
+  try {
+    if (!fs.existsSync(CRASHLOG_PATH)) return;
+    // Windows renameSync fails if the destination exists — clear any older .prev first.
+    fs.rmSync(CRASHLOG_PREV_PATH, { force: true });
+    fs.renameSync(CRASHLOG_PATH, CRASHLOG_PREV_PATH);
+  } catch {
+    /* best-effort: a failed rotation must never gate boot — fall through, the worst case is a clobber */
+  }
+}
+
+/**
  * Install the top-level fatal-exit handlers. Wired ONCE at the daemon entrypoint:
  * - `uncaughtException` / `unhandledRejection` — write the crashlog, then `process.exit(1)`. With a
  *   handler attached Node no longer self-terminates, so we MUST exit to preserve the default fatal code.
@@ -119,6 +149,10 @@ export function writeCrashlog(input: CrashlogInput): void {
 export function installCrashHandlers(): void {
   if (installed) return;
   installed = true;
+
+  // Rotate any crash.log from a PRIOR run to .prev BEFORE wiring the handlers below — so on the shipped
+  // (supervisor-less) path a crash→auto-restart preserves the previous signature instead of clobbering it.
+  rotateCrashlog();
 
   process.on("uncaughtException", (err) => {
     // Attaching a listener SUPPRESSES Node's default stderr stack-print, so log it ourselves FIRST —

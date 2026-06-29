@@ -131,6 +131,59 @@ if (scenario) {
       check("exit-restart: child exited 75", code === 75);
       check("exit-restart: NO crashlog written (restart sentinel is not a crash)", readCrashlog(home) === null);
     }
+
+    // ── G: boot-time crash.log rotation (the SHIPPED, supervisor-less daemon path) ────────────────────
+    // installCrashHandlers must rotate a PRE-EXISTING crash.log → crash.log.prev at boot, BEFORE any new
+    // crash record can be written, so a crash→auto-restart preserves the prior signature.
+    // NOTE: crashlog.js caches CRASHLOG_PATH from LOOM_HOME at its FIRST import (section A's home), so a
+    // re-import does NOT repoint it — operate against the module's exported paths and clear them first.
+    {
+      const { rotateCrashlog, CRASHLOG_PATH, CRASHLOG_PREV_PATH } = await import("../dist/crashlog.js");
+      fs.rmSync(CRASHLOG_PATH, { force: true });
+      fs.rmSync(CRASHLOG_PREV_PATH, { force: true });
+      const readPrev = () => (fs.existsSync(CRASHLOG_PREV_PATH) ? fs.readFileSync(CRASHLOG_PREV_PATH, "utf8") : null);
+
+      // No crash.log present → idempotent no-op, never throws, leaves no .prev.
+      let threw = false;
+      try { rotateCrashlog(); } catch { threw = true; }
+      check("rotate: no crash.log → no-op, does not throw", !threw);
+      check("rotate: no crash.log → no .prev created", !fs.existsSync(CRASHLOG_PATH) && !fs.existsSync(CRASHLOG_PREV_PATH));
+
+      // A pre-existing crash.log is moved to crash.log.prev (content preserved verbatim).
+      fs.mkdirSync(path.dirname(CRASHLOG_PATH), { recursive: true });
+      fs.writeFileSync(CRASHLOG_PATH, "FIRST-CRASH");
+      rotateCrashlog();
+      check("rotate: crash.log moved to crash.log.prev", !fs.existsSync(CRASHLOG_PATH) && readPrev() === "FIRST-CRASH");
+
+      // A second crash.log rotates over the older .prev (keeps the last two, drops the oldest).
+      fs.writeFileSync(CRASHLOG_PATH, "SECOND-CRASH");
+      rotateCrashlog();
+      check("rotate: newer crash.log overwrites older .prev", !fs.existsSync(CRASHLOG_PATH) && readPrev() === "SECOND-CRASH");
+
+      // Idempotent: rotating again with no crash.log is a harmless no-op and does NOT touch the .prev —
+      // this is the supervisor-interaction guarantee (supervisor pre-rotated; daemon boot finds no crash.log).
+      rotateCrashlog();
+      check("rotate: re-run with no crash.log preserves .prev (no double-rotation)", readPrev() === "SECOND-CRASH");
+    }
+
+    // ── H: a crash→restart cycle preserves the prior crash as .prev (end-to-end, real handlers) ───────
+    // Crash a child (writes crash.log via the real handler), then crash a SECOND child sharing the SAME
+    // LOOM_HOME: its installCrashHandlers must rotate the first crash to .prev before writing the second.
+    {
+      const home = freshHome("cycle");
+      const run = (sc) => spawnSync(process.execPath, [__filename], {
+        env: { ...process.env, CRASH_SCENARIO: sc, LOOM_HOME: home }, encoding: "utf8", timeout: 30_000,
+      });
+      run("uncaught"); // first crash → crash.log
+      const first = readCrashlog(home);
+      check("cycle: first crash wrote crash.log", first?.json?.error?.message === "child uncaught boom");
+      run("uncaught"); // second crash → boot rotation moves first to .prev, then writes a fresh crash.log
+      const prevPath = path.join(home, "crash.log.prev");
+      const prev = fs.existsSync(prevPath) ? JSON.parse(fs.readFileSync(prevPath, "utf8")) : null;
+      const current = readCrashlog(home);
+      check("cycle: prior crash preserved as crash.log.prev", prev?.error?.message === "child uncaught boom");
+      check("cycle: current crash.log still present after rotation", current?.json?.kind === "uncaughtException");
+    }
   } finally {
     for (const root of tmpRoots) {
       for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry (Windows WAL/handle) */ } }
