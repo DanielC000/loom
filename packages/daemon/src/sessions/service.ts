@@ -1221,12 +1221,23 @@ export class SessionService {
       skills: src.skills ?? null, // a fork inherits the source's pinned skill subset (null ⇒ all)
     };
     this.db.insertSession(session);
+    // Re-resolve the agent's spawn so the fork keeps its profile's LAYERED allowlist (baseline
+    // mcp__loom-tasks + profile allowDelta), not the bare config.permission — exactly as resume() does.
+    // Without this a fork in a project whose custom allow omits the baseline HANGS on its first tasks_*
+    // call, and a forked profile-pinned manager/worker silently loses its allowDelta entries. The role
+    // is the source row's role (carried onto the fork below). Model is DELIBERATELY omitted — like
+    // resume, --fork-session inherits the source transcript's model. Agent-missing (deleted) ⇒ fall back
+    // to bare config.permission so the fork still works.
+    const agent = this.db.getAgent(session.agentId);
+    const forkPermission = agent
+      ? this.resolveAgentSpawn(agent, config, src.role ?? undefined).permission
+      : config.permission;
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(session.id, "live");
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd,
-      permission: config.permission,
+      permission: forkPermission,
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
