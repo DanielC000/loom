@@ -70,6 +70,27 @@ try {
   let threwNull = false; let nullCost = NaN;
   try { nullCost = computeRunCostUsd({ inputTokens: 100, outputTokens: 100, model: null }); } catch { threwNull = true; }
   check("1 null model → cost 0, NO throw", !threwNull && nullCost === 0);
+  // UNPRICED-MODEL WARNING is deduped per model id per process (usage sampler calls this every tick for a
+  // live session; without dedupe it would spam). First occurrence logs; repeats are silent. A DIFFERENT
+  // unknown id still logs its own first warning (the legitimately-useful first warning is preserved).
+  {
+    const orig = console.warn;
+    const warned = [];
+    console.warn = (...a) => warned.push(a.join(" "));
+    try {
+      const m = `xyz-unpriced-${Date.now()}`;     // unique id → not yet in the process-level warned set
+      computeRunCostUsd({ inputTokens: 5, outputTokens: 5, model: m });
+      computeRunCostUsd({ inputTokens: 5, outputTokens: 5, model: m });
+      computeRunCostUsd({ inputTokens: 5, outputTokens: 5, model: m });
+      const sameModel = warned.filter((w) => w.includes(m));
+      check("1 unpriced model warns AT MOST ONCE across 3 calls (sampler-spam fix)", sameModel.length === 1);
+      const other = `${m}-other`;
+      computeRunCostUsd({ inputTokens: 5, outputTokens: 5, model: other });
+      check("1 a DIFFERENT unknown model still logs its own first warning", warned.some((w) => w.includes(other)));
+    } finally {
+      console.warn = orig;
+    }
+  }
 
   // =====================================================================================================
   // 2) CUMULATIVE USAGE CAPTURE — sum over ALL turns + DEDUPE split lines sharing one message.id
