@@ -1356,7 +1356,13 @@ export class SessionService {
     const now = new Date().toISOString();
     const sessionId = randomUUID();
     const runId = randomUUID();
-    const schema = opts.schema ?? null;
+    // Default the run's I/O contract to the agent's declared `ioSchema` when the caller omits one (chose
+    // option A). Without this fallback an agent's first-class, human-writable `ioSchema` had ZERO effect —
+    // a schemaless start got a freeform run regardless of the declared contract. `startRun` is the single
+    // choke point ALL run starts funnel through (R2 internal + R3 keyed REST), so defaulting here covers
+    // every entry. An explicit `opts.schema` still OVERRIDES (a null/absent one falls through to ioSchema,
+    // then to null ⇒ freeform). submitRunResult validates against this now-defaulted `run.schema`.
+    const schema = opts.schema ?? agent.ioSchema ?? null;
 
     // Disposable read-only HEAD snapshot as cwd (runs/snapshot.ts — no .git, no branch, no worktree
     // registration). A snapshot failure (e.g. an empty repo with no HEAD) fails the run cleanly BEFORE

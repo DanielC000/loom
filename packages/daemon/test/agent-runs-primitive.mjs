@@ -253,6 +253,36 @@ try {
   await sleep(150); // well past the 50ms hard timeout — a late fire would flip it to timed_out
   check("6 BUG2: the completed run never flips to timed_out (timer was cleared, no late fire)",
     db.getRun(rClr.id).status === "completed");
+
+  // ===================== 7. ioSchema DEFAULT — a schemaless start inherits the agent's declared contract =====================
+  // The agent's first-class, human-writable `ioSchema` is the run's DEFAULT I/O contract: a start that
+  // omits `schema` uses it (so configuring ioSchema actually shapes schemaless runs), an explicit body
+  // `schema` still OVERRIDES it, and submitRunResult validates against the now-defaulted run.schema.
+  const ioSchema = { type: "object", required: ["answer"], additionalProperties: true, properties: { answer: { type: "string" } } };
+  db.insertAgent({ id: "agentIo", projectId: PROJECT_ID, name: "IoAnalyst", startupPrompt: "IO_DOCTRINE", position: 2, profileId: null, endpoint: true, ioSchema });
+
+  // (7a) schema OMITTED from the start → the run inherits the agent's ioSchema as its contract.
+  const { run: rIo, session: sIo } = await svc.startRun({ agentId: "agentIo", input: { q: "default?" } });
+  check("7 a schemaless start inherits the agent's ioSchema onto the run row",
+    JSON.stringify(db.getRun(rIo.id).schema) === JSON.stringify(ioSchema));
+  check("7 the inherited schema is composed into the run's startup prompt (the agent sees the contract)",
+    optsFor(sIo.id).startupPrompt === composeRunStartupPrompt("IO_DOCTRINE", { q: "default?" }, ioSchema));
+  const ioBad = svc.submitRunResult(sIo.id, { wrong: true }); // missing required "answer" per the ioSchema
+  check("7 submit_result REJECTS a payload invalid against the inherited ioSchema (run still in-flight)",
+    ioBad.ok === false && Array.isArray(ioBad.errors) && ioBad.errors.length > 0 && db.getRun(rIo.id).status === "running");
+  const ioGood = svc.submitRunResult(sIo.id, { answer: "yes" }); // valid against the ioSchema
+  check("7 submit_result ACCEPTS a payload valid against the inherited ioSchema (run completes)",
+    ioGood.ok === true && db.getRun(rIo.id).status === "completed" && db.getRun(rIo.id).result?.answer === "yes");
+
+  // (7b) an EXPLICIT body schema still OVERRIDES the agent default (and a stricter shape is what's enforced).
+  const overrideSchema = { type: "object", required: ["count"], additionalProperties: false, properties: { count: { type: "number" } } };
+  const { run: rOv, session: sOv } = await svc.startRun({ agentId: "agentIo", input: {}, schema: overrideSchema });
+  check("7 an explicit start schema OVERRIDES the agent's ioSchema on the run row",
+    JSON.stringify(db.getRun(rOv.id).schema) === JSON.stringify(overrideSchema));
+  check("7 a payload valid for the ioSchema but NOT the override is rejected (the override is enforced)",
+    svc.submitRunResult(sOv.id, { answer: "yes" }).ok === false);
+  check("7 a payload valid for the override is accepted",
+    svc.submitRunResult(sOv.id, { count: 3 }).ok === true && db.getRun(rOv.id).result?.count === 3);
 } finally {
   db.close(); // free the WAL handle before removing the temp dir (Windows)
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -260,6 +290,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the AgentRun primitive: snapshot-isolated cwd (no worktree), doctrine+input+schema prompt, loom-run-only MCP, submit_result validate→retry→accept, freeform accept, terminal teardown + GC, restart→fail-clean, and the run MCP gated to kind==='run' — claude-free."
+  ? "\n✅ ALL PASS — the AgentRun primitive: snapshot-isolated cwd (no worktree), doctrine+input+schema prompt, loom-run-only MCP, submit_result validate→retry→accept, freeform accept, a schemaless start inheriting the agent's ioSchema (explicit schema overrides), terminal teardown + GC, restart→fail-clean, and the run MCP gated to kind==='run' — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
