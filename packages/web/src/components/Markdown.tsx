@@ -1,4 +1,4 @@
-import { Children, cloneElement, isValidElement, useState, type MouseEvent as ReactMouseEvent, type ReactElement, type ReactNode } from "react";
+import { Children, cloneElement, createContext, isValidElement, useContext, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit } from "unist-util-visit";
@@ -9,6 +9,14 @@ import { visit } from "unist-util-visit";
 //   - ![[embeds]]                       → an embed chip that opens the target note
 //   - > [!type] callouts                → styled callout boxes
 //   - YAML frontmatter                  → a compact properties panel (not raw source)
+
+/**
+ * Bridges the in-doc find bar (which lives in the Vault page, OUTSIDE this renderer) to the
+ * collapsible sections below. Each {@link CollapsibleSection} registers its `<section>` element →
+ * an expander, so when find navigates to a match buried in a collapsed section it can open every
+ * collapsed ancestor first. The Vault page owns the registry Map and provides it; sections consume it.
+ */
+export const CollapseContext = createContext<Map<HTMLElement, () => void> | null>(null);
 
 /** Split leading YAML frontmatter into key/value lines + the remaining body. */
 function splitFrontmatter(src: string): { props: Array<[string, string]>; body: string } {
@@ -131,11 +139,21 @@ function CollapseChevron({ open }: { open: boolean }) {
 /**
  * A header section emitted by {@link rehypeCollapsibleSections}: its first child is the heading, the rest
  * is the section body. A keyboard-accessible chevron toggle is injected into the heading; collapsing
- * unmounts the body (so nested sections collapse with their parent). Clicking the heading text toggles too
- * (but not when a link inside it is clicked).
+ * HIDES the body via CSS (`[data-collapsed] > :not(:first-child)`) rather than unmounting it — so the
+ * body's text nodes stay in the DOM and the in-doc find bar can locate matches inside a collapsed section
+ * (then expand it to reveal them). Clicking the heading text toggles too (but not when a link is clicked).
+ * The `<section>` registers itself into {@link CollapseContext} so find can expand it programmatically.
  */
 function CollapsibleSection({ level, children }: { level: number; children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
+  const registry = useContext(CollapseContext);
+  const sectionRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = sectionRef.current;
+    if (!el || !registry) return;
+    registry.set(el, () => setCollapsed(false));
+    return () => { registry.delete(el); };
+  }, [registry]);
   const toggle = () => setCollapsed((c) => !c);
   const items = Children.toArray(children);
   const heading = items[0];
@@ -160,9 +178,9 @@ function CollapsibleSection({ level, children }: { level: number; children: Reac
     : heading;
 
   return (
-    <section className="md-section" data-level={level} data-collapsed={collapsed ? "true" : "false"}>
+    <section ref={sectionRef} className="md-section" data-level={level} data-collapsed={collapsed ? "true" : "false"}>
       {headingWithToggle}
-      {!collapsed && body}
+      {body}
     </section>
   );
 }
@@ -327,6 +345,13 @@ const MD_CSS = `
 .loom-md .md-callout-question, .loom-md .md-callout-help, .loom-md .md-callout-faq, .loom-md .md-callout-example { border-left-color: #a36ce0; background: rgba(163,108,224,0.07); }
 .loom-md .md-callout-quote, .loom-md .md-callout-cite, .loom-md .md-callout-abstract, .loom-md .md-callout-summary { border-left-color: #8a8a92; background: rgba(138,138,146,0.07); }
 .loom-md .md-section { margin: 0; }
+/* Collapsed: hide everything after the heading (the section body) without unmounting it, so the
+   in-doc find bar can still see the text nodes and expand the section to reveal a match. */
+.loom-md .md-section[data-collapsed="true"] > :not(:first-child) { display: none; }
+/* In-doc find (CSS Custom Highlight API): all matches read as a quiet amber wash; the active match
+   is a solid amber so prev/next is obvious. Names match the registry keys in DocFind.tsx. */
+::highlight(loom-find) { background-color: rgba(255, 178, 62, 0.30); color: #0a0b0c; }
+::highlight(loom-find-active) { background-color: var(--loom-amber); color: #0a0b0c; }
 .loom-md .md-heading-collapsible { cursor: pointer; }
 .loom-md .md-collapse-toggle {
   display: inline-flex; align-items: center; justify-content: center;

@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import type { VaultEntry } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import Markdown from "../components/Markdown";
+import Markdown, { CollapseContext } from "../components/Markdown";
+import DocFind from "../components/DocFind";
 import { Panel, Button, Input } from "../components/ui";
 import { color, font, radius } from "../theme";
 
@@ -97,6 +98,10 @@ export default function Vault() {
   const [newName, setNewName] = useState("");
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // The scrollable doc-view box is the scope boundary for the in-doc find bar (Ctrl+F) + its search
+  // region; the registry lets find expand collapsed header sections that hold a match.
+  const docContainerRef = useRef<HTMLDivElement>(null);
+  const collapseRegistry = useMemo(() => new Map<HTMLElement, () => void>(), []);
 
   // Reset open file + editor + tree state when the active project changes.
   useEffect(() => { setFile(""); setEditing(false); setNewName(""); setQuery(""); setExpanded(new Set()); }, [projectId]);
@@ -191,7 +196,7 @@ export default function Vault() {
                   )}
                   <DeleteButton name={file} onDelete={() => remove.mutate(file)} deleting={remove.isPending} />
                 </div>
-                <div style={{ flex: 1, overflow: "auto", position: "relative" }}>
+                <div ref={docContainerRef} style={{ flex: 1, overflow: "auto", position: "relative" }}>
                   {editing && isTextual ? (
                     content.data?.content === undefined
                       ? <p style={{ color: color.textMuted }}>…</p>
@@ -199,7 +204,10 @@ export default function Vault() {
                           onSave={(c) => save.mutate({ path: file, content: c })} saving={save.isPending}
                           onCancel={() => setEditing(false)} />
                   ) : (
-                    <ContentView projectId={projectId} path={file} kind={kind!} content={content.data?.content} loading={content.isLoading} files={fileList} onOpen={openFile} />
+                    <CollapseContext.Provider value={collapseRegistry}>
+                      {kind === "md" && <DocFind containerRef={docContainerRef} registry={collapseRegistry} docKey={file} />}
+                      <ContentView projectId={projectId} path={file} kind={kind!} content={content.data?.content} loading={content.isLoading} files={fileList} onOpen={openFile} />
+                    </CollapseContext.Provider>
                   )}
                 </div>
               </>
