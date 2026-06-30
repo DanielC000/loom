@@ -35,6 +35,7 @@ import type {
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PresetPrompt, PresetPromptSuggestion,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
+  UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
 } from "@loom/shared";
 import { isOwnerHeldTaskTitle } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret } from "./keys/hash.js";
@@ -148,6 +149,28 @@ CREATE TABLE IF NOT EXISTS run_events (
   kind TEXT NOT NULL,                                  -- cap_rejected (+ optional future lifecycle markers)
   detail_json TEXT,                                    -- kind-specific JSON ({cap,limit,observed,agentId})
   created_at TEXT NOT NULL
+);
+-- Session usage telemetry (epic c9924bcd): an append-only time-series of each INTERACTIVE session's
+-- BILLED usage, sampled by the daemon's background sampler (card B) — token-free (it reads transcript
+-- JSONL the engine already writes; no agent turn). Each row is a per-interval DELTA (additive): the
+-- token/cost columns are the CHANGE since that session's previous sample, so a windowed/bucketed SUM is
+-- genuine usage with NO read-time monotonicity math (the sampler computes the deltas + handles
+-- transcript-rotation resets). Brand-new table ⇒ CREATE TABLE IF NOT EXISTS is itself the additive
+-- migration (no ALTER), exactly like runs/run_events; an existing DB simply gains an empty table on next
+-- boot. agent_id/model are nullable (defensive); ts is the ISO instant the sample was taken. Pruned past
+-- usageSampleRetentionDays by pruneUsageSamples.
+CREATE TABLE IF NOT EXISTS session_usage_samples (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  agent_id TEXT,                                       -- nullable (defensive); LEFT JOIN agents for a display name
+  model TEXT,                                          -- model id billed for this delta (NULL if unknown)
+  ts TEXT NOT NULL,                                    -- ISO instant the sample was taken
+  input_tokens INTEGER NOT NULL DEFAULT 0,             -- per-interval DELTAS (NOT cumulative) — sum directly
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0                     -- best-effort priced delta (unpriced model ⇒ 0)
 );
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
@@ -312,6 +335,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS idx_run_events_project ON run_events(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_samples_ts ON session_usage_samples(ts);
+CREATE INDEX IF NOT EXISTS idx_usage_samples_project ON session_usage_samples(project_id, ts);
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_fire_at);
 CREATE INDEX IF NOT EXISTS idx_wakes_due ON wakes(wake_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id, last_activity DESC);
@@ -1311,6 +1336,108 @@ export class Db {
     }));
 
     return { totals, byProject, byAgent };
+  }
+
+  // --- Session usage telemetry (epic c9924bcd): the DATA layer for daemon-collected interactive-session
+  // usage. Each `session_usage_samples` row is a per-interval DELTA (additive), so totals/buckets are a
+  // plain SUM — no read-time monotonicity math (the sampler, card B, computes the deltas + handles
+  // transcript resets). insertUsageSample appends one row; aggregateSessionUsage reads totals +
+  // byProject/byAgent/byDay over a window; pruneUsageSamples enforces retention. Mirrors aggregateRunUsage's
+  // COALESCE(SUM(...)) + LEFT JOIN projects/agents-for-names + GROUP BY shape, but SUMs the stored numeric
+  // DELTA columns directly (each row is already a delta — not a json_extract of a cumulative snapshot). ---
+
+  /** Append one usage sample (a per-interval billed-usage DELTA for a session segment). */
+  insertUsageSample(s: UsageSample): void {
+    this.db.prepare(
+      `INSERT INTO session_usage_samples
+         (id,session_id,project_id,agent_id,model,ts,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cost_usd)
+       VALUES
+         (@id,@sessionId,@projectId,@agentId,@model,@ts,@inputTokens,@outputTokens,@cacheCreationTokens,@cacheReadTokens,@costUsd)`,
+    ).run({
+      id: s.id, sessionId: s.sessionId, projectId: s.projectId,
+      agentId: s.agentId ?? null, model: s.model ?? null, ts: s.ts,
+      inputTokens: s.inputTokens, outputTokens: s.outputTokens,
+      cacheCreationTokens: s.cacheCreationTokens, cacheReadTokens: s.cacheReadTokens,
+      costUsd: s.costUsd,
+    });
+  }
+
+  /**
+   * Read-only HISTORICAL interactive-session usage aggregation for GET /api/usage/sessions/history: grand
+   * totals + per-project + per-agent + per-DAY breakdowns over every sample at/after `sinceIso`, optionally
+   * scoped to ONE project. Mirrors aggregateRunUsage's COALESCE(SUM(...)) + LEFT JOIN projects/agents-for-
+   * names + GROUP BY shape, but SUMs the stored numeric DELTA columns directly (each row is already a
+   * per-interval delta — no json_extract, no monotonicity math). `byDay` buckets via GROUP BY substr(ts,1,10)
+   * (the ISO date), ordered ascending, for the over-time chart. When projectId is omitted/null/"all" the
+   * aggregation spans every project. `bucket` is reserved for future granularities (the over-time series is
+   * day-grained today). Cost is best-effort — an unpriced model's samples contribute 0 costUsd.
+   */
+  aggregateSessionUsage(opts: { sinceIso: string; projectId?: string | null; bucket?: "day" }): {
+    totals: SessionUsageTotals;
+    byProject: SessionUsageProject[];
+    byAgent: SessionUsageAgent[];
+    byDay: SessionUsageDay[];
+  } {
+    const scoped = opts.projectId != null && opts.projectId !== "all";
+    const params: Record<string, string> = { sinceIso: opts.sinceIso };
+    if (scoped) params.projectId = opts.projectId as string;
+    // samples aliased `s` in every query (join or not) so the column refs are identical throughout.
+    const where = `s.ts >= @sinceIso${scoped ? " AND s.project_id = @projectId" : ""}`;
+    // Each row's columns are already per-interval DELTAS; sum directly (a NULL/missing field coalesces to 0).
+    const sums = `
+      COUNT(*) AS samples,
+      COALESCE(SUM(s.input_tokens), 0) AS inputTokens,
+      COALESCE(SUM(s.output_tokens), 0) AS outputTokens,
+      COALESCE(SUM(s.cache_creation_tokens), 0) AS cacheCreationTokens,
+      COALESCE(SUM(s.cache_read_tokens), 0) AS cacheReadTokens,
+      COALESCE(SUM(s.cost_usd), 0) AS costUsd`;
+    const num = (v: unknown): number => Number(v) || 0;
+    const measures = (row: Row): SessionUsageTotals => ({
+      samples: num(row.samples),
+      inputTokens: num(row.inputTokens),
+      outputTokens: num(row.outputTokens),
+      cacheCreationTokens: num(row.cacheCreationTokens),
+      cacheReadTokens: num(row.cacheReadTokens),
+      costUsd: num(row.costUsd),
+    });
+
+    const t = this.db.prepare(`SELECT ${sums} FROM session_usage_samples s WHERE ${where}`).get(params) as Row;
+    const totals = measures(t);
+
+    const byProject = (this.db.prepare(
+      `SELECT s.project_id AS projectId, p.name AS projectName, ${sums}
+       FROM session_usage_samples s LEFT JOIN projects p ON s.project_id = p.id
+       WHERE ${where} GROUP BY s.project_id ORDER BY costUsd DESC, samples DESC`,
+    ).all(params) as Row[]).map((row) => ({
+      projectId: row.projectId as string,
+      projectName: (row.projectName as string | null) ?? null,
+      ...measures(row),
+    }));
+
+    const byAgent = (this.db.prepare(
+      `SELECT s.agent_id AS agentId, a.name AS agentName, ${sums}
+       FROM session_usage_samples s LEFT JOIN agents a ON s.agent_id = a.id
+       WHERE ${where} GROUP BY s.agent_id ORDER BY costUsd DESC, samples DESC`,
+    ).all(params) as Row[]).map((row) => ({
+      agentId: (row.agentId as string | null) ?? null,
+      agentName: (row.agentName as string | null) ?? null,
+      ...measures(row),
+    }));
+
+    const byDay = (this.db.prepare(
+      `SELECT substr(s.ts, 1, 10) AS day, ${sums}
+       FROM session_usage_samples s WHERE ${where} GROUP BY day ORDER BY day ASC`,
+    ).all(params) as Row[]).map((row) => ({
+      day: row.day as string,
+      ...measures(row),
+    }));
+
+    return { totals, byProject, byAgent, byDay };
+  }
+
+  /** Retention: delete every sample older than `beforeIso` (ts < beforeIso). Returns rows removed. */
+  pruneUsageSamples(beforeIso: string): number {
+    return this.db.prepare("DELETE FROM session_usage_samples WHERE ts < ?").run(beforeIso).changes;
   }
 
   // --- Agent Runs follow-up #1: the run-scoped audit trail (cap-rejections) -------------------------

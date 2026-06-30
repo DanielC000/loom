@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory } from "@loom/shared";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -326,6 +326,28 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const sinceIso = new Date(sinceMs).toISOString();
     const filter = projectId && projectId !== "all" ? projectId : null;
     const agg = deps.db.aggregateRunUsage({ sinceIso, projectId: filter });
+    return { since: sinceIso, projectId: filter, ...agg };
+  });
+  // --- INTERACTIVE-session usage telemetry over a timespan (epic c9924bcd): grand totals + per-project +
+  // per-agent + per-DAY breakdowns, aggregated read-only from the daemon-sampled `session_usage_samples`
+  // table — the OWNER'S OWN interactive usage over time (DISTINCT from /api/usage/history above, which is
+  // Agent-Runs-backed). Loopback, human-only, NOT an agent MCP tool — same posture as /api/usage/history.
+  // The `since` clamp is IDENTICAL: a missing/unparseable/future value defaults to the trailing 30 days,
+  // and a cutoff older than 1 year is floored at 1 year ago (never an unbounded scan). `projectId` is
+  // optional; omitted or "all" → every project. The applied (clamped) since + filter are echoed back. ---
+  app.get("/api/usage/sessions/history", async (req): Promise<SessionUsageHistory> => {
+    const { since, projectId } = req.query as { since?: string; projectId?: string };
+    const nowMs = Date.now();
+    const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+    const DEFAULT_MS = 30 * 24 * 60 * 60 * 1000;
+    const parsed = since ? Date.parse(since) : NaN;
+    // Clamp to (now - 1yr, now]: unparseable/future ⇒ default 30d back; older than 1yr ⇒ floor at 1yr.
+    const sinceMs = Number.isFinite(parsed) && parsed <= nowMs
+      ? Math.max(parsed, nowMs - YEAR_MS)
+      : nowMs - DEFAULT_MS;
+    const sinceIso = new Date(sinceMs).toISOString();
+    const filter = projectId && projectId !== "all" ? projectId : null;
+    const agg = deps.db.aggregateSessionUsage({ sinceIso, projectId: filter });
     return { since: sinceIso, projectId: filter, ...agg };
   });
   // --- Markitdown (shared Python venv) provisioning status + retry. HUMAN/REST-ONLY (loopback) — NOT an MCP

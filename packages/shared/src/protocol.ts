@@ -141,6 +141,76 @@ export interface UsageHistory {
   byAgent: UsageHistoryAgent[];
 }
 
+// ── Interactive-session usage telemetry (GET /api/usage/sessions/history) ───────────────────────
+// A real time-series of every INTERACTIVE session's BILLED usage, sampled periodically by the daemon
+// (epic c9924bcd). Token-free: the sampler reads the transcript JSONL the engine already writes — no
+// agent turn, no model call. Each `session_usage_samples` row is a per-interval DELTA (additive): its
+// token/cost fields are the CHANGE since that session's previous sample, NOT a cumulative snapshot, so a
+// windowed/bucketed sum is a plain SUM with no read-time monotonicity math (the sampler — card B —
+// computes the deltas + handles transcript-rotation/reset). DISTINCT from the runs-backed UsageHistory
+// above (Agent Runs): this is the OWNER'S OWN interactive usage over time. Best-effort cost: an unpriced
+// model contributes 0 costUsd, so costUsd is a meter, not a billing ledger.
+
+/** One persisted usage sample — a per-interval DELTA of billed usage for one session segment. The
+ *  token/cost fields are the CHANGE since the session's previous sample (not cumulative), so they sum
+ *  directly. `agentId`/`model` are nullable (defensive); `ts` is the ISO instant the sample was taken. */
+export interface UsageSample {
+  id: string;
+  sessionId: string;
+  projectId: string;
+  agentId: string | null;
+  model: string | null;
+  ts: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+}
+
+/** The aggregated measures shared by the grand totals and each breakdown row. `samples` is the COUNT of
+ *  sample rows in the window; the token/cost fields are summed DELTAS (genuine billed usage). */
+export interface SessionUsageTotals {
+  samples: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+}
+
+/** Per-project breakdown row — the totals plus the project id and its display name (null if the project
+ *  row is gone). */
+export interface SessionUsageProject extends SessionUsageTotals {
+  projectId: string;
+  projectName: string | null;
+}
+
+/** Per-agent breakdown row — the totals plus the agent id and its display name (both null if the sample
+ *  carried no agent or the agent row is gone). */
+export interface SessionUsageAgent extends SessionUsageTotals {
+  agentId: string | null;
+  agentName: string | null;
+}
+
+/** One time-bucket row for the over-time chart — the totals for a single ISO `YYYY-MM-DD` day. The
+ *  `byDay` array is ordered ascending by `day`. */
+export interface SessionUsageDay extends SessionUsageTotals {
+  day: string;
+}
+
+/** GET /api/usage/sessions/history response: grand totals over the window + per-project, per-agent, and
+ *  per-day breakdowns. `since` echoes the (clamped) ISO cutoff actually applied; `projectId` echoes the
+ *  applied filter (null = all projects). */
+export interface SessionUsageHistory {
+  since: string;
+  projectId: string | null;
+  totals: SessionUsageTotals;
+  byProject: SessionUsageProject[];
+  byAgent: SessionUsageAgent[];
+  byDay: SessionUsageDay[];
+}
+
 // ── Session/run AUDIT LOG (the replayable + diffable timeline) ──────────────────────────────────
 // A read model over Loom's EXISTING durable record — the `orchestration_events` table (the manager↔
 // worker timeline: spawns, messages, redirects, merges, restarts, reports, completion/board events)

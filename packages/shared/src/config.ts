@@ -389,6 +389,20 @@ export interface ResolvedConfig {
   obsidian: ObsidianConfig;
   /** Python tooling (shared Loom-managed venv). Only `interpreterPath` is configurable — see PythonConfig. */
   python: PythonConfig;
+  /**
+   * Session-usage telemetry sampler cadence (ms): how often the daemon's background sampler reads each
+   * LIVE session's transcript and appends a usage DELTA sample (epic c9924bcd, card B). DAEMON-GLOBAL —
+   * like `backup`/`schedulerEnabled`, the daemon reads this off the platform default, NOT a per-project
+   * override (so it's HUMAN-only by construction; the agent-facing validator never sees it). Default
+   * 300000 (5m).
+   */
+  usageSampleIntervalMs: number;
+  /**
+   * Session-usage telemetry retention (days): samples older than this are pruned so the
+   * `session_usage_samples` table stays bounded (epic c9924bcd, card B's pruner). DAEMON-GLOBAL +
+   * HUMAN-only, exactly like `usageSampleIntervalMs`. Default 90.
+   */
+  usageSampleRetentionDays: number;
 }
 
 /** Per-project overrides. Deep-partial of ResolvedConfig; anything omitted inherits the default. */
@@ -472,6 +486,9 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   // Python: no base-interpreter override by default — the daemon discovers python3/python/`py -3` on PATH.
   // Loom owns + provisions the shared venv on first use of a Python-backed capability (e.g. documentConversion).
   python: {},
+  // Session-usage telemetry (epic c9924bcd): daemon-global sampler cadence (5m) + sample retention (90d).
+  usageSampleIntervalMs: 300000,
+  usageSampleRetentionDays: 90,
 };
 
 /**
@@ -751,5 +768,9 @@ export function resolveConfig(
     docLint: override.docLint ?? d.docLint,
     obsidian,
     python,
+    // Daemon-global (no per-project layer): the session-usage sampler cadence + retention. Always the
+    // platform default (HUMAN-only; not in ProjectConfigOverride, so an agent override can't reach them).
+    usageSampleIntervalMs: d.usageSampleIntervalMs,
+    usageSampleRetentionDays: d.usageSampleRetentionDays,
   };
 }

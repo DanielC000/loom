@@ -31,6 +31,7 @@ const HERMETIC = [
   "platform-prompt-migration",
   "agent-runs-keys", "agent-runs-primitive", "agent-runs-profile-attrs", "agent-runs-rest", "agent-runs-idempotency", "agent-runs-caps", "agent-runs-spend", "agent-runs-hardening", "agent-runs-audit",
   "usage-history", // read-only historical token/cost aggregation over the runs table (totals + byProject/byAgent + projectId filter + since cutoff) and the GET /api/usage/history clamp/echo
+  "usage-samples", // session usage telemetry DATA layer (epic c9924bcd card A): insert/aggregate/prune over session_usage_samples (totals + byProject/byAgent + byDay buckets + filter + cutoff) and GET /api/usage/sessions/history clamp/echo
   "audit-log", // replayable + diffable session/run audit log over the existing orchestration_events + sessions store (timeline + LCS/kind-delta diff + human-only REST)
   "tasks-filter", "tasks-priority", "task-delete", "task-column-guard", "kanban-columns-schema", "column-lifecycle", "column-presets", "preset-prompts", "preset-prompt-suggestions", "config-bounds", "config-rewire", "project-config-patch", "agent-override-host-exec-guard", "kanban-defaults", "transcript-encode", "alert-webhook",
   "ensure-obsidian", // card ab67eba3: Obsidian auto-start — config plumbing + human-only path gating + the vault preflight's gate/probe/fallback/launch-command construction (no real GUI launch)
