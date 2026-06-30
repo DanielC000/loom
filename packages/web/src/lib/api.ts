@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope } from "@loom/shared";
 
 // Per-conflict resolution for a profile adopt-update: pick the user's value or the shipped value,
 // wholesale (the field-level analog of the skills resolver's per-hunk mine/shipped choice).
@@ -410,6 +410,16 @@ export const api = {
   // The user's REAL Claude plan-usage (account-wide rate-limit headroom) — one daemon-side cached
   // poll of the OAuth usage endpoint. Always 200; `available:false`+reason when the daemon can't fetch it.
   usageLimits: () => get<UsageLimitsStatus>("/api/usage/limits"),
+  // HISTORICAL run usage (GET /api/usage/history) — timespan + project-scoped token/cost totals
+  // aggregated from the `runs` table (Loom's only persisted time-series usage; interactive sessions
+  // keep none). `sinceIso` is the window cutoff (server-clamped to (now-1yr, now]); `projectId` omitted
+  // or "all" = every project. The applied since + filter are echoed back. Human-only loopback, like
+  // usageLimits — NOT an agent MCP tool. DISTINCT from the live per-session occupancy on the Usage page.
+  usageHistory: (sinceIso: string, projectId?: string) => {
+    const params = new URLSearchParams({ since: sinceIso });
+    if (projectId && projectId !== "all") params.set("projectId", projectId);
+    return get<UsageHistory>(`/api/usage/history?${params.toString()}`);
+  },
   // Drop the GLOBAL usage-awareness latch so new worker_spawn is unblocked without touching any
   // session — for a transient overload with real headroom (HUMAN-only; no agent MCP surface).
   clearUsageHold: () => post<{ cleared: boolean }>("/api/usage/clear-hold"),
