@@ -97,6 +97,50 @@ export type UsageLimitsStatus =
       fetchedAt: string | null; // ISO of the last attempt, null if never tried
     };
 
+// ── Historical run-usage aggregation (GET /api/usage/history) ──────────────────────────────────
+// Timespan + project-scoped HISTORICAL token/cost usage, aggregated read-only from the `runs` table
+// (the only persisted time-series usage data in Loom — interactive sessions keep no history). Each run
+// row carries a CUMULATIVE usage snapshot at teardown (Agent Runs #2: tokens + costUsd, per-project,
+// per-agent, timestamped). DISTINCT from UsageLimitsStatus (live plan headroom) and the /usage page
+// (live per-session context occupancy). Best-effort: a run whose model had no price recorded 0 costUsd,
+// so costUsd is a meter, not a billing ledger; runs still in flight (no usage snapshot) are excluded.
+
+/** The six aggregated measures shared by the grand totals and each breakdown row. `runs` is the COUNT
+ *  of qualifying run rows; the token fields are CUMULATIVE billed tokens summed across those runs. */
+export interface UsageHistoryTotals {
+  runs: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+}
+
+/** Per-project breakdown row — the totals plus the project id and its display name (null if the project
+ *  row is gone). */
+export interface UsageHistoryProject extends UsageHistoryTotals {
+  projectId: string;
+  projectName: string | null;
+}
+
+/** Per-agent breakdown row — the totals plus the agent id and its display name (null if the agent row
+ *  is gone). */
+export interface UsageHistoryAgent extends UsageHistoryTotals {
+  agentId: string;
+  agentName: string | null;
+}
+
+/** GET /api/usage/history response: grand totals over the window + per-project and per-agent breakdowns.
+ *  `since` echoes the (clamped) ISO cutoff actually applied; `projectId` echoes the applied filter
+ *  (null = all projects). */
+export interface UsageHistory {
+  since: string;
+  projectId: string | null;
+  totals: UsageHistoryTotals;
+  byProject: UsageHistoryProject[];
+  byAgent: UsageHistoryAgent[];
+}
+
 // ── Session/run AUDIT LOG (the replayable + diffable timeline) ──────────────────────────────────
 // A read model over Loom's EXISTING durable record — the `orchestration_events` table (the manager↔
 // worker timeline: spawns, messages, redirects, merges, restarts, reports, completion/board events)

@@ -34,6 +34,7 @@ import type {
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PresetPrompt, PresetPromptSuggestion,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
+  UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
 } from "@loom/shared";
 import { isOwnerHeldTaskTitle } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret } from "./keys/hash.js";
@@ -1245,6 +1246,71 @@ export class Db {
       "SELECT COALESCE(SUM(json_extract(usage_json, '$.costUsd')), 0) AS t FROM runs WHERE key_id = ? AND created_at >= ? AND usage_json IS NOT NULL",
     ).get(keyId, sinceIso) as { t: number | null };
     return row.t ?? 0;
+  }
+
+  /**
+   * Read-only HISTORICAL run-usage aggregation for the usage-history surface (GET /api/usage/history):
+   * grand totals + per-project + per-agent breakdowns over every retained run-usage snapshot created
+   * at/after `sinceIso`, optionally scoped to ONE project. The `runs` table is Loom's only persisted
+   * time-series usage data (interactive sessions keep no history). Mirrors the COALESCE(SUM(json_extract(
+   * usage_json,'$.field'))) shape of sumKeyTokensSince/sumKeySpendSince, but across the full breakdown and
+   * joined to projects/agents for display names (like listAllSessions). Token/cost fields read the
+   * CUMULATIVE per-run snapshot (Agent Runs #2). Runs with no usage_json (in-flight / never recorded) are
+   * excluded. When projectId is omitted/null/"all" the aggregation spans every project. Best-effort: a run
+   * whose model had no price recorded 0 costUsd, so totals are a meter, not a billing ledger.
+   */
+  aggregateRunUsage(opts: { sinceIso: string; projectId?: string | null }): {
+    totals: UsageHistoryTotals;
+    byProject: UsageHistoryProject[];
+    byAgent: UsageHistoryAgent[];
+  } {
+    const scoped = opts.projectId != null && opts.projectId !== "all";
+    const params: Record<string, string> = { sinceIso: opts.sinceIso };
+    if (scoped) params.projectId = opts.projectId as string;
+    // runs aliased `r` in every query (join or not) so the column refs are identical throughout.
+    const where = `r.created_at >= @sinceIso AND r.usage_json IS NOT NULL${scoped ? " AND r.project_id = @projectId" : ""}`;
+    // CUMULATIVE per-run usage fields (Agent Runs #2), summed; a NULL/missing field coalesces to 0.
+    const sums = `
+      COUNT(*) AS runs,
+      COALESCE(SUM(json_extract(r.usage_json, '$.inputTokens')), 0) AS inputTokens,
+      COALESCE(SUM(json_extract(r.usage_json, '$.outputTokens')), 0) AS outputTokens,
+      COALESCE(SUM(json_extract(r.usage_json, '$.cacheCreationTokens')), 0) AS cacheCreationTokens,
+      COALESCE(SUM(json_extract(r.usage_json, '$.cacheReadTokens')), 0) AS cacheReadTokens,
+      COALESCE(SUM(json_extract(r.usage_json, '$.costUsd')), 0) AS costUsd`;
+    const num = (v: unknown): number => Number(v) || 0;
+    const measures = (row: Row): UsageHistoryTotals => ({
+      runs: num(row.runs),
+      inputTokens: num(row.inputTokens),
+      outputTokens: num(row.outputTokens),
+      cacheCreationTokens: num(row.cacheCreationTokens),
+      cacheReadTokens: num(row.cacheReadTokens),
+      costUsd: num(row.costUsd),
+    });
+
+    const t = this.db.prepare(`SELECT ${sums} FROM runs r WHERE ${where}`).get(params) as Row;
+    const totals = measures(t);
+
+    const byProject = (this.db.prepare(
+      `SELECT r.project_id AS projectId, p.name AS projectName, ${sums}
+       FROM runs r LEFT JOIN projects p ON r.project_id = p.id
+       WHERE ${where} GROUP BY r.project_id ORDER BY costUsd DESC, runs DESC`,
+    ).all(params) as Row[]).map((row) => ({
+      projectId: row.projectId as string,
+      projectName: (row.projectName as string | null) ?? null,
+      ...measures(row),
+    }));
+
+    const byAgent = (this.db.prepare(
+      `SELECT r.agent_id AS agentId, a.name AS agentName, ${sums}
+       FROM runs r LEFT JOIN agents a ON r.agent_id = a.id
+       WHERE ${where} GROUP BY r.agent_id ORDER BY costUsd DESC, runs DESC`,
+    ).all(params) as Row[]).map((row) => ({
+      agentId: row.agentId as string,
+      agentName: (row.agentName as string | null) ?? null,
+      ...measures(row),
+    }));
+
+    return { totals, byProject, byAgent };
   }
 
   // --- Agent Runs follow-up #1: the run-scoped audit trail (cap-rejections) -------------------------

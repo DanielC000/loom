@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory } from "@loom/shared";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -305,6 +305,28 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (s.processState === "live" && deps.pty.resumeAfterRateLimit(s.id)) resumed++;
     }
     return { cleared: true, resumed };
+  });
+  // --- HISTORICAL token/cost usage over a timespan, optionally project-scoped. Read-only aggregation of
+  // the `runs` table (Loom's only persisted time-series usage data — interactive sessions keep no history):
+  // grand totals + per-project + per-agent breakdowns. Loopback, human-only, NOT an agent MCP tool — same
+  // posture as /api/usage/limits above. `since` is a required ISO-8601 cutoff, CLAMPED to a sane window: a
+  // missing/unparseable/future value defaults to the trailing 30 days, and a cutoff older than 1 year is
+  // floored at 1 year ago (an unbounded scan is never what the caller wants). `projectId` is optional;
+  // omitted or "all" → every project. The applied (clamped) since + filter are echoed back. ---
+  app.get("/api/usage/history", async (req): Promise<UsageHistory> => {
+    const { since, projectId } = req.query as { since?: string; projectId?: string };
+    const nowMs = Date.now();
+    const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+    const DEFAULT_MS = 30 * 24 * 60 * 60 * 1000;
+    const parsed = since ? Date.parse(since) : NaN;
+    // Clamp to (now - 1yr, now]: unparseable/future ⇒ default 30d back; older than 1yr ⇒ floor at 1yr.
+    const sinceMs = Number.isFinite(parsed) && parsed <= nowMs
+      ? Math.max(parsed, nowMs - YEAR_MS)
+      : nowMs - DEFAULT_MS;
+    const sinceIso = new Date(sinceMs).toISOString();
+    const filter = projectId && projectId !== "all" ? projectId : null;
+    const agg = deps.db.aggregateRunUsage({ sinceIso, projectId: filter });
+    return { since: sinceIso, projectId: filter, ...agg };
   });
   // --- Markitdown (shared Python venv) provisioning status + retry. HUMAN/REST-ONLY (loopback) — NOT an MCP
   // tool: provisioning launches a host process (venv-create + pip), the same host-launch trust posture as the
