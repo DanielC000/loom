@@ -857,6 +857,12 @@ export class Db {
        ON CONFLICT(key) DO UPDATE SET value = @value, updated_at = @updatedAt`,
     ).run({ key, value, updatedAt: new Date().toISOString() });
   }
+  /** Delete a daemon-global meta value (a no-op when unset). Used by a one-shot corrective reset to clear
+   *  a fire-exactly-once marker so its guarded work re-runs on the next pass (e.g. re-priming the usage
+   *  backfill after wiping the inflated samples — see UsageSampler.correctiveResetOnce). */
+  deleteMeta(key: string): void {
+    this.db.prepare("DELETE FROM app_meta WHERE key = ?").run(key);
+  }
 
   // --- preset prompts (GLOBAL "terminal action-buttons" store; human/UI REST only, no MCP path) ---
   /** The whole global list, ordered by position (rowid breaks same-position ties → stable insertion order). */
@@ -1438,6 +1444,44 @@ export class Db {
   /** Retention: delete every sample older than `beforeIso` (ts < beforeIso). Returns rows removed. */
   pruneUsageSamples(beforeIso: string): number {
     return this.db.prepare("DELETE FROM session_usage_samples WHERE ts < ?").run(beforeIso).changes;
+  }
+
+  /**
+   * The sampler's RESTART-SAFE baseline: the already-persisted token SUM per session (one GROUP BY scan).
+   * `lastSeen` is in-memory and wiped on every daemon restart, so without this the sampler's FIRST-sight
+   * delta after a restart would re-emit a still-live session's whole transcript cumulative — double-counting
+   * everything already recorded. With it, first-sight delta = `transcript_cumulative − this[sessionId]`: a
+   * session resumed across the restart (plain `--resume` REUSES its engine id + the SAME transcript, which
+   * still holds the full pre-restart cumulative) counts only the UNCOUNTED remainder, while a genuinely new
+   * session (no prior rows) still counts its full cumulative-so-far. Each row is already a per-interval delta,
+   * so the per-session total is a plain SUM (epic c9924bcd, card B).
+   */
+  usagePersistedTotalsBySession(): Map<string, { inputTokens: number; outputTokens: number; cacheCreationTokens: number; cacheReadTokens: number }> {
+    const rows = this.db.prepare(
+      `SELECT session_id AS sessionId,
+              COALESCE(SUM(input_tokens), 0) AS inputTokens,
+              COALESCE(SUM(output_tokens), 0) AS outputTokens,
+              COALESCE(SUM(cache_creation_tokens), 0) AS cacheCreationTokens,
+              COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens
+       FROM session_usage_samples GROUP BY session_id`,
+    ).all() as Row[];
+    const out = new Map<string, { inputTokens: number; outputTokens: number; cacheCreationTokens: number; cacheReadTokens: number }>();
+    for (const r of rows) {
+      out.set(r.sessionId as string, {
+        inputTokens: Number(r.inputTokens) || 0,
+        outputTokens: Number(r.outputTokens) || 0,
+        cacheCreationTokens: Number(r.cacheCreationTokens) || 0,
+        cacheReadTokens: Number(r.cacheReadTokens) || 0,
+      });
+    }
+    return out;
+  }
+
+  /** Truncate the derived usage-samples table (returns rows removed). Used ONLY by the one-shot corrective
+   *  reset (UsageSampler.correctiveResetOnce) that rebuilds inflated telemetry from scratch — this table is
+   *  pure derived data (re-seedable from the on-disk transcripts via the boot backfill). */
+  clearUsageSamples(): number {
+    return this.db.prepare("DELETE FROM session_usage_samples").run().changes;
   }
 
   // --- Agent Runs follow-up #1: the run-scoped audit trail (cap-rejections) -------------------------

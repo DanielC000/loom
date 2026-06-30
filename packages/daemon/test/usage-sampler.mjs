@@ -17,6 +17,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   • boot backfill seeds ONE coarse historical sample per session at last_activity, is a no-op the 2nd
 //     run (app_meta marker), skips a zero-usage transcript, and seeds lastSeen so a still-live session's
 //     first live tick is INCREMENTAL (no double count).
+//   • RESTART double-count regression: a FRESH sampler (lastSeen wiped) with the backfill marker already
+//     set + the SAME transcript (plain --resume reuses the engine id + transcript) does NOT re-emit the
+//     whole cumulative — DB-aware first-sight delta = cumulative − already-persisted sum, so the total
+//     stays == the true cumulative (gap-window usage included exactly), while a genuinely-new session
+//     still counts its full cumulative.
+//   • the one-shot corrective reset clears the inflated samples + re-arms the backfill, runs EXACTLY once
+//     (marker), and does not clobber rows written after it.
 // Run: 1) build (turbo builds shared first), 2) node test/usage-sampler.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -187,11 +194,97 @@ try {
     agg.totals.samples === 2 && agg.totals.inputTokens === 1000);
 
   db2.close();
+
+  // ===================================================================================================
+  // PART 3 — RESTART double-count regression (the bug this fix closes) + gap-window + new-session-full.
+  // Simulate a daemon restart: a FRESH UsageSampler (lastSeen WIPED) with the backfill marker ALREADY set
+  // and the SAME transcript (a plain --resume reuses the engine id + transcript file, which still holds the
+  // full pre-restart cumulative) must NOT re-emit the whole cumulative. With the DB-aware first-sight
+  // baseline the total persisted stays == the true cumulative, not ~2×.
+  // ===================================================================================================
+  const db3 = new Db(path.join(tmpHome, "sampler3.db"));
+  const cwd3 = path.join(tmpHome, "repo3");
+  mkProject(db3, "p3", cwd3);
+  mkAgent(db3, "a3", "p3");
+  mkSession(db3, { id: "sessR", projectId: "p3", agentId: "a3", engineSessionId: "engR-1", cwd: cwd3 });
+  // NOT the first boot ever: the backfill marker is already stamped, so backfillOnce is a no-op and does
+  // NOT prime lastSeen — exactly the post-restart condition that produced the double-count.
+  db3.setMeta("usage_backfill_done", nowIso);
+  writeTranscript(cwd3, "engR-1", [{ in: 600, out: 250, cc: 120, cr: 60 }, { in: 400, out: 150, cc: 80, cr: 40 }]); // cumulative {1000,400,200,100}
+
+  // -- pre-restart: a sampler records the cumulative so far (the "before the restart" recording) --------
+  const sampler3a = new UsageSampler({ db: db3, intervalMs: 3_600_000, retentionDays: 90 });
+  sampler3a.backfillOnce(new Date()); // marker set → no-op, primes nothing
+  sampler3a.tick(new Date());
+  let t3 = totalsFor(db3, "p3");
+  check("10 pre-restart tick records the full cumulative once (samples 1, in 1000)", t3.samples === 1 && t3.inputTokens === 1000);
+
+  // -- gap-window: more usage accrues AFTER the last sample but BEFORE the restart (no tick captures it) --
+  appendTurn(cwd3, "engR-1", 2, { in: 300, out: 120, cc: 60, cr: 30 }); // cumulative now {1300,520,260,130}
+
+  // -- RESTART: a brand-new sampler (lastSeen WIPED), backfill marker still set, SAME transcript ---------
+  const sampler3b = new UsageSampler({ db: db3, intervalMs: 3_600_000, retentionDays: 90 });
+  sampler3b.backfillOnce(new Date()); // still a no-op (marker)
+  sampler3b.tick(new Date());
+  t3 = totalsFor(db3, "p3");
+  // OLD BUG: first-sight re-emitted the WHOLE 1300 cumulative → total 1000 + 1300 = 2300 (~2× double count).
+  // FIXED: first-sight delta = 1300 − persisted(1000) = 300 (the gap remainder) → total == 1300 (EXACT).
+  check("10 RESTART does NOT double-count: total == true cumulative 1300 (not ~2300)",
+    t3.inputTokens === 1300 && t3.outputTokens === 520);
+  check("10 restart tick wrote exactly the gap remainder (samples 2, +300 — not the full 1300)", t3.samples === 2);
+
+  // -- new-session-still-counts-full: a brand-new live session (no prior rows) counts its whole cumulative
+  mkSession(db3, { id: "sessNew", projectId: "p3", agentId: "a3", engineSessionId: "engN-1", cwd: cwd3 });
+  writeTranscript(cwd3, "engN-1", [{ in: 700, out: 250, cc: 150, cr: 75 }]);
+  sampler3b.tick(new Date()); // sessR unchanged → delta 0; sessNew first-sight, baseline 0 → full 700
+  check("11 a genuinely-new session still counts its FULL cumulative (total 1300 + 700 = 2000)",
+    totalsFor(db3, "p3").inputTokens === 2000);
+
+  db3.close();
+
+  // ===================================================================================================
+  // PART 4 — the one-shot CORRECTIVE RESET: clears the inflated samples + re-arms backfill, runs EXACTLY
+  // once, touches ONLY the derived table + its two markers.
+  // ===================================================================================================
+  const db4 = new Db(path.join(tmpHome, "sampler4.db"));
+  const cwd4 = path.join(tmpHome, "repo4");
+  mkProject(db4, "p4", cwd4);
+  mkAgent(db4, "a4", "p4");
+  mkSession(db4, { id: "sess4", projectId: "p4", agentId: "a4", engineSessionId: "eng4-1", cwd: cwd4, lastActivity: isoAgo(DAY) });
+  writeTranscript(cwd4, "eng4-1", [{ in: 800, out: 300, cc: 150, cr: 75 }]); // true cumulative {800,...}
+  // Simulate the inflated pre-fix state: a backfill already ran (marker set) AND double-counted rows exist.
+  db4.setMeta("usage_backfill_done", nowIso);
+  for (const id of ["inflate-1", "inflate-2"]) db4.insertUsageSample({ id, sessionId: "sess4", projectId: "p4",
+    agentId: "a4", model: MODEL, ts: nowIso, inputTokens: 800, outputTokens: 300, cacheCreationTokens: 150, cacheReadTokens: 75, costUsd: 1 });
+  check("12 pre-reset state is inflated (samples 2, in 1600 == 2× the true 800)",
+    totalsFor(db4, "p4").samples === 2 && totalsFor(db4, "p4").inputTokens === 1600);
+
+  const sampler4 = new UsageSampler({ db: db4, intervalMs: 3_600_000, retentionDays: 90 });
+  const cleared = sampler4.correctiveResetOnce(new Date());
+  check("12 reset cleared the inflated rows (2 removed)", cleared === 2);
+  check("12 reset emptied the samples table", totalsFor(db4, "p4").samples === 0);
+  check("12 reset cleared the backfill marker (re-armed)", db4.getMeta("usage_backfill_done") === undefined);
+  check("12 reset stamped its own one-shot marker", db4.getMeta("usage_samples_reset_v1") !== undefined);
+
+  // -- second reset is a no-op (marker): a row inserted AFTER the first reset must SURVIVE a second call --
+  db4.insertUsageSample({ id: "survivor", sessionId: "sess4", projectId: "p4", agentId: "a4", model: MODEL,
+    ts: nowIso, inputTokens: 5, outputTokens: 5, cacheCreationTokens: 5, cacheReadTokens: 5, costUsd: 0 });
+  const cleared2 = sampler4.correctiveResetOnce(new Date());
+  check("13 second reset is a no-op (returns 0, marker guard)", cleared2 === 0);
+  check("13 a row added after the first reset is NOT clobbered by the second call", totalsFor(db4, "p4").inputTokens === 5);
+
+  // -- after the reset the corrected backfill repopulates clean from the transcript (true cumulative, once) -
+  db4.clearUsageSamples(); // also exercises the helper — drop the survivor before the clean rebuild
+  const reseeded = sampler4.backfillOnce(new Date()); // backfill marker was cleared by the reset → it re-runs
+  check("13 corrected backfill repopulates clean from the transcript (1 row == true cumulative 800)",
+    reseeded === 1 && totalsFor(db4, "p4").inputTokens === 800);
+
+  db4.close();
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { await sleep(50); } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — session usage COLLECTION ENGINE: tick delta (first-sight/incremental/zero) + reset (never negative) + teardown tail + tick-driven prune + one-time boot backfill (seed-once marker + zero-skip + lastSeen no-double-count) — pure file IO, ZERO agent tokens."
+  ? "\n✅ ALL PASS — session usage COLLECTION ENGINE: tick delta (first-sight/incremental/zero) + reset (never negative) + teardown tail + tick-driven prune + one-time boot backfill (seed-once marker + zero-skip + lastSeen no-double-count) + RESTART double-count regression (DB-aware first-sight baseline: gap-window exact, new-session counts full) + one-shot corrective reset (runs once, re-arms backfill) — pure file IO, ZERO agent tokens."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

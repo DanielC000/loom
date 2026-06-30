@@ -470,6 +470,11 @@ async function main(): Promise<void> {
   // by the pty onExit closure (forward ref, runtime-only — same pattern as `sessions`/`orchMcp`).
   const usageSampler = new UsageSampler({ db, intervalMs: resolved.usageSampleIntervalMs, retentionDays: resolved.usageSampleRetentionDays });
   try {
+    // One-shot corrective reset (must precede the backfill): the boot that first ships the restart-double-
+    // count fix scrubs the inflated samples + re-arms the backfill so the corrected accounting repopulates
+    // clean. A no-op on every later boot (app_meta marker). See UsageSampler.correctiveResetOnce.
+    const cleared = usageSampler.correctiveResetOnce();
+    if (cleared > 0) console.log(`[boot] usage-sampler corrective reset: cleared ${cleared} inflated sample(s); rebuilding from transcripts`);
     const seeded = usageSampler.backfillOnce();
     if (seeded > 0) console.log(`[boot] usage-sampler backfill: seeded ${seeded} historical session usage sample(s)`);
   } catch (err) {

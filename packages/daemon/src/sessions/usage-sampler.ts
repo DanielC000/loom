@@ -8,8 +8,17 @@ import { computeRunCostUsd } from "./pricing.js";
  *  archived_at / held backfills). Daemon-GLOBAL (app_meta is not project-scoped); set once per LOOM_HOME. */
 const BACKFILL_MARKER_KEY = "usage_backfill_done";
 
-/** A session's last-seen CUMULATIVE token snapshot, tagged with the transcript (engine id) it came from
- *  so a resume (new engine id → new transcript, cumulative restarts at 0) is detected as a fresh segment. */
+/** app_meta one-time marker for the corrective reset that ships the restart-double-count fix. The boot that
+ *  first deploys this code wipes the (inflated) samples + clears BACKFILL_MARKER_KEY so the corrected
+ *  backfill repopulates clean; every later boot is a no-op. Bump the suffix if a future correction needs to
+ *  re-run. See `correctiveResetOnce`. */
+const RESET_MARKER_KEY = "usage_samples_reset_v1";
+
+/** A session's last-seen CUMULATIVE token snapshot, tagged with the engine transcript it came from. The tag
+ *  guards the FORK/RECYCLE case — those rotate to a fresh engine id → a brand-new transcript whose cumulative
+ *  starts at 0 — so a mid-run rotation is detected as a fresh segment. (A plain `--resume` does NOT rotate:
+ *  it reuses the same engine id + the SAME transcript file, which still holds the full pre-restart cumulative
+ *  — so restart-safety rides on the DB-aware first-sight baseline, not on this tag. See the class doc.) */
 interface LastSeen {
   engineSessionId: string;
   inputTokens: number;
@@ -37,18 +46,42 @@ export interface UsageSamplerDeps {
  * with a config-driven interval, `stop()`ed on graceful shutdown.
  *
  * Each stored row is a per-interval DELTA (additive), so the read-side aggregation is a plain SUM. The
- * delta is `current_cumulative − lastSeen[sessionId]`, with RESET handling (the load-bearing wrinkle):
- * `readRunUsage` is monotonic WITHIN one transcript, but a RESUMED session gets a new engine id → a new
- * transcript → cumulative restarts at 0. When the transcript changed (or any cumulative dropped) we treat
- * it as a fresh segment and the delta IS the new cumulative (never subtract → never emit a negative).
- * `lastSeen` is in-memory + re-seedable; `start()` does not need it primed because the backfill seeds it
- * for any session it backfills, and a post-restart resumed session starts a fresh (~0) transcript anyway.
+ * delta is `current_cumulative − lastSeen[sessionId]`, with two correctness wrinkles:
+ *
+ *  • **Mid-run rotation (FORK/RECYCLE):** `readRunUsage` is monotonic WITHIN one transcript, but a fork or
+ *    recycle rotates to a new engine id → a new transcript whose cumulative restarts at 0. When the engine
+ *    id changed (or any cumulative dropped) we treat it as a fresh segment and the delta IS the new
+ *    cumulative (never subtract → never emit a negative).
+ *
+ *  • **Restart double-count (the load-bearing one):** `lastSeen` is IN-MEMORY and wiped on every daemon
+ *    restart, and a plain `--resume` REUSES the same engine id + the SAME transcript file — which still
+ *    holds the full pre-restart cumulative. So a naive first-sight delta (`prev === undefined` → emit the
+ *    whole cumulative) would re-count, on every restart, everything a still-live session already recorded.
+ *    The fix: first-sight is DB-AWARE — delta = `current_cumulative − the session's already-persisted SUM`
+ *    (`db.usagePersistedTotalsBySession`, snapshotted once per process). A session resumed across the
+ *    restart counts only the UNCOUNTED remainder (incl. the gap-window usage between its last sample and
+ *    the restart — exact, unlike a seed-only "emit nothing" prime); a genuinely new session (no prior rows)
+ *    still counts its full cumulative-so-far. This makes priming automatic on EVERY boot (the first tick
+ *    self-corrects) — independent of the one-time backfill marker. `correctiveResetOnce` is the one-shot
+ *    that scrubs the historical inflation this fix corrects.
  */
 export class UsageSampler {
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Per-session last-seen cumulative usage (in-memory; re-derivable from the transcript). */
   private lastSeen = new Map<string, LastSeen>();
+  /** Lazily-snapshotted per-session already-persisted token totals — the restart-safe baseline for a
+   *  first-sight delta. Loaded once on first need (essentially boot, before any new row this process), so it
+   *  reflects pure pre-boot persisted state; a session's own baseline can't change before its first sight. */
+  private persistedBaseline: Map<string, { inputTokens: number; outputTokens: number; cacheCreationTokens: number; cacheReadTokens: number }> | null = null;
   constructor(private deps: UsageSamplerDeps) {}
+
+  /** The already-persisted token total for ONE session (zeros when it has no prior rows) — the first-sight
+   *  baseline. Snapshots the whole table once (single GROUP BY) and caches it; see `persistedBaseline`. */
+  private baselineFor(sessionId: string): { inputTokens: number; outputTokens: number; cacheCreationTokens: number; cacheReadTokens: number } {
+    if (!this.persistedBaseline) this.persistedBaseline = this.deps.db.usagePersistedTotalsBySession();
+    return this.persistedBaseline.get(sessionId)
+      ?? { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 };
+  }
 
   /**
    * Compute the DELTA of `cum` (a session's current cumulative transcript usage) against its last-seen
@@ -58,23 +91,25 @@ export class UsageSampler {
    */
   private recordDelta(session: Session, cum: RunUsageStats, eng: string, ts: string): boolean {
     const prev = this.lastSeen.get(session.id);
-    // Fresh segment when: first sight of this session, the transcript changed (resume → new engine id),
-    // or the cumulative dropped (defensive; can't happen within one monotonic transcript). The whole new
-    // cumulative is then the delta — NOT a subtraction, so we never emit a negative.
-    const fresh = !prev || prev.engineSessionId !== eng || cum.inputTokens < prev.inputTokens;
-    const delta = fresh
-      ? {
-          inputTokens: cum.inputTokens,
-          outputTokens: cum.outputTokens,
-          cacheCreationTokens: cum.cacheCreationTokens,
-          cacheReadTokens: cum.cacheReadTokens,
-        }
-      : {
-          inputTokens: Math.max(0, cum.inputTokens - prev.inputTokens),
-          outputTokens: Math.max(0, cum.outputTokens - prev.outputTokens),
-          cacheCreationTokens: Math.max(0, cum.cacheCreationTokens - prev.cacheCreationTokens),
-          cacheReadTokens: Math.max(0, cum.cacheReadTokens - prev.cacheReadTokens),
-        };
+    // Three cases, each subtracting a different baseline so a row is always the genuinely-uncounted slice:
+    //  • FIRST SIGHT (no in-memory prev — fresh process / post-restart): subtract the session's ALREADY-
+    //    PERSISTED sum. A plain --resume reuses the same transcript (full pre-restart cumulative intact), so
+    //    this counts only the remainder; a brand-new session (baseline 0) counts its full cumulative-so-far.
+    //  • MID-RUN ROTATION (prev exists but engine id changed → fork/recycle's new transcript, or a defensive
+    //    cumulative drop): the new transcript starts at 0 and is wholly uncounted → delta IS its cumulative.
+    //  • STEADY STATE: incremental vs the in-memory snapshot.
+    // Every branch clamps at 0 so we never emit a negative.
+    const base = !prev
+      ? this.baselineFor(session.id)
+      : (prev.engineSessionId !== eng || cum.inputTokens < prev.inputTokens)
+        ? { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 }
+        : prev;
+    const delta = {
+      inputTokens: Math.max(0, cum.inputTokens - base.inputTokens),
+      outputTokens: Math.max(0, cum.outputTokens - base.outputTokens),
+      cacheCreationTokens: Math.max(0, cum.cacheCreationTokens - base.cacheCreationTokens),
+      cacheReadTokens: Math.max(0, cum.cacheReadTokens - base.cacheReadTokens),
+    };
     // Always advance last-seen to the new cumulative (so the NEXT tick's delta is incremental) — even on a
     // zero-delta tick, and even on a reset (re-seed to the fresh transcript's cumulative).
     this.lastSeen.set(session.id, {
@@ -138,6 +173,29 @@ export class UsageSampler {
     const cum = readRunUsage(session.cwd, session.engineSessionId!);
     if (cum) this.recordDelta(session, cum, session.engineSessionId!, now.toISOString());
     this.lastSeen.delete(session.id);
+  }
+
+  /**
+   * One-shot CORRECTIVE RESET (idempotent via the `usage_samples_reset_v1` app_meta marker) — the boot that
+   * first deploys the restart-double-count fix. Every prior daemon restart re-emitted each still-live
+   * session's whole cumulative (first-sight before the DB-aware fix), so the historical
+   * `session_usage_samples` is inflated (≈ N× for a session that survived N restarts). Because that table is
+   * pure DERIVED data — re-seedable from the on-disk transcripts via the backfill — the clean fix is to
+   * scrub it and rebuild: clear the samples + clear the `usage_backfill_done` marker so the (now-corrected)
+   * `backfillOnce` re-runs and repopulates from scratch, then ticks accrue exactly from there. MUST run
+   * BEFORE `backfillOnce` at boot. Runs exactly once (marker checked FIRST, stamped LAST → a throw simply
+   * retries next boot; a second boot is a no-op). Touches ONLY the derived table + the two markers. Returns
+   * the number of inflated rows cleared.
+   */
+  correctiveResetOnce(now: Date = new Date()): number {
+    const db = this.deps.db;
+    if (db.getMeta(RESET_MARKER_KEY) !== undefined) return 0; // already corrected (one-shot)
+    const cleared = db.clearUsageSamples();          // scrub the inflated derived data
+    db.deleteMeta(BACKFILL_MARKER_KEY);              // let backfillOnce re-seed clean from transcripts
+    this.lastSeen.clear();                           // drop any stale in-memory snapshots
+    this.persistedBaseline = null;                   // force a fresh baseline snapshot after the rebuild
+    db.setMeta(RESET_MARKER_KEY, now.toISOString()); // stamp LAST — the one-shot guarantee
+    return cleared;
   }
 
   /**
