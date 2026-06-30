@@ -4,7 +4,7 @@ import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/rea
 import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { useAttention, attentionOpenTarget } from "../lib/attention";
+import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/attention";
 import { bySessionActivity, byCreatedStable, byManagerThenCreated } from "../lib/sessions";
 import Board from "./Board";
 import { TerminalPane } from "../components/Terminal";
@@ -194,7 +194,8 @@ export default function Overview() {
           {projAttention.length === 0 && <Panel><span style={{ color: color.textMuted }}>Nothing in this project needs you right now.</span></Panel>}
           {projAttention.map((item) => (
             <AttentionRow key={item.key} item={item}
-              onOpen={(() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()} />
+              onOpen={(() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()}
+              onDismiss={item.dismissKey ? () => dismissAttention(item.dismissKey!) : undefined} />
           ))}
         </section>
         <section>

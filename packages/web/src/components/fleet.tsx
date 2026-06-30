@@ -114,7 +114,7 @@ export function PlanUsageStrip() {
   );
 }
 
-export function AttentionRow({ item, onOpen }: { item: AttentionItem; onOpen?: () => void }) {
+export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionItem; onOpen?: () => void; onDismiss?: () => void }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 10px", marginBottom: 6 }}>
       <Dot tone={item.tone} glow={item.tone === "amber"} />
@@ -123,6 +123,13 @@ export function AttentionRow({ item, onOpen }: { item: AttentionItem; onOpen?: (
       <span style={{ flex: 1 }} />
       {item.rateLimitSessionId && <ClearRateLimitButton sessionId={item.rateLimitSessionId} />}
       {onOpen && <Button onClick={onOpen}>Open</Button>}
+      {/* Dismiss — STUCK-BUSY only (passed when item.dismissKey is set). The heuristic false-positives
+          on a legitimately long turn; this hides THIS episode (re-appears on the next one). */}
+      {onDismiss && (
+        <Button variant="ghost" onClick={onDismiss} aria-label="Dismiss this alert"
+          title="Dismiss — hides this stuck-busy alert until the session acts again"
+          style={{ padding: "0 6px", fontSize: 15, lineHeight: 1 }}>×</Button>
+      )}
     </div>
   );
 }

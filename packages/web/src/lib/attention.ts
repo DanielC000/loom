@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "./api";
@@ -25,11 +25,75 @@ export function isCrashLooped(s: SessionListItem): boolean {
   return s.processState === "exited" && !!s.lastError && s.lastError.startsWith(CRASH_LOOP_PREFIX);
 }
 
+// User-dismissable attention items (STUCK-BUSY only) carry a `dismissKey` — see the dismiss store
+// below. Keyed on `${sessionId}:${lastActivity}`, NOT the session id alone: lastActivity is frozen
+// for the duration of one stuck episode (so a dismiss sticks for THIS episode), but advances the
+// moment the session acts again (so a fresh stuck episode re-surfaces instead of being suppressed
+// forever). Only an item with a dismissKey is dismissable; the actionable kinds deliberately have none.
+const DISMISS_STORAGE_KEY = "loom.attention.dismissed";
+
+function loadDismissed(): Set<string> {
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(DISMISS_STORAGE_KEY) : null;
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? new Set(arr.filter((x): x is string => typeof x === "string")) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+// Module-level store so every useAttention instance (bell, Mission Control, Overview, command palette,
+// the toast/notification signal) reflects a dismiss the instant it happens — a per-hook useState would
+// leave the other surfaces stale until their next poll. useSyncExternalStore subscribes them all.
+let dismissedSet = loadDismissed();
+let dismissedSnapshot: readonly string[] = [...dismissedSet];
+const dismissListeners = new Set<() => void>();
+
+function persistDismissed() {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.setItem(DISMISS_STORAGE_KEY, JSON.stringify([...dismissedSet]));
+  } catch {
+    /* localStorage unavailable (private mode / quota) — dismiss still holds for this session */
+  }
+  dismissedSnapshot = [...dismissedSet]; // new identity so useSyncExternalStore re-renders subscribers
+  for (const l of dismissListeners) l();
+}
+
+export function dismissAttention(dismissKey: string): void {
+  if (dismissedSet.has(dismissKey)) return;
+  dismissedSet = new Set(dismissedSet).add(dismissKey);
+  persistDismissed();
+}
+
+// Drop stored dismiss keys that are no longer derivable from a live STUCK-BUSY session (it recovered,
+// exited, or acted again → a new key), so localStorage can't grow unbounded. Callers pass the set of
+// currently-derivable keys; pruning is gated on real session data upstream so a transient empty poll
+// can't wipe a still-valid dismiss.
+function pruneDismissed(derivable: Set<string>): void {
+  const next = new Set<string>();
+  for (const k of dismissedSet) if (derivable.has(k)) next.add(k);
+  if (next.size === dismissedSet.size) return; // nothing pruned → no churn
+  dismissedSet = next;
+  persistDismissed();
+}
+
+function useDismissedSet(): Set<string> {
+  const snap = useSyncExternalStore(
+    (cb) => { dismissListeners.add(cb); return () => dismissListeners.delete(cb); },
+    () => dismissedSnapshot,
+    () => dismissedSnapshot,
+  );
+  return useMemo(() => new Set(snap), [snap]);
+}
+
 export interface AttentionItem {
   key: string;
   tone: Tone;
   kind: string;
   text: string;
+  // Set ONLY on the user-dismissable STUCK-BUSY kind — `${sessionId}:${lastActivity}`. Its presence is
+  // what makes a row dismissable (AttentionRow renders × off it); the actionable kinds leave it unset.
+  dismissKey?: string | null;
   // STRICTLY a merge-review worker — set ONLY on MERGE REQUEST, whose branch diff opens in the review
   // panel (/review/:workerSessionId). Do NOT overload it as a generic session pointer (it once routed
   // every non-merge alert to a "No diff" merge page — card a16dfafb); use `sessionId` for those.
@@ -158,6 +222,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   for (const s of all.filter(isStuckBusy)) {
     items.push({
       key: `s-${s.id}`, tone: "amber", kind: "STUCK-BUSY", sessionId: s.id,
+      dismissKey: `${s.id}:${s.lastActivity}`,
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — busy, no activity since ${new Date(s.lastActivity).toLocaleTimeString()} (heuristic)`,
     });
   }
@@ -167,7 +232,23 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — died repeatedly after auto-resume; auto-resume STOPPED. Inspect the log + resume manually.`,
     });
   }
-  return { items, count: items.length };
+
+  // Single-source the dismiss filter HERE so every surface (the queue rows, the bell/MC count, and the
+  // new-item/toast signal that runs off useNewAttention → this same hook) agrees on what's hidden.
+  const dismissed = useDismissedSet();
+  const visible = items.filter((it) => !(it.dismissKey && dismissed.has(it.dismissKey)));
+
+  // Prune stored dismiss keys that no longer match a live STUCK-BUSY item. Gated on real session data
+  // (`sessions.data`) — a still-loading/empty poll yields no derivable keys, which must NOT wipe a valid
+  // dismiss. Keyed on the sorted derivable signature so the effect only fires when that set changes.
+  const loaded = sessions.data !== undefined;
+  const derivableSig = items.filter((it) => it.dismissKey).map((it) => it.dismissKey!).sort().join("\n");
+  useEffect(() => {
+    if (!loaded) return;
+    pruneDismissed(new Set(derivableSig ? derivableSig.split("\n") : []));
+  }, [loaded, derivableSig]);
+
+  return { items: visible, count: visible.length };
 }
 
 // Shared "newly-appeared attention item" detector. Seeds the seen-set silently on first load (so a

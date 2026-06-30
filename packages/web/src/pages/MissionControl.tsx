@@ -3,7 +3,7 @@ import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/rea
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "../lib/api";
 import { bySessionActivity, mostRecentActivity } from "../lib/sessions";
-import { useAttention, attentionOpenTarget } from "../lib/attention";
+import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/attention";
 import { useState } from "react";
 import { Panel, SectionLabel, Badge, Button } from "../components/ui";
 import { color, font } from "../theme";
@@ -160,7 +160,8 @@ export default function MissionControl() {
         {otherAttention.length === 0 && <Panel><span style={{ color: color.textMuted }}>Nothing needs you right now.</span></Panel>}
         {otherAttention.map((item) => (
           <AttentionRow key={item.key} item={item}
-            onOpen={(() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()} />
+            onOpen={(() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()}
+            onDismiss={item.dismissKey ? () => dismissAttention(item.dismissKey!) : undefined} />
         ))}
       </div>
 
