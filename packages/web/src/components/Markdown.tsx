@@ -1,3 +1,4 @@
+import { Children, cloneElement, isValidElement, useState, type MouseEvent as ReactMouseEvent, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit } from "unist-util-visit";
@@ -78,6 +79,92 @@ function remarkCallouts() {
       };
     });
   };
+}
+
+/**
+ * rehype plugin: wrap each heading + the content that follows it into a `<section class="md-section">`,
+ * nested by header level so a higher-level header's section CONTAINS the lower-level sections beneath it.
+ * This is what makes collapse boundaries correct: collapsing an h2 hides everything down to the next
+ * h2-or-higher (including its nested h3s), while collapsing one of those h3s only hides that h3's body.
+ * Content before the first heading stays at the root, ungrouped.
+ */
+function rehypeCollapsibleSections() {
+  const headingLevel = (n: any): number =>
+    n?.type === "element" && typeof n.tagName === "string" && /^h[1-6]$/.test(n.tagName) ? Number(n.tagName.slice(1)) : 0;
+  return (tree: any) => {
+    const out: any[] = [];
+    const stack: Array<{ level: number; section: any }> = [];
+    const append = (node: any) => {
+      const top = stack[stack.length - 1];
+      (top ? top.section.children : out).push(node);
+    };
+    for (const node of (tree?.children ?? []) as any[]) {
+      const level = headingLevel(node);
+      if (level > 0) {
+        while (stack.length > 0 && (stack[stack.length - 1]?.level ?? 0) >= level) stack.pop();
+        const section = {
+          type: "element",
+          tagName: "section",
+          properties: { className: ["md-section"] },
+          children: [node],
+        };
+        append(section);
+        stack.push({ level, section });
+      } else {
+        append(node);
+      }
+    }
+    tree.children = out;
+  };
+}
+
+/** Small caret that rotates from ▸ (collapsed) to ▾ (open), matching the vault tree's chevron. */
+function CollapseChevron({ open }: { open: boolean }) {
+  return (
+    <svg width="11" height="11" viewBox="0 0 10 10" aria-hidden
+      style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform 120ms ease" }}>
+      <path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/**
+ * A header section emitted by {@link rehypeCollapsibleSections}: its first child is the heading, the rest
+ * is the section body. A keyboard-accessible chevron toggle is injected into the heading; collapsing
+ * unmounts the body (so nested sections collapse with their parent). Clicking the heading text toggles too
+ * (but not when a link inside it is clicked).
+ */
+function CollapsibleSection({ level, children }: { level: number; children: ReactNode }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const toggle = () => setCollapsed((c) => !c);
+  const items = Children.toArray(children);
+  const heading = items[0];
+  const body = items.slice(1);
+
+  const headingEl = isValidElement(heading) ? (heading as ReactElement<any>) : null;
+  const headingWithToggle = headingEl
+    ? cloneElement(
+        headingEl,
+        {
+          className: `${headingEl.props.className ? `${headingEl.props.className} ` : ""}md-heading-collapsible`,
+          "data-collapsed": collapsed ? "true" : "false",
+          onClick: (e: ReactMouseEvent) => { if (!(e.target as HTMLElement).closest("a")) toggle(); },
+        },
+        <button key="md-collapse" type="button" className="md-collapse-toggle"
+          aria-expanded={!collapsed} aria-label={collapsed ? "Expand section" : "Collapse section"}
+          onClick={(e) => { e.stopPropagation(); toggle(); }}>
+          <CollapseChevron open={!collapsed} />
+        </button>,
+        ...Children.toArray(headingEl.props.children),
+      )
+    : heading;
+
+  return (
+    <section className="md-section" data-level={level} data-collapsed={collapsed ? "true" : "false"}>
+      {headingWithToggle}
+      {!collapsed && body}
+    </section>
+  );
 }
 
 function resolveWiki(rawTarget: string, files: string[]): string | null {
@@ -176,6 +263,15 @@ export default function Markdown({ source, files, currentPath = "", onOpen, asse
       }
       return <div className={className}>{children}</div>;
     },
+    // Header sections wrapped by rehypeCollapsibleSections → a collapsible block. Level is derived from
+    // the wrapped heading's tag so the chevron/indent matches h1…h6.
+    section({ node, className, children }) {
+      const cls = typeof className === "string" ? className : "";
+      if (!cls.includes("md-section")) return <section className={className}>{children}</section>;
+      const head = node?.children.find((c) => c.type === "element");
+      const level = head && head.type === "element" && /^h[1-6]$/.test(head.tagName) ? Number(head.tagName.slice(1)) : 1;
+      return <CollapsibleSection level={level}>{children}</CollapsibleSection>;
+    },
   };
 
   return (
@@ -188,6 +284,7 @@ export default function Markdown({ source, files, currentPath = "", onOpen, asse
       )}
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkCallouts]}
+        rehypePlugins={[rehypeCollapsibleSections]}
         urlTransform={(url) => (url.startsWith("wikilink:") || url.startsWith("wikiembed:") ? url : defaultUrlTransform(url))}
         components={components}
       >{transformed}</ReactMarkdown>
@@ -229,4 +326,14 @@ const MD_CSS = `
 .loom-md .md-callout-danger, .loom-md .md-callout-error, .loom-md .md-callout-bug, .loom-md .md-callout-failure { border-left-color: #e05a5a; background: rgba(224,90,90,0.07); }
 .loom-md .md-callout-question, .loom-md .md-callout-help, .loom-md .md-callout-faq, .loom-md .md-callout-example { border-left-color: #a36ce0; background: rgba(163,108,224,0.07); }
 .loom-md .md-callout-quote, .loom-md .md-callout-cite, .loom-md .md-callout-abstract, .loom-md .md-callout-summary { border-left-color: #8a8a92; background: rgba(138,138,146,0.07); }
+.loom-md .md-section { margin: 0; }
+.loom-md .md-heading-collapsible { cursor: pointer; }
+.loom-md .md-collapse-toggle {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1em; height: 1em; margin-right: 0.34em; margin-left: -0.1em; padding: 0;
+  vertical-align: -0.06em; background: none; border: none; border-radius: 3px;
+  color: #8a8a92; cursor: pointer; flex-shrink: 0; -webkit-appearance: none; appearance: none;
+}
+.loom-md .md-heading-collapsible:hover .md-collapse-toggle { color: #cfcfd4; }
+.loom-md .md-collapse-toggle:focus-visible { outline: 2px solid #5a8dee; outline-offset: 1px; color: #cfcfd4; }
 `;
