@@ -1941,6 +1941,19 @@ export class Db {
     return (this.db.prepare("SELECT * FROM sessions WHERE role = 'worker' AND process_state = 'live'")
       .all() as Row[]).map(toSession);
   }
+  /** ALL currently-LIVE sessions across every role/project — the usage sampler's per-tick work set
+   *  (epic c9924bcd, card B). The sampler skips run sessions itself (accounted via aggregateRunUsage). */
+  listLiveSessions(): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE process_state = 'live'")
+      .all() as Row[]).map(toSession);
+  }
+  /** Every session (live, exited, OR archived) that ever captured an engine transcript — the usage
+   *  sampler's one-time boot-backfill scan set (epic c9924bcd, card B). A session whose transcript is
+   *  already pruned from disk is skipped by the sampler (readRunUsage → null). */
+  listSessionsWithEngineId(): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE engine_session_id IS NOT NULL")
+      .all() as Row[]).map(toSession);
+  }
   /** Re-parent a recycled manager's LIVE workers onto its successor so the fleet survives the handoff. */
   reparentLiveWorkers(oldManagerId: string, newManagerId: string): number {
     return this.db.prepare("UPDATE sessions SET parent_session_id = ? WHERE parent_session_id = ? AND process_state = 'live'")

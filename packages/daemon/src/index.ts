@@ -17,6 +17,7 @@ import { backfillColumnRoles } from "./tasks/columns.js";
 import { prewarmMarkitdownForProfilesAtBoot } from "./python/prewarm.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
+import { UsageSampler } from "./sessions/usage-sampler.js";
 import { TaskMcpRouter } from "./mcp/server.js";
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
 import { PlatformMcpRouter } from "./mcp/platform.js";
@@ -249,6 +250,10 @@ async function main(): Promise<void> {
       // worker_exited_without_report event + nudge to the manager so it isn't left with a silent idle.
       // Best-effort: never disturb the exit path.
       try { if (exited?.role === "worker") sessions.notifyManagerOfExitedWorker(sessionId, info.intended); } catch { /* never disturb the exit path */ }
+      // Session usage telemetry (epic c9924bcd, card B): take a FINAL delta sample on exit so the tail of
+      // this session's billed usage isn't lost (the periodic tick may have missed the last segment). The
+      // sampler skips run / no-transcript sessions itself. Best-effort: never disturb the exit path.
+      try { if (exited) usageSampler.onSessionExit(exited); } catch { /* never disturb the exit path */ }
       mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); userAuditMcp.dispose(sessionId); setupMcp.dispose(sessionId); runMcp.dispose(sessionId);
     },
   }, { busyStaleMs: timeouts.busyStaleMs }); // BOOT-BOUND: stuck-busy self-heal threshold from resolved platform config
@@ -456,6 +461,23 @@ async function main(): Promise<void> {
   busyWorkerWatcher.start();
   console.log(`[boot] busy-worker stuck watchdog on (tick ${idleWatchMs}ms)`);
 
+  // Session usage telemetry sampler (epic c9924bcd, card B) — a background ticker that reads each LIVE
+  // session's engine transcript, computes the per-interval billed-usage DELTA (reset-aware), and appends a
+  // session_usage_samples row. 100% daemon-side + token-FREE (pure file IO; never invokes an agent / makes
+  // a model call). A one-time boot backfill (app_meta marker) seeds coarse history from transcripts still
+  // on disk so the page isn't empty on day one; the teardown sample (onExit, above) catches each tail.
+  // Cadence + retention are DAEMON-GLOBAL (resolved platform default; HUMAN-only). Declared here, referenced
+  // by the pty onExit closure (forward ref, runtime-only — same pattern as `sessions`/`orchMcp`).
+  const usageSampler = new UsageSampler({ db, intervalMs: resolved.usageSampleIntervalMs, retentionDays: resolved.usageSampleRetentionDays });
+  try {
+    const seeded = usageSampler.backfillOnce();
+    if (seeded > 0) console.log(`[boot] usage-sampler backfill: seeded ${seeded} historical session usage sample(s)`);
+  } catch (err) {
+    console.warn(`[boot] usage-sampler backfill failed (continuing boot): ${(err as Error).message}`);
+  }
+  usageSampler.start();
+  console.log(`[boot] session usage sampler on (tick ${resolved.usageSampleIntervalMs}ms, retain ${resolved.usageSampleRetentionDays}d)`);
+
   // Crash-recovery watchdog — the complement of resumeFleetOnBoot (which owns daemon-RESTART recovery):
   // bounded auto-resume of an ISOLATED session whose pty died UNEXPECTEDLY while the daemon stayed healthy
   // (the `session_died` trigger recorded in onExit). Caps attempts per project (crashRecoveryMaxAttempts;
@@ -572,7 +594,7 @@ async function main(): Promise<void> {
       for (const v of vaultVersioners) { if (v.flushSync()) flushed++; }
       if (flushed > 0) console.log(`[shutdown] flushed ${flushed} pending vault commit(s)`);
     } catch { /* never block the exit */ }
-    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop();
+    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop();
     console.log(`[shutdown] graceful stop (${reason})`);
     process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
   };
