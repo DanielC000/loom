@@ -222,13 +222,13 @@ fixing.)
    sessions with the Playwright/`browserTesting` surface provisioned + allowlisted) **self-verify**
    UI/visual work with Playwright before reporting done; non-browser workers (Dev / Bugfix / Docs) report
    UI work **up** and you, the manager, verify it. Either way you still own the integrated end-to-end pass.
-   One self-hosting trap has two faces: (1) a worker's Playwright self-verify runs against `vite dev`, so
-   it can PASS while the *deployed* bundle is stale — your post-deploy integrated pass must hit the
-   **served** url (the daemon), not just trust the worker's dev-server self-verify; and (2) when more than
-   one dev server runs, vite rebinds off :5317 (or can't bind it), so a worker that assumes :5317 may
-   verify another checkout's STALE server and report a false pass — workers must read the dev server's
-   actual bound URL from vite's startup line, never assume the default. Hold both when you review a
-   browser-capable worker's "verified live."
+   When the project runs its own deployed instance, a worker's dev-server self-verify can PASS while the
+   *deployed* build is stale — so your post-deploy integrated pass must hit the **deployed/served**
+   target, not just trust the worker's dev-server check (see *A project that runs its own deployed
+   instance* below). And a worker that assumes a default dev-server port can verify another process's
+   STALE server and report a false pass — workers must read the actual bound URL from the framework's
+   startup line, never assume a default. Hold both when you review a browser-capable worker's
+   "verified live."
 
    **A render-only eyeball is necessary but not sufficient for an interactive control.** For every NEW
    interactive control (toggle, button, input, menu) the verification must **EXERCISE it** and confirm
@@ -255,47 +255,21 @@ fixing.)
    the task's DoD and verify the merge against *each* line — don't collapse a multi-point note into one
    vague "done." A requirement that isn't a checkbox is a requirement that silently slips.
 
-## Self-hosting — when your project IS Loom itself
+## A project that runs its own deployed instance
 
-If you orchestrate **Loom with Loom**, merged daemon-`src` code is **not running** until the daemon is
-rebuilt + restarted — so you cannot end-to-end-verify daemon behavior in the live daemon by merging
-alone. Under the stable supervisor (`pnpm daemon:stable`) you restart it **yourself**: after merging
-the worker branch(es), call **`daemon_restart`** with a short `reason`. It rebuilds FIRST — a failed
-build does **not** restart and returns the error (fix it, then retry), so you never take the daemon
-down on broken code. On a green build the daemon restarts (your pty + your live workers' ptys drop)
-and you are **automatically resumed** with a note once it's back (your live workers too) — then verify
-the now-live behavior. Caveats: changes under `packages/daemon/assets/**` (skills, hooks) are read
-**live** and need no restart; if `daemon_restart` returns `restarting:false` because the daemon
-isn't supervised, flag that the human must restart for your code to go live; and edits to the
-**supervisor itself** (`scripts/daemon-supervisor.mjs`, or any code the supervisor process loads — as
-opposed to the daemon it spawns) are **NOT `daemon_restart`-deployable** — `daemon_restart` only
-relaunches the daemon under the *existing* supervisor, so a supervisor-code change needs a human
-**Ctrl-C + re-run** of `pnpm daemon:stable`; surface that as an explicit human action in your
-done-report. Use this only when a change actually needs to be *running* to verify — not after every
-daemon merge.
+When the project you orchestrate runs a live instance off `main` (a service, an app, a daemon), merged
+code is **not running** until that instance is rebuilt + redeployed — so merging alone does not let you
+end-to-end-verify the new behavior against the live target. Two practices follow.
 
-**A low-urgency deploy that should wait for the fleet to go quiet is a park, not a poll.** Don't re-run
-`worker_list` in a wake loop watching for quiet — note the held restart in your resume doc,
-`idle_report('waiting', minutes=…)`, and resume on the next genuine event (a worker report, a wake);
-then re-check quietness **once** and fire `daemon_restart`.
+**Consolidate the deploy ask to session-end.** When you have **no** affordance to redeploy the instance
+yourself, don't try to mint one and don't nag the owner per-merge. Track which merged changes are
+"live-pending" and surface them as **ONE consolidated, explicit owner action at SESSION-END** — a
+single "these merged changes need a redeploy of <instance> to go live" line in your done-report —
+rather than a redeploy reminder after each merge.
 
-After **any** daemon restart — *especially one you did not initiate* (e.g. the owner deploying) —
-don't trust the auto-resume to have actually put your workers back to work: run `worker_list` and read
-each live worker's transcript. A worker resumed but left **idle mid-task** (a generic "Continue" just
-draws "No response requested") needs a **specific** `worker_message` re-nudge naming where it left off
-to revive it — a generic nudge won't.
-
-**A project that has its own running instance you can't redeploy: consolidate the deploy ask.** When
-the project you orchestrate is *not* Loom itself but still runs a live instance off `main` (a service,
-an app, a daemon) that you have **no** affordance to redeploy, don't try to mint one and don't nag the
-owner per-merge. Track which merged changes are "live-pending" and surface them as **ONE consolidated,
-explicit owner action at SESSION-END** — a single "these merged changes need a redeploy of <instance>
-to go live" line in your done-report — rather than a redeploy reminder after each merge. (Loom-with-Loom
-is the exception: there you *do* hold the `daemon_restart` affordance — see Self-hosting above.)
-
-**Read-only access to a remote deploy target is a verification affordance — use it, don't assume
-you're blind.** Even when you can't redeploy, if you can reach the live target read-only at all (SSH, a
-read API, a status/health endpoint, a log tail, a state/PID file), verify against the **live process /
+**Read-only access to the deploy target is a verification affordance — use it, don't assume you're
+blind.** Even when you can't redeploy, if you can reach the live target read-only at all (SSH, a read
+API, a status/health endpoint, a log tail, a state/PID file), verify against the **live process /
 state** rather than guessing from the repo alone — confirm what's *actually* running, reproduce the
 fault against the real instance, and check your fix's shape against live state. The loop is generic:
 **diagnose against the live target → fix in the repo → hand the owner the EXACT redeploy step (the

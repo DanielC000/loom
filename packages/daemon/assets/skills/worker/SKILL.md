@@ -46,10 +46,10 @@ brief only if it is written to carry them.)
    not enough: **EXERCISE it** and confirm an **observable state change** — DOM/network/text differs
    before vs. after — not just that the page renders without console errors. Otherwise report the UI
    work **up** for your manager to verify. When you self-verify,
-   point Playwright at the dev server's **actual bound URL** — read the port from vite's startup line
-   (`Local: http://…:PORT`); never assume the default :5317. If that port is already held (the owner's
-   main-checkout dev server or the live daemon), vite binds a different one or fails — verifying the
-   default would silently drive the wrong, *stale* server and report a false pass.
+   point Playwright at the dev server's **actual bound URL** — read the port from the framework's startup
+   line (e.g. vite's `Local: http://…:PORT`); never assume a default port. If that port is already held
+   by another process, the dev server binds a different one or fails — verifying the default would
+   silently drive the wrong, *stale* server and report a false pass.
 5. **Hold the line on honesty.** "Done" means done and verified — report what passed, what you skipped,
    and any known limitation rather than papering over it. Keep any docs you touch accurate: rewrite
    stale claims in place, no "UPDATE:" appends.

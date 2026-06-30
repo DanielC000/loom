@@ -78,6 +78,15 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
   aborts the restart and leaves the daemon up), then exits `75`; the supervisor relaunches and boot
   re-resumes the manager + its live workers (via `~/.loom/restart-intent.json`) with a "code is live"
   note. Outside the supervisor the tool refuses (nothing would relaunch the daemon).
+- **Manager orchestration around a restart:** after **any** daemon restart — *especially one you did
+  not initiate* (e.g. the owner deploying) — don't trust the auto-resume to have put your workers back
+  to work: run `worker_list` and read each live worker's transcript. A worker resumed but left **idle
+  mid-task** (a generic "Continue" just draws "No response requested") needs a **specific**
+  `worker_message` re-nudge naming where it left off — a generic nudge won't revive it. And a
+  low-urgency `daemon_restart` that should wait for the fleet to go quiet is a **park, not a poll**:
+  don't re-run `worker_list` in a wake loop watching for quiet — note the held restart in your resume
+  doc, `idle_report('waiting', minutes=…)`, and resume on the next genuine event (a worker report, a
+  wake), then re-check quietness **once** and fire `daemon_restart`.
 - **Deploy-build gate integrity** (`restart.ts` › `deployBuildSteps`/`buildDaemon`): the deploy rebuild
   is two ordered, fail-closed steps so a stale cache or a missing install can't verify a broken main
   green. (1) `pnpm install --frozen-lockfile` FIRST — a merged dep-add (package.json + lockfile) gets
