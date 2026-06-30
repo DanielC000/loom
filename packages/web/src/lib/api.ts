@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope } from "@loom/shared";
 
 // Per-conflict resolution for a profile adopt-update: pick the user's value or the shipped value,
 // wholesale (the field-level analog of the skills resolver's per-hunk mine/shipped choice).
@@ -419,6 +419,16 @@ export const api = {
     const params = new URLSearchParams({ since: sinceIso });
     if (projectId && projectId !== "all") params.set("projectId", projectId);
     return get<UsageHistory>(`/api/usage/history?${params.toString()}`);
+  },
+  // INTERACTIVE-SESSION usage telemetry (GET /api/usage/sessions/history) — the OWNER'S OWN
+  // interactive-session BILLED usage over time, sampled token-free from transcripts (epic c9924bcd).
+  // Mirrors usageHistory's since/projectId handling exactly (drop projectId when "all"); the server
+  // echoes the clamped since + applied filter and adds a per-DAY breakdown (byDay) for the over-time
+  // chart. Human-only loopback — NOT an agent MCP tool. DISTINCT from the runs-backed usageHistory.
+  sessionUsageHistory: (sinceIso: string, projectId?: string) => {
+    const params = new URLSearchParams({ since: sinceIso });
+    if (projectId && projectId !== "all") params.set("projectId", projectId);
+    return get<SessionUsageHistory>(`/api/usage/sessions/history?${params.toString()}`);
   },
   // Drop the GLOBAL usage-awareness latch so new worker_spawn is unblocked without touching any
   // session — for a transient overload with real headroom (HUMAN-only; no agent MCP surface).

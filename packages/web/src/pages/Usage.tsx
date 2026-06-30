@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
-import type { SessionListItem, UsageHistory, UsageHistoryTotals, UsageHistoryAgent, UsageHistoryProject } from "@loom/shared";
+import type { SessionListItem, UsageHistory, UsageHistoryTotals, UsageHistoryAgent, UsageHistoryProject, SessionUsageHistory, SessionUsageTotals, SessionUsageAgent, SessionUsageProject, SessionUsageDay } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -9,25 +9,32 @@ import { isRateLimited } from "../lib/attention";
 import { Panel, SectionLabel, StatusPill, Badge, Chip, Meter, Select } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
 
-// USAGE — a god-eye page split into TWO deliberately separate, distinctly-labeled views:
+// USAGE — a god-eye page split into THREE deliberately separate, distinctly-labeled planes:
 //
-//  1. LIVE OCCUPANCY ("live · now"): every live session's CONTEXT occupancy. Sessions already report
+//  1. INTERACTIVE SESSIONS ("billed · over time"): the OWNER'S OWN interactive-session BILLED usage over
+//     time, from GET /api/usage/sessions/history — a real per-day/-project/-agent time series sampled
+//     token-free from the transcripts the engine already writes (epic c9924bcd). This is where the real
+//     cumulative numbers live, so it leads the page.
+//
+//  2. LIVE OCCUPANCY ("live · now"): every live session's CONTEXT occupancy. Sessions already report
 //     `ctxInputTokens` (the measured size of the engine's CURRENT context, i.e. last-assistant input
 //     usage) + `model`; we size each meter with the shared contextWindowForModel and colour it at
 //     CONTEXT_WARN_RATIO, exactly as Mission Control's fleet rows do. Pure view over /api/sessions.
 //
-//  2. AGENT RUNS (historical): token/cost totals aggregated from the `runs` table — Loom's ONLY
-//     persisted time-series usage (interactive sessions keep no history), via GET /api/usage/history.
+//  3. AGENT RUNS (historical): token/cost totals aggregated from the `runs` table — the API RUNS plane
+//     (distinct from interactive sessions), via GET /api/usage/history.
 //
-// HONESTY NOTE (load-bearing): the two views measure DIFFERENT things and must never be conflated.
+// HONESTY NOTE (load-bearing): the three planes measure DIFFERENT things and must NEVER be summed.
+//   • INTERACTIVE "cost" is CUMULATIVE BILLED interactive-session spend, summed from per-interval deltas.
 //   • LIVE "ctx in use" is the CURRENT context SIZE (an occupancy snapshot, can exceed 100%, UNBILLED);
 //     its dollar figure is an ESTIMATE of ONE input pass at list rates — never cumulative spend.
-//   • HISTORICAL "cost" is CUMULATIVE BILLED spend recorded per finished Agent Run.
-// They live in separate sections with their own labels; the page never sums one into the other.
+//   • AGENT-RUNS "cost" is CUMULATIVE BILLED spend recorded per finished Agent Run (the runs plane).
+// They live in separate sections with their own labels + tag tones; the page never sums one into another.
 //
 // SCOPE CONTROLS (page-local, NOT coupled to the header active project — this page stays god-eye):
-//   • Project filters BOTH sections.
-//   • Window (24h / 7d / 30d / All) governs ONLY the historical section; live occupancy is always "now".
+//   • Project filters ALL THREE sections.
+//   • Window (24h / 7d / 30d / All) governs the two HISTORICAL sections (Interactive sessions + Agent
+//     Runs); live occupancy is always "now".
 
 // Hand-maintained input-token list prices (USD per million input tokens), matched by model id.
 // These are Anthropic's published STANDARD-context input rates as a coarse reference — NOT a billing
@@ -65,12 +72,18 @@ function shortModel(model?: string | null): string {
   return model.replace(/^claude-/i, "");
 }
 function fmtTokens(n: number): string {
+  // Interactive cache-read totals reach the billions over a wide window — keep the readout legible with a
+  // B tier above M/k rather than printing "6020.4M".
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 }
 function fmtUsd(n: number): string {
   if (n === 0) return "$0.00";
-  return n < 0.01 ? `<$0.01` : `$${n.toFixed(2)}`;
+  if (n < 0.01) return `<$0.01`;
+  // Thousands separators — billed interactive totals run to the thousands ($6,020.00 reads far better
+  // than $6020.00).
+  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 // ── Historical window controls ─────────────────────────────────────────────────
@@ -96,6 +109,11 @@ function sinceIsoFor(span: Timespan): string {
 function totalTokens(t: UsageHistoryTotals): number {
   return t.inputTokens + t.outputTokens + t.cacheCreationTokens + t.cacheReadTokens;
 }
+// Same sum for an interactive-session usage row (totals / per-day / per-project / per-agent all share the
+// SessionUsageTotals token fields).
+function sessionTotalTokens(t: SessionUsageTotals): number {
+  return t.inputTokens + t.outputTokens + t.cacheCreationTokens + t.cacheReadTokens;
+}
 
 export default function Usage() {
   const { projects } = useActiveProject();
@@ -113,6 +131,12 @@ export default function Usage() {
     queryKey: ["usageHistory", span, scope],
     queryFn: () => api.usageHistory(sinceIsoFor(span), scope),
     refetchInterval: 10000,
+  });
+  // The owner's interactive-session billed usage over the same window + scope (the headline new plane).
+  const sessionHistory = useQuery({
+    queryKey: ["sessionUsageHistory", span, scope],
+    queryFn: () => api.sessionUsageHistory(sinceIsoFor(span), scope),
+    refetchInterval: 30000,
   });
 
   // Overall LIVE aggregates over the scoped sessions. totalCtx is summed context-in-use (not cumulative
@@ -152,10 +176,20 @@ export default function Usage() {
           </Select>
         </Field>
         <span style={{ flex: 1 }} />
-        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, maxWidth: 320, lineHeight: 1.5, textAlign: "right" }}>
-          Project filters both sections. Window governs the Agent&nbsp;Runs history only — live occupancy is always now.
+        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, maxWidth: 340, lineHeight: 1.5, textAlign: "right" }}>
+          Project filters all three sections. Window governs the two historical sections (Interactive
+          sessions &amp; Agent&nbsp;Runs) — live occupancy is always now.
         </span>
       </div>
+
+      {/* ════ INTERACTIVE SESSIONS (historical · billed) ════ — the headline new plane, placed first. */}
+      <SessionUsageSection
+        query={sessionHistory}
+        scope={scope}
+        scopeName={scopeName}
+        window={spanMeta.window}
+        allTime={span === "all"}
+      />
 
       {/* ════ LIVE OCCUPANCY ════ */}
       <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -385,6 +419,227 @@ function SortToggle({ value, onChange }: { value: "tokens" | "cost"; onChange: (
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
       <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.08em" }}>sort</span>
+      <span style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: 4, overflow: "hidden" }}>
+        {items.map((it) => {
+          const active = value === it.key;
+          return (
+            <button key={it.key} onClick={() => onChange(it.key)}
+              style={{
+                background: active ? color.phosphorDim : "transparent",
+                color: active ? color.phosphor : color.textDim,
+                border: "none", padding: "3px 10px", fontFamily: font.mono, fontSize: 11,
+                cursor: "pointer", textTransform: "uppercase", letterSpacing: "0.06em",
+              }}>
+              {it.label}
+            </button>
+          );
+        })}
+      </span>
+    </span>
+  );
+}
+
+// ── Interactive-sessions (historical · billed) section ───────────────────────────
+// The owner's OWN interactive-session billed usage over the window: totals, an over-time chart from
+// byDay, a per-project breakdown (in "all" scope), and a sortable per-agent breakdown. This is the
+// real cumulative spend — DISTINCT from live occupancy (an unbilled snapshot) and Agent Runs (the runs
+// plane); the section never sums into either.
+function SessionUsageSection({
+  query, scope, scopeName, window, allTime,
+}: {
+  query: UseQueryResult<SessionUsageHistory>;
+  scope: string;
+  scopeName: string;
+  window: string;
+  allTime: boolean;
+}) {
+  const [agentSort, setAgentSort] = useState<"tokens" | "cost">("cost");
+  const [chartMetric, setChartMetric] = useState<"cost" | "tokens">("cost");
+  const data = query.data;
+  const totals = data?.totals;
+
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <SectionHead title="Interactive sessions" tag="billed · over time" tagTone="amber" />
+      <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, lineHeight: 1.5, marginTop: -8 }}>
+        Your REAL interactive-session usage over time — CUMULATIVE BILLED tokens + cost, sampled token-free
+        from session transcripts. This is genuine spend, distinct from the live occupancy snapshot below
+        (current context size, unbilled) and the Agent&nbsp;Runs plane further down; the page never sums
+        across the three.
+      </span>
+
+      {query.isLoading && <Panel><span style={{ color: color.textMuted }}>Loading interactive-session usage…</span></Panel>}
+      {query.isError && (
+        <Panel><span style={{ color: color.red, fontFamily: font.mono, fontSize: 12 }}>Couldn't load interactive-session usage: {(query.error as Error)?.message ?? "unknown error"}</span></Panel>
+      )}
+
+      {!query.isLoading && !query.isError && totals && (
+        totals.samples === 0 ? (
+          <Panel style={{ padding: 20 }}>
+            <div style={{ fontFamily: font.head, fontSize: 13, color: color.textDim, marginBottom: 6 }}>
+              No interactive-session usage in this window
+            </div>
+            <div style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, lineHeight: 1.6, maxWidth: 560 }}>
+              No billed interactive-session samples recorded for {scopeName} in this window ({window}). Try a
+              wider window, or this fills in as the owner's sessions run and the daemon samples them.
+            </div>
+          </Panel>
+        ) : (
+          <>
+            {/* Aggregate strip — distinctly BILLED interactive spend, never summed with the other planes. */}
+            <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+              <Stat label="cost (billed)" value={fmtUsd(totals.costUsd)} tone="amber" />
+              <Stat label="input tok" value={fmtTokens(totals.inputTokens)} tone="cyan" />
+              <Stat label="output tok" value={fmtTokens(totals.outputTokens)} tone="cyan" />
+              <Stat label="cache tok" value={fmtTokens(totals.cacheCreationTokens + totals.cacheReadTokens)} tone="muted" />
+              <Stat label="samples" value={fmtTokens(totals.samples)} tone="muted" />
+            </div>
+
+            {/* Over-time chart from byDay — ascending by day, legible up to ~365 buckets. */}
+            <ByDayChart byDay={data!.byDay} metric={chartMetric} onMetric={setChartMetric} allTime={allTime} />
+
+            {/* Per-project breakdown — only meaningful in the "all" scope. */}
+            {scope === "all" && data!.byProject.length > 0 && (() => {
+              const max = Math.max(...data!.byProject.map(sessionTotalTokens), 1);
+              return (
+                <div>
+                  <SectionLabel>By project</SectionLabel>
+                  <Panel>
+                    {[...data!.byProject]
+                      .sort((a, b) => b.costUsd - a.costUsd || sessionTotalTokens(b) - sessionTotalTokens(a))
+                      .map((p) => (
+                        <SessionHistoryRow key={p.projectId} name={p.projectName ?? p.projectId.slice(0, 8)} row={p} max={max} />
+                      ))}
+                  </Panel>
+                </div>
+              );
+            })()}
+
+            {/* Per-agent breakdown — sortable by tokens / cost. */}
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <SectionLabel style={{ margin: 0 }}>By agent</SectionLabel>
+                <span style={{ flex: 1 }} />
+                <SortToggle value={agentSort} onChange={setAgentSort} />
+              </div>
+              <Panel>
+                {data!.byAgent.length === 0 && (
+                  <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No per-agent rows.</span>
+                )}
+                {(() => {
+                  const max = Math.max(...data!.byAgent.map(sessionTotalTokens), 1);
+                  return [...data!.byAgent]
+                    .sort((a, b) => agentSort === "cost"
+                      ? (b.costUsd - a.costUsd || sessionTotalTokens(b) - sessionTotalTokens(a))
+                      : (sessionTotalTokens(b) - sessionTotalTokens(a) || b.costUsd - a.costUsd))
+                    .map((a) => (
+                      <SessionHistoryRow key={a.agentId ?? "—"} name={a.agentName ?? (a.agentId ? a.agentId.slice(0, 8) : "(no agent)")} row={a} max={max} />
+                    ));
+                })()}
+              </Panel>
+            </div>
+          </>
+        )
+      )}
+    </section>
+  );
+}
+
+// One interactive-session breakdown row (project or agent): name, sample count, a token meter relative to
+// the section's max, and the billed cost.
+function SessionHistoryRow({ name, row, max }: { name: string; row: SessionUsageProject | SessionUsageAgent; max?: number }) {
+  const tok = sessionTotalTokens(row);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.border}` }}>
+      <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, minWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+      <Chip label="samples" value={fmtTokens(row.samples)} />
+      <span style={{ flex: 1 }} />
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
+        {max != null && <Meter value={tok} max={max} tone="cyan" width={90} />}
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, minWidth: 72, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
+      </span>
+    </div>
+  );
+}
+
+// Over-time bar chart for the interactive-session series. Bars ascend by day and fill the width, so a
+// 7-day window reads as a few wide bars and the 365-bucket "all time" window as a dense sparkline-of-bars;
+// each bar's height scales to the window's peak. The metric toggle switches between billed cost and total
+// tokens. A non-zero day always paints at least a hairline so sparse early days stay visible.
+function ByDayChart({
+  byDay, metric, onMetric, allTime,
+}: {
+  byDay: SessionUsageDay[];
+  metric: "cost" | "tokens";
+  onMetric: (m: "cost" | "tokens") => void;
+  allTime: boolean;
+}) {
+  const valueOf = (d: SessionUsageDay) => (metric === "cost" ? d.costUsd : sessionTotalTokens(d));
+  const fmtVal = (v: number) => (metric === "cost" ? fmtUsd(v) : `${fmtTokens(v)} tok`);
+  const vals = byDay.map(valueOf);
+  const peak = Math.max(...vals, 0);
+  const dense = byDay.length > 60;
+  const first = byDay[0]?.day;
+  const last = byDay[byDay.length - 1]?.day;
+  const tColor = metric === "cost" ? color.amber : color.cyan;
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+        <SectionLabel style={{ margin: 0 }}>By day</SectionLabel>
+        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>
+          {byDay.length} day{byDay.length === 1 ? "" : "s"} · peak {fmtVal(peak)}
+        </span>
+        <span style={{ flex: 1 }} />
+        <MetricToggle value={metric} onChange={onMetric} />
+      </div>
+      <Panel>
+        <div
+          role="img"
+          aria-label={`Interactive-session ${metric === "cost" ? "billed cost" : "total tokens"} per day, ${byDay.length} days, peak ${fmtVal(peak)}`}
+          style={{ display: "flex", alignItems: "flex-end", gap: dense ? 1 : 3, height: 88, borderBottom: `1px solid ${color.border}`, paddingBottom: 1 }}
+        >
+          {byDay.map((d) => {
+            const v = valueOf(d);
+            const h = peak > 0 && v > 0 ? Math.max(2, Math.round((v / peak) * 86)) : v > 0 ? 2 : 0;
+            return (
+              <div
+                key={d.day}
+                title={`${d.day} · ${fmtVal(v)}`}
+                style={{
+                  flex: 1, minWidth: 1, height: Math.max(h, 1),
+                  background: v > 0 ? tColor : color.border,
+                  opacity: v > 0 ? 1 : 0.4, borderRadius: 1,
+                }}
+              />
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>
+          <span>{first ?? ""}</span>
+          <span>{first && last && first !== last ? last : ""}</span>
+        </div>
+        {allTime && (
+          <div style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, lineHeight: 1.5, marginTop: 8 }}>
+            Early points are coarse — one backfilled sample per session at its last activity — and get finer
+            going forward as the daemon samples live sessions on an interval.
+          </div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+// Cost / Tokens toggle for the by-day chart — same shape as SortToggle, but it picks the charted measure.
+function MetricToggle({ value, onChange }: { value: "cost" | "tokens"; onChange: (v: "cost" | "tokens") => void }) {
+  const items: { key: "cost" | "tokens"; label: string }[] = [
+    { key: "cost", label: "Cost" },
+    { key: "tokens", label: "Tokens" },
+  ];
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.08em" }}>chart</span>
       <span style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: 4, overflow: "hidden" }}>
         {items.map((it) => {
           const active = value === it.key;
