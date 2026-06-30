@@ -69,8 +69,8 @@ export const NAV_PAGES: NavPage[] = [
   { label: "Platform", to: "/platform", element: <Platform />, group: "system", primary: true },
   { label: "Terminals", to: "/terminals", element: <Terminals />, group: "operate", primary: true },
   { label: "Board", to: "/board", element: <Board />, group: "project", primary: true, scoped: true },
-  { label: "Runs", to: "/runs", element: <Runs />, group: "operate", primary: true, scoped: true },
   // ── More ▾ · Operate ─────────────────────────────────────────────────────────
+  { label: "Runs", to: "/runs", element: <Runs />, group: "operate", scoped: true },
   { label: "Workspace", to: "/workspace", element: <Workspace />, group: "operate" },
   { label: "Archive", to: "/archive", element: <Archive />, group: "operate" },
   // ── More ▾ · Project ─────────────────────────────────────────────────────────
