@@ -124,10 +124,13 @@ export interface UsageHistoryProject extends UsageHistoryTotals {
 }
 
 /** Per-agent breakdown row — the totals plus the agent id and its display name (null if the agent row
- *  is gone). */
+ *  is gone). `projectId`/`projectName` identify the agent's OWNING project so identically-named agents
+ *  across projects (each project seeds its own "Dev", "Bugfix", … ) disambiguate in the "all" scope. */
 export interface UsageHistoryAgent extends UsageHistoryTotals {
   agentId: string;
   agentName: string | null;
+  projectId: string | null;
+  projectName: string | null;
 }
 
 /** GET /api/usage/history response: grand totals over the window + per-project and per-agent breakdowns.
@@ -187,10 +190,14 @@ export interface SessionUsageProject extends SessionUsageTotals {
 }
 
 /** Per-agent breakdown row — the totals plus the agent id and its display name (both null if the sample
- *  carried no agent or the agent row is gone). */
+ *  carried no agent or the agent row is gone). `projectId`/`projectName` identify the agent's OWNING
+ *  project so identically-named agents across projects (each project seeds its own "Dev", "Bugfix", … )
+ *  disambiguate in the "all" scope; both null when the agent (or its project) is gone. */
 export interface SessionUsageAgent extends SessionUsageTotals {
   agentId: string | null;
   agentName: string | null;
+  projectId: string | null;
+  projectName: string | null;
 }
 
 /** One time-bucket row for the over-time chart — the totals for a single ISO `YYYY-MM-DD` day. The

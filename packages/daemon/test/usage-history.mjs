@@ -105,6 +105,11 @@ try {
   check("2 byAgent[aA2] name + runs(1) + input(200)", ag.aA2.agentName === "Analyst Two" && ag.aA2.runs === 1 && ag.aA2.inputTokens === 200);
   check("2 byAgent[aB1] name + runs(1, r5 in-flight excluded) + input(300)",
     ag.aB1.agentName === "Beta Bot" && ag.aB1.runs === 1 && ag.aB1.inputTokens === 300);
+  // byAgent now carries the agent's OWNING project (projectId/projectName) to disambiguate identically-
+  // named agents across projects in the "all" scope.
+  check("2 byAgent[aA1] owning project (pA / Alpha)", ag.aA1.projectId === "pA" && ag.aA1.projectName === "Alpha");
+  check("2 byAgent[aA2] owning project (pA / Alpha)", ag.aA2.projectId === "pA" && ag.aA2.projectName === "Alpha");
+  check("2 byAgent[aB1] owning project (pB / Beta)", ag.aB1.projectId === "pB" && ag.aB1.projectName === "Beta");
 
   // =====================================================================================================
   // 3) projectId FILTER — scoping to pA narrows totals + breakdowns.

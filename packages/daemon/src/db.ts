@@ -1331,13 +1331,17 @@ export class Db {
       ...measures(row),
     }));
 
+    // LEFT JOIN agents (for the name) AND projects (on the agent's project_id, for the OWNING-project
+    // label) so identically-named agents across projects disambiguate in the "all" scope.
     const byAgent = (this.db.prepare(
-      `SELECT r.agent_id AS agentId, a.name AS agentName, ${sums}
-       FROM runs r LEFT JOIN agents a ON r.agent_id = a.id
+      `SELECT r.agent_id AS agentId, a.name AS agentName, a.project_id AS projectId, p.name AS projectName, ${sums}
+       FROM runs r LEFT JOIN agents a ON r.agent_id = a.id LEFT JOIN projects p ON a.project_id = p.id
        WHERE ${where} GROUP BY r.agent_id ORDER BY costUsd DESC, runs DESC`,
     ).all(params) as Row[]).map((row) => ({
       agentId: row.agentId as string,
       agentName: (row.agentName as string | null) ?? null,
+      projectId: (row.projectId as string | null) ?? null,
+      projectName: (row.projectName as string | null) ?? null,
       ...measures(row),
     }));
 
@@ -1420,13 +1424,17 @@ export class Db {
       ...measures(row),
     }));
 
+    // LEFT JOIN agents (for the name) AND projects (on the agent's project_id, for the OWNING-project
+    // label) so identically-named agents across projects disambiguate in the "all" scope.
     const byAgent = (this.db.prepare(
-      `SELECT s.agent_id AS agentId, a.name AS agentName, ${sums}
-       FROM session_usage_samples s LEFT JOIN agents a ON s.agent_id = a.id
+      `SELECT s.agent_id AS agentId, a.name AS agentName, a.project_id AS projectId, p.name AS projectName, ${sums}
+       FROM session_usage_samples s LEFT JOIN agents a ON s.agent_id = a.id LEFT JOIN projects p ON a.project_id = p.id
        WHERE ${where} GROUP BY s.agent_id ORDER BY costUsd DESC, samples DESC`,
     ).all(params) as Row[]).map((row) => ({
       agentId: (row.agentId as string | null) ?? null,
       agentName: (row.agentName as string | null) ?? null,
+      projectId: (row.projectId as string | null) ?? null,
+      projectName: (row.projectName as string | null) ?? null,
       ...measures(row),
     }));
 

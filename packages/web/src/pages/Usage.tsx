@@ -381,7 +381,7 @@ function HistorySection({
                       ? (b.costUsd - a.costUsd || totalTokens(b) - totalTokens(a))
                       : (totalTokens(b) - totalTokens(a) || b.costUsd - a.costUsd))
                     .map((a) => (
-                      <HistoryRow key={a.agentId} name={a.agentName ?? a.agentId.slice(0, 8)} row={a} max={max} />
+                      <HistoryRow key={a.agentId} name={a.agentName ?? a.agentId.slice(0, 8)} subtitle={a.projectName} row={a} max={max} />
                     ));
                 })()}
               </Panel>
@@ -393,13 +393,28 @@ function HistorySection({
   );
 }
 
+// A breakdown row's leading label: the primary name with an optional secondary subtitle stacked under it
+// (the owning project for agent rows — e.g. "Dev" · "Fire Studio"), so identically-named agents across
+// projects read unambiguously. With no subtitle it lays out exactly like the old single-line name.
+function RowName({ name, subtitle }: { name: string; subtitle?: string | null }) {
+  return (
+    <span style={{ display: "flex", flexDirection: "column", minWidth: 160, maxWidth: 200, overflow: "hidden" }}>
+      <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+      {subtitle && (
+        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
+      )}
+    </span>
+  );
+}
+
 // One historical breakdown row (project or agent): name, run count, a token meter relative to the
-// section's max, and the billed cost.
-function HistoryRow({ name, row, max }: { name: string; row: UsageHistoryProject | UsageHistoryAgent; max?: number }) {
+// section's max, and the billed cost. `subtitle` (the owning project, for agent rows) renders as a small
+// secondary label so identically-named agents across projects disambiguate.
+function HistoryRow({ name, subtitle, row, max }: { name: string; subtitle?: string | null; row: UsageHistoryProject | UsageHistoryAgent; max?: number }) {
   const tok = totalTokens(row);
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.border}` }}>
-      <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, minWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+      <RowName name={name} subtitle={subtitle} />
       <Chip label="runs" value={String(row.runs)} />
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
@@ -533,7 +548,7 @@ function SessionUsageSection({
                       ? (b.costUsd - a.costUsd || sessionTotalTokens(b) - sessionTotalTokens(a))
                       : (sessionTotalTokens(b) - sessionTotalTokens(a) || b.costUsd - a.costUsd))
                     .map((a) => (
-                      <SessionHistoryRow key={a.agentId ?? "—"} name={a.agentName ?? (a.agentId ? a.agentId.slice(0, 8) : "(no agent)")} row={a} max={max} />
+                      <SessionHistoryRow key={a.agentId ?? "—"} name={a.agentName ?? (a.agentId ? a.agentId.slice(0, 8) : "(no agent)")} subtitle={a.projectName} row={a} max={max} />
                     ));
                 })()}
               </Panel>
@@ -546,12 +561,13 @@ function SessionUsageSection({
 }
 
 // One interactive-session breakdown row (project or agent): name, sample count, a token meter relative to
-// the section's max, and the billed cost.
-function SessionHistoryRow({ name, row, max }: { name: string; row: SessionUsageProject | SessionUsageAgent; max?: number }) {
+// the section's max, and the billed cost. `subtitle` (the owning project, for agent rows) renders as a
+// small secondary label so identically-named agents across projects disambiguate.
+function SessionHistoryRow({ name, subtitle, row, max }: { name: string; subtitle?: string | null; row: SessionUsageProject | SessionUsageAgent; max?: number }) {
   const tok = sessionTotalTokens(row);
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.border}` }}>
-      <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, minWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+      <RowName name={name} subtitle={subtitle} />
       <Chip label="samples" value={fmtTokens(row.samples)} />
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
