@@ -77,9 +77,9 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
     mutationFn: (title: string) => api.createTask(projectId, { title, columnKey: "inbox" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["board", projectId] }),
   });
-  // Edit a task's title/description/priority from the detail drawer (same store the MCP tools read/write).
+  // Edit a task's title/description/priority/held from the detail drawer (same store the MCP tools read/write).
   const edit = useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: { title?: string; body?: string; priority?: TaskPriority } }) => api.updateTask(id, patch),
+    mutationFn: ({ id, patch }: { id: string; patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean } }) => api.updateTask(id, patch),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["board", projectId] }),
   });
   // PERMANENTLY delete a task card from the drawer (HUMAN-only REST; no MCP path). On success close the
@@ -519,6 +519,13 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
         <div onClick={onOpen} title="Open task" style={{ flex: 1, cursor: "pointer", minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
             <PriorityChip priority={prio(task)} />
+            {task.held && (
+              <span title="On hold — the idle watchdog won't nag the manager to pick this up"
+                style={{ flexShrink: 0, fontFamily: font.head, fontSize: 9, fontWeight: 700, letterSpacing: "0.08em",
+                  textTransform: "uppercase", color: color.bg, background: color.amber, borderRadius: 3, padding: "1px 4px" }}>
+                held
+              </span>
+            )}
             <span style={{ flex: 1 }}>{task.title}</span>
             {hasBody && <span title="has a description" style={{ color: color.textMuted, flexShrink: 0 }}>≣</span>}
           </div>
@@ -538,14 +545,15 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
 // MCP task tools read/write but the card never showed). Backdrop or Esc closes; keyed by task id so
 // switching cards resets the fields. Save patches the shared task store, then the board refetches.
 function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteError }:
-  { task: Task; onClose: () => void; onSave: (patch: { title?: string; body?: string; priority?: TaskPriority }) => void; saving: boolean;
+  { task: Task; onClose: () => void; onSave: (patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean }) => void; saving: boolean;
     onDelete: () => void; deleting: boolean; deleteError: string | null }) {
   const [title, setTitle] = useState(task.title);
   const [body, setBody] = useState(task.body ?? "");
   const [priority, setPriority] = useState<TaskPriority>(prio(task));
+  const [held, setHeld] = useState<boolean>(task.held ?? false);
   // Two-step delete: a first click arms the confirm so the destructive action can't fire on a single misclick.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const dirty = title !== task.title || body !== (task.body ?? "") || priority !== prio(task);
+  const dirty = title !== task.title || body !== (task.body ?? "") || priority !== prio(task) || held !== (task.held ?? false);
   // Guard the three close paths (backdrop / Esc / ✕) against silently discarding unsaved edits. When dirty,
   // a close request arms an in-drawer "Discard unsaved changes?" confirm (mirroring the delete two-step)
   // instead of closing; when clean it closes immediately, zero extra friction.
@@ -641,6 +649,27 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
             );
           })}
         </div>
+        {/* Owner HOLD gate: parks this card so the idle watchdog won't nag the manager to pick it up,
+            WITHOUT moving it to the blocked brake lane. Distinct from priority/column — an owner-only
+            "don't drive this yet" signal. Persisted on the same task store the MCP tools read. */}
+        <span style={labelStyle}>Hold</span>
+        <button type="button" role="switch" aria-checked={held} aria-label="Owner hold — idle watchdog won't nag about this card"
+          title={held
+            ? "Held — the idle watchdog discounts this card (won't nag the manager to pick it up). Click to release."
+            : "Not held — click to park this card so the idle watchdog won't nag about it (without using the blocked lane)."}
+          onClick={() => setHeld((h) => !h)}
+          style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", textAlign: "left",
+            padding: "6px 8px", borderRadius: 4, background: color.panel2,
+            border: `1px solid ${held ? color.amber : color.border}` }}>
+          <span aria-hidden style={{ width: 30, height: 16, borderRadius: 999, flexShrink: 0, position: "relative",
+            background: held ? color.amber : color.border, transition: "background 0.12s" }}>
+            <span style={{ position: "absolute", top: 2, left: held ? 16 : 2, width: 12, height: 12, borderRadius: 999,
+              background: color.bg, transition: "left 0.12s" }} />
+          </span>
+          <span style={{ fontFamily: font.mono, fontSize: 12, color: held ? color.amber : color.textDim }}>
+            {held ? "Held — won't nag" : "Not held"}
+          </span>
+        </button>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ ...labelStyle, flex: 1 }}>Description</span>
           <DescriptionMic speech={speech} dictating={dictating} onStart={startDictation} />
@@ -654,9 +683,9 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
           }} />
         {speech.supported && <DescriptionVoiceNote speech={speech} />}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave({ title, body, priority })}>{saving ? "Saving…" : "Save"}</Button>
+          <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave({ title, body, priority, held })}>{saving ? "Saving…" : "Save"}</Button>
           {dirty
-            ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); }}>Reset</Button>
+            ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); setHeld(task.held ?? false); }}>Reset</Button>
             : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
           {/* Destructive delete, pushed to the right and visually separated from Save. Two-step confirm. */}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>

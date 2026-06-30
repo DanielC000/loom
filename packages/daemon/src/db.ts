@@ -35,6 +35,7 @@ import type {
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PresetPrompt, PresetPromptSuggestion,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
 } from "@loom/shared";
+import { isOwnerHeldTaskTitle } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret } from "./keys/hash.js";
 
 const SCHEMA = `
@@ -222,6 +223,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   position REAL NOT NULL DEFAULT 0,
   -- p0 (critical) → p3 (low); default p2 (normal). Added to existing DBs via migrateTasks() below.
   priority TEXT NOT NULL DEFAULT 'p2',
+  -- owner-gated HOLD flag (idle-watchdog discount signal). Added to existing DBs via migrateTasks(); the
+  -- NOT NULL + constant DEFAULT 0 backfills every legacy task row to "not held" in place.
+  held INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -320,6 +324,13 @@ CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_s
  */
 const ARCHIVED_AT_BACKFILL_KEY = "archived_at_backfill_done";
 
+/**
+ * app_meta marker for the one-time `held` backfill (backfillHeldFromTitlesOnce) — seeds the structured
+ * Task.held flag from the LEGACY uppercase-HOLD/CONFIRM title heuristic so cards intentionally parked
+ * before the flag existed keep their idle-watchdog discount. Daemon-GLOBAL; set once per LOOM_HOME.
+ */
+const HELD_BACKFILL_KEY = "task_held_title_backfill_done";
+
 /** Columns added to `sessions` after phase-1; applied to existing DBs by migrateSessions(). */
 const SESSION_ADDED_COLUMNS: Record<string, string> = {
   role: "TEXT",
@@ -410,6 +421,9 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   // p0 (critical) → p3 (low). NOT NULL + constant DEFAULT 'p2' is legal on ALTER TABLE ADD COLUMN, so
   // every legacy row backfills to 'p2' (Normal) in place — existing cards keep all other fields intact.
   priority: "TEXT NOT NULL DEFAULT 'p2'",
+  // Owner-gated HOLD flag. NOT NULL + constant DEFAULT 0 backfills every legacy row to "not held" in place;
+  // intentionally-held legacy cards are seeded true post-migration by backfillHeldFromTitlesOnce().
+  held: "INTEGER NOT NULL DEFAULT 0",
 };
 
 type Row = Record<string, unknown>;
@@ -1451,6 +1465,29 @@ export class Db {
     this.setMeta(ARCHIVED_AT_BACKFILL_KEY, new Date().toISOString()); // stamp last — the one-shot guarantee
     return res.changes;
   }
+  /**
+   * One-time backfill of the structured `Task.held` flag from the LEGACY uppercase-HOLD/CONFIRM title
+   * heuristic (isOwnerHeldTaskTitle). Before `held` existed, the idle watchdog discounted owner-gated
+   * cards by matching their title; that brittle path is now gone, so this seeds the flag on every card
+   * that WOULD have been discounted, so intentionally-parked cards keep their discount instead of
+   * suddenly nagging. After this runs, `held` is authoritative — the title regex never gates again.
+   *
+   * Title-only (lane-agnostic) on purpose: that mirrors the OLD discount, which matched the title in
+   * EVERY actionable lane. A matched done/blocked card is harmless (held has no effect on a terminal or
+   * already-excluded card). One-shot via an app_meta marker (checked FIRST, stamped LAST), idempotent on
+   * a second invocation (returns 0). The SQLite regex can't do word boundaries, so we match in JS.
+   * Returns the count of rows newly flagged.
+   */
+  backfillHeldFromTitlesOnce(): number {
+    if (this.getMeta(HELD_BACKFILL_KEY) !== undefined) return 0; // guard: already run (one-shot)
+    const rows = this.db.prepare("SELECT id, title FROM tasks WHERE held = 0").all() as Row[];
+    const flag = this.db.prepare("UPDATE tasks SET held = 1 WHERE id = ?");
+    let changed = 0;
+    const run = this.db.transaction((toFlag: string[]) => { for (const id of toFlag) { flag.run(id); changed++; } });
+    run(rows.filter((r) => isOwnerHeldTaskTitle(r.title as string)).map((r) => r.id as string));
+    this.setMeta(HELD_BACKFILL_KEY, new Date().toISOString()); // stamp last — the one-shot guarantee
+    return changed;
+  }
   /** Permanently delete a session row (the Archive tab's Delete). Also drops its pending wakes. */
   deleteSession(id: string): void {
     this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(id);
@@ -1834,18 +1871,18 @@ export class Db {
   }
   insertTask(t: Task): void {
     this.db.prepare(
-      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,created_at,updated_at)
-       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@createdAt,@updatedAt)`,
-    ).run({ ...t, priority: t.priority ?? "p2" }); // default p2 when an (untyped) caller omits it
+      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,created_at,updated_at)
+       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@createdAt,@updatedAt)`,
+    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0 }); // defaults when an (untyped) caller omits them
   }
-  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority">>): void {
+  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held">>): void {
     const cur = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     if (!cur) return;
     const t = toTask(cur);
     const next = { ...t, ...patch, updatedAt: new Date().toISOString() };
     this.db.prepare(
-      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, updated_at=@updatedAt WHERE id=@id",
-    ).run(next);
+      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, updated_at=@updatedAt WHERE id=@id",
+    ).run({ ...next, held: next.held ? 1 : 0 });
   }
   /** PERMANENTLY delete a task card. Idempotent on a missing id (DELETE … WHERE matches nothing). HUMAN-only
    * (no MCP path) — an agent can only move a card to done; the REST route enforces the live-session guard. */
@@ -2124,6 +2161,7 @@ function toTask(r0: unknown): Task {
     id: r.id as string, projectId: r.project_id as string, title: r.title as string,
     body: r.body as string, columnKey: r.column_key as string, position: r.position as number,
     priority: (r.priority as Task["priority"]) ?? "p2",
+    held: (r.held as number) === 1,
     createdAt: r.created_at as string, updatedAt: r.updated_at as string,
   };
 }

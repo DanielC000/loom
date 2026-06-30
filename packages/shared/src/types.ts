@@ -608,24 +608,28 @@ export interface Task {
   columnKey: string; // references a resolved kanban column key
   position: number;  // fractional index for cheap reordering
   priority: TaskPriority; // p0 (critical) → p3 (low); default p2 (normal)
+  /**
+   * Owner-gated HOLD flag: a card parked in an actionable lane that the OWNER has gated ("don't pick
+   * this up — it's parked on a product decision") yet is NOT in the `blocked` brake lane. The idle
+   * watchdog DISCOUNTS a held card from its "actionable" count so it never nags a manager to pick up a
+   * card it's forbidden to touch. Additive + default false; distinct from `blocked` (the owner's brake
+   * lane) — `held` is the "parked-in-todo, owner-gated, don't nag" signal. Owner-settable only.
+   */
+  held?: boolean;
   createdAt: string;
   updatedAt: string;
 }
 
 /**
- * Owner-gated / HOLD marker convention for a task TITLE — the explicit, single-source-of-truth contract
- * the idle watchdog uses to DISCOUNT a parked owner product-decision from its "actionable" count.
+ * LEGACY owner-gated / HOLD title heuristic — RETAINED ONLY for the one-time boot backfill that seeds the
+ * structured `Task.held` flag from pre-existing cards (db.backfillHeldFromTitlesOnce). It is NO LONGER the
+ * live idle-watchdog discount signal: that now keys SOLELY off `Task.held` (set explicitly by the owner via
+ * the board / tasks_update), so a card titled with uppercase HOLD/CONFIRM is NOT discounted unless flagged.
  *
- * A card that is really an owner decision (HOLD / "confirm intent first") is sometimes parked in an
- * actionable lane (e.g. `todo`) rather than `blocked` — and `blocked` is the SOLE owner-controlled brake,
- * so the manager cannot move it there itself to silence the watchdog. Such a card is conventionally
- * titled with an explicit UPPERCASE `HOLD` or `CONFIRM` marker, e.g.
- *   "[HOLD — owner go required] …"   "fix(pty): … — CONFIRM run-role intent first".
- * The manager cannot action or clear it, so it is NOT actionable for idle-watchdog purposes.
- *
- * UPPERCASE + word-boundary on purpose: this is an explicit gate signal the OWNER writes, NOT lowercase
- * prose ("confirm the dialog renders", "hold the connection open") which must NOT trip it. This is a
- * defined convention, not free-text guessing — keep it the one place the marker is decided.
+ * The old brittleness this replaces: a legit card whose title merely contained "HOLD"/"CONFIRM" (e.g.
+ * "fix(pty): … — CONFIRM run-role intent first" as a real, actionable task) was silently discounted. The
+ * flag makes the gate explicit. Keep this UPPERCASE word-boundary matcher as the backfill seed only — do
+ * NOT reintroduce it on the live discount path.
  */
 const OWNER_HELD_TITLE_RE = /\b(HOLD|CONFIRM)\b/;
 export function isOwnerHeldTaskTitle(title: string): boolean {

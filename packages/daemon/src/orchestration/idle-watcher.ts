@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { resolveConfig, contextWindowForModel, columnKeyForRole, isOwnerHeldTaskTitle } from "@loom/shared";
+import { resolveConfig, contextWindowForModel, columnKeyForRole } from "@loom/shared";
 import type { OrchestrationEventKind } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
@@ -153,11 +153,14 @@ export class IdleWatcher {
       const openCards = db.listTasks(m.projectId).filter(
         (t) => t.columnKey !== terminalKey && t.columnKey !== humanHoldKey,
       );
-      // DISCOUNT owner-gated/HOLD/CONFIRM-first cards: a product-decision parked in an actionable lane
-      // (the owner left it in `todo`, not `blocked`) is NOT something the manager can drive — and it
-      // can't move it to `blocked` itself (the sole owner brake). Counting it kept nagging the manager to
-      // "pick up the next task NOW" on a card it's forbidden to touch (structural deadlock, card f8f1c1d5).
-      const heldCount = openCards.filter((t) => isOwnerHeldTaskTitle(t.title)).length;
+      // DISCOUNT owner-gated/HELD cards: a product-decision parked in an actionable lane (the owner left
+      // it in `todo`, not `blocked`) is NOT something the manager can drive — and it can't move it to
+      // `blocked` itself (the sole owner brake). Counting it kept nagging the manager to "pick up the next
+      // task NOW" on a card it's forbidden to touch (structural deadlock, card f8f1c1d5). The signal is the
+      // STRUCTURED `held` flag set by the owner (board / tasks_update) — SOLE source, not a title heuristic:
+      // a legit card titled with uppercase HOLD/CONFIRM is counted/nudges unless explicitly flagged held
+      // (card 788274a9 hardened the old OWNER_HELD_TITLE_RE false-positive away).
+      const heldCount = openCards.filter((t) => t.held === true).length;
       const openTodos = openCards.length - heldCount;
       // If EVERY open card is an owner-held gate (≥1 held, 0 genuinely-actionable), the manager has
       // nothing it can action and no way to clear the gate → skip silently instead of deadlock-nudging.

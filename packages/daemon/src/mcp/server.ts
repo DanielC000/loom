@@ -70,7 +70,7 @@ export class TaskMcpRouter {
     server.registerTool(
       "tasks_update",
       {
-        description: "Update a task by id; project-scoped. priority p0|p1|p2|p3 (low number = higher priority).",
+        description: "Update a task by id; project-scoped. priority p0|p1|p2|p3 (low number = higher priority). held=true marks an owner-gated card the idle watchdog won't nag about.",
         inputSchema: {
           id: z.string(),
           title: z.string().optional(),
@@ -78,6 +78,7 @@ export class TaskMcpRouter {
           columnKey: z.string().optional(),
           position: z.number().optional(),
           priority: prioritySchema.optional(),
+          held: z.boolean().optional(),
         },
       },
       async ({ id, ...patch }) => ok(updateProjectTask(db, projectId, id, patch)),

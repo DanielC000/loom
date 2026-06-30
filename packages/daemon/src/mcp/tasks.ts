@@ -121,7 +121,7 @@ export function createProjectTask(
 
 export function updateProjectTask(
   db: Db, projectId: string, taskId: string,
-  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority">>,
+  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held">>,
 ): Task | { error: string } {
   // Guard: the task must belong to this project (defense even though id is opaque).
   const owned = db.listTasks(projectId).find((t) => t.id === taskId);
@@ -145,5 +145,5 @@ export const TASK_TOOL_DESCRIPTORS = [
   { name: "tasks_list", description: "List the current project's board tasks. Defaults to a lightweight summary (no body) with done cards excluded; pass includeBody:true or use tasks_get(id) for bodies." },
   { name: "tasks_get", description: "Read ONE full task (title + body) by id, within the current project." },
   { name: "tasks_create", description: "Create a task on the current project's board (title, body?, columnKey?, priority?). priority is p0|p1|p2|p3 (low number = higher priority), default p2." },
-  { name: "tasks_update", description: "Update a task (title?, body?, columnKey?, position?, priority?) by id, within the current project. priority is p0|p1|p2|p3." },
+  { name: "tasks_update", description: "Update a task (title?, body?, columnKey?, position?, priority?, held?) by id, within the current project. priority is p0|p1|p2|p3; held=true is the owner-gated 'don't nag' flag the idle watchdog discounts." },
 ] as const;

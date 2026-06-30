@@ -71,10 +71,10 @@ function seedCard(e, columnKey) {
   e.db.insertTask({ id: `tk-${columnKey}-${Math.random().toString(36).slice(2, 6)}`, projectId: e.projId,
     title: columnKey, body: "", columnKey, position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
 }
-// Seed one card with an explicit title (for the owner-held/HOLD discount test).
-function seedTitled(e, columnKey, title) {
+// Seed one card with an explicit title (for the owner-held/HOLD discount test) and an optional `held` flag.
+function seedTitled(e, columnKey, title, held = false) {
   e.db.insertTask({ id: `tk-${columnKey}-${Math.random().toString(36).slice(2, 6)}`, projectId: e.projId,
-    title, body: "", columnKey, position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+    title, body: "", columnKey, held, position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
 }
 function cleanup(e) {
   try { e.db.close(); } catch { /* ignore */ }
@@ -114,44 +114,47 @@ function cleanup(e) {
   cleanup(e);
 }
 
-// ===== (1c) owner-gated/HOLD cards are DISCOUNTED from the actionable count (card f8f1c1d5) =====
-// A held card as the SOLE open card → NO nudge (the manager can't action or clear it; it's parked on an
-// owner decision and `blocked` is the sole owner brake). A genuinely-actionable card still nudges.
+// ===== (1c) owner-gated cards are DISCOUNTED from the actionable count off the STRUCTURED `held` flag =====
+// (card 788274a9 — the discount now keys SOLELY off Task.held, NOT an uppercase HOLD/CONFIRM title regex.)
+// A held=true card as the SOLE open card → NO nudge (the manager can't action or clear it; `blocked` is the
+// sole owner brake). A genuinely-actionable card still nudges.
 {
   const e = makeEnv();
   seedManager(e, "mgr-held-only");
-  seedTitled(e, "todo", "[HOLD — owner go required] fix(pty): confirm run-role intent first");
+  seedTitled(e, "todo", "big owner decision parked here", true); // held=true
   e.watcher.tick(NOW);
-  check("(1c) a HELD card as the sole todo → NO idle nudge (discounted, not a deadlock-nag)", e.enqueued.length === 0);
+  check("(1c) a held=true card as the sole todo → NO idle nudge (discounted, not a deadlock-nag)", e.enqueued.length === 0);
   cleanup(e);
 }
 {
-  // CONFIRM marker (mid-title, uppercase) is also discounted.
+  // FALSE-POSITIVE GONE: a real, actionable card whose title merely CONTAINS uppercase HOLD/CONFIRM but is
+  // held=false IS counted + nudges (the old OWNER_HELD_TITLE_RE would have wrongly discounted it).
   const e = makeEnv();
-  seedManager(e, "mgr-confirm-only");
-  seedTitled(e, "todo", "fix(pty): wire run-role — CONFIRM run-role intent first");
+  seedManager(e, "mgr-confirm-titled");
+  seedTitled(e, "todo", "fix(pty): wire run-role — CONFIRM run-role intent first", false); // held=false
   e.watcher.tick(NOW);
-  check("(1c) a sole CONFIRM-first card → NO idle nudge", e.enqueued.length === 0);
+  check("(1c) a CONFIRM/HOLD-TITLED but held=false card IS counted + nudges (title false-positive gone)",
+    e.enqueued.length === 1 && e.enqueued[0].id === "mgr-confirm-titled" && e.enqueued[0].text.includes("1 actionable"));
   cleanup(e);
 }
 {
   // A genuinely-actionable card alongside a held one → STILL nudges, and the count EXCLUDES the held card.
   const e = makeEnv();
   seedManager(e, "mgr-mixed");
-  seedTitled(e, "todo", "[HOLD — owner go required] big decision");
-  seedTitled(e, "todo", "fix(web): real actionable task");
+  seedTitled(e, "todo", "big decision", true);              // held=true → discounted
+  seedTitled(e, "todo", "fix(web): real actionable task", false); // held=false → counted
   e.watcher.tick(NOW);
   check("(1c) a held + a genuine card → STILL nudged (genuine work exists)", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-mixed");
   check("(1c) the reported actionable count EXCLUDES the held card (1, not 2)", e.enqueued[0]?.text.includes("1 actionable"));
   cleanup(e);
 }
 {
-  // Lowercase prose must NOT trip the marker (it's an explicit UPPERCASE owner gate, not free-text).
+  // A genuine held=false card DOES nudge (the third DoD direction, explicit).
   const e = makeEnv();
-  seedManager(e, "mgr-lowercase");
-  seedTitled(e, "todo", "fix(web): confirm dialog renders wrong + hold-to-save button");
+  seedManager(e, "mgr-genuine-todo");
+  seedTitled(e, "todo", "fix(web): ordinary actionable card", false);
   e.watcher.tick(NOW);
-  check("(1c) lowercase 'confirm'/'hold' prose is NOT discounted (still actionable → nudged)", e.enqueued.length === 1 && e.enqueued[0].text.includes("1 actionable"));
+  check("(1c) a genuine held=false card DOES nudge", e.enqueued.length === 1 && e.enqueued[0].text.includes("1 actionable"));
   cleanup(e);
 }
 {
@@ -160,6 +163,29 @@ function cleanup(e) {
   seedManager(e, "mgr-empty-board");
   e.watcher.tick(NOW);
   check("(1c) an empty board (0 cards, none held) STILL nudges (report 'done' path unchanged)", e.enqueued.length === 1 && e.enqueued[0].text.includes("0 actionable"));
+  cleanup(e);
+}
+
+// ===== (1d) one-time held backfill seeds the flag from legacy HOLD/CONFIRM titles (card 788274a9) =====
+// The transitional path: cards intentionally parked by the OLD title heuristic must keep their discount
+// once the flag is authoritative. backfillHeldFromTitlesOnce seeds held=true on matching-titled cards,
+// leaves non-matching cards held=false, and is one-shot (a second call is a no-op).
+{
+  const e = makeEnv();
+  seedTitled(e, "todo", "[HOLD — owner go required] big decision");          // matches → seeded held
+  seedTitled(e, "todo", "fix(pty): … — CONFIRM run-role intent first");      // matches → seeded held
+  seedTitled(e, "todo", "fix(web): ordinary actionable card");               // no match → stays held=false
+  seedTitled(e, "todo", "lowercase confirm/hold prose should not match");    // lowercase → no match
+  const tasks = () => e.db.listTasks(e.projId);
+  check("(1d) precondition: all four cards start held=false", tasks().every((t) => t.held === false));
+  const n = e.db.backfillHeldFromTitlesOnce();
+  check("(1d) backfill flips exactly the 2 uppercase HOLD/CONFIRM-titled cards", n === 2);
+  const heldTitles = tasks().filter((t) => t.held).map((t) => t.title);
+  check("(1d) the HOLD-titled card is now held", heldTitles.some((t) => t.includes("[HOLD")));
+  check("(1d) the CONFIRM-titled card is now held", heldTitles.some((t) => t.includes("CONFIRM")));
+  check("(1d) the ordinary + lowercase cards stay held=false", tasks().filter((t) => !t.held).length === 2);
+  // One-shot: a second invocation is a clean no-op (returns 0, flips nothing more).
+  check("(1d) a second backfill is a no-op (one-shot marker)", e.db.backfillHeldFromTitlesOnce() === 0);
   cleanup(e);
 }
 

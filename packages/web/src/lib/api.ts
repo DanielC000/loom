@@ -322,7 +322,7 @@ export const api = {
   // (e.g. dropping a non-required role lane) — shown but non-blocking.
   updateProjectColumns: (id: string, columns: DesiredColumn[]) =>
     putErr<{ ok: boolean; columns: KanbanColumn[]; warnings: string[] }>(`/api/projects/${id}/columns`, { columns }),
-  updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority">>) =>
+  updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held">>) =>
     post<{ ok: boolean }>(`/api/tasks/${id}`, patch),
   // PERMANENTLY delete a task card (drawer Delete button). HUMAN/loopback REST only — no MCP path. Uses
   // delErr so the server's live-session guard 400 ({ error }) surfaces verbatim to the user.

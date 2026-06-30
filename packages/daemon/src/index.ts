@@ -161,6 +161,16 @@ async function main(): Promise<void> {
   } catch (err) {
     console.warn(`[boot] archived_at backfill failed (continuing boot): ${(err as Error).message}`);
   }
+  // One-time backfill: before the structured Task.held flag (card 788274a9), the idle watchdog discounted
+  // owner-gated cards by matching uppercase HOLD/CONFIRM in the title — a brittle path now removed. Seed
+  // `held` on every card that heuristic WOULD have discounted so intentionally-parked cards keep their
+  // discount instead of suddenly nagging the manager. One-shot (app_meta marker); idempotent. Best-effort.
+  try {
+    const heldBackfilled = db.backfillHeldFromTitlesOnce();
+    if (heldBackfilled > 0) console.log(`[boot] backfilled held=true on ${heldBackfilled} legacy HOLD/CONFIRM-titled card(s)`);
+  } catch (err) {
+    console.warn(`[boot] held backfill failed (continuing boot): ${(err as Error).message}`);
+  }
   const recovered = db.recoverStaleSessions();
   if (recovered.length > 0) console.log(`[boot] reconciled ${recovered.length} stale session(s) -> exited`);
   // Crash-path backstop (card b37750a4): a daemon crash fires no onExit, so snapshot the transcript +
