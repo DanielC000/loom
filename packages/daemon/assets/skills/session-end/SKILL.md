@@ -15,9 +15,8 @@ prose. The daemon auto-commits the vault — never run manual vault git.
    / waiting). Only mark **done** if it's actually true — scoped work outstanding means it isn't done.
 2. **Code state** — ensure the build/gate passes; commit only if asked. Report any uncommitted changes
    plainly. When you *do* commit, stage an **explicit list of the paths this session touched**
-   (`git add <path> …`) — **never `git add -A` or `git add .`** in a shared workspace: unrelated
-   in-flight owner work (other Career / Homelab / Loom edits) may be present and a blanket stage would
-   sweep it into your commit. Push with plain `git push` (it already refuses a non-fast-forward — there
+   (`git add <path> …`) — **never `git add -A` or `git add .`** in a shared workspace: other unrelated
+   in-flight work may be present and a blanket stage would sweep it into your commit. Push with plain `git push` (it already refuses a non-fast-forward — there
    is no valid `--ff-only` push flag); reach for `--force-with-lease` only as a deliberate guard when a
    force is genuinely intended.
 3. **Prose** — if you changed design/architecture notes in the project's vault, apply `/doc-hygiene`

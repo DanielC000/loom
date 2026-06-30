@@ -8,9 +8,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       platform profiles; seedPlatformHome no-ops (no reserved project, no platform agents).
 //   (2) DEV boot (LOOM_DEV=1): the platform profiles ALSO seed, seedPlatformHome seeds the reserved
 //       project + Lead/Auditor agents, and a re-seed is idempotent (no duplicates).
-//   (3) RELEASE skill curation: curateSkillDirs (the pure helper the npm builder uses) excludes the two
-//       platform skills from the staged assets/skills but keeps the core ones — checked against the REAL
-//       bundled asset listing.
+//   (3) RELEASE skill curation: curateSkillDirs (the pure helper the npm builder uses) excludes the
+//       dev-only platform skills AND the install-specific `research` skill from the staged assets/skills
+//       but keeps the core ones — checked against the REAL bundled asset listing.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-dev-flag.mjs
 import fs from "node:fs";
@@ -87,11 +87,16 @@ try {
   const assetSkills = path.join(__dirname, "..", "assets", "skills");
   const allSkillDirs = fs.readdirSync(assetSkills, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
   const kept = curateSkillDirs(allSkillDirs);
-  check("(3) precondition: both platform skills exist in the bundled assets",
+  check("(3) precondition: every omitted skill exists in the bundled assets",
     DEV_ONLY_SKILLS.every((n) => allSkillDirs.includes(n)));
-  check("(3) staged release EXCLUDES both platform skills", DEV_ONLY_SKILLS.every((n) => !kept.includes(n)));
+  check("(3) staged release EXCLUDES every omitted skill (dev-only + install-specific)", DEV_ONLY_SKILLS.every((n) => !kept.includes(n)));
   check("(3) staged release KEEPS the core orchestration skills",
     ["orchestrate", "worker", "pickup", "doc-hygiene", "web-design"].every((n) => kept.includes(n)));
+  // The install-specific `research` skill (bespoke to the owner's geopolitics/history vault) must NOT
+  // ship to regular `loomctl` users — it lives in DEV_ONLY_SKILLS and is dropped from the staged set.
+  check("(3) research skill exists in the bundled assets", allSkillDirs.includes("research"));
+  check("(3) research is omitted from the ship set", DEV_ONLY_SKILLS.includes("research"));
+  check("(3) staged release EXCLUDES the install-specific research skill", !kept.includes("research"));
   // The user-facing Setup Assistant SHIPS to all users (ungated, core-seed): it is NOT a dev-only
   // platform skill, so it must survive curation. Guard against it ever being added to DEV_ONLY_SKILLS.
   check("(3) Setup Assistant skill exists in the bundled assets", allSkillDirs.includes("setup-assistant"));
@@ -103,13 +108,13 @@ try {
   check("(3) workspace-audit skill exists in the bundled assets", allSkillDirs.includes("workspace-audit"));
   check("(3) workspace-audit is NOT dev-only (ships to all users)", !DEV_ONLY_SKILLS.includes("workspace-audit"));
   check("(3) staged release KEEPS the workspace-audit skill", kept.includes("workspace-audit"));
-  check("(3) curation drops EXACTLY the two platform skills (kept = all − dev-only)",
+  check("(3) curation drops EXACTLY the omitted skills (kept = all − omitted)",
     kept.length === allSkillDirs.length - DEV_ONLY_SKILLS.length);
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle on Windows) */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Platform layer is gated behind LOOM_DEV: default boot seeds NO platform project/agents/profiles (core profiles present), LOOM_DEV=1 seeds the full layer idempotently, and the staged release assets/skills exclude the two platform skills while keeping the core ones."
+  ? "\n✅ ALL PASS — the Platform layer is gated behind LOOM_DEV: default boot seeds NO platform project/agents/profiles (core profiles present), LOOM_DEV=1 seeds the full layer idempotently, and the staged release assets/skills exclude the dev-only platform skills and the install-specific research skill while keeping the core ones."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

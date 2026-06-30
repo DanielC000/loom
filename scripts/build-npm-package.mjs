@@ -77,17 +77,18 @@ log("copy web dist → dist/web/  (resolveWebDistDir → <daemon-dist>/web)");
 fs.cpSync(webDist, path.join(stage, "dist", "web"), { recursive: true });
 log("copy daemon assets → assets/  (hook-relay, vault-lint, bundled skills)");
 fs.cpSync(daemonAssets, path.join(stage, "assets"), { recursive: true });
-// Curate the staged skills: the DEV-ONLY Platform-layer skills (platform-lead / platform-audit) are
-// gated behind LOOM_DEV and must NOT ship to regular `loomctl` users; the core orchestration skills
-// always ship. Prune the dev-only dirs from the staged copy (curation decided by the shared pure helper
-// in curate-release-skills.mjs, so the build + the daemon dev-flag test stay in lockstep).
+// Curate the staged skills: the dev-only Platform-layer skills (platform-lead / platform-audit, gated
+// behind LOOM_DEV) and the install-specific `research` skill must NOT ship to regular `loomctl` users;
+// the core orchestration skills always ship. Prune the omitted dirs from the staged copy (curation
+// decided by the shared pure helper in curate-release-skills.mjs, so the build + the daemon dev-flag
+// test stay in lockstep).
 const stagedSkills = path.join(stage, "assets", "skills");
 if (fs.existsSync(stagedSkills)) {
   const all = fs.readdirSync(stagedSkills, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
   const kept = new Set(curateSkillDirs(all));
   const omitted = all.filter((n) => !kept.has(n));
   for (const name of omitted) fs.rmSync(path.join(stagedSkills, name), { recursive: true, force: true });
-  log(omitted.length ? `curate skills → omitted dev-only: ${omitted.join(", ")}` : `curate skills → no dev-only skills present (omit set: ${DEV_ONLY_SKILLS.join(", ")})`);
+  log(omitted.length ? `curate skills → omitted: ${omitted.join(", ")}` : `curate skills → no omitted skills present (omit set: ${DEV_ONLY_SKILLS.join(", ")})`);
 }
 
 log("bundle @loom/shared → node_modules/@loom/shared/");
