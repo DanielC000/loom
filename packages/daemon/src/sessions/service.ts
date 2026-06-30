@@ -279,6 +279,21 @@ export class SessionService {
    * finally once the row is live (the liveHolder guard then owns exclusion) or on any failure.
    */
   private readonly inFlightSpawnTaskIds = new Set<string>();
+  /**
+   * msgIds of durable queued messages whose RE-DRIVE enqueue is currently HELD in a recipient's pty FIFO
+   * — enqueued onto a now-live recipient but not yet drained, so the durable `session_message_queued`
+   * record is still unresolved. Guards against a SECOND re-drive of the same held message: the one-shot
+   * boot scan (recoverUndeliveredMessagesOnBoot) and the resume/live-flip re-drive
+   * (redriveUndeliveredMessagesForRecipient) both run on boot — without this, each would enqueue the SAME
+   * text onto the FIFO and the recipient would see it TWICE (onDeliver's delivered-marker idempotency
+   * stops double RESOLUTION, not double ENQUEUE). Cleared when the held entry finally drains
+   * (resolveQueuedMessage in the onDeliver wrapper). If the holding pty (or the whole daemon) dies before
+   * the entry drains, the mark is simply never set again in the next process: the durable record stays
+   * unresolved and the next daemon boot's scan re-drives it exactly once (same as the pre-fix baseline —
+   * an intra-process pty death just defers recovery to the next boot, it can't lose the message). In-memory
+   * + process-local; the durable delivered marker remains the cross-restart idempotency guard.
+   */
+  private readonly redriveInFlightMsgIds = new Set<string>();
   constructor(
     private db: Db, private pty: PtyHost, private control: OrchestrationControl,
     opts?: { gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number; runTimeoutMs?: number },
@@ -849,6 +864,13 @@ export class SessionService {
     // busy=true carried in the DB across the restart. Without this the session shows/acts "busy"
     // forever, so enqueued worker reports queue instead of submitting and the idle guard can't fire.
     this.db.setBusy(session.id, false);
+    // Live-flip re-drive (card 225559e5): this recipient just transitioned to live, so re-drive any durable
+    // queued messages addressed to it that the ONE-SHOT boot scan couldn't deliver because it wasn't live
+    // when that scan ran (a later resume, a wake/crash-recovery resume, or a crash boot with no restart
+    // intent). Idempotent with the boot scan via redriveInFlightMsgIds + the durable delivered marker, so a
+    // boot that runs BOTH (resumeFleetOnBoot → resume() here, THEN recoverUndeliveredMessagesOnBoot) enqueues
+    // each message exactly once. enqueueStdin is ready-gated, so the message holds until the resumed TUI boots.
+    this.redriveUndeliveredMessagesForRecipient(session.id);
     return { ...session, processState: "live", busy: false };
   }
 
@@ -1195,27 +1217,14 @@ export class SessionService {
     // recipientId → sender(s) of messages we couldn't re-enqueue (stuck) → surfaced to live senders below.
     const stuckBySender = new Map<string, Set<string>>();
     for (const e of this.db.listUndeliveredQueuedMessages()) {
-      const recipientId = e.workerSessionId ?? null;
-      const msgId = typeof e.detail?.msgId === "string" ? e.detail.msgId : null;
-      const text = typeof e.detail?.text === "string" ? e.detail.text : null;
-      const sender = typeof e.detail?.sender === "string" ? e.detail.sender : e.managerSessionId;
-      if (!recipientId || !msgId || text === null) continue; // malformed — skip (can't act on it)
-
-      const recipient = this.db.getSession(recipientId);
-      if (!recipient || this.db.hasSuccessor(recipientId) || recipient.archivedAt) {
-        // Gone / recycled-forward / archived → retire so it never re-scans forever.
-        this.resolveQueuedMessage(msgId, { recipientId, reason: "recipient-gone-or-superseded" });
-        retired++;
-        continue;
-      }
-      if (recipient.processState === "live") {
-        // Re-enqueue with the SAME msgId so its drain resolves THIS queued event (no duplicate record).
-        // Ready-gated in host.ts: a freshly-resumed pty holds it until its TUI boots, then drains.
-        const r = this.pty.enqueueStdin(recipientId, text, "system", (reason?: string) => this.resolveQueuedMessage(msgId, { recipientId, reason }));
-        if (r.delivered || r.position !== undefined) { reEnqueued++; continue; }
-        // delivered:false with no position ⇒ the host has no live pty for it (DB/host skew) → treat as stuck.
-      }
+      const outcome = this.redriveQueuedMessage(e);
+      if (outcome === "reEnqueued") { reEnqueued++; continue; }
+      if (outcome === "retired") { retired++; continue; }
+      if (outcome === "skip") continue; // malformed — can't act on it (and nobody to nudge)
       // Not live (exited / starting) or live-without-pty → stuck; surface to the sender below.
+      const recipientId = e.workerSessionId;
+      if (!recipientId) continue;
+      const sender = typeof e.detail?.sender === "string" ? e.detail.sender : e.managerSessionId;
       const set = stuckBySender.get(sender) ?? new Set<string>();
       set.add(recipientId);
       stuckBySender.set(sender, set);
@@ -1237,6 +1246,74 @@ export class SessionService {
       try { const nr = this.pty.enqueueStdin(senderId, note); if (nr.delivered || nr.position !== undefined) senderNudges++; } catch { /* sender not ready — the durable record stands */ }
     }
     return { reEnqueued, retired, senderNudges };
+  }
+
+  /**
+   * Re-drive ONE still-undelivered durable `session_message_queued` event onto its recipient, idempotently.
+   * The SINGLE per-message engine shared by the one-shot boot scan (recoverUndeliveredMessagesOnBoot) and
+   * the resume/live-flip path (redriveUndeliveredMessagesForRecipient), so the two can NEVER double-deliver:
+   *   • malformed (no recipient/msgId/text) → "skip";
+   *   • recipient gone / recycled-forward / archived → RETIRE (a delivered marker, reason
+   *     "recipient-gone-or-superseded") so the undelivered set can't grow forever → "retired";
+   *   • recipient LIVE → re-enqueue with the SAME msgId (no new queued event) so its drain resolves THIS
+   *     event; ready-gated in host.ts (a freshly-resumed pty holds it until its TUI boots, then drains) →
+   *     "reEnqueued";
+   *   • recipient exists but isn't live (exited/starting) or live-without-pty → "stuck" (the caller decides
+   *     what to do — the boot scan surfaces it to the live sender; the resume path leaves it for a later flip).
+   * IDEMPOTENT two ways: (1) the in-process {@link redriveInFlightMsgIds} guard — a msgId whose previous
+   * re-drive is still HELD in a FIFO is reported "reEnqueued" without enqueuing a SECOND copy (the guard the
+   * boot-scan↔resume overlap needs, since the held record stays unresolved until it drains); (2) across
+   * restarts, the durable `session_message_delivered` marker (the unresolved-set query already excludes
+   * resolved ones, and resolveQueuedMessage is a no-op if already marked).
+   */
+  private redriveQueuedMessage(e: OrchestrationEvent): "reEnqueued" | "retired" | "stuck" | "skip" {
+    const recipientId = e.workerSessionId ?? null;
+    const msgId = typeof e.detail?.msgId === "string" ? e.detail.msgId : null;
+    const text = typeof e.detail?.text === "string" ? e.detail.text : null;
+    if (!recipientId || !msgId || text === null) return "skip"; // malformed — can't act on it
+    // A prior re-drive of this exact message is already HELD awaiting drain (this boot's other path, or a
+    // near-simultaneous live-flip) → don't enqueue a second copy; its onDeliver will resolve the record.
+    if (this.redriveInFlightMsgIds.has(msgId)) return "reEnqueued";
+
+    const recipient = this.db.getSession(recipientId);
+    if (!recipient || this.db.hasSuccessor(recipientId) || recipient.archivedAt) {
+      // Gone / recycled-forward / archived → retire so it never re-scans forever.
+      this.resolveQueuedMessage(msgId, { recipientId, reason: "recipient-gone-or-superseded" });
+      return "retired";
+    }
+    if (recipient.processState === "live") {
+      // Re-enqueue with the SAME msgId so its drain resolves THIS queued event (no duplicate record). Mark
+      // it in-flight FIRST so the overlapping path skips it; the onDeliver wrapper clears the mark AND
+      // resolves the durable record the instant the held message is finally handed to the recipient.
+      this.redriveInFlightMsgIds.add(msgId);
+      const r = this.pty.enqueueStdin(recipientId, text, "system", (reason?: string) => {
+        this.redriveInFlightMsgIds.delete(msgId);
+        this.resolveQueuedMessage(msgId, { recipientId, reason });
+      });
+      if (r.delivered || r.position !== undefined) return "reEnqueued";
+      // delivered:false with no position ⇒ the host has no live pty for it (DB/host skew) → not actually
+      // enqueued; undo the in-flight mark and treat as stuck so a later live-flip can retry it.
+      this.redriveInFlightMsgIds.delete(msgId);
+    }
+    return "stuck"; // not live (exited / starting) or live-without-pty
+  }
+
+  /**
+   * Re-drive any still-undelivered durable queued messages addressed to a recipient that JUST transitioned
+   * to LIVE (the resume/live-flip chokepoint) — the complement to the one-shot boot scan
+   * (recoverUndeliveredMessagesOnBoot). It closes the gap where a recipient is NOT live at boot recovery and
+   * comes online LATER: a Lead/manager resumed after the boot scan ran (manual REST /resume, a due wake, a
+   * crash-recovery resume), or a crash boot with no restart intent (so resumeFleetOnBoot never flipped it
+   * live before the scan). Idempotent via {@link redriveQueuedMessage} (the in-flight guard + durable
+   * delivered marker), so even when boot recovery ALSO handles the same message it is enqueued exactly once.
+   * Best-effort + never throws (a re-drive fault must never disturb the resume it hangs off).
+   */
+  private redriveUndeliveredMessagesForRecipient(recipientId: string): void {
+    try {
+      for (const e of this.db.listUnresolvedQueuedMessagesForWorker(recipientId)) {
+        this.redriveQueuedMessage(e);
+      }
+    } catch { /* best-effort — must never gate a resume */ }
   }
 
   /**

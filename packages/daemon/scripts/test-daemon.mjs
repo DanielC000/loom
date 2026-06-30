@@ -47,7 +47,7 @@ const HERMETIC = [
   "no-commit-reviewer", // card 14434d6b: a declared no-commit worker (Profile noCommit) auto-retires on 0-commit done (frees the cap slot, no worker_stop) + the forgot-to-commit warning is suppressed; a normal 0-commit worker still warns + stays live
   "merge-orphaned-to-main",
 
-  "pty-busy-drain", "pty-coalesce-drain", "pty-rate-limit-park-drain", "pty-composer-dirty", "pty-queue-mutations", "pty-queue-rest", "pty-resume-readiness", "pty-stop-queue", "pty-interrupt-redirect", "redirect-worker", "spawn-env", "queued-message-durability", "graceful-stop", "resume-mode-cycles", "resume-mode-detect", "resume-mode-feedback", "resume-already-live-guard", "shell-terminal",
+  "pty-busy-drain", "pty-coalesce-drain", "pty-rate-limit-park-drain", "pty-composer-dirty", "pty-queue-mutations", "pty-queue-rest", "pty-resume-readiness", "pty-stop-queue", "pty-interrupt-redirect", "redirect-worker", "spawn-env", "queued-message-durability", "queued-message-liveflip-redrive", "graceful-stop", "resume-mode-cycles", "resume-mode-detect", "resume-mode-feedback", "resume-already-live-guard", "shell-terminal",
   "db-backup",
   "crashlog", // card c00be6e8: top-level fatal-exit handler writes a diagnosable crashlog under .loom; clean/restart exits don't
   "my-context-gate", // PL Auditor finding #9: my_context folds in the RESOLVED project gateCommand, READ-ONLY (no set/propose surface)
