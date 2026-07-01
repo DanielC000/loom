@@ -8,6 +8,7 @@ import { useState } from "react";
 import { Panel, SectionLabel, Badge, Button } from "../components/ui";
 import { color, font } from "../theme";
 import { Stat, PlanUsageStrip, AttentionRow, FleetRow, FleetCard, EventRow, WaveConsumption } from "../components/fleet";
+import { archivedOnlyProjects, ARCHIVED_ONLY_CAP, type ArchivedOnlyProject } from "../lib/fleet";
 import { ReviewQueue } from "../components/reviewQueue";
 import { AuditReplayPanel } from "../components/auditReplay";
 
@@ -79,6 +80,13 @@ export default function MissionControl() {
     (sessionsByProject.get(s.projectName) ?? sessionsByProject.set(s.projectName, []).get(s.projectName)!).push(s);
   const projectNames = [...sessionsByProject.keys()]
     .sort((a, b) => mostRecentActivity(sessionsByProject.get(b)!) - mostRecentActivity(sessionsByProject.get(a)!));
+
+  // Fully-archived projects — those present ONLY in the archived set (all their sessions have exited, so
+  // they're absent from the live `projectNames` above). MC builds its fleet from the RUNNING set, so these
+  // finished waves would otherwise drop off the god-eye entirely. Derived O(n) (a live-name Set + one pass
+  // over the archive; see lib/fleet.ts) and rendered as MUTED cards BELOW the live fleet, so live projects
+  // always rank first and archived history can never crowd the active fleet.
+  const archivedOnly = archivedOnlyProjects(projectNames, archived.data ?? []);
 
   // Per-project Fleet card mode: small fixed-size summary by default; a card expands to the full
   // managers→workers view. State holds the EXPANDED project names (empty = all small). Persisted to
@@ -215,6 +223,11 @@ export default function MissionControl() {
               );
             })}
           </div>
+
+          {/* Fully-archived projects — finished waves with zero live sessions, kept glanceable as MUTED
+              cards. Rendered AFTER the live grid (live always ranks first) and collapsed behind a small
+              affordance + capped, so they never crowd the active fleet. */}
+          <ArchivedOnlyFleet projects={archivedOnly} />
         </div>
 
         <div>
@@ -230,6 +243,42 @@ export default function MissionControl() {
           observability surface for "what actually happened" once a wave is several agents deep. Roots are
           managers, live first then by recency, so the default subject is the wave you're driving now. */}
       <AuditReplayPanel managers={replayRoots} />
+    </div>
+  );
+}
+
+// Fully-archived projects strip — the finished-wave tier of the fleet. Every project here has zero live
+// sessions (present only in the archive), so MC's running-derived fleet would drop it entirely; we surface
+// each as a MUTED FleetCard so past waves stay glanceable. Kept OUT of the way per the owner's constraint:
+// collapsed behind a "N archived project(s)" affordance (closed by default) AND, once open, capped at
+// ARCHIVED_ONLY_CAP cards (the affordance still reports the true total) so archived history can never crowd
+// the active fleet above it.
+function ArchivedOnlyFleet({ projects }: { projects: ArchivedOnlyProject[] }) {
+  const [open, setOpen] = useState(false);
+  if (projects.length === 0) return null;
+  const shown = projects.slice(0, ARCHIVED_ONLY_CAP);
+  const overflow = projects.length - shown.length;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <Button variant="ghost" onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        title={open ? "Hide fully-archived projects" : "Show fully-archived projects"}
+        style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, padding: "2px 6px" }}>
+        {open ? "▾" : "▸"} {projects.length} archived project{projects.length === 1 ? "" : "s"}
+      </Button>
+      {open && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, alignItems: "start", marginTop: 8 }}>
+          {shown.map((p) => (
+            <FleetCard key={p.name} name={p.name} managers={[]} workers={[]} archived={p.archived}
+              attention={0} onExpand={() => { /* no live sessions to expand into */ }} muted />
+          ))}
+          {overflow > 0 && (
+            <span style={{ alignSelf: "center", fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+              +{overflow} more archived
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

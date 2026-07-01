@@ -46,3 +46,37 @@ export function workerBuckets(workers: SessionListItem[]) {
   }
   return { busy, idle, rl, offline, total: workers.length };
 }
+
+// ── Archived-only projects (the god-eye "finished wave" tier) ──────────────────────────────────────────
+// Mission Control builds its project list from the RUNNING session set, so a project whose sessions have
+// ALL exited (auto-archived on exit) drops off the god-eye entirely. To keep a finished wave glanceable,
+// surface projects present ONLY in the archived set — in archived, absent from the live set — as MUTED
+// cards, rendered AFTER the live fleet so live projects always rank first and archived history can never
+// crowd the active fleet. The derivation is O(n): a Set of live project names, then ONE pass over the
+// archived rows (never O(n²) over a large archive). The rendered count is capped (ARCHIVED_ONLY_CAP) so a
+// deep archive stays out of the way; the affordance still reports the true total.
+export const ARCHIVED_ONLY_CAP = 4;
+
+export interface ArchivedOnlyProject { name: string; archived: SessionListItem[] }
+
+export function archivedOnlyProjects(
+  liveProjectNames: Iterable<string>,
+  archived: readonly SessionListItem[],
+): ArchivedOnlyProject[] {
+  const live = new Set(liveProjectNames);
+  const byProject = new Map<string, SessionListItem[]>();
+  for (const s of archived) {
+    if (live.has(s.projectName)) continue; // still has live sessions → already in the active fleet
+    (byProject.get(s.projectName) ?? byProject.set(s.projectName, []).get(s.projectName)!).push(s);
+  }
+  // Freshest finished wave first, so the most-recently-archived project reads at the top of the strip.
+  return [...byProject.entries()]
+    .map(([name, sessions]) => ({ name, archived: sessions }))
+    .sort((a, b) => archivedRecency(b.archived) - archivedRecency(a.archived));
+}
+
+function archivedRecency(sessions: readonly SessionListItem[]): number {
+  let max = -Infinity;
+  for (const s of sessions) max = Math.max(max, +new Date(s.lastActivity));
+  return max;
+}

@@ -253,7 +253,7 @@ function CompBar({ buckets }: { buckets: ReturnType<typeof workerBuckets> }) {
   );
 }
 
-export function FleetCard({ name, managers, workers, archived = [], attention, onExpand }: {
+export function FleetCard({ name, managers, workers, archived = [], attention, onExpand, muted }: {
   name: string;
   managers: SessionListItem[]; // activity-sorted by the caller
   workers: SessionListItem[];
@@ -263,6 +263,10 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
   archived?: SessionListItem[];
   attention: number;
   onExpand: () => void;
+  // A fully-archived project (zero live sessions) — de-emphasize the whole card so finished waves stay
+  // glanceable without crowding the active fleet. A restrained lower-contrast treatment (opacity), not a
+  // new visual language. Optional + defaulted-off, so live cards stay byte-identical.
+  muted?: boolean;
 }) {
   const running = [...managers, ...workers];
   // Cap the archived rows folded into the card's buckets so a big archive can't dominate the composition
@@ -277,7 +281,7 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
   const topSt = topMgr ? sessionStatus(topMgr) : null;
 
   return (
-    <Panel style={{ height: 206, display: "flex", flexDirection: "column", gap: 8, overflow: "hidden" }}>
+    <Panel style={{ height: 206, display: "flex", flexDirection: "column", gap: 8, overflow: "hidden", ...(muted ? { opacity: 0.6 } : null) }}>
       {/* header: roll-up dot + name + expand */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Dot tone={roll.tone} glow={roll.glow} />
