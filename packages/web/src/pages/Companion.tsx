@@ -8,6 +8,8 @@ import {
   validateBinding, validatePairing, validateSender, type CompanionConfigForm,
 } from "../lib/companion";
 import { Panel, Button, Input, Select, SectionLabel, Badge, StatusPill, Chip } from "../components/ui";
+import { CompanionChat } from "../components/CompanionChat";
+import { IN_APP_CHANNEL } from "../lib/companionChat";
 import { color, font, radius } from "../theme";
 
 // Loom Companion management (Companion epic Phase 3). The HUMAN-only cockpit surface over the loopback
@@ -382,12 +384,19 @@ function ConfigFields({ form, set, mode, currentToken }: {
   );
 }
 
-// ── Detail: config editor + access + pairing ────────────────────────────────────
+// ── Detail: chat surface (default face) + config editor + access + pairing ───────
 function CompanionDetail({ companion, label, onChanged, onDeleted }: {
   companion: CompanionRow; label: string; onChanged: () => void; onDeleted: () => void;
 }) {
+  // Chat is the companion's DEFAULT face in the app (not the raw terminal); Manage is a click away.
+  const [mode, setMode] = useState<"chat" | "manage">("chat");
+  // In-app reachability: an in-app reply frame only comes back when a binding on the in-app channel exists
+  // for this session (chatId == sessionId — the loopback self-address). Anything else ⇒ chat shows the
+  // gentle "not wired" notice instead of implying a message was delivered.
+  const armed = companion.binding?.channel === IN_APP_CHANNEL && companion.binding.chatId === companion.sessionId;
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{label}</strong>
         {companion.config
@@ -396,21 +405,62 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
         {companion.config?.envPinned && <Badge tone="amber">pinned by env</Badge>}
         {companion.config && !companion.binding && <Badge tone="amber">not reachable — no binding</Badge>}
         <span style={{ flex: 1 }} />
-        <Chip label="session" value={companion.sessionId.slice(0, 8)} />
+        <ModeToggle mode={mode} onMode={setMode} />
       </div>
 
-      <ConfigSection companion={companion} onChanged={onChanged} onDeleted={onDeleted} />
-      <AccessSection companion={companion} onChanged={onChanged} />
-      <PairingSection sessionId={companion.sessionId} />
+      {mode === "chat" ? (
+        <div role="tabpanel" id="companion-panel-chat" aria-labelledby="companion-tab-chat"
+          style={{ flex: 1, minHeight: "62vh", display: "flex", flexDirection: "column" }}>
+          <CompanionChat sessionId={companion.sessionId} title={label} armed={armed} />
+        </div>
+      ) : (
+        <div role="tabpanel" id="companion-panel-manage" aria-labelledby="companion-tab-manage"
+          style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+          <ConfigSection companion={companion} onChanged={onChanged} onDeleted={onDeleted} />
+          <AccessSection companion={companion} onChanged={onChanged} />
+          <PairingSection sessionId={companion.sessionId} />
 
-      <Panel style={{ padding: 12, background: color.panel2 }}>
-        <SectionLabel style={{ margin: "0 0 6px" }}>Restrict this companion's tools</SectionLabel>
-        <p style={{ ...hint, margin: 0 }}>
-          A chat-reachable agent is high blast-radius. Confine what it can do with the{" "}
-          <strong style={{ color: color.text }}>restricted / confirm-gated</strong> tool toggle on its Profile —{" "}
-          <Link to="/profiles" style={{ color: color.cyan }}>open Profiles →</Link>
-        </p>
-      </Panel>
+          <Panel style={{ padding: 12, background: color.panel2 }}>
+            <SectionLabel style={{ margin: "0 0 6px" }}>Restrict this companion's tools</SectionLabel>
+            <p style={{ ...hint, margin: 0 }}>
+              A chat-reachable agent is high blast-radius. Confine what it can do with the{" "}
+              <strong style={{ color: color.text }}>restricted / confirm-gated</strong> tool toggle on its Profile —{" "}
+              <Link to="/profiles" style={{ color: color.cyan }}>open Profiles →</Link>
+            </p>
+          </Panel>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Segmented Chat / Manage switch — a companion's chat is the default view; management is one click away.
+function ModeToggle({ mode, onMode }: { mode: "chat" | "manage"; onMode: (m: "chat" | "manage") => void }) {
+  const opts: { key: "chat" | "manage"; label: string }[] = [{ key: "chat", label: "Chat" }, { key: "manage", label: "Manage" }];
+  return (
+    <div role="tablist" aria-label="Companion view" style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden" }}>
+      {opts.map((o) => {
+        const on = o.key === mode;
+        return (
+          <button
+            key={o.key}
+            id={`companion-tab-${o.key}`}
+            role="tab"
+            aria-selected={on}
+            aria-controls={`companion-panel-${o.key}`}
+            onClick={() => onMode(o.key)}
+            className="loom-toggle"
+            style={{
+              background: on ? color.phosphorDim : "transparent",
+              color: on ? color.text : color.textDim,
+              border: "none", padding: "5px 14px", fontFamily: font.mono, fontSize: 12, cursor: "pointer",
+              textTransform: "uppercase", letterSpacing: "0.06em",
+            }}
+          >
+            {o.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
