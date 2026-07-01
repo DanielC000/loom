@@ -154,6 +154,7 @@ export default function Overview() {
         {all.length > 0 && !fleetOpen && (
           <div style={{ maxWidth: 280 }}>
             <FleetCard name={project?.name ?? projectId} managers={managers} workers={workers}
+              archived={archived.data ?? []}
               attention={projAttention.length} onExpand={() => setFleet(true)} />
           </div>
         )}

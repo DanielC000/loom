@@ -178,13 +178,16 @@ export default function MissionControl() {
               // activity under it (hierarchy intact); orphan workers ordered among themselves.
               const projManagers = managers.filter((m) => m.projectName === pn).sort(bySessionActivity);
               const projWorkers = workers.filter((w) => w.projectName === pn);
+              // This project's archived (exited) sessions — folded into the compact card as muted history
+              // so it doesn't go blank the moment the wave auto-archives.
+              const projArchived = (archived.data ?? []).filter((s) => s.projectName === pn);
               const looseWorkers = projWorkers
                 .filter((w) => !projManagers.some((m) => m.id === w.parentSessionId))
                 .sort(bySessionActivity);
 
               if (!expanded.has(pn)) {
                 return (
-                  <FleetCard key={pn} name={pn} managers={projManagers} workers={projWorkers}
+                  <FleetCard key={pn} name={pn} managers={projManagers} workers={projWorkers} archived={projArchived}
                     attention={attnByProject.get(pn) ?? 0} onExpand={() => toggleExpanded(pn)} />
                 );
               }

@@ -2,7 +2,12 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "./api";
+import { isRateLimited } from "./fleet";
 import type { Tone } from "../theme";
+
+// isRateLimited moved to lib/fleet.ts (a JSX-free, runtime-relative-import-free module the hermetic fleet
+// test can load); re-exported here so its existing importers keep resolving it from lib/attention.
+export { isRateLimited };
 
 // Centralized "things needing a human" derivation, shared by Mission Control's attention queue and
 // the shell bell. Built from the already-polled sessions + per-manager events (react-query dedups
@@ -10,9 +15,6 @@ import type { Tone } from "../theme";
 
 const STUCK_BUSY_MS = 3 * 60_000; // busy with no activity this long → likely stuck (heuristic)
 
-export function isRateLimited(s: SessionListItem): boolean {
-  return !!s.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > Date.now();
-}
 export function isStuckBusy(s: SessionListItem): boolean {
   return s.processState === "live" && s.busy && Date.now() - new Date(s.lastActivity).getTime() > STUCK_BUSY_MS;
 }

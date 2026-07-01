@@ -3,8 +3,13 @@ import type { SessionListItem, OrchestrationEvent, UsageLimitsStatus, UsageWindo
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
 import { isRateLimited, type AttentionItem } from "../lib/attention";
+import { fleetRollup, workerBuckets, capArchived } from "../lib/fleet";
 import { Panel, StatusPill, Chip, Meter, Button, Dot } from "./ui";
 import { color, font, radius, tone, type Tone } from "../theme";
+
+// The pure roll-up math lives in lib/fleet.ts (JSX-free, so the hermetic node test can import it); the
+// widgets re-export it so existing consumers (Overview) keep importing from the components/fleet barrel.
+export { fleetRollup, workerBuckets };
 
 // Shared FLEET widgets — the projects→managers→workers roll-up cards, fleet rows, plan-usage strip,
 // attention rows, activity rows, and their roll-up helpers. Extracted from MissionControl (the
@@ -216,26 +221,7 @@ export function WaveConsumption({ sessions }: { sessions: SessionListItem[] }) {
 // A FIXED-SIZE per-project card: a roll-up status, manager/worker counts, a worker-state
 // composition bar, worst-case context pressure, and a hint of the busiest manager. Expands to the
 // full FleetRow list. Same component kit + tokens as the rest of the page (no new color/chart deps).
-
-// Roll-up status — worst-of across the project's sessions: rate-limited > busy > idle > no-live-mgr.
-export function fleetRollup(sessions: SessionListItem[]): { tone: Tone; label: string; glow?: boolean } {
-  if (sessions.some(isRateLimited)) return { tone: "red", label: "rate-limited" };
-  if (sessions.some((s) => s.processState === "live" && s.busy)) return { tone: "amber", label: "busy", glow: true };
-  if (sessions.some((s) => s.role === "manager" && s.processState === "live")) return { tone: "phosphor", label: "idle" };
-  return { tone: "muted", label: "no live manager" };
-}
-
-// Worker-state tally for the composition bar — each worker lands in exactly one bucket.
-export function workerBuckets(workers: SessionListItem[]) {
-  let busy = 0, idle = 0, rl = 0, offline = 0;
-  for (const w of workers) {
-    if (isRateLimited(w)) rl++;
-    else if (w.processState !== "live") offline++;
-    else if (w.busy) busy++;
-    else idle++;
-  }
-  return { busy, idle, rl, offline, total: workers.length };
-}
+// (fleetRollup + workerBuckets live in lib/fleet.ts — imported + re-exported above.)
 
 // Worst-case context occupancy across the fleet (the session closest to its window) — the figure
 // that signals "someone needs recycling soon". 0/0 when no session reports ctx.
@@ -267,29 +253,43 @@ function CompBar({ buckets }: { buckets: ReturnType<typeof workerBuckets> }) {
   );
 }
 
-export function FleetCard({ name, managers, workers, attention, onExpand }: {
+export function FleetCard({ name, managers, workers, archived = [], attention, onExpand }: {
   name: string;
   managers: SessionListItem[]; // activity-sorted by the caller
   workers: SessionListItem[];
+  // The project's ARCHIVED (exited) sessions — ArchivedSessionListItem extends SessionListItem, so they
+  // drop in as-is. Folded in (capped) as muted history so the card doesn't go blank right after a wave
+  // auto-archives. Optional + defaulted, so every existing call site stays byte-identical when omitted.
+  archived?: SessionListItem[];
   attention: number;
   onExpand: () => void;
 }) {
-  const sessions = [...managers, ...workers];
-  const roll = fleetRollup(sessions);
-  const buckets = workerBuckets(workers);
-  const wc = worstContext(sessions);
+  const running = [...managers, ...workers];
+  // Cap the archived rows folded into the card's buckets so a big archive can't dominate the composition
+  // bar; the header below still reports the TRUE archived total. Archived rows are exited → offline bucket.
+  const foldedArchived = capArchived(archived);
+  const archivedWorkers = foldedArchived.filter((s) => s.role !== "manager");
+  const roll = fleetRollup(running); // severity from live state only (see lib/fleet.ts)
+  const buckets = workerBuckets([...workers, ...archivedWorkers]);
+  const wc = worstContext(running); // ctx pressure is a live recycle signal — finished sessions excluded
   const ctxHot = wc.ratio > CONTEXT_WARN_RATIO;
   const topMgr = managers[0];
   const topSt = topMgr ? sessionStatus(topMgr) : null;
 
   return (
-    <Panel style={{ height: 188, display: "flex", flexDirection: "column", gap: 8, overflow: "hidden" }}>
+    <Panel style={{ height: 206, display: "flex", flexDirection: "column", gap: 8, overflow: "hidden" }}>
       {/* header: roll-up dot + name + expand */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Dot tone={roll.tone} glow={roll.glow} />
         <span style={{ fontFamily: font.head, fontSize: 13, textTransform: "uppercase", letterSpacing: "0.06em", color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={name}>{name}</span>
         <span style={{ flex: 1 }} />
         <Button variant="ghost" style={{ padding: "0 6px" }} title="Expand" onClick={onExpand}>⤢</Button>
+      </div>
+
+      {/* running / archived split — the "both-in-one" summary. Archived reads as clearly secondary. */}
+      <div style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, whiteSpace: "nowrap" }}>
+        running {running.length}
+        {archived.length > 0 && <span style={{ color: color.textDim }}> · archived {archived.length}</span>}
       </div>
 
       {/* status + counts */}
