@@ -85,7 +85,14 @@ export type InboundResult =
   | { accepted: false; reason: "session-dead"; sessionId: string; acked: boolean }
   // The submit primitive THREW (e.g. pty.write racing a dying session, or a fail-loud M1/M2 guard). The
   // gateway contains it — a racy inbound must NEVER crash the daemon via an unhandled rejection.
-  | { accepted: false; reason: "submit-failed"; sessionId: string; acked: boolean };
+  | { accepted: false; reason: "submit-failed"; sessionId: string; acked: boolean }
+  // A DM-PAIRING code redeemed successfully (Companion DM-pairing). NOT a turn (no submit — the code text
+  // never reaches the agent): the redeemer's AUTHENTICATED chat.id was bound to `sessionId` ('paired-dm')
+  // or their authenticated sender.id was added to a group binding's allowlist ('paired-sender'). `acked`
+  // reports whether the "paired" confirmation reached the chat. A FAILED redemption never returns these —
+  // it falls through to the SAME silent reject as any unallowlisted inbound (no pairing oracle).
+  | { accepted: false; reason: "paired-dm"; sessionId: string; acked: boolean }
+  | { accepted: false; reason: "paired-sender"; sessionId: string; acked: boolean };
 
 /**
  * A session↔chat binding (spike scope: seeded from env as a SINGLE binding). Models WHICH chat on WHICH

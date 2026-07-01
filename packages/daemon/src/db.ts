@@ -39,7 +39,19 @@ import type {
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
 } from "@loom/shared";
 import { isOwnerHeldTaskTitle } from "@loom/shared";
-import { mintApiKey, parseApiKey, verifySecret } from "./keys/hash.js";
+import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken } from "./keys/hash.js";
+
+/**
+ * The atomic result of a companion pairing-code redemption (db layer). A single silent `rejected` covers
+ * EVERY failure (wrong/expired/consumed/locked-out/grant-type-or-session mismatch/route-collision) so the
+ * caller can surface the SAME reject as any unallowlisted inbound — no pairing oracle. On success the grant
+ * is applied + the code consumed in ONE transaction; `bound` carries the freshly-created dm binding so the
+ * gateway can live-sync its in-memory routing map.
+ */
+export type PairingRedeemResult =
+  | { outcome: "rejected" }
+  | { outcome: "bound"; sessionId: string; channel: string; chatId: string; scope: "dm" | "group" }
+  | { outcome: "sender-added"; sessionId: string };
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects (
@@ -363,6 +375,38 @@ CREATE TABLE IF NOT EXISTS companion_allowed_senders (
   created_at TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_allowed_senders_route ON companion_allowed_senders(session_id, channel, sender_id);
+-- Companion DM-pairing (SECURITY): an owner-minted, single-use, short-TTL code that ENROLLS a new
+-- chat/sender into the binding/allowlist records above WITHOUT hand-entering numeric ids. The code is
+-- hashed at rest (salted SHA-256; plaintext shown to the human ONCE at mint — never stored, never echoed
+-- to a chat). At mint the human targets a companion session_id + a grant_type; at redemption the grant
+-- always captures the AUTHENTICATED inbound metadata id (never a body-supplied id). Brand-new tables ⇒
+-- CREATE TABLE IF NOT EXISTS is itself the additive migration (an existing DB gains empty tables on boot).
+-- All times are epoch-ms INTEGERs (paired with an injectable numeric clock, so TTL/lockout are pure
+-- integer math and deterministically testable — no wall-clock sleeps).
+CREATE TABLE IF NOT EXISTS companion_pairing_codes (
+  code_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,          -- the companion session the grant targets
+  channel TEXT NOT NULL,             -- the channel the code is valid on (redemption channel must match)
+  grant_type TEXT NOT NULL,          -- 'dm-bind' (new dm binding) | 'group-sender' (add to a group allowlist)
+  code_hash TEXT NOT NULL,           -- salted SHA-256 of the secret (hex) — NEVER plaintext
+  code_salt TEXT NOT NULL,           -- per-code random salt (hex)
+  minted_at INTEGER NOT NULL,        -- epoch ms
+  expires_at INTEGER NOT NULL,       -- epoch ms (short TTL)
+  consumed_at INTEGER,               -- epoch ms of single-use consumption (NULL = unused)
+  consumed_by TEXT                   -- the authenticated sender id that redeemed it
+);
+-- Per-(channel, sender_id) redemption attempt counters — the rate-limit / lockout defense-in-depth
+-- (the ≥64-bit secret is the primary defense). Keyed on the AUTHENTICATED sender id; while locked the
+-- redemption path rejects WITHOUT even loading a code. UNIQUE per (channel, sender_id) so an increment is
+-- an upsert. Times are epoch-ms INTEGERs like the codes table.
+CREATE TABLE IF NOT EXISTS companion_pairing_attempts (
+  channel TEXT NOT NULL,
+  sender_id TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  window_start INTEGER NOT NULL,     -- epoch ms — start of the current failed-attempt window
+  locked_until INTEGER,              -- epoch ms — locked out until this instant (NULL = not locked)
+  PRIMARY KEY (channel, sender_id)
+);
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, created_at);
@@ -1070,6 +1114,129 @@ export class Db {
   /** Remove an allowlisted sender by id (idempotent — a missing id matches nothing). */
   removeAllowedSender(id: string): void {
     this.db.prepare("DELETE FROM companion_allowed_senders WHERE id = ?").run(id);
+  }
+
+  // --- companion DM-pairing (SECURITY): owner-minted, single-use, short-TTL, rate-limited enrollment ---
+  // HUMAN-managed mint (loopback REST) only; NO MCP path. The redemption txn below is the ONE place a
+  // pairing code turns into a durable grant, applied ATOMICALLY with consuming the code.
+  /**
+   * Mint a one-time pairing code targeted at `sessionId` + `grantType`, valid for `ttlMs`. Stores only the
+   * SALTED HASH + salt (never plaintext); returns the plaintext ONCE for the human. `nowMs` is the injected
+   * clock (epoch ms) so minted_at/expires_at are deterministic in tests.
+   */
+  mintPairingCode(input: { sessionId: string; channel: string; grantType: "dm-bind" | "group-sender"; ttlMs: number }, nowMs: number): { codeId: string; code: string; expiresAt: string } {
+    this.purgeExpiredPairingCodes(nowMs); // opportunistic housekeeping — expired codes are dead weight (TTL rejects them anyway)
+    const minted = mintPairingToken(); // { id, plaintext (pair_<id>.<secret>), salt, hash }
+    const expiresMs = nowMs + input.ttlMs;
+    this.db.prepare(
+      `INSERT INTO companion_pairing_codes (code_id, session_id, channel, grant_type, code_hash, code_salt, minted_at, expires_at, consumed_at, consumed_by)
+       VALUES (@codeId, @sessionId, @channel, @grantType, @hash, @salt, @mintedAt, @expiresAt, NULL, NULL)`,
+    ).run({ codeId: minted.id, sessionId: input.sessionId, channel: input.channel, grantType: input.grantType, hash: minted.hash, salt: minted.salt, mintedAt: nowMs, expiresAt: expiresMs });
+    return { codeId: minted.id, code: minted.plaintext, expiresAt: new Date(expiresMs).toISOString() };
+  }
+  /** Read one pairing code row by id (test/admin read; returns the raw persisted shape or undefined). */
+  getPairingCodeById(codeId: string): Record<string, unknown> | undefined {
+    return this.db.prepare("SELECT * FROM companion_pairing_codes WHERE code_id = ?").get(codeId) as Row | undefined;
+  }
+  /** Drop every expired code (housekeeping; idempotent). `nowMs` is the injected clock. */
+  purgeExpiredPairingCodes(nowMs: number): void {
+    this.db.prepare("DELETE FROM companion_pairing_codes WHERE expires_at < ?").run(nowMs);
+  }
+  /**
+   * Redeem a pairing code — the SECURITY-CRITICAL atomic path. In ONE transaction: (1) a lockout gate that
+   * rejects WITHOUT loading a code while (channel, senderId) is locked; (2) load + constant-time verify +
+   * unexpired/unconsumed/grant-type/session/channel checks; (3) on success, apply the grant from the
+   * AUTHENTICATED metadata (dm binding upsert OR group allowlist add) AND consume the code, then clear the
+   * attempt counter; (4) on ANY failure, bump the per-(channel, senderId) attempt counter (locking out at
+   * `maxAttempts`) and return the SAME silent `rejected` (no oracle). A grant-write collision (e.g. the
+   * UNIQUE route index) is contained as `rejected` and leaves the code UNCONSUMED (the grant never landed).
+   */
+  redeemPairingCode(input: {
+    codeId: string; secret: string; channel: string; senderId: string; chatId: string;
+    expectedGrantType: "dm-bind" | "group-sender"; bindingSessionId?: string;
+    maxAttempts: number; windowMs: number; lockoutMs: number;
+  }, nowMs: number): PairingRedeemResult {
+    return this.db.transaction((): PairingRedeemResult => {
+      // (1) Lockout gate — reject before even loading a code while locked out.
+      const attempt = this.db.prepare(
+        "SELECT attempts, window_start, locked_until FROM companion_pairing_attempts WHERE channel = ? AND sender_id = ?",
+      ).get(input.channel, input.senderId) as Row | undefined;
+      const lockedUntil = attempt?.locked_until as number | null | undefined;
+      if (lockedUntil != null && nowMs < lockedUntil) return { outcome: "rejected" };
+
+      // (2) Load + validate. Every check folds into one boolean so a failure is INDISTINGUISHABLE.
+      const code = this.db.prepare("SELECT * FROM companion_pairing_codes WHERE code_id = ?").get(input.codeId) as Row | undefined;
+      const valid = !!code
+        && code.consumed_at == null
+        && nowMs < (code.expires_at as number)
+        && (code.channel as string) === input.channel
+        && (code.grant_type as string) === input.expectedGrantType
+        && (input.expectedGrantType !== "group-sender" || (code.session_id as string) === input.bindingSessionId)
+        && verifySecret(input.secret, code.code_salt as string, code.code_hash as string);
+      if (!valid) {
+        this.recordPairingFailure(input.channel, input.senderId, nowMs, input.maxAttempts, input.windowMs, input.lockoutMs, attempt);
+        return { outcome: "rejected" };
+      }
+
+      // (3) Apply the grant from the AUTHENTICATED metadata (never a body-supplied id) + consume, atomically.
+      const sessionId = code!.session_id as string;
+      const consume = () => this.db.prepare(
+        "UPDATE companion_pairing_codes SET consumed_at = ?, consumed_by = ? WHERE code_id = ?",
+      ).run(nowMs, input.senderId, input.codeId);
+      if (input.expectedGrantType === "dm-bind") {
+        // SILENT-TAKEOVER REFUSAL: a dm-bind code must never rebind/repurpose a session that is ALREADY
+        // bound to a DIFFERENT chat — that would silently lock out its current owner. Refuse conservatively
+        // (same no-oracle reject, code UNCONSUMED, NO counter bump — the secret was valid, this is a safety
+        // refusal not a guess); the human clears the old binding via the REST admin first to move it. A
+        // no-existing-binding or an exact-same-chat re-pair (idempotent) is allowed through.
+        const prior = this.db.prepare("SELECT chat_id FROM companion_bindings WHERE session_id = ?").get(sessionId) as Row | undefined;
+        if (prior && (prior.chat_id as string) !== input.chatId) return { outcome: "rejected" };
+        let binding;
+        try {
+          binding = this.upsertCompanionBinding({ sessionId, channel: input.channel, chatId: input.chatId, scope: "dm" });
+        } catch {
+          // The UNIQUE (channel, chat_id) route index (a stale in-memory map raced the db). Contain it as
+          // the same silent reject; the code stays UNCONSUMED so a legitimate re-try can still land.
+          return { outcome: "rejected" };
+        }
+        consume();
+        this.clearPairingAttempts(input.channel, input.senderId);
+        return { outcome: "bound", sessionId: binding.sessionId, channel: binding.channel, chatId: binding.chatId, scope: binding.scope };
+      }
+      try {
+        this.addAllowedSender({ sessionId, channel: input.channel, senderId: input.senderId });
+      } catch {
+        // Symmetric with the dm-bind path: contain any grant-write throw as the same silent reject (code
+        // left UNCONSUMED). The add is an idempotent upsert today, so this is a belt-and-suspenders guard.
+        return { outcome: "rejected" };
+      }
+      consume();
+      this.clearPairingAttempts(input.channel, input.senderId);
+      return { outcome: "sender-added", sessionId };
+    })();
+  }
+  /** Bump the failed-attempt counter for (channel, senderId), locking out at `maxAttempts`. A window that
+   *  has elapsed (or a lock that has expired) resets to strike 1. Called ONLY inside redeemPairingCode's txn. */
+  private recordPairingFailure(channel: string, senderId: string, nowMs: number, maxAttempts: number, windowMs: number, lockoutMs: number, existing?: Row): void {
+    const lockedUntil = existing?.locked_until as number | null | undefined;
+    const windowStartPrev = existing?.window_start as number | undefined;
+    let attempts: number;
+    let windowStart: number;
+    if (!existing || (lockedUntil != null && nowMs >= lockedUntil) || (windowStartPrev != null && nowMs - windowStartPrev > windowMs)) {
+      attempts = 1; windowStart = nowMs; // fresh window (first strike, expired lock, or elapsed window)
+    } else {
+      attempts = (existing.attempts as number) + 1; windowStart = windowStartPrev ?? nowMs;
+    }
+    const newLockedUntil = attempts >= maxAttempts ? nowMs + lockoutMs : null;
+    this.db.prepare(
+      `INSERT INTO companion_pairing_attempts (channel, sender_id, attempts, window_start, locked_until)
+       VALUES (@channel, @senderId, @attempts, @windowStart, @lockedUntil)
+       ON CONFLICT(channel, sender_id) DO UPDATE SET attempts = @attempts, window_start = @windowStart, locked_until = @lockedUntil`,
+    ).run({ channel, senderId, attempts, windowStart, lockedUntil: newLockedUntil });
+  }
+  /** Clear the attempt/lockout row for (channel, senderId) — a successful redemption wipes the strikes. */
+  private clearPairingAttempts(channel: string, senderId: string): void {
+    this.db.prepare("DELETE FROM companion_pairing_attempts WHERE channel = ? AND sender_id = ?").run(channel, senderId);
   }
 
   // --- companion home channel (the proactive/outbound "where to reach the owner" target; app_meta JSON) ---

@@ -24,6 +24,7 @@ import type {
   SubmitTurn,
 } from "./types.js";
 import { allowIfDmMatch, type CompanionAuth } from "./auth.js";
+import { noPairing, type CompanionPairing } from "./pairing.js";
 
 /**
  * Split `text` into chunks no longer than `max` chars, preferring a newline then a whitespace boundary so
@@ -67,11 +68,15 @@ export class ChatGateway {
    * @param auth        the injected sender-authorization decision (Companion authz layer). Defaults to
    *                    the db-free allow-if-DM-match impl so existing `new ChatGateway(submit, [...])`
    *                    constructions stay green; the daemon injects the db-backed impl.
+   * @param pairing     the injected DM-pairing coordinator (Companion DM-pairing). Defaults to the no-op
+   *                    (redemption never fires ⇒ every existing construction is byte-identical); the daemon
+   *                    injects the db-backed impl.
    */
   constructor(
     private readonly submitTurn: SubmitTurn,
     bindings: SessionBinding[] = [],
     private readonly auth: CompanionAuth = allowIfDmMatch(),
+    private readonly pairing: CompanionPairing = noPairing(),
   ) {
     for (const b of bindings) this.bindingsBySession.set(b.sessionId, b);
   }
@@ -113,6 +118,17 @@ export class ChatGateway {
     }
     const binding = this.bindingForInbound(msg.channel, msg.chatId);
     if (!binding) {
+      // Companion DM-pairing: BEFORE rejecting an unbound chat, attempt a `dm-bind` redemption from the
+      // body. The bound id is the AUTHENTICATED chat.id (never a body-supplied one). On success the code
+      // text NEVER reaches submitTurn — we bind + live-sync + ack "paired" and return here. On ANY failure
+      // (incl. a code-shaped body that doesn't redeem) we fall through to the SAME silent reject below.
+      const red = this.pairing.redeem({ grantType: "dm-bind", channel: msg.channel, chatId: msg.chatId, senderId: msg.sender?.id, body: msg.body });
+      if (red.outcome === "bound") {
+        this.bind(red.binding); // live-sync the routing map so this chat routes immediately (no restart)
+        const acked = await this.tryAck(red.binding, PAIRED_ACK);
+        this.debug(`inbound PAIRED (dm-bind): chat now bound (channel=${msg.channel} chat=${msg.chatId} session=${red.binding.sessionId})`);
+        return { accepted: false, reason: "paired-dm", sessionId: red.binding.sessionId, acked };
+      }
       this.debug(`inbound REJECTED: chat not allowlisted (channel=${msg.channel} chat=${msg.chatId})`);
       return { accepted: false, reason: "chat-not-allowlisted" };
     }
@@ -121,6 +137,17 @@ export class ChatGateway {
     // submission. DM: authorized by the route match (single owner). GROUP: requires an allowlisted
     // sender.id; a missing/unlisted sender is rejected here.
     if (!this.auth.isSenderAuthorized(binding, msg.sender)) {
+      // Companion DM-pairing: BEFORE rejecting an unauthorized sender on a matched (group) binding, attempt
+      // a `group-sender` redemption. The added id is the AUTHENTICATED sender.id, and the code MUST be
+      // scoped to THIS binding's session (enforced in the db txn) — a code for session A can't grant into
+      // group B. On success the code text never reaches submitTurn; on failure we fall through to the SAME
+      // silent reject below.
+      const red = this.pairing.redeem({ grantType: "group-sender", channel: msg.channel, chatId: msg.chatId, senderId: msg.sender?.id, body: msg.body, bindingSessionId: binding.sessionId });
+      if (red.outcome === "sender-added") {
+        const acked = await this.tryAck(binding, PAIRED_ACK);
+        this.debug(`inbound PAIRED (group-sender): sender allowlisted (channel=${msg.channel} chat=${msg.chatId} session=${binding.sessionId})`);
+        return { accepted: false, reason: "paired-sender", sessionId: binding.sessionId, acked };
+      }
       this.debug(
         `inbound REJECTED: sender not authorized (channel=${msg.channel} chat=${msg.chatId} ` +
           `scope=${binding.scope} sender=${msg.sender?.id ?? "none"})`,
@@ -211,6 +238,10 @@ export class ChatGateway {
     console.debug(`[companion] ${msg}`);
   }
 }
+
+/** The confirmation sent back to a chat on a successful pairing. Deliberately generic — a failed
+ *  redemption NEVER acks (it is indistinguishable from any unallowlisted inbound: no pairing oracle). */
+const PAIRED_ACK = "✅ Paired — you can now message me here.";
 
 function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

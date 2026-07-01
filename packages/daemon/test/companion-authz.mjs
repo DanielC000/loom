@@ -188,8 +188,9 @@ try {
       "user-audit": await listOf(new WorkspaceAuditMcpRouter(db, svc).buildServer("aud-1")),
     };
 
-    // The companion admin surface (bindings/allowlist/home writers) exists on NO agent-facing MCP router.
-    const forbidden = /bind|allow|home|sender/i;
+    // The companion admin surface (bindings/allowlist/home writers + DM-pairing MINT) exists on NO
+    // agent-facing MCP router — the pairing mint is human-only loopback REST, so `pairing` is guarded here too.
+    const forbidden = /bind|allow|home|sender|pairing/i;
     for (const [name, tools] of Object.entries(surfaces)) {
       const bad = tools.filter((t) => forbidden.test(t));
       check(`human-only: the ${name} MCP surface (${tools.length} tools) has NO binding/allowlist/home tool (found: ${bad.join(",") || "none"})`, bad.length === 0);

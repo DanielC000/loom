@@ -16,6 +16,11 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
  */
 
 const TOKEN_PREFIX = "lrk_";
+/** Companion DM-pairing codes reuse the SAME salted-hash core (hashed at rest, plaintext once) but carry
+ *  a DISTINCT, human-recognizable prefix so an inbound chat message is only treated as a redemption
+ *  candidate when it is plausibly-a-code — every other message falls straight through to the normal
+ *  reject, never even touching the pairing store. Format: `pair_<codeId>.<secret>`. */
+const PAIRING_PREFIX = "pair_";
 
 export interface MintedKey {
   /** The db row id (public; embedded in the token for O(1) verify lookup). */
@@ -44,13 +49,33 @@ export function mintApiKey(id: string = randomUUID()): MintedKey {
   return { id, plaintext: `${TOKEN_PREFIX}${id}.${secret}`, salt, hash: hashSecret(secret, salt) };
 }
 
-/** Parse a presented token into its public id + secret parts; null if malformed (not our format). */
-export function parseApiKey(token: unknown): { id: string; secret: string } | null {
-  if (typeof token !== "string" || !token.startsWith(TOKEN_PREFIX)) return null;
-  const rest = token.slice(TOKEN_PREFIX.length);
+/** Parse a `<prefix><id>.<secret>` token into its public id + secret parts; null if malformed. */
+function parsePrefixedToken(token: unknown, prefix: string): { id: string; secret: string } | null {
+  if (typeof token !== "string" || !token.startsWith(prefix)) return null;
+  const rest = token.slice(prefix.length);
   const dot = rest.indexOf(".");
   if (dot <= 0 || dot >= rest.length - 1) return null; // need a non-empty id AND secret
   return { id: rest.slice(0, dot), secret: rest.slice(dot + 1) };
+}
+
+/** Parse a presented token into its public id + secret parts; null if malformed (not our format). */
+export function parseApiKey(token: unknown): { id: string; secret: string } | null {
+  return parsePrefixedToken(token, TOKEN_PREFIX);
+}
+
+/**
+ * Mint a fresh Companion DM-pairing code — the SAME salted-hash core as mintApiKey (the stored salt+hash
+ * verify a redeemed code without ever persisting plaintext), only with the `pair_` prefix. The salt+hash
+ * are computed over the SECRET alone, so the prefix swap is verification-transparent.
+ */
+export function mintPairingCode(id: string = randomUUID()): MintedKey {
+  const k = mintApiKey(id);
+  return { ...k, plaintext: `${PAIRING_PREFIX}${k.plaintext.slice(TOKEN_PREFIX.length)}` };
+}
+
+/** Parse a presented pairing code into its public id + secret parts; null if not `pair_`-shaped. */
+export function parsePairingCode(token: unknown): { id: string; secret: string } | null {
+  return parsePrefixedToken(token, PAIRING_PREFIX);
 }
 
 /** Constant-time verify of a presented secret against a stored salt+hash (timing-safe; length-guarded). */

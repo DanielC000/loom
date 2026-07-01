@@ -9,13 +9,15 @@
  */
 import { ChatGateway } from "./chat-gateway.js";
 import { createDbCompanionAuth, type AllowlistReader } from "./auth.js";
+import { createDbCompanionPairing, type PairingStore } from "./pairing.js";
 import type { CompanionConfig } from "./config.js";
 import { createTelegramAdapter, TELEGRAM_CHANNEL } from "./telegram.js";
 import type { SessionBinding, SubmitTurn } from "./types.js";
 import type { CompanionBinding } from "@loom/shared";
 
-/** The narrow db surface the factory needs: the durable binding store + the allowlist reader (for authz). */
-export interface CompanionBindingStore extends AllowlistReader {
+/** The narrow db surface the factory needs: the durable binding store + the allowlist reader (for authz)
+ *  + the pairing-code redemption txn (for DM-pairing). */
+export interface CompanionBindingStore extends AllowlistReader, PairingStore {
   listCompanionBindings(): CompanionBinding[];
   upsertCompanionBinding(input: { sessionId: string; channel: string; chatId: string; scope?: "dm" | "group" }): CompanionBinding;
 }
@@ -36,7 +38,10 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
     db.upsertCompanionBinding({ sessionId: cfg.sessionId, channel: TELEGRAM_CHANNEL, chatId: cfg.allowedChatId, scope: cfg.chatScope });
     bindings = db.listCompanionBindings();
   }
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db));
+  // DM-pairing coordinator: the db-backed redemption path with the real wall clock (epoch ms). Default
+  // rate-limit/lockout policy (5 attempts / 10-min window / 15-min lockout) — tests inject a fake clock.
+  const pairing = createDbCompanionPairing(db, { now: () => Date.now() });
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing);
   // The adapter normalizes each Telegram update, then hands it to the gateway (route → authz → submit).
   // handleInbound is fire-and-forget, so BACKSTOP its promise with .catch(): even though the gateway
   // already contains a synchronous submit throw, any future rejection here must never become an unhandled

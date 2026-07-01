@@ -25,6 +25,7 @@ import type { WorkspaceAuditMcpRouter } from "../mcp/user-audit.js";
 import type { SetupMcpRouter } from "../mcp/setup.js";
 import type { RunMcpRouter } from "../mcp/run.js";
 import type { ChatGateway } from "../companion/chat-gateway.js";
+import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validateColumnLayout } from "../mcp/platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
@@ -612,6 +613,34 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!isNonBlankStr(b.chatId)) return reply.code(400).send({ error: "chatId must be a non-empty string" });
     deps.db.setCompanionHome({ channel: b.channel.trim(), chatId: b.chatId.trim() });
     return deps.db.getCompanionHome();
+  });
+
+  // --- Companion DM-pairing: mint a one-time enrollment code (SECURITY). HUMAN-ONLY loopback REST, with
+  // INTENTIONALLY NO MCP path (same trust posture as the bindings/allowlist/home writers above) — a
+  // chat-reachable, injection-exposed companion agent must NEVER be able to mint an enrollment code for
+  // itself (self-authorization). The plaintext code is returned ONCE here (the store keeps only a salted
+  // hash); the human relays it to the person being enrolled, who redeems it by sending it to the chat.
+  // The bound id at redemption is the AUTHENTICATED inbound metadata, never anything in this request. ---
+  const PAIRING_TTL_DEFAULT_MIN = 10;
+  const PAIRING_TTL_MAX_MIN = 15; // PL-stated 10–15 min window; short-TTL is a core anti-guessing defense
+  app.post("/api/companion/pairing", async (req, reply) => {
+    const b = (req.body ?? {}) as { sessionId?: unknown; grantType?: unknown; ttlMinutes?: unknown };
+    if (!isNonBlankStr(b.sessionId)) return reply.code(400).send({ error: "sessionId must be a non-empty string" });
+    if (b.grantType !== "dm-bind" && b.grantType !== "group-sender") {
+      return reply.code(400).send({ error: "grantType is required and must be 'dm-bind' or 'group-sender'" });
+    }
+    let ttlMinutes = PAIRING_TTL_DEFAULT_MIN;
+    if (b.ttlMinutes !== undefined) {
+      if (typeof b.ttlMinutes !== "number" || !Number.isFinite(b.ttlMinutes) || b.ttlMinutes <= 0 || b.ttlMinutes > PAIRING_TTL_MAX_MIN) {
+        return reply.code(400).send({ error: `ttlMinutes must be a number in (0, ${PAIRING_TTL_MAX_MIN}]` });
+      }
+      ttlMinutes = b.ttlMinutes;
+    }
+    const minted = deps.db.mintPairingCode(
+      { sessionId: b.sessionId.trim(), channel: TELEGRAM_CHANNEL, grantType: b.grantType, ttlMs: ttlMinutes * 60_000 },
+      Date.now(),
+    );
+    return reply.code(201).send({ codeId: minted.codeId, code: minted.code, expiresAt: minted.expiresAt });
   });
 
   // --- Hook relay target (loopback only) ---
