@@ -1,6 +1,6 @@
 ---
 name: doc-hygiene
-description: Apply whenever writing or editing documentation, notes, or knowledge files (Obsidian vault notes, READMEs, design/architecture docs, changelogs). Enforces rewrite-in-place over append, no contradictions, and bounded docs. Shipped and kept current by Loom.
+description: Apply whenever writing or editing documentation, notes, or knowledge files (vault notes, READMEs, design/architecture docs, changelogs). Enforces rewrite-in-place over append, no contradictions, and bounded docs. Shipped and kept current by Loom.
 ---
 
 # doc-hygiene
