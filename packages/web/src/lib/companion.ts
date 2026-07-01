@@ -10,9 +10,15 @@
 
 import type { CompanionConfigMasked } from "@loom/shared";
 
+// Mirror of the daemon's COMPANION_ID_MAX (gateway/server.ts) — the max length the REST surface accepts
+// for chat/sender ids + sender labels. Kept in sync here so the UI rejects an over-long value inline
+// instead of round-tripping to a 400.
+export const COMPANION_ID_MAX = 200;
+
 // The write-side form state for creating/configuring a companion. `botToken` is write-only: blank on an
 // EDIT means "keep the stored token"; on a CREATE it is required. `heartbeatIntervalMinutes` is a text
-// field (blank = 0 = off). `home*` sets the daemon-global proactive home target (both or neither).
+// field (blank = 0 = off). The proactive HOME is DAEMON-GLOBAL (app_meta), so it is deliberately NOT on
+// this per-companion form — it is managed on its own global control (PL ruling 2026-07-01).
 export interface CompanionConfigForm {
   sessionId: string;
   botToken: string;
@@ -21,8 +27,6 @@ export interface CompanionConfigForm {
   chatScope: "dm" | "group";
   heartbeatIntervalMinutes: string;
   heartbeatPrompt: string;
-  homeChannel: string;
-  homeChatId: string;
   enabled: boolean;
 }
 
@@ -36,8 +40,6 @@ export function emptyConfigForm(sessionId = ""): CompanionConfigForm {
     chatScope: "dm",
     heartbeatIntervalMinutes: "",
     heartbeatPrompt: "",
-    homeChannel: "",
-    homeChatId: "",
     enabled: true,
   };
 }
@@ -53,8 +55,6 @@ export function formFromMasked(cfg: CompanionConfigMasked): CompanionConfigForm 
     chatScope: cfg.chatScope,
     heartbeatIntervalMinutes: cfg.heartbeatIntervalMinutes ? String(cfg.heartbeatIntervalMinutes) : "",
     heartbeatPrompt: cfg.heartbeatPrompt ?? "",
-    homeChannel: cfg.home?.channel ?? "",
-    homeChatId: cfg.home?.chatId ?? "",
     enabled: cfg.enabled,
   };
 }
@@ -90,12 +90,6 @@ export function buildConfigBody(form: CompanionConfigForm, mode: "create" | "edi
     heartbeatIntervalMinutes = n;
   }
 
-  const homeChannel = form.homeChannel.trim();
-  const homeChatId = form.homeChatId.trim();
-  if ((homeChannel === "") !== (homeChatId === "")) {
-    return { error: "Set both the home channel and the home chat id, or leave both blank." };
-  }
-
   const body: Record<string, unknown> = {
     channel: form.channel.trim() || "telegram",
     chatScope: form.chatScope,
@@ -108,10 +102,29 @@ export function buildConfigBody(form: CompanionConfigForm, mode: "create" | "edi
   if (allowedChatId) body.allowedChatId = allowedChatId;
   // botToken: WRITE-ONLY. Only ever attach a user-typed token; a blank field never sends one.
   if (token) body.botToken = token;
-  // home: both-or-neither (validated above). Attach only when set — omitting it leaves the global home.
-  if (homeChannel && homeChatId) body.home = { channel: homeChannel, chatId: homeChatId };
+  // NOTE: the proactive HOME is intentionally NOT written here — it is daemon-global (app_meta), owned by
+  // the dedicated global-home control, so a per-companion config write can never clobber the shared value.
 
   return { body };
+}
+
+// Derive the create-time DM binding from a create form. Per the PL bindings-authoritative ruling
+// (2026-07-01), the config row alone provisions TRANSPORT but does NOT make the companion reachable —
+// the gateway routes ONLY off bindings. So the create flow ALSO writes a binding (via the existing
+// human-only POST /api/companion/bindings) using the form's allowedChatId + chatScope, arming transport
+// AND routing from one form. Returns null when no chat id was supplied (a valid "provisioned, not yet
+// reachable" companion). Mirrors buildConfigBody's channel defaulting so the two writes agree.
+export function bindingFromCreateForm(
+  form: CompanionConfigForm,
+): { sessionId: string; channel: string; chatId: string; scope: "dm" | "group" } | null {
+  const chatId = form.allowedChatId.trim();
+  if (!chatId) return null;
+  return {
+    sessionId: form.sessionId.trim(),
+    channel: form.channel.trim() || "telegram",
+    chatId,
+    scope: form.chatScope,
+  };
 }
 
 // Binding (access route) validation — mirrors the daemon's POST /api/companion/bindings guards so the UI
@@ -125,9 +138,13 @@ export function validateBinding(b: { sessionId: string; channel: string; chatId:
   return null;
 }
 
-// Allowed-sender (group allowlist) validation.
-export function validateSender(b: { senderId: string }): string | null {
+// Allowed-sender (group allowlist) validation — mirrors the daemon's POST /api/companion/allowed-senders
+// guards: the sender id is non-blank and at most COMPANION_ID_MAX chars, and the optional label is at
+// most COMPANION_ID_MAX chars (the daemon bounds the raw length before trimming, so we match on `.length`).
+export function validateSender(b: { senderId: string; label?: string | null }): string | null {
   if (!b.senderId.trim()) return "A sender id is required.";
+  if (b.senderId.length > COMPANION_ID_MAX) return `The sender id must be at most ${COMPANION_ID_MAX} characters.`;
+  if (b.label != null && b.label.length > COMPANION_ID_MAX) return `The label must be at most ${COMPANION_ID_MAX} characters.`;
   return null;
 }
 

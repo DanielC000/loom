@@ -617,6 +617,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deps.db.setCompanionHome({ channel: b.channel.trim(), chatId: b.chatId.trim() });
     return deps.db.getCompanionHome();
   });
+  app.delete("/api/companion/home", async () => {
+    deps.db.clearCompanionHome(); // proactive delivery falls back to OFF until a home is set again
+    return { ok: true };
+  });
 
   // --- Companion DM-pairing: mint a one-time enrollment code (SECURITY). HUMAN-ONLY loopback REST, with
   // INTENTIONALLY NO MCP path (same trust posture as the bindings/allowlist/home writers above) — a

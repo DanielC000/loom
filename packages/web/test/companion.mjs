@@ -9,7 +9,7 @@
 //   node --experimental-strip-types packages/web/test/companion.mjs
 import assert from "node:assert/strict";
 import {
-  buildConfigBody, emptyConfigForm, formFromMasked, maskedToken,
+  COMPANION_ID_MAX, bindingFromCreateForm, buildConfigBody, emptyConfigForm, formFromMasked, maskedToken,
   validateBinding, validateSender, validatePairing,
 } from "../src/lib/companion.ts";
 
@@ -94,13 +94,9 @@ check("heartbeat prompt: blank sends null (default), text is trimmed", () => {
   assert.equal(buildConfigBody({ ...baseForm(), heartbeatPrompt: " hi " }, "create").body.heartbeatPrompt, "hi");
 });
 
-check("home: both-or-neither — one side alone errors, both send a home object, neither omits it", () => {
-  assert.ok("error" in buildConfigBody({ ...baseForm(), homeChannel: "telegram", homeChatId: "" }, "create"));
-  assert.ok("error" in buildConfigBody({ ...baseForm(), homeChannel: "", homeChatId: "42" }, "create"));
-  const both = buildConfigBody({ ...baseForm(), homeChannel: "telegram", homeChatId: "42" }, "create");
-  assert.deepEqual(both.body.home, { channel: "telegram", chatId: "42" });
-  const neither = buildConfigBody(baseForm(), "create");
-  assert.ok(!("home" in neither.body), "no home fields → no home key");
+check("home is never written by a config body — it is the daemon-global store, not per-companion", () => {
+  assert.ok(!("home" in buildConfigBody(baseForm(), "create").body), "create must not carry a home key");
+  assert.ok(!("home" in buildConfigBody(baseForm(), "edit").body), "edit must not carry a home key either");
 });
 
 check("channel defaults to telegram when left blank", () => {
@@ -119,9 +115,27 @@ check("validateBinding: requires sessionId/channel/chatId and a real scope", () 
   assert.ok(validateBinding({ sessionId: "s", channel: "telegram", chatId: "1", scope: "public" }), "an unknown scope is rejected");
 });
 
-check("validateSender: requires a non-blank sender id", () => {
+check("validateSender: non-blank sender id, sender id + label both bounded by COMPANION_ID_MAX", () => {
   assert.equal(validateSender({ senderId: "42" }), null);
-  assert.ok(validateSender({ senderId: "   " }));
+  assert.equal(validateSender({ senderId: "42", label: "me" }), null);
+  assert.equal(validateSender({ senderId: "42", label: null }), null, "a null label is fine");
+  assert.ok(validateSender({ senderId: "   " }), "a blank sender id is rejected");
+  assert.ok(validateSender({ senderId: "x".repeat(COMPANION_ID_MAX + 1) }), "an over-long sender id is rejected");
+  assert.ok(validateSender({ senderId: "42", label: "y".repeat(COMPANION_ID_MAX + 1) }), "an over-long label is rejected");
+  assert.equal(validateSender({ senderId: "x".repeat(COMPANION_ID_MAX), label: "y".repeat(COMPANION_ID_MAX) }), null, "exactly-max passes");
+});
+
+// ── Create-flow binding derivation (the bindings-authoritative routing arm) ───────────────────────────
+
+check("bindingFromCreateForm: derives a dm binding, carries scope, defaults channel, null on no chat id", () => {
+  assert.deepEqual(bindingFromCreateForm(baseForm()), { sessionId: "sess-123", channel: "telegram", chatId: "999", scope: "dm" });
+  assert.equal(bindingFromCreateForm({ ...baseForm(), allowedChatId: "" }), null, "no chat id → no binding (provisioned, not reachable)");
+  assert.equal(bindingFromCreateForm({ ...baseForm(), allowedChatId: "   " }), null, "a blank chat id → no binding");
+  assert.deepEqual(
+    bindingFromCreateForm({ ...baseForm(), chatScope: "group", channel: "" }),
+    { sessionId: "sess-123", channel: "telegram", chatId: "999", scope: "group" },
+    "scope is carried through and a blank channel defaults to telegram (matching the config write)",
+  );
 });
 
 check("validatePairing: only the two enrollment grant types pass", () => {

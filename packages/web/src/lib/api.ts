@@ -560,4 +560,11 @@ export const api = {
   // is returned ONCE (the store keeps only a salted hash); the human relays it to the person enrolling.
   mintCompanionPairing: (b: { sessionId: string; grantType: "dm-bind" | "group-sender"; ttlMinutes?: number }) =>
     postErr<CompanionPairingCode>("/api/companion/pairing", b),
+  // Proactive HOME — the daemon-GLOBAL outbound target where heartbeats post (a single app_meta value, NOT
+  // per-companion). Managed on its own global control so a per-companion edit can't silently redirect the
+  // shared value. `setCompanionHome` surfaces the server's `{ error }` verbatim; clearing turns proactive OFF.
+  companionHome: () => get<{ channel: string; chatId: string } | null>("/api/companion/home"),
+  setCompanionHome: (b: { channel: string; chatId: string }) =>
+    putErr<{ channel: string; chatId: string } | null>("/api/companion/home", b),
+  clearCompanionHome: () => del<{ ok: boolean }>("/api/companion/home"),
 };

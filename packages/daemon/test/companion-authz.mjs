@@ -246,6 +246,8 @@ try {
     const putHome = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { channel: "telegram", chatId: "home-9" } });
     check("REST home: PUT sets + echoes", putHome.statusCode === 200 && JSON.parse(putHome.payload).chatId === "home-9");
     check("REST home: PUT missing chatId → 400", (await app.inject({ method: "PUT", url: "/api/companion/home", payload: { channel: "telegram" } })).statusCode === 400);
+    const delHome = await app.inject({ method: "DELETE", url: "/api/companion/home" });
+    check("REST home: DELETE clears it (proactive falls back to OFF)", delHome.statusCode === 200 && db.getCompanionHome() === null);
 
     // DELETE a binding → the live map is unbound too.
     await app.inject({ method: "DELETE", url: "/api/companion/bindings/s1" });

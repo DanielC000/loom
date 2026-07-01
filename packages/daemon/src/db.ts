@@ -1305,6 +1305,10 @@ export class Db {
   setCompanionHome(home: { channel: string; chatId: string }): void {
     this.setMeta(COMPANION_HOME_KEY, JSON.stringify({ channel: home.channel, chatId: home.chatId }));
   }
+  /** Clear the home channel target (drop the app_meta key) — proactive delivery falls back to OFF. */
+  clearCompanionHome(): void {
+    this.deleteMeta(COMPANION_HOME_KEY);
+  }
 
   // --- companion RUN config (Companion epic Phase 3): the "how to RUN this companion" layer, keyed by
   // session_id, with the bot token ENCRYPTED at rest. HUMAN-managed only (loopback REST); NO MCP path.

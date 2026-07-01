@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import type { CompanionConfigMasked, CompanionBinding, SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
 import {
-  buildConfigBody, emptyConfigForm, formFromMasked, maskedToken,
+  bindingFromCreateForm, buildConfigBody, emptyConfigForm, formFromMasked, maskedToken,
   validateBinding, validatePairing, validateSender, type CompanionConfigForm,
 } from "../lib/companion";
 import { Panel, Button, Input, Select, SectionLabel, Badge, StatusPill, Chip } from "../components/ui";
@@ -38,8 +38,9 @@ function Field({ label, sub, children }: { label: string; sub?: string; children
 
 // One companion, keyed by its bound assistant session id — the union of a run-config row and/or an
 // access binding (either can exist alone: env-bootstrapped companions may have a binding before a
-// REST config; a fresh REST config may exist before its binding is added).
-interface Companion { sessionId: string; config?: CompanionConfigMasked; binding?: CompanionBinding; }
+// REST config; a fresh REST config may exist before its binding is added — a "provisioned, not yet
+// reachable" companion, since the gateway routes ONLY off bindings).
+interface CompanionRow { sessionId: string; config?: CompanionConfigMasked; binding?: CompanionBinding; }
 
 export default function Companion() {
   const qc = useQueryClient();
@@ -51,8 +52,8 @@ export default function Companion() {
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
 
   // Merge configs + bindings into the companion list, keyed by session id.
-  const companions = useMemo<Companion[]>(() => {
-    const byId = new Map<string, Companion>();
+  const companions = useMemo<CompanionRow[]>(() => {
+    const byId = new Map<string, CompanionRow>();
     for (const c of configs.data ?? []) byId.set(c.sessionId, { sessionId: c.sessionId, config: c });
     for (const b of bindings.data ?? []) {
       const cur = byId.get(b.sessionId) ?? { sessionId: b.sessionId };
@@ -83,16 +84,38 @@ export default function Companion() {
     qc.invalidateQueries({ queryKey: ["companionBindings"] });
   };
 
+  // Create = TWO writes (PL bindings-authoritative ruling): the config row arms transport, and — when a DM
+  // chat id was supplied — a binding via the existing human-only POST arms ROUTING (the gateway routes
+  // ONLY off bindings). One form, both stores. If the config lands but the binding fails, the companion is
+  // a valid "provisioned, not yet reachable" row; we surface the reason and keep it in the list so the human
+  // can add the binding under Access.
   const createConfig = useMutation({
-    mutationFn: (b: Record<string, unknown>) => api.createCompanionConfig(b),
+    mutationFn: async ({ configBody, binding }: {
+      configBody: Record<string, unknown>;
+      binding: ReturnType<typeof bindingFromCreateForm>;
+    }) => {
+      const row = await api.createCompanionConfig(configBody);
+      if (binding) {
+        try {
+          await api.createCompanionBinding({ ...binding, sessionId: row.sessionId });
+        } catch (e) {
+          throw new Error(`Companion saved, but arming its DM routing failed: ${(e as Error).message} — open it and add a binding under Access.`);
+        }
+      }
+      return row;
+    },
     onSuccess: (row) => { invalidateAll(); setSelected(row.sessionId); setCreating(false); },
+    // The config may have been written even though the binding failed — refresh so the new (not-yet-reachable)
+    // companion still shows up while the create form keeps the error visible.
+    onError: () => { invalidateAll(); },
   });
 
   const current = companions.find((c) => c.sessionId === selected) ?? null;
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16, maxWidth: 1180 }}>
-      <Panel style={{ alignSelf: "start" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16, alignSelf: "start" }}>
+      <Panel>
         <SectionLabel>Companions</SectionLabel>
         <p style={{ ...hint, margin: "0 0 10px" }}>
           Chat-native personal agents reachable over Telegram. Each is a real <code>claude</code> session
@@ -109,6 +132,9 @@ export default function Companion() {
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {sessionLabel(c.sessionId)}
                 </span>
+                {c.config && !c.binding && (
+                  <span style={{ fontSize: 9, color: color.amber, fontFamily: font.mono }} title="provisioned but no chat binding — not reachable yet">NO ROUTE</span>
+                )}
                 {c.config
                   ? <span style={{ fontSize: 9, color: on ? color.phosphor : color.textMuted, fontFamily: font.mono }}>{on ? "ON" : "OFF"}</span>
                   : <span style={{ fontSize: 9, color: color.cyan, fontFamily: font.mono }} title="access binding only — no run config yet">BIND</span>}
@@ -123,12 +149,14 @@ export default function Companion() {
           <Button variant="primary" style={{ width: "100%" }} onClick={() => { setCreating(true); setSelected(null); }}>+ New companion</Button>
         </div>
       </Panel>
+      <GlobalHome />
+      </div>
 
       <Panel style={{ minHeight: "72vh", padding: 14 }}>
         {creating ? (
           <ConfigCreate
             assistantSessions={assistantSessions}
-            onCreate={(b) => createConfig.mutate(b)}
+            onCreate={(p) => createConfig.mutate(p)}
             pending={createConfig.isPending}
             error={createConfig.error ? (createConfig.error as Error).message : null}
             onCancel={() => { setCreating(false); createConfig.reset(); }}
@@ -149,10 +177,79 @@ export default function Companion() {
   );
 }
 
+// ── Global proactive home ───────────────────────────────────────────────────────
+// The proactive HOME is a daemon-GLOBAL value (app_meta), NOT per-companion — so it lives here in the
+// sidebar, managed on its own, rather than buried in a per-companion form where editing one companion
+// would silently redirect every companion's heartbeats (the footgun this control removes).
+function GlobalHome() {
+  const qc = useQueryClient();
+  const home = useQuery({ queryKey: ["companionHome"], queryFn: api.companionHome });
+  const [editing, setEditing] = useState(false);
+  const [channel, setChannel] = useState("");
+  const [chatId, setChatId] = useState("");
+  const [localErr, setLocalErr] = useState<string | null>(null);
+
+  // A masked config echoes the global home, so refresh the config list too when it changes.
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["companionHome"] });
+    qc.invalidateQueries({ queryKey: ["companionConfigs"] });
+  };
+  const save = useMutation({
+    mutationFn: (b: { channel: string; chatId: string }) => api.setCompanionHome(b),
+    onSuccess: () => { invalidate(); setEditing(false); },
+  });
+  const clear = useMutation({
+    mutationFn: () => api.clearCompanionHome(),
+    onSuccess: invalidate,
+  });
+
+  const beginEdit = () => {
+    setChannel(home.data?.channel ?? "telegram");
+    setChatId(home.data?.chatId ?? "");
+    setLocalErr(null);
+    setEditing(true);
+  };
+  const submit = () => {
+    setLocalErr(null);
+    if (!channel.trim() || !chatId.trim()) { setLocalErr("Set both a channel and a chat id."); return; }
+    save.mutate({ channel: channel.trim(), chatId: chatId.trim() });
+  };
+
+  return (
+    <Panel>
+      <SectionLabel>Proactive home</SectionLabel>
+      <p style={{ ...hint, margin: "0 0 10px" }}>
+        Daemon-<strong style={{ color: color.text }}>global</strong> — the one chat every companion's
+        heartbeats post to. Not per companion; changing it here moves them all.
+      </p>
+      {editing ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <Field label="Channel"><Input value={channel} onChange={(e) => setChannel(e.target.value)} placeholder="telegram" spellCheck={false} /></Field>
+          <Field label="Chat id"><Input value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="home chat id" spellCheck={false} /></Field>
+          {(localErr || save.error) && <span style={errStyle}>{localErr ?? (save.error as Error).message}</span>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <Button variant="primary" disabled={save.isPending} onClick={submit}>{save.isPending ? "Saving…" : "Save home"}</Button>
+            <Button variant="ghost" disabled={save.isPending} onClick={() => { setEditing(false); save.reset(); setLocalErr(null); }}>Cancel</Button>
+          </div>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <Chip label="home" value={home.data ? `${home.data.channel}:${home.data.chatId}` : "unset"} tone={home.data ? undefined : "muted"} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <Button variant="primary" onClick={beginEdit}>{home.data ? "Change home" : "Set home"}</Button>
+            {home.data && <Button variant="danger" disabled={clear.isPending} onClick={() => clear.mutate()}>Clear</Button>}
+          </div>
+          {clear.error && <span style={errStyle}>{(clear.error as Error).message}</span>}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 // ── Create form ────────────────────────────────────────────────────────────────
 function ConfigCreate({ assistantSessions, onCreate, pending, error, onCancel }: {
   assistantSessions: SessionListItem[];
-  onCreate: (b: Record<string, unknown>) => void;
+  onCreate: (p: { configBody: Record<string, unknown>; binding: ReturnType<typeof bindingFromCreateForm> }) => void;
   pending: boolean;
   error: string | null;
   onCancel: () => void;
@@ -166,7 +263,14 @@ function ConfigCreate({ assistantSessions, onCreate, pending, error, onCancel }:
     setLocalErr(null);
     const built = buildConfigBody(form, "create");
     if ("error" in built) { setLocalErr(built.error); return; }
-    onCreate(built.body);
+    // The create flow also arms routing: derive the DM binding from the same form and validate it before
+    // the round-trip (the gateway routes only off bindings — see bindingFromCreateForm).
+    const binding = bindingFromCreateForm(form);
+    if (binding) {
+      const bErr = validateBinding(binding);
+      if (bErr) { setLocalErr(bErr); return; }
+    }
+    onCreate({ configBody: built.body, binding });
   };
 
   return (
@@ -174,7 +278,10 @@ function ConfigCreate({ assistantSessions, onCreate, pending, error, onCancel }:
       <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>New companion</strong>
       <p style={hint}>
         Bind a run configuration to an <strong style={{ color: color.text }}>assistant</strong>-role session. The
-        session is the companion's brain; this config tells the daemon which bot to run it as.
+        session is the companion's brain; this config tells the daemon which bot to run it as. The{" "}
+        <strong style={{ color: color.text }}>chat id</strong> you give below both boot-seeds the config and
+        arms routing — it writes a DM binding so the companion is reachable straight away. Change where it's
+        reachable later under Access.
       </p>
 
       <Field label="Companion session" sub={manualId ? "paste an assistant session id" : "assistant-role sessions"}>
@@ -232,7 +339,7 @@ function ConfigFields({ form, set, mode, currentToken }: {
         <Field label="Channel">
           <Input value={form.channel} onChange={(e) => set("channel", e.target.value)} placeholder="telegram" spellCheck={false} />
         </Field>
-        <Field label="Chat scope" sub="dm = private · group = allowlisted senders">
+        <Field label="Chat scope" sub={mode === "create" ? "dm = private · group = allowlisted senders" : "boot-seed default · routing lives in Access"}>
           <Select value={form.chatScope} onChange={(e) => set("chatScope", e.target.value as "dm" | "group")}>
             <option value="dm">dm</option>
             <option value="group">group</option>
@@ -240,8 +347,14 @@ function ConfigFields({ form, set, mode, currentToken }: {
         </Field>
       </div>
 
-      <Field label="Allowed chat id" sub="the owner / bootstrap chat this companion answers">
+      <Field label="Allowed chat id" sub={mode === "create" ? "the owner DM chat — arms routing (writes a binding)" : "boot-seed only · edit routing under Access"}>
         <Input value={form.allowedChatId} onChange={(e) => set("allowedChatId", e.target.value)} placeholder="e.g. 123456789" spellCheck={false} />
+        {mode === "edit" && (
+          <span style={hint}>
+            Live inbound routing is owned by the binding under <strong style={{ color: color.text }}>Access</strong> —
+            editing this only changes the boot-seed default the daemon reads on a cold start.
+          </span>
+        )}
       </Field>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -261,13 +374,6 @@ function ConfigFields({ form, set, mode, currentToken }: {
           }} />
       </Field>
 
-      <Field label="Proactive home" sub="daemon-global · where heartbeats post · both or neither">
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <Input value={form.homeChannel} onChange={(e) => set("homeChannel", e.target.value)} placeholder="channel (e.g. telegram)" spellCheck={false} />
-          <Input value={form.homeChatId} onChange={(e) => set("homeChatId", e.target.value)} placeholder="home chat id" spellCheck={false} />
-        </div>
-      </Field>
-
       <label style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 13, color: color.text, cursor: "pointer" }}>
         <input type="checkbox" checked={form.enabled} onChange={(e) => set("enabled", e.target.checked)} />
         Enabled
@@ -278,7 +384,7 @@ function ConfigFields({ form, set, mode, currentToken }: {
 
 // ── Detail: config editor + access + pairing ────────────────────────────────────
 function CompanionDetail({ companion, label, onChanged, onDeleted }: {
-  companion: Companion; label: string; onChanged: () => void; onDeleted: () => void;
+  companion: CompanionRow; label: string; onChanged: () => void; onDeleted: () => void;
 }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -288,6 +394,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
           ? <Badge tone={companion.config.enabled ? "phosphor" : "muted"}>{companion.config.enabled ? "enabled" : "disabled"}</Badge>
           : <Badge tone="cyan">binding only</Badge>}
         {companion.config?.envPinned && <Badge tone="amber">pinned by env</Badge>}
+        {companion.config && !companion.binding && <Badge tone="amber">not reachable — no binding</Badge>}
         <span style={{ flex: 1 }} />
         <Chip label="session" value={companion.sessionId.slice(0, 8)} />
       </div>
@@ -308,7 +415,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
   );
 }
 
-function ConfigSection({ companion, onChanged, onDeleted }: { companion: Companion; onChanged: () => void; onDeleted: () => void }) {
+function ConfigSection({ companion, onChanged, onDeleted }: { companion: CompanionRow; onChanged: () => void; onDeleted: () => void }) {
   const cfg = companion.config;
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<CompanionConfigForm>(() => (cfg ? formFromMasked(cfg) : emptyConfigForm(companion.sessionId)));
@@ -376,9 +483,13 @@ function ConfigSection({ companion, onChanged, onDeleted }: { companion: Compani
             <Chip label="scope" value={cfg.chatScope} />
             <Chip label="chat" value={cfg.allowedChatId} />
             <Chip label="heartbeat" value={cfg.heartbeatIntervalMinutes ? `${cfg.heartbeatIntervalMinutes}m` : "off"} tone={cfg.heartbeatIntervalMinutes ? "phosphor" : "muted"} />
-            <Chip label="home" value={cfg.home ? `${cfg.home.channel}:${cfg.home.chatId}` : "unset"} tone={cfg.home ? undefined : "muted"} />
+            <Chip label="home (global)" value={cfg.home ? `${cfg.home.channel}:${cfg.home.chatId}` : "unset"} tone={cfg.home ? undefined : "muted"} />
           </div>
           <p style={{ ...hint, margin: 0 }}>Changes apply on the next daemon restart.</p>
+          <p style={{ ...hint, margin: 0 }}>
+            The proactive <strong style={{ color: color.text }}>home</strong> is daemon-global (shared by every
+            companion) — manage it under <strong style={{ color: color.text }}>Proactive home</strong> in the sidebar.
+          </p>
           <div>
             {confirmDel ? (
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -397,7 +508,7 @@ function ConfigSection({ companion, onChanged, onDeleted }: { companion: Compani
 }
 
 // ── Access: the session↔chat binding + the group sender allowlist ───────────────
-function AccessSection({ companion, onChanged }: { companion: Companion; onChanged: () => void }) {
+function AccessSection({ companion, onChanged }: { companion: CompanionRow; onChanged: () => void }) {
   const { sessionId } = companion;
   const binding = companion.binding ?? null;
   const [adding, setAdding] = useState(false);
@@ -487,7 +598,7 @@ function AllowedSenders({ sessionId, channel }: { sessionId: string; channel: st
 
   const submit = () => {
     setLocalErr(null);
-    const err = validateSender({ senderId });
+    const err = validateSender({ senderId, label });
     if (err) { setLocalErr(err); return; }
     add.mutate({ sessionId, channel, senderId: senderId.trim(), label: label.trim() || null });
   };
