@@ -95,6 +95,18 @@ export function companionSkillsDir(sessionId: string): string {
 }
 
 /**
+ * The Loom Companion's SELF-AUTHORED memory store — the sibling of COMPANION_SKILLS_DIR, same isolation
+ * discipline: each bound companion gets its OWN base dir `<LOOM_HOME>/companion-memory/<companionSessionId>/
+ * <name>/MEMORY.md`. Memory entries are authored/refined by the companion (name+description+pinned
+ * frontmatter) and loaded ON-DEMAND, NEVER seeded/injected into any session's skill dir. Created lazily on
+ * first author (never in ensureDirs), so default-OFF stays byte-identical.
+ */
+export const COMPANION_MEMORY_DIR = path.join(LOOM_HOME, "companion-memory");
+export function companionMemoryDir(sessionId: string): string {
+  return path.join(COMPANION_MEMORY_DIR, sessionId);
+}
+
+/**
  * Single-process mode (Releases v1): where the PREBUILT web viewport (Vite output) lives, so the daemon
  * can serve the UI from its own loopback origin — no separate `pnpm web`. One resolver, with an env
  * override so it works in the monorepo NOW and from a bundled npm package LATER (Part 2). Priority:
