@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node test/terminal-chrome.mjs && node --experimental-strip-types test/diff.mjs && node --experimental-strip-types test/companion.mjs && node --experimental-strip-types test/companionChat.mjs && node --experimental-strip-types test/archive-invalidate.mjs && node --experimental-strip-types test/profileRoles.mjs && node --experimental-strip-types test/sessions.mjs && node --experimental-strip-types test/column-sort.mjs && node --experimental-strip-types test/fleet.mjs && node --experimental-strip-types test/nav-companion-gating.mjs && tsc -p tsconfig.json --noEmit && vite build",
+    "build": "node test/terminal-chrome.mjs && node --experimental-strip-types test/diff.mjs && node --experimental-strip-types test/companion.mjs && node --experimental-strip-types test/companionChat.mjs && node --experimental-strip-types test/archive-invalidate.mjs && node --experimental-strip-types test/profileRoles.mjs && node --experimental-strip-types test/sessions.mjs && node --experimental-strip-types test/column-sort.mjs && node --experimental-strip-types test/fleet.mjs && node --experimental-strip-types test/nav-companion-gating.mjs && node --experimental-strip-types test/orchestration-no-global-cluster.mjs && tsc -p tsconfig.json --noEmit && vite build",
     "test:terminal-chrome": "node test/terminal-chrome.mjs",
     "test:diff": "node --experimental-strip-types test/diff.mjs",
     "test:companion": "node --experimental-strip-types test/companion.mjs",
@@ -16,6 +16,7 @@
     "test:column-sort": "node --experimental-strip-types test/column-sort.mjs",
     "test:fleet": "node --experimental-strip-types test/fleet.mjs",
     "test:nav-companion-gating": "node --experimental-strip-types test/nav-companion-gating.mjs",
+    "test:orchestration-no-global-cluster": "node --experimental-strip-types test/orchestration-no-global-cluster.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "preview": "vite preview"
   },

@@ -78,7 +78,6 @@ export const NAV_PAGES: NavPage[] = [
   { label: "Workspace", to: "/workspace", element: <Workspace />, group: "operate" },
   { label: "Archive", to: "/archive", element: <Archive />, group: "operate" },
   // ── More ▾ · Project ─────────────────────────────────────────────────────────
-  { label: "Orchestration", to: "/orchestration", element: <Orchestration />, group: "project", scoped: true },
   { label: "Vault", to: "/vault", element: <Vault />, group: "project", scoped: true },
   { label: "Git", to: "/git", element: <Git />, group: "project", scoped: true },
   // ── More ▾ · Config ──────────────────────────────────────────────────────────
@@ -91,6 +90,10 @@ export const NAV_PAGES: NavPage[] = [
   // it stays right here under More ▾ · Config.
   { label: "Companion", to: "/companion", element: <Companion />, group: "config" },
   { label: "Schedules", to: "/schedules", element: <Schedules />, group: "config", scoped: true },
+  // Orchestration (UI-audit finding #11): the manager→worker→diff drill-down, not a standalone
+  // destination — demoted out of Project into Config (last slot) since the global pause/kill cluster
+  // that used to live here now lives ONLY on Mission Control (finding #6).
+  { label: "Orchestration", to: "/orchestration", element: <Orchestration />, group: "config", scoped: true },
   // ── More ▾ · System ──────────────────────────────────────────────────────────
   { label: "Usage", to: "/usage", element: <Usage />, group: "system" },
   { label: "Settings", to: "/settings", element: <Settings />, group: "system", scoped: true },

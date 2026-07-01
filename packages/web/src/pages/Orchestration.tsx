@@ -9,12 +9,12 @@ import { Panel, Button, Select, SectionLabel, Badge, StatusPill, Chip, Meter } f
 import { DiffView } from "../components/Diff";
 import { color, font } from "../theme";
 
-// Orchestration viewport (#18b): SEE the spine that the MCP manager drives. A live fleet view of
-// ONE manager's workers, its orchestration_events timeline, and a per-worker branch diff — plus
-// the REST pause/kill/stop controls. (The all-managers god-eye view is Mission Control.)
+// Orchestration viewport (#18b): the manager→worker→live-diff drill-down for ONE manager — its
+// workers, its orchestration_events timeline, and a per-worker branch diff. The global pause/kill
+// cluster and the all-managers god-eye view live on Mission Control only (UI-audit finding #6/#11) —
+// this page is reached from a fleet card there, not a duplicate standalone control surface.
 
 export default function Orchestration() {
-  const qc = useQueryClient();
   const { projectId } = useActiveProject();
   const [managerId, setManagerId] = useState("");
   const [workerId, setWorkerId] = useState(""); // selected worker → diff panel
@@ -23,7 +23,6 @@ export default function Orchestration() {
 
   // Poll so the fleet updates live (processState/busy/ctx) without a manual refresh.
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 2000 });
-  const status = useQuery({ queryKey: ["orchStatus"], queryFn: api.orchestrationStatus, refetchInterval: 2000 });
   const events = useQuery({ queryKey: ["orchEvents", managerId], queryFn: () => api.orchestrationEvents(managerId), enabled: !!managerId, refetchInterval: 2000, placeholderData: keepPreviousData });
   const diff = useQuery({ queryKey: ["workerDiff", workerId], queryFn: () => api.workerDiff(workerId), enabled: !!workerId, placeholderData: keepPreviousData });
 
@@ -33,20 +32,13 @@ export default function Orchestration() {
   const managers = all.filter((s) => s.role === "manager" && s.projectId === projectId).sort(bySessionActivity);
   const workers = all.filter((s) => s.parentSessionId === managerId).sort(bySessionActivity);
   const selectedWorker = workers.find((w) => w.id === workerId);
-  const paused = status.data?.pausedScopes ?? [];
-  const globalPaused = paused.includes("global");
-  const scoped = paused.filter((s) => s !== "global");
 
-  const refreshStatus = () => qc.invalidateQueries({ queryKey: ["orchStatus"] });
-  const refreshSessions = () => qc.invalidateQueries({ queryKey: ["allSessions"] });
-  const pause = useMutation({ mutationFn: () => api.pauseOrchestration(), onSuccess: refreshStatus });
-  const resume = useMutation({ mutationFn: () => api.resumeOrchestration(), onSuccess: refreshStatus });
-  const kill = useMutation({ mutationFn: () => api.killOrchestration(), onSuccess: () => { refreshStatus(); refreshSessions(); } });
-  const stop = useMutation({ mutationFn: (id: string) => api.stopSession(id, "hard"), onSuccess: refreshSessions });
+  const qc = useQueryClient();
+  const stop = useMutation({ mutationFn: (id: string) => api.stopSession(id, "hard"), onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }) });
 
   return (
     <div>
-      {/* Global controls + live pause status */}
+      {/* Manager picker — scoped to the active project. */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
         <span style={{ fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>Manager</span>
         <Select value={managerId} onChange={(e) => { setManagerId(e.target.value); setWorkerId(""); }}>
@@ -55,12 +47,6 @@ export default function Orchestration() {
             <option key={m.id} value={m.id}>{m.agentName} · {m.id.slice(0, 8)} ({m.processState})</option>
           ))}
         </Select>
-        <span style={{ flex: 1 }} />
-        <Badge tone={globalPaused ? "red" : "phosphor"}>{globalPaused ? "paused (global)" : "running"}</Badge>
-        {scoped.length > 0 && <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber }}>scoped: {scoped.map((s) => s.slice(0, 8)).join(", ")}</span>}
-        <Button disabled={pause.isPending} onClick={() => pause.mutate()}>Pause</Button>
-        <Button disabled={resume.isPending} onClick={() => resume.mutate()}>Resume</Button>
-        <Button variant="danger" disabled={kill.isPending} onClick={() => kill.mutate()}>Kill all</Button>
       </div>
 
       {!managerId && <p style={{ color: color.textMuted }}>Select a manager to view its workers, timeline, and diffs.</p>}
