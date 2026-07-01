@@ -61,6 +61,7 @@ export type PairingRedeemResult =
  */
 export interface CompanionConfigRow {
   sessionId: string;
+  /** Envelope ciphertext, or the EMPTY STRING for an in-app-only companion (no bot token stored). */
   botTokenBlob: string;
   channel: string;
   allowedChatId: string;
@@ -68,6 +69,12 @@ export interface CompanionConfigRow {
   heartbeatIntervalMinutes: number;
   heartbeatPrompt: string | null;
   enabled: boolean;
+  /**
+   * Provision provenance: TRUE ⇒ the `/api/companion/provision` endpoint minted the bound session, so
+   * deleting this config also retires that session. FALSE (env bootstrap / a human-bound pre-existing
+   * session) ⇒ the session outlives the config on delete. Backfills to 0 on legacy rows.
+   */
+  provisioned: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -449,6 +456,7 @@ CREATE TABLE IF NOT EXISTS companion_config (
   heartbeat_interval_minutes INTEGER NOT NULL DEFAULT 0, -- proactive cadence in minutes (0 = off)
   heartbeat_prompt TEXT,                      -- framed proactive-prompt text (NULL ⇒ DEFAULT_HEARTBEAT_PROMPT)
   enabled INTEGER NOT NULL DEFAULT 1,         -- a disabled config is treated as OFF at boot
+  provisioned INTEGER NOT NULL DEFAULT 0,     -- 1 ⇒ the provision endpoint minted the session (delete retires it)
   created_at TEXT,
   updated_at TEXT
 );
@@ -586,6 +594,14 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   held: "INTEGER NOT NULL DEFAULT 0",
 };
 
+/** Columns added to `companion_config` after its initial ship; applied to existing DBs by
+ *  migrateCompanionConfig() (fresh installs already have them via CREATE TABLE). */
+const COMPANION_CONFIG_ADDED_COLUMNS: Record<string, string> = {
+  // Provision provenance. NOT NULL + constant DEFAULT 0 is legal on ALTER TABLE ADD COLUMN, so every
+  // legacy config row backfills to provisioned=0 (env/human-bound — a delete never retires its session).
+  provisioned: "INTEGER NOT NULL DEFAULT 0",
+};
+
 type Row = Record<string, unknown>;
 
 /**
@@ -646,6 +662,7 @@ export class Db {
     this.migrateTasks();
     this.migrateSchedules();
     this.migrateRuns();
+    this.migrateCompanionConfig();
   }
 
   /**
@@ -812,6 +829,21 @@ export class Db {
       // Differs (old predicate) or absent (fresh DB) — (re)build to the desired shape.
       this.db.exec("DROP INDEX IF EXISTS idx_runs_idempotency");
       this.db.exec(desiredIndexSql);
+    }
+  }
+
+  /**
+   * Idempotent additive migration for `companion_config` — ADD COLUMN any column added after the table's
+   * initial ship missing from an existing DB (fresh installs already have them via CREATE TABLE). Mirrors
+   * migrateSchedules; the NOT NULL + constant DEFAULT 0 backfills every legacy config row to
+   * provisioned=0 (env/human-bound — a delete never retires its session) in place.
+   */
+  private migrateCompanionConfig(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(companion_config)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(COMPANION_CONFIG_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE companion_config ADD COLUMN ${name} ${type}`);
     }
   }
 
@@ -1332,22 +1364,29 @@ export class Db {
   upsertCompanionConfig(input: {
     sessionId: string; botTokenBlob: string; channel: string; allowedChatId: string;
     chatScope: "dm" | "group"; heartbeatIntervalMinutes: number; heartbeatPrompt: string | null; enabled: boolean;
+    /** Provision provenance (see CompanionConfigRow.provisioned). OMITTED ⇒ PRESERVE the stored value on an
+     *  update (env-bootstrap / REST-config writes leave it untouched), defaulting to false on first insert. */
+    provisioned?: boolean;
   }): CompanionConfigRow {
-    const existing = this.db.prepare("SELECT created_at FROM companion_config WHERE session_id = ?").get(input.sessionId) as Row | undefined;
+    const existing = this.db.prepare("SELECT created_at, provisioned FROM companion_config WHERE session_id = ?").get(input.sessionId) as Row | undefined;
     const now = new Date().toISOString();
     const row: CompanionConfigRow = {
       sessionId: input.sessionId, botTokenBlob: input.botTokenBlob, channel: input.channel,
       allowedChatId: input.allowedChatId, chatScope: input.chatScope,
       heartbeatIntervalMinutes: input.heartbeatIntervalMinutes, heartbeatPrompt: input.heartbeatPrompt,
-      enabled: input.enabled, createdAt: (existing?.created_at as string) ?? now, updatedAt: now,
+      enabled: input.enabled,
+      // Explicit value wins; else keep what's stored (an update never silently clears provenance); else false.
+      provisioned: input.provisioned ?? (existing?.provisioned as number | undefined) === 1,
+      createdAt: (existing?.created_at as string) ?? now, updatedAt: now,
     };
     this.db.prepare(
-      `INSERT INTO companion_config (session_id, bot_token_blob, channel, allowed_chat_id, chat_scope, heartbeat_interval_minutes, heartbeat_prompt, enabled, created_at, updated_at)
-       VALUES (@sessionId, @botTokenBlob, @channel, @allowedChatId, @chatScope, @heartbeatIntervalMinutes, @heartbeatPrompt, @enabledInt, @createdAt, @updatedAt)
+      `INSERT INTO companion_config (session_id, bot_token_blob, channel, allowed_chat_id, chat_scope, heartbeat_interval_minutes, heartbeat_prompt, enabled, provisioned, created_at, updated_at)
+       VALUES (@sessionId, @botTokenBlob, @channel, @allowedChatId, @chatScope, @heartbeatIntervalMinutes, @heartbeatPrompt, @enabledInt, @provisionedInt, @createdAt, @updatedAt)
        ON CONFLICT(session_id) DO UPDATE SET
          bot_token_blob = @botTokenBlob, channel = @channel, allowed_chat_id = @allowedChatId, chat_scope = @chatScope,
-         heartbeat_interval_minutes = @heartbeatIntervalMinutes, heartbeat_prompt = @heartbeatPrompt, enabled = @enabledInt, updated_at = @updatedAt`,
-    ).run({ ...row, enabledInt: row.enabled ? 1 : 0 });
+         heartbeat_interval_minutes = @heartbeatIntervalMinutes, heartbeat_prompt = @heartbeatPrompt, enabled = @enabledInt,
+         provisioned = @provisionedInt, updated_at = @updatedAt`,
+    ).run({ ...row, enabledInt: row.enabled ? 1 : 0, provisionedInt: row.provisioned ? 1 : 0 });
     return row;
   }
   /**
@@ -2868,6 +2907,7 @@ function toCompanionConfigRow(r0: unknown): CompanionConfigRow {
     heartbeatIntervalMinutes: (r.heartbeat_interval_minutes as number) ?? 0,
     heartbeatPrompt: (r.heartbeat_prompt as string | null) ?? null,
     enabled: (r.enabled as number) !== 0,
+    provisioned: (r.provisioned as number) === 1,
     createdAt: (r.created_at as string) ?? "", updatedAt: (r.updated_at as string) ?? "",
   };
 }

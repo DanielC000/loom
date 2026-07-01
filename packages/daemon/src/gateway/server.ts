@@ -26,6 +26,7 @@ import type { SetupMcpRouter } from "../mcp/setup.js";
 import type { RunMcpRouter } from "../mcp/run.js";
 import type { CompanionControl } from "../companion/controller.js";
 import type { InAppChannel } from "../companion/in-app.js";
+import { IN_APP_CHANNEL } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig } from "../companion/store.js";
 import { encryptSecret } from "../keys/envelope.js";
@@ -47,7 +48,7 @@ import { resetProfileToBundled } from "../profiles/seed.js";
 import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge, profileUpdateDiff, adoptProfileUpdate, type ProfileFieldResolution } from "../profiles/customization.js";
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
-import { SETUP_PROJECT_NAME } from "../setup/seed.js";
+import { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME } from "../setup/seed.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -776,9 +777,163 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return maskCompanionConfig(row, homeOf(), process.env);
   });
   app.delete("/api/companion/config/:sessionId", async (req) => {
-    deps.db.deleteCompanionConfig((req.params as { sessionId: string }).sessionId);
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    // Provenance-scoped teardown: read the row BEFORE the cascade delete so we know whether THIS endpoint's
+    // provision minted the session (provisioned:true). A provisioned session is RETIRED with the config; a
+    // pre-existing human-bound / env session (provisioned:false) is left running — deleting its run-config
+    // only unarms the companion, it must not stop a session the user still owns.
+    const existing = deps.db.getCompanionConfig(sessionId);
+    deps.db.deleteCompanionConfig(sessionId); // cascade: config + bindings + allowed-senders + pairing codes
     await deps.companion?.reconcile(); // tear the live companion down to the OFF state — no restart
-    return { ok: true };
+    if (existing?.provisioned) {
+      // Best-effort graceful retire (preserves the transcript; the session archives on exit). Never let a
+      // teardown fault fail the delete — the durable cascade already succeeded.
+      try { deps.sessions.stopSession(sessionId, "graceful"); } catch { /* session already gone / not live */ }
+    }
+    return { ok: true, retiredSession: !!existing?.provisioned };
+  });
+
+  // --- Companion PROVISION (card cbc9fa68): the one-shot "New companion" endpoint behind the future UI
+  // button. HUMAN-ONLY loopback REST, INTENTIONALLY NO MCP path (of ANY router): a chat-reachable,
+  // injection-exposed companion agent must NEVER be able to provision (self-spawn) a companion — same trust
+  // posture as the bindings/allowlist/config human-only writers. ATOMIC: spawn a long-lived assistant
+  // session on the chosen rig (default = the bundled "Companion" agent), create the config row bound to that
+  // NEW session (token encrypted via envelope IF a botToken is given; no token ⇒ IN-APP-ONLY, the default),
+  // write the session's single bindings-authoritative route (the Telegram dm route when botToken+allowedChatId
+  // are given, else the default in-app route — companion_bindings is one-per-session), and arm the running
+  // companion via reconcile() (Telegram adapter armed ONLY when a token exists).
+  // ROLLBACK (load-bearing): any post-spawn write failure TEARS DOWN the spawned session so no orphan is
+  // left. Returns the MASKED companion (never the plaintext token). ---
+  app.post("/api/companion/provision", async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    // name: optional human label (advisory today — there is no session-title store to persist it to).
+    if (b.name !== undefined && b.name !== null && (typeof b.name !== "string" || b.name.length > COMPANION_ID_MAX)) {
+      return reply.code(400).send({ error: `name must be a string of at most ${COMPANION_ID_MAX} characters` });
+    }
+    // GUARD 1 (single-companion precondition, PRE-SPAWN): resolveEffectiveConfig arms only the OLDEST enabled
+    // config, so a 2nd companion provisioned while one is enabled would spawn a REAL but inert/unrouted session
+    // and mislead with armed:true. Until multi-companion runtime support lands, REFUSE here — BEFORE spawning,
+    // so no inert session is ever created.
+    if (deps.db.listCompanionConfigs().some((c) => c.enabled)) {
+      return reply.code(409).send({ error: "a companion is already active — delete it first, or multi-companion support is not yet available" });
+    }
+    // Resolve the rig: an explicit agentId, else the bundled "Companion" agent in the reserved setup home.
+    let agentId: string;
+    if (b.agentId !== undefined && b.agentId !== null) {
+      if (!isNonBlankStr(b.agentId)) return reply.code(400).send({ error: "agentId must be a non-empty string" });
+      if (!deps.db.getAgent(b.agentId.trim())) return reply.code(404).send({ error: "agent not found" });
+      agentId = b.agentId.trim();
+    } else {
+      const home = deps.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+      const companionAgent = home ? deps.db.listAgents(home.id).find((a) => a.name === COMPANION_AGENT_NAME) : undefined;
+      if (!companionAgent) return reply.code(400).send({ error: "no default Companion rig is available — pass an explicit agentId" });
+      agentId = companionAgent.id;
+    }
+    // GUARD 3 (assistant-role rig, correctness + least-privilege): chat_reply is gated on role=assistant, so a
+    // non-assistant rig yields a companion that can't reply — and binding a chat-reachable/injection-exposed
+    // agent to a manager/platform/worker rig is a blast-radius escalation. REJECT any rig whose resolved
+    // profile role isn't "assistant" (a profile-less / null-role agent is rejected too). The bundled Companion
+    // rig is assistant, so the default path is unaffected; only an explicit non-assistant agentId is rejected.
+    const rigAgent = deps.db.getAgent(agentId);
+    const rigProfile = rigAgent?.profileId ? deps.db.getProfile(rigAgent.profileId) : undefined;
+    if (rigProfile?.role !== "assistant") {
+      return reply.code(400).send({ error: "a companion rig must be an assistant-role profile" });
+    }
+    // botToken: optional. Present ⇒ Telegram is ALSO wired (encrypted at rest); omitted ⇒ in-app-only.
+    let botToken: string | null = null;
+    if (isNonBlankStr(b.botToken, COMPANION_TOKEN_MAX)) botToken = b.botToken.trim();
+    else if (b.botToken !== undefined && b.botToken !== null) {
+      return reply.code(400).send({ error: `botToken must be a non-empty string of at most ${COMPANION_TOKEN_MAX} characters` });
+    }
+    // allowedChatId: the Telegram chat to bind (only meaningful WITH a token). Optional; validated when present.
+    let allowedChatId = "";
+    if (isNonBlankStr(b.allowedChatId)) allowedChatId = b.allowedChatId.trim();
+    else if (b.allowedChatId !== undefined && b.allowedChatId !== null) {
+      return reply.code(400).send({ error: "allowedChatId must be a non-empty string" });
+    }
+    // GUARD 2 (token needs a chat to reach): a botToken with NO allowedChatId would arm a Telegram long-poll
+    // but write the IN-APP binding (the else branch below) — advertising telegram/tokenConfigured while being
+    // unreachable over Telegram. REJECT. (No token + no chatId stays the in-app-only default.)
+    if (botToken && !allowedChatId) {
+      return reply.code(400).send({ error: "allowedChatId is required when botToken is given" });
+    }
+    // channel: the Telegram transport channel label (default telegram). Optional.
+    let channel = TELEGRAM_CHANNEL;
+    if (isNonBlankStr(b.channel)) channel = b.channel.trim();
+    else if (b.channel !== undefined && b.channel !== null) {
+      return reply.code(400).send({ error: "channel must be a non-empty string" });
+    }
+    // cadence: optional proactive heartbeat interval in minutes (0 = off).
+    let cadence = 0;
+    if (b.cadence !== undefined && b.cadence !== null) {
+      if (typeof b.cadence !== "number" || !Number.isInteger(b.cadence) || b.cadence < 0 || b.cadence > COMPANION_CADENCE_MAX) {
+        return reply.code(400).send({ error: `cadence must be an integer in [0, ${COMPANION_CADENCE_MAX}]` });
+      }
+      cadence = b.cadence;
+    }
+    // enabled: optional boolean (default true — a provisioned companion arms immediately).
+    let enabled = true;
+    if (typeof b.enabled === "boolean") enabled = b.enabled;
+    else if (b.enabled !== undefined && b.enabled !== null) return reply.code(400).send({ error: "enabled must be a boolean" });
+    // home: optional { channel, chatId } proactive target.
+    let home: { channel: string; chatId: string } | null = null;
+    if (b.home !== undefined && b.home !== null) {
+      const h = b.home as { channel?: unknown; chatId?: unknown };
+      if (!isNonBlankStr(h.channel) || !isNonBlankStr(h.chatId)) return reply.code(400).send({ error: "home must be { channel, chatId } non-empty strings" });
+      home = { channel: h.channel.trim(), chatId: h.chatId.trim() };
+    }
+
+    // (a) Spawn the long-lived assistant session on the chosen rig. A spawn failure here has nothing to roll
+    // back (no session, no writes) — surface it directly.
+    let sessionId: string;
+    try {
+      sessionId = deps.sessions.startNew(agentId).id;
+    } catch (e) {
+      return reply.code(500).send({ error: `failed to spawn the companion session: ${(e as Error).message}` });
+    }
+
+    // (b–d) Everything AFTER the spawn is wrapped so a failure tears the session down (no orphan). The
+    // cascade delete cleans any partial config/binding writes; deleteSession + a hard stop remove the row.
+    try {
+      // (b) config row bound to the NEW session — token encrypted IF given, else empty blob (no token stored).
+      const row = deps.db.upsertCompanionConfig({
+        sessionId,
+        botTokenBlob: botToken ? encryptSecret(botToken) : "",
+        channel: botToken ? channel : IN_APP_CHANNEL,
+        allowedChatId,
+        chatScope: "dm",
+        heartbeatIntervalMinutes: cadence,
+        heartbeatPrompt: null,
+        enabled,
+        provisioned: true, // origin marker — delete-companion retires THIS session (teardown symmetry)
+      });
+      // (c) the session's SINGLE authoritative binding (companion_bindings is ONE-per-session — `session_id`
+      // is the PK, and the gateway's bindingsBySession map is 1:1). A companion with a Telegram token binds
+      // its Telegram dm route (its external reach); otherwise the default IN-APP route (chatId == the session
+      // id, loopback-authenticated — the cockpit chat panel). Both go through the SAME human-only bindings/
+      // authz path (db.upsertCompanionBinding). CONSTRAINT (flagged up): the one-per-session invariant means a
+      // Telegram companion is reachable over Telegram, NOT ALSO the in-app cockpit panel — a dual-channel
+      // (in-app + Telegram) companion would require a bindings multimap (a load-bearing change to the routing/
+      // authz table, out of scope for this card).
+      if (botToken && allowedChatId) {
+        deps.db.upsertCompanionBinding({ sessionId, channel, chatId: allowedChatId, scope: "dm" });
+      } else {
+        deps.db.upsertCompanionBinding({ sessionId, channel: IN_APP_CHANNEL, chatId: sessionId, scope: "dm" });
+      }
+      if (home) deps.db.setCompanionHome(home);
+      // (d) arm the running companion — reconcile builds the gateway from the bindings above; the Telegram
+      // adapter arms ONLY when a token exists (in-app-only ⇒ no external adapter). reconcile is best-effort
+      // (never throws), so it never triggers rollback — only a durable write failure above does.
+      await deps.companion?.reconcile();
+      return reply.code(201).send(maskCompanionConfig(row, homeOf(), process.env));
+    } catch (e) {
+      // ROLLBACK: tear the spawned session down so no orphan session/config/binding survives a partial write.
+      try { deps.db.deleteCompanionConfig(sessionId); } catch { /* nothing written / already gone */ }
+      try { deps.sessions.stopSession(sessionId, "hard"); } catch { /* pty already gone */ }
+      try { deps.db.deleteSession(sessionId); } catch { /* row already gone */ }
+      await deps.companion?.reconcile(); // return the live companion to whatever the DB now reflects (OFF)
+      return reply.code(500).send({ error: `companion provision failed and was rolled back: ${(e as Error).message}` });
+    }
   });
 
   // --- Hook relay target (loopback only) ---

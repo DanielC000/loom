@@ -6,8 +6,13 @@ import { TELEGRAM_CHANNEL } from "./telegram.js";
 
 /** Companion configuration (spike scope) — all three are required for the adapter to run. */
 export interface CompanionConfig {
-  /** Telegram bot token — its PRESENCE is what turns the companion ON (default OFF; see readCompanionConfig). */
-  botToken: string;
+  /**
+   * Telegram bot token. `null` ⇒ an IN-APP-ONLY companion (no external channel — the provision default):
+   * the gateway comes up with only the in-app adapter and NO Telegram long-poll is armed. A non-null token
+   * additionally wires Telegram. (The env spike path always supplies a token — its presence is what turns
+   * that path ON; see readCompanionConfig — so only the DB-backed provision path produces a null here.)
+   */
+  botToken: string | null;
   /** The SINGLE allowlisted chat id (spike). Any other chat id is rejected. */
   allowedChatId: string;
   /** The bound companion session id — an EXISTING live session (assistant / manager / worker). */

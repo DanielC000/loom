@@ -36,8 +36,11 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // (LOOM_COMPANION_CHAT_SCOPE=group) seeds a group binding to which senders are added over REST. This
   // whole path only runs when the companion is configured (index.ts gates on a non-null CompanionConfig),
   // so an unconfigured daemon never writes a binding row — default-OFF stays byte-identical.
+  // Bootstrap the single env/Telegram binding ONLY when a token exists (the env single-owner path). An
+  // IN-APP-ONLY companion (no token) carries no Telegram route — its in-app binding is minted by the
+  // provision endpoint, not here — so seeding a Telegram binding from an empty allowedChatId is skipped.
   let bindings = db.listCompanionBindings();
-  if (bindings.length === 0) {
+  if (bindings.length === 0 && cfg.botToken) {
     db.upsertCompanionBinding({ sessionId: cfg.sessionId, channel: TELEGRAM_CHANNEL, chatId: cfg.allowedChatId, scope: cfg.chatScope });
     bindings = db.listCompanionBindings();
   }
@@ -48,17 +51,22 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // the owner via the configured companion home. Read LIVE (a human REST PUT /api/companion/home takes
   // effect with no restart), like the binding routing map.
   const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, () => db.getCompanionHome());
-  // The adapter normalizes each Telegram update, then hands it to the gateway (route → authz → submit).
-  // handleInbound is fire-and-forget, so BACKSTOP its promise with .catch(): even though the gateway
-  // already contains a synchronous submit throw, any future rejection here must never become an unhandled
-  // rejection (which the daemon's global handler turns into process.exit(1) — the whole daemon down).
-  const adapter = createTelegramAdapter(cfg.botToken, (msg) => {
-    gateway.handleInbound(msg).catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error(`[companion] inbound handling failed: ${err instanceof Error ? err.message : String(err)}`);
+  // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
+  // arms NO Telegram long-poll: the gateway comes up with the in-app adapter alone (registered below), so no
+  // external network transport is started and default-OFF stays byte-identical. The adapter normalizes each
+  // Telegram update, then hands it to the gateway (route → authz → submit). handleInbound is fire-and-forget,
+  // so BACKSTOP its promise with .catch(): even though the gateway already contains a synchronous submit
+  // throw, any future rejection here must never become an unhandled rejection (which the daemon's global
+  // handler turns into process.exit(1) — the whole daemon down).
+  if (cfg.botToken) {
+    const adapter = createTelegramAdapter(cfg.botToken, (msg) => {
+      gateway.handleInbound(msg).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error(`[companion] inbound handling failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     });
-  });
-  gateway.registerAdapter(adapter);
+    gateway.registerAdapter(adapter);
+  }
   // The in-app channel (default companion transport): register the STABLE hub's adapter so an in-app
   // binding routes over the same bindings-authoritative gateway (OUTBOUND chat_reply → deliverReply →
   // hub.adapter.send → the connected web client). ADDITIVE — with no in-app binding + no attached client

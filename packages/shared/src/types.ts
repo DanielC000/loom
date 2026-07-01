@@ -779,6 +779,18 @@ export interface CompanionConfigMasked {
   sessionId: SessionId;
   /** Always true for a returned config (a missing config is a 404 / absent from the list, not `configured:false`). */
   configured: true;
+  /**
+   * Whether a bot token is stored for this companion (Telegram wired). FALSE for an IN-APP-ONLY companion
+   * (the provision default — no external channel), in which case `tokenLast4` is empty. Distinct from
+   * `configured` (a config row exists) and from an empty `tokenLast4` on a corrupt/undecryptable blob.
+   */
+  tokenConfigured: boolean;
+  /**
+   * Whether THIS endpoint minted the bound session (provision provenance). TRUE ⇒ deleting the companion
+   * also RETIRES the session it spawned; FALSE (env bootstrap / a human-bound pre-existing session) ⇒ the
+   * session outlives the config on delete. See the provision endpoint.
+   */
+  provisioned: boolean;
   /** The last 4 characters of the bot token, for human confirmation — NEVER the token itself. */
   tokenLast4: string;
   /** The transport channel (e.g. "telegram"). */

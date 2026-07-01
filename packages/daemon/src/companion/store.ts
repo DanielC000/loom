@@ -30,6 +30,7 @@ export interface CompanionConfigStore {
   upsertCompanionConfig(input: {
     sessionId: string; botTokenBlob: string; channel: string; allowedChatId: string;
     chatScope: "dm" | "group"; heartbeatIntervalMinutes: number; heartbeatPrompt: string | null; enabled: boolean;
+    provisioned?: boolean;
   }): CompanionConfigRow;
   getCompanionHome(): { channel: string; chatId: string } | null;
   setCompanionHome(home: { channel: string; chatId: string }): void;
@@ -51,7 +52,9 @@ export function resolveCompanionConfig(
   keyPath?: string,
 ): CompanionConfig | null {
   const envCfg = readCompanionConfig(env);
-  if (envCfg) {
+  // The env spike path ALWAYS carries a token (readCompanionConfig returns null without one — the in-app-only
+  // tokenless companion is a DB-provision-only shape, never an env config), so envCfg.botToken is non-null here.
+  if (envCfg && envCfg.botToken) {
     // Env bootstrap/override: seed/override the DB row from env BEFORE the gateway is built (token encrypted).
     db.upsertCompanionConfig({
       sessionId: envCfg.sessionId,
@@ -104,15 +107,20 @@ export function resolveEffectiveConfig(
   }
   if (!row || !row.enabled) return null; // OFF — no env + no enabled row ⇒ byte-identical to today.
 
-  let botToken: string;
-  try {
-    botToken = decryptSecret(row.botTokenBlob, keyPath);
-  } catch {
-    // A corrupt/undecryptable blob (e.g. a lost key file) — stay OFF rather than crash the daemon. Do NOT
-    // log the blob; the reason is generic on purpose (no ciphertext / no key material in the log).
-    // eslint-disable-next-line no-console
-    console.warn(`[companion] stored config for session ${row.sessionId.slice(0, 8)} could not be decrypted — companion NOT started.`);
-    return null;
+  // An IN-APP-ONLY companion stores NO token (empty blob): botToken stays null and the gateway comes up with
+  // only the in-app adapter (no Telegram long-poll — see createCompanionGateway). This is a VALID armed
+  // companion, NOT the OFF path. Only a NON-EMPTY blob is decrypted; a decrypt FAILURE there still ⇒ OFF.
+  let botToken: string | null = null;
+  if (row.botTokenBlob) {
+    try {
+      botToken = decryptSecret(row.botTokenBlob, keyPath);
+    } catch {
+      // A corrupt/undecryptable blob (e.g. a lost key file) — stay OFF rather than crash the daemon. Do NOT
+      // log the blob; the reason is generic on purpose (no ciphertext / no key material in the log).
+      // eslint-disable-next-line no-console
+      console.warn(`[companion] stored config for session ${row.sessionId.slice(0, 8)} could not be decrypted — companion NOT started.`);
+      return null;
+    }
   }
   // Home comes from app_meta (the single source), with the env-style default (channel / allowedChatId).
   const home = db.getCompanionHome();
@@ -142,16 +150,23 @@ export function maskCompanionConfig(
   env?: NodeJS.ProcessEnv,
   keyPath?: string,
 ): CompanionConfigMasked {
+  // In-app-only companion (empty blob) ⇒ no token configured, empty last-4. Only a NON-EMPTY blob is
+  // decrypted for its last-4 (a corrupt blob yields an empty last-4, never a throw).
+  const tokenConfigured = !!row.botTokenBlob;
   let tokenLast4 = "";
-  try {
-    tokenLast4 = decryptSecret(row.botTokenBlob, keyPath).slice(-4);
-  } catch {
-    tokenLast4 = ""; // corrupt/undecryptable blob — never leak, never throw
+  if (tokenConfigured) {
+    try {
+      tokenLast4 = decryptSecret(row.botTokenBlob, keyPath).slice(-4);
+    } catch {
+      tokenLast4 = ""; // corrupt/undecryptable blob — never leak, never throw
+    }
   }
   const envPinned = !!env && readCompanionConfig(env)?.sessionId === row.sessionId;
   return {
     sessionId: row.sessionId,
     configured: true,
+    tokenConfigured,
+    provisioned: row.provisioned,
     tokenLast4,
     channel: row.channel,
     allowedChatId: row.allowedChatId,
