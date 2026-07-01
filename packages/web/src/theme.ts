@@ -4,7 +4,7 @@
 // This module exposes them to TS / React inline-styles as var() references, so there is
 // a single source of truth and no drifting hex literals. Spec: packages/web/design/DESIGN.md.
 
-import type { ColumnRole } from "@loom/shared";
+import type { ColumnRole, SessionRole } from "@loom/shared";
 
 export const color = {
   // Surfaces — depth comes from hairline borders, not shadows.
@@ -61,4 +61,19 @@ export const roleTone: Record<ColumnRole, Tone> = {
   parked: "muted", // waiting / parked
   humanHold: "red", // needs a human
   terminal: "phosphor", // done
+};
+
+// Session-ROLE → badge tone. The ONE place a session/profile's orchestration role maps to a signal
+// tone, so every surface that tints a session by its role agrees (Archive / Overview / Profiles /
+// Workspace all read this). null/plain sessions fall back to "muted" at the call site. Distinct from
+// the lane-oriented `roleTone` above (ColumnRole) — this keys on SessionRole.
+export const sessionRoleTone: Record<NonNullable<SessionRole>, Tone> = {
+  manager: "phosphor",
+  worker: "cyan",
+  platform: "amber",
+  auditor: "muted",
+  setup: "cyan",
+  "workspace-auditor": "muted",
+  run: "muted",
+  assistant: "cyan",
 };
