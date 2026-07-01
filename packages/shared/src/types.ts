@@ -113,6 +113,20 @@ export interface Profile {
    */
   documentConversion?: boolean;
   /**
+   * Opt-in RESTRICTED-tools capability (blast-radius control for a chat-reachable Companion): when true, a
+   * session under this rig is spawned with a curated, HARDCODED set of dangerous NATIVE tools (raw shell +
+   * host-writes: `Bash`/`Edit`/`Write`/`NotebookEdit`/`MultiEdit`) REMOVED from the model's tool list
+   * (appended to `--disallowedTools`, unioned with the role's human-prompt disallow). SUBTRACTIVE — unlike
+   * browserTesting/documentConversion it confers no capability, it withdraws one. Default OFF (absent/false)
+   * and fully additive — a rig without it spawns byte-identically to today (the disallow list is exactly the
+   * role's human-prompt tools). Least-privilege by construction: the tool set is fixed, never agent- or
+   * free-form-configurable; the human WIDENS deliberately by turning the flag OFF. HUMAN-set only (Profiles
+   * UI / REST), like role/browserTesting: NEVER exposed as an agent MCP setter beyond the profile surface
+   * (same capability-gating posture as browserTesting/gateCommand). The counterweight to a companion driven
+   * by untrusted inbound chat (a prompt-injection vector).
+   */
+  restrictedTools?: boolean;
+  /**
    * Opt-in "no-commit role" declaration: when true, a worker under this rig is a READ-ONLY / no-commit
    * worker (e.g. a Code Reviewer) whose CORRECT contract is to produce NO commit (`filesChanged:0`).
    * Default OFF (absent/false) and fully additive — a rig without it behaves byte-identically to today.
@@ -404,6 +418,15 @@ export interface Session {
    * Absent/false on every existing session ⇒ no markitdown MCP, byte-identical spawn.
    */
   documentConversion?: boolean;
+  /**
+   * Restricted-tools capability, resolved from the session's Profile at spawn and PINNED here (mirrors
+   * `browserTesting`): when true, the curated dangerous NATIVE tools (Bash/Edit/Write/NotebookEdit/
+   * MultiEdit) are appended to this session's `--disallowedTools`. Persisted so EVERY respawn path
+   * (resume / fork / recycle / boot) re-applies the restriction — a resumed Companion keeps its locked-down
+   * tool surface, exactly as role is re-passed. Absent/false on every existing session ⇒ no restriction,
+   * byte-identical spawn.
+   */
+  restrictedTools?: boolean;
   /**
    * Declared no-commit role, resolved from the session's Profile at spawn and PINNED here (mirrors
    * `browserTesting`): when true, this is a READ-ONLY / no-commit worker. Confers NO spawn-time

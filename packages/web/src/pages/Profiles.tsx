@@ -247,6 +247,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
   const [model, setModel] = useState(profile.model ?? "");
   const [browserTesting, setBrowserTesting] = useState(profile.browserTesting ?? false);
   const [documentConversion, setDocumentConversion] = useState(profile.documentConversion ?? false);
+  const [restrictedTools, setRestrictedTools] = useState(profile.restrictedTools ?? false);
   const [noCommit, setNoCommit] = useState(profile.noCommit ?? false);
   // Skill subset (empty = deliver ALL, the default — null and [] are equivalent, matching the daemon).
   const [skills, setSkills] = useState<string[]>(profile.skills ?? []);
@@ -277,6 +278,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
     (model.trim() || null) !== profile.model ||
     browserTesting !== (profile.browserTesting ?? false) ||
     documentConversion !== (profile.documentConversion ?? false) ||
+    restrictedTools !== (profile.restrictedTools ?? false) ||
     noCommit !== (profile.noCommit ?? false) ||
     sortedJson(skills) !== sortedJson(profile.skills ?? []);
 
@@ -286,7 +288,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
     background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
   };
 
-  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setNoCommit(profile.noCommit ?? false); setSkills(profile.skills ?? []); };
+  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setRestrictedTools(profile.restrictedTools ?? false); setNoCommit(profile.noCommit ?? false); setSkills(profile.skills ?? []); };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
@@ -380,6 +382,23 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
           can silently lack the markitdown MCP only because the venv is still installing or failed to. */}
       {documentConversion && <MarkitdownProvisioning />}
 
+      {/* Opt-in restricted tools: a session under this rig spawns with the dangerous NATIVE tools (raw
+          shell + host-writes) removed from the model's tool list. Blast-radius control for a chat-reachable
+          Companion driven by untrusted input — human-set here only, never via an agent tool. */}
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+        <input type="checkbox" checked={restrictedTools} onChange={(e) => setRestrictedTools(e.target.checked)} style={{ marginTop: 2 }} />
+        <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <span style={fieldLabel}>Restricted tools</span>
+          <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+            Lock down blast radius: remove the dangerous native tools (Bash / Edit / Write / NotebookEdit /
+            MultiEdit, subagent delegation Task / Agent, and network egress WebFetch / WebSearch) from this
+            rig's tool list — so it can't run a shell, write host files, spawn a subagent that re-acquires
+            them, or reach the network. Read / Glob / Grep and the Loom MCP tools stay. Turn ON for a companion
+            reachable from untrusted chat; turning it OFF widens the rig deliberately.
+          </span>
+        </span>
+      </label>
+
       {/* Declared no-commit role: a read-only worker (e.g. a code reviewer) whose correct contract is to
           produce NO commit. Lifecycle-only — confers no spawn capability; human-set here only. */}
       <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
@@ -432,7 +451,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
       <span style={{ flex: 1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || !name.trim() || saving}
-          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, noCommit, skills: skills.length ? skills : null })}>
+          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, restrictedTools, noCommit, skills: skills.length ? skills : null })}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {dirty
@@ -601,7 +620,7 @@ function FieldSide({ label, tone: t, active, value, onPick }: { label: string; t
 const FIELD_DISPLAY: Record<string, string> = {
   role: "Role", description: "Description", allowDelta: "Allow delta", skills: "Skills",
   model: "Model", icon: "Icon", browserTesting: "Browser testing", documentConversion: "Document conversion",
-  noCommit: "No-commit role",
+  restrictedTools: "Restricted tools", noCommit: "No-commit role",
 };
 function fieldDisplayName(field: string): string {
   return FIELD_DISPLAY[field] ?? field;

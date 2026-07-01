@@ -764,6 +764,14 @@ export interface SpawnOpts {
    */
   documentConversion?: boolean;
   /**
+   * Opt-in RESTRICTED-tools (resolved from the session's Profile, gated; blast-radius control). When true,
+   * the curated dangerous native tools ({@link RESTRICTED_NATIVE_TOOLS}) are UNIONed into this spawn's
+   * `--disallowedTools` (on top of the role's human-prompt disallow), removing them from the model's tool
+   * list. Default OFF — every existing spawn is byte-identical when unset/false (the disallow list stays
+   * exactly `disallowedToolsForRole(role)`). Threaded on EVERY spawn path from the pinned session row.
+   */
+  restrictedTools?: boolean;
+  /**
    * Profile-resolved skill-name SUBSET pinned on the session row (mirrors browserTesting): injectSkills
    * delivers ONLY these skills. null/empty/absent ⇒ ALL store skills (byte-identical to today). Threaded
    * on EVERY spawn path (fresh/resume/fork/recycle/boot) — read from the row, never re-resolved — so the
@@ -846,6 +854,56 @@ export function disallowedToolsForRole(role?: SessionRole | null): string[] {
     default:
       return []; // manager / platform / plain — unchanged, no disallow
   }
+}
+
+/**
+ * The CURATED, HARDCODED set of dangerous NATIVE tools a `restrictedTools` session spawns WITHOUT —
+ * removed from the model's tool list via `--disallowedTools` (blast-radius control for a chat-reachable
+ * Companion driven by UNTRUSTED inbound chat; CLAUDE.md load-bearing rule #5). Four categories:
+ *
+ *  RAW SHELL / HOST-WRITES (the direct-damage surface):
+ *   - `Bash`         — arbitrary shell / process execution.
+ *   - `Edit` / `Write` / `NotebookEdit` — host filesystem writes (auto-accepted under acceptEdits).
+ *   - `MultiEdit`    — the multi-hunk write tool. Included DEFENSIVELY: it is NOT present in the current
+ *                      engine's native toolset (Edit's replace_all subsumed it), so disallowing it is a
+ *                      harmless no-op today — kept so a future re-introduction can't silently re-open a
+ *                      host-write vector.
+ *
+ *  SUBAGENT DELEGATION (closes the residual BYPASS — the important one):
+ *   - `Task` / `Agent` — the subagent-launch tool. Without this a restricted companion could spawn a
+ *                      general-purpose subagent that re-acquires Bash/Write, defeating the whole
+ *                      restriction (we can't rely on a subagent inheriting the parent's --disallowedTools).
+ *                      Removing the delegation tool makes that inheritance question MOOT. BOTH names are
+ *                      listed on purpose: the classic Claude Code name is `Task`, but the CURRENT engine
+ *                      exposes it as `Agent` — disallowing a non-present name is a harmless no-op, so listing
+ *                      both closes the bypass regardless of which name the spawned `claude` registers.
+ *
+ *  NETWORK EGRESS (exfil / SSRF for an agent reading untrusted chat):
+ *   - `WebFetch` / `WebSearch` — outbound network. A companion exposed to untrusted input should not have a
+ *                      data-exfiltration / SSRF channel; a companion that genuinely needs web runs with the
+ *                      flag OFF (the human widens deliberately).
+ *
+ * NOT restricted: Read/Glob/Grep (read-only — a companion needs context) and the MCP tools
+ * (my_context/chat_reply/skill_*). FIXED by construction — never agent- or free-form-configurable; the
+ * human WIDENS by turning the flag OFF. Frozen so a caller can't mutate the shared constant.
+ */
+export const RESTRICTED_NATIVE_TOOLS: readonly string[] = Object.freeze([
+  "Bash", "Edit", "Write", "NotebookEdit", "MultiEdit", "Task", "Agent", "WebFetch", "WebSearch",
+]);
+
+/**
+ * The FULL `--disallowedTools` list for a spawn: the role's human-prompt disallow ({@link
+ * disallowedToolsForRole}) UNIONed (de-duped, role tools first) with {@link RESTRICTED_NATIVE_TOOLS} iff
+ * `restrictedTools` is on. When OFF this returns EXACTLY `disallowedToolsForRole(role)` — so the flag-off
+ * argv is BYTE-IDENTICAL to today (no restricted tokens appended). Pure + exported so the spawn-args test
+ * asserts the union + the byte-identical-off invariant with no real claude. (Companion blast-radius card.)
+ */
+export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedTools?: boolean): string[] {
+  const base = disallowedToolsForRole(role);
+  if (!restrictedTools) return base; // OFF: exactly the role's human-prompt tools (byte-identical to today)
+  const merged = [...base];
+  for (const t of RESTRICTED_NATIVE_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
+  return merged;
 }
 
 /**
@@ -1268,10 +1326,12 @@ export class PtyHost {
     // and hand it to the shared-venv markitdown resolver (only consulted when documentConversion is on).
     const mcpServers = buildMcpServers({ sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion, pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER });
     // Role-scoped disallow of the interactive human-prompt tools (AskUserQuestion / Exit|EnterPlanMode):
-    // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human. Computed
-    // from the session role at the single spawn chokepoint, so EVERY path (fresh/resume/fork/recycle/boot)
-    // inherits it; empty for every out-of-scope role ⇒ no flag ⇒ byte-identical argv. See disallowedToolsForRole.
-    const disallowedTools = disallowedToolsForRole(opts.role);
+    // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human — UNIONed with
+    // the curated dangerous native tools when this session's Profile set restrictedTools (Companion
+    // blast-radius control). Computed from the session role + pinned flag at the single spawn chokepoint, so
+    // EVERY path (fresh/resume/fork/recycle/boot) inherits it; when restrictedTools is off this is exactly
+    // disallowedToolsForRole(role) ⇒ byte-identical argv. See disallowedToolsForSpawn.
+    const disallowedTools = disallowedToolsForSpawn(opts.role, opts.restrictedTools);
     const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt, model: opts.model, disallowedTools });
 
     // Inherited env (CLAUDE_*/CLAUDECODE scrubbed) + sessionEnv merge + the three git-safety vars that

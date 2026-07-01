@@ -30,6 +30,11 @@ const profileSchema = z
     // Opt-in document-conversion capability (default off). Human-gated identically to browserTesting —
     // it launches a host markitdown process, so it is never an agent MCP write surface.
     documentConversion: z.boolean().optional(),
+    // Opt-in RESTRICTED-tools (default off). Blast-radius control for a chat-reachable Companion: when on,
+    // the curated dangerous native tools (Bash/Edit/Write/NotebookEdit/MultiEdit) are appended to
+    // --disallowedTools at spawn. Human-gated identically to browserTesting — it is never a NEW agent MCP
+    // write surface; a companion (assistant role) has no profile write tool, so it can never self-widen.
+    restrictedTools: z.boolean().optional(),
     // Declared no-commit role (default off). Lifecycle-only flag (no spawn-time host capability) — a
     // 0-commit done auto-retires + skips the forgot-to-commit warning. Human-gated like browserTesting.
     noCommit: z.boolean().optional(),
@@ -57,6 +62,7 @@ export function validateProfile(
       icon: d.icon ?? null,
       browserTesting: d.browserTesting ?? false, // normalize to the stored default (off)
       documentConversion: d.documentConversion ?? false, // normalize to the stored default (off)
+      restrictedTools: d.restrictedTools ?? false, // normalize to the stored default (off)
       noCommit: d.noCommit ?? false, // normalize to the stored default (off)
     },
   };
