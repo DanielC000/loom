@@ -21,8 +21,21 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * Stateless: a fresh McpServer+transport per request (the URL-path session id supplies the role
  * binding). No cached transport, so a dropped stream can't wedge the surface mid-session.
  */
+/**
+ * Loom Companion (Phase 0 spike) hooks, threaded from index.ts. The `chat_reply` tool is registered
+ * ONLY on the single configured companion session's MCP server, so every OTHER manager/worker spawn's
+ * surface stays byte-identical and never sees a stray tool (the "fully additive" discipline). Both fields
+ * absent ⇒ companion off ⇒ no session ever gets chat_reply.
+ */
+export interface CompanionHooks {
+  /** The bound companion session id — chat_reply is registered iff sessionId === this. Null/undefined ⇒ off. */
+  companionSessionId?: string | null;
+  /** Deliver the agent's chat_reply(text) back OUT to the chat bound to the session (companion/gateway.ts). */
+  deliverReply?: (sessionId: string, text: string) => Promise<{ delivered: boolean; reason?: string }>;
+}
+
 export class OrchestrationMcpRouter {
-  constructor(private db: Db, private sessions: SessionService) {}
+  constructor(private db: Db, private sessions: SessionService, private companion: CompanionHooks = {}) {}
 
   /** Role gate: returns the session's id + orchestration role, or null (→ 404) for plain/unknown. */
   resolveRole(sessionId: string): { id: string; role: SessionRole } | null {
@@ -105,10 +118,42 @@ export class OrchestrationMcpRouter {
     );
   }
 
+  /**
+   * Loom Companion (Phase 0 spike): register `chat_reply` ONLY on the single configured companion
+   * session's MCP server. Placed BEFORE the role split so a companion bound to EITHER a manager or a
+   * worker session gets it; a session that isn't the companion never registers it, keeping every other
+   * spawn's tool surface byte-identical. The tool routes to the companion delivery path (deliverReply →
+   * the chat transport) — it does NOT submit a turn (that would loop the reply back into the agent).
+   */
+  private registerChatReplyIfCompanion(server: McpServer, sessionId: string): void {
+    const companionId = this.companion.companionSessionId;
+    if (!companionId || sessionId !== companionId) return;
+    const deliverReply = this.companion.deliverReply;
+    server.registerTool(
+      "chat_reply",
+      {
+        description:
+          "Reply to the user talking to you over the Loom Companion chat channel (e.g. Telegram). Pass " +
+          "the reply `text`; it is delivered VERBATIM back to the chat you're bound to. This is your ONLY " +
+          "way to reach that user — the incoming chat message was injected as this turn, and calling " +
+          "chat_reply is how your answer gets OUT (it does NOT loop back in as a new turn). Mirrors " +
+          "worker_report: emit one clean, final reply.",
+        inputSchema: { text: z.string() },
+      },
+      async ({ text }) => {
+        if (!deliverReply) return ok({ delivered: false, error: "companion transport not configured" });
+        return ok(await deliverReply(sessionId, text));
+      },
+    );
+  }
+
   private buildServer(sessionId: string, role: SessionRole): McpServer {
     const db = this.db;
     const sessions = this.sessions;
     const server = new McpServer({ name: "loom-orchestration", version: "0.1.0" });
+
+    // Companion spike: additive, single-session-gated chat_reply (see registerChatReplyIfCompanion).
+    this.registerChatReplyIfCompanion(server, sessionId);
 
     if (role === "worker") {
       this.registerMyContext(server, sessionId);
