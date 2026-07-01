@@ -111,8 +111,8 @@ export default function Overview() {
         <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap", marginTop: 8 }}>
           <StatusPill tone={roll.tone} label={roll.label} glow={roll.glow} />
           <div style={{ display: "flex", gap: 10 }}>
-            <Stat label="managers" value={managers.length} />
-            <Stat label="workers" value={workers.length} />
+            <Stat label="active managers" value={managers.length} />
+            <Stat label="active workers" value={workers.length} />
             <Stat label="attention" value={projAttention.length} tone={projAttention.length ? "amber" : "muted"} />
             <Stat label="archived" value={archived.data?.length ?? 0} tone="muted" />
           </div>
@@ -264,9 +264,10 @@ function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRol
 // SINGLE-OPEN / LAZY-MOUNT (the load-bearing perf constraint): one `openId` — at most one row is
 // expanded, so at most ONE SessionCockpit (hence ONE TerminalPane + its websocket) is mounted across
 // the whole fleet. The cockpit mounts on expand and unmounts on collapse or when another row opens
-// (conditional render off `openId`), so we never run N live xterms at once. This replaced the old
-// standalone ProjectTerminals "Terminals" section (which tiled ALL live terminals simultaneously —
-// directly contradicting this constraint); the all-terminals view still lives on the /terminals page.
+// (conditional render off `openId`), so we never run N live xterms at once. This lazy-mount is the
+// accordion's OWN perf discipline; it lives alongside — and does NOT replace — the standalone
+// ProjectTerminals "Terminals" grid below (a deliberately-kept feature that tiles the project's live
+// terminals), which the /terminals page also mirrors.
 //
 // All mutations already exist (mirrors Workspace's wiring) and invalidate the shared ["allSessions"]
 // query the page reads — ZERO new daemon/REST. The manager-archive worker-count confirm is built per
