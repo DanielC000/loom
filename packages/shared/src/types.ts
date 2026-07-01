@@ -885,12 +885,15 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000;
 export const CONTEXT_WARN_RATIO = 0.6;
 // Map a model id to its context window. The transcript reports a BARE model id (e.g.
 // "claude-opus-4-8") with no signal of the 1M-context beta, so we size by the model's MAX
-// attainable window: Claude 4.x Opus/Sonnet run with the 1M beta in this deployment. An explicit
-// "1m" in the id always wins. Unknown models fall back to DEFAULT_CONTEXT_WINDOW. Adjust here if
-// you run a 4.x model pinned to the smaller 200k window.
+// attainable window: Claude 4.x Opus/Sonnet run with the 1M beta in this deployment, and the
+// Claude 5 flagship family (Opus/Sonnet/Fable 5) ships with a genuine 1M window natively. An
+// explicit "1m" in the id always wins. Unknown models fall back to DEFAULT_CONTEXT_WINDOW.
+// Haiku is deliberately excluded (small/fast tier, genuinely 200k). Adjust here if you run a
+// 4.x/5.x model pinned to the smaller 200k window.
 const CONTEXT_WINDOW_BY_MODEL: { match: RegExp; window: number }[] = [
-  { match: /1m/i, window: 1_000_000 },               // an explicit 1M-context model id
-  { match: /opus-4|sonnet-4/i, window: 1_000_000 },  // Claude 4.x Opus/Sonnet — 1M-context beta
+  { match: /1m/i, window: 1_000_000 },                       // an explicit 1M-context model id
+  { match: /opus-4|sonnet-4/i, window: 1_000_000 },          // Claude 4.x Opus/Sonnet — 1M-context beta
+  { match: /opus-5|sonnet-5|fable-5/i, window: 1_000_000 },  // Claude 5 flagship family — native 1M
 ];
 /** Resolve a session's context window from its (possibly null) model id. */
 export function contextWindowForModel(model?: string | null): number {

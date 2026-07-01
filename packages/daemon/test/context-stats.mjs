@@ -45,6 +45,15 @@ try {
   // (c) missing transcript file → null.
   check("(c) missing transcript file → null", readContextStats(cwd, "no-such-id") === null);
 
+  // Claude 5 flagship family sizes to the native 1M window; Haiku (small/fast tier) stays at
+  // the 200k default; an explicit "[1m]" marker id and an unknown id are unchanged.
+  check("contextWindowForModel(claude-sonnet-5) = 1M", contextWindowForModel("claude-sonnet-5") === 1_000_000);
+  check("contextWindowForModel(claude-opus-4-8) = 1M (unchanged 4.x case)", contextWindowForModel("claude-opus-4-8") === 1_000_000);
+  check("contextWindowForModel(claude-fable-5) = 1M", contextWindowForModel("claude-fable-5") === 1_000_000);
+  check("contextWindowForModel(claude-haiku-4-5-20251001) stays 200k (small/fast tier)", contextWindowForModel("claude-haiku-4-5-20251001") === 200_000);
+  check("contextWindowForModel(some-model-[1m]) = 1M (explicit marker unchanged)", contextWindowForModel("some-model-[1m]") === 1_000_000);
+  check("contextWindowForModel(unknown-model) = 200k (unchanged unknown case)", contextWindowForModel("unknown-model") === 200_000);
+
   // (d) assistant lines present but none carry usage → null (even though turns would be > 0).
   writeFixture("nousage", [
     { type: "user", message: { content: "hi" } },
