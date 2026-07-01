@@ -1204,21 +1204,26 @@ export class Db {
   /**
    * Delete a binding by session id, or (when `channel` is given) only that session's binding on that ONE
    * channel — the other channels' bindings are untouched. Idempotent either way (a missing id/channel
-   * matches nothing, a safe no-op). CASCADE-clears that scope's allowlisted senders in the SAME
-   * transaction (PL + Lead ruling: least-privilege on an auth boundary — a re-bind of the same
-   * (session, channel) must start with an EMPTY allowlist, never inherit a prior grant).
+   * matches nothing, a safe no-op). CASCADE-clears that scope's allowlisted senders AND unconsumed pairing
+   * codes in the SAME transaction (PL + Lead ruling: least-privilege on an auth boundary — a re-bind of
+   * the same (session, channel) must start with an EMPTY allowlist, never inherit a prior grant, and a
+   * still-outstanding pairing code from before the unbind must not be able to re-populate it). Mirrors the
+   * full-teardown `deleteCompanionConfig`'s cascade shape. companion_pairing_attempts is deliberately LEFT
+   * (see deleteCompanionConfig — a lockout must survive unbind/re-bind churn).
    */
   deleteCompanionBinding(sessionId: string, channel?: string): void {
     if (channel !== undefined) {
       this.db.transaction(() => {
         this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ? AND channel = ?").run(sessionId, channel);
         this.db.prepare("DELETE FROM companion_allowed_senders WHERE session_id = ? AND channel = ?").run(sessionId, channel);
+        this.db.prepare("DELETE FROM companion_pairing_codes WHERE session_id = ? AND channel = ?").run(sessionId, channel);
       })();
       return;
     }
     this.db.transaction(() => {
       this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM companion_allowed_senders WHERE session_id = ?").run(sessionId);
+      this.db.prepare("DELETE FROM companion_pairing_codes WHERE session_id = ?").run(sessionId);
     })();
   }
   /** A session's per-binding allowlisted senders (the group-scope allowlist). Ordered for a stable list. */

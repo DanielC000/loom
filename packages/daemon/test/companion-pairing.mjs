@@ -251,11 +251,17 @@ try {
     check("takeover: a dm-bind code for an already-bound session (different chat) is REFUSED", rTakeover.outcome === "rejected");
     check("takeover: the existing binding is UNCHANGED", db.listCompanionBindings().find((b) => b.sessionId === "sess-A")?.chatId === "orig-chat");
     check("takeover: the refused code is NOT consumed", db.getPairingCodeById(cA.codeId)?.consumed_at == null);
-    // …and after the human clears the old binding via admin, the SAME code legitimately rebinds.
+    // …and after the human clears the old binding via admin, the STALE code is gone too (deleteCompanionBinding
+    // cascade-clears a session's outstanding pairing codes, not just its allowlist — a still-unexpired code
+    // must not survive an admin unbind and later re-populate a grant). A FRESH code legitimately rebinds.
     db.deleteCompanionBinding("sess-A");
-    const rMoved = redeemDm(cA.code, "attacker-chat", "mallory");
-    check("takeover: after the old binding is removed, the same code rebinds to the new chat", rMoved.outcome === "bound" && rMoved.chatId === "attacker-chat");
-    check("takeover: that legit redemption consumed the code", db.getPairingCodeById(cA.codeId)?.consumed_at != null);
+    check("takeover: the admin unbind cascade-clears the now-stale outstanding code", db.getPairingCodeById(cA.codeId) === undefined);
+    const rStale = redeemDm(cA.code, "attacker-chat", "mallory");
+    check("takeover: the stale (deleted) code can no longer redeem", rStale.outcome === "rejected");
+    const cA2 = db.mintPairingCode({ sessionId: "sess-A", channel: "telegram", grantType: "dm-bind", ttlMs: TTL_MS }, NOW);
+    const rMoved = redeemDm(cA2.code, "attacker-chat", "mallory");
+    check("takeover: after the old binding is removed, a FRESH code rebinds to the new chat", rMoved.outcome === "bound" && rMoved.chatId === "attacker-chat");
+    check("takeover: that legit redemption consumed the fresh code", db.getPairingCodeById(cA2.codeId)?.consumed_at != null);
 
     // (b) Exact-same-chat re-pair is idempotent (allowed): sess-B bound to same-chat, code redeemed there.
     db.upsertCompanionBinding({ sessionId: "sess-B", channel: "telegram", chatId: "same-chat", scope: "dm" });
