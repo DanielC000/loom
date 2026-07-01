@@ -1,11 +1,17 @@
 // Hermetic unit test for the Companion → Manage overhaul (Companion epic): the pure logic that makes the
 // Manage tab the single home for everything companion.
 //   1. Profiles split (lib/profileRoles.ts): the companion's assistant-role rig is HIDDEN from the agent
-//      Profiles page (agentProfiles) and resolved for the inline restricted-tools toggle (companionProfile).
+//      Profiles page (agentProfiles); companionProfile resolves the shared rig itself (not a specific
+//      running companion's live settings — those are pinned per-session, see restricted-tools below).
 //   2. Persona-prompt bounds (lib/companion.ts): validatePersonaPrompt / COMPANION_PROMPT_MAX mirror the
 //      daemon's 10k guard so the editor rejects an over-long prompt inline, not at a 400.
 //   3. The api.ts client mirrors for the NEW human-only REST — prompt (GET/PUT), skills (GET list/single,
-//      DELETE) — driven against a mocked global fetch: request shapes + response unwrapping.
+//      DELETE), and session-row restricted-tools (GET/PUT) — driven against a mocked global fetch: request
+//      shapes + response unwrapping.
+//   4. restartCompanionSession (api.ts): stop → poll until truly exited → resume, and — the live-apply
+//      fix's silent-failure guard — it THROWS instead of calling resume() if the session is still
+//      live/starting at the poll deadline (a resume() against a still-alive pty is a server-side no-op, so
+//      calling it there would report success without applying anything).
 // No daemon, no claude, no network: imports the TS source directly via Node type stripping.
 //
 // The web package has no test runner, so this is a self-contained node script, auto-globbed by
@@ -16,7 +22,7 @@ import { agentProfiles, companionProfile } from "../src/lib/profileRoles.ts";
 import { validatePersonaPrompt, COMPANION_PROMPT_MAX } from "../src/lib/companion.ts";
 // api.ts has only a type-only `@loom/shared` import (erased under --experimental-strip-types), so it loads
 // here with no daemon/build — letting us drive the companion prompt/skills client against a mocked fetch.
-import { api } from "../src/lib/api.ts";
+import { api, restartCompanionSession } from "../src/lib/api.ts";
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
@@ -47,7 +53,7 @@ check("agentProfiles: never mutates its input", () => {
   assert.equal(input.length, 4, "the original list is untouched");
 });
 
-check("companionProfile: returns the assistant-role rig (the inline restricted-tools toggle edits it)", () => {
+check("companionProfile: returns the assistant-role rig (the shared Companion Profile, not a per-session pin)", () => {
   const p = companionProfile(profilesFixture());
   assert.equal(p?.id, "pC");
   assert.equal(p?.restrictedTools, true, "carries the restrictedTools value the Manage toggle reads");
@@ -158,6 +164,95 @@ await acheck("deleteCompanionSkill: DELETEs by name, returns the updated { ok, s
   let threw = null;
   try { await api.deleteCompanionSkill("s", "git-flow"); } catch (e) { threw = e; }
   assert.ok(threw && /no skill/.test(threw.message), "an unknown skill's 404 reason is surfaced verbatim");
+});
+
+// ── Session-ROW restrictedTools (live-apply fix): resolved by sessionId, distinct from the shared Profile ──
+
+await acheck("companionRestrictedTools: GETs /api/companion/restricted-tools/:sessionId", async () => {
+  let captured = null;
+  globalThis.fetch = async (url, opts) => {
+    captured = { url, opts };
+    return { ok: true, status: 200, json: async () => ({ sessionId: "sess 1", restrictedTools: true }) };
+  };
+  const r = await api.companionRestrictedTools("sess 1");
+  assert.equal(captured.url, "/api/companion/restricted-tools/sess%201", "sessionId is URL-encoded into the path");
+  assert.ok(!captured.opts || captured.opts.method === undefined || captured.opts.method === "GET");
+  assert.equal(r.restrictedTools, true);
+});
+
+await acheck("updateCompanionRestrictedTools: PUTs { restrictedTools } scoped to the one sessionId, surfaces a 400 reason", async () => {
+  let captured = null;
+  globalThis.fetch = async (url, opts) => { captured = { url, opts }; return { ok: true, status: 200, json: async () => ({ sessionId: "s", restrictedTools: false }) }; };
+  const r = await api.updateCompanionRestrictedTools("s", false);
+  assert.equal(captured.url, "/api/companion/restricted-tools/s");
+  assert.equal(captured.opts.method, "PUT");
+  assert.equal(captured.opts.headers["content-type"], "application/json");
+  assert.deepEqual(JSON.parse(captured.opts.body), { restrictedTools: false });
+  assert.equal(r.restrictedTools, false);
+
+  globalThis.fetch = async () => ({ ok: false, status: 400, json: async () => ({ error: "restrictedTools must be a boolean" }) });
+  let threw = null;
+  try { await api.updateCompanionRestrictedTools("s", /** @type {any} */ ("nope")); } catch (e) { threw = e; }
+  assert.ok(threw && /must be a boolean/.test(threw.message), "the 400 reason is surfaced verbatim");
+});
+
+// ── restartCompanionSession: stop → poll allSessions until truly exited → resume (never resume-while-live) ──
+// Both checks fake `setTimeout` to fire immediately (no real 500ms waits), and the second also fakes
+// `Date.now` so the 15s deadline is reached in a tight loop instead of a real 15-second test.
+
+await acheck("restartCompanionSession: stops, polls allSessions until the session has EXITED, then resumes", async () => {
+  const calls = [];
+  let pollCount = 0;
+  globalThis.fetch = async (url, opts) => {
+    calls.push(`${opts?.method ?? "GET"} ${url}`);
+    if (url === "/api/sessions/s1/stop") return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    if (url === "/api/sessions") {
+      pollCount++;
+      // First poll: still live. Second poll: gone from the list entirely (exited).
+      const body = pollCount === 1 ? [{ id: "s1", processState: "live" }] : [];
+      return { ok: true, status: 200, json: async () => body };
+    }
+    if (url === "/api/sessions/s1/resume") return { ok: true, status: 200, json: async () => ({ id: "s1", processState: "live" }) };
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
+  try {
+    await restartCompanionSession("s1");
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+  assert.deepEqual(calls, [
+    "POST /api/sessions/s1/stop",
+    "GET /api/sessions",
+    "GET /api/sessions",
+    "POST /api/sessions/s1/resume",
+  ], "stops, polls (still-live, then exited), THEN resumes — in that order, resume only after exit is observed");
+});
+
+await acheck("restartCompanionSession: throws (and NEVER calls resume) if the session is still live at the deadline", async () => {
+  let resumeCalled = false;
+  globalThis.fetch = async (url) => {
+    if (url === "/api/sessions/s2/stop") return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    if (url === "/api/sessions") return { ok: true, status: 200, json: async () => [{ id: "s2", processState: "live" }] }; // NEVER exits
+    if (url === "/api/sessions/s2/resume") { resumeCalled = true; return { ok: true, status: 200, json: async () => ({}) }; }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const realSetTimeout = globalThis.setTimeout;
+  const realDateNow = Date.now;
+  let fakeNow = 0;
+  Date.now = () => fakeNow;
+  globalThis.setTimeout = (fn) => { fakeNow += 500; fn(); return 0; }; // fast-forward the 15s deadline
+  let threw = null;
+  try {
+    await restartCompanionSession("s2");
+  } catch (e) { threw = e; }
+  finally {
+    globalThis.setTimeout = realSetTimeout;
+    Date.now = realDateNow;
+  }
+  assert.ok(threw && /didn.t stop in time/i.test(threw.message), "throws a readable 'didn't stop in time' error, not a silent success");
+  assert.equal(resumeCalled, false, "resume() is NEVER called when the session never exited — the silent-failure guard the security review flagged");
 });
 
 console.log(`\n${pass} passed`);

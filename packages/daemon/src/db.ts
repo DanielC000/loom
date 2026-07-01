@@ -2348,6 +2348,17 @@ export class Db {
       .run(busy ? 1 : 0, new Date().toISOString(), id);
   }
   /**
+   * Re-pin the session-row `restrictedTools` flag directly (the human-only Companion Manage toggle) —
+   * a DIRECT row write, NOT re-resolved from the Profile (mirrors how the row is the source of truth on
+   * every resume/fork/recycle path — see resolveAgentSpawn's comment). restrictedTools is a spawn-time
+   * property (the `--disallowedTools` list), so this write alone has NO live effect until the session is
+   * next restarted (stop+resume) — the caller (REST route) is responsible for making that plain to the human.
+   */
+  setRestrictedTools(id: string, restrictedTools: boolean): void {
+    this.db.prepare("UPDATE sessions SET restricted_tools = ?, last_activity = ? WHERE id = ?")
+      .run(restrictedTools ? 1 : 0, new Date().toISOString(), id);
+  }
+  /**
    * On daemon boot, no pty from a previous run survives — reconcile any session still
    * marked live/starting to exited (it stays resumable if it captured an engine id).
    * Returns the recovered rows (read BEFORE the flip) so boot can run the crash-path

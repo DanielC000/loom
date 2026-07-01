@@ -10,6 +10,10 @@ export interface CompanionPairingCode { codeId: string; code: string; expiresAt:
 // self-authored skill entry — the companion authors these over MCP; this surface only reads + curates.
 export interface CompanionPrompt { sessionId: string; startupPrompt: string; baseBrief: string; }
 export interface CompanionSkillEntry { name: string; description: string; }
+// The session-ROW restrictedTools flag (blast-radius control) — DISTINCT from the Profile's
+// restrictedTools default: this is what a running companion's PTY was actually spawned with, and what a
+// restart re-applies from. See db.setRestrictedTools + sessions/service.ts resolveAgentSpawn.
+export interface CompanionRestrictedTools { sessionId: string; restrictedTools: boolean; }
 
 // Per-conflict resolution for a profile adopt-update: pick the user's value or the shipped value,
 // wholesale (the field-level analog of the skills resolver's per-hunk mine/shipped choice).
@@ -625,4 +629,35 @@ export const api = {
     getErr<{ name: string; content: string }>(`/api/companion/skills/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
   deleteCompanionSkill: (sessionId: string, name: string) =>
     delErr<{ ok: boolean; skills: CompanionSkillEntry[] }>(`/api/companion/skills/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
+
+  // Session-ROW restrictedTools (live-apply fix): GET/PUT the flag the running companion's PTY actually
+  // spawned with — distinct from the Profile default, and re-read on every resume. A write here needs a
+  // restart (stop+resume) to take effect; the caller drives that explicitly (see RestrictToolsSection).
+  companionRestrictedTools: (sessionId: string) =>
+    getErr<CompanionRestrictedTools>(`/api/companion/restricted-tools/${encodeURIComponent(sessionId)}`),
+  updateCompanionRestrictedTools: (sessionId: string, restrictedTools: boolean) =>
+    putErr<CompanionRestrictedTools>(`/api/companion/restricted-tools/${encodeURIComponent(sessionId)}`, { restrictedTools }),
 };
+
+// Stop + (once fully exited) resume a companion's own session — the only way a spawn-time property like
+// restrictedTools actually takes effect on an already-running companion (see RestrictToolsSection in
+// pages/Companion.tsx, the sole caller today). `resume()` server-side is a no-op SHORT-CIRCUIT while the
+// pty is still alive (sessions/service.ts), so calling it immediately after stop would silently do nothing
+// — this polls the session's processState until it truly exited (graceful stop escalates to a hard kill
+// within a bounded window server-side, so this always converges) before resuming. If the deadline is hit
+// while the session is STILL live/starting, this THROWS rather than calling resume() anyway — a resume()
+// against a still-alive pty is ALSO a no-op, so calling it here would silently fail to apply the new
+// setting while reporting success.
+export async function restartCompanionSession(sessionId: string): Promise<void> {
+  await api.stopSession(sessionId, "graceful");
+  const deadline = Date.now() + 15_000;
+  let exited = false;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const sessions = await api.allSessions();
+    const s = sessions.find((x) => x.id === sessionId);
+    if (!s || (s.processState !== "live" && s.processState !== "starting")) { exited = true; break; }
+  }
+  if (!exited) throw new Error("Companion didn't stop in time — try again.");
+  await api.resumeSession(sessionId);
+}

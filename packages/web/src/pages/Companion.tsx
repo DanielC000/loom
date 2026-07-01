@@ -1,14 +1,13 @@
 import { useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { CompanionConfigMasked, CompanionBinding, SessionListItem } from "@loom/shared";
-import { api, type CompanionProvisionError, type CompanionSkillEntry } from "../lib/api";
+import { api, restartCompanionSession, type CompanionProvisionError, type CompanionSkillEntry } from "../lib/api";
 import {
   bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, emptyConfigForm,
   emptyTelegramForm, formFromMasked, hasChannelBinding, maskedToken, provisionBody, provisionErrorMessage,
   validateBinding, validatePairing, validateSender, validatePersonaPrompt, COMPANION_PROMPT_MAX, TELEGRAM_CHANNEL,
   type CompanionConfigForm, type CompanionTelegramForm,
 } from "../lib/companion";
-import { companionProfile } from "../lib/profileRoles";
 import { Panel, Button, Input, Select, SectionLabel, Badge, StatusPill, Chip } from "../components/ui";
 import { CompanionChat } from "../components/CompanionChat";
 import { TerminalPane } from "../components/Terminal";
@@ -404,7 +403,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
           <ChannelsSection companion={companion} onChanged={onChanged} />
           <PersonaSection sessionId={companion.sessionId} />
           <SkillsSection sessionId={companion.sessionId} />
-          <RestrictToolsSection />
+          <RestrictToolsSection sessionId={companion.sessionId} />
           <PairingSection sessionId={companion.sessionId} />
         </div>
       )}
@@ -974,32 +973,45 @@ function SkillRow({ sessionId, skill, onDelete, deleting }: { sessionId: string;
 
 // ── Restrict tools: the blast-radius toggle, INLINE (was a link-out to Profiles) ──────────────────────
 // A chat-reachable companion driven by untrusted input is high blast-radius. This toggles `restrictedTools`
-// on the companion's assistant-role Profile — removing the dangerous native tools (shell / host-writes /
-// subagent delegation / network egress) from its tool list. HUMAN-only (like the Profiles surface it
-// replaces). All companions share the one bundled Companion rig, so this edits that shared profile.
-function RestrictToolsSection() {
+// on the SESSION ROW of the SPECIFIC companion being viewed (resolved by sessionId, not "the first
+// assistant-role profile" — a stale Profile-wide edit did nothing for an already-running companion, since
+// restrictedTools is a spawn-time property re-read from the row on every resume, never from the Profile).
+// HUMAN-only, matching the other Manage writers. restrictedTools feeds `--disallowedTools` at SPAWN time,
+// so a toggle here has NO live effect until the companion is restarted — the restart affordance below is
+// CONFIRM-GATED and never fires on its own (it would interrupt the owner's live companion).
+function RestrictToolsSection({ sessionId }: { sessionId: string }) {
   const qc = useQueryClient();
-  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
-  const profile = companionProfile(profiles.data ?? []);
+  const q = useQuery({ queryKey: ["companionRestrictedTools", sessionId], queryFn: () => api.companionRestrictedTools(sessionId) });
+  const [needsRestart, setNeedsRestart] = useState(false);
+  const [confirmRestart, setConfirmRestart] = useState(false);
 
   const save = useMutation({
-    mutationFn: (restrictedTools: boolean) => api.updateProfile(profile!.id, { restrictedTools }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["profiles"] });
-      if (profile) qc.invalidateQueries({ queryKey: ["profile", profile.id] });
+    mutationFn: (restrictedTools: boolean) => api.updateCompanionRestrictedTools(sessionId, restrictedTools),
+    onSuccess: (r) => {
+      qc.setQueryData(["companionRestrictedTools", sessionId], r);
+      setNeedsRestart(true);
     },
   });
 
-  // Optimistic display: reflect the in-flight value immediately, else the persisted profile value.
-  const on = save.isPending ? !!save.variables : (profile?.restrictedTools ?? false);
+  const restart = useMutation({
+    mutationFn: () => restartCompanionSession(sessionId),
+    onSuccess: () => {
+      setNeedsRestart(false);
+      setConfirmRestart(false);
+      qc.invalidateQueries({ queryKey: ["allSessions"] });
+    },
+  });
+
+  // Optimistic display: reflect the in-flight value immediately, else the persisted row value.
+  const on = save.isPending ? !!save.variables : (q.data?.restrictedTools ?? false);
 
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <SectionLabel style={{ margin: 0 }}>Restrict tools</SectionLabel>
-      {profiles.isLoading ? (
+      {q.isLoading ? (
         <span style={hint}>Loading…</span>
-      ) : !profile ? (
-        <p style={hint}>No companion rig found to restrict.</p>
+      ) : q.isError ? (
+        <span style={errStyle}>{(q.error as Error).message}</span>
       ) : (
         <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: save.isPending ? "default" : "pointer" }}>
           <input type="checkbox" checked={on} disabled={save.isPending}
@@ -1019,10 +1031,29 @@ function RestrictToolsSection() {
       )}
       {save.error && <span style={errStyle}>{(save.error as Error).message}</span>}
       <p style={{ ...hint, margin: 0 }}>
-        Edits the shared Companion rig — it takes effect when a companion is{" "}
-        <strong style={{ color: color.text }}>provisioned</strong>. A companion that's already running keeps
-        its current setting until it's re-provisioned.
+        A spawn-time setting — it's re-applied every time this companion (re)starts, but a change here has{" "}
+        <strong style={{ color: color.text }}>no effect on the currently running session</strong> until it's
+        restarted.
       </p>
+      {needsRestart && (
+        confirmRestart ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={errStyle}>Restart now to apply — this interrupts the companion's live session.</span>
+            <Button variant="danger" disabled={restart.isPending} onClick={() => restart.mutate()}>
+              {restart.isPending ? "Restarting…" : "Confirm restart"}
+            </Button>
+            <Button variant="ghost" disabled={restart.isPending} onClick={() => setConfirmRestart(false)}>Cancel</Button>
+          </div>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <Badge tone="amber">restart to apply</Badge>
+            <Button onClick={() => setConfirmRestart(true)} data-testid="companion-restart-to-apply">
+              Restart this companion to apply
+            </Button>
+          </div>
+        )
+      )}
+      {restart.error && <span style={errStyle}>{(restart.error as Error).message}</span>}
     </section>
   );
 }

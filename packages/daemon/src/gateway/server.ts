@@ -1011,6 +1011,36 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true, skills: result.skills };
   });
 
+  // --- Companion RESTRICTED TOOLS (blast-radius control, live-apply fix): restrictedTools is a SPAWN-TIME
+  // property re-read from the SESSION ROW on every resume/fork/recycle (sessions/service.ts resolveAgentSpawn's
+  // comment; `restrictedTools` on the row, NOT re-resolved from the Profile) — the Manage toggle used to edit
+  // only the shared Companion Profile, which a resume-durable companion never re-reads, so the toggle did
+  // nothing for an already-running companion. This writes the ROW directly instead. HUMAN-ONLY loopback REST,
+  // INTENTIONALLY NO MCP path — same trust posture as the prompt/skills writers above: a chat-reachable,
+  // injection-exposed companion agent must never widen its own tool surface. Resolves the SPECIFIC companion
+  // by sessionId (mirrors resolveCompanionAgent above), never "the first assistant-role profile".
+  // A write here has NO live effect until the session is next restarted (stop+resume) — restrictedTools
+  // feeds `buildSpawnArgs`' `--disallowedTools` list, which is fixed at spawn time; the web UI surfaces that
+  // plainly and gates the restart behind an explicit human confirm (never silently restarts a live companion).
+  app.get("/api/companion/restricted-tools/:sessionId", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const session = deps.db.getSession(sessionId)!;
+    return { sessionId, restrictedTools: session.restrictedTools ?? false };
+  });
+  app.put("/api/companion/restricted-tools/:sessionId", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const b = (req.body ?? {}) as { restrictedTools?: unknown };
+    if (typeof b.restrictedTools !== "boolean") {
+      return reply.code(400).send({ error: "restrictedTools must be a boolean" });
+    }
+    deps.db.setRestrictedTools(sessionId, b.restrictedTools);
+    return { sessionId, restrictedTools: b.restrictedTools };
+  });
+
   // --- Hook relay target (loopback only) ---
   app.post("/internal/hook", async (req, reply) => {
     if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
