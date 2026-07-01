@@ -298,3 +298,66 @@ export function seedSetupAuditorAgent(db: Db): string | null {
   db.insertAgent(agent);
   return SETUP_AUDITOR_AGENT_NAME;
 }
+
+/** The bundled profile the Companion agent runs under (seeded ungated by seedDefaultProfiles). */
+const COMPANION_PROFILE_NAME = "Companion";
+
+/**
+ * The seeded Companion agent's DISPLAY name (also the name-scoped anchor seedCompanionAgent resolves by —
+ * DISTINCT from SETUP_AGENT_NAME "Platform" and SETUP_AUDITOR_AGENT_NAME "Workspace Auditor" so the three
+ * standing agents in the reserved home never collide).
+ */
+export const COMPANION_AGENT_NAME = "Companion";
+
+/**
+ * The default startup prompt shipped for the Companion agent (user-editable after seed). LIGHT — persona
+ * and tone ONLY. The server-owned ASSISTANT_BASE_BRIEF (composeAssistantStartupPrompt, PREPENDED at spawn)
+ * already supplies the companion identity, the untrusted-input security posture, the chat_reply doctrine,
+ * and the personal-skills surface — none of which may live in a user-editable prompt — so this must NOT
+ * restate them. It only adds the persona a companion greets the user with (which a human CAN edit freely).
+ */
+const COMPANION_PROMPT = `You are the user's **Companion** — a warm, personable assistant they talk to day to day. Be genuinely helpful, concise, and direct: match the user's tone, keep track of what matters to them across the conversation, and follow through on what you say you'll do.
+
+When a request is ambiguous, make a sensible assumption and say what you assumed rather than stalling. Keep replies tight and easy to read on a phone.`;
+
+/**
+ * Seed the bundled Companion agent into the SAME reserved "Platform" setup home as the operator + auditor
+ * (one home, three standing agents), SEED-IF-ABSENT BY AGENT-NAME — the EXACT mirror of seedSetupAuditorAgent
+ * (B4). Run at boot AFTER seedSetupHome, scoped to the reserved home (resolved by NAME — gotcha #1), never a
+ * name-agnostic reserved lookup.
+ *
+ * Why a separate boot-time seeder and not an extension of seedSetupHome (gotcha #2): seedSetupHome no-ops the
+ * WHOLE seed once the home exists, so an EXISTING install would never get the Companion rig if it were added
+ * there. Seeding the agent by its own name-presence check instead backfills existing installs on upgrade AND
+ * covers fresh installs (operator + auditor + companion on one boot).
+ *
+ * TEMPLATE ONLY — this seeds the rig (the assistant-role Companion profile + a Companion agent bound to it)
+ * so a "New companion" provision has an author-free default spawn target. It creates NO session and writes
+ * NO companion_config; the rig is invisible until a human provisions from it.
+ *
+ * Idempotent + non-clobbering: if an agent named COMPANION_AGENT_NAME already lives in the home this no-ops
+ * (returns null), so reboots never duplicate it and a user's edits (prompt, profile) are preserved. A user
+ * who RENAMES the companion leaves no agent under the bundled name — the documented seed-if-absent-by-name
+ * limitation shared with seedSetupAuditorAgent / resetProfileToBundled. Bound to the bundled "Companion"
+ * profile (looked up by name; profileId null backstop if absent so the seed never throws). Returns the
+ * seeded name, or null when it no-ops.
+ */
+export function seedCompanionAgent(db: Db): string | null {
+  const home = db.getReservedProjectByName(SETUP_PROJECT_NAME);
+  if (!home) return null; // no setup home yet — seedSetupHome (run first) creates it; nothing to attach to
+  const agents = db.listAgents(home.id);
+  if (agents.some((a) => a.name === COMPANION_AGENT_NAME)) return null; // already present — idempotent
+
+  const profile = db.listProfiles().find((p) => p.name === COMPANION_PROFILE_NAME);
+  const agent: Agent = {
+    id: randomUUID(),
+    projectId: home.id,
+    name: COMPANION_AGENT_NAME,
+    startupPrompt: COMPANION_PROMPT,
+    position: agents.length, // after the operator + auditor — keeps the operator first in the home
+    profileId: profile?.id ?? null, // plain backstop if the bundled profile is unexpectedly absent
+    endpoint: false, ioSchema: null, // not an API endpoint
+  };
+  db.insertAgent(agent);
+  return COMPANION_AGENT_NAME;
+}

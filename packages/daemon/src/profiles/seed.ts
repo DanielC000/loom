@@ -106,6 +106,25 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
     icon: null,
   },
   {
+    // CORE product, UNGATED (role "assistant" is NOT a platform-exclusive role, so isPlatformProfile()
+    // returns false and this seeds for every loomctl user regardless of LOOM_DEV, like the workers above).
+    // The default spawn TARGET for the human-triggered "New companion" provision flow: a long-lived
+    // chat-reachable assistant. `restrictedTools: true` by construction — a companion is driven by UNTRUSTED
+    // inbound chat (a prompt-injection surface), so it ships LEAST-PRIVILEGE with raw shell + host-writes
+    // withdrawn (the human widens deliberately by turning the flag OFF), the same way QA Tester/Web Designer
+    // ship browserTesting on. Seeding this rig only removes author-your-own friction; it creates NO
+    // companion session and NO companion_config — the rig stays invisible until a human provisions from it.
+    name: "Companion",
+    role: "assistant",
+    description:
+      "Companion rig: a long-lived, chat-reachable assistant a single user talks to over a chat channel (e.g. Telegram). The default spawn target for the 'New companion' flow. Ships with restricted tools (restrictedTools) — raw shell + host-writes withdrawn — because a companion is driven by untrusted inbound chat; widen it deliberately by turning that off. Seeded as a template only; provision a companion from it to create a live session.",
+    allowDelta: [],
+    skills: null,
+    model: null,
+    icon: "💬",
+    restrictedTools: true, // chat-reachable ⇒ least-privilege out of the box (untrusted-input blast-radius control)
+  },
+  {
     // CORE product, UNGATED: role "setup" is NOT a platform-exclusive role, so isPlatformProfile()
     // returns false and this seeds for every loomctl user regardless of LOOM_DEV (like the workers above).
     name: "Setup Assistant",

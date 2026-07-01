@@ -11,7 +11,7 @@ import { snapshotAndArchiveRecovered } from "./sessions/boot-backstop.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
 import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
-import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent } from "./setup/seed.js";
+import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles } from "./tasks/columns.js";
 import { prewarmMarkitdownForProfilesAtBoot } from "./python/prewarm.js";
@@ -106,6 +106,13 @@ async function main(): Promise<void> {
   // never clobbers a user-renamed agent. The operator still resolves by SETUP_AGENT_NAME (distinct name).
   const seededAuditor = seedSetupAuditorAgent(db);
   if (seededAuditor) console.log(`[boot] seeded workspace auditor agent: ${seededAuditor}`);
+  // Loom Companion: seed the bundled Companion RIG (the assistant-role Companion profile + a Companion agent
+  // bound to it) into the SAME reserved "Platform" setup home — the default spawn TARGET for the
+  // human-triggered "New companion" flow. Its OWN seed-if-absent-by-name backfill (like the auditor above),
+  // so it covers both existing installs (seedSetupHome already no-ops) and fresh ones. TEMPLATE ONLY — it
+  // spawns NO session and writes NO companion_config; the rig stays invisible until a human provisions it.
+  const seededCompanion = seedCompanionAgent(db);
+  if (seededCompanion) console.log(`[boot] seeded companion agent: ${seededCompanion}`);
   // Platform Manager P1: seed the reserved "Loom Platform" home + its Platform Lead / Platform Auditor
   // agents, seed-if-absent (idempotent; runs AFTER seedDefaultProfiles so the bundled platform profiles
   // exist to assign). Hidden from the project picker (db.listProjects), still Mission-Control visible.
