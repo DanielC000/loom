@@ -1,14 +1,33 @@
 import { randomUUID } from "node:crypto";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
-import type { Wake } from "@loom/shared";
+import type { CompanionRoute, Wake } from "@loom/shared";
 import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
 
 /** The slice of PtyHost the WakeService needs (injectable so the tick logic unit-tests claude-free). */
 export interface WakePty {
   isAlive(sessionId: string): boolean;
-  /** Submit text as a turn if the session is idle, else queue it FIFO (drains on the next Stop). */
-  enqueueStdin(sessionId: string, text: string): { delivered: boolean; position?: number };
+  /**
+   * Submit text as a turn if the session is idle, else queue it FIFO (drains on the next Stop). The
+   * trailing `source`/`onDeliver`/`route` mirror PtyHost.enqueueStdin (and HeartbeatPty) so the real
+   * pty is assignable directly; a plain 2-arg call (every existing non-companion caller) is
+   * byte-identical to before this route-aware fire path existed.
+   */
+  enqueueStdin(
+    sessionId: string,
+    text: string,
+    source?: "human" | "system",
+    onDeliver?: () => void,
+    route?: CompanionRoute,
+  ): { delivered: boolean; position?: number };
+  /**
+   * The session's IN-FLIGHT turn's originating companion route, or null when the current turn wasn't
+   * formed from a companion inbound / proactive-home submit (mirrors PtyHost.getActiveTurnOrigin).
+   * Read at SCHEDULE time (not fire time) and persisted onto the Wake row, so a companion-origin
+   * `wake_me` can fire its reminder back through the SAME chat route later, even after the turn that
+   * scheduled it has long since ended.
+   */
+  getActiveTurnOrigin(sessionId: string): CompanionRoute | null;
 }
 
 export interface WakeServiceDeps {
@@ -90,10 +109,15 @@ export class WakeService {
       throw new Error(`too many pending wakes (max ${MAX_PENDING_PER_SESSION}); cancel one first`);
     }
 
+    // SERVER-DERIVED route capture: read the CURRENT turn's originating companion route (if any) at
+    // schedule time — never from agent input (the wake_me tool has no route param) — so a companion
+    // session's wake_me fires back to the SAME chat later, even after this turn has ended.
+    const route = this.deps.pty.getActiveTurnOrigin(sessionId) ?? undefined;
     const wake: Wake = {
       id: randomUUID(), sessionId,
       wakeAt: new Date(wakeAtMs).toISOString(), note,
       createdAt: now.toISOString(),
+      ...(route ? { route } : {}),
     };
     this.deps.db.insertWake(wake);
     this.deps.db.appendEvent({
@@ -135,13 +159,21 @@ export class WakeService {
 
     for (const w of due) {
       this.deps.db.deleteWake(w.id); // claim the slot first
-      const nudge = framedNote(w);
       try {
         if (!this.deps.pty.isAlive(w.sessionId)) {
           if (usageLimited) { this.deps.db.insertWake(w); continue; } // defer — don't resume into a cap
           await this.deps.resume(w.sessionId); // throws if unresumable → caught below → dropped
         }
-        this.deps.pty.enqueueStdin(w.sessionId, nudge);
+        // Route-aware fire: a companion-origin wake (route captured at schedule time) delivers a
+        // [loom:reminder] turn through the SAME per-turn route path the heartbeat uses — carrying the
+        // route into enqueueStdin so a later chat_reply resolves back to this exact chat. Every OTHER
+        // wake (route undefined — the overwhelming majority) takes the EXACT plain enqueueStdin call
+        // that ran before this feature existed: byte-identical.
+        if (w.route) {
+          this.deps.pty.enqueueStdin(w.sessionId, framedReminder(w), "system", undefined, w.route);
+        } else {
+          this.deps.pty.enqueueStdin(w.sessionId, framedNote(w));
+        }
         this.deps.db.appendEvent({
           id: randomUUID(), ts: now.toISOString(),
           managerSessionId: w.sessionId, kind: "wake_fired",
@@ -172,4 +204,10 @@ export class WakeService {
 
 function framedNote(w: Wake): string {
   return `[loom:wake] Your scheduled wake-up (set ${w.createdAt}) fired. Your note: "${w.note}". If you were waiting on a process or condition, check it now.`;
+}
+
+/** Companion-route variant of framedNote — distinctly tagged so a wake fired back into a chat route
+ *  reads as a reminder-to-continue-the-conversation, not a bare internal nudge. */
+function framedReminder(w: Wake): string {
+  return `[loom:reminder] Your scheduled wake-up (set ${w.createdAt}) fired. Your note: "${w.note}". If you were waiting on a process or condition, check it now.`;
 }

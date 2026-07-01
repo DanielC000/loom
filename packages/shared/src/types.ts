@@ -850,6 +850,17 @@ export interface Schedule {
 }
 
 /**
+ * An originating chat ROUTE — WHICH chat on WHICH channel. Mirrors daemon/src/companion/types.ts'
+ * `CompanionRoute` verbatim (duplicated here, not imported: `shared` has no dependency on the daemon's
+ * companion subsystem); the two are structurally identical so a daemon `TurnRoute`/`CompanionRoute`
+ * value is assignable to this shape with no conversion.
+ */
+export interface CompanionRoute {
+  channel: string;
+  chatId: string;
+}
+
+/**
  * A one-shot self-scheduled wake-up (the agent-facing `wake_me` primitive). A session schedules
  * one, ends its turn, and goes idle; when `wakeAt` passes the daemon WakeService re-submits `note`
  * as a fresh turn — auto-resuming the session first if it was stopped. Unlike a Schedule it does
@@ -861,6 +872,14 @@ export interface Wake {
   wakeAt: string;            // ISO; when to re-nudge the session
   note: string;
   createdAt: string;
+  /**
+   * The companion chat route the in-flight turn originated from AT SCHEDULE TIME (captured via
+   * `pty.getActiveTurnOrigin`), or undefined for an ordinary (non-companion) wake. SERVER-DERIVED —
+   * the agent cannot set or spoof this; the `wake_me` MCP tool never accepts a route input. When
+   * present, the WakeService fires the wake back through the SAME per-turn companion route the
+   * heartbeat uses, instead of a plain nudge.
+   */
+  route?: CompanionRoute;
 }
 
 /**

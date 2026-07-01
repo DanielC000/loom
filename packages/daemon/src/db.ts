@@ -318,7 +318,11 @@ CREATE TABLE IF NOT EXISTS wakes (
   session_id TEXT NOT NULL REFERENCES sessions(id),
   wake_at TEXT NOT NULL,
   note TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- The companion route (JSON {channel,chatId}) captured at SCHEDULE time via
+  -- pty.getActiveTurnOrigin, or NULL for an ordinary wake. Nullable -- NULL is the byte-identical
+  -- default (fires via plain enqueueStdin, exactly as before this column existed).
+  route TEXT
 );
 -- Daemon-GLOBAL platform tuning override (rate-limit numbers / watcher cadences / op timeouts), held
 -- as a single JSON blob in a SINGLETON row (id pinned to 1 by the CHECK). NOT per-project — the daemon
@@ -608,6 +612,14 @@ const COMPANION_CONFIG_ADDED_COLUMNS: Record<string, string> = {
   provisioned: "INTEGER NOT NULL DEFAULT 0",
 };
 
+/** Columns added to `wakes` after its initial ship (route-aware wake engine); applied to existing DBs
+ *  by migrateWakes() (fresh installs already have them via CREATE TABLE). */
+const WAKE_ADDED_COLUMNS: Record<string, string> = {
+  // Nullable JSON `{channel,chatId}` captured at schedule time; NULL backfills every legacy wake row,
+  // so an existing pending wake keeps firing via plain enqueueStdin exactly as before.
+  route: "TEXT",
+};
+
 type Row = Record<string, unknown>;
 
 /**
@@ -670,6 +682,7 @@ export class Db {
     this.migrateRuns();
     this.migrateCompanionConfig();
     this.migrateCompanionBindings();
+    this.migrateWakes();
   }
 
   /**
@@ -851,6 +864,21 @@ export class Db {
     );
     for (const [name, type] of Object.entries(COMPANION_CONFIG_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE companion_config ADD COLUMN ${name} ${type}`);
+    }
+  }
+
+  /**
+   * Idempotent additive migration for `wakes` (route-aware wake engine) — ADD COLUMN any column added
+   * after the table's initial ship missing from an existing DB (fresh installs already have them via
+   * CREATE TABLE). Mirrors migrateCompanionConfig; the nullable `route` backfills every legacy wake row
+   * to NULL, so an existing pending wake keeps firing via plain enqueueStdin exactly as before.
+   */
+  private migrateWakes(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(wakes)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(WAKE_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE wakes ADD COLUMN ${name} ${type}`);
     }
   }
 
@@ -2771,9 +2799,9 @@ export class Db {
   // --- wakes (one-shot self-scheduled wake-ups; the `wake_me` primitive) ---
   insertWake(w: Wake): void {
     this.db.prepare(
-      `INSERT INTO wakes (id,session_id,wake_at,note,created_at)
-       VALUES (@id,@sessionId,@wakeAt,@note,@createdAt)`,
-    ).run(w);
+      `INSERT INTO wakes (id,session_id,wake_at,note,created_at,route)
+       VALUES (@id,@sessionId,@wakeAt,@note,@createdAt,@route)`,
+    ).run({ ...w, route: w.route ? JSON.stringify(w.route) : null });
   }
   getWake(id: string): Wake | undefined {
     const r = this.db.prepare("SELECT * FROM wakes WHERE id = ?").get(id) as Row | undefined;
@@ -3000,8 +3028,10 @@ function toSchedule(r0: unknown): Schedule {
 }
 function toWake(r0: unknown): Wake {
   const r = r0 as Row;
+  const routeJson = r.route as string | null | undefined;
   return {
     id: r.id as string, sessionId: r.session_id as string,
     wakeAt: r.wake_at as string, note: r.note as string, createdAt: r.created_at as string,
+    ...(routeJson ? { route: JSON.parse(routeJson) as Wake["route"] } : {}),
   };
 }
