@@ -42,8 +42,7 @@ import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent } from ".
 import { startVaultVersioners, type VaultVersioner } from "./vault/versioner.js";
 import { buildServer } from "./gateway/server.js";
 import { resolveCompanionConfig } from "./companion/store.js";
-import { createCompanionGateway } from "./companion/factory.js";
-import { CompanionHeartbeatWatcher } from "./companion/heartbeat.js";
+import { CompanionController, type CompanionReplyHooks } from "./companion/controller.js";
 import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 
@@ -318,16 +317,31 @@ async function main(): Promise<void> {
   // returns — so env wins, a REST-configured companion with no env still boots, and no env + no enabled
   // row ⇒ null ⇒ every path below is byte-identical to an unconfigured daemon (default-OFF).
   const companionCfg = resolveCompanionConfig(db, process.env);
-  const companion = companionCfg
-    ? createCompanionGateway(companionCfg, (sid, text) => pty.enqueueStdin(sid, text, "system"), db)
-    : null;
+  // The mutable chat_reply gate the OrchestrationMcpRouter reads per MCP request. companionSessionId is
+  // SEEDED from the boot config (so a configured companion's bound session gets chat_reply immediately) and
+  // then FLIPPED live by the controller as the companion starts/stops (a REST enable/disable takes effect
+  // with no restart). deliverReply routes THROUGH the controller so it always targets the CURRENT gateway
+  // (stable across a token-change adapter rebuild — never a stale closure).
+  const companionHooks: CompanionReplyHooks = {
+    companionSessionId: companionCfg?.sessionId ?? null,
+    deliverReply: (sid, text) => companionController.deliverReply(sid, text),
+  };
+  // The hot-lifecycle controller (Companion Phase 3 backend): owns the live ChatGateway (Telegram long-poll)
+  // + the proactive heartbeat, and drives BOTH from the human-only REST config writes with NO daemon
+  // restart. Constructed ALWAYS — even when the companion is OFF at boot — so a REST enable can start it
+  // live. Default-OFF stays byte-identical: with companionCfg null it builds no gateway, arms no heartbeat,
+  // and leaves companionSessionId null (chat_reply never registers) — every path below is unchanged.
+  const companionController = new CompanionController({
+    db,
+    submitTurn: (sid, text) => pty.enqueueStdin(sid, text, "system"),
+    pty,
+    hooks: companionHooks,
+    env: process.env,
+  });
 
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after. The
   // companion hooks gate chat_reply to the single bound session (additive; every other spawn unchanged).
-  const orchMcp = new OrchestrationMcpRouter(db, sessions, {
-    companionSessionId: companionCfg?.sessionId ?? null,
-    deliverReply: companion ? (sid, text) => companion.deliverReply(sid, text) : undefined,
-  });
+  const orchMcp = new OrchestrationMcpRouter(db, sessions, companionHooks);
   // Platform MCP (Pillar C / P2) needs the registry (project/agent/profile/schedule + config) AND
   // SessionService (the cross-project session_spawn/session_stop lifecycle ops). P3 also threads the
   // BOOT-BOUND git-write timeouts so the Lead's elevated git tools (git_checkout/commit/push) bound a
@@ -397,15 +411,18 @@ async function main(): Promise<void> {
     }
   };
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus, companion, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"), updateStatus: () => updateCheck.current(), beginSelfUpdate });
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus, companion: companionController, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"), updateStatus: () => updateCheck.current(), beginSelfUpdate });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon v${loomVersion()} listening on http://127.0.0.1:${PORT}`);
 
-  // Loom Companion (Phase 1): start the channel adapters (Telegram long-poll) now that the server is up
-  // (chat_reply routes back through this process). OFF unless the bot token env was set (companion null).
-  if (companion && companionCfg) {
-    companion.start();
+  // Loom Companion: start the initial companion now that the server is up (chat_reply routes back through
+  // this process). The controller builds+starts the Telegram long-poll, arms the proactive heartbeat if a
+  // positive cadence is set, and flips the chat_reply gate on — a no-op when the companion is OFF at boot
+  // (companionCfg null). From here a human-only REST config write reconciles this SAME live state with no
+  // daemon restart (start/re-arm/restart/teardown), so this is the ONLY boot-time companion start.
+  await companionController.startInitial(companionCfg);
+  if (companionCfg) {
     // Boot-time warn: inbound is role-agnostic, but chat_reply only registers for manager|worker|assistant.
     // A binding to any OTHER role could "hear but not reply" — surface it rather than fail silently.
     const boundRole = db.getSession(companionCfg.sessionId)?.role ?? null;
@@ -417,25 +434,13 @@ async function main(): Promise<void> {
       );
     }
     console.log(`[boot] Loom Companion on (bound session ${companionCfg.sessionId.slice(0, 8)}, allowlisted chat ${companionCfg.allowedChatId})`);
+    if (companionCfg.heartbeatIntervalMinutes > 0) {
+      console.log(`[boot] Companion heartbeat on (every ${companionCfg.heartbeatIntervalMinutes}m, session ${companionCfg.sessionId.slice(0, 8)})`);
+    } else {
+      console.log("[boot] Companion heartbeat off (set LOOM_COMPANION_HEARTBEAT_INTERVAL_MINUTES to a positive value)");
+    }
   } else {
     console.log("[boot] Loom Companion off (set LOOM_COMPANION_BOT_TOKEN + LOOM_COMPANION_CHAT_ID + LOOM_COMPANION_SESSION_ID)");
-  }
-
-  // Companion proactive HEARTBEAT watcher (card 9488951e) — a daemon-driven, conservative-cadence proactive
-  // turn woken into the EXISTING long-lived companion session (never a fresh spawn/resume). DEFAULT-OFF:
-  // armed ONLY when the companion is configured AND a positive cadence is set — with no cadence, no watcher
-  // exists and every path is byte-identical. Reuses pty.enqueueStdin + the rate-limit-park DEFER discipline;
-  // does NOT touch the shared Scheduler or the WakeService.
-  let heartbeatWatcher: CompanionHeartbeatWatcher | null = null;
-  if (companionCfg && companionCfg.heartbeatIntervalMinutes > 0) {
-    heartbeatWatcher = new CompanionHeartbeatWatcher({
-      db, pty, sessionId: companionCfg.sessionId,
-      intervalMinutes: companionCfg.heartbeatIntervalMinutes, prompt: companionCfg.heartbeatPrompt,
-    });
-    heartbeatWatcher.start();
-    console.log(`[boot] Companion heartbeat on (every ${companionCfg.heartbeatIntervalMinutes}m, session ${companionCfg.sessionId.slice(0, 8)})`);
-  } else if (companionCfg) {
-    console.log("[boot] Companion heartbeat off (set LOOM_COMPANION_HEARTBEAT_INTERVAL_MINUTES to a positive value)");
   }
 
   // Pillar B: the cron trigger layer. Boots a manager (interactive pty, never headless) on each
@@ -659,9 +664,10 @@ async function main(): Promise<void> {
       for (const v of vaultVersioners) { if (v.flushSync()) flushed++; }
       if (flushed > 0) console.log(`[shutdown] flushed ${flushed} pending vault commit(s)`);
     } catch { /* never block the exit */ }
-    // Best-effort courtesy stop of the companion long-poll (no-op when off); it dies with the process anyway.
-    if (companion) { void companion.stop().catch(() => { /* never block the exit */ }); }
-    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); heartbeatWatcher?.stop();
+    // Best-effort courtesy stop of the companion (long-poll + heartbeat, no-op when off); it dies with the
+    // process anyway. The controller owns BOTH now, so stop() disarms the heartbeat too (no separate stop).
+    void companionController.stop().catch(() => { /* never block the exit */ });
+    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop();
     console.log(`[shutdown] graceful stop (${reason})`);
     process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
   };

@@ -24,7 +24,7 @@ import type { AuditMcpRouter } from "../mcp/audit.js";
 import type { WorkspaceAuditMcpRouter } from "../mcp/user-audit.js";
 import type { SetupMcpRouter } from "../mcp/setup.js";
 import type { RunMcpRouter } from "../mcp/run.js";
-import type { ChatGateway } from "../companion/chat-gateway.js";
+import type { CompanionControl } from "../companion/controller.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig } from "../companion/store.js";
 import { encryptSecret } from "../keys/envelope.js";
@@ -87,11 +87,12 @@ export interface GatewayDeps {
   runMcp: RunMcpRouter;
   control: OrchestrationControl;
   usageStatus: UsageStatusPoller;
-  /** The live Companion ChatGateway (Companion authz layer), or null when the companion is OFF (no bot
-   *  token). Threaded so the human-only /api/companion/bindings admin routes can keep the gateway's
-   *  in-memory routing map in sync with the durable db (bind on POST, unbind on DELETE) — no restart.
-   *  Optional: absent/null keeps the routes serving db state, they just skip the live-map update. */
-  companion?: ChatGateway | null;
+  /** The Companion hot-lifecycle CONTROLLER (a stable facade over the live ChatGateway + heartbeat), or
+   *  null when the companion subsystem isn't wired. Threaded so the human-only /api/companion routes drive
+   *  the RUNNING companion with NO restart: bindings POST/DELETE keep the gateway's routing map in sync
+   *  (bind/unbind), and config POST/PUT/DELETE reconcile() the live adapter+heartbeat to the new DB config.
+   *  Optional: absent/null keeps the routes serving db state, they just skip the live update. */
+  companion?: CompanionControl | null;
   /** Loopback control hook for `loom stop`: trigger the daemon's GRACEFUL shutdown (snapshot live
    * transcripts + clean watcher teardown, then exit 0). Wired by index.ts to the SAME path the
    * SIGINT/SIGTERM handlers use — Windows has no real SIGTERM, so the CLI can't signal a detached
@@ -650,8 +651,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // bound session id. HUMAN-ONLY loopback REST, INTENTIONALLY NO MCP path (of ANY router): a chat-reachable,
   // injection-exposed companion agent must NEVER be able to read or write its own bot token (same trust
   // posture as the bindings/allowlist/home writers + the git/vault/api_keys human-only writers). SECURITY:
-  // the token is NEVER returned in clear or logged — every read is MASKED (configured + last-4 only). Config
-  // applies on the next daemon (re)start; the HOT live-reconfigure path is a SEPARATE follow-up card. ---
+  // the token is NEVER returned in clear or logged — every read is MASKED (configured + last-4 only). Every
+  // write drives the RUNNING companion LIVE (no restart) via deps.companion.reconcile() AFTER the durable
+  // write: an enable starts the adapter + arms the heartbeat, an edit re-arms/restarts, a disable/delete
+  // tears it down to the OFF state. reconcile is best-effort (its own failures are logged, never 500 the
+  // write) and serialized, so a burst of writes can't leak a long-poll or double-register chat_reply. ---
   const COMPANION_TOKEN_MAX = 4096;
   const COMPANION_PROMPT_MAX = 10_000;
   const COMPANION_CADENCE_MAX = 525_600; // one year in minutes — a generous upper bound, not a working value
@@ -745,6 +749,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const homeErr = applyHomeIfPresent(b);
     if (homeErr) return reply.code(400).send({ error: homeErr });
     const row = deps.db.upsertCompanionConfig(built);
+    await deps.companion?.reconcile(); // drive the running companion live (start/re-arm) — no restart
     return reply.code(existing ? 200 : 201).send(maskCompanionConfig(row, homeOf(), process.env));
   });
   app.put("/api/companion/config/:sessionId", async (req, reply) => {
@@ -757,10 +762,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const homeErr = applyHomeIfPresent(b);
     if (homeErr) return reply.code(400).send({ error: homeErr });
     const row = deps.db.upsertCompanionConfig(built);
+    await deps.companion?.reconcile(); // drive the running companion live (re-arm/restart) — no restart
     return maskCompanionConfig(row, homeOf(), process.env);
   });
   app.delete("/api/companion/config/:sessionId", async (req) => {
     deps.db.deleteCompanionConfig((req.params as { sessionId: string }).sessionId);
+    await deps.companion?.reconcile(); // tear the live companion down to the OFF state — no restart
     return { ok: true };
   });
 

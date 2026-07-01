@@ -1346,9 +1346,22 @@ export class Db {
     ).run({ ...row, enabledInt: row.enabled ? 1 : 0 });
     return row;
   }
-  /** Delete a run-config by session id (idempotent — a missing id matches nothing). */
+  /**
+   * Delete a run-config by session id (idempotent — a missing id matches nothing), CASCADE-cleaning its
+   * routing/authz rows in ONE transaction so no stale binding/allowlist/pairing row survives a torn-down
+   * companion (data-integrity — PL ruling, single-companion model). The cascade is ONE-WAY: deleting a
+   * CONFIG cleans its bindings/allowed-senders/pairing codes; a binding WITHOUT a config is a VALID
+   * "provisioned-but-unarmed" state, so removing a binding NEVER deletes the config (no reverse cascade).
+   * companion_pairing_attempts is deliberately LEFT (it's keyed by channel+sender, not session, and
+   * self-expires — a lockout window must survive a config churn so it can't be reset by delete/recreate).
+   */
   deleteCompanionConfig(sessionId: string): void {
-    this.db.prepare("DELETE FROM companion_config WHERE session_id = ?").run(sessionId);
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM companion_config WHERE session_id = ?").run(sessionId);
+      this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ?").run(sessionId);
+      this.db.prepare("DELETE FROM companion_allowed_senders WHERE session_id = ?").run(sessionId);
+      this.db.prepare("DELETE FROM companion_pairing_codes WHERE session_id = ?").run(sessionId);
+    })();
   }
 
   // --- agents ---

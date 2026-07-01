@@ -1,0 +1,265 @@
+/**
+ * Loom Companion — the HOT LIFECYCLE controller (Companion epic Phase 3 backend). Closes the "no .env, no
+ * restart" headline of the PL ruling: it makes the REST config writes (POST/PUT/DELETE at
+ * /api/companion/config) drive the RUNNING gateway LIVE, instead of applying only on the next daemon boot.
+ *
+ * It owns — as ONE stable facade the REST + MCP hooks hold across gateway rebuilds — the live ChatGateway
+ * (Telegram long-poll) and the proactive CompanionHeartbeatWatcher, and reconciles them to the current DB
+ * config on demand:
+ *   • CREATE/enable  (a config write makes an enabled row the effective companion): build + start() the
+ *     gateway, arm the heartbeat if cadence>0, and flip the chat_reply gate ON — NO restart.
+ *   • UPDATE: apply changes live — a cadence/prompt change re-arms/disarms the heartbeat; a
+ *     token/session/chat/scope change RESTARTS the adapter (stop old long-poll, build+start fresh); a home
+ *     change is already live (the gateway's homeResolver reads app_meta each deliver).
+ *   • DELETE/disable: stop() the adapter, disarm the heartbeat, flip chat_reply OFF → the daemon returns to
+ *     the SAME OFF state as an unconfigured boot (default-OFF byte-identical).
+ *
+ * It REUSES the existing primitives verbatim — createCompanionGateway (bind/adapter/inbound wiring),
+ * ChatGateway.start()/stop()/bind()/unbind(), CompanionHeartbeatWatcher, and the chat_reply hook gate the
+ * OrchestrationMcpRouter reads per MCP request — and adds no new turn-submit / delivery path.
+ *
+ * IDEMPOTENCY + no-leak (load-bearing): every reconcile is SERIALIZED on an internal promise chain, so a
+ * burst of REST writes can't interleave a teardown with a start; startGateway refuses to stack a second
+ * adapter, stopGateway clears the ref BEFORE awaiting the old stop (a racing deliverReply/bind can't touch
+ * a stopping gateway), and a token change AWAITS the old long-poll's stop before starting the new one — so
+ * repeated enable/disable toggles never leak a long-poll or double-register chat_reply.
+ *
+ * SECURITY (unchanged, do NOT regress): inbound = pty.enqueueStdin, outbound = chat_reply→deliverReply,
+ * never cross-wired; chat_reply stays gated to the single bound companion session; authz stays fail-closed
+ * at inbound time (the gateway's per-binding CompanionAuth). This controller only (re)wires the SAME parts.
+ */
+import type { Db } from "../db.js";
+import type { ChatGateway } from "./chat-gateway.js";
+import { createCompanionGateway } from "./factory.js";
+import { CompanionHeartbeatWatcher, type HeartbeatPty } from "./heartbeat.js";
+import { resolveEffectiveConfig } from "./store.js";
+import type { CompanionConfig } from "./config.js";
+import type { DeliverResult, SessionBinding, SubmitTurn } from "./types.js";
+
+/** The minimal lifecycle handle the controller needs from a heartbeat watcher (satisfied by
+ *  CompanionHeartbeatWatcher; narrowed so a test can inject a spy). */
+export interface HeartbeatHandle {
+  start(): void;
+  stop(): void;
+}
+
+/** The minimal facade the human-only companion REST + shutdown hold — a STABLE reference that survives a
+ *  gateway rebuild (the REST closures capture this once at buildServer time). */
+export interface CompanionControl {
+  /** Live-sync a new/edited binding into the running gateway's routing map (no-op when OFF). */
+  bind(binding: SessionBinding): void;
+  /** Live-remove a binding from the running gateway's routing map (no-op when OFF). */
+  unbind(sessionId: string): void;
+  /** Reconcile the live companion to the CURRENT DB config after a REST config write (the hot path). */
+  reconcile(): Promise<void>;
+  /** Best-effort teardown on daemon shutdown (stops the adapter long-poll + the heartbeat). */
+  stop(): Promise<void>;
+}
+
+/** The mutable chat_reply gate the OrchestrationMcpRouter reads per MCP request. The controller flips
+ *  `companionSessionId` as the companion starts/stops so chat_reply (un)registers with no restart, and
+ *  routes `deliverReply` back through the controller so it always targets the CURRENT gateway. */
+export interface CompanionReplyHooks {
+  companionSessionId: string | null;
+  deliverReply?: (sessionId: string, text: string) => Promise<{ delivered: boolean; reason?: string }>;
+}
+
+export interface CompanionControllerDeps {
+  db: Db;
+  /** The pty turn-submit primitive handed to the gateway (kept db-free; index passes enqueueStdin). */
+  submitTurn: SubmitTurn;
+  /** The pty slice the heartbeat watcher needs (isAlive / enqueueStdin / getPending). */
+  pty: HeartbeatPty;
+  /** The chat_reply gate the OrchestrationMcpRouter reads — the controller mutates it on start/stop. */
+  hooks: CompanionReplyHooks;
+  /** Process env — read to resolve the EFFECTIVE config (which session env pins), never re-bootstrapped. */
+  env: NodeJS.ProcessEnv;
+  /** Envelope key-file override (test seam only). */
+  keyPath?: string;
+  /** Build the gateway for an effective config (test seam — defaults to createCompanionGateway with the
+   *  real Telegram adapter). Returns the gateway NOT started; the controller calls start(). */
+  buildGateway?: (cfg: CompanionConfig, submitTurn: SubmitTurn, db: Db) => ChatGateway;
+  /** Build the heartbeat watcher for an effective config (test seam — defaults to a CompanionHeartbeatWatcher
+   *  over db+pty). Returns it NOT started; the controller calls start(). */
+  buildHeartbeat?: (cfg: CompanionConfig) => HeartbeatHandle;
+  /** Resolve the effective desired config from db+env (test seam — defaults to resolveEffectiveConfig). */
+  resolveEffective?: (db: Db, env: NodeJS.ProcessEnv, keyPath?: string) => CompanionConfig | null;
+}
+
+export class CompanionController implements CompanionControl {
+  private gateway: ChatGateway | null = null;
+  private heartbeat: HeartbeatHandle | null = null;
+  /** The config the live state currently reflects (null ⇒ OFF). The diff source for a reconcile. */
+  private cfg: CompanionConfig | null = null;
+  /** Serializes reconciles so a burst of REST writes can't interleave a teardown with a start. */
+  private chain: Promise<void> = Promise.resolve();
+
+  constructor(private readonly deps: CompanionControllerDeps) {}
+
+  /**
+   * BOOT entry: apply the already-resolved boot config (may be null). Kept separate from reconcile() so the
+   * exact boot config (env bootstrap already applied by resolveCompanionConfig) is used verbatim — no
+   * re-resolve. Serialized on the same chain as reconcile.
+   */
+  startInitial(cfg: CompanionConfig | null): Promise<void> {
+    return this.enqueue(() => this.applyDesired(cfg));
+  }
+
+  /**
+   * The HOT path: recompute the effective config from the DB (side-effect-free — never re-bootstraps env)
+   * and reconcile the live state to it. Called by the REST config POST/PUT/DELETE after the durable write.
+   *
+   * NOTE (env-pinned revival — known, no code change): a live REST DELETE/disable of an ENV-pinned companion
+   * (LOOM_COMPANION_* set for its session) tears it down live here, but the env bootstrap re-creates the row
+   * and revives it on the NEXT daemon boot. This is surfaced to the human via `envPinned:true` in the masked
+   * config read, so a REST edit to an env-pinned companion is visibly "reverts on restart" rather than silent.
+   */
+  reconcile(): Promise<void> {
+    return this.enqueue(() => {
+      const resolve = this.deps.resolveEffective ?? resolveEffectiveConfig;
+      return this.applyDesired(resolve(this.deps.db, this.deps.env, this.deps.keyPath));
+    });
+  }
+
+  bind(binding: SessionBinding): void {
+    this.gateway?.bind(binding);
+  }
+
+  unbind(sessionId: string): void {
+    this.gateway?.unbind(sessionId);
+  }
+
+  stop(): Promise<void> {
+    return this.enqueue(() => this.teardown());
+  }
+
+  /**
+   * The chat_reply delivery indirection wired into the MCP hooks. STABLE across gateway rebuilds: it always
+   * routes to the CURRENT gateway, so the hooks object never holds a stale closure. Returns a structured
+   * "companion-off" when there is no live gateway (chat_reply is gated to the companion session, so this is
+   * only reachable in a brief window; it never throws).
+   *
+   * NOTE (stateless-MCP tool discovery — known, SAFE, no code change): flipping `hooks.companionSessionId`
+   * (un)registers chat_reply at the ROUTER, but an ALREADY-CONNECTED companion `claude` session won't
+   * re-list tools until its next MCP (re)connect — so a LIVE enable may not surface chat_reply on a running
+   * session until reconnect/resume, and a lingering chat_reply on a running session AFTER teardown routes
+   * HERE and no-ops with "companion-off" (the gateway ref is cleared) — never a cross-wire or a throw.
+   */
+  async deliverReply(sessionId: string, text: string): Promise<DeliverResult | { delivered: false; reason: "companion-off" }> {
+    if (!this.gateway) return { delivered: false, reason: "companion-off" };
+    return this.gateway.deliverReply(sessionId, text);
+  }
+
+  /** Read-only introspection (tests + potential status surface): is a gateway live, which session, heartbeat armed. */
+  snapshot(): { running: boolean; sessionId: string | null; heartbeatArmed: boolean } {
+    return { running: this.gateway != null, sessionId: this.cfg?.sessionId ?? null, heartbeatArmed: this.heartbeat != null };
+  }
+
+  // ---- internals -------------------------------------------------------------------------------
+
+  /** Append an op to the serialized reconcile chain; a failed op is caught + logged (never rejects the
+   *  chain nor the REST write — the durable DB write already succeeded; the live apply is best-effort). */
+  private enqueue(op: () => Promise<void>): Promise<void> {
+    this.chain = this.chain.then(() =>
+      op().catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error(`[companion] hot-lifecycle reconcile failed: ${err instanceof Error ? err.message : String(err)}`);
+      }),
+    );
+    return this.chain;
+  }
+
+  /** Reconcile the live state to `desired` (null ⇒ OFF). The single decision point for start/stop/rebuild. */
+  private async applyDesired(desired: CompanionConfig | null): Promise<void> {
+    const current = this.cfg;
+    if (!desired) {
+      // → OFF: tear down to the same state as an unconfigured boot.
+      await this.teardown();
+      return;
+    }
+    if (!current) {
+      // OFF → ON: full start.
+      await this.stopGateway(); // defensive (invariant: no gateway when cfg is null) — never stack
+      this.startGateway(desired);
+      this.rearmHeartbeat(desired);
+      this.cfg = desired;
+      this.deps.hooks.companionSessionId = desired.sessionId;
+      return;
+    }
+    // ON → ON: apply only what changed.
+    // The adapter/long-poll depends ONLY on the BOT TOKEN at runtime, so a token change is the ONLY thing
+    // that requires restarting it. Routing + per-binding authz are owned by the BINDINGS layer
+    // (companion_bindings — the single source of truth, managed live via the bindings REST / the Access UI
+    // section, and consulted live by the gateway at inbound time). config.allowedChatId/chatScope are
+    // BOOT-SEED ONLY: createCompanionGateway seeds the INITIAL binding from them ONLY when the bindings
+    // store is empty (mirroring LOOM_COMPANION_CHAT_ID) — once a binding row exists, a rebuilt gateway
+    // re-reads the SAME durable bindings, so churning the adapter on an allowedChatId/chatScope/sessionId
+    // change would NOT re-route. They are therefore DELIBERATELY not rebuild triggers. (A sessionId change
+    // IS still applied below — it re-points the chat_reply gate + the proactive heartbeat at the config's
+    // session; a home change is picked up live by the gateway's homeResolver — neither needs a rebuild.)
+    if (desired.botToken !== current.botToken) {
+      await this.stopGateway(); // AWAIT the old long-poll's stop before starting the new one (no overlap)
+      this.startGateway(desired);
+    }
+    // Heartbeat: re-arm on a cadence/prompt change (or a session change — the watcher targets the session).
+    const hbChanged =
+      desired.sessionId !== current.sessionId ||
+      desired.heartbeatIntervalMinutes !== current.heartbeatIntervalMinutes ||
+      desired.heartbeatPrompt !== current.heartbeatPrompt;
+    if (hbChanged) this.rearmHeartbeat(desired);
+    this.cfg = desired;
+    this.deps.hooks.companionSessionId = desired.sessionId;
+  }
+
+  /** Build + start the gateway. Idempotent: refuses to stack a second adapter/long-poll (a rebuild caller
+   *  stopGateway()s first; this guard is the defensive backstop). */
+  private startGateway(cfg: CompanionConfig): void {
+    if (this.gateway) return;
+    const build = this.deps.buildGateway ?? createCompanionGateway;
+    this.gateway = build(cfg, this.deps.submitTurn, this.deps.db);
+    this.gateway.start();
+  }
+
+  /** Stop + drop the current gateway (releases the long-poll). Clears the ref FIRST so a concurrent
+   *  deliverReply/bind can't touch a stopping gateway, then awaits the best-effort adapter stop. */
+  private async stopGateway(): Promise<void> {
+    const gw = this.gateway;
+    if (!gw) return;
+    this.gateway = null;
+    await gw.stop();
+  }
+
+  /** Disarm any existing heartbeat and (re-)arm a fresh one iff cadence>0 (0 ⇒ stay disarmed). */
+  private rearmHeartbeat(cfg: CompanionConfig): void {
+    this.stopHeartbeat();
+    if (cfg.heartbeatIntervalMinutes > 0) {
+      const build =
+        this.deps.buildHeartbeat ??
+        ((c: CompanionConfig) =>
+          new CompanionHeartbeatWatcher({
+            db: this.deps.db,
+            pty: this.deps.pty,
+            sessionId: c.sessionId,
+            intervalMinutes: c.heartbeatIntervalMinutes,
+            prompt: c.heartbeatPrompt,
+          }));
+      this.heartbeat = build(cfg);
+      this.heartbeat.start();
+    }
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeat) {
+      this.heartbeat.stop();
+      this.heartbeat = null;
+    }
+  }
+
+  /** Full teardown → the OFF state: stop the adapter long-poll, disarm the heartbeat, flip chat_reply OFF. */
+  private async teardown(): Promise<void> {
+    await this.stopGateway();
+    this.stopHeartbeat();
+    this.cfg = null;
+    this.deps.hooks.companionSessionId = null;
+  }
+}

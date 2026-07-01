@@ -40,6 +40,10 @@ export interface CompanionConfigStore {
  * when neither env nor an enabled DB row configures a companion — the OFF path is byte-identical to today.
  * A row whose token blob can't be decrypted (corrupt / wrong key) is treated as OFF with a warning, never
  * a crash. `keyPath` overrides the envelope key file (test seam only).
+ *
+ * This is the BOOT resolver: it performs the env BOOTSTRAP write (seed/override the DB row + lay the home)
+ * and then reads back the effective config via `resolveEffectiveConfig`. The hot-lifecycle controller uses
+ * the side-effect-FREE `resolveEffectiveConfig` directly (a live REST reconcile must NOT re-bootstrap env).
  */
 export function resolveCompanionConfig(
   db: CompanionConfigStore,
@@ -62,11 +66,27 @@ export function resolveCompanionConfig(
     // Seed the home target from env if unset (app_meta is the single source; a REST PUT can override later).
     if (!db.getCompanionHome()) db.setCompanionHome({ channel: envCfg.homeChannel, chatId: envCfg.homeChatId });
   }
-  // Effective row: env's session when env is present (it was just upserted), else the single enabled row.
+  return resolveEffectiveConfig(db, env, keyPath);
+}
+
+/**
+ * The side-effect-FREE effective-config resolver, factored out of `resolveCompanionConfig` so the hot
+ * lifecycle controller can recompute "what the single live companion should be" on a REST config write
+ * WITHOUT re-running the env bootstrap (which would re-encrypt/re-write the row every reconcile). It only
+ * READS: picks the effective row (env's pinned session when env is present, else the single enabled row),
+ * decrypts, and builds the CompanionConfig — or returns null (OFF) when no row configures a companion, a
+ * disabled row, or a corrupt/undecryptable blob. Never writes, never throws. `keyPath` is the test seam.
+ */
+export function resolveEffectiveConfig(
+  db: CompanionConfigStore,
+  env: NodeJS.ProcessEnv,
+  keyPath?: string,
+): CompanionConfig | null {
+  const envCfg = readCompanionConfig(env);
+  // Effective row: env's session when env is present (boot upserted it), else the single enabled row.
   // Single-companion today: if a human left MORE THAN ONE enabled config on different sessions, only the
-  // first boots and the rest silently never come up — warn (naming the count + chosen session) so that
-  // isn't invisible. (A hard single-enabled invariant belongs to the hot-lifecycle card; a boot warning is
-  // enough here.)
+  // first comes up and the rest silently never do — warn (naming the count + chosen session) so that isn't
+  // invisible. (A hard single-enabled invariant is a future decision; a warning is enough here.)
   let row: CompanionConfigRow | undefined;
   if (envCfg) {
     row = db.getCompanionConfig(envCfg.sessionId);
