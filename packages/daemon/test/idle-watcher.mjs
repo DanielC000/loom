@@ -95,29 +95,31 @@ function cleanup(e) {
   cleanup(e);
 }
 
-// ===== (1b) the nudge counts ALL actionable lanes (not just workReady), excluding terminal + humanHold =====
+// ===== (1b) the nudge counts ALL actionable lanes (not just workReady), excluding ONLY terminal =====
+// (Board Hold Model redesign: the `blocked` column / `humanHold` role is retired — there is no longer a
+// column-based exclusion. A card on ANY non-terminal lane, including one literally keyed "blocked", now
+// counts as actionable unless it is explicitly `held` — see (1c) below for the held-based exclusion.)
 {
   const e = makeEnv();
   seedManager(e, "mgr-multilane");
-  // Default board: actionable = every lane EXCEPT done (terminal) + blocked (humanHold).
+  // Default board: actionable = every lane EXCEPT done (terminal).
   seedCard(e, "inbox");        // intake      → actionable
   seedCard(e, "backlog");      // defaultLanding → actionable
   seedCard(e, "todo");         // workReady   → actionable
   seedCard(e, "in_progress");  // active      → actionable
   seedCard(e, "review");       // review      → actionable
   seedCard(e, "waiting");      // parked      → actionable
-  seedCard(e, "blocked");      // humanHold   → EXCLUDED
   seedCard(e, "done");         // terminal    → EXCLUDED
   e.watcher.tick(NOW);
-  check("(1b) counts ALL actionable lanes (6), excluding the blocked + done lanes",
+  check("(1b) counts ALL actionable lanes (6), excluding only the done lane",
     e.enqueued.length === 1 && e.enqueued[0].text.includes("6 actionable"));
   cleanup(e);
 }
 
 // ===== (1c) owner-gated cards are DISCOUNTED from the actionable count off the STRUCTURED `held` flag =====
 // (card 788274a9 — the discount now keys SOLELY off Task.held, NOT an uppercase HOLD/CONFIRM title regex.)
-// A held=true card as the SOLE open card → NO nudge (the manager can't action or clear it; `blocked` is the
-// sole owner brake). A genuinely-actionable card still nudges.
+// A held=true card as the SOLE open card → NO nudge (the manager can't action or clear it; `held` is the
+// sole owner brake — Board Hold Model). A genuinely-actionable card still nudges.
 {
   const e = makeEnv();
   seedManager(e, "mgr-held-only");

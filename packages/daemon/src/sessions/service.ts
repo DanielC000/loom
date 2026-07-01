@@ -1094,10 +1094,11 @@ export class SessionService {
     // bystander no-ops cheaply (isNoOpManagerWake) instead of burning a full re-check turn.
     const liveWorkerCount = (managerId: string): number =>
       entries.filter((e) => e.role === "worker" && e.parentSessionId === managerId).length;
-    // Actionable board work: a task whose column is NEITHER the terminal lane NOR the humanHold (blocked)
-    // lane (every other lane — intake/defaultLanding/workReady/active/review/parked — is pending work a
-    // manager should drive). It FORCES the full nudge: the idle-watcher skips a snoozed/suppressed manager,
-    // so the restart re-check is its only re-engagement — a cheap no-op would silently strand the queue.
+    // Actionable board work: a task whose column is NOT the terminal lane AND is NOT held (every other
+    // non-held lane — intake/defaultLanding/workReady/active/review/parked — is pending work a manager
+    // should drive; a held card is the owner's brake and never counts, in any column). It FORCES the full
+    // nudge: the idle-watcher skips a snoozed/suppressed manager, so the restart re-check is its only
+    // re-engagement — a cheap no-op would silently strand the queue.
     const hasPendingBoardWork = (id: string): boolean => {
       try {
         const projectId = this.db.getSession(id)?.projectId;
@@ -1106,9 +1107,8 @@ export class SessionService {
         if (!project) return true;
         const cols = resolveConfig(project.config).kanbanColumns;
         const terminalKey = columnKeyForRole(cols, "terminal");
-        const humanHoldKey = columnKeyForRole(cols, "humanHold");
         return this.db.listTasks(projectId).some(
-          (t) => t.columnKey !== terminalKey && t.columnKey !== humanHoldKey,
+          (t) => t.columnKey !== terminalKey && !t.held,
         );
       } catch {
         return true; // defensive: a board-read fault must never produce a false "no-op" stall
@@ -1852,15 +1852,11 @@ export class SessionService {
     if (!task || task.projectId !== manager.projectId) throw new Error(`worker_spawn taskId '${taskId}' does not resolve to an existing task in this project`);
     const terminalKey = columnKeyForRole(config.kanbanColumns, "terminal");
     if (task.columnKey === terminalKey) throw new Error(`worker_spawn taskId '${taskId}' is in the terminal column ('${task.columnKey}') — pick a non-terminal task`);
-    // OWNER-BRAKE (structural): refuse to dispatch onto the human-hold lane (role `humanHold`, the `blocked`
-    // column by default) — the owner's SOLE brake on a card. Doctrine + owner memory treat it as never-dispatch,
-    // but nothing structurally enforced it: spawnWorker resolved only the terminal column (humanHold was consulted
-    // for convergence in hasPendingBoardWork, never on dispatch). A one-line sibling of the terminal rail, BEFORE
-    // any worktree/pty side effect. humanHold is optional — a board with no such lane resolves undefined and this
-    // is a no-op, never a false reject.
-    const humanHoldKey = columnKeyForRole(config.kanbanColumns, "humanHold");
-    if (humanHoldKey && task.columnKey === humanHoldKey) {
-      throw new Error(`worker_spawn taskId '${taskId}' is on the human-hold lane ('${task.columnKey}') — the owner's brake; clear the card off it before dispatching a worker`);
+    // OWNER-BRAKE (structural): refuse to dispatch onto a HELD card — the owner's SOLE brake, a per-card
+    // flag checked in ANY column (Board Hold Model redesign; retires the column-based `blocked`/`humanHold`
+    // lane this used to key off). A one-line sibling of the terminal rail, BEFORE any worktree/pty side effect.
+    if (task.held === true) {
+      throw new Error(`worker_spawn taskId '${taskId}' is HELD (owner brake) — release the hold before dispatching a worker`);
     }
     // DATA-LOSS guard (structural): refuse a SECOND live worker on a task already held by a live one. The
     // worktree path is DETERMINISTIC per task and createWorktree REUSES an existing dir, recutting a 0-ahead

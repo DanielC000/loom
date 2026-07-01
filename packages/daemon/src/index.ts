@@ -13,7 +13,7 @@ import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.j
 import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
 import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
-import { backfillColumnRoles } from "./tasks/columns.js";
+import { backfillColumnRoles, migrateHumanHoldToHeld } from "./tasks/columns.js";
 import { prewarmMarkitdownForProfilesAtBoot } from "./python/prewarm.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
@@ -142,6 +142,19 @@ async function main(): Promise<void> {
     if (columnRoles.migrated) console.log(`[boot] backfilled column roles on ${columnRoles.migrated} project config(s)`);
   } catch (err) {
     console.warn(`[boot] column-role backfill failed (continuing boot): ${(err as Error).message}`);
+  }
+  // Board Hold Model redesign: the `blocked` column / `humanHold` role is retired — `held` is now the SOLE
+  // human brake (checked in ANY column by spawnWorker/idle-watcher/hasPendingBoardWork below). One-shot,
+  // MUST run in the same deploy as that engine brake flip (a migrated card must never sit in an actionable
+  // lane while dispatch still ignored `held`). Runs AFTER backfillColumnRoles (above) so a legacy override's
+  // `blocked` key already carries role:"humanHold" by the time this reads it. Best-effort: never gate boot.
+  try {
+    const humanHoldMig = migrateHumanHoldToHeld(db);
+    if (humanHoldMig.projectsMigrated) {
+      console.log(`[boot] migrated humanHold → held on ${humanHoldMig.projectsMigrated} project(s) (${humanHoldMig.cardsMigrated} card(s) promoted)`);
+    }
+  } catch (err) {
+    console.warn(`[boot] humanHold→held migration failed (continuing boot): ${(err as Error).message}`);
   }
   // Resolve the daemon-global platform tuning ONCE at boot (SQLite singleton override ?? LOOM_* env ??
   // defaults). Every BOOT-BOUND consumer below — PtyHost busy-stale, SessionService git timeouts, the

@@ -142,30 +142,22 @@ export class IdleWatcher {
       }
 
       // Count ALL actionable cards (role-resolved), not just the workReady lane: a task is actionable when
-      // its column is NEITHER the terminal lane NOR the humanHold (blocked) lane — every other lane
+      // its column is NOT the terminal lane AND it is NOT held — every other non-held lane
       // (intake/defaultLanding/workReady/active/review/parked) is pending work a manager should be driving.
       // Counting only workReady mis-told an idle manager "0 todo" while actionable cards sat in inbox/active/
       // review. Mirrors resumeFleetOnBoot's "pending board work" definition (sessions/service.ts) so the two
-      // stay consistent. A missing terminal/humanHold key just means that lane doesn't exclude anything.
+      // stay consistent. `held` (Board Hold Model redesign) is the SOLE owner brake now, checked in ANY
+      // column — a legit card titled with uppercase HOLD/CONFIRM is counted/nudges unless explicitly flagged
+      // held (card 788274a9 hardened the old OWNER_HELD_TITLE_RE false-positive away).
       const cols = resolveConfig(project.config).kanbanColumns;
       const terminalKey = columnKeyForRole(cols, "terminal");
-      const humanHoldKey = columnKeyForRole(cols, "humanHold");
-      const openCards = db.listTasks(m.projectId).filter(
-        (t) => t.columnKey !== terminalKey && t.columnKey !== humanHoldKey,
-      );
-      // DISCOUNT owner-gated/HELD cards: a product-decision parked in an actionable lane (the owner left
-      // it in `todo`, not `blocked`) is NOT something the manager can drive — and it can't move it to
-      // `blocked` itself (the sole owner brake). Counting it kept nagging the manager to "pick up the next
-      // task NOW" on a card it's forbidden to touch (structural deadlock, card f8f1c1d5). The signal is the
-      // STRUCTURED `held` flag set by the owner (board / tasks_update) — SOLE source, not a title heuristic:
-      // a legit card titled with uppercase HOLD/CONFIRM is counted/nudges unless explicitly flagged held
-      // (card 788274a9 hardened the old OWNER_HELD_TITLE_RE false-positive away).
-      const heldCount = openCards.filter((t) => t.held === true).length;
-      const openTodos = openCards.length - heldCount;
-      // If EVERY open card is an owner-held gate (≥1 held, 0 genuinely-actionable), the manager has
-      // nothing it can action and no way to clear the gate → skip silently instead of deadlock-nudging.
-      // A truly empty board (no held cards either) still nudges — the manager should `idle_report 'done'`.
-      if (heldCount > 0 && openTodos === 0) continue;
+      const nonTerminal = db.listTasks(m.projectId).filter((t) => t.columnKey !== terminalKey);
+      const openCards = nonTerminal.filter((t) => t.held !== true);
+      // If EVERY non-terminal card is held (≥1 exists, 0 genuinely-actionable), the manager has nothing it
+      // can action and no way to clear the gate → skip silently instead of deadlock-nudging. A truly empty
+      // board (no cards at all) still nudges — the manager should `idle_report 'done'`.
+      if (nonTerminal.length > 0 && openCards.length === 0) continue;
+      const openTodos = openCards.length;
       const n = Math.round((nowMs - lastActivityMs) / 60_000);
       const msg =
         `[loom:idle] You've been idle ~${n} min with no live workers and ${openTodos} actionable task(s). ` +

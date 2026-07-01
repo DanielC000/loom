@@ -16,7 +16,6 @@ export type ColumnRole =
   | "active"
   | "review"
   | "parked"
-  | "humanHold"
   | "terminal";
 
 export interface KanbanColumn {
@@ -437,7 +436,6 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   kanbanColumns: [
     { key: "inbox", label: "Inbox", role: "intake" },
     { key: "backlog", label: "Backlog", role: "defaultLanding" },
-    { key: "blocked", label: "Blocked (Human)", role: "humanHold" },
     { key: "todo", label: "To Do", role: "workReady" },
     { key: "in_progress", label: "In Progress", role: "active" },
     { key: "waiting", label: "Waiting", role: "parked" },

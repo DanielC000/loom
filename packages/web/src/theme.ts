@@ -59,7 +59,6 @@ export const roleTone: Record<ColumnRole, Tone> = {
   active: "amber", // in flight
   review: "cyan", // under review
   parked: "muted", // waiting / parked
-  humanHold: "red", // needs a human
   terminal: "phosphor", // done
 };
 

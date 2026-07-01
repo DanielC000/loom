@@ -26,7 +26,6 @@ const LEGACY_KEY_TO_ROLE: Readonly<Record<string, ColumnRole>> = {
   in_progress: "active",
   review: "review",
   waiting: "parked",
-  blocked: "humanHold",
   done: "terminal",
 };
 
@@ -84,6 +83,78 @@ export function backfillColumnRoles(db: Db): { migrated: number } {
   return { migrated };
 }
 
+// --- One-time migration: retire the humanHold column-role in favor of the `held` flag ---------------
+
+/**
+ * app_meta one-shot marker for the Board Hold Model migration. Daemon-GLOBAL; survives a daemon_restart.
+ */
+export const HUMAN_HOLD_MIGRATION_KEY = "tasks.humanHoldToHeldMigration";
+
+/**
+ * ONE-TIME boot migration (Board Hold Model redesign, mirrors backfillColumnRoles/backfillHeldFromTitlesOnce):
+ * the `blocked` column / `humanHold` column-role is retired — the per-card `held` flag becomes the SOLE
+ * human brake, checked in ANY column. For every project (live + archived) whose board still carries a
+ * humanHold-role column: every card on it is promoted `held=true` and moved to the `workReady` lane
+ * (fallback `defaultLanding`), then the humanHold column is dropped from the project's STORED override.
+ *
+ * A project with NO explicit `kanbanColumns` override never had one to rewrite — it inherited the
+ * pre-migration PLATFORM_DEFAULTS, whose humanHold column was always keyed `blocked` (the same assumption
+ * LEGACY_KEY_TO_ROLE above made before this migration retired that key). Any of ITS cards sitting on that
+ * key are migrated the same way; there is no override to rewrite since the newly-resolved defaults already
+ * exclude the column.
+ *
+ * Runs AFTER backfillColumnRoles (so a legacy override's `blocked` key already carries role:"humanHold" by
+ * the time this reads it) and MUST ship in the SAME deploy as the engine brake flip (spawnWorker /
+ * idle-watcher / hasPendingBoardWork all key off `held` now) — a migrated card must never land in an
+ * actionable lane while dispatch still keys off the old column. Lossless: blocked → held is a promotion,
+ * never a downgrade. One-shot via an app_meta marker (checked first, stamped last); idempotent — a second
+ * run finds no humanHold columns/legacy keys and no-ops.
+ */
+export function migrateHumanHoldToHeld(db: Db): { projectsMigrated: number; cardsMigrated: number } {
+  if (db.getMeta(HUMAN_HOLD_MIGRATION_KEY) !== undefined) return { projectsMigrated: 0, cardsMigrated: 0 };
+  let projectsMigrated = 0;
+  let cardsMigrated = 0;
+  const projects = [...db.listAllProjects(), ...db.listArchivedProjects()]; // live (incl. reserved) + archived
+  for (const p of projects) {
+    const override = p.config.kanbanColumns;
+    const hasOverride = !!override && override.length > 0;
+    // Resolve the humanHold column key + the column set to derive the migration target from. An
+    // override-based board reads its OWN stored columns (already role-backfilled by now, in the COMMON
+    // case); an override-less board never stored one — it inherited the legacy default, whose humanHold
+    // column was always `blocked`. The override-based match ALSO falls back to the legacy key `blocked`
+    // (not just role) — a never-backfilled home (a pre-role DB upgraded straight to this build, after
+    // `blocked`→`humanHold` was removed from LEGACY_KEY_TO_ROLE above) would otherwise carry a role-LESS
+    // `blocked` override column that role-matching alone can never find, silently losing the brake. The
+    // role comparison reads legacy PERSISTED data (a role value the current ColumnRole type no longer
+    // permits), hence the cast — this migration is the one place that's expected and correct.
+    const humanHoldKey = hasOverride
+      ? override!.find((c) => (c.role as string) === "humanHold" || c.key === "blocked")?.key
+      : "blocked";
+    if (!humanHoldKey) continue; // override-based board with no humanHold/blocked column — nothing to migrate
+    const targetCols: KanbanColumn[] = hasOverride ? override! : resolveConfig(p.config).kanbanColumns;
+    const targetKey = columnKeyForRole(targetCols, "workReady") ?? columnKeyForRole(targetCols, "defaultLanding");
+    const cardsOnKey = db.listTasks(p.id).filter((t) => t.columnKey === humanHoldKey);
+    if (!cardsOnKey.length && !hasOverride) continue; // override-less + no legacy cards → a genuine no-op
+    if (cardsOnKey.length && !targetKey) continue; // defensive: no landing lane — never drop the column with cards still on it (no orphans)
+    let actioned = false;
+    if (cardsOnKey.length && targetKey) {
+      for (const t of cardsOnKey) {
+        db.updateTask(t.id, { held: true, columnKey: targetKey });
+        cardsMigrated++;
+      }
+      actioned = true;
+    }
+    if (hasOverride) {
+      const nextCols = override!.filter((c) => c.key !== humanHoldKey);
+      db.setProjectConfig(p.id, { ...p.config, kanbanColumns: nextCols });
+      actioned = true;
+    }
+    if (actioned) projectsMigrated++;
+  }
+  db.setMeta(HUMAN_HOLD_MIGRATION_KEY, new Date().toISOString()); // stamp last — the one-shot guarantee
+  return { projectsMigrated, cardsMigrated };
+}
+
 // --- Part B: pure desired-vs-current layout planner -----------------------------------------------
 
 /** A desired column in an atomic layout update. `prevKey` marks a KEY RENAME (re-key its cards old→new). */
@@ -121,7 +192,6 @@ const ROLE_DEPENDS: Readonly<Partial<Record<ColumnRole, string>>> = {
   active: "where a spawned worker's task is moved",
   review: "where a worker's done report lands for review",
   parked: "where a worker's blocked report lands",
-  humanHold: "the human-hold lane",
 };
 
 /**

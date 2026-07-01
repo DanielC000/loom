@@ -19,9 +19,12 @@ export const ROLE_ACCENT: Readonly<Record<ColumnRole, string>> = {
   active: "#ffb23e", // amber — in flight
   review: "#5bc8ff", // cyan — under review
   parked: "#7c8b9a", // slate — waiting / parked
-  humanHold: "#ff5c5c", // red — needs a human
   terminal: "#2ee66e", // phosphor — done
 };
+
+/** The general-purpose red swatch (matches the retired humanHold role's tone) — kept as a plain accent
+ *  choice for the per-column picker even though no role wears it by default anymore. */
+const RED_ACCENT = "#ff5c5c";
 
 /** The restrained accent palette for the per-column accent PICKER (Settings ColumnManager) — the DISTINCT
  *  colors from ROLE_ACCENT, each named. A deliberate, token-consistent set (one swatch per theme tone) so a
@@ -32,7 +35,7 @@ export const ACCENT_PALETTE: ReadonlyArray<{ name: string; value: string }> = [
   { name: "Phosphor", value: ROLE_ACCENT.defaultLanding },
   { name: "Amber", value: ROLE_ACCENT.active },
   { name: "Cyan", value: ROLE_ACCENT.intake },
-  { name: "Red", value: ROLE_ACCENT.humanHold },
+  { name: "Red", value: RED_ACCENT },
   { name: "Slate", value: ROLE_ACCENT.workReady },
 ];
 
@@ -77,12 +80,11 @@ export const COLUMN_PRESETS: ColumnPreset[] = [
       col("reading", "Reading", "defaultLanding"),
       col("drafting", "Drafting", "active"),
       col("review", "Review", "review"),
-      col("blocked", "Blocked", "humanHold"),
       col("published", "Published", "terminal"),
     ],
   },
   {
-    // A lean operations board: triage → do → wait → done, with a human-hold lane.
+    // A lean operations board: triage → do → wait → done.
     id: "ops",
     name: "Ops",
     description: "A lean operations board: triage → in progress → waiting → done.",
@@ -90,7 +92,6 @@ export const COLUMN_PRESETS: ColumnPreset[] = [
       col("triage", "Triage", "defaultLanding"),
       col("in_progress", "In Progress", "active"),
       col("waiting", "Waiting", "parked"),
-      col("blocked", "Blocked", "humanHold"),
       col("done", "Done", "terminal"),
     ],
   },
@@ -118,7 +119,6 @@ export const COLUMN_PRESETS: ColumnPreset[] = [
       col("backlog", "Backlog", "defaultLanding"),
       col("in_progress", "In Progress", "active"),
       col("review", "Review", "review"),
-      col("blocked", "Blocked", "humanHold"),
       col("done", "Done", "terminal"),
     ],
   },

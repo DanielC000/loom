@@ -44,7 +44,7 @@ function columnsToDesired(cols: KanbanColumn[]): DesiredColumn[] {
 // lane"). The authoritative, full coupling text comes back from the server in the PUT response.
 const ROLE_LABEL: Record<ColumnRole, string> = {
   intake: "Intake", defaultLanding: "Default landing", workReady: "Work ready", active: "Active",
-  review: "Review", parked: "Parked", humanHold: "Human hold", terminal: "Terminal (done)",
+  review: "Review", parked: "Parked", terminal: "Terminal (done)",
 };
 // The two roles the server requires exactly once — their columns can't be removed from the board
 // (a hard reject), so the contextual remove affordance is disabled for them.
@@ -500,7 +500,10 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
   return (
     <div ref={setNodeRef}
       style={{
-        border: `1px solid ${color.border}`, borderLeft: `2px solid ${accent}`, borderRadius: 4,
+        // Held reads as braked WHEREVER the card sits — its amber left-border overrides the column's
+        // own role accent, so a held card never blends into an ordinary lane.
+        border: `1px solid ${task.held ? color.amber : color.border}`,
+        borderLeft: `3px solid ${task.held ? color.amber : accent}`, borderRadius: 4,
         padding: "6px 8px", marginBottom: 6, background: color.panel2,
         opacity: isDragging ? 0.5 : 1,
         transform: transform ? `translate(${transform.x}px, ${transform.y}px)` : undefined,
@@ -514,7 +517,7 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
           <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
             <PriorityChip priority={prio(task)} />
             {task.held && (
-              <span title="On hold — the idle watchdog won't nag the manager to pick this up"
+              <span title="Held — won't be worked or nagged (the owner's brake)"
                 style={{ flexShrink: 0, fontFamily: font.head, fontSize: 9, fontWeight: 700, letterSpacing: "0.08em",
                   textTransform: "uppercase", color: color.bg, background: color.amber, borderRadius: 3, padding: "1px 4px" }}>
                 held
@@ -643,14 +646,15 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
             );
           })}
         </div>
-        {/* Owner HOLD gate: parks this card so the idle watchdog won't nag the manager to pick it up,
-            WITHOUT moving it to the blocked brake lane. Distinct from priority/column — an owner-only
-            "don't drive this yet" signal. Persisted on the same task store the MCP tools read. */}
+        {/* Owner HOLD gate — the SOLE human brake (Board Hold Model): held=true means this card won't be
+            worked (spawnWorker refuses to dispatch onto it) AND won't nag (excluded from the idle-watcher's
+            actionable count) — in whatever column it sits. Distinct from priority/column — an owner-only
+            "don't touch this" signal. Persisted on the same task store the MCP tools read. */}
         <span style={labelStyle}>Hold</span>
-        <button type="button" role="switch" aria-checked={held} aria-label="Owner hold — idle watchdog won't nag about this card"
+        <button type="button" role="switch" aria-checked={held} aria-label="Held — won't be worked or nagged"
           title={held
-            ? "Held — the idle watchdog discounts this card (won't nag the manager to pick it up). Click to release."
-            : "Not held — click to park this card so the idle watchdog won't nag about it (without using the blocked lane)."}
+            ? "Held — won't be worked or nagged. No worker will be dispatched onto this card and the idle watchdog won't nag about it. Click to release."
+            : "Not held — click to hold this card so it won't be worked or nagged."}
           onClick={() => setHeld((h) => !h)}
           style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", textAlign: "left",
             padding: "6px 8px", borderRadius: 4, background: color.panel2,
@@ -661,7 +665,7 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
               background: color.bg, transition: "left 0.12s" }} />
           </span>
           <span style={{ fontFamily: font.mono, fontSize: 12, color: held ? color.amber : color.textDim }}>
-            {held ? "Held — won't nag" : "Not held"}
+            {held ? "Held — won't be worked or nagged" : "Not held"}
           </span>
         </button>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

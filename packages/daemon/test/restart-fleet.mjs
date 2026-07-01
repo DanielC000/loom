@@ -57,6 +57,9 @@ const sessions = new SessionService(db, pty, new OrchestrationControl());
 const mkProject = (id, repo) => db.insertProject({ id, name: id, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
 const mkAgent = (id, projId) => db.insertAgent({ id, projectId: projId, name: "t", startupPrompt: "", position: 0 });
 const mkTask = (id, projId) => db.insertTask({ id, projectId: projId, title: id, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+// A HELD card (Board Hold Model): non-terminal column, but the owner's brake is set — hasPendingBoardWork
+// must treat this the same as no card at all (excluded, not "pending").
+const mkHeldTask = (id, projId) => db.insertTask({ id, projectId: projId, title: id, body: "", columnKey: "in_progress", position: 1, held: true, createdAt: now, updatedAt: now });
 function mkSession(o) {
   db.insertSession({
     id: o.id, projectId: o.projId, agentId: o.agentId, engineSessionId: o.engineSessionId ?? `eng-${o.id}`,
@@ -262,18 +265,24 @@ try {
   // stale suppressed/snoozed idle-policy) still gets the full "re-check your workers" re-orient; and the
   // deploy REQUESTER is NEVER short-circuited.
   // C.proj is an EMPTY board (no tasks) — its 0-worker managers are GENUINELY converged.
-  // C2.proj has ≥1 PENDING card (mkTask lands at "in_progress" = the `active` lane, neither terminal
-  // nor humanHold) — its 0-worker managers are NOT converged despite a stale suppressed idle-policy
-  // (card 90058589: a manager that deploys mid-queue sits at 0 live workers but still has pending work).
+  // C2.proj has ≥1 PENDING card (mkTask lands at "in_progress" = the `active` lane, non-terminal and NOT
+  // held) — its 0-worker managers are NOT converged despite a stale suppressed idle-policy (card 90058589:
+  // a manager that deploys mid-queue sits at 0 live workers but still has pending work).
+  // C3.proj's ONLY card is HELD (Board Hold Model) — the owner's brake, checked in ANY column now, not a
+  // `blocked` column. hasPendingBoardWork must exclude it exactly like C's empty board, NOT count it like
+  // C2's genuine pending card.
   const C = { proj: `rf-C-${sfx}`, agent: `rf-C-ag-${sfx}` };
   const C2 = { proj: `rf-C2-${sfx}`, agent: `rf-C2-ag-${sfx}` };
+  const C3 = { proj: `rf-C3-${sfx}`, agent: `rf-C3-ag-${sfx}` };
   mkProject(C.proj, "/tmp/rf-C"); mkAgent(C.agent, C.proj);
   mkProject(C2.proj, "/tmp/rf-C2"); mkAgent(C2.agent, C2.proj);
+  mkProject(C3.proj, "/tmp/rf-C3"); mkAgent(C3.agent, C3.proj);
   mkTask(`rf-C2-pending-${sfx}`, C2.proj); // one PENDING card on C2's board (column "in_progress")
+  mkHeldTask(`rf-C3-held-${sfx}`, C3.proj); // one HELD card on C3's board — must NOT count as pending
   const cid = {
     auditor: `rf-auditor-${sfx}`, wsAuditor: `rf-wsaud-${sfx}`, setup: `rf-setup-${sfx}`, run: `rf-run-${sfx}`,
     reqMgr: `rf-reqMgr-${sfx}`, convMgr: `rf-convMgr-${sfx}`, pendMgr: `rf-pendMgr-${sfx}`,
-    activeMgr: `rf-activeMgr-${sfx}`, activeWkr: `rf-activeWkr-${sfx}`,
+    activeMgr: `rf-activeMgr-${sfx}`, activeWkr: `rf-activeWkr-${sfx}`, heldMgr: `rf-heldMgr-${sfx}`,
   };
   mkSession({ id: cid.auditor, projId: C.proj, agentId: C.agent, role: "auditor" });
   mkSession({ id: cid.wsAuditor, projId: C.proj, agentId: C.agent, role: "workspace-auditor" });
@@ -294,6 +303,10 @@ try {
   // activeMgr: a NON-requesting manager WITH a live worker → full re-check nudge (the control).
   mkSession({ id: cid.activeMgr, projId: C.proj, agentId: C.agent, role: "manager" });
   mkSession({ id: cid.activeWkr, projId: C.proj, agentId: C.agent, role: "worker", parentSessionId: cid.activeMgr });
+  // heldMgr: a NON-requesting manager on C3 (suppressed idle-policy + 0 workers + a HELD-only board). The
+  // held card must NOT be counted as pending — it resumes SILENTLY just like the genuinely-empty C board.
+  mkSession({ id: cid.heldMgr, projId: C3.proj, agentId: C3.agent, role: "manager" });
+  db.setIdleNudgePolicy(cid.heldMgr, "suppressed");
 
   const pty6 = new PtyStub();
   const sessions6 = new SessionService(db, pty6, new OrchestrationControl());
@@ -309,6 +322,7 @@ try {
       { sessionId: cid.pendMgr, role: "manager", parentSessionId: null },
       { sessionId: cid.activeMgr, role: "manager", parentSessionId: null },
       { sessionId: cid.activeWkr, role: "worker", parentSessionId: cid.activeMgr },
+      { sessionId: cid.heldMgr, role: "manager", parentSessionId: null },
     ],
   };
   sessions6.resumeFleetOnBoot(intent6, { resumeOne: () => true });
@@ -340,6 +354,11 @@ try {
   const activeMsg = n6(cid.activeMgr);
   check("(6c) an active manager (live worker) still gets the FULL re-check nudge",
     activeMsg.length === 1 && /re-check your workers/i.test(activeMsg[0]) && !/no action is needed/i.test(activeMsg[0]));
+  // Board Hold Model: a HELD-only board must NOT count as pending work — a stale suppressed idle-policy
+  // + 0 workers + a held card resumes SILENTLY, same as C's genuinely-empty board (not C2's real pending card).
+  const heldMsg = n6(cid.heldMgr);
+  check("(6c) a non-requesting manager whose ONLY board card is HELD resumes SILENTLY (held is never pending)",
+    heldMsg.length === 0);
 } finally {
   db.close();
   for (const repo of repoRoots) {
