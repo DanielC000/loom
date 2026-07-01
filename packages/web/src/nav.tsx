@@ -11,6 +11,7 @@ import Vault from "./pages/Vault";
 import Git from "./pages/Git";
 import Skills from "./pages/Skills";
 import Profiles from "./pages/Profiles";
+import Companion from "./pages/Companion";
 import Schedules from "./pages/Schedules";
 import Usage from "./pages/Usage";
 import Platform from "./pages/Platform";
@@ -80,6 +81,9 @@ export const NAV_PAGES: NavPage[] = [
   // ── More ▾ · Config ──────────────────────────────────────────────────────────
   { label: "Skills", to: "/skills", element: <Skills />, group: "config" },
   { label: "Profiles", to: "/profiles", element: <Profiles />, group: "config" },
+  // Companion management is daemon-GLOBAL (one companion config store, not project-scoped) — deliberately
+  // not `scoped`. Lives under Config alongside Profiles (the companion's restricted-tools toggle is there).
+  { label: "Companion", to: "/companion", element: <Companion />, group: "config" },
   { label: "Schedules", to: "/schedules", element: <Schedules />, group: "config", scoped: true },
   // ── More ▾ · System ──────────────────────────────────────────────────────────
   { label: "Usage", to: "/usage", element: <Usage />, group: "system" },

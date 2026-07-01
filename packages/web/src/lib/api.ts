@@ -1,4 +1,8 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender } from "@loom/shared";
+
+// A one-time DM-pairing enrollment code, returned ONCE by the mint endpoint (the store keeps only a
+// salted hash). The human relays `code` to the person being enrolled; it is never recoverable after.
+export interface CompanionPairingCode { codeId: string; code: string; expiresAt: string; }
 
 // Per-conflict resolution for a profile adopt-update: pick the user's value or the shipped value,
 // wholesale (the field-level analog of the skills resolver's per-hunk mine/shipped choice).
@@ -528,4 +532,32 @@ export const api = {
   presetPromptSuggestions: () => get<PresetPromptSuggestion[]>("/api/preset-prompt-suggestions"),
   adoptPresetPromptSuggestion: (id: string) => postErr<PresetPrompt>(`/api/preset-prompt-suggestions/${id}/adopt`),
   dismissPresetPromptSuggestion: (id: string) => postErr<{ ok: boolean }>(`/api/preset-prompt-suggestions/${id}/dismiss`),
+
+  // --- Loom Companion management (Companion epic Phase 3). HUMAN-only loopback REST — there is
+  // INTENTIONALLY NO agent MCP path for ANY of these (a chat-reachable, injection-exposed companion must
+  // never read/write its own bot token or authorize senders for itself; same trust posture as the
+  // git/vault/api_keys human-only writers). SECURITY: `companionConfigs`/reads return the MASKED shape
+  // only — the bot token is ENCRYPTED at rest on the daemon and NEVER returned in clear (configured +
+  // last-4 only). create/update surface the server's `{ error }` body verbatim (token/cadence/home
+  // validation) via *Err for inline display; an omitted `botToken` on update keeps the stored token. ---
+  companionConfigs: () => get<CompanionConfigMasked[]>("/api/companion/config"),
+  createCompanionConfig: (b: Record<string, unknown>) => postErr<CompanionConfigMasked>("/api/companion/config", b),
+  updateCompanionConfig: (sessionId: string, b: Record<string, unknown>) =>
+    putErr<CompanionConfigMasked>(`/api/companion/config/${encodeURIComponent(sessionId)}`, b),
+  deleteCompanionConfig: (sessionId: string) => del<{ ok: boolean }>(`/api/companion/config/${encodeURIComponent(sessionId)}`),
+  // Access routes: the durable session↔chat bindings + the per-binding group sender allowlist. The
+  // binding create 409s ({ error }) when the (channel, chatId) route is already bound to another session.
+  companionBindings: () => get<CompanionBinding[]>("/api/companion/bindings"),
+  createCompanionBinding: (b: { sessionId: string; channel: string; chatId: string; scope: "dm" | "group" }) =>
+    postErr<CompanionBinding>("/api/companion/bindings", b),
+  deleteCompanionBinding: (sessionId: string) => del<{ ok: boolean }>(`/api/companion/bindings/${encodeURIComponent(sessionId)}`),
+  companionAllowedSenders: (sessionId: string) =>
+    get<CompanionAllowedSender[]>(`/api/companion/allowed-senders?sessionId=${encodeURIComponent(sessionId)}`),
+  addCompanionAllowedSender: (b: { sessionId: string; channel: string; senderId: string; label?: string | null }) =>
+    postErr<CompanionAllowedSender>("/api/companion/allowed-senders", b),
+  removeCompanionAllowedSender: (id: string) => del<{ ok: boolean }>(`/api/companion/allowed-senders/${encodeURIComponent(id)}`),
+  // DM-pairing: mint a one-time enrollment code for a companion session + grant type. The plaintext code
+  // is returned ONCE (the store keeps only a salted hash); the human relays it to the person enrolling.
+  mintCompanionPairing: (b: { sessionId: string; grantType: "dm-bind" | "group-sender"; ttlMinutes?: number }) =>
+    postErr<CompanionPairingCode>("/api/companion/pairing", b),
 };
