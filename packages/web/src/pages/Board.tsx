@@ -8,6 +8,7 @@ import { Button, Input, SectionLabel, StatusPill, Chip } from "../components/ui"
 import { color, font, tone, roleTone, type Tone } from "../theme";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
 import { useVoiceLang } from "../lib/useVoiceLang";
+import { isDoneColumn } from "../lib/columnSort";
 // Priority chip + metadata live in one place so the board and the /terminals task card never drift.
 import { PRIORITY_META, PriorityChip, prio } from "../components/priority";
 
@@ -191,7 +192,7 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
                 {board.data.columns.map((col) => (
                   <Column key={col.key} col={col}
                     tasks={shownTasks.filter((t) => t.columnKey === col.key)
-                      .sort(isDoneColumn(col.key) ? byRecentlyDone : byPriorityThenPosition)}
+                      .sort(isDoneColumn(col) ? byRecentlyDone : byPriorityThenPosition)}
                     filterActive={filterActive} workers={workerByTask} onOpen={setOpenTaskId}
                     cardCount={allTasks.filter((t) => t.columnKey === col.key).length}
                     landingLabel={landingLabel} busy={columns.isPending}
@@ -216,13 +217,6 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
       )}
     </div>
   );
-}
-
-// A column counts as "done" when its key signals completion (done/complete/merged). Single source
-// of truth for both the phosphor tone and the recently-done sort, so the two never drift apart.
-function isDoneColumn(key: string): boolean {
-  const k = key.toLowerCase();
-  return k.includes("done") || k.includes("complete") || k.includes("merged");
 }
 
 // ── One source of truth for a board lane's color ──────────────────────────────────
