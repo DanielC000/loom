@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { gracefulShutdownRegion } from "./_graceful-region.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-shutdown-snap-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -99,8 +100,9 @@ try {
   // the loopback POST /internal/shutdown control hook (the cross-platform `loom stop`). Anchor on that
   // function's definition and assert it calls snapshotAllLive BEFORE process.exit(0) — the shutdown
   // backstop must run on every graceful stop (signal OR endpoint).
-  const gsIdx = indexJs.indexOf("gracefulShutdown = (");
-  const region = gsIdx >= 0 ? indexJs.slice(gsIdx, gsIdx + 2200) : ""; // window covers the vault flushSync block now added before exit
+  // Structural window: gracefulShutdown anchor → its first process.exit (inclusive). No byte budget, so
+  // future teardown lines/comments before the exit can't push it out of the region (shared helper).
+  const region = gracefulShutdownRegion(indexJs);
   check("(5) built daemon references snapshotAllLive", /snapshotAllLive\s*\(/.test(indexJs));
   check("(5) the graceful-shutdown path invokes snapshotAllLive before exit",
     /snapshotAllLive\s*\(/.test(region) && region.indexOf("snapshotAllLive") < region.indexOf("process.exit(0)"));
