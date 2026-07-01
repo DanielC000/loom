@@ -11,10 +11,11 @@ import { color, font, tone, type Tone } from "../theme";
 
 // USAGE — a god-eye page split into THREE deliberately separate, distinctly-labeled planes:
 //
-//  1. INTERACTIVE SESSIONS ("billed · over time"): the OWNER'S OWN interactive-session BILLED usage over
-//     time, from GET /api/usage/sessions/history — a real per-day/-project/-agent time series sampled
-//     token-free from the transcripts the engine already writes (epic c9924bcd). This is where the real
-//     cumulative numbers live, so it leads the page.
+//  1. INTERACTIVE SESSIONS ("est. consumption · over time"): the OWNER'S OWN interactive-session usage
+//     over time, from GET /api/usage/sessions/history — a real per-day/-project/-agent time series sampled
+//     token-free from the transcripts the engine already writes (epic c9924bcd). Its dollar figure is an
+//     ESTIMATE of what the tokens would cost on metered API — plan consumption, not a separate bill. This
+//     is where the real cumulative numbers live, so it leads the page.
 //
 //  2. LIVE OCCUPANCY ("live · now"): every live session's CONTEXT occupancy. Sessions already report
 //     `ctxInputTokens` (the measured size of the engine's CURRENT context, i.e. last-assistant input
@@ -25,7 +26,8 @@ import { color, font, tone, type Tone } from "../theme";
 //     (distinct from interactive sessions), via GET /api/usage/history.
 //
 // HONESTY NOTE (load-bearing): the three planes measure DIFFERENT things and must NEVER be summed.
-//   • INTERACTIVE "cost" is CUMULATIVE BILLED interactive-session spend, summed from per-interval deltas.
+//   • INTERACTIVE "cost" is CUMULATIVE ESTIMATED interactive-session consumption (what the tokens would
+//     cost on metered API), summed from per-interval deltas — plan usage, not a metered bill.
 //   • LIVE "ctx in use" is the CURRENT context SIZE (an occupancy snapshot, can exceed 100%, UNBILLED);
 //     its dollar figure is an ESTIMATE of ONE input pass at list rates — never cumulative spend.
 //   • AGENT-RUNS "cost" is CUMULATIVE BILLED spend recorded per finished Agent Run (the runs plane).
@@ -81,7 +83,7 @@ function fmtTokens(n: number): string {
 function fmtUsd(n: number): string {
   if (n === 0) return "$0.00";
   if (n < 0.01) return `<$0.01`;
-  // Thousands separators — billed interactive totals run to the thousands ($6,020.00 reads far better
+  // Thousands separators — estimated interactive totals run to the thousands ($6,020.00 reads far better
   // than $6020.00).
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -132,7 +134,7 @@ export default function Usage() {
     queryFn: () => api.usageHistory(sinceIsoFor(span), scope),
     refetchInterval: 10000,
   });
-  // The owner's interactive-session billed usage over the same window + scope (the headline new plane).
+  // The owner's interactive-session usage (estimated plan consumption) over the same window + scope (the headline new plane).
   const sessionHistory = useQuery({
     queryKey: ["sessionUsageHistory", span, scope],
     queryFn: () => api.sessionUsageHistory(sinceIsoFor(span), scope),
@@ -182,7 +184,7 @@ export default function Usage() {
         </span>
       </div>
 
-      {/* ════ INTERACTIVE SESSIONS (historical · billed) ════ — the headline new plane, placed first. */}
+      {/* ════ INTERACTIVE SESSIONS (historical · est. consumption) ════ — the headline new plane, placed first. */}
       <SessionUsageSection
         query={sessionHistory}
         scope={scope}
@@ -454,11 +456,12 @@ function SortToggle({ value, onChange }: { value: "tokens" | "cost"; onChange: (
   );
 }
 
-// ── Interactive-sessions (historical · billed) section ───────────────────────────
-// The owner's OWN interactive-session billed usage over the window: totals, an over-time chart from
-// byDay, a per-project breakdown (in "all" scope), and a sortable per-agent breakdown. This is the
-// real cumulative spend — DISTINCT from live occupancy (an unbilled snapshot) and Agent Runs (the runs
-// plane); the section never sums into either.
+// ── Interactive-sessions (historical · est. consumption) section ──────────────────
+// The owner's OWN interactive-session usage over the window: totals, an over-time chart from byDay, a
+// per-project breakdown (in "all" scope), and a sortable per-agent breakdown. Its dollar figure is an
+// ESTIMATE of plan consumption (what the tokens would cost on metered API), NOT a metered bill —
+// DISTINCT from live occupancy (a context snapshot) and Agent Runs (the runs plane, genuinely metered);
+// the section never sums into either.
 function SessionUsageSection({
   query, scope, scopeName, window, allTime,
 }: {
@@ -475,12 +478,12 @@ function SessionUsageSection({
 
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <SectionHead title="Interactive sessions" tag="billed · over time" tagTone="amber" />
+      <SectionHead title="Interactive sessions" tag="est. consumption · over time" tagTone="amber" />
       <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, lineHeight: 1.5, marginTop: -8 }}>
-        Your REAL interactive-session usage over time — CUMULATIVE BILLED tokens + cost, sampled token-free
-        from session transcripts. This is genuine spend, distinct from the live occupancy snapshot below
-        (current context size, unbilled) and the Agent&nbsp;Runs plane further down; the page never sums
-        across the three.
+        Your interactive-session usage over time — cumulative tokens + an ESTIMATE of what they'd cost on
+        metered API, sampled token-free from session transcripts. On a flat Claude subscription this is what
+        you're consuming, not a separate bill — distinct from the live occupancy snapshot below (current
+        context size) and the Agent&nbsp;Runs plane further down; the page never sums across the three.
       </span>
 
       {query.isLoading && <Panel><span style={{ color: color.textMuted }}>Loading interactive-session usage…</span></Panel>}
@@ -495,15 +498,15 @@ function SessionUsageSection({
               No interactive-session usage in this window
             </div>
             <div style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, lineHeight: 1.6, maxWidth: 560 }}>
-              No billed interactive-session samples recorded for {scopeName} in this window ({window}). Try a
+              No interactive-session usage recorded for {scopeName} in this window ({window}). Try a
               wider window, or this fills in as the owner's sessions run and the daemon samples them.
             </div>
           </Panel>
         ) : (
           <>
-            {/* Aggregate strip — distinctly BILLED interactive spend, never summed with the other planes. */}
+            {/* Aggregate strip — an ESTIMATE of plan consumption, never summed with the other planes. */}
             <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-              <Stat label="cost (billed)" value={fmtUsd(totals.costUsd)} tone="amber" />
+              <Stat label="est. consumption" value={fmtUsd(totals.costUsd)} tone="amber" />
               <Stat label="input tok" value={fmtTokens(totals.inputTokens)} tone="cyan" />
               <Stat label="output tok" value={fmtTokens(totals.outputTokens)} tone="cyan" />
               <Stat label="cache tok" value={fmtTokens(totals.cacheCreationTokens + totals.cacheReadTokens)} tone="muted" />
@@ -561,7 +564,7 @@ function SessionUsageSection({
 }
 
 // One interactive-session breakdown row (project or agent): name, sample count, a token meter relative to
-// the section's max, and the billed cost. `subtitle` (the owning project, for agent rows) renders as a
+// the section's max, and the estimated cost. `subtitle` (the owning project, for agent rows) renders as a
 // small secondary label so identically-named agents across projects disambiguate.
 function SessionHistoryRow({ name, subtitle, row, max }: { name: string; subtitle?: string | null; row: SessionUsageProject | SessionUsageAgent; max?: number }) {
   const tok = sessionTotalTokens(row);
@@ -581,8 +584,8 @@ function SessionHistoryRow({ name, subtitle, row, max }: { name: string; subtitl
 
 // Over-time bar chart for the interactive-session series. Bars ascend by day and fill the width, so a
 // 7-day window reads as a few wide bars and the 365-bucket "all time" window as a dense sparkline-of-bars;
-// each bar's height scales to the window's peak. The metric toggle switches between billed cost and total
-// tokens. A non-zero day always paints at least a hairline so sparse early days stay visible.
+// each bar's height scales to the window's peak. The metric toggle switches between estimated cost and
+// total tokens. A non-zero day always paints at least a hairline so sparse early days stay visible.
 function ByDayChart({
   byDay, metric, onMetric, allTime,
 }: {
@@ -613,7 +616,7 @@ function ByDayChart({
       <Panel>
         <div
           role="img"
-          aria-label={`Interactive-session ${metric === "cost" ? "billed cost" : "total tokens"} per day, ${byDay.length} days, peak ${fmtVal(peak)}`}
+          aria-label={`Interactive-session ${metric === "cost" ? "estimated cost" : "total tokens"} per day, ${byDay.length} days, peak ${fmtVal(peak)}`}
           style={{ display: "flex", alignItems: "flex-end", gap: dense ? 1 : 3, height: 88, borderBottom: `1px solid ${color.border}`, paddingBottom: 1 }}
         >
           {byDay.map((d) => {
