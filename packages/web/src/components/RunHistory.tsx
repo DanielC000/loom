@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 import { TranscriptPane } from "./TranscriptPane";
 import { Panel, Button, StatusPill, Chip } from "./ui";
 import { color, font } from "../theme";
+import { canResumeSession } from "../lib/sessions";
 
 // A platform/home agent's RUN HISTORY — every RUN of a given `role` is a session of that role in a
 // reserved home project. SHARED between the dev Platform view (Lead role:"platform" + Auditor
@@ -87,11 +88,14 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle }:
   { run: SessionListItem; schedules: Schedule[]; tasks: Task[]; showFindings: boolean; open: boolean; onToggle: () => void }) {
   const qc = useQueryClient();
   const live = !run.archivedAt && run.processState === "live";
-  // On-demand human resume of an EXITED run (distinct from a manual Spawn, which always mints a FRESH
-  // session, and from boot/restart resume, which is resume-by-id). resumability is only reliably "dead"
-  // after a failed resume — most exited rows are "unknown" — so we offer Resume on any exited-non-archived
-  // run and surface the server's error inline if it turns out to be unresumable.
-  const canResume = !run.archivedAt && run.processState !== "live";
+  // On-demand human resume of a non-live run (distinct from a manual Spawn, which always mints a FRESH
+  // session, and from boot/restart resume, which is resume-by-id) — via the SHARED canResumeSession gate
+  // (lib/sessions.ts, also used by SessionActions). Almost every non-live run here is ARCHIVED (auto-
+  // archive-on-exit fires within seconds), so gating on "exited" alone would make Resume practically
+  // unreachable — canResumeSession treats an archived row as resumable too, and resumeSession un-archives
+  // + respawns in one call either way. Excludes only a confirmed-"dead" row (no engine transcript to
+  // resume); surface the server's error inline if a "resumable"/"unknown" row still turns out unresumable.
+  const canResume = canResumeSession(run);
   const resumeM = useMutation({
     mutationFn: () => api.resumeSession(run.id),
     onSuccess: () => {

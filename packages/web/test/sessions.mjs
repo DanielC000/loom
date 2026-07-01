@@ -7,7 +7,7 @@
 // wired into @loom/web's `build` script (which CI runs via `pnpm build`). Run it standalone with:
 //   node --experimental-strip-types packages/web/test/sessions.mjs
 import assert from "node:assert/strict";
-import { groupSessionRows } from "../src/lib/sessions.ts";
+import { groupSessionRows, canResumeSession } from "../src/lib/sessions.ts";
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
@@ -64,6 +64,28 @@ check("a worker whose parent isn't in the set becomes an orphan (not dropped)", 
   const orphan = rows.find((r) => r.kind === "orphans");
   assert.ok(orphan, "an orphan row is emitted");
   assert.deepEqual(orphan.list.map((s) => s.id), ["wkr-1"]);
+});
+
+// ── canResumeSession — the shared Resume gate (SessionActions + RunHistory) ────────────────────────────
+// findings #14/#15: auto-archive-on-exit means almost every non-live row is ARCHIVED, not "exited", so
+// the gate must treat an already-archived row as resumable too — not just the ephemeral exited window.
+
+check("a live session cannot resume", () => {
+  assert.equal(canResumeSession({ processState: "live", resumability: "unknown" }), false);
+});
+
+check("a still-exited-not-yet-archived session can resume (the old reachable case)", () => {
+  assert.equal(canResumeSession({ processState: "exited", resumability: "unknown", archivedAt: null }), true);
+});
+
+check("an ARCHIVED session exposes resume — the durable path this fix adds", () => {
+  assert.equal(canResumeSession({ processState: "exited", resumability: "unknown", archivedAt: "2026-07-01T00:00:00.000Z" }), true);
+  assert.equal(canResumeSession({ processState: "exited", resumability: "resumable", archivedAt: "2026-07-01T00:00:00.000Z" }), true);
+});
+
+check("a confirmed-dead session never exposes resume, archived or not", () => {
+  assert.equal(canResumeSession({ processState: "exited", resumability: "dead", archivedAt: null }), false);
+  assert.equal(canResumeSession({ processState: "exited", resumability: "dead", archivedAt: "2026-07-01T00:00:00.000Z" }), false);
 });
 
 console.log(`\n${pass} passed`);

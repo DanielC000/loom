@@ -1,6 +1,7 @@
 import type { Session } from "@loom/shared";
 import { Button } from "./ui";
 import { color, font } from "../theme";
+import { canResumeSession } from "../lib/sessions";
 
 // The per-session quick-action cluster — Clear-rate-limit / Fork / Stop / Resume — with its
 // per-state gating. The Workspace cockpit and the Overview fleet-accordion cockpit drive the SAME
@@ -11,6 +12,14 @@ import { color, font } from "../theme";
 //
 // Manual archive was REMOVED (archiving is now automatic on session exit — Card A); stopped sessions
 // live on the Archive page. There is no manual-archive button here anymore.
+//
+// Resume is gated by the shared canResumeSession (lib/sessions.ts) — NOT a bare
+// `processState === "exited"` check. A session leaves "exited" for "archived" within the same
+// onExit handler that set it, so a caller sourced from the rail/god-eye lists (which exclude
+// archived rows) would otherwise never see the exited state long enough to offer Resume (finding
+// #15). canResumeSession also treats an already-archived row (archivedAt set) as resumable, so a
+// caller that folds archived sessions in (e.g. the Overview fleet accordion) gets a working Resume
+// through that path too — both branches call the same resumeSession mutation.
 //
 // Note the `ev.stopPropagation()` on Fork/Stop/Clear: these buttons can sit next to a
 // click-to-select row, so the click must not bubble to the row's onSelect. Resume keeps no
@@ -24,7 +33,7 @@ export function SessionActions({
   onFork: () => void; forking: boolean;
   onClearRateLimit: () => void; clearingRateLimit: boolean;
 }) {
-  const canResume = s.processState === "exited" && s.resumability !== "dead";
+  const canResume = canResumeSession(s);
   const live = s.processState === "live";
   const rateLimited = !!s.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > Date.now();
   return (

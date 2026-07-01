@@ -6,6 +6,7 @@ import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/attention";
 import { bySessionActivity, byCreatedStable, byManagerThenCreated } from "../lib/sessions";
+import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
 import Board from "./Board";
 import { TerminalPane } from "../components/Terminal";
 import { TerminalTile } from "../components/TerminalTile";
@@ -37,7 +38,10 @@ export default function Overview() {
   const agents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
-  const archived = useQuery({ queryKey: ["archive", projectId], queryFn: () => api.archivedSessions(projectId), enabled: !!projectId });
+  // Polled (not just invalidation-driven): the accordion below now folds archived rows in as the
+  // durable Resume path (finding #15), so a session that just auto-archived should surface here
+  // promptly, not only after some other mutation happens to invalidate this query.
+  const archived = useQuery({ queryKey: ["archive", projectId], queryFn: () => api.archivedSessions(projectId), enabled: !!projectId, refetchInterval: 5000 });
   const { items: attention } = useAttention();
 
   // Project-filtered session set — every section below scopes off this.
@@ -83,9 +87,19 @@ export default function Overview() {
     try { localStorage.setItem(`overview.fleetCollapsed.${projectId}`, open ? "0" : "1"); } catch { /* ignore */ }
   };
 
-  const looseWorkers = workers
-    .filter((w) => !managers.some((m) => m.id === w.parentSessionId))
+  // The EXPANDED accordion folds the project's ARCHIVED managers/workers in alongside the live ones —
+  // without this, SessionActions' Resume never gets an archived row to act on (canResumeSession alone
+  // isn't enough if the caller never feeds it one — finding #15). Kept SEPARATE from managers/workers/
+  // all above, which stay live-only for the roll-up severity + worst-context math (fleetRollup/
+  // worstContext are deliberately fed the running set only, per lib/fleet.ts).
+  const archivedManagers = archived.data?.filter((s) => s.role === "manager") ?? [];
+  const archivedWorkers = archived.data?.filter((s) => s.role === "worker") ?? [];
+  const accordionManagers = [...managers, ...archivedManagers].sort(byCreatedStable);
+  const accordionWorkers = [...workers, ...archivedWorkers];
+  const accordionLooseWorkers = accordionWorkers
+    .filter((w) => !accordionManagers.some((m) => m.id === w.parentSessionId))
     .sort(bySessionActivity);
+  const hasAnySessions = all.length > 0 || (archived.data?.length ?? 0) > 0;
 
   if (!projectId) return <p style={{ color: color.textMuted, fontFamily: font.mono }}>No project selected — pick a project in the header.</p>;
 
@@ -150,16 +164,16 @@ export default function Overview() {
           <Button variant="ghost" style={{ padding: "0 6px" }} title={fleetOpen ? "Collapse to summary" : "Expand to the full hierarchy"}
             onClick={() => setFleet(!fleetOpen)}>{fleetOpen ? "⤡" : "⤢"}</Button>
         </SectionLabel>
-        {all.length === 0 && <Panel><span style={{ color: color.textMuted }}>No active sessions in this project.</span></Panel>}
-        {all.length > 0 && !fleetOpen && (
+        {!hasAnySessions && <Panel><span style={{ color: color.textMuted }}>No sessions in this project.</span></Panel>}
+        {hasAnySessions && !fleetOpen && (
           <div style={{ maxWidth: 280 }}>
             <FleetCard name={project?.name ?? projectId} managers={managers} workers={workers}
               archived={archived.data ?? []}
               attention={projAttention.length} onExpand={() => setFleet(true)} />
           </div>
         )}
-        {all.length > 0 && fleetOpen && (
-          <FleetAccordion managers={managers} workers={workers} looseWorkers={looseWorkers} />
+        {hasAnySessions && fleetOpen && (
+          <FleetAccordion managers={accordionManagers} workers={accordionWorkers} looseWorkers={accordionLooseWorkers} />
         )}
       </section>
 
@@ -278,7 +292,10 @@ function FleetAccordion({ managers, workers, looseWorkers }: {
   const qc = useQueryClient();
   const [openId, setOpenId] = useState<string | null>(null);
   const toggle = (id: string) => setOpenId((cur) => (cur === id ? null : id));
-  const invalidate = () => qc.invalidateQueries({ queryKey: ["allSessions"] });
+  // Rows here can now be ARCHIVED (folded in by the caller so Resume has something to act on — finding
+  // #15), so invalidation uses the shared ARCHIVE_INVALIDATE_KEYS (not just ["allSessions"]) — a
+  // resumed archived row must drop out of the archive query too, or it'd show live AND archived at once.
+  const invalidate = () => ARCHIVE_INVALIDATE_KEYS.forEach((queryKey) => qc.invalidateQueries({ queryKey }));
 
   const resume = useMutation({ mutationFn: (id: string) => api.resumeSession(id), onSuccess: invalidate });
   const stop = useMutation({ mutationFn: (id: string) => api.stopSession(id, "graceful"), onSuccess: invalidate });

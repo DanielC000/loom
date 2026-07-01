@@ -64,6 +64,25 @@ export function byManagerThenCreated(a: SessionRoleOrder, b: SessionRoleOrder): 
   return byCreatedStable(a, b);
 }
 
+/** The minimal shape the resume gate needs — Session and SessionListItem both satisfy it. */
+export type SessionResumeGate = Pick<Session, "processState" | "resumability"> & { archivedAt?: string | null };
+
+/**
+ * Whether a session's Resume affordance should show. Auto-archive-on-exit (card b37750a4) stamps
+ * archivedAt in the SAME onExit handler that flips processState to "exited", and the rail/god-eye
+ * lists (listAllSessions) exclude archived rows outright — so by the time any poll observes a row,
+ * gating Resume on `processState === "exited"` alone is already too late: the row either hasn't
+ * archived yet (a window of effectively zero) or has archived and vanished from the rail entirely
+ * (findings #14/#15). Gate on EITHER signal — still-exited-but-not-yet-archived, OR already
+ * archived — so Resume has a durable path through the archive, not just the ephemeral rail window.
+ * resume()/resumeSession un-archives + respawns in one call regardless of which state it finds the
+ * row in, so both branches call the exact same mutation. Shared by SessionActions and RunHistory so
+ * the two surfaces don't drift onto separate resume mechanisms.
+ */
+export function canResumeSession(s: SessionResumeGate): boolean {
+  return (s.processState === "exited" || !!s.archivedAt) && s.resumability !== "dead";
+}
+
 /**
  * Most-recent activity timestamp (epoch ms) across a group's members — for ranking GROUPS (a
  * project lane, a manager's subtree) by their freshest member, so the group you're driving floats
