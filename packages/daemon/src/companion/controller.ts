@@ -33,8 +33,9 @@ import type { ChatGateway } from "./chat-gateway.js";
 import { createCompanionGateway } from "./factory.js";
 import { CompanionHeartbeatWatcher, type HeartbeatPty } from "./heartbeat.js";
 import { resolveEffectiveConfig } from "./store.js";
+import { normalizeInAppMessage, type InAppChannel } from "./in-app.js";
 import type { CompanionConfig } from "./config.js";
-import type { DeliverResult, SessionBinding, SubmitTurn } from "./types.js";
+import type { DeliverResult, InboundResult, SessionBinding, SubmitTurn } from "./types.js";
 
 /** The minimal lifecycle handle the controller needs from a heartbeat watcher (satisfied by
  *  CompanionHeartbeatWatcher; narrowed so a test can inject a spy). */
@@ -52,6 +53,13 @@ export interface CompanionControl {
   unbind(sessionId: string): void;
   /** Reconcile the live companion to the CURRENT DB config after a REST config write (the hot path). */
   reconcile(): Promise<void>;
+  /**
+   * INBOUND for the in-app channel: a message typed in the cockpit companion chat panel, routed through the
+   * SAME bindings-authoritative gateway (chatId == the companion session id). Stable indirection over the
+   * CURRENT gateway (symmetric with deliverReply) so it never targets a torn-down one; returns "companion-off"
+   * when no gateway is live. The /ws/companion route calls this.
+   */
+  handleInAppInbound(sessionId: string, body: string): Promise<InboundResult | { accepted: false; reason: "companion-off" }>;
   /** Best-effort teardown on daemon shutdown (stops the adapter long-poll + the heartbeat). */
   stop(): Promise<void>;
 }
@@ -74,6 +82,10 @@ export interface CompanionControllerDeps {
   hooks: CompanionReplyHooks;
   /** Process env — read to resolve the EFFECTIVE config (which session env pins), never re-bootstrapped. */
   env: NodeJS.ProcessEnv;
+  /** The STABLE in-app transport hub (default companion channel). Threaded into the default gateway builder
+   *  so every built gateway registers its adapter (outbound in-app delivery) — see createCompanionGateway.
+   *  Optional: absent ⇒ no in-app channel is registered (Telegram-only / test seams). */
+  inApp?: InAppChannel;
   /** Envelope key-file override (test seam only). */
   keyPath?: string;
   /** Build the gateway for an effective config (test seam — defaults to createCompanionGateway with the
@@ -150,6 +162,22 @@ export class CompanionController implements CompanionControl {
     return this.gateway.deliverReply(sessionId, text);
   }
 
+  /**
+   * The in-app INBOUND indirection wired into the /ws/companion route. STABLE across gateway rebuilds: it
+   * always routes to the CURRENT gateway (symmetric with deliverReply), so a torn-down gateway never
+   * receives traffic. For in-app the chat id IS the companion session id (a loopback self-address), so this
+   * normalizes to { channel:"in-app", chatId:sessionId } and hands it to the SAME bindings-authoritative
+   * handleInbound — routing/authz are UNCHANGED (a session with no in-app binding is rejected there, so this
+   * carries traffic only for an already-provisioned in-app companion). Returns "companion-off" when no
+   * gateway is live; never throws.
+   */
+  async handleInAppInbound(sessionId: string, body: string): Promise<InboundResult | { accepted: false; reason: "companion-off" }> {
+    if (!this.gateway) return { accepted: false, reason: "companion-off" };
+    const msg = normalizeInAppMessage(sessionId, body);
+    if (!msg) return { accepted: false, reason: "no-text" };
+    return this.gateway.handleInbound(msg);
+  }
+
   /** Read-only introspection (tests + potential status surface): is a gateway live, which session, heartbeat armed. */
   snapshot(): { running: boolean; sessionId: string | null; heartbeatArmed: boolean } {
     return { running: this.gateway != null, sessionId: this.cfg?.sessionId ?? null, heartbeatArmed: this.heartbeat != null };
@@ -215,7 +243,11 @@ export class CompanionController implements CompanionControl {
    *  stopGateway()s first; this guard is the defensive backstop). */
   private startGateway(cfg: CompanionConfig): void {
     if (this.gateway) return;
-    const build = this.deps.buildGateway ?? createCompanionGateway;
+    // Default builder threads the stable in-app hub so every built gateway registers its adapter (an
+    // injected buildGateway test seam supplies its own). The hub is stable across rebuilds — see in-app.ts.
+    const build =
+      this.deps.buildGateway ??
+      ((c: CompanionConfig, submit: SubmitTurn, db: typeof this.deps.db) => createCompanionGateway(c, submit, db, this.deps.inApp));
     this.gateway = build(cfg, this.deps.submitTurn, this.deps.db);
     this.gateway.start();
   }

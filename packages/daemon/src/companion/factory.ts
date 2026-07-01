@@ -12,6 +12,7 @@ import { createDbCompanionAuth, type AllowlistReader } from "./auth.js";
 import { createDbCompanionPairing, type PairingStore } from "./pairing.js";
 import type { CompanionConfig } from "./config.js";
 import { createTelegramAdapter, TELEGRAM_CHANNEL } from "./telegram.js";
+import type { InAppChannel } from "./in-app.js";
 import type { SessionBinding, SubmitTurn } from "./types.js";
 import type { CompanionBinding } from "@loom/shared";
 
@@ -29,7 +30,7 @@ function toSessionBinding(b: CompanionBinding): SessionBinding {
   return { sessionId: b.sessionId, channel: b.channel, chatId: b.chatId, scope: b.scope };
 }
 
-export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitTurn, db: CompanionBindingStore): ChatGateway {
+export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitTurn, db: CompanionBindingStore, inApp?: InAppChannel): ChatGateway {
   // Load durable bindings. BOOTSTRAP: an empty store + present env config seeds ONE binding (the
   // single-owner env path). The DM authz rule means the owner works with no allowlist row; a group scope
   // (LOOM_COMPANION_CHAT_SCOPE=group) seeds a group binding to which senders are added over REST. This
@@ -58,5 +59,12 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
     });
   });
   gateway.registerAdapter(adapter);
+  // The in-app channel (default companion transport): register the STABLE hub's adapter so an in-app
+  // binding routes over the same bindings-authoritative gateway (OUTBOUND chat_reply → deliverReply →
+  // hub.adapter.send → the connected web client). ADDITIVE — with no in-app binding + no attached client
+  // it is inert, so a Telegram-only companion is byte-identical. INBOUND does not wire here (no long-poll);
+  // it enters via the controller's stable handleInAppInbound indirection. The hub is threaded in so it
+  // survives a gateway rebuild (a token change must not drop live chat clients).
+  if (inApp) gateway.registerAdapter(inApp.adapter);
   return gateway;
 }

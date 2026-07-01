@@ -43,6 +43,7 @@ import { startVaultVersioners, type VaultVersioner } from "./vault/versioner.js"
 import { buildServer } from "./gateway/server.js";
 import { resolveCompanionConfig } from "./companion/store.js";
 import { CompanionController, type CompanionReplyHooks } from "./companion/controller.js";
+import { InAppChannel } from "./companion/in-app.js";
 import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 
@@ -333,6 +334,11 @@ async function main(): Promise<void> {
     companionSessionId: companionCfg?.sessionId ?? null,
     deliverReply: (sid, text) => companionController.deliverReply(sid, text),
   };
+  // The IN-APP channel (default companion transport): a STABLE transport hub, constructed ALWAYS (even when
+  // the companion is OFF at boot) so the /ws/companion route + every built gateway share ONE client registry
+  // that survives a gateway rebuild. Default-OFF byte-identical: with no in-app binding + no attached web
+  // client it is inert (its adapter is registered but never hit; the WS route accepts but delivers nothing).
+  const inAppChannel = new InAppChannel();
   // The hot-lifecycle controller (Companion Phase 3 backend): owns the live ChatGateway (Telegram long-poll)
   // + the proactive heartbeat, and drives BOTH from the human-only REST config writes with NO daemon
   // restart. Constructed ALWAYS — even when the companion is OFF at boot — so a REST enable can start it
@@ -344,6 +350,7 @@ async function main(): Promise<void> {
     pty,
     hooks: companionHooks,
     env: process.env,
+    inApp: inAppChannel,
   });
 
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after. The
@@ -418,7 +425,7 @@ async function main(): Promise<void> {
     }
   };
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus, companion: companionController, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"), updateStatus: () => updateCheck.current(), beginSelfUpdate });
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus, companion: companionController, inApp: inAppChannel, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"), updateStatus: () => updateCheck.current(), beginSelfUpdate });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon v${loomVersion()} listening on http://127.0.0.1:${PORT}`);
