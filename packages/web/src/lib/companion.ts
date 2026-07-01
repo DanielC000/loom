@@ -8,7 +8,7 @@
 //   • a config UPDATE with a BLANK token OMITS `botToken` from the request body entirely, so the daemon
 //     keeps the stored encrypted token (a "replace token" is the ONLY way a new token is ever sent).
 
-import type { CompanionConfigMasked } from "@loom/shared";
+import type { CompanionConfigMasked, SessionListItem } from "@loom/shared";
 
 // Mirror of the daemon's COMPANION_ID_MAX (gateway/server.ts) — the max length the REST surface accepts
 // for chat/sender ids + sender labels. Kept in sync here so the UI rejects an over-long value inline
@@ -174,4 +174,28 @@ export function validateSender(b: { senderId: string; label?: string | null }): 
 export function validatePairing(grantType: string): string | null {
   if (grantType !== "dm-bind" && grantType !== "group-sender") return "Pick a grant type.";
   return null;
+}
+
+// ── Header-nav gating (UI-audit finding #4) ──────────────────────────────────────────────────────────
+// Companion renders as a primary header tab ONLY when a companion is ACTIVE — an enabled companion
+// config exists, and/or a live bound `assistant` session exists. Otherwise it stays where it lives today,
+// tucked under "More ▾ · Config" (nav.tsx). Reuses the SAME REST reads the Companion page already queries
+// (companionConfigs / allSessions) — no new endpoint. Pulled out here rather than nav.tsx: nav.tsx has
+// top-level JSX (page element imports), which node's `--experimental-strip-types` test runner can't parse,
+// so the gating logic needs a JSX-free home to be hermetically testable.
+export function isCompanionActive(
+  configs: Pick<CompanionConfigMasked, "enabled">[] | undefined,
+  sessions: Pick<SessionListItem, "role">[] | undefined,
+): boolean {
+  return (configs ?? []).some((c) => c.enabled) || (sessions ?? []).some((s) => s.role === "assistant");
+}
+
+// Promotes the `/companion` entry to a primary header tab when active; every other page (and Companion's
+// own `group`, used only for its "More ▾" bucket when NOT primary) passes through untouched. Toggling a
+// single boolean on one entry means Companion is always in exactly one place — never both.
+export function withCompanionNavGating<T extends { to: string; primary?: boolean }>(
+  pages: T[],
+  companionActive: boolean,
+): T[] {
+  return pages.map((p) => (p.to === "/companion" ? { ...p, primary: companionActive } : p));
 }

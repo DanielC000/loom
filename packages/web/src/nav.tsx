@@ -1,4 +1,7 @@
 import type { ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "./lib/api";
+import { isCompanionActive, withCompanionNavGating } from "./lib/companion";
 import MissionControl from "./pages/MissionControl";
 import Workspace from "./pages/Workspace";
 import Overview from "./pages/Overview";
@@ -82,7 +85,10 @@ export const NAV_PAGES: NavPage[] = [
   { label: "Skills", to: "/skills", element: <Skills />, group: "config" },
   { label: "Profiles", to: "/profiles", element: <Profiles />, group: "config" },
   // Companion management is daemon-GLOBAL (one companion config store, not project-scoped) — deliberately
-  // not `scoped`. Lives under Config alongside Profiles (the companion's restricted-tools toggle is there).
+  // not `scoped`. Declared here under Config alongside Profiles (the companion's restricted-tools toggle is
+  // there); `useVisibleNavPages` promotes it to a primary header tab at runtime when a companion is ACTIVE
+  // (UI-audit finding #4) — see `withCompanionNavGating`/`isCompanionActive` in lib/companion.ts. Inactive,
+  // it stays right here under More ▾ · Config.
   { label: "Companion", to: "/companion", element: <Companion />, group: "config" },
   { label: "Schedules", to: "/schedules", element: <Schedules />, group: "config", scoped: true },
   // ── More ▾ · System ──────────────────────────────────────────────────────────
@@ -91,10 +97,14 @@ export const NAV_PAGES: NavPage[] = [
 ];
 
 // The source of truth for what the header tabs, the "More ▾" menu, and the Command Palette LIST show
-// (App.tsx + CommandPalette.tsx all call this). There is no runtime nav gating anymore: the dev-vs-
-// shipping edition split that used to hide a second "Platform" tab now lives INSIDE the single Platform
-// page (it picks its surface by edition), so every nav page is always visible. Kept as a hook (rather
-// than reading NAV_PAGES directly) so callers stay unchanged and a future per-user gate has one home.
+// (App.tsx + CommandPalette.tsx all call this). Every nav page is always LISTED (the dev-vs-shipping
+// edition split that used to hide a second "Platform" tab now lives INSIDE the single Platform page, which
+// picks its surface by edition) — the one runtime gate is Companion's `primary` flag, promoted to a header
+// tab only while a companion is ACTIVE (see `withCompanionNavGating`). Reuses the existing companion-config
+// + sessions reads (same query keys pages/Companion.tsx already uses), so this never fires an extra request
+// beyond react-query's normal cache/refetch behavior.
 export function useVisibleNavPages(): NavPage[] {
-  return NAV_PAGES;
+  const configs = useQuery({ queryKey: ["companionConfigs"], queryFn: api.companionConfigs });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  return withCompanionNavGating(NAV_PAGES, isCompanionActive(configs.data, sessions.data));
 }
