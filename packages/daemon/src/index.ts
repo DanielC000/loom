@@ -313,8 +313,14 @@ async function main(): Promise<void> {
   // / FIFO coalesce / rate-limit park all reused) as a 'system' source.
   const companionCfg = readCompanionConfig(process.env);
   const companion = companionCfg
-    ? createCompanionGateway(companionCfg, (sid, text) => pty.enqueueStdin(sid, text, "system"))
+    ? createCompanionGateway(companionCfg, (sid, text) => pty.enqueueStdin(sid, text, "system"), db)
     : null;
+  // Companion authz layer: lay the HOME channel target (the proactive card 9488951e reads it) from env
+  // on first boot, if unset. Gated on companionCfg — an unconfigured daemon never touches app_meta, so
+  // default-OFF stays byte-identical. Human REST (PUT /api/companion/home) can override it later.
+  if (companionCfg && !db.getCompanionHome()) {
+    db.setCompanionHome({ channel: companionCfg.homeChannel, chatId: companionCfg.homeChatId });
+  }
 
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after. The
   // companion hooks gate chat_reply to the single bound session (additive; every other spawn unchanged).
@@ -391,7 +397,7 @@ async function main(): Promise<void> {
     }
   };
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"), updateStatus: () => updateCheck.current(), beginSelfUpdate });
+  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus, companion, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"), updateStatus: () => updateCheck.current(), beginSelfUpdate });
   await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon v${loomVersion()} listening on http://127.0.0.1:${PORT}`);

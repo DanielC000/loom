@@ -682,6 +682,55 @@ export interface PresetPromptSuggestion {
 }
 
 /**
+ * A durable Companion session↔chat binding (Companion authorization layer, Phase 1). Persists WHICH
+ * chat on WHICH channel is wired to WHICH companion session, PLUS the `scope` that selects the
+ * authorization rule the ChatGateway applies to an inbound message (see {@link SessionBinding}):
+ *   • "dm"    — a private 1:1 chat. The (channel, chatId) match alone proves the single owner (a
+ *               Telegram private chatId IS the user id), so every inbound is authorized — the
+ *               single-owner path, unchanged from the env-seeded spike.
+ *   • "group" — a shared chat. An inbound is authorized ONLY when the message carries a `sender.id`
+ *               that is on this binding's per-binding {@link CompanionAllowedSender} allowlist; a
+ *               missing/unlisted sender is HARD-rejected (an unidentifiable speaker in a shared chat
+ *               can never be authorized).
+ * At most one binding per (channel, chatId) route (a UNIQUE db index). GLOBAL / daemon-wide, like the
+ * companion config itself. HUMAN-managed only over the loopback REST surface — there is intentionally
+ * NO MCP path: a chat-reachable, injection-exposed agent must NOT be able to authorize senders for
+ * itself (same trust posture as the vault/git/api_keys human-only writers). See `[[Companion Design]]`.
+ */
+export interface CompanionBinding {
+  /** The bound companion session id (PRIMARY KEY — at most one binding per session). */
+  sessionId: SessionId;
+  /** The chat channel name (e.g. "telegram") — matches the originating ChannelAdapter.name. */
+  channel: string;
+  /** The bound chat id (stringified platform id). Unique with `channel` (one session per route). */
+  chatId: string;
+  /** The authorization scope selecting the rule applied to inbound messages on this binding. */
+  scope: "dm" | "group";
+  createdAt: string;
+}
+
+/**
+ * A per-binding allowlisted sender (Companion authorization layer, Phase 1) — one identified human who
+ * may post to a GROUP-scoped {@link CompanionBinding}. The load-bearing security record for the
+ * multi-user (group) case: an inbound group message is authorized ONLY when its `sender.id` matches an
+ * allowlist row for the bound session+channel. Unique per (sessionId, channel, senderId). Like the
+ * binding above it is GLOBAL / daemon-wide and HUMAN-managed only (loopback REST, NO MCP path — the
+ * agent must never allowlist a sender for itself). See `[[Companion Design]]`.
+ */
+export interface CompanionAllowedSender {
+  id: string;
+  /** The companion session this sender is allowed to reach. */
+  sessionId: SessionId;
+  /** The chat channel the sender speaks on (e.g. "telegram"). */
+  channel: string;
+  /** The platform sender id that is authorized (stringified). */
+  senderId: string;
+  /** Optional human label for the sender (who this is), UI-only; null when unset. */
+  label: string | null;
+  createdAt: string;
+}
+
+/**
  * A cron-triggered schedule (phase-2 Pillar B). On its minute boundary the daemon Scheduler
  * boots a manager session in `agentId` (the agent's startupPrompt is the kickoff), which then
  * runs the Pillar-A loop. `nextFireAt` is recomputed on create/update and after each fire.

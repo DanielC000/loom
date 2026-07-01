@@ -78,6 +78,10 @@ export type DeliverResult =
 export type InboundResult =
   | { accepted: true; sessionId: string; queued: boolean; position?: number }
   | { accepted: false; reason: "no-text" | "chat-not-allowlisted" }
+  // The (channel, chatId) binding matched, but the SENDER is not authorized for it (Companion authz
+  // layer): a GROUP-scoped binding with a missing or unlisted sender.id. Rejected BEFORE any turn is
+  // submitted — the load-bearing deny path for the multi-user (shared-chat) case.
+  | { accepted: false; reason: "sender-not-authorized" }
   | { accepted: false; reason: "session-dead"; sessionId: string; acked: boolean }
   // The submit primitive THREW (e.g. pty.write racing a dying session, or a fail-loud M1/M2 guard). The
   // gateway contains it — a racy inbound must NEVER crash the daemon via an unhandled rejection.
@@ -93,4 +97,14 @@ export interface SessionBinding {
   readonly sessionId: string;
   readonly channel: string;
   readonly chatId: string;
+  /**
+   * The AUTHORIZATION scope (Companion authz layer). Selects the rule handleInbound applies after the
+   * (channel, chatId) route match, via the injected CompanionAuth (companion/auth.ts):
+   *   • "dm"    — a private 1:1 chat: the route match alone proves the single owner ⇒ authorized (the
+   *               single-owner spike path, UNCHANGED). • "group" — a shared chat: authorized ONLY when
+   *               the inbound carries a `sender.id` on this binding's per-binding allowlist; a missing
+   *               or unlisted sender is HARD-rejected. The db-backed CompanionBinding carries the same
+   *               field; a binding minted without it defaults to the safe single-owner "dm".
+   */
+  readonly scope: "dm" | "group";
 }

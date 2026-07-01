@@ -56,6 +56,7 @@ const HERMETIC = [
   "my-context-gate", // PL Auditor finding #9: my_context folds in the RESOLVED project gateCommand, READ-ONLY (no set/propose surface)
   "companion-loop", // Loom Companion: the end-to-end chat loop over the ChatGateway (inbound turn-submit + allowlist + chat_reply routed back to the bound chat, gated to the companion session)
   "companion-gateway", // Loom Companion Phase 1: adapter-interface CONFORMANCE — a fake adapter drives the gateway (inbound route/allowlist, busy≠dead, dead-session ack, multi-adapter chat_reply routing, >4096 chunking, transport-failure structured result)
+  "companion-authz", // Loom Companion Phase 1 (SECURITY): per-binding sender authz — GROUP requires an allowlisted sender (missing/unlisted → hard reject, never submitted), DM single-owner, durable binding/allowlist round-trip + unique route index, default-OFF byte-identical, and no binding/allowlist/home tool on the orchestration MCP surface
   "companion-telegram", // Loom Companion Phase 1: the Telegram adapter — grammY update normalization + send routing via an injected fake bot + inbound error boundary + reconnect-on-drop wiring
   "assistant-role", // Loom Companion Phase 1: the long-lived `assistant` SessionRole — non-worktree spawn+persist, resume carrying the role, base brief injection, human-prompt disallow (others byte-identical), and the minimal resolveRole surface (my_context + companion-gated chat_reply)
 ];

@@ -24,6 +24,7 @@ import type { AuditMcpRouter } from "../mcp/audit.js";
 import type { WorkspaceAuditMcpRouter } from "../mcp/user-audit.js";
 import type { SetupMcpRouter } from "../mcp/setup.js";
 import type { RunMcpRouter } from "../mcp/run.js";
+import type { ChatGateway } from "../companion/chat-gateway.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validateColumnLayout } from "../mcp/platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
@@ -83,6 +84,11 @@ export interface GatewayDeps {
   runMcp: RunMcpRouter;
   control: OrchestrationControl;
   usageStatus: UsageStatusPoller;
+  /** The live Companion ChatGateway (Companion authz layer), or null when the companion is OFF (no bot
+   *  token). Threaded so the human-only /api/companion/bindings admin routes can keep the gateway's
+   *  in-memory routing map in sync with the durable db (bind on POST, unbind on DELETE) — no restart.
+   *  Optional: absent/null keeps the routes serving db state, they just skip the live-map update. */
+  companion?: ChatGateway | null;
   /** Loopback control hook for `loom stop`: trigger the daemon's GRACEFUL shutdown (snapshot live
    * transcripts + clean watcher teardown, then exit 0). Wired by index.ts to the SAME path the
    * SIGINT/SIGTERM handlers use — Windows has no real SIGTERM, so the CLI can't signal a detached
@@ -532,6 +538,80 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
     if (!ok) return reply.code(404).send({ error: "preset prompt suggestion not found" });
     return { ok: true };
+  });
+
+  // --- Companion authorization admin (Companion epic Phase 1): the durable session↔chat bindings + the
+  // per-binding group sender allowlist + the proactive HOME channel. HUMAN-ONLY loopback REST — there is
+  // INTENTIONALLY NO MCP path (of ANY router: orchestration / platform / setup / audit). A chat-reachable,
+  // injection-exposed companion agent must NOT be able to authorize new senders (or re-home itself) for
+  // itself — same trust posture as the vault/git/api_keys human-only writers. The allowlist is consulted
+  // LIVE by the db-backed CompanionAuth at inbound time, so an allowed-sender add/remove takes effect with
+  // no restart; only the in-memory BINDING map needs a live poke (gateway.bind/unbind), done below. ---
+  const COMPANION_ID_MAX = 200;
+  const isNonBlankStr = (v: unknown, max = COMPANION_ID_MAX): v is string =>
+    typeof v === "string" && v.trim().length > 0 && v.length <= max;
+  app.get("/api/companion/bindings", async () => deps.db.listCompanionBindings());
+  app.post("/api/companion/bindings", async (req, reply) => {
+    const b = (req.body ?? {}) as { sessionId?: unknown; channel?: unknown; chatId?: unknown; scope?: unknown };
+    if (!isNonBlankStr(b.sessionId)) return reply.code(400).send({ error: "sessionId must be a non-empty string" });
+    if (!isNonBlankStr(b.channel)) return reply.code(400).send({ error: "channel must be a non-empty string" });
+    if (!isNonBlankStr(b.chatId)) return reply.code(400).send({ error: "chatId must be a non-empty string" });
+    // scope is REQUIRED on the REST surface (product-safety): a human binding a GROUP chat MUST consciously
+    // declare it. Defaulting to "dm" would silently admit EVERY member of a group chat bound by chatId
+    // alone — reintroducing the multi-user hole this layer closes, by omission. (The ENV bootstrap keeps a
+    // "dm" default — that path is the single-owner private chat, and requiring the var would break every
+    // simple setup; only the REST surface, where group bindings are deliberately created, demands it.)
+    if (b.scope !== "dm" && b.scope !== "group") return reply.code(400).send({ error: "scope is required and must be 'dm' or 'group'" });
+    const scope = b.scope;
+    let binding;
+    try {
+      binding = deps.db.upsertCompanionBinding({ sessionId: b.sessionId.trim(), channel: b.channel.trim(), chatId: b.chatId.trim(), scope });
+    } catch (e) {
+      // The UNIQUE (channel, chat_id) route index rejected a 2nd session claiming a bound route.
+      return reply.code(409).send({ error: `that (channel, chatId) route is already bound to another session: ${(e as Error).message}` });
+    }
+    // Keep the live routing map in sync so the new/edited binding takes effect with no restart.
+    deps.companion?.bind({ sessionId: binding.sessionId, channel: binding.channel, chatId: binding.chatId, scope: binding.scope });
+    return reply.code(201).send(binding);
+  });
+  app.delete("/api/companion/bindings/:sessionId", async (req) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    deps.db.deleteCompanionBinding(sessionId);
+    deps.companion?.unbind(sessionId); // stop routing immediately (no stale in-memory binding until restart)
+    return { ok: true };
+  });
+
+  // Per-binding allowlisted senders (the group-scope allowlist). GET is session-scoped (?sessionId=).
+  app.get("/api/companion/allowed-senders", async (req, reply) => {
+    const q = (req.query ?? {}) as { sessionId?: unknown };
+    if (!isNonBlankStr(q.sessionId)) return reply.code(400).send({ error: "sessionId query param is required" });
+    return deps.db.listAllowedSenders(q.sessionId.trim());
+  });
+  app.post("/api/companion/allowed-senders", async (req, reply) => {
+    const b = (req.body ?? {}) as { sessionId?: unknown; channel?: unknown; senderId?: unknown; label?: unknown };
+    if (!isNonBlankStr(b.sessionId)) return reply.code(400).send({ error: "sessionId must be a non-empty string" });
+    if (!isNonBlankStr(b.channel)) return reply.code(400).send({ error: "channel must be a non-empty string" });
+    if (!isNonBlankStr(b.senderId)) return reply.code(400).send({ error: "senderId must be a non-empty string" });
+    if (b.label !== undefined && b.label !== null && (typeof b.label !== "string" || b.label.length > COMPANION_ID_MAX)) {
+      return reply.code(400).send({ error: `label must be a string of at most ${COMPANION_ID_MAX} characters` });
+    }
+    const label = typeof b.label === "string" ? b.label.trim() : null;
+    const created = deps.db.addAllowedSender({ sessionId: b.sessionId.trim(), channel: b.channel.trim(), senderId: b.senderId.trim(), label });
+    return reply.code(201).send(created);
+  });
+  app.delete("/api/companion/allowed-senders/:id", async (req) => {
+    deps.db.removeAllowedSender((req.params as { id: string }).id);
+    return { ok: true };
+  });
+
+  // The proactive HOME channel target (the proactive card 9488951e reads it). Single {channel, chatId}.
+  app.get("/api/companion/home", async () => deps.db.getCompanionHome());
+  app.put("/api/companion/home", async (req, reply) => {
+    const b = (req.body ?? {}) as { channel?: unknown; chatId?: unknown };
+    if (!isNonBlankStr(b.channel)) return reply.code(400).send({ error: "channel must be a non-empty string" });
+    if (!isNonBlankStr(b.chatId)) return reply.code(400).send({ error: "chatId must be a non-empty string" });
+    deps.db.setCompanionHome({ channel: b.channel.trim(), chatId: b.chatId.trim() });
+    return deps.db.getCompanionHome();
   });
 
   // --- Hook relay target (loopback only) ---

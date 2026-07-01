@@ -33,6 +33,7 @@ import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PresetPrompt, PresetPromptSuggestion,
+  CompanionBinding, CompanionAllowedSender,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
@@ -329,6 +330,39 @@ CREATE TABLE IF NOT EXISTS preset_prompt_suggestions (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_preset_prompt_suggestions_position ON preset_prompt_suggestions(position);
+-- Companion authorization layer (Companion epic Phase 1). Durable session↔chat bindings + per-binding
+-- allowlisted senders — the security store that decides WHICH human may reach a chat-native companion
+-- session. Brand-new tables ⇒ each CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER,
+-- no migrateX() PRAGMA-diff), exactly like preset_prompts / api_keys: an existing DB simply gains two
+-- empty tables on next boot, and an UNCONFIGURED daemon (no LOOM_COMPANION_BOT_TOKEN) never writes a row
+-- — default-OFF stays byte-identical. HUMAN-managed only (loopback REST); there is intentionally NO MCP
+-- path (an injection-exposed companion agent must never authorize senders for itself).
+--   • bindings: at most ONE session per (channel, chat_id) route — the UNIQUE index below enforces it, so
+--     a second session claiming a bound route is rejected at the db. scope selects the authz rule
+--     ('dm' = single-owner (channel,chat_id) match; 'group' = require an allowlisted sender).
+-- The identifying route columns are NOT NULL: SQLite treats NULLs as DISTINCT in a UNIQUE index, so a
+-- NULL route would slip the one-session-per-route guard — NOT NULL makes it airtight at the schema
+-- (unreachable today: REST validates non-blank + callers pass non-blank, but the guard holds regardless).
+CREATE TABLE IF NOT EXISTS companion_bindings (
+  session_id TEXT PRIMARY KEY,
+  channel TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'dm',
+  created_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_bindings_route ON companion_bindings(channel, chat_id);
+--   • allowed_senders: the per-binding group allowlist — one row per identified human who may post to a
+--     GROUP-scoped binding. UNIQUE per (session_id, channel, sender_id) so a re-add is an upsert, not a dup;
+--     those identifying columns are NOT NULL for the same airtight-unique-index reason as the bindings route.
+CREATE TABLE IF NOT EXISTS companion_allowed_senders (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  sender_id TEXT NOT NULL,
+  label TEXT,
+  created_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_allowed_senders_route ON companion_allowed_senders(session_id, channel, sender_id);
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, created_at);
@@ -356,6 +390,13 @@ const ARCHIVED_AT_BACKFILL_KEY = "archived_at_backfill_done";
  * before the flag existed keep their idle-watchdog discount. Daemon-GLOBAL; set once per LOOM_HOME.
  */
 const HELD_BACKFILL_KEY = "task_held_title_backfill_done";
+
+/**
+ * app_meta key for the Companion home channel (the proactive/outbound "where to reach the owner"
+ * target — a single JSON blob `{channel, chatId}`). Daemon-GLOBAL, mirroring getPlatformConfig's
+ * singleton pattern but over app_meta (NO new table). Read by getCompanionHome/setCompanionHome.
+ */
+const COMPANION_HOME_KEY = "companion_home";
 
 /** Columns added to `sessions` after phase-1; applied to existing DBs by migrateSessions(). */
 const SESSION_ADDED_COLUMNS: Record<string, string> = {
@@ -959,6 +1000,94 @@ export class Db {
     this.db.prepare("UPDATE preset_prompt_suggestions SET status = 'dismissed', updated_at = ? WHERE id = ?")
       .run(new Date().toISOString(), id);
     return true;
+  }
+
+  // --- companion authorization (durable session↔chat bindings + per-binding sender allowlist) ---
+  // HUMAN-managed only (loopback REST); NO MCP path — the security store deciding who may reach a
+  // chat-native companion session. Mirrors the preset/api-key accessor shape (db owns id + timestamps).
+  /** Every durable binding (GLOBAL / daemon-wide). Ordered by created_at for a stable admin list. */
+  listCompanionBindings(): CompanionBinding[] {
+    return (this.db.prepare("SELECT * FROM companion_bindings ORDER BY created_at, rowid").all() as Row[]).map(toCompanionBinding);
+  }
+  /**
+   * Upsert a binding KEYED ON session_id (one binding per session): a re-bind of the SAME session
+   * updates its route/scope in place. A DIFFERENT session claiming an already-bound (channel, chat_id)
+   * route hits the UNIQUE route index and THROWS (a SqliteError) — at most one session per route, by
+   * construction (the caller/REST surfaces this as a 409). Stamps created_at on first insert; keeps it
+   * on update (ON CONFLICT touches only channel/chat_id/scope). Returns the stored row.
+   */
+  upsertCompanionBinding(input: { sessionId: string; channel: string; chatId: string; scope?: "dm" | "group" }): CompanionBinding {
+    const existing = this.db.prepare("SELECT created_at FROM companion_bindings WHERE session_id = ?").get(input.sessionId) as Row | undefined;
+    const createdAt = (existing?.created_at as string) ?? new Date().toISOString();
+    const b: CompanionBinding = {
+      sessionId: input.sessionId, channel: input.channel, chatId: input.chatId,
+      scope: input.scope ?? "dm", createdAt,
+    };
+    this.db.prepare(
+      `INSERT INTO companion_bindings (session_id, channel, chat_id, scope, created_at)
+       VALUES (@sessionId, @channel, @chatId, @scope, @createdAt)
+       ON CONFLICT(session_id) DO UPDATE SET channel = @channel, chat_id = @chatId, scope = @scope`,
+    ).run(b);
+    return b;
+  }
+  /** Delete a binding by session id (idempotent — a missing id matches nothing). */
+  deleteCompanionBinding(sessionId: string): void {
+    this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ?").run(sessionId);
+  }
+  /** A session's per-binding allowlisted senders (the group-scope allowlist). Ordered for a stable list. */
+  listAllowedSenders(sessionId: string): CompanionAllowedSender[] {
+    return (this.db.prepare("SELECT * FROM companion_allowed_senders WHERE session_id = ? ORDER BY created_at, rowid")
+      .all(sessionId) as Row[]).map(toCompanionAllowedSender);
+  }
+  /**
+   * The load-bearing authz predicate for a GROUP-scoped binding: is `senderId` on `sessionId`'s
+   * allowlist for `channel`? A pure existence check over the unique (session_id, channel, sender_id)
+   * key — no row ⇒ false (REJECT). Used by the db-backed CompanionAuth in companion/auth.ts.
+   */
+  isSenderAllowed(sessionId: string, channel: string, senderId: string): boolean {
+    return !!this.db.prepare(
+      "SELECT 1 FROM companion_allowed_senders WHERE session_id = ? AND channel = ? AND sender_id = ? LIMIT 1",
+    ).get(sessionId, channel, senderId);
+  }
+  /** Add (or re-add, upserting the label) an allowlisted sender. Unique per (session_id, channel,
+   *  sender_id): a repeat add updates the label rather than erroring. Returns the stored row. */
+  addAllowedSender(input: { sessionId: string; channel: string; senderId: string; label?: string | null }): CompanionAllowedSender {
+    const existing = this.db.prepare(
+      "SELECT id, created_at FROM companion_allowed_senders WHERE session_id = ? AND channel = ? AND sender_id = ?",
+    ).get(input.sessionId, input.channel, input.senderId) as Row | undefined;
+    const s: CompanionAllowedSender = {
+      id: (existing?.id as string) ?? randomUUID(),
+      sessionId: input.sessionId, channel: input.channel, senderId: input.senderId,
+      label: input.label ?? null, createdAt: (existing?.created_at as string) ?? new Date().toISOString(),
+    };
+    this.db.prepare(
+      `INSERT INTO companion_allowed_senders (id, session_id, channel, sender_id, label, created_at)
+       VALUES (@id, @sessionId, @channel, @senderId, @label, @createdAt)
+       ON CONFLICT(session_id, channel, sender_id) DO UPDATE SET label = @label`,
+    ).run(s);
+    return s;
+  }
+  /** Remove an allowlisted sender by id (idempotent — a missing id matches nothing). */
+  removeAllowedSender(id: string): void {
+    this.db.prepare("DELETE FROM companion_allowed_senders WHERE id = ?").run(id);
+  }
+
+  // --- companion home channel (the proactive/outbound "where to reach the owner" target; app_meta JSON) ---
+  // Durable over the EXISTING app_meta key/value store (single JSON key, NO new table) — mirrors
+  // getPlatformConfig/setPlatformConfig. Phase 1 only LAYS this; the proactive card (9488951e) reads it.
+  /** The stored home channel target, or null when unset/corrupt (never throws). */
+  getCompanionHome(): { channel: string; chatId: string } | null {
+    const raw = this.getMeta(COMPANION_HOME_KEY);
+    if (!raw) return null;
+    try {
+      const v = JSON.parse(raw) as { channel?: unknown; chatId?: unknown };
+      if (v && typeof v.channel === "string" && typeof v.chatId === "string") return { channel: v.channel, chatId: v.chatId };
+    } catch { /* corrupt blob ⇒ null (like getPlatformConfig) */ }
+    return null;
+  }
+  /** Upsert the home channel target (a single app_meta JSON key). */
+  setCompanionHome(home: { channel: string; chatId: string }): void {
+    this.setMeta(COMPANION_HOME_KEY, JSON.stringify({ channel: home.channel, chatId: home.chatId }));
   }
 
   // --- agents ---
@@ -2429,6 +2558,22 @@ function toPresetPrompt(r0: unknown): PresetPrompt {
     id: r.id as string, label: r.label as string, prompt: r.prompt as string,
     position: r.position as number,
     createdAt: r.created_at as string, updatedAt: r.updated_at as string,
+  };
+}
+function toCompanionBinding(r0: unknown): CompanionBinding {
+  const r = r0 as Row;
+  return {
+    sessionId: r.session_id as string, channel: r.channel as string, chatId: r.chat_id as string,
+    scope: (r.scope as CompanionBinding["scope"]) ?? "dm",
+    createdAt: (r.created_at as string) ?? "",
+  };
+}
+function toCompanionAllowedSender(r0: unknown): CompanionAllowedSender {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, sessionId: r.session_id as string, channel: r.channel as string,
+    senderId: r.sender_id as string, label: (r.label as string | null) ?? null,
+    createdAt: (r.created_at as string) ?? "",
   };
 }
 function toPresetPromptSuggestion(r0: unknown): PresetPromptSuggestion {

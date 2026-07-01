@@ -23,6 +23,7 @@ import type {
   SessionBinding,
   SubmitTurn,
 } from "./types.js";
+import { allowIfDmMatch, type CompanionAuth } from "./auth.js";
 
 /**
  * Split `text` into chunks no longer than `max` chars, preferring a newline then a whitespace boundary so
@@ -60,7 +61,18 @@ export class ChatGateway {
   private readonly adapters = new Map<string, ChannelAdapter>();
   private readonly bindingsBySession = new Map<string, SessionBinding>();
 
-  constructor(private readonly submitTurn: SubmitTurn, bindings: SessionBinding[] = []) {
+  /**
+   * @param submitTurn  the injected pty turn-submit primitive (kept db-free — see SubmitTurn).
+   * @param bindings    the initial session↔chat bindings (loaded from the db by the factory).
+   * @param auth        the injected sender-authorization decision (Companion authz layer). Defaults to
+   *                    the db-free allow-if-DM-match impl so existing `new ChatGateway(submit, [...])`
+   *                    constructions stay green; the daemon injects the db-backed impl.
+   */
+  constructor(
+    private readonly submitTurn: SubmitTurn,
+    bindings: SessionBinding[] = [],
+    private readonly auth: CompanionAuth = allowIfDmMatch(),
+  ) {
     for (const b of bindings) this.bindingsBySession.set(b.sessionId, b);
   }
 
@@ -69,9 +81,16 @@ export class ChatGateway {
     this.adapters.set(adapter.name, adapter);
   }
 
-  /** Seed / replace a session↔chat binding (spike: seeded once from env; the auth card extends this). */
+  /** Seed / replace a session↔chat binding — keeps the live in-memory routing map in sync with a durable
+   *  db write (the admin REST POST calls this so a new/edited binding takes effect with no restart). */
   bind(binding: SessionBinding): void {
     this.bindingsBySession.set(binding.sessionId, binding);
+  }
+
+  /** Remove a session's binding from the live routing map (the admin REST DELETE calls this alongside the
+   *  db delete, so a revoked route stops routing immediately — no stale in-memory binding until restart). */
+  unbind(sessionId: string): void {
+    this.bindingsBySession.delete(sessionId);
   }
 
   private bindingForInbound(channel: string, chatId: string): SessionBinding | undefined {
@@ -96,6 +115,17 @@ export class ChatGateway {
     if (!binding) {
       this.debug(`inbound REJECTED: chat not allowlisted (channel=${msg.channel} chat=${msg.chatId})`);
       return { accepted: false, reason: "chat-not-allowlisted" };
+    }
+    // Per-binding SENDER authz (Companion authz layer) — the load-bearing deny gate. Placed IMMEDIATELY
+    // after the route match and BEFORE submitTurn, so an unauthorized sender PROVABLY never reaches turn
+    // submission. DM: authorized by the route match (single owner). GROUP: requires an allowlisted
+    // sender.id; a missing/unlisted sender is rejected here.
+    if (!this.auth.isSenderAuthorized(binding, msg.sender)) {
+      this.debug(
+        `inbound REJECTED: sender not authorized (channel=${msg.channel} chat=${msg.chatId} ` +
+          `scope=${binding.scope} sender=${msg.sender?.id ?? "none"})`,
+      );
+      return { accepted: false, reason: "sender-not-authorized" };
     }
     let submit: { delivered: boolean; position?: number };
     try {
