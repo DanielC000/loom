@@ -253,7 +253,7 @@ async function main(): Promise<void> {
       // Session usage telemetry (epic c9924bcd, card B): take a FINAL delta sample on exit so the tail of
       // this session's billed usage isn't lost (the periodic tick may have missed the last segment). The
       // sampler skips run / no-transcript sessions itself. Best-effort: never disturb the exit path.
-      try { if (exited) usageSampler.onSessionExit(exited); } catch { /* never disturb the exit path */ }
+      try { if (exited) void usageSampler.onSessionExit(exited).catch(() => { /* async best-effort */ }); } catch { /* never disturb the exit path */ }
       mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); userAuditMcp.dispose(sessionId); setupMcp.dispose(sessionId); runMcp.dispose(sessionId);
     },
   }, { busyStaleMs: timeouts.busyStaleMs }); // BOOT-BOUND: stuck-busy self-heal threshold from resolved platform config

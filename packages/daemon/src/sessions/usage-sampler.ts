@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Session } from "@loom/shared";
 import type { Db } from "../db.js";
-import { readRunUsage, type RunUsageStats } from "./context.js";
+import { IncrementalRunUsageReader, readRunUsage, type RunUsageStats } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
 
 /** app_meta one-time marker for the boot backfill (same fire-exactly-once pattern as the first-run /
@@ -73,7 +73,30 @@ export class UsageSampler {
    *  first-sight delta. Loaded once on first need (essentially boot, before any new row this process), so it
    *  reflects pure pre-boot persisted state; a session's own baseline can't change before its first sight. */
   private persistedBaseline: Map<string, { inputTokens: number; outputTokens: number; cacheCreationTokens: number; cacheReadTokens: number }> | null = null;
+  /** LAYER 1: incremental+async transcript reader (parses only appended bytes per tick). Its per-session
+   *  cache mirrors `lastSeen`'s lifecycle — dropped on exit, cleared on the corrective reset — and returns a
+   *  cumulative byte-identical to a full parse, so `recordDelta`'s correctness is preserved by construction. */
+  private incrementalReader = new IncrementalRunUsageReader();
+  /** Serializes EVERY async op that touches the reader cache / lastSeen (a tick, an onSessionExit) into ONE
+   *  chain, so their per-session awaits can NEVER interleave. Without this a session exiting mid-tick would
+   *  delete `lastSeen[S]` between that tick's read and its recordDelta → the tick's recordDelta hits the
+   *  first-sight branch and re-emits the whole cumulative (re-opening the 7f47621 double-count); two ticks
+   *  overlapping would also race the same cache entry's offset/acc. A coarse mutex — these are cheap IO. */
+  private opChain: Promise<unknown> = Promise.resolve();
+  /** Re-entrancy guard for the PERIODIC timer only: true while a timer-driven tick is in flight, so an
+   *  overlapping fire is a no-op (a skipped periodic tick is harmless — the next catches up via the
+   *  cumulative). Direct callers (tests, onSessionExit) still enqueue and always run. */
+  private ticking = false;
   constructor(private deps: UsageSamplerDeps) {}
+
+  /** Run `fn` after all previously-enqueued sampler ops complete, and never concurrently with them. The
+   *  chain is kept alive (failures swallowed) so one throwing op can't wedge every later op. Returns fn's
+   *  own promise (so a direct `await sampler.tick()` still sees the real completion/rejection). */
+  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.opChain.then(fn, fn); // run regardless of a prior op's outcome
+    this.opChain = run.then(() => {}, () => {});
+    return run;
+  }
 
   /** The already-persisted token total for ONE session (zeros when it has no prior rows) — the first-sight
    *  baseline. Snapshots the whole table once (single GROUP BY) and caches it; see `persistedBaseline`. */
@@ -148,11 +171,18 @@ export class UsageSampler {
    * DELTA (reset-aware, zero skipped), then prune samples past retention. Never throws (the start() timer
    * also guards). `now` is injectable so a test drives the tick directly with no real wait.
    */
-  tick(now: Date = new Date()): void {
+  tick(now: Date = new Date()): Promise<void> {
+    // Serialized: mutually exclusive with any other tick and with onSessionExit (see `enqueue`/`opChain`).
+    return this.enqueue(() => this.tickLocked(now));
+  }
+
+  private async tickLocked(now: Date): Promise<void> {
     const nowIso = now.toISOString();
     for (const s of this.deps.db.listLiveSessions()) {
       if (this.skip(s)) continue;
-      const cum = readRunUsage(s.cwd, s.engineSessionId!);
+      // await PER SESSION: the incremental reader parses only appended bytes off the event loop, and the
+      // await between sessions is exactly what un-blocks the loop (no synchronous whole-fleet read burst).
+      const cum = await this.incrementalReader.read(s.id, s.cwd, s.engineSessionId!);
       if (!cum) continue; // missing/unreadable transcript — skip this session
       this.recordDelta(s, cum, s.engineSessionId!, nowIso);
     }
@@ -168,11 +198,20 @@ export class UsageSampler {
    * the in-memory last-seen entry (an exited session never ticks again). Skips run / no-transcript
    * sessions. Best-effort — the caller wraps it; this never throws on a normal path.
    */
-  onSessionExit(session: Session, now: Date = new Date()): void {
-    if (this.skip(session)) { this.lastSeen.delete(session.id); return; }
-    const cum = readRunUsage(session.cwd, session.engineSessionId!);
+  onSessionExit(session: Session, now: Date = new Date()): Promise<void> {
+    // Serialized behind any in-flight tick (never dropped): it waits its turn on the chain, then runs — so
+    // its load-bearing tail delta can't interleave with a tick's read→recordDelta and re-trigger first-sight.
+    return this.enqueue(() => this.onSessionExitLocked(session, now));
+  }
+
+  private async onSessionExitLocked(session: Session, now: Date): Promise<void> {
+    if (this.skip(session)) { this.lastSeen.delete(session.id); this.incrementalReader.drop(session.id); return; }
+    // Final read through the SAME incremental reader: it returns the full cumulative (incl. the tail
+    // appended since the last tick), so the delta captures the last segment exactly.
+    const cum = await this.incrementalReader.read(session.id, session.cwd, session.engineSessionId!);
     if (cum) this.recordDelta(session, cum, session.engineSessionId!, now.toISOString());
     this.lastSeen.delete(session.id);
+    this.incrementalReader.drop(session.id); // an exited session never ticks again — free its parse cache
   }
 
   /**
@@ -193,6 +232,7 @@ export class UsageSampler {
     const cleared = db.clearUsageSamples();          // scrub the inflated derived data
     db.deleteMeta(BACKFILL_MARKER_KEY);              // let backfillOnce re-seed clean from transcripts
     this.lastSeen.clear();                           // drop any stale in-memory snapshots
+    this.incrementalReader.clear();                  // force a fresh full parse on the next tick (mirrors lastSeen)
     this.persistedBaseline = null;                   // force a fresh baseline snapshot after the rebuild
     db.setMeta(RESET_MARKER_KEY, now.toISOString()); // stamp LAST — the one-shot guarantee
     return cleared;
@@ -248,7 +288,13 @@ export class UsageSampler {
 
   start(): void {
     this.timer = setInterval(
-      () => { try { this.tick(); } catch { /* never let a bad tick kill the loop */ } },
+      () => {
+        // Re-entrancy skip: if a periodic tick is still running (a tick outlasting intervalMs at fleet
+        // scale), skip this fire rather than stacking overlapping ticks. The next fire catches up.
+        if (this.ticking) return;
+        this.ticking = true;
+        this.tick().catch(() => { /* never let a bad tick kill the loop */ }).finally(() => { this.ticking = false; });
+      },
       this.deps.intervalMs,
     );
   }
