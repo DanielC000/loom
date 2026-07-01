@@ -120,8 +120,9 @@ export default function Companion() {
       <Panel>
         <SectionLabel>Companions</SectionLabel>
         <p style={{ ...hint, margin: "0 0 10px" }}>
-          Chat-native personal agents reachable over Telegram. Each is a real <code>claude</code> session
-          bound to a chat. Human-managed; the bot token is stored encrypted and never shown.
+          Personal <code>claude</code> agents you talk to right here in the app — in-app chat is a
+          companion's default face. Human-managed; connect Telegram optionally (its bot token is stored
+          encrypted and never shown).
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {companions.map((c) => {
