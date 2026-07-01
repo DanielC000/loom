@@ -1,0 +1,96 @@
+/**
+ * Loom Companion — the channel-adapter CONTRACT + the platform-agnostic normalized message shape.
+ *
+ * A ChannelAdapter is the ONLY thing that knows a given chat platform's wire format. It normalizes every
+ * inbound platform update into an InboundMessage and pushes it to the ChatGateway; and it sends outbound
+ * text back to a chat id. New channels (WhatsApp, Slack, …) slot in by implementing this interface — the
+ * gateway never learns a platform's shape.
+ *
+ * Clean-room: the adapter → normalized-message split is modelled on OpenClaw/Hermes' Channel-Adapter
+ * normalization pattern (learned, not copied).
+ */
+
+/** A non-text payload carried by an inbound update (Phase 1 carries the SHAPE; ingestion is a later card). */
+export interface InboundAttachment {
+  /** Coarse kind — "photo" | "document" | "audio" | "video" | … (adapter-defined, free-form). */
+  type: string;
+  /** A fetchable URL or platform file id, when the platform exposes one. */
+  url?: string;
+  fileName?: string;
+  mimeType?: string;
+}
+
+/** A platform-agnostic inbound message — every adapter normalizes its wire update into THIS. */
+export interface InboundMessage {
+  /** The source channel's name — matches the originating ChannelAdapter.name (e.g. "telegram"). */
+  channel: string;
+  /** The originating chat id, always a string (a numeric platform id is stringified for stable compare). */
+  chatId: string;
+  /** The message body text (may be empty when the update is attachment-only). */
+  body: string;
+  /** The sender, when the platform identifies them (all optional — some channels are chat-scoped only). */
+  sender?: { id?: string; username?: string; displayName?: string };
+  /** Non-text payloads carried by the update. */
+  attachments?: InboundAttachment[];
+  /** Free-form channel-specific extras (message id, timestamp, reply-to, …) — opaque to the gateway. */
+  metadata?: Record<string, unknown>;
+}
+
+/** The gateway's inbound entrypoint, handed to each adapter so it can push normalized messages up. */
+export type InboundHandler = (msg: InboundMessage) => void;
+
+/**
+ * A chat channel — the pluggable transport. The gateway owns a registry of these; each is started/stopped
+ * with the daemon. `send` is the OUTBOUND leg (chat_reply → adapter.send); inbound flows the other way,
+ * via the InboundHandler the adapter was constructed with.
+ */
+export interface ChannelAdapter {
+  /** Stable channel name — the key in the gateway registry and the `channel` on every InboundMessage. */
+  readonly name: string;
+  /**
+   * The platform's max single-message length in chars, when it has a hard cap (Telegram: 4096). The
+   * gateway chunks outbound replies to this so a long reply never throws; undefined ⇒ no chunking.
+   */
+  readonly maxMessageLength?: number;
+  /** Begin receiving (e.g. start long-polling). Fire-and-forget; must not throw synchronously. */
+  start(): void;
+  /** Stop receiving and release resources (best-effort on shutdown). */
+  stop(): Promise<void>;
+  /** OUTBOUND: send `text` to `chatId` on this channel. */
+  send(chatId: string, text: string): Promise<void>;
+}
+
+/**
+ * Submit inbound text as a TURN into a live session — the EXISTING PTY primitive (pty.enqueueStdin),
+ * injected so the gateway stays free of the pty host. Returns the primitive's contract:
+ *   { delivered:true }               → submitted immediately as a turn
+ *   { delivered:false, position:N }  → HELD in the session's FIFO (busy/not-ready) — still accepted
+ *   { delivered:false }              → session not alive (DEAD) — nothing queued
+ */
+export type SubmitTurn = (sessionId: string, text: string) => { delivered: boolean; position?: number };
+
+/** The OUTBOUND delivery result — STRUCTURED across every failure mode (never throws out of chat_reply). */
+export type DeliverResult =
+  | { delivered: true; chunks: number }
+  | { delivered: false; reason: "unknown-session" | "no-adapter" | "send-failed" };
+
+/** The result of routing one inbound message. */
+export type InboundResult =
+  | { accepted: true; sessionId: string; queued: boolean; position?: number }
+  | { accepted: false; reason: "no-text" | "chat-not-allowlisted" }
+  | { accepted: false; reason: "session-dead"; sessionId: string; acked: boolean }
+  // The submit primitive THREW (e.g. pty.write racing a dying session, or a fail-loud M1/M2 guard). The
+  // gateway contains it — a racy inbound must NEVER crash the daemon via an unhandled rejection.
+  | { accepted: false; reason: "submit-failed"; sessionId: string; acked: boolean };
+
+/**
+ * A session↔chat binding (spike scope: seeded from env as a SINGLE binding). Models WHICH chat on WHICH
+ * channel is wired to WHICH companion session. Kept as a small in-memory map so the routing abstraction is
+ * clean and the identity-binding/auth card (5e574ca9) can extend it — NO persistence / pairing / multi-user
+ * auth here.
+ */
+export interface SessionBinding {
+  readonly sessionId: string;
+  readonly channel: string;
+  readonly chatId: string;
+}

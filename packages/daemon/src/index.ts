@@ -41,8 +41,8 @@ import { rateLimitDeadline, rateLimitedUntil } from "./orchestration/usage-limit
 import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent } from "./orchestration/restart.js";
 import { startVaultVersioners, type VaultVersioner } from "./vault/versioner.js";
 import { buildServer } from "./gateway/server.js";
-import { readCompanionConfig } from "./companion/gateway.js";
-import { createTelegramCompanion } from "./companion/telegram.js";
+import { readCompanionConfig } from "./companion/config.js";
+import { createCompanionGateway } from "./companion/factory.js";
 import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 
@@ -304,22 +304,23 @@ async function main(): Promise<void> {
   const wakes = new WakeService({ db, pty, resume: (id) => sessions.resume(id), intervalMs: wakeIntervalMs });
   // The task MCP hosts the universal wake tools, so it takes the WakeService.
   const mcp = new TaskMcpRouter(db, wakes);
-  // Loom Companion (Phase 0 spike): a chat-native companion whose brain is a live `claude` PTY session.
-  // OFF by default — the adapter is only constructed when LOOM_COMPANION_BOT_TOKEN (+ the allowlisted chat
-  // id + the bound session id) is set, so a normal daemon is byte-identical. The core gateway is built
-  // here (so orchMcp can route the agent's chat_reply through deliverReply); the grammY long-poll is
-  // started after `listen` below. INBOUND submits a turn via the EXISTING pty.enqueueStdin primitive
-  // (busy-gating / composer-defer / FIFO coalesce / rate-limit park all reused) as a 'system' source.
+  // Loom Companion (Phase 1): a chat-native companion whose brain is a live `claude` PTY session, served
+  // by the ChatGateway subsystem (registry of channel adapters + inbound routing + outbound deliverReply).
+  // OFF by default — the gateway is only constructed when LOOM_COMPANION_BOT_TOKEN (+ the allowlisted chat
+  // id + the bound session id) is set, so a normal daemon is byte-identical. Built here (so orchMcp can
+  // route the agent's chat_reply through deliverReply); the long-poll adapters are started after `listen`
+  // below. INBOUND submits a turn via the EXISTING pty.enqueueStdin primitive (busy-gating / composer-defer
+  // / FIFO coalesce / rate-limit park all reused) as a 'system' source.
   const companionCfg = readCompanionConfig(process.env);
   const companion = companionCfg
-    ? createTelegramCompanion(companionCfg, (sid, text) => pty.enqueueStdin(sid, text, "system"))
+    ? createCompanionGateway(companionCfg, (sid, text) => pty.enqueueStdin(sid, text, "system"))
     : null;
 
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after. The
   // companion hooks gate chat_reply to the single bound session (additive; every other spawn unchanged).
   const orchMcp = new OrchestrationMcpRouter(db, sessions, {
     companionSessionId: companionCfg?.sessionId ?? null,
-    deliverReply: companion ? (sid, text) => companion.gateway.deliverReply(sid, text) : undefined,
+    deliverReply: companion ? (sid, text) => companion.deliverReply(sid, text) : undefined,
   });
   // Platform MCP (Pillar C / P2) needs the registry (project/agent/profile/schedule + config) AND
   // SessionService (the cross-project session_spawn/session_stop lifecycle ops). P3 also threads the
@@ -395,10 +396,20 @@ async function main(): Promise<void> {
   // eslint-disable-next-line no-console
   console.log(`Loom daemon v${loomVersion()} listening on http://127.0.0.1:${PORT}`);
 
-  // Loom Companion (Phase 0 spike): start the Telegram long-poll now that the server is up (its
-  // chat_reply routes back through this process). OFF unless the bot token env was set (companion null).
+  // Loom Companion (Phase 1): start the channel adapters (Telegram long-poll) now that the server is up
+  // (chat_reply routes back through this process). OFF unless the bot token env was set (companion null).
   if (companion && companionCfg) {
     companion.start();
+    // Boot-time warn: inbound is role-agnostic, but chat_reply only registers for manager|worker|assistant.
+    // A binding to any OTHER role could "hear but not reply" — surface it rather than fail silently.
+    const boundRole = db.getSession(companionCfg.sessionId)?.role ?? null;
+    if (boundRole && boundRole !== "manager" && boundRole !== "worker" && boundRole !== "assistant") {
+      console.warn(
+        `[companion] WARNING: bound session ${companionCfg.sessionId.slice(0, 8)} has role '${boundRole}' — ` +
+          "inbound will be delivered but chat_reply is NOT registered for this role (companion can HEAR but " +
+          "not REPLY). Bind an assistant/manager/worker session.",
+      );
+    }
     console.log(`[boot] Loom Companion on (bound session ${companionCfg.sessionId.slice(0, 8)}, allowlisted chat ${companionCfg.allowedChatId})`);
   } else {
     console.log("[boot] Loom Companion off (set LOOM_COMPANION_BOT_TOKEN + LOOM_COMPANION_CHAT_ID + LOOM_COMPANION_SESSION_ID)");

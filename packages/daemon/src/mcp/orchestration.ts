@@ -30,7 +30,7 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
 export interface CompanionHooks {
   /** The bound companion session id — chat_reply is registered iff sessionId === this. Null/undefined ⇒ off. */
   companionSessionId?: string | null;
-  /** Deliver the agent's chat_reply(text) back OUT to the chat bound to the session (companion/gateway.ts). */
+  /** Deliver the agent's chat_reply(text) back OUT to the chat bound to the session (companion/chat-gateway.ts). */
   deliverReply?: (sessionId: string, text: string) => Promise<{ delivered: boolean; reason?: string }>;
 }
 

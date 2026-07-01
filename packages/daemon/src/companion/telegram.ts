@@ -1,55 +1,159 @@
 /**
- * Loom Companion — Telegram adapter (Phase 0 spike). A THIN wire between the real grammY bot and the
- * transport-agnostic CompanionGateway core: the bot's `sendMessage` is the OUTBOUND transport, and each
- * inbound message update is fed into `handleInboundUpdate` (which allowlists + submits the turn).
+ * Loom Companion — the productized Telegram CHANNEL ADAPTER.
  *
- * LONG-POLL (grammY `bot.start()`), NOT a webhook — so no public URL / TLS is needed. Default OFF: the
- * daemon only constructs this when the bot token env is set (see index.ts + readCompanionConfig), so a
- * normal daemon is byte-identical.
+ * Implements the platform-agnostic ChannelAdapter: it is the ONLY file that touches grammY. It normalizes
+ * each inbound Telegram update into the standard InboundMessage and pushes it up (the gateway allowlists +
+ * submits the turn); and its `send` is the OUTBOUND leg. Long-poll by DEFAULT (grammY `bot.start()`) — no
+ * public URL / webhook needed — with two productization hardenings the Phase-0 spike lacked:
+ *   - an EXPLICIT ERROR BOUNDARY on the inbound path (a per-update try/catch + grammY `bot.catch`) so an
+ *     enqueueStdin throw can never crash the poll loop (STRUCTURAL, not grammY's implicit default handler);
+ *   - RECONNECT-ON-DROP (runWithReconnect) so a dropped long-poll recovers instead of silently dying.
  *
- * Kept intentionally minimal — the real channel-adapter interface is a later card (Phase 1). This file is
- * the only one that touches grammY; the loop's logic lives in gateway.ts so it can be tested without a
- * live network.
+ * Testability: `normalizeTelegramMessage` is a pure exported function, and the grammY Bot is behind the
+ * minimal `TelegramBotLike` seam so a test injects a fake (no live network). Default OFF: the daemon only
+ * constructs this when the companion is configured (see companion/config.ts + factory.ts).
  */
 import { Bot } from "grammy";
-import { CompanionGateway, type ChatTransport, type CompanionConfig, type SubmitTurn } from "./gateway.js";
+import type { ChannelAdapter, InboundHandler, InboundMessage } from "./types.js";
+import { cappedBackoff, runWithReconnect } from "./resilience.js";
 
-export interface CompanionAdapter {
-  /** The core gateway — index.ts routes the agent's chat_reply through `gateway.deliverReply`. */
-  gateway: CompanionGateway;
-  /** Begin the long-poll loop (fire-and-forget; resolves only when the bot stops). */
-  start(): void;
-  /** Stop the long-poll loop (best-effort on shutdown). */
+export const TELEGRAM_CHANNEL = "telegram";
+/** Telegram's hard per-message character limit — the gateway chunks outbound replies to this. */
+export const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
+
+/** The minimal grammY Bot surface the adapter uses — lets a test inject a fake (no live network). */
+export interface TelegramBotLike {
+  api: { sendMessage(chatId: string | number, text: string): Promise<unknown> };
+  on(filter: "message", handler: (ctx: { update: unknown }) => void | Promise<void>): void;
+  catch(handler: (err: unknown) => void): void;
+  start(opts?: { onStart?: (info: { username: string }) => void }): Promise<void>;
   stop(): Promise<void>;
+  isRunning(): boolean;
 }
 
 /**
- * Wire the real grammY Telegram bot as the companion's transport AND long-poll feed. Constructing this
- * does NOT touch the network; call `start()` to begin polling.
+ * Normalize a Telegram Bot API update into the platform-agnostic InboundMessage, or null if it carries no
+ * usable text. Reads message.chat.id + message.text + the sender (message.from.*); other update kinds
+ * (edits, callbacks, media captions, channel posts) are ignored for now. Defensive against a malformed /
+ * partial update shape.
  */
-export function createTelegramCompanion(cfg: CompanionConfig, submitTurn: SubmitTurn): CompanionAdapter {
-  const bot = new Bot(cfg.botToken);
-  const transport: ChatTransport = {
+export function normalizeTelegramMessage(update: unknown): InboundMessage | null {
+  const message = (
+    update as {
+      message?: {
+        chat?: { id?: unknown };
+        text?: unknown;
+        message_id?: unknown;
+        from?: { id?: unknown; username?: unknown; first_name?: unknown; last_name?: unknown };
+      };
+    } | null
+  )?.message;
+  const chatId = message?.chat?.id;
+  const text = message?.text;
+  if ((typeof chatId !== "number" && typeof chatId !== "string") || typeof text !== "string" || text.length === 0) {
+    return null;
+  }
+  const from = message?.from;
+  const displayName = [from?.first_name, from?.last_name].filter((n) => typeof n === "string").join(" ").trim();
+  const sender = from
+    ? {
+        id: from.id !== undefined ? String(from.id) : undefined,
+        username: typeof from.username === "string" ? from.username : undefined,
+        displayName: displayName.length > 0 ? displayName : undefined,
+      }
+    : undefined;
+  return {
+    channel: TELEGRAM_CHANNEL,
+    chatId: String(chatId),
+    body: text,
+    sender,
+    metadata: message?.message_id !== undefined ? { messageId: message.message_id } : undefined,
+  };
+}
+
+export interface TelegramAdapterOptions {
+  /** Inject a fake bot for tests; defaults to a real grammY `Bot(botToken)`. */
+  bot?: TelegramBotLike;
+  /** Injectable sleep for the reconnect backoff (tests pass an immediate sleep — no real timers). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Override the reconnect backoff (tests). */
+  backoffMs?: (attempt: number) => number;
+}
+
+/**
+ * Build the Telegram channel adapter. Constructing it does NOT touch the network — `start()` begins the
+ * resilient long-poll loop. `onInbound` receives every normalized inbound message (the gateway wires this
+ * to `handleInbound`).
+ */
+export function createTelegramAdapter(
+  botToken: string,
+  onInbound: InboundHandler,
+  opts: TelegramAdapterOptions = {},
+): ChannelAdapter {
+  const bot: TelegramBotLike = opts.bot ?? (new Bot(botToken) as unknown as TelegramBotLike);
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const backoffMs = opts.backoffMs ?? cappedBackoff();
+  let stopped = false;
+
+  // ERROR BOUNDARY 1 — a per-update try/catch: a throw in normalize/onInbound (e.g. an enqueueStdin throw)
+  // is contained to that update and never rejects the middleware / crashes the poll loop.
+  bot.on("message", (ctx) => {
+    try {
+      const msg = normalizeTelegramMessage(ctx.update);
+      if (msg) onInbound(msg);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[companion] telegram inbound handler error: ${describeError(err)}`);
+    }
+  });
+  // ERROR BOUNDARY 2 — grammY's central error handler: anything the middleware throws lands here instead of
+  // bubbling out of the poll loop (structural, not grammY's implicit default handler).
+  bot.catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error(`[companion] telegram bot error: ${describeError(err)}`);
+  });
+
+  return {
+    name: TELEGRAM_CHANNEL,
+    maxMessageLength: TELEGRAM_MAX_MESSAGE_LENGTH,
+    start() {
+      // Fire-and-forget the RESILIENT poll loop: runWithReconnect re-runs bot.start() after a backoff on
+      // any drop, until stop() flips `stopped`. A startup failure (bad token / network) is logged, never
+      // thrown, so it can't crash the daemon boot.
+      void runWithReconnect({
+        run: async () => {
+          // A reconnect must start from a clean state — grammY refuses start() while already running.
+          if (bot.isRunning()) {
+            try { await bot.stop(); } catch { /* ignore */ }
+          }
+          await bot.start({
+            // eslint-disable-next-line no-console
+            onStart: (info) => console.log(`[companion] telegram long-poll started as @${info.username}`),
+          });
+        },
+        isStopped: () => stopped,
+        delayMs: backoffMs,
+        sleep,
+        onError: (err, attempt) =>
+          // eslint-disable-next-line no-console
+          console.error(`[companion] telegram long-poll dropped (attempt ${attempt}): ${describeError(err)} — reconnecting`),
+        // eslint-disable-next-line no-console
+        onReconnect: (attempt) => console.log(`[companion] telegram reconnecting (attempt ${attempt})`),
+      }).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error(`[companion] telegram reconnect loop exited: ${describeError(err)}`);
+      });
+    },
+    async stop() {
+      stopped = true;
+      try { await bot.stop(); } catch { /* best-effort on shutdown */ }
+    },
     async send(chatId, text) {
       await bot.api.sendMessage(chatId, text);
     },
   };
-  const gateway = new CompanionGateway(cfg, submitTurn, transport);
-  // Feed every inbound message update into the transport-agnostic core (allowlist-check → submit turn).
-  bot.on("message", (ctx) => {
-    gateway.handleInboundUpdate(ctx.update);
-  });
-  return {
-    gateway,
-    start() {
-      // bot.start() only resolves when the bot stops, so fire-and-forget the long-poll loop; a startup
-      // failure (bad token / network) is logged, not thrown, so it can never crash the daemon boot.
-      void bot
-        .start({ onStart: (info) => console.log(`[companion] Telegram long-poll started as @${info.username}`) })
-        .catch((err) => console.error(`[companion] Telegram long-poll error: ${(err as Error).message}`));
-    },
-    stop() {
-      return bot.stop();
-    },
-  };
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
