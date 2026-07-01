@@ -58,6 +58,7 @@ const HERMETIC = [
   "companion-gateway", // Loom Companion Phase 1: adapter-interface CONFORMANCE — a fake adapter drives the gateway (inbound route/allowlist, busy≠dead, dead-session ack, multi-adapter chat_reply routing, >4096 chunking, transport-failure structured result)
   "companion-authz", // Loom Companion Phase 1 (SECURITY): per-binding sender authz — GROUP requires an allowlisted sender (missing/unlisted → hard reject, never submitted), DM single-owner, durable binding/allowlist round-trip + unique route index, default-OFF byte-identical, and no binding/allowlist/home tool on the orchestration MCP surface
   "companion-telegram", // Loom Companion Phase 1: the Telegram adapter — grammY update normalization + send routing via an injected fake bot + inbound error boundary + reconnect-on-drop wiring
+  "companion-skills", // Loom Companion Phase 2: SELF-AUTHORED skills — isolated per-companion store (never the global SKILLS_DIR / never injected), on-demand list/read, refine-in-place, redundancy guard against near-dup NEW names, path-traversal confinement, and the tools gated to the single bound companion session
   "assistant-role", // Loom Companion Phase 1: the long-lived `assistant` SessionRole — non-worktree spawn+persist, resume carrying the role, base brief injection, human-prompt disallow (others byte-identical), and the minimal resolveRole surface (my_context + companion-gated chat_reply)
 ];
 

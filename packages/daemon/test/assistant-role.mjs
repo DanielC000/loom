@@ -184,7 +184,10 @@ try {
     check("(e) companion assistant HAS chat_reply (the companion gate)", names.includes("chat_reply"));
     check("(e) companion assistant does NOT have worker_spawn (no manager surface)", !names.includes("worker_spawn"));
     check("(e) companion assistant does NOT have worker_report", !names.includes("worker_report"));
-    check("(e) companion assistant surface is EXACTLY {my_context, chat_reply}", JSON.stringify([...names].sort()) === JSON.stringify(["chat_reply", "my_context"]));
+    // Phase 2 (self-authored skills) adds the four skill_* tools to the bound companion surface — still NO
+    // manager/writer surface. The full companion surface is chat_reply + my_context + the skill tools.
+    check("(e) companion assistant surface is EXACTLY {my_context, chat_reply, skill_author, skill_list, skill_read, skill_remove}",
+      JSON.stringify([...names].sort()) === JSON.stringify(["chat_reply", "my_context", "skill_author", "skill_list", "skill_read", "skill_remove"]));
     const res = await client.callTool({ name: "chat_reply", arguments: { text: "hi from the companion" } });
     check("(e) chat_reply routes to deliverReply", JSON.parse(res.content[0].text).delivered === true && delivered.length === 1 && delivered[0].sid === "asst-sess");
     await close();

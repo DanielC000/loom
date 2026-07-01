@@ -71,6 +71,20 @@ export const SKILLS_DIR = path.join(LOOM_HOME, "skills");
 export const SKILL_BASE_DIR = path.join(LOOM_HOME, "skill-base");
 
 /**
+ * The Loom Companion's SELF-AUTHORED skill store (epic Phase 2) — ISOLATED per companion session and kept
+ * strictly SEPARATE from the global SKILLS_DIR. Each bound companion gets its OWN base dir
+ * `<LOOM_HOME>/companion-skills/<companionSessionId>/<name>/SKILL.md`. These skills are authored/refined by
+ * the companion over MCP and loaded ON-DEMAND (skill_list + skill_read); they are NEVER seeded into
+ * SKILLS_DIR and NEVER injected into any session's `<cwd>/.claude/skills` — a companion co-located with a
+ * manager on the same repoPath cwd would otherwise LEAK its private skills into the manager's skill dir.
+ * Created lazily on first author (never in ensureDirs), so default-OFF stays byte-identical.
+ */
+export const COMPANION_SKILLS_DIR = path.join(LOOM_HOME, "companion-skills");
+export function companionSkillsDir(sessionId: string): string {
+  return path.join(COMPANION_SKILLS_DIR, sessionId);
+}
+
+/**
  * Single-process mode (Releases v1): where the PREBUILT web viewport (Vite output) lives, so the daemon
  * can serve the UI from its own loopback origin — no separate `pnpm web`. One resolver, with an env
  * override so it works in the monorepo NOW and from a bundled npm package LATER (Part 2). Priority:

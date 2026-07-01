@@ -24,7 +24,15 @@ export function isValidSkillName(name: string): boolean {
 
 const skillMd = (name: string): string => path.join(SKILLS_DIR, name, "SKILL.md");
 
-function descriptionOf(content: string): string {
+/** Atomic file write (tmp + rename) — the store's durability idiom, shared by the companion skill store. */
+export function atomicWriteFile(file: string, content: string): void {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, content);
+  fs.renameSync(tmp, file);
+}
+
+/** Parse `description:` out of a SKILL.md frontmatter block (empty string if absent). */
+export function descriptionOf(content: string): string {
   const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   const m = fm?.[1]?.match(/^description:\s*(.*)$/m);
   return (m?.[1] ?? "").trim();
@@ -59,10 +67,7 @@ function readFileOrNull(p: string): string | null {
 /** Atomic write of `name`'s base snapshot (tmp+rename), creating SKILL_BASE_DIR if needed. */
 function writeBase(name: string, content: string): void {
   fs.mkdirSync(SKILL_BASE_DIR, { recursive: true });
-  const file = baseFile(name);
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, file);
+  atomicWriteFile(baseFile(name), content);
 }
 
 // LOAD-BEARING: store SKILL.md is written CRLF on Windows; the asset may be CRLF or LF. Normalize both
@@ -270,10 +275,7 @@ export function readSkill(name: string): { name: string; content: string } | nul
 export function writeSkill(name: string, content: string): boolean {
   if (!isValidSkillName(name)) return false;
   fs.mkdirSync(path.join(SKILLS_DIR, name), { recursive: true });
-  const file = skillMd(name);
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, file);
+  atomicWriteFile(skillMd(name), content);
   return true;
 }
 

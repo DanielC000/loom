@@ -194,8 +194,10 @@ try {
       const bad = tools.filter((t) => forbidden.test(t));
       check(`human-only: the ${name} MCP surface (${tools.length} tools) has NO binding/allowlist/home tool (found: ${bad.join(",") || "none"})`, bad.length === 0);
     }
-    // The companion agent's ENTIRE companion surface is chat_reply (+ my_context) — never an admin writer.
-    check("human-only: the assistant's ONLY companion tool is chat_reply", assistantTools.includes("chat_reply") && assistantTools.every((t) => t === "chat_reply" || t === "my_context"));
+    // The companion agent's companion surface is chat_reply + its self-authored-skill tools (Phase 2) —
+    // never an admin writer (bindings/allowlist/home stay human-only REST, asserted by the `forbidden` gate above).
+    const companionSkillTools = new Set(["skill_author", "skill_list", "skill_read", "skill_remove"]);
+    check("human-only: the assistant's tools are chat_reply + my_context + its skill tools (no admin writer)", assistantTools.includes("chat_reply") && assistantTools.every((t) => t === "chat_reply" || t === "my_context" || companionSkillTools.has(t)));
     check("human-only: a non-companion manager never even gets chat_reply", !managerTools.includes("chat_reply"));
     // Negative control — prove the substring gate HAS TEETH (a hypothetical admin tool WOULD be caught).
     check("human-only: negative control — a phantom 'companion_bind' tool WOULD trip the gate", forbidden.test("companion_bind"));

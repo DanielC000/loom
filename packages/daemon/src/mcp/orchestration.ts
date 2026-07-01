@@ -7,6 +7,12 @@ import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript } from "../sessions/transcript.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
+import {
+  authorCompanionSkill,
+  listCompanionSkills,
+  readCompanionSkill,
+  removeCompanionSkill,
+} from "../skills/companion-store.js";
 
 // Same envelope as the task MCP server (mcp/server.ts).
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -149,6 +155,78 @@ export class OrchestrationMcpRouter {
     );
   }
 
+  /**
+   * Loom Companion (epic Phase 2): self-authored skills. Registered ONLY on the single bound companion
+   * session (the SAME gate as chat_reply) so every other manager/worker spawn's surface stays byte-identical.
+   * The store is ISOLATED per companion under <LOOM_HOME>/companion-skills/<sessionId>/ (skills/companion-
+   * store.ts): writes NEVER touch the global SKILLS_DIR and are NEVER injected into any session's
+   * .claude/skills. Loading is ON-DEMAND — the companion consults skill_list (compact) then skill_read (full);
+   * skill_author authors/refines-in-place (with a redundancy guard against near-duplicate NEW names) and
+   * skill_remove curates.
+   */
+  private registerCompanionSkillTools(server: McpServer, sessionId: string): void {
+    const companionId = this.companion.companionSessionId;
+    if (!companionId || sessionId !== companionId) return;
+
+    server.registerTool(
+      "skill_author",
+      {
+        description:
+          "Author or REFINE one of YOUR OWN personal skills (a reusable playbook, private to you and " +
+          "isolated from Loom's shared skills). `content` is the FULL SKILL.md (frontmatter `name`/" +
+          "`description` + body). Authoring an EXISTING `name` REWRITES it in place — supply the whole " +
+          "improved content (no appending, keep it bounded and self-consistent). A NEW name that closely " +
+          "duplicates an existing skill is REJECTED with a note telling you to refine the existing one " +
+          "instead. Returns the updated compact skill list, or {error}.",
+        inputSchema: { name: z.string(), content: z.string() },
+      },
+      async ({ name, content }) => {
+        const r = authorCompanionSkill(sessionId, name, content);
+        return ok(r.ok ? { authored: name, skills: r.skills } : { error: r.error });
+      },
+    );
+
+    server.registerTool(
+      "skill_list",
+      {
+        description:
+          "List YOUR OWN personal skills as compact {name, description} entries. Consult this when a request " +
+          "may match something you've learned before, then skill_read the one that fits to load it in full.",
+        inputSchema: {},
+      },
+      async () => ok({ skills: listCompanionSkills(sessionId) }),
+    );
+
+    server.registerTool(
+      "skill_read",
+      {
+        description:
+          "Read the FULL SKILL.md of one of YOUR OWN personal skills by name — the on-demand full load. Use " +
+          "it after skill_list identifies a relevant skill, to load its steps before acting. Returns {name, " +
+          "content}, or {error} if there's no such skill.",
+        inputSchema: { name: z.string() },
+      },
+      async ({ name }) => {
+        const content = readCompanionSkill(sessionId, name);
+        return ok(content == null ? { error: `no skill "${name}"` } : { name, content });
+      },
+    );
+
+    server.registerTool(
+      "skill_remove",
+      {
+        description:
+          "Remove one of YOUR OWN personal skills by name (curation/dedup). Returns the updated compact skill " +
+          "list, or {error} if there's no such skill.",
+        inputSchema: { name: z.string() },
+      },
+      async ({ name }) => {
+        const r = removeCompanionSkill(sessionId, name);
+        return ok(r.ok ? { removed: name, skills: r.skills } : { error: r.error });
+      },
+    );
+  }
+
   private buildServer(sessionId: string, role: SessionRole): McpServer {
     const db = this.db;
     const sessions = this.sessions;
@@ -156,6 +234,8 @@ export class OrchestrationMcpRouter {
 
     // Companion spike: additive, single-session-gated chat_reply (see registerChatReplyIfCompanion).
     this.registerChatReplyIfCompanion(server, sessionId);
+    // Companion Phase 2: additive, single-session-gated self-authored skill tools (SAME gate as chat_reply).
+    this.registerCompanionSkillTools(server, sessionId);
 
     // Companion (epic Phase 1): the long-lived `assistant` role gets a MINIMAL surface — the read-only
     // my_context PLUS (only when this IS the bound companion session) the chat_reply registered just above.
