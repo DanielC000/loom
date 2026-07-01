@@ -11,6 +11,7 @@ import {
 } from "../lib/companion";
 import { Panel, Button, Input, Select, SectionLabel, Badge, StatusPill, Chip } from "../components/ui";
 import { CompanionChat } from "../components/CompanionChat";
+import { TerminalPane } from "../components/Terminal";
 import { IN_APP_CHANNEL, isArmedInApp } from "../lib/companionChat";
 import { color, font, radius } from "../theme";
 
@@ -360,11 +361,13 @@ function ConfigFields({ form, set, mode, currentToken }: {
 }
 
 // ── Detail: chat surface (default face) + config editor + access + pairing ───────
+type CompanionMode = "chat" | "manage" | "terminal";
+
 function CompanionDetail({ companion, label, onChanged, onDeleted }: {
   companion: CompanionRow; label: string; onChanged: () => void; onDeleted: () => void;
 }) {
-  // Chat is the companion's DEFAULT face in the app (not the raw terminal); Manage is a click away.
-  const [mode, setMode] = useState<"chat" | "manage">("chat");
+  // Chat is the companion's DEFAULT face in the app (not the raw terminal); Manage + Terminal are a click away.
+  const [mode, setMode] = useState<CompanionMode>("chat");
   // In-app reachability: an in-app reply frame only comes back when a binding on the in-app channel exists
   // for this session (chatId == sessionId — the loopback self-address). MULTI-CHANNEL: scan ALL bindings so
   // a Telegram binding never hides the in-app one; anything else ⇒ chat shows the gentle "not wired" notice
@@ -389,6 +392,11 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
           style={{ flex: 1, minHeight: "62vh", display: "flex", flexDirection: "column" }}>
           <CompanionChat sessionId={companion.sessionId} title={label} armed={armed} />
         </div>
+      ) : mode === "terminal" ? (
+        <div role="tabpanel" id="companion-panel-terminal" aria-labelledby="companion-tab-terminal"
+          style={{ flex: 1, minHeight: "62vh", display: "flex", flexDirection: "column", gap: 8 }}>
+          <CompanionTerminal sessionId={companion.sessionId} />
+        </div>
       ) : (
         <div role="tabpanel" id="companion-panel-manage" aria-labelledby="companion-tab-manage"
           style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -410,9 +418,12 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
   );
 }
 
-// Segmented Chat / Manage switch — a companion's chat is the default view; management is one click away.
-function ModeToggle({ mode, onMode }: { mode: "chat" | "manage"; onMode: (m: "chat" | "manage") => void }) {
-  const opts: { key: "chat" | "manage"; label: string }[] = [{ key: "chat", label: "Chat" }, { key: "manage", label: "Manage" }];
+// Segmented Chat / Manage / Terminal switch — a companion's chat is the default view; management and the
+// read-only terminal window onto its own session are each one click away.
+function ModeToggle({ mode, onMode }: { mode: CompanionMode; onMode: (m: CompanionMode) => void }) {
+  const opts: { key: CompanionMode; label: string }[] = [
+    { key: "chat", label: "Chat" }, { key: "manage", label: "Manage" }, { key: "terminal", label: "Terminal" },
+  ];
   return (
     <div role="tablist" aria-label="Companion view" style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden" }}>
       {opts.map((o) => {
@@ -438,6 +449,33 @@ function ModeToggle({ mode, onMode }: { mode: "chat" | "manage"; onMode: (m: "ch
         );
       })}
     </div>
+  );
+}
+
+// ── Terminal: a READ-ONLY window onto the companion's OWN pty session ──────────────
+// Companions are DELIBERATELY hidden from the Terminals page + project grids (they're driven through
+// chat, never a raw stdin composer — the load-bearing filter in lib/sessions.ts groupSessionRows). This
+// view is the one sanctioned exception, scoped to a single companion: it reuses the same xterm attach
+// component (TerminalPane over /ws/term/:sessionId) but in `readOnly` mode, so you can watch the agent's
+// real Claude TUI stream without a way to type into it. It never un-hides companions anywhere else.
+function CompanionTerminal({ sessionId }: { sessionId: string }) {
+  return (
+    <>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <StatusPill tone="cyan" label="read-only" />
+        <span style={{ ...hint, margin: 0 }}>
+          A live window onto this companion's own <code>claude</code> session — watch it work. Talk to it
+          under <strong style={{ color: color.text }}>Chat</strong>; typing here is disabled.
+        </span>
+      </div>
+      {/* overflow:hidden clips xterm's canvas to the framed box; the pane scales the pinned grid to fill it. */}
+      <div style={{
+        flex: 1, minHeight: 0, overflow: "hidden", background: "#0b0b0c",
+        border: `1px solid ${color.border}`, borderRadius: radius.base,
+      }}>
+        <TerminalPane sessionId={sessionId} readOnly />
+      </div>
+    </>
   );
 }
 

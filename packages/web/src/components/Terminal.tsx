@@ -18,8 +18,14 @@ import "./Terminal.css";
  *  • Shell terminals (resizable=true): the OPPOSITE — a plain shell has no alt-screen repaint
  *    constraint, so we FIT the grid to the pane (FitAddon) and tell the daemon to resize the pty to
  *    match (a `resize` ws msg). The shell then wraps to the pane like any terminal emulator.
+ *
+ * `readOnly` (default false): a WATCH-ONLY attach — the pane still streams pty bytes and honors the
+ * pinned geometry + attach repaint, but keyboard input is inert (xterm `disableStdin`) and onData never
+ * sends a stdin frame. Used by the Companion "Terminal" view, where the companion is driven through its
+ * chat surface, not raw stdin — so the terminal is purely an observation window. Copy (select + Ctrl-C)
+ * still works; only writing to the session is suppressed.
  */
-export function TerminalPane({ sessionId, resizable = false }: { sessionId: string; resizable?: boolean }) {
+export function TerminalPane({ sessionId, resizable = false, readOnly = false }: { sessionId: string; resizable?: boolean; readOnly?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -28,7 +34,8 @@ export function TerminalPane({ sessionId, resizable = false }: { sessionId: stri
     const term = new XTerm({
       fontSize: 13,
       convertEol: true,
-      cursorBlink: true,
+      cursorBlink: !readOnly,
+      disableStdin: readOnly,
       scrollback: 5000,
       theme: { background: "#0b0b0c" },
     });
@@ -171,6 +178,7 @@ export function TerminalPane({ sessionId, resizable = false }: { sessionId: stri
       }
     };
     const onData = term.onData((d) => {
+      if (readOnly) return; // watch-only attach — never write to the session
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "stdin", data: d }));
     });
 
@@ -195,7 +203,7 @@ export function TerminalPane({ sessionId, resizable = false }: { sessionId: stri
       else ws.close();
       term.dispose();
     };
-  }, [sessionId, resizable]);
+  }, [sessionId, resizable, readOnly]);
 
   // overflow:hidden so the xterm canvas is clipped to this box — a font rescale (applyFontSize, fired
   // on container resize) can briefly overshoot the cell math; this stops the canvas painting outside.
