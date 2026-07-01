@@ -51,6 +51,16 @@ const BRACKET_PASTE_END = "\x1b[201~";
 const DRAIN_SEPARATOR = "\n\n────────\n\n";
 
 /**
+ * The coalescing key for a queued message's route (Loom Companion multi-channel routing). A NO-route
+ * message (every non-companion inject — manager→worker direction, nudges, reports) maps to the EMPTY key,
+ * so all no-route messages share one key and coalesce ALL-TOGETHER exactly as before. A routed companion
+ * inbound keys on channel+chatId (NUL-joined, unambiguous), so a different route breaks the coalescing run.
+ */
+function routeKeyOf(route?: TurnRoute): string {
+  return route ? `${route.channel}\x00${route.chatId}` : "";
+}
+
+/**
  * A session marked busy with NO engine output for this long is treated as STUCK (a turn that never
  * really started, or a missed Stop hook) and self-healed to idle so its queued messages can drain
  * and the UI stops showing a phantom 'busy'. Conservative — a genuinely long, silent tool call is
@@ -674,7 +684,15 @@ interface Subscriber {
  * no-arg call leaves reason undefined (unchanged behaviour).
  */
 export type QueueSource = "human" | "system";
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void };
+/**
+ * An originating chat ROUTE pinned to a turn (Loom Companion multi-channel reply routing). Structurally the
+ * companion's `CompanionRoute`; kept as a local type so the pty host takes NO dependency on the companion
+ * layer (it's a lower-level primitive shared by ALL sessions). Optional on QueuedMessage: a message with NO
+ * route is a plain non-companion turn (every existing caller ⇒ undefined ⇒ byte-identical). The route also
+ * KEYS drainPending's coalescing so cross-route messages never merge into one turn (see drainPending).
+ */
+export type TurnRoute = { channel: string; chatId: string };
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute };
 
 interface Live {
   pty: IPty;
@@ -712,6 +730,14 @@ interface Live {
                         // into the capped account and CLOBBER lastPrompt — the killed turn resumeAfterRateLimit
                         // must replay. Set when the StopFailure is detected as rate_limit; cleared on resume.
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
+  // Loom Companion (multi-channel reply routing): the ORIGINATING chat route of the IN-FLIGHT turn, or null
+  // when the turn wasn't formed from a companion inbound / proactive-home submit. Set SYNCHRONOUSLY in
+  // submit() (both the idle-submit and drain paths), read by getActiveTurnOrigin when the companion's
+  // chat_reply fires — so a reply resolves to the EXACT route of the turn it answers (no shared/last-inbound
+  // field, no cross-delivery). `lastPromptRoute` mirrors `lastPrompt` so a rate-limit-killed companion turn
+  // replays to its ORIGINAL route on resume. Both null on every non-companion turn ⇒ byte-identical.
+  activeTurnRoute: TurnRoute | null;
+  lastPromptRoute: TurnRoute | null;
   startupModeCycles: number; // Shift+Tab presses to inject once, after SessionStart, to reach the target mode
   startupCyclesDone: boolean; // guard so the cycle-inject fires at most once per session
   mcpPromptHandled: boolean;  // guard: dismiss the plugin-MCP enable-prompt with Esc at most once per session
@@ -1052,8 +1078,11 @@ export class PtyHost {
       stopping: false,
       rateLimited: false,
       // The startup-prompt turn runs from a CLI arg (not submit()), so seed lastPrompt with it —
-      // a cap on the FIRST turn must still be re-submittable on resume (§19c-b).
+      // a cap on the FIRST turn must still be re-submittable on resume (§19c-b). It carries NO companion
+      // route (a startup turn is never a companion inbound), so the route fields start null.
       lastPrompt: opts.startupPrompt ?? null,
+      activeTurnRoute: null,
+      lastPromptRoute: null,
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
@@ -1174,6 +1203,7 @@ export class PtyHost {
       busy: false, ready: true, busySince: null,
       lastOutputAt: Date.now(), composerLen: 0,
       pending: [], stopping: false, rateLimited: false, lastPrompt: null,
+      activeTurnRoute: null, lastPromptRoute: null,
       startupModeCycles: 0, startupCyclesDone: true,
       mcpPromptHandled: true, bootScan: "",
       resumeGateHandled: true, resumeGateScan: "",
@@ -1476,7 +1506,7 @@ export class PtyHost {
    * busy nudges, resume notes, escalations) stays 'system' unchanged; only the REST composer passes
    * 'human'. A held entry's source is what the human-facing mutators gate on (see QueuedMessage).
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void): { delivered: boolean; position?: number } {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute): { delivered: boolean; position?: number } {
     const live = this.live.get(sessionId);
     if (!live?.alive) return { delivered: false };
     this.healIfStuck(live, sessionId);
@@ -1491,7 +1521,7 @@ export class PtyHost {
       if (this.finalizingTurn) {
         throw new Error("M2 invariant violated: enqueueStdin reached the idle-submit path mid turn-finalize — an `await` leaked between setBusy(false) and drainPending in deliverHook (host.ts).");
       }
-      this.submit(sessionId, text);
+      this.submit(sessionId, text, route);
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
       // enqueue arriving next sees busy and QUEUES instead of racing this turn's pending `\r`. If busy
       // is still false here, a future refactor deferred the set behind an await/callback — fail loud.
@@ -1507,7 +1537,7 @@ export class PtyHost {
     // Held (busy / not-ready / composer-dirty / rate-limit parked). Carry the optional delivery callback so that when this
     // entry is finally handed to the recipient (drainPending or consumePending), the durable queued
     // message can be marked delivered. Undefined for every existing (non-messaging) caller → a no-op.
-    live.pending.push({ id: randomUUID(), text, source, onDeliver });
+    live.pending.push({ id: randomUUID(), text, source, onDeliver, route });
     return { delivered: false, position: live.pending.length };
   }
 
@@ -1519,6 +1549,18 @@ export class PtyHost {
    */
   getPending(sessionId: string): string[] {
     return (this.live.get(sessionId)?.pending ?? []).map((m) => m.text);
+  }
+
+  /**
+   * Loom Companion (multi-channel reply routing): the ORIGINATING route of the session's IN-FLIGHT turn, or
+   * null when the current/last turn wasn't formed from a companion inbound / proactive-home submit. The
+   * companion's chat_reply reads THIS (via an injected resolver in the gateway) to deliver a reply back to
+   * the exact route of the turn it answers. Because turns run serially and the route is pinned when a turn
+   * is FORMED (submit/drain) — never when a later inbound is merely queued — an interleaved cross-route
+   * inbound can't redirect an in-flight turn's reply. Returns null for an unknown/dead session.
+   */
+  getActiveTurnOrigin(sessionId: string): TurnRoute | null {
+    return this.live.get(sessionId)?.activeTurnRoute ?? null;
   }
 
   /**
@@ -1716,8 +1758,17 @@ export class PtyHost {
     // the interrupted turn. The held queue is kept intact and drains normally on the post-resume Stop.
     if (live.rateLimited) return;
     if (this.deferForHumanDraft(live)) return; // HOLD while the human's raw composer is dirty — never land on half-typed text
-    const drained = live.pending.splice(0); // splice the WHOLE FIFO (mirror consumePending) — coalesce all into one turn
-    this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR)); // one submit, one busy re-arm, FIFO order preserved
+    // ROUTE-KEYED coalescing (Loom Companion multi-channel): coalesce ONLY the LEADING run of pending
+    // messages that share the FIRST entry's route key. Messages with NO route (the manager→worker direction
+    // path, and every non-companion inject) all share the empty key, so they still coalesce ALL-TOGETHER —
+    // byte-identical to the old splice(0). A DIFFERENT route breaks the run: it stays queued and drains as a
+    // DISTINCT next turn on the next Stop. So EVERY turn has EXACTLY ONE originating route ⇒ chat_reply
+    // resolves it unambiguously and cross-delivery is impossible by construction (no runtime check needed).
+    const key = routeKeyOf(live.pending[0]!.route);
+    let n = 1;
+    while (n < live.pending.length && routeKeyOf(live.pending[n]!.route) === key) n++;
+    const drained = live.pending.splice(0, n); // the leading same-route run (all-together when no route)
+    this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR), drained[0]!.route); // one submit, one busy re-arm, FIFO order preserved, ONE route
     // ADDITIVE delivery hook (card 2ca18433): every drained entry was just handed to the recipient as
     // part of this turn — fire each callback (durable-message resolution) AFTER submit, outside the
     // M1/M2 ordering. Guarded so a faulty callback can never disturb the drain. Undefined for every
@@ -1754,10 +1805,15 @@ export class PtyHost {
    * `await`/callback or make submit() async — that would reopen the race. enqueueStdin asserts the set
    * landed synchronously (the M1 GUARD there).
    */
-  private submit(sessionId: string, text: string): void {
+  private submit(sessionId: string, text: string, route?: TurnRoute): void {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
     live.lastPrompt = text; // remember the in-flight turn so a usage-cap kill is recoverable (§19c-b)
+    // Pin this turn's ORIGINATING route (Loom Companion), SYNCHRONOUSLY — before the async writeChunked, so
+    // it's in place the instant the agent processes the turn and can chat_reply. null for every non-companion
+    // turn (route undefined). `lastPromptRoute` mirrors `lastPrompt` so a rate-limit replay keeps the route.
+    live.activeTurnRoute = route ?? null;
+    live.lastPromptRoute = route ?? null;
     live.pty.write(BRACKET_PASTE_START);
     // Chunk the text — a long turn (e.g. a worker report) sent as one pty.write is truncated by
     // ConPTY. Close the paste + send Enter only AFTER the last chunk lands, else it submits a partial.
@@ -1781,7 +1837,9 @@ export class PtyHost {
     // UNPARK: drop the suppress flag FIRST so the re-submitted turn (and the post-resume Stop drain of the
     // held queue) can proceed. submit() re-arms busy, so the reconcile drain stays no-op until that turn ends.
     live.rateLimited = false;
-    if (live.lastPrompt != null) this.submit(sessionId, live.lastPrompt);
+    // Replay the killed turn WITH its original route (lastPromptRoute) so a rate-limited companion inbound
+    // still replies to the channel it came from after the reset (§19c-b + companion route routing).
+    if (live.lastPrompt != null) this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined);
     return true;
   }
 

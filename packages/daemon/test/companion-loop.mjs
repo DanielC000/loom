@@ -31,9 +31,12 @@ function fakeAdapter(name, sent) {
 // --- Part A: the ChatGateway loop (fake submit + fake adapter) -----------------------------------
 {
   const submitted = [];
-  const submitTurn = (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; };
+  // FAITHFUL to the real pty: submit PINS the turn's originating route; getActiveTurnOrigin (the injected
+  // resolver) reads it back so chat_reply delivers to the channel the message came from.
+  let activeRoute = null;
+  const submitTurn = (sid, text, route) => { submitted.push({ sid, text, route }); activeRoute = route ?? null; return { delivered: true }; };
   const sent = [];
-  const gw = new ChatGateway(submitTurn, [{ sessionId: CFG.sessionId, channel: CHANNEL, chatId: CFG.allowedChatId }]);
+  const gw = new ChatGateway(submitTurn, [{ sessionId: CFG.sessionId, channel: CHANNEL, chatId: CFG.allowedChatId }], undefined, undefined, (sid) => (sid === CFG.sessionId ? activeRoute : null));
   gw.registerAdapter(fakeAdapter(CHANNEL, sent));
 
   // INBOUND, allowlisted → submitted as a turn to the bound companion session.
@@ -53,18 +56,19 @@ function fakeAdapter(name, sent) {
   check("inbound (no text): rejected as no-text", r3.accepted === false && r3.reason === "no-text");
   check("inbound (no text): NOT submitted", submitted.length === 1);
 
-  // OUTBOUND: chat_reply → delivered to the CORRECT chat id via the bound adapter, NOT re-submitted.
+  // OUTBOUND: chat_reply → delivered to the channel/chat the in-flight turn came from (the last inbound's
+  // route, 12345), via the bound adapter, NOT re-submitted.
   const d1 = await gw.deliverReply("companion-sess", "here is your answer");
   check("outbound: delivered", d1.delivered === true);
   check("outbound: sent exactly once", sent.length === 1);
-  check("outbound: routed to the CORRECT chat id", sent[0]?.chatId === "12345");
+  check("outbound: routed to the in-flight turn's origin chat id", sent[0]?.chatId === "12345");
   check("outbound: the reply text is delivered verbatim", sent[0]?.text === "here is your answer");
   check("outbound: deliverReply did NOT loop back as a turn (submit count unchanged)", submitted.length === 1);
 
-  // OUTBOUND from an UNKNOWN session → rejected, nothing sent.
+  // OUTBOUND from a session with NO in-flight-turn origin → no target, nothing sent.
   const d2 = await gw.deliverReply("some-other-session", "leak?");
-  check("outbound (unknown session): rejected", d2.delivered === false && d2.reason === "unknown-session");
-  check("outbound (unknown session): nothing sent", sent.length === 1);
+  check("outbound (no turn origin): no-target", d2.delivered === false && d2.reason === "no-target");
+  check("outbound (no turn origin): nothing sent", sent.length === 1);
 }
 
 // --- Part B: readCompanionConfig from env (default OFF) -----------------------------------------

@@ -107,6 +107,11 @@ const inbound = (channel, chatId, body) => ({ channel, chatId, body });
   check("submit-throws: an error ack was sent to the chat", r && r.acked === true && tg.sent.length === 1 && tg.sent[0].chatId === "111");
 }
 
+// deliverReply now routes PURELY by the session's in-flight turn ORIGIN (an injected resolver simulating the
+// pty's getActiveTurnOrigin) — NOT by bindings. Each block below injects an origin map as the 5th ChatGateway
+// arg; a session with no origin ⇒ `no-target` (delivers nowhere).
+const originOf = (map) => (sid) => map[sid] ?? null;
+
 // --- chat_reply → the CORRECT adapter + chat id (multi-adapter registry routing) -----------------
 {
   const tg = makeAdapter("telegram");
@@ -114,7 +119,7 @@ const inbound = (channel, chatId, body) => ({ channel, chatId, body });
   const gw = new ChatGateway(() => ({ delivered: true }), [
     { sessionId: "sess-A", channel: "telegram", chatId: "111" },
     { sessionId: "sess-B", channel: "fakechat", chatId: "222" },
-  ]);
+  ], undefined, undefined, originOf({ "sess-A": { channel: "telegram", chatId: "111" }, "sess-B": { channel: "fakechat", chatId: "222" } }));
   gw.registerAdapter(tg.adapter);
   gw.registerAdapter(other.adapter);
 
@@ -128,13 +133,13 @@ const inbound = (channel, chatId, body) => ({ channel, chatId, body });
   check("routing: telegram adapter still only has its one send", tg.sent.length === 1);
 
   const unknown = await gw.deliverReply("sess-Z", "nobody");
-  check("routing: unknown session → structured unknown-session, nothing sent", unknown.delivered === false && unknown.reason === "unknown-session");
+  check("routing: a session with NO in-flight-turn origin → structured no-target, nothing sent", unknown.delivered === false && unknown.reason === "no-target");
 }
 
 // --- Outbound >4096 → chunked into multiple sends (each ≤ max) -----------------------------------
 {
   const tg = makeAdapter("telegram", { maxMessageLength: 4096 });
-  const gw = new ChatGateway(() => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }]);
+  const gw = new ChatGateway(() => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }], undefined, undefined, originOf({ "sess-A": { channel: "telegram", chatId: "111" } }));
   gw.registerAdapter(tg.adapter);
 
   const long = "a".repeat(10000); // no boundaries → hard cuts; concatenation must be lossless
@@ -153,7 +158,7 @@ const inbound = (channel, chatId, body) => ({ channel, chatId, body });
 // --- Outbound chunking on WHITESPACE/NEWLINE boundaries is byte-LOSSLESS -------------------------
 {
   const tg = makeAdapter("telegram", { maxMessageLength: 30 });
-  const gw = new ChatGateway(() => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }]);
+  const gw = new ChatGateway(() => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }], undefined, undefined, originOf({ "sess-A": { channel: "telegram", chatId: "111" } }));
   gw.registerAdapter(tg.adapter);
   // Text WITH spaces + newlines that forces boundary splits (the case the hard-cut test can't cover).
   const withBreaks = "line one goes here\nline two goes there\n" + "word ".repeat(15).trim();
@@ -165,7 +170,7 @@ const inbound = (channel, chatId, body) => ({ channel, chatId, body });
 // --- Transport failure → structured result, NEVER throws ----------------------------------------
 {
   const tg = makeAdapter("telegram", { fail: true });
-  const gw = new ChatGateway(() => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }]);
+  const gw = new ChatGateway(() => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }], undefined, undefined, originOf({ "sess-A": { channel: "telegram", chatId: "111" } }));
   gw.registerAdapter(tg.adapter);
   let threw = false;
   let res;

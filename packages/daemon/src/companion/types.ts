@@ -61,18 +61,31 @@ export interface ChannelAdapter {
 }
 
 /**
+ * An originating chat ROUTE — WHICH chat on WHICH channel a turn came from (companion inbound) or is
+ * addressed to (proactive/heartbeat home). Threaded per-turn through the pty host so an agent's chat_reply
+ * resolves DAEMON-side to the exact route of the turn it is answering — never a shared/guessed channel.
+ */
+export interface CompanionRoute {
+  channel: string;
+  chatId: string;
+}
+
+/**
  * Submit inbound text as a TURN into a live session — the EXISTING PTY primitive (pty.enqueueStdin),
- * injected so the gateway stays free of the pty host. Returns the primitive's contract:
+ * injected so the gateway stays free of the pty host. `route` is the ORIGINATING (channel, chatId): the pty
+ * pins it to the formed turn so chat_reply delivers back there. Returns the primitive's contract:
  *   { delivered:true }               → submitted immediately as a turn
  *   { delivered:false, position:N }  → HELD in the session's FIFO (busy/not-ready) — still accepted
  *   { delivered:false }              → session not alive (DEAD) — nothing queued
  */
-export type SubmitTurn = (sessionId: string, text: string) => { delivered: boolean; position?: number };
+export type SubmitTurn = (sessionId: string, text: string, route?: CompanionRoute) => { delivered: boolean; position?: number };
 
-/** The OUTBOUND delivery result — STRUCTURED across every failure mode (never throws out of chat_reply). */
+/** The OUTBOUND delivery result — STRUCTURED across every failure mode (never throws out of chat_reply).
+ *  `no-target` = the in-flight turn had NO reply-to route (a turn that wasn't formed from a companion
+ *  inbound / proactive-home submit) ⇒ chat_reply delivers NOWHERE (never broadcasts, never guesses). */
 export type DeliverResult =
   | { delivered: true; chunks: number }
-  | { delivered: false; reason: "unknown-session" | "no-adapter" | "send-failed" };
+  | { delivered: false; reason: "unknown-session" | "no-adapter" | "send-failed" | "no-target" };
 
 /** The result of routing one inbound message. */
 export type InboundResult =

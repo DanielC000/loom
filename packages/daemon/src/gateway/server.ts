@@ -799,9 +799,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // posture as the bindings/allowlist/config human-only writers. ATOMIC: spawn a long-lived assistant
   // session on the chosen rig (default = the bundled "Companion" agent), create the config row bound to that
   // NEW session (token encrypted via envelope IF a botToken is given; no token ⇒ IN-APP-ONLY, the default),
-  // write the session's single bindings-authoritative route (the Telegram dm route when botToken+allowedChatId
-  // are given, else the default in-app route — companion_bindings is one-per-session), and arm the running
-  // companion via reconcile() (Telegram adapter armed ONLY when a token exists).
+  // write the session's bindings-authoritative route(s) — the in-app route ALWAYS, plus the Telegram dm route
+  // when botToken+allowedChatId are given (companion_bindings is multi-channel: one binding per channel), and
+  // arm the running companion via reconcile() (Telegram adapter armed ONLY when a token exists).
   // ROLLBACK (load-bearing): any post-spawn write failure TEARS DOWN the spawned session so no orphan is
   // left. Returns the MASKED companion (never the plaintext token). ---
   app.post("/api/companion/provision", async (req, reply) => {
@@ -907,18 +907,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         enabled,
         provisioned: true, // origin marker — delete-companion retires THIS session (teardown symmetry)
       });
-      // (c) the session's SINGLE authoritative binding (companion_bindings is ONE-per-session — `session_id`
-      // is the PK, and the gateway's bindingsBySession map is 1:1). A companion with a Telegram token binds
-      // its Telegram dm route (its external reach); otherwise the default IN-APP route (chatId == the session
-      // id, loopback-authenticated — the cockpit chat panel). Both go through the SAME human-only bindings/
-      // authz path (db.upsertCompanionBinding). CONSTRAINT (flagged up): the one-per-session invariant means a
-      // Telegram companion is reachable over Telegram, NOT ALSO the in-app cockpit panel — a dual-channel
-      // (in-app + Telegram) companion would require a bindings multimap (a load-bearing change to the routing/
-      // authz table, out of scope for this card).
+      // (c) the session's authoritative binding(s). companion_bindings is now MULTI-CHANNEL (one binding per
+      // session PER channel), so a Telegram companion is reachable over Telegram AND the in-app cockpit panel
+      // at once. Write the IN-APP route ALWAYS (chatId == the session id, loopback-authenticated — the cockpit
+      // chat panel), and ADDITIVELY the Telegram dm route when a token + chat are given (its external reach).
+      // Both go through the SAME human-only bindings/authz path (db.upsertCompanionBinding, keyed on
+      // (session_id, channel)), so the Telegram write NEVER clobbers the in-app one.
+      deps.db.upsertCompanionBinding({ sessionId, channel: IN_APP_CHANNEL, chatId: sessionId, scope: "dm" });
       if (botToken && allowedChatId) {
         deps.db.upsertCompanionBinding({ sessionId, channel, chatId: allowedChatId, scope: "dm" });
-      } else {
-        deps.db.upsertCompanionBinding({ sessionId, channel: IN_APP_CHANNEL, chatId: sessionId, scope: "dm" });
       }
       if (home) deps.db.setCompanionHome(home);
       // (d) arm the running companion — reconcile builds the gateway from the bindings above; the Telegram

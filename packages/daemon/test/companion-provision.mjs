@@ -187,13 +187,15 @@ try {
     check("telegram: the stored blob decrypts internally back to the exact token", decryptSecret(row.botTokenBlob) === TOKEN);
     check("telegram: config row provisioned + enabled + telegram channel", row.provisioned === true && row.enabled === true && row.channel === TELEGRAM);
 
-    // One-binding-per-session (companion_bindings PK is session_id): a Telegram companion's single
-    // authoritative route is the Telegram dm binding (a dual-channel in-app+Telegram companion would need a
-    // bindings multimap — out of scope). Assert the Telegram binding is written as THE session's binding.
+    // MULTI-CHANNEL (companion_bindings keyed on (session_id, channel)): a Telegram companion is reachable
+    // over Telegram AND the in-app cockpit at once, so provision-with-token writes BOTH bindings — the
+    // in-app one is NOT clobbered by the Telegram write.
     const binds = rig.db.listCompanionBindings().filter((b) => b.sessionId === sid);
-    check("telegram: the session has exactly ONE binding (one-per-session invariant)", binds.length === 1);
-    const tgBind = binds[0];
-    check("telegram: the Telegram dm binding is written { telegram, chat-9, dm }", tgBind.channel === TELEGRAM && tgBind.chatId === "chat-9" && tgBind.scope === "dm");
+    check("telegram: the session has BOTH bindings (in-app + telegram)", binds.length === 2);
+    const tgBind = binds.find((b) => b.channel === TELEGRAM);
+    const inAppBind = binds.find((b) => b.channel === IN_APP_CHANNEL);
+    check("telegram: the Telegram dm binding is written { telegram, chat-9, dm }", !!tgBind && tgBind.chatId === "chat-9" && tgBind.scope === "dm");
+    check("telegram: the in-app binding coexists (not clobbered) { in-app, chatId==sessionId, dm }", !!inAppBind && inAppBind.chatId === sid && inAppBind.scope === "dm");
 
     check("telegram: the Telegram adapter is ARMED (started)", rig.gw.built.length === 1 && rig.gw.built[0].telegram && rig.gw.built[0].telegram.started === 1);
     check("telegram: heartbeat armed (cadence>0)", rig.hb.built.length === 1 && rig.hb.built[0].started === 1);
@@ -292,7 +294,10 @@ try {
     db.upsertCompanionBinding({ sessionId: sid, channel: IN_APP_CHANNEL, chatId: sid, scope: "dm" });
     db.upsertCompanionBinding({ sessionId: "sess-tg", channel: TELEGRAM, chatId: "chat-x", scope: "dm" });
     const cfg = { botToken: null, allowedChatId: "", sessionId: sid, chatScope: "dm", homeChannel: IN_APP_CHANNEL, homeChatId: sid, heartbeatIntervalMinutes: 0, heartbeatPrompt: "x" };
-    const gw = createCompanionGateway(cfg, () => ({ delivered: true }), db, inApp);
+    // 5th arg = the per-turn origin resolver (stands in for pty.getActiveTurnOrigin): each session's turn came
+    // in on its own route, so deliverReply targets that channel — proving adapter PRESENCE (in-app yes, telegram no).
+    const originResolver = (s) => (s === sid ? { channel: IN_APP_CHANNEL, chatId: sid } : s === "sess-tg" ? { channel: TELEGRAM, chatId: "chat-x" } : null);
+    const gw = createCompanionGateway(cfg, () => ({ delivered: true }), db, inApp, originResolver);
     const inAppOut = await gw.deliverReply(sid, "hi"); // in-app adapter registered ⇒ delivered
     const tgOut = await gw.deliverReply("sess-tg", "hi"); // NO telegram adapter ⇒ no-adapter
     check("factory: tokenless gateway registers the in-app adapter (reply delivered)", inAppOut.delivered === true);

@@ -35,7 +35,7 @@ import { CompanionHeartbeatWatcher, type HeartbeatPty } from "./heartbeat.js";
 import { resolveEffectiveConfig } from "./store.js";
 import { normalizeInAppMessage, type InAppChannel } from "./in-app.js";
 import type { CompanionConfig } from "./config.js";
-import type { DeliverResult, InboundResult, SessionBinding, SubmitTurn } from "./types.js";
+import type { CompanionRoute, DeliverResult, InboundResult, SessionBinding, SubmitTurn } from "./types.js";
 
 /** The minimal lifecycle handle the controller needs from a heartbeat watcher (satisfied by
  *  CompanionHeartbeatWatcher; narrowed so a test can inject a spy). */
@@ -86,6 +86,11 @@ export interface CompanionControllerDeps {
    *  so every built gateway registers its adapter (outbound in-app delivery) — see createCompanionGateway.
    *  Optional: absent ⇒ no in-app channel is registered (Telegram-only / test seams). */
   inApp?: InAppChannel;
+  /** The per-turn ORIGIN resolver (multi-channel reply routing) threaded into the default gateway builder —
+   *  the daemon injects `(sid) => pty.getActiveTurnOrigin(sid)` so chat_reply delivers to the in-flight
+   *  turn's originating route. Optional: absent ⇒ deliverReply has no target (test seams that don't exercise
+   *  reply routing). */
+  originResolver?: (sessionId: string) => CompanionRoute | null;
   /** Envelope key-file override (test seam only). */
   keyPath?: string;
   /** Build the gateway for an effective config (test seam — defaults to createCompanionGateway with the
@@ -247,7 +252,7 @@ export class CompanionController implements CompanionControl {
     // injected buildGateway test seam supplies its own). The hub is stable across rebuilds — see in-app.ts.
     const build =
       this.deps.buildGateway ??
-      ((c: CompanionConfig, submit: SubmitTurn, db: typeof this.deps.db) => createCompanionGateway(c, submit, db, this.deps.inApp));
+      ((c: CompanionConfig, submit: SubmitTurn, db: typeof this.deps.db) => createCompanionGateway(c, submit, db, this.deps.inApp, this.deps.originResolver));
     this.gateway = build(cfg, this.deps.submitTurn, this.deps.db);
     this.gateway.start();
   }

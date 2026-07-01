@@ -7,16 +7,23 @@
  *      `handleInbound`, which ALLOWLISTS by (channel, chatId) → the bound session and submits the body as
  *      a TURN via the EXISTING pty primitive (`SubmitTurn` = pty.enqueueStdin) — we do NOT re-implement
  *      turn submission (busy-gating / composer-defer / FIFO coalesce / rate-limit park all live there);
- *   3. OUTBOUND delivery — `deliverReply(sessionId, text)` resolves the session's bound adapter + chat id
- *      and sends the reply OUT. It NEVER submits a turn (that would loop the reply back into the agent).
+ *   3. OUTBOUND delivery — `deliverReply(sessionId, text)` sends the reply OUT on the ORIGINATING route of the
+ *      session's IN-FLIGHT turn (a session may be reachable on several channels at once — in-app + Telegram).
+ *      The route is resolved PURELY from the pty's per-turn origin (injected `originResolver`) — the pty pins
+ *      it when the turn is formed (a companion inbound, or a proactive/heartbeat submit carrying the home
+ *      route), and route-keyed coalescing guarantees each turn has EXACTLY ONE route. So a reply always goes
+ *      back to the channel of the turn it answers — cross-delivery is impossible by construction. A turn with
+ *      NO route delivers NOWHERE (`no-target`); it NEVER broadcasts and NEVER submits a turn (would loop back).
  *
  * SECURITY (owner standing rule): every inbound chat message is UNTRUSTED DATA / a prompt-injection vector.
- * The spike allowlists to a SINGLE binding designed in — any (channel, chatId) with no binding is rejected
- * and never submitted. Ingested text is handed to the agent as a turn (data it reads), never interpreted as
- * an instruction to the gateway. The binding map is the seam the identity/auth card (5e574ca9) extends.
+ * Routing is BINDINGS-AUTHORITATIVE — any (channel, chatId) with no binding is rejected and never submitted;
+ * a session may hold up to one binding PER channel, but the (channel, chatId) route stays globally unique so
+ * inbound is never ambiguous. Ingested text is handed to the agent as a turn (data it reads), never
+ * interpreted as an instruction to the gateway.
  */
 import type {
   ChannelAdapter,
+  CompanionRoute,
   DeliverResult,
   InboundMessage,
   InboundResult,
@@ -60,7 +67,12 @@ export function chunkText(text: string, max: number): string[] {
 
 export class ChatGateway {
   private readonly adapters = new Map<string, ChannelAdapter>();
-  private readonly bindingsBySession = new Map<string, SessionBinding>();
+  /**
+   * MULTI-CHANNEL routing map: session id → its bindings, up to ONE per channel (in-app + Telegram
+   * coexist). Keyed by session so deliverReply/unbind are O(1) by session; the per-(channel,chatId) route
+   * stays globally unique (the db route index), so bindingForInbound still resolves to exactly one binding.
+   */
+  private readonly bindingsBySession = new Map<string, SessionBinding[]>();
 
   /**
    * @param submitTurn  the injected pty turn-submit primitive (kept db-free — see SubmitTurn).
@@ -71,20 +83,23 @@ export class ChatGateway {
    * @param pairing     the injected DM-pairing coordinator (Companion DM-pairing). Defaults to the no-op
    *                    (redemption never fires ⇒ every existing construction is byte-identical); the daemon
    *                    injects the db-backed impl.
-   * @param homeResolver  the injected proactive HOME-channel resolver (card 9488951e). Returns the
-   *                    configured companion home {channel, chatId} or null. Used by deliverReply as a
-   *                    FALLBACK when a session has NO binding (a proactive/heartbeat turn still reaches the
-   *                    owner). Defaults to undefined (no fallback ⇒ every existing construction is
-   *                    byte-identical); the daemon injects `() => db.getCompanionHome()`.
+   * @param originResolver  the injected PER-TURN ORIGIN resolver (multi-channel reply routing). Given a
+   *                    sessionId, returns the {channel, chatId} the session's IN-FLIGHT turn originated from
+   *                    (the pty host pins it when the turn is formed — from a companion inbound, or a
+   *                    proactive/heartbeat submit carrying the home route), or null. deliverReply targets
+   *                    EXACTLY this route — so a reply always goes back to the channel of the turn it answers,
+   *                    never a shared/guessed channel and never cross-delivered under interleaved inbounds.
+   *                    Defaults to undefined (⇒ no target ⇒ deliverReply returns `no-target`); the daemon
+   *                    injects `(sid) => pty.getActiveTurnOrigin(sid)`.
    */
   constructor(
     private readonly submitTurn: SubmitTurn,
     bindings: SessionBinding[] = [],
     private readonly auth: CompanionAuth = allowIfDmMatch(),
     private readonly pairing: CompanionPairing = noPairing(),
-    private readonly homeResolver: (() => { channel: string; chatId: string } | null) | undefined = undefined,
+    private readonly originResolver: ((sessionId: string) => CompanionRoute | null) | undefined = undefined,
   ) {
-    for (const b of bindings) this.bindingsBySession.set(b.sessionId, b);
+    for (const b of bindings) this.addBinding(b);
   }
 
   /** Register a channel adapter under its `name` (later channels register the same way — no core change). */
@@ -93,20 +108,40 @@ export class ChatGateway {
   }
 
   /** Seed / replace a session↔chat binding — keeps the live in-memory routing map in sync with a durable
-   *  db write (the admin REST POST calls this so a new/edited binding takes effect with no restart). */
+   *  db write (the admin REST POST calls this so a new/edited binding takes effect with no restart). A
+   *  binding on a NEW channel is ADDED alongside the session's others; a re-bind of the SAME channel
+   *  replaces that channel's entry in place (mirrors the db upsert on (session_id, channel)). */
   bind(binding: SessionBinding): void {
-    this.bindingsBySession.set(binding.sessionId, binding);
+    this.addBinding(binding);
   }
 
-  /** Remove a session's binding from the live routing map (the admin REST DELETE calls this alongside the
-   *  db delete, so a revoked route stops routing immediately — no stale in-memory binding until restart). */
+  /** Remove ALL of a session's bindings from the live routing map (mirrors deleteCompanionBinding, which
+   *  deletes by session_id; the admin REST DELETE calls this so a revoked session stops routing immediately
+   *  — no stale in-memory binding until restart). */
   unbind(sessionId: string): void {
     this.bindingsBySession.delete(sessionId);
   }
 
+  /** Insert-or-replace a binding into the session's array, one entry per channel (the (session, channel)
+   *  upsert semantics, in memory). */
+  private addBinding(binding: SessionBinding): void {
+    const arr = this.bindingsBySession.get(binding.sessionId);
+    if (!arr) {
+      this.bindingsBySession.set(binding.sessionId, [binding]);
+      return;
+    }
+    const i = arr.findIndex((b) => b.channel === binding.channel);
+    if (i >= 0) arr[i] = binding;
+    else arr.push(binding);
+  }
+
+  /** Resolve the ONE binding for an inbound (channel, chatId). The db route index is UNIQUE per
+   *  (channel, chat_id), so at most one binding across ALL sessions matches — no inbound ambiguity. */
   private bindingForInbound(channel: string, chatId: string): SessionBinding | undefined {
-    for (const b of this.bindingsBySession.values()) {
-      if (b.channel === channel && b.chatId === chatId) return b;
+    for (const arr of this.bindingsBySession.values()) {
+      for (const b of arr) {
+        if (b.channel === channel && b.chatId === chatId) return b;
+      }
     }
     return undefined;
   }
@@ -162,7 +197,10 @@ export class ChatGateway {
     }
     let submit: { delivered: boolean; position?: number };
     try {
-      submit = this.submitTurn(binding.sessionId, msg.body);
+      // Submit WITH the originating route {channel, chatId}: the pty pins it to the formed turn so the
+      // agent's chat_reply resolves back to THIS chat (multi-channel routing). The route is the AUTHENTICATED
+      // inbound's own (channel, chatId) — never a body-supplied one.
+      submit = this.submitTurn(binding.sessionId, msg.body, { channel: msg.channel, chatId: msg.chatId });
     } catch (err) {
       // The submit primitive (pty.enqueueStdin) can THROW: its fail-loud M1/M2 guards, or realistically
       // `submit()`'s pty.write() throwing when the bound session's pty dies in the window between the
@@ -206,20 +244,19 @@ export class ChatGateway {
   }
 
   /**
-   * OUTBOUND. Route the agent's chat_reply(text) back OUT to the chat bound to `sessionId`. NEVER submits a
-   * turn (that would loop back in). Chunks a long reply to the adapter's max length so it can't throw on a
-   * platform cap. Returns a STRUCTURED result on every failure (unknown session / no adapter / send threw)
-   * — the chat_reply MCP handler stays symmetric and never throws out.
+   * OUTBOUND. Route the agent's chat_reply(text) back OUT for `sessionId`. `replyTarget` picks the ONE
+   * channel (single binding, else the proactive home) — never a broadcast, never a cross-wire. NEVER submits
+   * a turn (that would loop back in). Chunks a long reply to the adapter's max length so it can't throw on a
+   * platform cap. Returns a STRUCTURED result on every failure (unknown session / no adapter / send threw) —
+   * the chat_reply MCP handler stays symmetric.
    */
   async deliverReply(sessionId: string, text: string): Promise<DeliverResult> {
-    // Binding WINS when present (inbound-reply routing unchanged). With NO binding, FALL BACK to the
-    // configured companion HOME (card 9488951e) so a PROACTIVE/heartbeat turn on an unbound session still
-    // reaches the owner. No binding + no home ⇒ unknown-session (byte-identical to the pre-fallback path).
-    const binding = this.bindingsBySession.get(sessionId);
-    const target = binding
-      ? { channel: binding.channel, chatId: binding.chatId }
-      : this.resolveHome();
-    if (!target) return { delivered: false, reason: "unknown-session" };
+    // PURELY per-turn-route: the target is the ORIGINATING route of the session's in-flight turn (the pty
+    // pinned it when the turn was formed). NO binding-based / home fallback and NO broadcast — a turn with no
+    // reply-to route (not formed from a companion inbound / proactive-home submit) delivers NOWHERE. This is
+    // what makes cross-delivery impossible by construction: the reply can only go where the turn came from.
+    const target = this.replyTarget(sessionId);
+    if (!target) return { delivered: false, reason: "no-target" };
     const adapter = this.adapters.get(target.channel);
     if (!adapter) return { delivered: false, reason: "no-adapter" };
     const parts = adapter.maxMessageLength ? chunkText(text, adapter.maxMessageLength) : [text];
@@ -232,10 +269,15 @@ export class ChatGateway {
     }
   }
 
-  /** The configured companion home {channel, chatId} or null — the proactive deliverReply fallback.
-   *  A throwing resolver degrades to null (never breaks a reply path). */
-  private resolveHome(): { channel: string; chatId: string } | null {
-    try { return this.homeResolver?.() ?? null; } catch { return null; }
+  /**
+   * The reply target for `sessionId`: the ORIGINATING route of its IN-FLIGHT turn, via the injected
+   * originResolver (pty.getActiveTurnOrigin). null ⇒ no reply-to route for this turn ⇒ deliverReply delivers
+   * nowhere (`no-target`). A throwing resolver degrades to null (never breaks a reply path). This is the
+   * SOLE reply-target source — no binding/home guessing — so an interleaved cross-route inbound can never
+   * redirect an in-flight turn's reply (the route is pinned per-turn in the pty, not read from a shared field).
+   */
+  private replyTarget(sessionId: string): CompanionRoute | null {
+    try { return this.originResolver?.(sessionId) ?? null; } catch { return null; }
   }
 
   /** Start every registered adapter (called after the daemon's server is listening). */

@@ -30,11 +30,20 @@ export function framedHeartbeat(prompt: string): string {
   return `${HEARTBEAT_TAG} ${prompt}`;
 }
 
-/** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
+/** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). The
+ *  enqueueStdin signature MIRRORS PtyHost.enqueueStdin (source/onDeliver/route optional) so the real pty is
+ *  assignable directly; the watcher only uses the leading args + the trailing `route` (the HOME route it
+ *  pins on the proactive turn, so its chat_reply flows out on the home channel via the per-turn-route path). */
 export interface HeartbeatPty {
   isAlive(sessionId: string): boolean;
   /** Submit text as a turn if the session is idle, else queue it FIFO (drains on the next Stop). */
-  enqueueStdin(sessionId: string, text: string): { delivered: boolean; position?: number };
+  enqueueStdin(
+    sessionId: string,
+    text: string,
+    source?: "human" | "system",
+    onDeliver?: () => void,
+    route?: { channel: string; chatId: string },
+  ): { delivered: boolean; position?: number };
   /** The session's queued message texts (FIFO) — the no-stacking guard checks for an unconsumed heartbeat. */
   getPending(sessionId: string): string[];
 }
@@ -98,10 +107,13 @@ export class CompanionHeartbeatWatcher {
       return;
     }
 
-    // Fire: enqueue ONE framed proactive turn. If the session is busy, enqueueStdin queues it FIFO (the
-    // no-stacking guard above ensures at most one pending). Record lastFiredAt + emit the durable event.
-    // A real fire ends the current defer streak, re-arming the next streak's single deferred emit.
-    this.deps.pty.enqueueStdin(this.deps.sessionId, framedHeartbeat(this.deps.prompt));
+    // Fire: enqueue ONE framed proactive turn, CARRYING the configured HOME route so the turn's chat_reply
+    // delivers to the home channel via the per-turn-route path (multi-channel routing). No home configured ⇒
+    // no route ⇒ a proactive reply has nowhere to go (chat_reply → no-target), which is correct. If the
+    // session is busy, enqueueStdin queues it FIFO (the no-stacking guard above ensures at most one pending).
+    // Record lastFiredAt + emit the durable event. A real fire ends the current defer streak.
+    const home = this.deps.db.getCompanionHome();
+    this.deps.pty.enqueueStdin(this.deps.sessionId, framedHeartbeat(this.deps.prompt), "system", undefined, home ?? undefined);
     this.lastFiredAt = now.getTime();
     this.deferredSinceLastFire = false;
     this.emit(now, "companion_heartbeat_fired", { intervalMinutes: this.deps.intervalMinutes });

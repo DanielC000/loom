@@ -3,7 +3,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // injected pty-slice + a REAL Db on an explicit temp file, so the tick tests use RECORDING STUBS and drive
 // tick() directly. Covers: due live-fire (framed [loom:heartbeat] + lastFiredAt + fired-event), cadence
 // not-due, rate-limit PARK defer, not-live skip (never resumes), no pending-heartbeat stacking, DEFAULT-OFF
-// (0 cadence never fires + config default), and the deliverReply HOME fallback (unbound→home, bound→binding).
+// (0 cadence never fires + config default), the heartbeat CARRYING the HOME route on its submitted turn, and
+// the per-turn-route deliverReply (route present → delivered there; no route → no-target).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -35,13 +36,15 @@ function makeEnv(opts = {}) {
     createdAt: now, lastActivity: now, lastError: null, role: "assistant",
   });
   if (opts.parked) db.setRateLimitedUntil(sessId, new Date(Date.now() + 3_600_000).toISOString(), "usage limit");
+  if (opts.home) db.setCompanionHome(opts.home); // configure the proactive HOME the heartbeat pins as its route
 
   const alive = new Set(opts.notLive ? [] : [sessId]); // isAlive source of truth
-  const enqueued = [];   // { sessionId, text } — permanent record of every enqueue
+  const enqueued = [];   // { sessionId, text, route } — permanent record of every enqueue (route = 5th arg)
   let pendingQueue = []; // mutable "unconsumed" FIFO getPending returns; a test clears it to simulate consumption
   const pty = {
     isAlive: (id) => alive.has(id),
-    enqueueStdin: (id, text) => { enqueued.push({ sessionId: id, text }); pendingQueue.push(text); return { delivered: false, position: pendingQueue.length }; },
+    // Mirror PtyHost.enqueueStdin's shape (source, onDeliver, route); the watcher passes ("system", undefined, home).
+    enqueueStdin: (id, text, _source, _onDeliver, route) => { enqueued.push({ sessionId: id, text, route }); pendingQueue.push(text); return { delivered: false, position: pendingQueue.length }; },
     getPending: (id) => (id === sessId ? pendingQueue : []),
   };
   const watcher = new CompanionHeartbeatWatcher({ db, pty, sessionId: sessId, intervalMinutes: opts.intervalMinutes ?? INTERVAL_MIN, prompt: PROMPT });
@@ -184,42 +187,43 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
   check("prompt: an env override wins", readCompanionConfig({ ...base, LOOM_COMPANION_HEARTBEAT_PROMPT: "hi" }).heartbeatPrompt === "hi");
 }
 
-// --- 7. deliverReply HOME fallback: unbound→home, bound→binding, unbound+no-home→unknown ---
+// --- 7. The heartbeat carries the HOME route on its turn → per-turn-route deliverReply → HOME ---
 {
   const fakeAdapter = (name, sent) => ({ name, maxMessageLength: 4096, start() {}, async stop() {}, async send(chatId, text) { sent.push({ chatId, text }); } });
   const noopSubmit = () => ({ delivered: true });
+  const home = { channel: "telegram", chatId: "home-chat" };
 
-  // (a) Unbound session + configured home → delivers to the HOME {channel, chatId}.
+  // (a) With a configured HOME, a fired heartbeat carries it as the turn's ROUTE (so the turn's chat_reply
+  //     later resolves to home via the pty's per-turn origin — no special-case in deliverReply).
   {
-    const sent = [];
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, () => ({ channel: "telegram", chatId: "home-chat" }));
-    gw.registerAdapter(fakeAdapter("telegram", sent));
-    const res = await gw.deliverReply("unbound-session", "proactive hello");
-    check("home-fallback: an unbound proactive reply is delivered", res.delivered === true);
-    check("home-fallback: it lands on the configured home chat", sent.length === 1 && sent[0].chatId === "home-chat" && sent[0].text === "proactive hello");
+    const e = makeEnv({ home });
+    e.watcher.tick(new Date());
+    check("home-route: the fired heartbeat carries the HOME route", e.enqueued.length === 1 && JSON.stringify(e.enqueued[0].route) === JSON.stringify(home));
+    cleanupEnv(e);
   }
 
-  // (b) Bound session → delivers to its BINDING (home is not consulted).
+  // (b) With NO home configured, the heartbeat carries NO route (a proactive reply then has nowhere to go).
   {
-    const sent = [];
-    const binding = { sessionId: "bound-session", channel: "telegram", chatId: "bound-chat", scope: "dm" };
-    const gw = new ChatGateway(noopSubmit, [binding], undefined, undefined, () => ({ channel: "telegram", chatId: "home-chat" }));
-    gw.registerAdapter(fakeAdapter("telegram", sent));
-    const res = await gw.deliverReply("bound-session", "reply");
-    check("bound-wins: a bound reply routes to the binding, not home", res.delivered === true && sent.length === 1 && sent[0].chatId === "bound-chat");
+    const e = makeEnv(); // no home
+    e.watcher.tick(new Date());
+    check("home-route: no home configured ⇒ the heartbeat carries no route", e.enqueued.length === 1 && e.enqueued[0].route === undefined);
+    cleanupEnv(e);
   }
 
-  // (c) Unbound + NO home resolver → unknown-session (byte-identical to the pre-fallback behavior).
+  // (c) deliverReply for that turn routes to the pinned origin (home): the injected origin resolver returns
+  //     the home route ⇒ delivered there. No route ⇒ no-target, nothing sent.
   {
     const sent = [];
-    const gw = new ChatGateway(noopSubmit, []); // no homeResolver
+    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, (sid) => (sid === "hb-sess" ? home : null));
     gw.registerAdapter(fakeAdapter("telegram", sent));
-    const res = await gw.deliverReply("nobody", "x");
-    check("no-home: unbound + no home → unknown-session, nothing sent", res.delivered === false && res.reason === "unknown-session" && sent.length === 0);
+    const res = await gw.deliverReply("hb-sess", "proactive hello");
+    check("per-turn-route: a proactive reply on the home-routed turn lands on the HOME chat", res.delivered === true && sent.length === 1 && sent[0].chatId === "home-chat" && sent[0].text === "proactive hello");
+    const none = await gw.deliverReply("no-route-sess", "x");
+    check("per-turn-route: a turn with no route → no-target, nothing sent", none.delivered === false && none.reason === "no-target" && sent.length === 1);
   }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — CompanionHeartbeatWatcher fires due/live, defers under park, skips stopped, never stacks, stays OFF at 0 cadence; deliverReply falls back to home for an unbound session while a binding still wins."
+  ? "\n✅ ALL PASS — CompanionHeartbeatWatcher fires due/live, defers under park, skips stopped, never stacks, stays OFF at 0 cadence, and carries the configured HOME route on its proactive turn so its chat_reply flows to home via the per-turn-route path (no route ⇒ no-target)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

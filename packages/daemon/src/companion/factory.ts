@@ -13,7 +13,7 @@ import { createDbCompanionPairing, type PairingStore } from "./pairing.js";
 import type { CompanionConfig } from "./config.js";
 import { createTelegramAdapter, TELEGRAM_CHANNEL } from "./telegram.js";
 import type { InAppChannel } from "./in-app.js";
-import type { SessionBinding, SubmitTurn } from "./types.js";
+import type { CompanionRoute, SessionBinding, SubmitTurn } from "./types.js";
 import type { CompanionBinding } from "@loom/shared";
 
 /** The narrow db surface the factory needs: the durable binding store + the allowlist reader (for authz)
@@ -21,7 +21,8 @@ import type { CompanionBinding } from "@loom/shared";
 export interface CompanionBindingStore extends AllowlistReader, PairingStore {
   listCompanionBindings(): CompanionBinding[];
   upsertCompanionBinding(input: { sessionId: string; channel: string; chatId: string; scope?: "dm" | "group" }): CompanionBinding;
-  /** The proactive HOME channel target (card 9488951e) — the deliverReply fallback for an unbound session. */
+  /** The proactive HOME channel target (card 9488951e) — carried explicitly on the heartbeat's submitted
+   *  turn (as its per-turn route), not consulted by deliverReply. */
   getCompanionHome(): { channel: string; chatId: string } | null;
 }
 
@@ -30,7 +31,13 @@ function toSessionBinding(b: CompanionBinding): SessionBinding {
   return { sessionId: b.sessionId, channel: b.channel, chatId: b.chatId, scope: b.scope };
 }
 
-export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitTurn, db: CompanionBindingStore, inApp?: InAppChannel): ChatGateway {
+/**
+ * Build the ChatGateway. `originResolver` (multi-channel reply routing) resolves a session's in-flight turn
+ * origin — the daemon injects `(sid) => pty.getActiveTurnOrigin(sid)` so chat_reply delivers to the exact
+ * route of the turn it answers. Undefined ⇒ deliverReply has no target (`no-target`); test seams that don't
+ * exercise chat_reply routing may omit it.
+ */
+export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitTurn, db: CompanionBindingStore, inApp?: InAppChannel, originResolver?: (sessionId: string) => CompanionRoute | null): ChatGateway {
   // Load durable bindings. BOOTSTRAP: an empty store + present env config seeds ONE binding (the
   // single-owner env path). The DM authz rule means the owner works with no allowlist row; a group scope
   // (LOOM_COMPANION_CHAT_SCOPE=group) seeds a group binding to which senders are added over REST. This
@@ -47,10 +54,10 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // DM-pairing coordinator: the db-backed redemption path with the real wall clock (epoch ms). Default
   // rate-limit/lockout policy (5 attempts / 10-min window / 15-min lockout) — tests inject a fake clock.
   const pairing = createDbCompanionPairing(db, { now: () => Date.now() });
-  // Home-channel fallback (card 9488951e): a proactive/heartbeat turn on an unbound session still reaches
-  // the owner via the configured companion home. Read LIVE (a human REST PUT /api/companion/home takes
-  // effect with no restart), like the binding routing map.
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, () => db.getCompanionHome());
+  // Per-turn ORIGIN resolver (multi-channel reply routing): deliverReply targets the in-flight turn's
+  // originating route (pty.getActiveTurnOrigin, injected). NOT the old home fallback — a proactive/heartbeat
+  // turn now carries the home route ON its submit, so its chat_reply flows through the SAME per-turn path.
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver);
   // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
   // arms NO Telegram long-poll: the gateway comes up with the in-app adapter alone (registered below), so no
   // external network transport is started and default-OFF stays byte-identical. The adapter normalizes each

@@ -374,25 +374,31 @@ CREATE TABLE IF NOT EXISTS preset_prompt_suggestions (
 CREATE INDEX IF NOT EXISTS idx_preset_prompt_suggestions_position ON preset_prompt_suggestions(position);
 -- Companion authorization layer (Companion epic Phase 1). Durable session↔chat bindings + per-binding
 -- allowlisted senders — the security store that decides WHICH human may reach a chat-native companion
--- session. Brand-new tables ⇒ each CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER,
--- no migrateX() PRAGMA-diff), exactly like preset_prompts / api_keys: an existing DB simply gains two
--- empty tables on next boot, and an UNCONFIGURED daemon (no LOOM_COMPANION_BOT_TOKEN) never writes a row
--- — default-OFF stays byte-identical. HUMAN-managed only (loopback REST); there is intentionally NO MCP
--- path (an injection-exposed companion agent must never authorize senders for itself).
---   • bindings: at most ONE session per (channel, chat_id) route — the UNIQUE index below enforces it, so
---     a second session claiming a bound route is rejected at the db. scope selects the authz rule
---     ('dm' = single-owner (channel,chat_id) match; 'group' = require an allowlisted sender).
+-- session. The allowlist table is a brand-new table ⇒ its CREATE TABLE IF NOT EXISTS is itself the
+-- additive migration; the bindings table needed a TABLE-REBUILD migration (session_id: PK → non-unique) to
+-- go MULTI-CHANNEL — see migrateCompanionBindings(). An UNCONFIGURED daemon (no LOOM_COMPANION_BOT_TOKEN)
+-- never writes a row — default-OFF stays byte-identical. HUMAN-managed only (loopback REST); there is
+-- intentionally NO MCP path (an injection-exposed companion agent must never authorize senders for itself).
+--   • bindings: MULTI-CHANNEL — a session may hold up to ONE binding PER channel (the UNIQUE
+--     (session_id, channel) index is the upsert key), so an in-app + a Telegram binding coexist for the
+--     SAME companion. Routing stays unambiguous: at most ONE session per (channel, chat_id) route — the
+--     UNIQUE route index below is UNCHANGED, so a chat still maps to exactly one session (no inbound
+--     ambiguity), and a second session claiming a bound route is rejected at the db. scope selects the
+--     authz rule ('dm' = single-owner (channel,chat_id) match; 'group' = require an allowlisted sender),
+--     applied PER binding (per channel) independently.
+-- session_id is NON-unique (no PRIMARY KEY — the rebuild dropped it); the table is a plain rowid table.
 -- The identifying route columns are NOT NULL: SQLite treats NULLs as DISTINCT in a UNIQUE index, so a
--- NULL route would slip the one-session-per-route guard — NOT NULL makes it airtight at the schema
--- (unreachable today: REST validates non-blank + callers pass non-blank, but the guard holds regardless).
+-- NULL route/channel would slip the unique guards — NOT NULL makes them airtight at the schema
+-- (unreachable today: REST validates non-blank + callers pass non-blank, but the guards hold regardless).
 CREATE TABLE IF NOT EXISTS companion_bindings (
-  session_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
   channel TEXT NOT NULL,
   chat_id TEXT NOT NULL,
   scope TEXT NOT NULL DEFAULT 'dm',
   created_at TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_bindings_route ON companion_bindings(channel, chat_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_bindings_session_channel ON companion_bindings(session_id, channel);
 --   • allowed_senders: the per-binding group allowlist — one row per identified human who may post to a
 --     GROUP-scoped binding. UNIQUE per (session_id, channel, sender_id) so a re-add is an upsert, not a dup;
 --     those identifying columns are NOT NULL for the same airtight-unique-index reason as the bindings route.
@@ -663,6 +669,7 @@ export class Db {
     this.migrateSchedules();
     this.migrateRuns();
     this.migrateCompanionConfig();
+    this.migrateCompanionBindings();
   }
 
   /**
@@ -845,6 +852,43 @@ export class Db {
     for (const [name, type] of Object.entries(COMPANION_CONFIG_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE companion_config ADD COLUMN ${name} ${type}`);
     }
+  }
+
+  /**
+   * One-shot TABLE-REBUILD migration: make companion_bindings MULTI-CHANNEL by dropping the legacy
+   * `session_id PRIMARY KEY` so a session may hold up to one binding PER channel (in-app + Telegram at
+   * once). SQLite cannot drop a PRIMARY KEY via ALTER, so this copies rows into a PK-free table, drops the
+   * old, and renames — losslessly. Runs AFTER exec(SCHEMA) (so a fresh DB already has the new PK-free
+   * shape and this no-ops) and inside a transaction (a failure rolls back to the legacy schema).
+   *
+   * GUARD (idempotent): fires ONLY when the legacy PRIMARY KEY is still present — detected via
+   * PRAGMA table_info, where the `pk` marker on `session_id` is >0 on the old schema and 0 once rebuilt.
+   * After the rebuild the UNIQUE route index (channel, chat_id) — UNCHANGED, still one-session-per-route —
+   * and the NEW UNIQUE (session_id, channel) upsert key are recreated (DROP TABLE dropped the originals).
+   */
+  private migrateCompanionBindings(): void {
+    const cols = this.db.prepare("PRAGMA table_info(companion_bindings)").all() as { name: string; pk: number }[];
+    const sessionCol = cols.find((c) => c.name === "session_id");
+    if (!sessionCol || sessionCol.pk === 0) return; // table absent, or already rebuilt (PK-free) ⇒ no-op
+    this.db.transaction(() => {
+      this.db.exec(`CREATE TABLE companion_bindings_new (
+        session_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        scope TEXT NOT NULL DEFAULT 'dm',
+        created_at TEXT
+      )`);
+      // Copy every legacy row verbatim (old session_id PK ⇒ each session had exactly one binding, so the
+      // new UNIQUE (session_id, channel) can never collide on the copy).
+      this.db.exec(
+        "INSERT INTO companion_bindings_new (session_id, channel, chat_id, scope, created_at) " +
+          "SELECT session_id, channel, chat_id, scope, created_at FROM companion_bindings",
+      );
+      this.db.exec("DROP TABLE companion_bindings"); // drops the old table AND its indexes
+      this.db.exec("ALTER TABLE companion_bindings_new RENAME TO companion_bindings");
+      this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_bindings_route ON companion_bindings(channel, chat_id)");
+      this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_bindings_session_channel ON companion_bindings(session_id, channel)");
+    })();
   }
 
   /** Release the SQLite handle (used by hermetic tests to free the file before cleanup). */
@@ -1135,14 +1179,16 @@ export class Db {
     return (this.db.prepare("SELECT * FROM companion_bindings ORDER BY created_at, rowid").all() as Row[]).map(toCompanionBinding);
   }
   /**
-   * Upsert a binding KEYED ON session_id (one binding per session): a re-bind of the SAME session
-   * updates its route/scope in place. A DIFFERENT session claiming an already-bound (channel, chat_id)
-   * route hits the UNIQUE route index and THROWS (a SqliteError) — at most one session per route, by
-   * construction (the caller/REST surfaces this as a 409). Stamps created_at on first insert; keeps it
-   * on update (ON CONFLICT touches only channel/chat_id/scope). Returns the stored row.
+   * Upsert a binding KEYED ON (session_id, channel) (multi-channel: one binding per session PER channel):
+   * a re-bind of the SAME session on the SAME channel updates its chat_id/scope in place, while a binding
+   * on a DIFFERENT channel is ADDED alongside (so writing a Telegram binding never clobbers the session's
+   * in-app one). A DIFFERENT session claiming an already-bound (channel, chat_id) route hits the UNCHANGED
+   * UNIQUE route index and THROWS (a SqliteError) — still at most one session per route, by construction
+   * (the caller/REST surfaces this as a 409). Stamps created_at on first insert; keeps it on update
+   * (ON CONFLICT touches only chat_id/scope — channel is part of the conflict key). Returns the stored row.
    */
   upsertCompanionBinding(input: { sessionId: string; channel: string; chatId: string; scope?: "dm" | "group" }): CompanionBinding {
-    const existing = this.db.prepare("SELECT created_at FROM companion_bindings WHERE session_id = ?").get(input.sessionId) as Row | undefined;
+    const existing = this.db.prepare("SELECT created_at FROM companion_bindings WHERE session_id = ? AND channel = ?").get(input.sessionId, input.channel) as Row | undefined;
     const createdAt = (existing?.created_at as string) ?? new Date().toISOString();
     const b: CompanionBinding = {
       sessionId: input.sessionId, channel: input.channel, chatId: input.chatId,
@@ -1151,7 +1197,7 @@ export class Db {
     this.db.prepare(
       `INSERT INTO companion_bindings (session_id, channel, chat_id, scope, created_at)
        VALUES (@sessionId, @channel, @chatId, @scope, @createdAt)
-       ON CONFLICT(session_id) DO UPDATE SET channel = @channel, chat_id = @chatId, scope = @scope`,
+       ON CONFLICT(session_id, channel) DO UPDATE SET chat_id = @chatId, scope = @scope`,
     ).run(b);
     return b;
   }

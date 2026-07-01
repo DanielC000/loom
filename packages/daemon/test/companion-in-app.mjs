@@ -54,7 +54,9 @@ const inAppBinding = (sessionId) => ({ sessionId, channel: IN_APP_CHANNEL, chatI
 // --- 2) OUTBOUND chat_reply reaches adapter.send and is FRAMED for the web client ---------------------
 {
   const inApp = new InAppChannel();
-  const gw = new ChatGateway(() => ({ delivered: true }), [inAppBinding("sess-A")]);
+  // deliverReply routes by the in-flight turn's origin (injected resolver, simulating pty.getActiveTurnOrigin):
+  // sess-A's turn came in on in-app/sess-A, so the reply goes to that in-app chat.
+  const gw = new ChatGateway(() => ({ delivered: true }), [inAppBinding("sess-A")], undefined, undefined, (sid) => (sid === "sess-A" ? { channel: IN_APP_CHANNEL, chatId: "sess-A" } : null));
   gw.registerAdapter(inApp.adapter);
 
   // A web client attaches to the in-app chat (chatId == sess-A) — this is the "simulate the WS client".
@@ -108,11 +110,14 @@ const inAppBinding = (sessionId) => ({ sessionId, channel: IN_APP_CHANNEL, chatI
 {
   const inApp = new InAppChannel();
   const submitted = [];
-  const submitSpy = (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; };
+  // FAITHFUL to the real pty: submit PINS the turn's route; the gateway's origin resolver reads it back so
+  // the reply routes to the channel the inbound came from.
+  let activeRoute = null;
+  const submitSpy = (sid, text, route) => { submitted.push({ sid, text }); activeRoute = route ?? null; return { delivered: true }; };
   // Injected gateway builder: a REAL ChatGateway over an in-app binding + the SAME hub's adapter (so the
   // real bind/route/deliver logic runs) — no Telegram, no long-poll, no network.
   const buildGateway = (_cfg, submit, _db) => {
-    const gw = new ChatGateway(submit, [inAppBinding("sess-A")]);
+    const gw = new ChatGateway(submit, [inAppBinding("sess-A")], undefined, undefined, (sid) => (sid === "sess-A" ? activeRoute : null));
     gw.registerAdapter(inApp.adapter);
     return gw;
   };
@@ -179,7 +184,9 @@ const inAppBinding = (sessionId) => ({ sessionId, channel: IN_APP_CHANNEL, chatI
     homeChannel: IN_APP_CHANNEL, homeChatId: "sess-F", heartbeatIntervalMinutes: 0, heartbeatPrompt: "p",
   };
   const submitted = [];
-  const gw = createCompanionGateway(cfg, (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; }, fakeStore, inApp);
+  // The factory's 5th arg is the per-turn origin resolver; a constant one here stands in for an in-flight
+  // turn on in-app/sess-F so deliverReply has a target (this block probes ADAPTER registration, not routing).
+  const gw = createCompanionGateway(cfg, (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; }, fakeStore, inApp, (sid) => (sid === "sess-F" ? { channel: IN_APP_CHANNEL, chatId: "sess-F" } : null));
 
   const { frames, client } = makeClient();
   inApp.attach("sess-F", client);

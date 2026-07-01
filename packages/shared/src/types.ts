@@ -726,15 +726,19 @@ export interface PresetPromptSuggestion {
  *               that is on this binding's per-binding {@link CompanionAllowedSender} allowlist; a
  *               missing/unlisted sender is HARD-rejected (an unidentifiable speaker in a shared chat
  *               can never be authorized).
- * At most one binding per (channel, chatId) route (a UNIQUE db index). GLOBAL / daemon-wide, like the
- * companion config itself. HUMAN-managed only over the loopback REST surface — there is intentionally
- * NO MCP path: a chat-reachable, injection-exposed agent must NOT be able to authorize senders for
- * itself (same trust posture as the vault/git/api_keys human-only writers). See `[[Companion Design]]`.
+ * MULTI-CHANNEL: a session may hold up to ONE binding PER channel (UNIQUE (sessionId, channel)), so an
+ * in-app + a Telegram binding coexist for the SAME companion — reachable on both at once. Routing stays
+ * unambiguous: at most one binding per (channel, chatId) route (a UNIQUE db index), so a chat still maps
+ * to exactly one session. GLOBAL / daemon-wide, like the companion config itself. HUMAN-managed only over
+ * the loopback REST surface — there is intentionally NO MCP path: a chat-reachable, injection-exposed
+ * agent must NOT be able to authorize senders for itself (same trust posture as the vault/git/api_keys
+ * human-only writers). See `[[Companion Design]]`.
  */
 export interface CompanionBinding {
-  /** The bound companion session id (PRIMARY KEY — at most one binding per session). */
+  /** The bound companion session id (NON-unique — a session may bind one channel each). */
   sessionId: SessionId;
-  /** The chat channel name (e.g. "telegram") — matches the originating ChannelAdapter.name. */
+  /** The chat channel name (e.g. "telegram") — matches the originating ChannelAdapter.name. Unique with
+   *  `sessionId` (one binding per session per channel — the upsert key). */
   channel: string;
   /** The bound chat id (stringified platform id). Unique with `channel` (one session per route). */
   chatId: string;

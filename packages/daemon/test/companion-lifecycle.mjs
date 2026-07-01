@@ -91,9 +91,15 @@ function makeGatewayBuilder(submitSpy) {
       db.upsertCompanionBinding({ sessionId: cfg.sessionId, channel: "telegram", chatId: cfg.allowedChatId, scope: cfg.chatScope });
       bindings = db.listCompanionBindings();
     }
+    // Origin resolver stand-in for pty.getActiveTurnOrigin: this lifecycle test isn't about per-turn routing
+    // nuance (that's covered in companion-multichannel/loop/heartbeat) — it just needs deliverReply to reach
+    // the CURRENT gateway's adapter, so resolve a session to its bound route (as if an in-flight turn came
+    // from that chat). Reads the SAME durable bindings, so it survives an adapter rebuild.
+    const routeFor = (sid) => { const b = bindings.find((x) => x.sessionId === sid); return b ? { channel: b.channel, chatId: b.chatId } : null; };
     const gw = new ChatGateway(
       submitTurn ?? submitSpy,
       bindings.map((b) => ({ sessionId: b.sessionId, channel: b.channel, chatId: b.chatId, scope: b.scope })),
+      undefined, undefined, routeFor,
     );
     gw.registerAdapter(adapter);
     built.push({ cfg, gw, adapter });

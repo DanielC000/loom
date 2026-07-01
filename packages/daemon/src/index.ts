@@ -346,11 +346,16 @@ async function main(): Promise<void> {
   // and leaves companionSessionId null (chat_reply never registers) — every path below is unchanged.
   const companionController = new CompanionController({
     db,
-    submitTurn: (sid, text) => pty.enqueueStdin(sid, text, "system"),
+    // INBOUND submit carries the originating {channel, chatId} route as the pty turn's route (5th arg), so
+    // the agent's chat_reply resolves back to that exact chat (multi-channel reply routing).
+    submitTurn: (sid, text, route) => pty.enqueueStdin(sid, text, "system", undefined, route),
     pty,
     hooks: companionHooks,
     env: process.env,
     inApp: inAppChannel,
+    // Per-turn ORIGIN resolver: chat_reply delivers to the in-flight turn's originating route (pinned in the
+    // pty when the turn was formed). The SOLE reply-target source — no binding/home guessing, no cross-wire.
+    originResolver: (sid) => pty.getActiveTurnOrigin(sid),
   });
 
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after. The
