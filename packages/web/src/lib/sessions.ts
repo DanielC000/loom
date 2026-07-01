@@ -74,3 +74,49 @@ export function mostRecentActivity(members: readonly SessionOrder[]): number {
   for (const m of members) max = Math.max(max, +new Date(m.lastActivity));
   return max;
 }
+
+/** The minimal session shape the Terminals-page grouping needs — role + parent + the stable-order keys. */
+export type SessionRowMember = SessionRoleOrder & Pick<Session, "parentSessionId">;
+
+/** One rendered row of the Terminals live-sessions grid (see groupSessionRows). */
+export type SessionRowGroup<T> = { key: string; kind: "manager" | "orphans" | "standalone"; list: T[] };
+
+/**
+ * The Terminals-page manager-centric grouping, extracted here as a PURE function so it can't drift
+ * and is hermetically testable (test/sessions.mjs). One ROW per live manager — the manager first, its
+ * workers (attached via parentSessionId) to the right in stable order — then two catch-all rows:
+ * orphan workers (parent absent from the input — a recycled/stopped manager) and standalone sessions
+ * (no role / no parent — plain human sessions, platform leads).
+ *
+ * COMPANION EXCLUSION (load-bearing security invariant): assistant-role (companion) sessions are
+ * dropped HERE, at the grouping source, so a companion can never surface as a pty tile + STDIN
+ * Composer in ANY sub-list (manager row, orphan, or standalone). A companion is driven ONLY through
+ * its chat surface (/companion). The Terminals page ALSO excludes them upstream at `live` (so they
+ * stay out of the project dropdown + counts); this in-function guard is the belt to that suspenders —
+ * feed this a companion and it still emits no row for it.
+ */
+export function groupSessionRows<T extends SessionRowMember>(sessions: readonly T[]): SessionRowGroup<T>[] {
+  const shown = sessions.filter((s) => s.role !== "assistant").slice().sort(byManagerThenCreated);
+  const managers = shown.filter((s) => s.role === "manager");
+  const managerIds = new Set(managers.map((m) => m.id));
+  const workersByParent = new Map<string, T[]>();
+  const orphans: T[] = [];
+  const standalone: T[] = [];
+  for (const s of shown) {
+    if (s.role === "manager") continue;
+    const pid = s.parentSessionId ?? null;
+    if (s.role === "worker" || pid) {
+      if (pid && managerIds.has(pid)) (workersByParent.get(pid) ?? workersByParent.set(pid, []).get(pid)!).push(s);
+      else orphans.push(s); // parent stopped/recycled or not a live manager — don't drop it
+    } else standalone.push(s); // no role / platform lead — its own trailing row
+  }
+  // `managers` is already in stable createdAt/id order (from `shown`), so the rows are too — no
+  // re-sort, and a row holds its slot regardless of activity. Nested workers + the catch-all rows
+  // use the same shared stable key (byCreatedStable) so nothing reshuffles on a poll.
+  const managerRows: SessionRowGroup<T>[] = managers
+    .map((m) => ({ key: m.id, kind: "manager" as const, list: [m, ...(workersByParent.get(m.id) ?? []).slice().sort(byCreatedStable)] }));
+  const trailing: SessionRowGroup<T>[] = [];
+  if (orphans.length) trailing.push({ key: "__orphans", kind: "orphans", list: orphans.slice().sort(byCreatedStable) });
+  if (standalone.length) trailing.push({ key: "__standalone", kind: "standalone", list: standalone.slice().sort(byCreatedStable) });
+  return [...managerRows, ...trailing];
+}

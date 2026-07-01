@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, ShellTerminal } from "@loom/shared";
 import { api } from "../lib/api";
-import { byCreatedStable, byManagerThenCreated } from "../lib/sessions";
+import { byManagerThenCreated, groupSessionRows, type SessionRowGroup } from "../lib/sessions";
 import { TerminalPane } from "../components/Terminal";
 import { TerminalTile } from "../components/TerminalTile";
 import { Panel, Button, Select, Input, StatusPill, SectionLabel } from "../components/ui";
@@ -12,8 +12,9 @@ import { color, font } from "../theme";
 const gridStyle: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12 };
 
 // One rendered row of the Claude-sessions grid. A "manager" row = its manager tile first then the
-// workers it parented; "orphans"/"standalone" are the trailing catch-all rows (see the `rows` memo).
-type SessionRow = { key: string; kind: "manager" | "orphans" | "standalone"; list: SessionListItem[] };
+// workers it parented; "orphans"/"standalone" are the trailing catch-all rows. The grouping itself
+// lives in lib/sessions.ts (groupSessionRows) — pure + hermetically tested; companions are excluded there.
+type SessionRow = SessionRowGroup<SessionListItem>;
 
 // Global Live Terminals grid: all running sessions, with a project filter, tiled, maximizable.
 // Also reachable per-project by pre-selecting the filter.
@@ -34,7 +35,12 @@ export default function Terminals() {
     mutationFn: (id: string) => api.forkSession(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
   });
-  const live = (sessions.data ?? []).filter((s) => s.processState === "live");
+  // Companion (assistant-role) sessions are EXCLUDED here at the source: a companion is driven ONLY
+  // through its chat surface (/companion, over /ws/companion/:id), never a raw pty tile + STDIN
+  // Composer. Filtering at `live` keeps them out of every downstream view — the project dropdown, the
+  // counts, `shown`, and all grouping sub-lists (managers/orphans/standalone) — so a companion can
+  // never leak a raw-STDIN path onto this page.
+  const live = (sessions.data ?? []).filter((s) => s.processState === "live" && s.role !== "assistant");
   const projectNames = useMemo(() => [...new Set(live.map((s) => s.projectName))].sort(), [live]);
   // Tile order: the STABLE shared key (lib/sessions.ts byManagerThenCreated) — managers first, then
   // createdAt DESC (newest first), tiebreak by id within each bucket. A session keeps its slot whether
@@ -47,33 +53,9 @@ export default function Terminals() {
   // parentSessionId. Two catch-all rows trail the manager rows so nothing is dropped: orphan workers
   // (parent absent from the live set — a recycled/stopped manager) and standalone sessions (no role /
   // no parent — plain human sessions, platform leads — which must never anchor a manager row).
-  // Manager rows are ordered by a STABLE key (manager createdAt DESC, tiebreak id, via `shown`) so a
-  // row never jumps when its manager/workers flip busy↔idle. Computed from `shown` (already in that
-  // stable order), so the same layout holds inside a project filter.
-  const rows = useMemo<SessionRow[]>(() => {
-    const managers = shown.filter((s) => s.role === "manager");
-    const managerIds = new Set(managers.map((m) => m.id));
-    const workersByParent = new Map<string, SessionListItem[]>();
-    const orphans: SessionListItem[] = [];
-    const standalone: SessionListItem[] = [];
-    for (const s of shown) {
-      if (s.role === "manager") continue;
-      const pid = s.parentSessionId ?? null;
-      if (s.role === "worker" || pid) {
-        if (pid && managerIds.has(pid)) (workersByParent.get(pid) ?? workersByParent.set(pid, []).get(pid)!).push(s);
-        else orphans.push(s); // parent stopped/recycled or not a live manager — don't drop it
-      } else standalone.push(s); // no role / platform lead — its own trailing row
-    }
-    // `managers` is already in stable createdAt/id order (from `shown`), so the rows are too — no
-    // re-sort, and a row holds its slot regardless of activity. Nested workers + the catch-all rows
-    // use the same shared stable key (byCreatedStable) so nothing reshuffles on a poll.
-    const managerRows: SessionRow[] = managers
-      .map((m) => ({ key: m.id, kind: "manager" as const, list: [m, ...(workersByParent.get(m.id) ?? []).slice().sort(byCreatedStable)] }));
-    const trailing: SessionRow[] = [];
-    if (orphans.length) trailing.push({ key: "__orphans", kind: "orphans", list: orphans.slice().sort(byCreatedStable) });
-    if (standalone.length) trailing.push({ key: "__standalone", kind: "standalone", list: standalone.slice().sort(byCreatedStable) });
-    return [...managerRows, ...trailing];
-  }, [shown]);
+  // The grouping itself is the pure, hermetically-tested groupSessionRows (lib/sessions.ts), which also
+  // drops companion/assistant sessions at the source so they can never render a pty tile in any row.
+  const rows = useMemo<SessionRow[]>(() => groupSessionRows(shown), [shown]);
 
   // The slim bound-task bar is fetched + rendered by TerminalTile itself (per-session), so no task
   // lookup or prop pass is needed here — every tile shows it automatically, identically to Overview.
