@@ -1201,15 +1201,25 @@ export class Db {
     ).run(b);
     return b;
   }
-  /** Delete a binding by session id, or (when `channel` is given) only that session's binding on that ONE
-   *  channel — the other channels' bindings are untouched. Idempotent either way (a missing id/channel
-   *  matches nothing, a safe no-op). */
+  /**
+   * Delete a binding by session id, or (when `channel` is given) only that session's binding on that ONE
+   * channel — the other channels' bindings are untouched. Idempotent either way (a missing id/channel
+   * matches nothing, a safe no-op). CASCADE-clears that scope's allowlisted senders in the SAME
+   * transaction (PL + Lead ruling: least-privilege on an auth boundary — a re-bind of the same
+   * (session, channel) must start with an EMPTY allowlist, never inherit a prior grant).
+   */
   deleteCompanionBinding(sessionId: string, channel?: string): void {
     if (channel !== undefined) {
-      this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ? AND channel = ?").run(sessionId, channel);
+      this.db.transaction(() => {
+        this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ? AND channel = ?").run(sessionId, channel);
+        this.db.prepare("DELETE FROM companion_allowed_senders WHERE session_id = ? AND channel = ?").run(sessionId, channel);
+      })();
       return;
     }
-    this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ?").run(sessionId);
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ?").run(sessionId);
+      this.db.prepare("DELETE FROM companion_allowed_senders WHERE session_id = ?").run(sessionId);
+    })();
   }
   /** A session's per-binding allowlisted senders (the group-scope allowlist). Ordered for a stable list. */
   listAllowedSenders(sessionId: string): CompanionAllowedSender[] {

@@ -22,6 +22,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       correctly — while the removed channel is genuinely unbound (its inbound now rejects). Delete-ALL
 //       (channel omitted) stays byte-identical to the pre-existing behavior, and removing an already-unbound
 //       or never-bound channel is a safe no-op (no throw).
+// Sibling coverage: unbind CASCADE-clearing companion_allowed_senders is in companion-unbind-cascade.mjs.
 // Sibling coverage: the pure pty route-keyed coalescing (cross-route ⇒ distinct turns; no-route worker path
 // byte-identical) is in pty-route-coalesce.mjs; heartbeat→HOME via the route in companion-heartbeat.mjs;
 // provision-writes-BOTH-bindings in companion-provision.mjs (Part 2).
@@ -289,6 +290,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a companion reachable on in-app + Telegram AT ONCE: each turn's chat_reply goes back on the channel that turn came from (proven end-to-end through the real pty, INTERLEAVED with no swap and no cross-wire), a turn with no origin delivers nowhere (no-target), per-binding sender authz gates each channel independently, the table-rebuild migration turns the legacy single-PK bindings table multi-channel losslessly + idempotently, and PER-CHANNEL unbind removes one channel while the other survives + keeps routing (delete-ALL unchanged, re-removal a safe no-op)."
+  ? "\n✅ ALL PASS — a companion reachable on in-app + Telegram AT ONCE: each turn's chat_reply goes back on the channel that turn came from (proven end-to-end through the real pty, INTERLEAVED with no swap and no cross-wire), a turn with no origin delivers nowhere (no-target), per-binding sender authz gates each channel independently, the table-rebuild migration turns the legacy single-PK bindings table multi-channel losslessly + idempotently, PER-CHANNEL unbind removes one channel while the other survives + keeps routing (delete-ALL unchanged, re-removal a safe no-op), and unbind CASCADE-clears that channel's allowlist so a re-bind starts EMPTY while the other channel's allowlist is untouched (delete-ALL clears every allowlist row)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
