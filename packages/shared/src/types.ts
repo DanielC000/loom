@@ -267,7 +267,8 @@ export type Resumability = "unknown" | "resumable" | "dead";
  *   spawn/stop/list surface or any writer (least-privilege; the restricted tool profile is a later card).
  *   Profile-spawnable + resume-durable like the other non-worktree persistent roles. See `[[Companion Design]]`.
  */
-export type SessionRole = "manager" | "worker" | "platform" | "auditor" | "setup" | "workspace-auditor" | "run" | "assistant";
+export const SESSION_ROLES = ["manager", "worker", "platform", "auditor", "setup", "workspace-auditor", "run", "assistant"] as const;
+export type SessionRole = (typeof SESSION_ROLES)[number];
 
 // --- Agent Runs (R2): the AgentRun primitive ------------------------------------------------------
 /**

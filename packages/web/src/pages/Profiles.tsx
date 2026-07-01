@@ -4,6 +4,7 @@ import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Se
 import { api, type ProfileFieldResolution, type PythonProvisioning, type PythonProvisioningReason } from "../lib/api";
 import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components/ui";
 import { color, font, radius, tone, sessionRoleTone as roleTone, type Tone } from "../theme";
+import { PROFILE_ROLE_OPTIONS } from "../lib/profileRoles";
 
 // A profile's role, as a coloured pill. null = a plain (non-orchestration) session — today's default.
 function RoleBadge({ role }: { role: SessionRole | null }) {
@@ -323,10 +324,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={fieldLabel}>Role</span>
           <Select value={role} onChange={(e) => setRole(e.target.value as SessionRole | "")}>
-            <option value="">— (plain)</option>
-            <option value="manager">manager</option>
-            <option value="worker">worker</option>
-            <option value="platform">platform</option>
+            {PROFILE_ROLE_OPTIONS.map((r) => <option key={r || "plain"} value={r}>{r === "" ? "— (plain)" : r}</option>)}
           </Select>
         </label>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
