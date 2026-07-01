@@ -8,6 +8,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** All daemon-owned state lives under ~/.loom (overridable via LOOM_HOME). */
 export const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
 export const DB_PATH = path.join(LOOM_HOME, "loom.db");
+/**
+ * The local 32-byte master key for the recoverable-secret envelope helper (`keys/envelope.ts`).
+ * A recoverable OUTWARD credential — e.g. the companion bot token the daemon must DECRYPT to call
+ * Telegram — is stored AES-256-GCM-encrypted at rest (in loom.db, which is backed up + syncable);
+ * the ciphertext is useless without THIS separate local key file, which is NEVER backed up. Lazily
+ * generated 0600 on first use (win32 mode is best-effort — confidentiality rests on the file living
+ * under the user profile). NOT created in ensureDirs (lazy), so a daemon with no recoverable secret
+ * never writes it. Resolve via LOOM_HOME here — never hard-code — and pass an override key path in tests.
+ */
+export const SECRET_KEY_PATH = path.join(LOOM_HOME, "secret.key");
 export const SETTINGS_DIR = path.join(LOOM_HOME, "tmp", "settings");
 export const LOGS_DIR = path.join(LOOM_HOME, "logs");
 /**
