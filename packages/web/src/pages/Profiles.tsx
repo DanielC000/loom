@@ -6,7 +6,7 @@ import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components
 import { color, font, radius, tone, type Tone } from "../theme";
 
 // A profile's role, as a coloured pill. null = a plain (non-orchestration) session — today's default.
-const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", "workspace-auditor": "muted", run: "muted" };
+const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", "workspace-auditor": "muted", run: "muted", assistant: "cyan" };
 function RoleBadge({ role }: { role: SessionRole | null }) {
   return <Badge tone={role ? roleTone[role] : "muted"}>{role ?? "plain"}</Badge>;
 }

@@ -6,7 +6,7 @@ import { useActiveProject } from "../lib/activeProject";
 import { Panel, Button, Input, Select, SectionLabel, PresetAccentDots } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
 
-const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", "workspace-auditor": "muted", run: "muted" };
+const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", "workspace-auditor": "muted", run: "muted", assistant: "cyan" };
 
 // Starter agents seeded on project creation (editable afterward via the preset editor). Generic
 // role scaffolds — the canonical, project-specific prompts get filled in per project.

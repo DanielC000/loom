@@ -37,10 +37,12 @@ export interface CompanionHooks {
 export class OrchestrationMcpRouter {
   constructor(private db: Db, private sessions: SessionService, private companion: CompanionHooks = {}) {}
 
-  /** Role gate: returns the session's id + orchestration role, or null (→ 404) for plain/unknown. */
+  /** Role gate: returns the session's id + orchestration role, or null (→ 404) for plain/unknown.
+   *  Admits the Companion (assistant) too — it reaches this surface for its MINIMAL toolset (my_context +
+   *  the companion-gated chat_reply); buildServer restricts what it actually registers. */
   resolveRole(sessionId: string): { id: string; role: SessionRole } | null {
     const role = this.db.getSession(sessionId)?.role;
-    return role === "manager" || role === "worker" ? { id: sessionId, role } : null;
+    return role === "manager" || role === "worker" || role === "assistant" ? { id: sessionId, role } : null;
   }
 
   /**
@@ -154,6 +156,15 @@ export class OrchestrationMcpRouter {
 
     // Companion spike: additive, single-session-gated chat_reply (see registerChatReplyIfCompanion).
     this.registerChatReplyIfCompanion(server, sessionId);
+
+    // Companion (epic Phase 1): the long-lived `assistant` role gets a MINIMAL surface — the read-only
+    // my_context PLUS (only when this IS the bound companion session) the chat_reply registered just above.
+    // DELIBERATELY no manager spawn/stop/list surface and no writer (least-privilege — the restricted tool
+    // profile is a later card). Returns before the manager fall-through below.
+    if (role === "assistant") {
+      this.registerMyContext(server, sessionId);
+      return server;
+    }
 
     if (role === "worker") {
       this.registerMyContext(server, sessionId);

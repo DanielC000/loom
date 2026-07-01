@@ -22,7 +22,7 @@ import {
 import { color, font, tone, type Tone } from "../theme";
 
 // Profile-role → badge tone, mirroring Workspace's roleTone (null/plain → muted).
-const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", "workspace-auditor": "muted", run: "muted" };
+const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", "workspace-auditor": "muted", run: "muted", assistant: "cyan" };
 
 // PROJECT OVERVIEW — the project-scoped analog of the Platform page: one scrolling cockpit for the
 // active project (header-selected via useActiveProject). It composes the SAME fleet widgets Mission

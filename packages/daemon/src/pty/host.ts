@@ -578,7 +578,10 @@ export function buildMcpServers(o: {
   if (o.role === "run") {
     return { "loom-run": { type: "http", url: `http://127.0.0.1:${o.port}/mcp-run/${o.sessionId}` } };
   }
-  const wantsOrch = o.role === "manager" || o.role === "worker";
+  // manager/worker AND the Companion (assistant) mount loom-orchestration — but a role-gated surface:
+  // the assistant gets only my_context + the companion-gated chat_reply (buildServer's assistant branch),
+  // NEVER the manager spawn/stop/list tools. Additive: byte-identical map for every non-orch role.
+  const wantsOrch = o.role === "manager" || o.role === "worker" || o.role === "assistant";
   const wantsPlatform = o.role === "platform";
   const wantsAudit = o.role === "auditor";
   const wantsUserAudit = o.role === "workspace-auditor";
@@ -823,6 +826,9 @@ export const HUMAN_PROMPT_TOOLS: readonly string[] = ["AskUserQuestion", "ExitPl
  *   - `run`               — a fully autonomous, human-LESS, Loom-driven session; nobody can answer a
  *                           prompt, so a model that called one would block until the hard run-timeout
  *                           reaped it (a wasted full-timeout window + a `timed_out` run).
+ *   - `assistant`         — the long-lived Loom Companion; its "human" reaches it over a CHAT channel and
+ *                           it answers via `chat_reply`, so its stdin is never a live TUI human — an
+ *                           interactive prompt would block the turn on input that never comes.
  * DELIBERATELY EXCLUDED (left byte-identical): `manager`/orchestrator + `platform` (the human-driven
  * Platform Lead) legitimately surface decisions to the human; a plain (role-less) session is out of
  * scope. Pure + exported so the spawn-args test asserts the per-role mapping with no real claude.
@@ -835,6 +841,7 @@ export function disallowedToolsForRole(role?: SessionRole | null): string[] {
     case "auditor":
     case "workspace-auditor":
     case "run":
+    case "assistant":
       return [...HUMAN_PROMPT_TOOLS];
     default:
       return []; // manager / platform / plain — unchanged, no disallow
@@ -1222,7 +1229,10 @@ export class PtyHost {
     // platform-lead instead gets the loom-platform MCP (project/agent creation, Pillar C). acceptEdits
     // does NOT auto-approve MCP tools (the §9 lesson — why mcp__loom-tasks is in the default allow),
     // so allowlist the role's MCP server too, else the agent hangs on a prompt.
-    const wantsOrch = opts.role === "manager" || opts.role === "worker";
+    // manager/worker AND the Companion (assistant) allowlist the loom-orchestration server (acceptEdits
+    // doesn't auto-approve MCP tools — the §9 lesson); the assistant's registered surface is just
+    // my_context + the companion-gated chat_reply, so the server-level allow is all it needs.
+    const wantsOrch = opts.role === "manager" || opts.role === "worker" || opts.role === "assistant";
     const wantsPlatform = opts.role === "platform";
     const wantsAudit = opts.role === "auditor";
     const wantsUserAudit = opts.role === "workspace-auditor";

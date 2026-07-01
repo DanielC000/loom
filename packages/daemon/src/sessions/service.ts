@@ -20,6 +20,7 @@ import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../r
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt } from "./manager-prompt.js";
 import { composeWorkerStartupPrompt } from "./worker-prompt.js";
+import { composeAssistantStartupPrompt } from "./assistant-prompt.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
@@ -151,6 +152,10 @@ function suggestAgentRef(agents: Agent[], ref: string): string | undefined {
 
 /**
  * Least-privilege hardening: the ONLY session roles a Profile may confer on a default "+New" spawn.
+ * "assistant" (the long-lived Loom Companion — non-worktree, resume-durable) joins manager/worker as
+ * profile-spawnable: it holds no elevated/outward capability (its whole orchestration surface is
+ * my_context + the companion-gated chat_reply), so a "+New" on an assistant-profile agent may spawn it
+ * directly, like a manager/worker rig.
  * The elevated/locked roles — "platform" (loom-platform surface), "auditor" (loom-audit),
  * "workspace-auditor" (loom-user-audit), "setup" (loom-setup) and "run" (internal-only Agent
  * Runs) — must come EXCLUSIVELY from their explicit human spawn paths (startPlatformLead/startAuditor/
@@ -160,7 +165,7 @@ function suggestAgentRef(agents: Agent[], ref: string): string | undefined {
  * silently elevate. (Note: validateProfile already forbids "auditor"/"workspace-auditor"/"run" on a
  * profile; this is the spawn-side backstop and also covers the still-mintable "platform"/"setup".)
  */
-const PROFILE_SPAWNABLE_ROLES: ReadonlySet<SessionRole> = new Set<SessionRole>(["manager", "worker"]);
+const PROFILE_SPAWNABLE_ROLES: ReadonlySet<SessionRole> = new Set<SessionRole>(["manager", "worker", "assistant"]);
 
 /**
  * The task-board MCP baseline a custom `permission.allow` must never be able to STRIP. Every
@@ -352,18 +357,27 @@ export class SessionService {
     // baseline is already present (the default config + every profile-delta on top of it), this returns the
     // SAME reference, so the common path stays byte-identical; only a custom allow that dropped it is healed.
     const permission = withBaselineAllow(layered);
-    // LEAST-PRIVILEGE backstop: a profile may confer ONLY manager|worker (or no role). An elevated/locked
-    // profile role (platform/auditor/setup/run) is dropped to undefined here, so a role-omitted "+New"
+    // LEAST-PRIVILEGE backstop: a profile may confer ONLY manager|worker|assistant (or no role). An
+    // elevated/locked profile role (platform/auditor/setup/run) is dropped to undefined here, so a role-omitted "+New"
     // spawn yields a plain session, never a silent elevation. An EXPLICIT caller role is untouched and
     // still wins below (`??`), so startPlatformLead/startAuditor/startManager are byte-identical; a
     // manager/worker/null profile role is also unchanged (the common path).
     const profileRole = resolved.role && !PROFILE_SPAWNABLE_ROLES.has(resolved.role) ? undefined : resolved.role;
+    // An explicit caller role still wins; then the (clamped) profile role (null under forcePlain), then
+    // undefined (today's plain). The force-plain path passes no explicitRole, so it resolves null.
+    const role = explicitRole ?? profileRole ?? undefined;
+    // Same `|| undefined` empties-to-undefined coercion today's start paths use on the agent prompt.
+    const ownPrompt = resolved.startupPrompt || undefined;
+    // Companion (epic Phase 1): an "assistant" session gets the server-owned base brief PREPENDED here (the
+    // single spawn chokepoint), so the companion identity + untrusted-input posture + chat_reply doctrine
+    // ride EVERY assistant spawn regardless of the agent's own (user-editable) prompt — mirroring how the
+    // manager/worker briefs are composed, but centralized so a future explicit start path inherits it too.
+    // Role-gated ⇒ byte-identical for every other role. On resume() only `.permission` is read from this
+    // result, so the composed prompt is harmlessly discarded there (a resume injects nothing).
+    const startupPrompt = role === "assistant" ? composeAssistantStartupPrompt(ownPrompt) : ownPrompt;
     return {
-      // An explicit caller role still wins; then the (clamped) profile role (null under forcePlain), then
-      // undefined (today's plain). The force-plain path passes no explicitRole, so it resolves null.
-      role: explicitRole ?? profileRole ?? undefined,
-      // Same `|| undefined` empties-to-undefined coercion today's start paths use on the agent prompt.
-      startupPrompt: resolved.startupPrompt || undefined,
+      role,
+      startupPrompt,
       permission,
       // Opt-in browser capability from the resolved profile (backstop false under forcePlain / no profile).
       browserTesting: resolved.browserTesting,
@@ -1143,10 +1157,12 @@ export class SessionService {
             `off (re-check your workers' state; some may have just been resumed too).` + RESUME_NUDGE_TAIL,
           );
         }
-      } else if (e.role === "auditor" || e.role === "workspace-auditor" || e.role === "setup") {
-        // A scheduled/standing reviewer (Platform Auditor, Workspace Auditor, Setup Assistant) gets no
-        // startup prompt on resume, so a reviewer that was MID-RUN at the restart would otherwise sit idle
-        // until a human types "continue" — it gets the continuation nudge.
+      } else if (e.role === "auditor" || e.role === "workspace-auditor" || e.role === "setup" || e.role === "assistant") {
+        // A scheduled/standing role (Platform Auditor, Workspace Auditor, Setup Assistant, Companion) gets
+        // no startup prompt on resume, so one that was MID-TURN at the restart would otherwise sit idle
+        // until a human re-engages it — it gets the continuation nudge. (For the Companion, "mid-turn" means
+        // it was answering a chat message when the daemon went down; an idle Companion falls through to the
+        // silent resume below and its next inbound chat message re-engages it.)
         // card b5664b5b (Problem B): but gate it on busy-at-capture. An already-IDLE reviewer (e.g. an
         // Auditor that finished its bounded run between scheduled fires) does NOT need a nudge — its next
         // due wake/schedule re-engages it on its own via the durable WakeService/Scheduler tickers (which

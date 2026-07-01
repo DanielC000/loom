@@ -55,6 +55,7 @@ const HERMETIC = [
   "crashlog", // card c00be6e8: top-level fatal-exit handler writes a diagnosable crashlog under .loom; clean/restart exits don't
   "my-context-gate", // PL Auditor finding #9: my_context folds in the RESOLVED project gateCommand, READ-ONLY (no set/propose surface)
   "companion-loop", // Loom Companion Phase 0 spike: the end-to-end chat loop (inbound turn-submit + allowlist + chat_reply routed back to the bound chat, gated to the companion session)
+  "assistant-role", // Loom Companion Phase 1: the long-lived `assistant` SessionRole — non-worktree spawn+persist, resume carrying the role, base brief injection, human-prompt disallow (others byte-identical), and the minimal resolveRole surface (my_context + companion-gated chat_reply)
 ];
 
 // NOT run here (require a human-started isolated daemon and/or a real `claude` login, or are helpers):

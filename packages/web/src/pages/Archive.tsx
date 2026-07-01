@@ -7,7 +7,7 @@ import { TranscriptPane } from "../components/TranscriptPane";
 import { Panel, Button, Input, SectionLabel, StatusPill, Chip, Badge } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
 
-const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", "workspace-auditor": "muted", run: "muted" };
+const roleTone: Record<NonNullable<SessionRole>, Tone> = { manager: "phosphor", worker: "cyan", platform: "amber", auditor: "muted", setup: "cyan", "workspace-auditor": "muted", run: "muted", assistant: "cyan" };
 
 // Per-project Archive: every STOPPED session of the header's active project (sessions auto-archive on
 // exit, so Archive = all stopped sessions). Structured as a searchable manager → worker fold-out tree:

@@ -15,7 +15,10 @@ const profileSchema = z
     // their start* paths (startAuditor / the future startWorkspaceAuditor — the security boundary), so a
     // profile must never confer either. They're absent from this enum, so validateProfile REJECTS them by
     // construction. "setup" IS a valid profile role (the Setup Assistant rig). (End-User Platform tier B1.)
-    role: z.enum(["manager", "worker", "platform", "setup"]).nullable().optional(),
+    // "assistant" (the long-lived Loom Companion) is a valid, low-privilege profile role — profile-spawnable
+    // like manager/worker (its whole surface is my_context + the companion-gated chat_reply). The ungated
+    // Setup operator still can't mint one (setupRoleError's allowlist omits it) — human REST / dev only.
+    role: z.enum(["manager", "worker", "platform", "setup", "assistant"]).nullable().optional(),
     description: z.string().optional(),
     allowDelta: z.array(z.string()).optional(),
     skills: z.array(z.string()).nullable().optional(),

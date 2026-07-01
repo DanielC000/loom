@@ -18,7 +18,9 @@ check("HUMAN_PROMPT_TOOLS = AskUserQuestion + the two plan-mode prompts",
 // --- Per-role mapping (disallowedToolsForRole) -------------------------------------------------
 // IN scope: every Loom-driven, never-blocks-on-a-human role gets the full prompt-tool list.
 // `run` is human-LESS (fully autonomous) — nobody can answer a prompt, so it joins the disallow class.
-for (const role of ["worker", "setup", "auditor", "workspace-auditor", "run"]) {
+// `assistant` (the long-lived Companion) reaches its human over a CHAT channel + answers via chat_reply,
+// so its stdin is never a live TUI human — an interactive prompt would block on input that never comes.
+for (const role of ["worker", "setup", "auditor", "workspace-auditor", "run", "assistant"]) {
   check(`role '${role}': all human-prompt tools disallowed`,
     JSON.stringify(disallowedToolsForRole(role)) === JSON.stringify([...HUMAN_PROMPT_TOOLS]));
 }

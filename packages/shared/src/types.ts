@@ -244,8 +244,16 @@ export type Resumability = "unknown" | "resumable" | "dead";
  *   other MCP surface AND does not even mount `loom-tasks`. Runs are NOT resumable (ephemeral by design;
  *   a daemon restart mid-run fails the run clean). Started ONLY by the internal run-starter — no
  *   human/agent session-spawn route mints one (the public keyed trigger is R3). See `[[Agent Runs]]`.
+ * - assistant: a long-lived Loom Companion session (Companion epic Phase 1) — ONE persistent, NON-worktree
+ *   `claude` session (bound to a project or the platform, like manager/platform/setup — NOT a per-task
+ *   worktree) that a human reaches over a CHAT channel (Telegram, etc.) rather than the interactive TUI.
+ *   Its "human" never types at its stdin, so it is a Loom-DRIVEN role (spawns with the human-prompt tools
+ *   disallowed) and it answers by calling `chat_reply` — its ONLY channel back. It gets a MINIMAL
+ *   loom-orchestration surface (my_context + the companion-gated chat_reply), NEVER the manager
+ *   spawn/stop/list surface or any writer (least-privilege; the restricted tool profile is a later card).
+ *   Profile-spawnable + resume-durable like the other non-worktree persistent roles. See `[[Companion Design]]`.
  */
-export type SessionRole = "manager" | "worker" | "platform" | "auditor" | "setup" | "workspace-auditor" | "run";
+export type SessionRole = "manager" | "worker" | "platform" | "auditor" | "setup" | "workspace-auditor" | "run" | "assistant";
 
 // --- Agent Runs (R2): the AgentRun primitive ------------------------------------------------------
 /**
