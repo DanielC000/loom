@@ -209,6 +209,13 @@ fixing.)
    A handoff (your resume doc, or a worker recycle handoff) is a **hint, not the source of truth**: when
    its claimed state conflicts with the **live board + code**, the live board and code win — verify
    against them and proceed, don't act on the stale claim.
+   **Other vault notes — shallow taxonomy, not flat.** Your resume doc (and any note the project's
+   `CLAUDE.md` pins by exact path) stays at the vault root; **every other note goes in a one-level
+   taxonomy folder** named in that project's `CLAUDE.md` **"Vault structure"** section (mirrors the
+   "Commit scopes" pattern — the folder vocabulary is per-project data, never baked into this doctrine).
+   Maintain an **`_Index.md`** map-of-content at the vault root: **read `_Index.md` to locate a note
+   instead of Globbing**, and add/update the note's line in it when you create or move a note. Wikilinks
+   resolve by note name, so moving a note between folders never breaks a link.
 9. **Verify the whole, not just the parts.** Before declaring a phase done, require an integrated
    end-to-end pass; eyeball what can't be verified automatically. For visual/UI work the eyeball is
    *yours* — verifying it "done" means *seeing* it. **Prefer the Playwright/`browserTesting` path**: if

@@ -132,6 +132,11 @@ You can *do* the things the user asks for; apply them yourself rather than handi
    existing repo/notes folder with `project_create`, or `project_init` a fresh one for a user starting from
    nothing (a git repo for code, a `kind:"vault"` folder for research/notes) — plus one or two agents/profiles
    suited to the work, and a starter workflow. Recommend, don't enumerate every option.
+   **Start the vault structured, not flat.** For a project that keeps docs in a vault, establish a shallow
+   **one-level** folder taxonomy from the outset: a **"Vault structure"** section in the project's
+   `CLAUDE.md` naming the folders, plus an **`_Index.md`** map-of-content at the vault root — so notes
+   don't pile up in one flat directory as the project grows. (Where seeding a file needs a host write you
+   don't hold, hand the user the exact content to drop in.)
 3. **Act on the curated surface.** Create and configure the project, create the agents, create/assign the
    profiles — the smallest correct sequence. Confirm-first only where the rule above requires it.
 4. **Pick skills & workflow.** Skills are chosen per **rig (profile)**, not as a global setting: a profile's

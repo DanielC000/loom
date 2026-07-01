@@ -247,3 +247,19 @@ no meaningful code subdivisions may go scopeless.
   the same bounded writer code by explicit `projectId`). Every git write is bounded + non-interactive
   (`GIT_TERMINAL_PROMPT=0` + timeout) so a hung push can't wedge the daemon. The read-only log/branches
   view is unchanged.
+
+### Vault structure
+Loom's design docs live in the Obsidian vault at `Projects/Loom/` in a **shallow (one-level), stable**
+taxonomy — not a flat wall of notes. **Fixed-path / canonical docs stay pinned at the vault root** —
+including the ones this `CLAUDE.md` references by exact path (`Architecture.md`, `Vision & Architecture.md`,
+`Setup Assistant Design.md`), which is *why* they're pinned: moving them would break those refs. The
+root-pinned set: `Architecture.md`, `Vision & Architecture.md`, `Setup Assistant Design.md`,
+`Companion Design.md`, `Loom.md`, `Platform Manager.md`, `Orchestrator Log.md`, `Platform Lead Resume.md`.
+**Every other note lives in a taxonomy folder:** `Design/`, `Operations/`, `Roadmap/`, `Release/`,
+`Spikes/`. An **`_Index.md`** map-of-content at the vault root lists every note by group — **read it to
+locate a note instead of Globbing, and update its line when you add or move a note.** Wikilinks resolve by
+note name, so moving a note between folders never breaks a `[[link]]`.
+
+Like "Commit scopes", this folder vocabulary is **Loom-specific** — every project keeps its own "Vault
+structure" section in its own `CLAUDE.md`; the shipped skills teach the generic shallow-taxonomy +
+`_Index.md` principle and read the folder names from here.

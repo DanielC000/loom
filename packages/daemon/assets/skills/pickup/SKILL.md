@@ -23,9 +23,11 @@ project id anywhere; it's derived server-side.
      Glob from your home directory hits the search timeout). Cross-check it against the board.
    - *Worker:* your scope is your assigned board task / kickoff — orient narrowly to it, not the whole
      project.
-5. **Design notes** (optional) — the **vault root** is the one in your "Where things live" context
-   block; skim the latest design/task notes under `<vaultRoot>/Projects/<Project>/` (by absolute path,
-   never Glob) for decisions and rationale.
+5. **Design notes** (optional) — read **`_Index.md`** at the project vault root FIRST (the root is in
+   your "Where things live" context block): it's the map-of-content that lists every note by group, so
+   use it to locate the design/task notes you need **instead of Globbing** (a broad Glob from home times
+   out). Notes live in a shallow, one-level taxonomy folder per the project's `CLAUDE.md` "Vault
+   structure" section; fixed-path docs stay pinned at the vault root.
 
 ## Brief
 

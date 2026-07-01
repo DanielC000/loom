@@ -17,6 +17,8 @@ Rules to apply on **every** documentation edit. Docs are a living source of trut
 
 4. **Keep docs bounded.** Don't let a doc grow without limit. Prefer revising existing sections to adding new ones. Consolidate duplicated explanations into one canonical place and link to it. Length should track the size of the subject, not the number of times it was touched.
 
+5. **Shallow, stable structure for a notes collection.** In a multi-note vault/docs tree, keep a **one-level** folder taxonomy — don't pile notes flat, and don't nest deeply. **Fixed-path / canonical docs** (ones referenced by exact path — a resume log, a note a `CLAUDE.md` pins by path) stay at the collection root; every other note lives in a taxonomy folder. Maintain an **`_Index.md`** map-of-content at the root: read it to locate a note instead of Globbing, and update it when you add or move one.
+
 ## How to apply
 
 - **Editing an existing doc:** read the whole relevant section first, fold new information into it, and delete what the new information supersedes. The diff should show the doc moving from one correct state to another — not accreting.

@@ -54,6 +54,13 @@ brief only if it is written to carry them.)
    and any known limitation rather than papering over it. Keep any docs you touch accurate: rewrite
    stale claims in place, no "UPDATE:" appends.
 
+**Writing a vault note?** If your task creates a design/notes artifact in the project's Obsidian vault,
+don't drop it flat at the vault root: put it in the shallow, one-level **taxonomy folder** named in the
+project's `CLAUDE.md` **"Vault structure"** section, and add its line to the **`_Index.md`**
+map-of-content at the vault root (read `_Index.md` to find an existing note rather than Globbing). Notes
+the `CLAUDE.md` pins by exact path stay at the root. Wikilinks resolve by note name, so the folder never
+breaks a `[[link]]`.
+
 **Never let a shell command hang your turn.** Your session is **unattended** — a command that blocks on
 input never returns, so the turn never ends and you wedge at `busy` (a false "stuck" trip + your report
 sits undelivered). Always inspect git with **`git --no-pager`** (`git --no-pager diff`, `git --no-pager
