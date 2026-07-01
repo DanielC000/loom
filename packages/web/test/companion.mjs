@@ -10,8 +10,11 @@
 import assert from "node:assert/strict";
 import {
   COMPANION_ID_MAX, bindingFromCreateForm, buildConfigBody, emptyConfigForm, formFromMasked, maskedToken,
-  validateBinding, validateSender, validatePairing,
+  provisionBody, provisionErrorMessage, validateBinding, validateSender, validatePairing,
 } from "../src/lib/companion.ts";
+// api.ts has only a type-only `@loom/shared` import (erased under --experimental-strip-types), so it loads
+// here with no daemon/build — letting us drive api.provisionCompanion against a mocked global fetch.
+import { api } from "../src/lib/api.ts";
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
@@ -143,6 +146,60 @@ check("validatePairing: only the two enrollment grant types pass", () => {
   assert.equal(validatePairing("group-sender"), null);
   assert.ok(validatePairing(""));
   assert.ok(validatePairing("admin"));
+});
+
+// ── Simple in-app-first create: provisionBody + the graceful single-companion (409) message ───────────
+
+check("provisionBody: a name sends { name } (trimmed); a blank name sends {} (no external config either way)", () => {
+  assert.deepEqual(provisionBody("Ada"), { name: "Ada" });
+  assert.deepEqual(provisionBody("  Ada  "), { name: "Ada" }, "the name is trimmed");
+  assert.deepEqual(provisionBody(""), {}, "a blank name sends an empty body (name is optional)");
+  assert.deepEqual(provisionBody("   "), {}, "a whitespace-only name is treated as unset");
+});
+
+check("provisionErrorMessage: 409 → a calm 'you already have one' precondition; anything else → the server message", () => {
+  assert.match(provisionErrorMessage(409, "a companion is already active — delete it first"), /already have a companion/i);
+  assert.doesNotMatch(provisionErrorMessage(409, "raw server string"), /raw server string/, "the 409 raw string is never shown");
+  assert.equal(provisionErrorMessage(500, "companion provision failed and was rolled back"), "companion provision failed and was rolled back");
+  assert.equal(provisionErrorMessage(0, "network down"), "network down", "a non-HTTP failure falls back to its own message");
+});
+
+// ── The create flow over a MOCKED fetch: POST provision called with { name }; a 409 surfaces status ────
+// Drives the real api.provisionCompanion (the exact call the create button makes) against a stubbed global
+// fetch, asserting the request shape and that a 409 body is surfaced status-tagged so the UI can render the
+// graceful message. No daemon, no network.
+
+const realFetch = globalThis.fetch;
+async function acheck(name, fn) {
+  try { await fn(); pass++; console.log(`ok   ${name}`); }
+  finally { globalThis.fetch = realFetch; }
+}
+
+await acheck("provision: POSTs { name } to /api/companion/provision and returns the masked companion", async () => {
+  let captured = null;
+  globalThis.fetch = async (url, opts) => {
+    captured = { url, opts };
+    return { ok: true, status: 201, json: async () => ({ sessionId: "sess-new", configured: true, tokenConfigured: false, provisioned: true, channel: "in-app" }) };
+  };
+  const row = await api.provisionCompanion(provisionBody("Ada"));
+  assert.equal(captured.url, "/api/companion/provision");
+  assert.equal(captured.opts.method, "POST");
+  assert.equal(captured.opts.headers["content-type"], "application/json");
+  assert.deepEqual(JSON.parse(captured.opts.body), { name: "Ada" }, "the body carries exactly { name }");
+  assert.equal(row.sessionId, "sess-new");
+  assert.equal(row.tokenConfigured, false, "the in-app default has no token");
+});
+
+await acheck("provision: a 409 throws an error tagged with status 409, which maps to the graceful message", async () => {
+  globalThis.fetch = async () => ({
+    ok: false, status: 409,
+    json: async () => ({ error: "a companion is already active — delete it first, or multi-companion support is not yet available" }),
+  });
+  let threw = null;
+  try { await api.provisionCompanion({}); } catch (e) { threw = e; }
+  assert.ok(threw, "a 409 rejects");
+  assert.equal(threw.status, 409, "the status is carried on the error so the UI can branch on the guard");
+  assert.match(provisionErrorMessage(threw.status, threw.message), /already have a companion/i);
 });
 
 // A representative masked config row (as the REST GET returns it) — NEVER carries the token, only last-4.

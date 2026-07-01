@@ -172,6 +172,29 @@ async function patch<T>(url: string, body: unknown): Promise<T> {
   return r.json() as Promise<T>;
 }
 
+// An Error from the companion PROVISION POST that also carries the HTTP status, so the create UI can tell
+// the single-companion 409 precondition (surfaced as a calm "you already have one" — see lib/companion.ts
+// › provisionErrorMessage) apart from a genuine failure, rather than rendering the raw server string.
+export interface CompanionProvisionError extends Error { status?: number; }
+
+// POST /api/companion/provision — the simple, in-app-first create. A bare `{ name }` provisions a working
+// IN-APP-ONLY companion (no session id, no bot token, no external config) and returns the MASKED companion.
+// Surfaces the server's `{ error }` verbatim AND attaches the status (409 = single-companion guard) so the
+// create flow can render a friendly, non-alarming message instead of a raw error.
+async function provisionCompanionReq(body: { name?: string }): Promise<CompanionConfigMasked> {
+  const r = await fetch("/api/companion/provision", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    let msg = `/api/companion/provision -> ${r.status}`;
+    try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON */ }
+    const e = new Error(msg) as CompanionProvisionError;
+    e.status = r.status;
+    throw e;
+  }
+  return r.json() as Promise<CompanionConfigMasked>;
+}
+
 export const api = {
   projects: () => get<Project[]>("/api/projects"),
   // Platform Manager P6 — discover the reserved "Loom Platform" home (hidden from the ordinary picker)
@@ -541,6 +564,10 @@ export const api = {
   // last-4 only). create/update surface the server's `{ error }` body verbatim (token/cadence/home
   // validation) via *Err for inline display; an omitted `botToken` on update keeps the stored token. ---
   companionConfigs: () => get<CompanionConfigMasked[]>("/api/companion/config"),
+  // The simple, in-app-first create: a bare `{ name }` provisions a working IN-APP-ONLY companion (spawns
+  // the assistant session + writes the in-app binding + arms it) with ZERO external config. Status-aware
+  // (409 = single-companion guard) so the create flow can render a friendly precondition message.
+  provisionCompanion: (b: { name?: string }) => provisionCompanionReq(b),
   createCompanionConfig: (b: Record<string, unknown>) => postErr<CompanionConfigMasked>("/api/companion/config", b),
   updateCompanionConfig: (sessionId: string, b: Record<string, unknown>) =>
     putErr<CompanionConfigMasked>(`/api/companion/config/${encodeURIComponent(sessionId)}`, b),

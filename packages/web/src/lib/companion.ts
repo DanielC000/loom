@@ -108,6 +108,28 @@ export function buildConfigBody(form: CompanionConfigForm, mode: "create" | "edi
   return { body };
 }
 
+// ── Simple in-app-first create ────────────────────────────────────────────────────────────────────────
+// The new "New companion" flow provisions a working IN-APP-ONLY companion with ZERO external config — no
+// session id, no bot token, no chat binding — via POST /api/companion/provision. The only input is an
+// optional friendly name.
+
+// Assemble the provision request body from the name field. The name is optional (the endpoint accepts an
+// empty body and defaults the rig); a blank name sends `{}` rather than an empty string, keeping the wire
+// minimal. Trims so a whitespace-only name is treated as unset.
+export function provisionBody(name: string): { name?: string } {
+  const trimmed = name.trim();
+  return trimmed ? { name: trimmed } : {};
+}
+
+// Map a failed provision to a friendly, non-alarming message for the create flow. The single-companion
+// guard (HTTP 409) is an expected PRECONDITION, not a failure — surface a calm "you already have one" with
+// a clear pointer, never the raw server string. Any other status falls back to the server's own message.
+// (Multi-companion support is a pending follow-up; until then one enabled companion is the ceiling.)
+export function provisionErrorMessage(status: number, serverMessage: string): string {
+  if (status === 409) return "You already have a companion. Delete it under Manage first, then create a new one.";
+  return serverMessage;
+}
+
 // Derive the create-time DM binding from a create form. Per the PL bindings-authoritative ruling
 // (2026-07-01), the config row alone provisions TRANSPORT but does NOT make the companion reachable —
 // the gateway routes ONLY off bindings. So the create flow ALSO writes a binding (via the existing

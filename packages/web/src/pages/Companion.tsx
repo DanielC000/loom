@@ -1,10 +1,10 @@
-import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import type { CompanionConfigMasked, CompanionBinding, SessionListItem } from "@loom/shared";
-import { api } from "../lib/api";
+import { api, type CompanionProvisionError } from "../lib/api";
 import {
-  bindingFromCreateForm, buildConfigBody, emptyConfigForm, formFromMasked, maskedToken,
+  buildConfigBody, emptyConfigForm, formFromMasked, maskedToken, provisionBody, provisionErrorMessage,
   validateBinding, validatePairing, validateSender, type CompanionConfigForm,
 } from "../lib/companion";
 import { Panel, Button, Input, Select, SectionLabel, Badge, StatusPill, Chip } from "../components/ui";
@@ -75,41 +75,23 @@ export default function Companion() {
     };
   }, [sessions.data]);
 
-  // Assistant-role sessions not yet configured — the create form's session picker.
-  const assistantSessions = useMemo(
-    () => (sessions.data ?? []).filter((s) => s.role === "assistant" && !companions.some((c) => c.sessionId === s.id)),
-    [sessions.data, companions],
-  );
-
   const invalidateAll = () => {
     qc.invalidateQueries({ queryKey: ["companionConfigs"] });
     qc.invalidateQueries({ queryKey: ["companionBindings"] });
   };
 
-  // Create = TWO writes (PL bindings-authoritative ruling): the config row arms transport, and — when a DM
-  // chat id was supplied — a binding via the existing human-only POST arms ROUTING (the gateway routes
-  // ONLY off bindings). One form, both stores. If the config lands but the binding fails, the companion is
-  // a valid "provisioned, not yet reachable" row; we surface the reason and keep it in the list so the human
-  // can add the binding under Access.
-  const createConfig = useMutation({
-    mutationFn: async ({ configBody, binding }: {
-      configBody: Record<string, unknown>;
-      binding: ReturnType<typeof bindingFromCreateForm>;
-    }) => {
-      const row = await api.createCompanionConfig(configBody);
-      if (binding) {
-        try {
-          await api.createCompanionBinding({ ...binding, sessionId: row.sessionId });
-        } catch (e) {
-          throw new Error(`Companion saved, but arming its DM routing failed: ${(e as Error).message} — open it and add a binding under Access.`);
-        }
-      }
-      return row;
-    },
+  // The simple, in-app-first create: POST /api/companion/provision { name } mints a working IN-APP-ONLY
+  // companion — one call spawns the assistant session, writes the in-app binding, and arms it, with ZERO
+  // external config. On success we select the new companion; its detail defaults to the Chat surface, so
+  // the user can talk to it immediately. The single-companion guard (409) is surfaced in the create card as
+  // a calm precondition (see provisionErrorMessage), not a raw error.
+  const provision = useMutation({
+    mutationFn: (name: string) => api.provisionCompanion(provisionBody(name)),
     onSuccess: (row) => { invalidateAll(); setSelected(row.sessionId); setCreating(false); },
-    // The config may have been written even though the binding failed — refresh so the new (not-yet-reachable)
-    // companion still shows up while the create form keeps the error visible.
-    onError: () => { invalidateAll(); },
+    // The create card renders its OWN inline error (the 409 single-companion guard as a calm Callout), so
+    // opt out of the global blocking window.alert (main.tsx) — a raw modal is exactly the alarming surface
+    // this flow avoids.
+    meta: { inlineError: true },
   });
 
   const current = companions.find((c) => c.sessionId === selected) ?? null;
@@ -157,12 +139,11 @@ export default function Companion() {
 
       <Panel style={{ minHeight: "72vh", padding: 14 }}>
         {creating ? (
-          <ConfigCreate
-            assistantSessions={assistantSessions}
-            onCreate={(p) => createConfig.mutate(p)}
-            pending={createConfig.isPending}
-            error={createConfig.error ? (createConfig.error as Error).message : null}
-            onCancel={() => { setCreating(false); createConfig.reset(); }}
+          <CompanionCreate
+            onCreate={(name) => provision.mutate(name)}
+            pending={provision.isPending}
+            error={provision.error as CompanionProvisionError | null}
+            onCancel={() => { setCreating(false); provision.reset(); }}
           />
         ) : current ? (
           <CompanionDetail
@@ -249,65 +230,54 @@ function GlobalHome() {
   );
 }
 
-// ── Create form ────────────────────────────────────────────────────────────────
-function ConfigCreate({ assistantSessions, onCreate, pending, error, onCancel }: {
-  assistantSessions: SessionListItem[];
-  onCreate: (p: { configBody: Record<string, unknown>; binding: ReturnType<typeof bindingFromCreateForm> }) => void;
+// ── Create: the simple, in-app-first "New companion" flow ────────────────────────
+// One field (a friendly name) + Create. POST /api/companion/provision { name } mints a working IN-APP-ONLY
+// companion — ZERO external config, no session id, no bot token, no chat binding. On success the parent
+// selects it and opens its Chat surface (its default face), so the user can talk to it straight away.
+//
+// DEFERRED (channel-model decision open): connecting Telegram to an EXISTING companion is NOT built here. A
+// companion is reachable on ONE channel today, so wiring Telegram would REPLACE the in-app route rather than
+// add to it. The interim path stays the Manage view's token/binding controls; a guided BotFather wizard is
+// out of scope for this card pending that channel-model decision.
+function CompanionCreate({ onCreate, pending, error, onCancel }: {
+  onCreate: (name: string) => void;
   pending: boolean;
-  error: string | null;
+  error: CompanionProvisionError | null;
   onCancel: () => void;
 }) {
-  const [form, setForm] = useState<CompanionConfigForm>(emptyConfigForm());
-  const [manualId, setManualId] = useState(assistantSessions.length === 0);
-  const [localErr, setLocalErr] = useState<string | null>(null);
-  const set = <K extends keyof CompanionConfigForm>(k: K, v: CompanionConfigForm[K]) => setForm((f) => ({ ...f, [k]: v }));
-
-  const submit = () => {
-    setLocalErr(null);
-    const built = buildConfigBody(form, "create");
-    if ("error" in built) { setLocalErr(built.error); return; }
-    // The create flow also arms routing: derive the DM binding from the same form and validate it before
-    // the round-trip (the gateway routes only off bindings — see bindingFromCreateForm).
-    const binding = bindingFromCreateForm(form);
-    if (binding) {
-      const bErr = validateBinding(binding);
-      if (bErr) { setLocalErr(bErr); return; }
-    }
-    onCreate({ configBody: built.body, binding });
+  const [name, setName] = useState("");
+  const submit = () => { if (!pending) onCreate(name); };
+  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") { e.preventDefault(); submit(); }
   };
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>New companion</strong>
-      <p style={hint}>
-        Bind a run configuration to an <strong style={{ color: color.text }}>assistant</strong>-role session. The
-        session is the companion's brain; this config tells the daemon which bot to run it as. The{" "}
-        <strong style={{ color: color.text }}>chat id</strong> you give below both boot-seeds the config and
-        arms routing — it writes a DM binding so the companion is reachable straight away. Change where it's
-        reachable later under Access.
-      </p>
+  // The single-companion guard (409) is a calm precondition, not a failure — render it in an amber notice
+  // with a pointer, distinct from the red style a genuine error uses.
+  const isGuard = error?.status === 409;
+  const message = error ? provisionErrorMessage(error.status ?? 0, error.message) : null;
 
-      <Field label="Companion session" sub={manualId ? "paste an assistant session id" : "assistant-role sessions"}>
-        {manualId ? (
-          <Input value={form.sessionId} onChange={(e) => set("sessionId", e.target.value)}
-            placeholder="session id" spellCheck={false} />
-        ) : (
-          <Select value={form.sessionId} onChange={(e) => set("sessionId", e.target.value)}>
-            <option value="">— select a session —</option>
-            {assistantSessions.map((s) => (
-              <option key={s.id} value={s.id}>{[s.agentName, s.title].filter(Boolean).join(" · ") || s.id.slice(0, 8)}</option>
-            ))}
-          </Select>
-        )}
-        <button type="button" onClick={() => { setManualId((m) => !m); set("sessionId", ""); }}
-          style={{ alignSelf: "flex-start", background: "transparent", border: "none", color: color.cyan, cursor: "pointer", fontFamily: font.mono, fontSize: 11, padding: "2px 0" }}>
-          {manualId ? "pick from sessions" : "paste an id instead"}
-        </button>
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 460 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>New companion</strong>
+        <p style={{ ...hint, margin: 0 }}>
+          Give it a name and you're set — a personal assistant you can talk to right here, no setup. Connect
+          Telegram later under <strong style={{ color: color.text }}>Manage</strong>.
+        </p>
+      </div>
+
+      <Field label="Name" sub="optional">
+        <Input value={name} onChange={(e) => setName(e.target.value)} onKeyDown={onKeyDown}
+          placeholder="e.g. Ada" spellCheck={false} autoFocus />
       </Field>
 
-      <ConfigFields form={form} set={set} mode="create" />
-
-      {(localErr || error) && <span style={errStyle}>{localErr ?? error}</span>}
+      {message && (
+        isGuard ? (
+          <Callout tone="amber">{message}</Callout>
+        ) : (
+          <span style={errStyle}>{message}</span>
+        )
+      )}
 
       <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
         <Button variant="primary" disabled={pending} onClick={submit}>{pending ? "Creating…" : "Create companion"}</Button>
