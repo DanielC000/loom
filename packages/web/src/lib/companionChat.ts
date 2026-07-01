@@ -13,6 +13,18 @@
 // whether a companion is reachable in-app (its binding must be on THIS channel to get a reply frame).
 export const IN_APP_CHANNEL = "in-app";
 
+// Whether a companion has a LIVE in-app route among its (now possibly MULTIPLE) bindings. The cockpit chat
+// panel only receives a reply frame when a binding exists on THIS channel whose chatId is the loopback
+// self-address (chatId == the session id). Multi-channel (d23b4e32): one companion may hold an in-app AND a
+// Telegram binding at once, so the "armed" check must scan the WHOLE binding list, not a single binding —
+// a Telegram binding must never mask (or be mistaken for) the in-app one. Pure — hermetically unit-tested.
+export function isArmedInApp(
+  bindings: { channel: string; chatId: string }[],
+  sessionId: string,
+): boolean {
+  return bindings.some((b) => b.channel === IN_APP_CHANNEL && b.chatId === sessionId);
+}
+
 // One rendered chat line. `author` drives the bubble side + tone; `id` is a per-panel-unique key (a
 // monotonic counter in the component — never re-used, so React keys stay stable as the list grows).
 export type ChatAuthor = "you" | "companion";

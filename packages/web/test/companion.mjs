@@ -9,8 +9,10 @@
 //   node --experimental-strip-types packages/web/test/companion.mjs
 import assert from "node:assert/strict";
 import {
-  COMPANION_ID_MAX, bindingFromCreateForm, buildConfigBody, emptyConfigForm, formFromMasked, maskedToken,
-  provisionBody, provisionErrorMessage, validateBinding, validateSender, validatePairing,
+  COMPANION_ID_MAX, COMPANION_TOKEN_MAX, TELEGRAM_CHANNEL, bindingFromCreateForm, bindingsForDisplay,
+  buildConfigBody, buildTelegramConnect, channelDisplayName, emptyConfigForm, emptyTelegramForm,
+  formFromMasked, hasChannelBinding, maskedToken, provisionBody, provisionErrorMessage, validateBinding,
+  validateSender, validatePairing, validateTelegramConnect,
 } from "../src/lib/companion.ts";
 // api.ts has only a type-only `@loom/shared` import (erased under --experimental-strip-types), so it loads
 // here with no daemon/build — letting us drive api.provisionCompanion against a mocked global fetch.
@@ -148,6 +150,66 @@ check("validatePairing: only the two enrollment grant types pass", () => {
   assert.ok(validatePairing("admin"));
 });
 
+// ── Guided "Connect Telegram" to an existing companion (multi-channel: ADDS a channel, never replaces) ──
+
+check("validateTelegramConnect: token + chatId both required, both bounded", () => {
+  assert.equal(validateTelegramConnect({ botToken: "123:ABC", chatId: "999" }), null);
+  assert.ok(validateTelegramConnect({ botToken: "   ", chatId: "999" }), "a blank token is rejected");
+  assert.ok(validateTelegramConnect({ botToken: "123:ABC", chatId: "  " }), "a blank chat id is rejected (a token needs a chat to reach)");
+  assert.ok(validateTelegramConnect({ botToken: "x".repeat(COMPANION_TOKEN_MAX + 1), chatId: "999" }), "an over-long token is rejected");
+  assert.ok(validateTelegramConnect({ botToken: "123:ABC", chatId: "9".repeat(COMPANION_ID_MAX + 1) }), "an over-long chat id is rejected");
+});
+
+// THE CONNECT CONTRACT: the guided connect assembles EXACTLY two writes — a config body carrying the typed
+// bot token + the telegram target, and a telegram binding on the SAME chat. The token is only ever SENT here
+// (write-only), and the binding is on channel telegram so the daemon ADDS it alongside the in-app one.
+check("buildTelegramConnect: assembles the config token write + the telegram binding (dm)", () => {
+  const built = buildTelegramConnect("sess-1", { botToken: "  123:ABC  ", chatId: "  999  " });
+  assert.ok(!("error" in built), "a valid form assembles both writes");
+  assert.equal(built.configBody.botToken, "123:ABC", "the typed token is trimmed and carried on the config write");
+  assert.equal(built.configBody.channel, TELEGRAM_CHANNEL, "the config points at the telegram transport");
+  assert.equal(built.configBody.allowedChatId, "999", "the config's boot-seed chat is the pasted chat id");
+  assert.equal(built.configBody.chatScope, "dm");
+  assert.deepEqual(built.bindingBody, { sessionId: "sess-1", channel: TELEGRAM_CHANNEL, chatId: "999", scope: "dm" },
+    "the authoritative route is a telegram dm binding — ADDED alongside in-app, never replacing it");
+});
+
+check("buildTelegramConnect: an invalid form errors and assembles NO write", () => {
+  const built = buildTelegramConnect("sess-1", { botToken: "", chatId: "999" });
+  assert.ok("error" in built, "a blank token yields an error, so the caller never fires a half write");
+  assert.ok(!("configBody" in built) && !("bindingBody" in built));
+});
+
+check("emptyTelegramForm is blank (a fresh connect form seeds no token or chat id)", () => {
+  assert.deepEqual(emptyTelegramForm(), { botToken: "", chatId: "" });
+});
+
+// ── Per-channel display helpers (a companion may be reachable on MANY channels at once) ────────────────
+
+check("bindingsForDisplay: in-app ALWAYS first, then channels alphabetically; input not mutated", () => {
+  const bs = [
+    { sessionId: "s", channel: "telegram", chatId: "t", scope: "dm", createdAt: "" },
+    { sessionId: "s", channel: "in-app", chatId: "s", scope: "dm", createdAt: "" },
+    { sessionId: "s", channel: "discord", chatId: "d", scope: "dm", createdAt: "" },
+  ];
+  const out = bindingsForDisplay(bs);
+  assert.deepEqual(out.map((b) => b.channel), ["in-app", "discord", "telegram"], "in-app first, rest alphabetical");
+  assert.equal(bs[0].channel, "telegram", "the original array order is untouched");
+});
+
+check("channelDisplayName: known channels get friendly names, unknown ones show verbatim", () => {
+  assert.equal(channelDisplayName("in-app"), "In-app");
+  assert.equal(channelDisplayName("telegram"), "Telegram");
+  assert.equal(channelDisplayName("discord"), "discord", "an unknown channel is never renamed");
+});
+
+check("hasChannelBinding: detects whether a companion already holds a binding on a channel", () => {
+  const bs = [{ sessionId: "s", channel: "in-app", chatId: "s", scope: "dm", createdAt: "" }];
+  assert.equal(hasChannelBinding(bs, "telegram"), false, "telegram not connected yet");
+  assert.equal(hasChannelBinding(bs, "in-app"), true);
+  assert.equal(hasChannelBinding([], "in-app"), false);
+});
+
 // ── Simple in-app-first create: provisionBody + the graceful single-companion (409) message ───────────
 
 check("provisionBody: a name sends { name } (trimmed); a blank name sends {} (no external config either way)", () => {
@@ -200,6 +262,43 @@ await acheck("provision: a 409 throws an error tagged with status 409, which map
   assert.ok(threw, "a 409 rejects");
   assert.equal(threw.status, 409, "the status is carried on the error so the UI can branch on the guard");
   assert.match(provisionErrorMessage(threw.status, threw.message), /already have a companion/i);
+});
+
+// ── Per-channel remove targets ONLY that channel (the daemon `?channel=` contract) ────────────────────
+await acheck("deleteCompanionBinding(sessionId, channel): hits the ?channel= endpoint (removes only that channel)", async () => {
+  let captured = null;
+  globalThis.fetch = async (url, opts) => { captured = { url, opts }; return { ok: true, status: 200, json: async () => ({ ok: true }) }; };
+  await api.deleteCompanionBinding("sess 1", "telegram");
+  assert.equal(captured.opts.method, "DELETE");
+  assert.equal(captured.url, "/api/companion/bindings/sess%201?channel=telegram", "the channel is a query param so only that channel's binding is removed");
+});
+
+await acheck("deleteCompanionBinding(sessionId): with NO channel omits the query param (delete-all, unchanged)", async () => {
+  let captured = null;
+  globalThis.fetch = async (url) => { captured = { url }; return { ok: true, status: 200, json: async () => ({ ok: true }) }; };
+  await api.deleteCompanionBinding("sess-1");
+  assert.equal(captured.url, "/api/companion/bindings/sess-1", "no ?channel= → the daemon's delete-ALL behavior (byte-identical)");
+});
+
+// ── The guided connect fires the config token write, THEN the binding POST — in order, both to the right endpoint ──
+await acheck("connect Telegram: PUTs the config (token) then POSTs the telegram binding, in that order", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url, method: opts?.method ?? "GET", body: opts?.body ? JSON.parse(opts.body) : undefined });
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  const built = buildTelegramConnect("sess-1", { botToken: "123:ABC", chatId: "999" });
+  assert.ok(!("error" in built));
+  // Mirror the ConnectTelegram mutation for an EXISTING config: PUT config, then POST binding.
+  await api.updateCompanionConfig("sess-1", built.configBody);
+  await api.createCompanionBinding(built.bindingBody);
+  assert.equal(calls.length, 2, "exactly two writes");
+  assert.equal(calls[0].url, "/api/companion/config/sess-1");
+  assert.equal(calls[0].method, "PUT");
+  assert.equal(calls[0].body.botToken, "123:ABC", "the token is sent on the config write (encrypted daemon-side)");
+  assert.equal(calls[1].url, "/api/companion/bindings");
+  assert.equal(calls[1].method, "POST");
+  assert.deepEqual(calls[1].body, { sessionId: "sess-1", channel: "telegram", chatId: "999", scope: "dm" }, "the telegram route is bound after the token lands");
 });
 
 // A representative masked config row (as the REST GET returns it) — NEVER carries the token, only last-4.

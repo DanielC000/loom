@@ -4,12 +4,14 @@ import { Link } from "react-router-dom";
 import type { CompanionConfigMasked, CompanionBinding, SessionListItem } from "@loom/shared";
 import { api, type CompanionProvisionError } from "../lib/api";
 import {
-  buildConfigBody, emptyConfigForm, formFromMasked, maskedToken, provisionBody, provisionErrorMessage,
-  validateBinding, validatePairing, validateSender, type CompanionConfigForm,
+  bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, emptyConfigForm,
+  emptyTelegramForm, formFromMasked, hasChannelBinding, maskedToken, provisionBody, provisionErrorMessage,
+  validateBinding, validatePairing, validateSender, TELEGRAM_CHANNEL,
+  type CompanionConfigForm, type CompanionTelegramForm,
 } from "../lib/companion";
 import { Panel, Button, Input, Select, SectionLabel, Badge, StatusPill, Chip } from "../components/ui";
 import { CompanionChat } from "../components/CompanionChat";
-import { IN_APP_CHANNEL } from "../lib/companionChat";
+import { IN_APP_CHANNEL, isArmedInApp } from "../lib/companionChat";
 import { color, font, radius } from "../theme";
 
 // Loom Companion management (Companion epic Phase 3). The HUMAN-only cockpit surface over the loopback
@@ -38,11 +40,12 @@ function Field({ label, sub, children }: { label: string; sub?: string; children
   );
 }
 
-// One companion, keyed by its bound assistant session id — the union of a run-config row and/or an
-// access binding (either can exist alone: env-bootstrapped companions may have a binding before a
+// One companion, keyed by its bound assistant session id — the union of a run-config row and/or its
+// access bindings (either can exist alone: env-bootstrapped companions may have a binding before a
 // REST config; a fresh REST config may exist before its binding is added — a "provisioned, not yet
-// reachable" companion, since the gateway routes ONLY off bindings).
-interface CompanionRow { sessionId: string; config?: CompanionConfigMasked; binding?: CompanionBinding; }
+// reachable" companion, since the gateway routes ONLY off bindings). MULTI-CHANNEL (d23b4e32): a session
+// may hold MANY bindings (one per channel — in-app + Telegram at once), so bindings is a list, not one.
+interface CompanionRow { sessionId: string; config?: CompanionConfigMasked; bindings: CompanionBinding[]; }
 
 export default function Companion() {
   const qc = useQueryClient();
@@ -53,13 +56,14 @@ export default function Companion() {
   const bindings = useQuery({ queryKey: ["companionBindings"], queryFn: api.companionBindings });
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
 
-  // Merge configs + bindings into the companion list, keyed by session id.
+  // Merge configs + bindings into the companion list, keyed by session id. A session may have MANY bindings
+  // (one per channel), so we collect them into a list per companion rather than overwriting a single slot.
   const companions = useMemo<CompanionRow[]>(() => {
     const byId = new Map<string, CompanionRow>();
-    for (const c of configs.data ?? []) byId.set(c.sessionId, { sessionId: c.sessionId, config: c });
+    for (const c of configs.data ?? []) byId.set(c.sessionId, { sessionId: c.sessionId, config: c, bindings: [] });
     for (const b of bindings.data ?? []) {
-      const cur = byId.get(b.sessionId) ?? { sessionId: b.sessionId };
-      byId.set(b.sessionId, { ...cur, binding: b });
+      const cur = byId.get(b.sessionId) ?? { sessionId: b.sessionId, bindings: [] };
+      byId.set(b.sessionId, { ...cur, bindings: [...cur.bindings, b] });
     }
     return [...byId.values()].sort((a, b) => a.sessionId.localeCompare(b.sessionId));
   }, [configs.data, bindings.data]);
@@ -117,7 +121,7 @@ export default function Companion() {
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {sessionLabel(c.sessionId)}
                 </span>
-                {c.config && !c.binding && (
+                {c.config && c.bindings.length === 0 && (
                   <span style={{ fontSize: 9, color: color.amber, fontFamily: font.mono }} title="provisioned but no chat binding — not reachable yet">NO ROUTE</span>
                 )}
                 {c.config
@@ -235,10 +239,10 @@ function GlobalHome() {
 // companion — ZERO external config, no session id, no bot token, no chat binding. On success the parent
 // selects it and opens its Chat surface (its default face), so the user can talk to it straight away.
 //
-// DEFERRED (channel-model decision open): connecting Telegram to an EXISTING companion is NOT built here. A
-// companion is reachable on ONE channel today, so wiring Telegram would REPLACE the in-app route rather than
-// add to it. The interim path stays the Manage view's token/binding controls; a guided BotFather wizard is
-// out of scope for this card pending that channel-model decision.
+// Connecting Telegram to an EXISTING companion lives in the Manage view (ChannelsSection › ConnectTelegram):
+// with the multi-binding schema (d23b4e32) it ADDS a Telegram route ALONGSIDE the in-app one (both channels
+// coexist, unified context) rather than replacing it — so the create flow stays deliberately in-app-only and
+// points the user to Manage for Telegram.
 function CompanionCreate({ onCreate, pending, error, onCancel }: {
   onCreate: (name: string) => void;
   pending: boolean;
@@ -362,9 +366,10 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
   // Chat is the companion's DEFAULT face in the app (not the raw terminal); Manage is a click away.
   const [mode, setMode] = useState<"chat" | "manage">("chat");
   // In-app reachability: an in-app reply frame only comes back when a binding on the in-app channel exists
-  // for this session (chatId == sessionId — the loopback self-address). Anything else ⇒ chat shows the
-  // gentle "not wired" notice instead of implying a message was delivered.
-  const armed = companion.binding?.channel === IN_APP_CHANNEL && companion.binding.chatId === companion.sessionId;
+  // for this session (chatId == sessionId — the loopback self-address). MULTI-CHANNEL: scan ALL bindings so
+  // a Telegram binding never hides the in-app one; anything else ⇒ chat shows the gentle "not wired" notice
+  // instead of implying a message was delivered.
+  const armed = isArmedInApp(companion.bindings, companion.sessionId);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
@@ -374,7 +379,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
           ? <Badge tone={companion.config.enabled ? "phosphor" : "muted"}>{companion.config.enabled ? "enabled" : "disabled"}</Badge>
           : <Badge tone="cyan">binding only</Badge>}
         {companion.config?.envPinned && <Badge tone="amber">pinned by env</Badge>}
-        {companion.config && !companion.binding && <Badge tone="amber">not reachable — no binding</Badge>}
+        {companion.config && companion.bindings.length === 0 && <Badge tone="amber">not reachable — no binding</Badge>}
         <span style={{ flex: 1 }} />
         <ModeToggle mode={mode} onMode={setMode} />
       </div>
@@ -388,7 +393,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
         <div role="tabpanel" id="companion-panel-manage" aria-labelledby="companion-tab-manage"
           style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <ConfigSection companion={companion} onChanged={onChanged} onDeleted={onDeleted} />
-          <AccessSection companion={companion} onChanged={onChanged} />
+          <ChannelsSection companion={companion} onChanged={onChanged} />
           <PairingSection sessionId={companion.sessionId} />
 
           <Panel style={{ padding: 12, background: color.panel2 }}>
@@ -528,23 +533,158 @@ function ConfigSection({ companion, onChanged, onDeleted }: { companion: Compani
   );
 }
 
-// ── Access: the session↔chat binding + the group sender allowlist ───────────────
-function AccessSection({ companion, onChanged }: { companion: CompanionRow; onChanged: () => void }) {
+// ── Channels: the per-channel bindings a companion is reachable on + guided Telegram connect ──────────
+// A companion may hold MANY bindings now (one per channel — d23b4e32). This section lists each channel as
+// its own row with a per-channel remove (unroutes ONLY that channel, keeping the others), offers a guided
+// Telegram connect when Telegram isn't wired yet, and keeps a manual advanced add for custom channels /
+// group scope. Every write is the human-only REST — the companion never binds or configures itself.
+function ChannelsSection({ companion, onChanged }: { companion: CompanionRow; onChanged: () => void }) {
   const { sessionId } = companion;
-  const binding = companion.binding ?? null;
-  const [adding, setAdding] = useState(false);
+  const rows = bindingsForDisplay(companion.bindings);
+  const telegramConnected = hasChannelBinding(companion.bindings, TELEGRAM_CHANNEL);
+
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <SectionLabel style={{ margin: 0 }}>Channels</SectionLabel>
+      <p style={{ ...hint, margin: 0 }}>
+        Where this companion is reachable. <strong style={{ color: color.text }}>In-app</strong> is its
+        default face; connect <strong style={{ color: color.text }}>Telegram</strong> to also reach it there —
+        both share one context. Removing a channel unroutes only that channel; the others stay.
+      </p>
+
+      {rows.length === 0 ? (
+        <p style={hint}>No channels yet — this companion isn't reachable until a channel is connected.</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {rows.map((b) => (
+            <ChannelRow key={b.channel} sessionId={sessionId} binding={b} onChanged={onChanged} />
+          ))}
+        </div>
+      )}
+
+      {!telegramConnected && <ConnectTelegram companion={companion} onChanged={onChanged} />}
+
+      <AdvancedAddBinding companion={companion} onChanged={onChanged} />
+    </section>
+  );
+}
+
+// One channel a companion is reachable on: its name + scope + chat, a per-channel remove (with an inline
+// confirm), and — for a GROUP-scoped binding — the sender allowlist that gates it. Remove targets ONLY this
+// channel via the `?channel=` daemon contract, so the session's other channels are untouched.
+function ChannelRow({ sessionId, binding, onChanged }: { sessionId: string; binding: CompanionBinding; onChanged: () => void }) {
+  const [confirm, setConfirm] = useState(false);
+  const inApp = binding.channel === IN_APP_CHANNEL;
+  const remove = useMutation({
+    mutationFn: () => api.deleteCompanionBinding(sessionId, binding.channel),
+    onSuccess: () => { setConfirm(false); onChanged(); },
+  });
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 12, color: color.text }}>
+          {channelDisplayName(binding.channel)}
+        </strong>
+        <StatusPill tone={binding.scope === "group" ? "amber" : inApp ? "phosphor" : "cyan"} label={inApp ? "default" : binding.scope} />
+        {!inApp && <Chip label="chat" value={binding.chatId} />}
+        <span style={{ flex: 1 }} />
+        {confirm ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={errStyle}>{inApp ? "Remove in-app? Chat here stops working." : "Remove this channel?"}</span>
+            <Button variant="danger" disabled={remove.isPending} onClick={() => remove.mutate()}>{remove.isPending ? "Removing…" : "Confirm"}</Button>
+            <Button variant="ghost" onClick={() => { setConfirm(false); remove.reset(); }}>Cancel</Button>
+          </div>
+        ) : (
+          <Button variant="danger" onClick={() => setConfirm(true)}>Remove</Button>
+        )}
+      </div>
+      {inApp && <span style={hint}>The cockpit chat panel — always this companion's own loopback route.</span>}
+      {remove.error && <span style={errStyle}>{(remove.error as Error).message}</span>}
+      {binding.scope === "group" && <AllowedSenders sessionId={sessionId} channel={binding.channel} />}
+    </div>
+  );
+}
+
+// Guided "Connect Telegram" to an EXISTING companion. BotFather steps → paste the bot token → enter the chat
+// id → Connect. Runs the TWO human-only REST writes in order: the companion config (stores the ENCRYPTED,
+// write-only token + telegram target) then the bindings POST (adds the telegram route alongside in-app). The
+// companion never performs either write. Collapsed to a single affordance until the user opts in.
+function ConnectTelegram({ companion, onChanged }: { companion: CompanionRow; onChanged: () => void }) {
+  const { sessionId } = companion;
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState<CompanionTelegramForm>(emptyTelegramForm);
+  const [localErr, setLocalErr] = useState<string | null>(null);
+  const set = <K extends keyof CompanionTelegramForm>(k: K, v: CompanionTelegramForm[K]) => setForm((f) => ({ ...f, [k]: v }));
+
+  const connect = useMutation({
+    // Two ordered writes: config first (token at rest), then the authoritative binding. If the binding POST
+    // fails the token is already stored (masked) — the user can retry Connect; we never leave a half state
+    // silently (the error surfaces). The config uses PUT when a row exists (the common in-app case), else POST.
+    mutationFn: async (b: { configBody: Record<string, unknown>; bindingBody: { sessionId: string; channel: string; chatId: string; scope: "dm" | "group" } }) => {
+      if (companion.config) await api.updateCompanionConfig(sessionId, b.configBody);
+      else await api.createCompanionConfig({ ...b.configBody, sessionId });
+      await api.createCompanionBinding(b.bindingBody);
+    },
+    onSuccess: () => { onChanged(); setOpen(false); setForm(emptyTelegramForm()); setLocalErr(null); },
+  });
+
+  const submit = () => {
+    setLocalErr(null);
+    const built = buildTelegramConnect(sessionId, form);
+    if ("error" in built) { setLocalErr(built.error); return; }
+    connect.mutate(built);
+  };
+
+  if (!open) {
+    return (
+      <div>
+        <Button variant="primary" onClick={() => setOpen(true)}>Connect Telegram</Button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: 12, border: `1px solid ${color.cyan}`, borderRadius: radius.base, background: color.panel2 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 12, color: color.text }}>Connect Telegram</strong>
+        <StatusPill tone="cyan" label="adds a channel" />
+      </div>
+      <ol style={{ ...hint, margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
+        <li>In Telegram, message <code style={{ color: color.text }}>@BotFather</code> and send <code style={{ color: color.text }}>/newbot</code>; follow the prompts to name it.</li>
+        <li>BotFather replies with a <strong style={{ color: color.text }}>bot token</strong> (like <code>123456:ABC-DEF…</code>). Paste it below.</li>
+        <li>Message your new bot once, then get the <strong style={{ color: color.text }}>chat id</strong> of that DM (e.g. via <code style={{ color: color.text }}>@userinfobot</code>).</li>
+      </ol>
+      <Field label="Bot token" sub="from BotFather · stored encrypted, never shown again">
+        <Input type="password" autoComplete="new-password" value={form.botToken}
+          onChange={(e) => set("botToken", e.target.value)} placeholder="123456:ABC-DEF…" spellCheck={false} />
+      </Field>
+      <Field label="Chat id" sub="the DM this bot messages">
+        <Input value={form.chatId} onChange={(e) => set("chatId", e.target.value)} placeholder="e.g. 123456789" spellCheck={false} />
+      </Field>
+      {(localErr || connect.error) && <span style={errStyle}>{localErr ?? (connect.error as Error).message}</span>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <Button variant="primary" disabled={connect.isPending} onClick={submit}>{connect.isPending ? "Connecting…" : "Connect"}</Button>
+        <Button variant="ghost" disabled={connect.isPending} onClick={() => { setOpen(false); connect.reset(); setForm(emptyTelegramForm()); setLocalErr(null); }}>Cancel</Button>
+      </div>
+    </div>
+  );
+}
+
+// Advanced manual add-binding — the escape hatch for a CUSTOM channel or a GROUP-scoped binding (which must
+// consciously declare group scope + an allowlist). Collapsed by default so the common path (guided Telegram)
+// stays front and center. Same human-only bindings POST; validated inline before the round-trip.
+function AdvancedAddBinding({ companion, onChanged }: { companion: CompanionRow; onChanged: () => void }) {
+  const { sessionId } = companion;
+  const [open, setOpen] = useState(false);
   const [chatId, setChatId] = useState("");
-  const [channel, setChannel] = useState(companion.config?.channel ?? "telegram");
-  const [scope, setScope] = useState<"dm" | "group">(companion.config?.chatScope ?? "dm");
+  const [channel, setChannel] = useState(companion.config?.channel ?? TELEGRAM_CHANNEL);
+  const [scope, setScope] = useState<"dm" | "group">("dm");
   const [localErr, setLocalErr] = useState<string | null>(null);
 
   const createBinding = useMutation({
     mutationFn: (b: { sessionId: string; channel: string; chatId: string; scope: "dm" | "group" }) => api.createCompanionBinding(b),
-    onSuccess: () => { onChanged(); setAdding(false); setChatId(""); },
-  });
-  const removeBinding = useMutation({
-    mutationFn: () => api.deleteCompanionBinding(sessionId),
-    onSuccess: onChanged,
+    onSuccess: () => { onChanged(); setOpen(false); setChatId(""); },
   });
 
   const submit = () => {
@@ -555,51 +695,36 @@ function AccessSection({ companion, onChanged }: { companion: CompanionRow; onCh
     createBinding.mutate(b);
   };
 
-  return (
-    <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <SectionLabel style={{ margin: 0 }}>Access</SectionLabel>
-        <span style={{ flex: 1 }} />
-        {!binding && !adding && <Button variant="primary" onClick={() => setAdding(true)}>Add binding</Button>}
+  if (!open) {
+    return (
+      <div>
+        <Button variant="ghost" onClick={() => setOpen(true)}>Advanced: add a custom binding</Button>
       </div>
-      <p style={{ ...hint, margin: 0 }}>
-        Which chat is wired to this companion. A <strong style={{ color: color.text }}>dm</strong> binding
-        trusts the private chat; a <strong style={{ color: color.text }}>group</strong> binding trusts only
-        the allowlisted senders below — an unlisted speaker is hard-rejected.
-      </p>
+    );
+  }
 
-      {binding ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <StatusPill tone={binding.scope === "group" ? "amber" : "cyan"} label={binding.scope} />
-          <Chip label="channel" value={binding.channel} />
-          <Chip label="chat" value={binding.chatId} />
-          <span style={{ flex: 1 }} />
-          <Button variant="danger" disabled={removeBinding.isPending} onClick={() => removeBinding.mutate()}>Unbind</Button>
-        </div>
-      ) : adding ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: 10, border: `1px solid ${color.border}`, borderRadius: radius.base }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 120px", gap: 10 }}>
-            <Field label="Channel"><Input value={channel} onChange={(e) => setChannel(e.target.value)} placeholder="telegram" spellCheck={false} /></Field>
-            <Field label="Chat id"><Input value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="e.g. -1001234" spellCheck={false} /></Field>
-            <Field label="Scope">
-              <Select value={scope} onChange={(e) => setScope(e.target.value as "dm" | "group")}>
-                <option value="dm">dm</option>
-                <option value="group">group</option>
-              </Select>
-            </Field>
-          </div>
-          {(localErr || createBinding.error) && <span style={errStyle}>{localErr ?? (createBinding.error as Error).message}</span>}
-          <div style={{ display: "flex", gap: 8 }}>
-            <Button variant="primary" disabled={createBinding.isPending} onClick={submit}>{createBinding.isPending ? "Binding…" : "Bind"}</Button>
-            <Button variant="ghost" onClick={() => { setAdding(false); createBinding.reset(); setLocalErr(null); }}>Cancel</Button>
-          </div>
-        </div>
-      ) : (
-        <p style={hint}>No binding yet — this companion isn't reachable until a chat is bound.</p>
-      )}
-
-      {binding?.scope === "group" && <AllowedSenders sessionId={sessionId} channel={binding.channel} />}
-    </section>
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: 10, border: `1px solid ${color.border}`, borderRadius: radius.base }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 120px", gap: 10 }}>
+        <Field label="Channel"><Input value={channel} onChange={(e) => setChannel(e.target.value)} placeholder="telegram" spellCheck={false} /></Field>
+        <Field label="Chat id"><Input value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="e.g. -1001234" spellCheck={false} /></Field>
+        <Field label="Scope">
+          <Select value={scope} onChange={(e) => setScope(e.target.value as "dm" | "group")}>
+            <option value="dm">dm</option>
+            <option value="group">group</option>
+          </Select>
+        </Field>
+      </div>
+      <span style={hint}>
+        A <strong style={{ color: color.text }}>group</strong> binding trusts only the allowlisted senders on
+        its row — an unlisted speaker is hard-rejected. A bare bot token is set under Run configuration.
+      </span>
+      {(localErr || createBinding.error) && <span style={errStyle}>{localErr ?? (createBinding.error as Error).message}</span>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <Button variant="primary" disabled={createBinding.isPending} onClick={submit}>{createBinding.isPending ? "Binding…" : "Bind"}</Button>
+        <Button variant="ghost" onClick={() => { setOpen(false); createBinding.reset(); setLocalErr(null); }}>Cancel</Button>
+      </div>
+    </div>
   );
 }
 

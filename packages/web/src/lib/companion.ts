@@ -8,12 +8,26 @@
 //   • a config UPDATE with a BLANK token OMITS `botToken` from the request body entirely, so the daemon
 //     keeps the stored encrypted token (a "replace token" is the ONLY way a new token is ever sent).
 
-import type { CompanionConfigMasked, SessionListItem } from "@loom/shared";
+import type { CompanionBinding, CompanionConfigMasked, SessionListItem } from "@loom/shared";
 
 // Mirror of the daemon's COMPANION_ID_MAX (gateway/server.ts) — the max length the REST surface accepts
 // for chat/sender ids + sender labels. Kept in sync here so the UI rejects an over-long value inline
 // instead of round-tripping to a 400.
 export const COMPANION_ID_MAX = 200;
+
+// Mirror of IN_APP_CHANNEL (the canonical export lives in lib/companionChat) — duplicated as a local
+// literal so this pure, hermetically unit-tested module keeps NO sibling VALUE import: the node
+// --experimental-strip-types test runner can't resolve an extensionless sibling, and bundler-mode tsc
+// forbids the `.ts` extension. Same import-light convention as the daemon-constant mirrors above/below.
+const IN_APP_CHANNEL = "in-app";
+
+// Mirror of the daemon's COMPANION_TOKEN_MAX (gateway/server.ts) — the max bot-token length the config
+// REST accepts. Kept in sync so the guided connect flow rejects an over-long token inline, not at a 400.
+export const COMPANION_TOKEN_MAX = 4096;
+
+// The default external channel label (matches the daemon's TELEGRAM_CHANNEL). The guided connect flow is
+// Telegram-specific; a custom channel still goes through the manual "Add binding" advanced control.
+export const TELEGRAM_CHANNEL = "telegram";
 
 // The write-side form state for creating/configuring a companion. `botToken` is write-only: blank on an
 // EDIT means "keep the stored token"; on a CREATE it is required. `heartbeatIntervalMinutes` is a text
@@ -174,6 +188,89 @@ export function validateSender(b: { senderId: string; label?: string | null }): 
 export function validatePairing(grantType: string): string | null {
   if (grantType !== "dm-bind" && grantType !== "group-sender") return "Pick a grant type.";
   return null;
+}
+
+// ── Guided "Connect Telegram" to an EXISTING companion (multi-channel, d23b4e32) ─────────────────────────
+// The Manage view lets a user connect Telegram to a companion that already exists (typically an in-app-only
+// one). Per the multi-binding schema, this ADDS a Telegram binding ALONGSIDE the in-app one — both channels
+// coexist on the same session, unified context — rather than replacing the in-app route. The wire is the
+// EXISTING human-only REST: PUT/POST /api/companion/config (stores the ENCRYPTED bot token + telegram target)
+// then POST /api/companion/bindings (adds the telegram route). The companion NEVER writes any of this itself.
+
+// The guided connect form. Both fields are required. `botToken` is WRITE-ONLY end to end — like the config
+// token it is only ever SENT, never read back (a masked config carries no token, only its last-4).
+export interface CompanionTelegramForm {
+  botToken: string;
+  chatId: string;
+}
+
+export function emptyTelegramForm(): CompanionTelegramForm {
+  return { botToken: "", chatId: "" };
+}
+
+// Validate the guided connect form — mirrors the daemon guards so a bad form never round-trips to a 400:
+// the token is non-blank and ≤ COMPANION_TOKEN_MAX, and the chat id is non-blank and ≤ COMPANION_ID_MAX (a
+// token with no chat to reach is the daemon's GUARD 2). Bounds match the daemon's `.length` checks.
+export function validateTelegramConnect(form: CompanionTelegramForm): string | null {
+  const token = form.botToken.trim();
+  if (!token) return "Paste the bot token from BotFather.";
+  if (form.botToken.length > COMPANION_TOKEN_MAX) return `The bot token must be at most ${COMPANION_TOKEN_MAX} characters.`;
+  if (!form.chatId.trim()) return "Enter the chat id the bot should message.";
+  if (form.chatId.length > COMPANION_ID_MAX) return `The chat id must be at most ${COMPANION_ID_MAX} characters.`;
+  return null;
+}
+
+// Assemble the TWO writes the guided connect performs, or an { error } for an invalid form (so the caller
+// never fires a half write):
+//   • configBody → the companion config write (PUT when a config row already exists, else POST create):
+//     the ENCRYPTED bot token + the telegram transport channel + the chat it DMs. botToken is WRITE-ONLY —
+//     it is sent ONLY here, from a value the human typed, never read back.
+//   • bindingBody → POST /api/companion/bindings: the authoritative telegram route, ADDED alongside the
+//     session's in-app binding (the daemon upserts on (session_id, channel), so the in-app row is untouched).
+// A DM scope: the guided flow binds the owner's private chat (a group binding is the manual advanced path,
+// which must consciously declare group scope + an allowlist).
+export function buildTelegramConnect(
+  sessionId: string,
+  form: CompanionTelegramForm,
+): { error: string } | {
+  configBody: Record<string, unknown>;
+  bindingBody: { sessionId: string; channel: string; chatId: string; scope: "dm" | "group" };
+} {
+  const err = validateTelegramConnect(form);
+  if (err) return { error: err };
+  const chatId = form.chatId.trim();
+  return {
+    configBody: { botToken: form.botToken.trim(), channel: TELEGRAM_CHANNEL, allowedChatId: chatId, chatScope: "dm" },
+    bindingBody: { sessionId: sessionId.trim(), channel: TELEGRAM_CHANNEL, chatId, scope: "dm" },
+  };
+}
+
+// ── Per-channel display (which channels a companion is reachable on) ──────────────────────────────────────
+// A companion may now hold MANY bindings (one per channel). The Manage view lists each as a channel row.
+// These pure helpers order + label them so the display logic stays testable and out of the component.
+
+// Order a companion's bindings for display: the in-app channel ALWAYS first (a companion's default face),
+// then the rest alphabetically by channel. Does not mutate the input.
+export function bindingsForDisplay(bindings: CompanionBinding[]): CompanionBinding[] {
+  return [...bindings].sort((a, b) => {
+    if (a.channel === IN_APP_CHANNEL) return b.channel === IN_APP_CHANNEL ? 0 : -1;
+    if (b.channel === IN_APP_CHANNEL) return 1;
+    return a.channel.localeCompare(b.channel);
+  });
+}
+
+// A friendly display name for a channel row. Known channels get a proper-cased label; anything else shows
+// verbatim (never invents a name for a channel the daemon added that the UI hasn't been taught).
+export function channelDisplayName(channel: string): string {
+  if (channel === IN_APP_CHANNEL) return "In-app";
+  if (channel === TELEGRAM_CHANNEL) return "Telegram";
+  return channel;
+}
+
+// Whether a companion already has a binding on the given channel — used to hide the "Connect Telegram" flow
+// once Telegram is connected (and to keep the connect idempotent from the UI's side).
+export function hasChannelBinding(bindings: CompanionBinding[], channel: string): boolean {
+  return bindings.some((b) => b.channel === channel);
 }
 
 // ── Header-nav gating (UI-audit finding #4) ──────────────────────────────────────────────────────────

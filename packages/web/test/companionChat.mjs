@@ -14,7 +14,7 @@
 //   node --experimental-strip-types packages/web/test/companionChat.mjs
 import assert from "node:assert/strict";
 import {
-  IN_APP_CHANNEL, companionMessage, parseInbound, prepareSend, youMessage,
+  IN_APP_CHANNEL, companionMessage, isArmedInApp, parseInbound, prepareSend, youMessage,
 } from "../src/lib/companionChat.ts";
 
 let pass = 0;
@@ -98,6 +98,27 @@ check("round-trip: send emits a frame; the echoed frame parses into a companion 
 
 check("IN_APP_CHANNEL mirrors the daemon's channel name", () => {
   assert.equal(IN_APP_CHANNEL, "in-app");
+});
+
+// ── isArmedInApp: the in-app route is detected among a companion's now-MULTIPLE bindings ──────────────
+// Multi-channel (d23b4e32): a companion may hold an in-app AND a Telegram binding at once. "Armed" means it
+// has a LIVE in-app route — a binding on the in-app channel whose chatId is the loopback self-address
+// (chatId == the session id). A Telegram binding must NEITHER satisfy the check NOR mask a present in-app one.
+check("isArmedInApp: true when an in-app binding (chatId == sessionId) is present among many", () => {
+  const bindings = [
+    { channel: "telegram", chatId: "999" },
+    { channel: "in-app", chatId: "sess-1" },
+  ];
+  assert.equal(isArmedInApp(bindings, "sess-1"), true, "the in-app route is found even with a telegram binding alongside");
+});
+
+check("isArmedInApp: false when only a telegram binding exists (no in-app route)", () => {
+  assert.equal(isArmedInApp([{ channel: "telegram", chatId: "999" }], "sess-1"), false);
+  assert.equal(isArmedInApp([], "sess-1"), false, "no bindings → not armed");
+});
+
+check("isArmedInApp: an in-app binding whose chatId is NOT the session id does not arm (not the loopback self-address)", () => {
+  assert.equal(isArmedInApp([{ channel: "in-app", chatId: "someone-else" }], "sess-1"), false);
 });
 
 console.log(`\n${pass} passed`);

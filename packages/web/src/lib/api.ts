@@ -577,7 +577,13 @@ export const api = {
   companionBindings: () => get<CompanionBinding[]>("/api/companion/bindings"),
   createCompanionBinding: (b: { sessionId: string; channel: string; chatId: string; scope: "dm" | "group" }) =>
     postErr<CompanionBinding>("/api/companion/bindings", b),
-  deleteCompanionBinding: (sessionId: string) => del<{ ok: boolean }>(`/api/companion/bindings/${encodeURIComponent(sessionId)}`),
+  // Delete a session's binding(s). With `channel` set, removes ONLY that channel's binding and keeps the
+  // others (multi-channel per-channel disconnect — the daemon contract: `?channel=<channel>`); omit it and
+  // the daemon deletes ALL of the session's bindings (byte-identical to the pre-multi-channel behavior).
+  deleteCompanionBinding: (sessionId: string, channel?: string) =>
+    del<{ ok: boolean }>(
+      `/api/companion/bindings/${encodeURIComponent(sessionId)}${channel ? `?channel=${encodeURIComponent(channel)}` : ""}`,
+    ),
   companionAllowedSenders: (sessionId: string) =>
     get<CompanionAllowedSender[]>(`/api/companion/allowed-senders?sessionId=${encodeURIComponent(sessionId)}`),
   addCompanionAllowedSender: (b: { sessionId: string; channel: string; senderId: string; label?: string | null }) =>
