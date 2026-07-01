@@ -1,6 +1,6 @@
 import { useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueries, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -16,6 +16,7 @@ import { SessionWakes } from "../components/SessionWakes";
 import { SessionQueue } from "../components/SessionQueue";
 import { SessionActions } from "../components/SessionActions";
 import { SpawnControls } from "../components/SpawnControls";
+import { DiffView } from "../components/Diff";
 import { Panel, Button, SectionLabel, StatusPill, Badge, Chip, Meter } from "../components/ui";
 import {
   Stat, FleetCard, FleetRow, AttentionRow, EventRow, fleetRollup, worstContext,
@@ -356,7 +357,7 @@ function FleetCockpitRow({ s, star, open, onToggle, actions }: {
       </div>
       {open && (
         <div style={{ marginLeft: 10, marginTop: 6, paddingLeft: 10, borderLeft: `1px solid ${color.phosphor}` }}>
-          <SessionCockpit sessionId={s.id} />
+          <SessionCockpit sessionId={s.id} role={s.role} />
         </div>
       )}
     </div>
@@ -367,24 +368,78 @@ function FleetCockpitRow({ s, star, open, onToggle, actions }: {
 // wakes / queued turns / composer. Reuses the standalone components AS-IS; mirrors Workspace's
 // right-hand cockpit. Mounted only by an OPEN FleetCockpitRow, so its TerminalPane is the one live
 // terminal on the page (single-open). The pane height is fixed (the page itself scrolls).
-function SessionCockpit({ sessionId }: { sessionId: string }) {
-  const [tab, setTab] = useState<"terminal" | "transcript">("terminal");
+//
+// The retired Orchestration page's two unique drill-down views are folded in here as role-scoped tabs,
+// so the manager→worker→live-diff drill-down survives its removal: a MANAGER row gains a "Timeline" tab
+// (its own orchestration_events), a WORKER row gains a "Diff" tab (its branch diff). Both panels are
+// bounded + internally scrollable so they don't unbalance the accordion.
+function SessionCockpit({ sessionId, role }: { sessionId: string; role: SessionListItem["role"] }) {
+  type CockpitTab = "terminal" | "transcript" | "timeline" | "diff";
+  const tabs: { key: CockpitTab; label: string }[] = [
+    { key: "terminal", label: "Terminal" },
+    { key: "transcript", label: "Transcript" },
+  ];
+  if (role === "manager") tabs.push({ key: "timeline", label: "Timeline" });
+  if (role === "worker") tabs.push({ key: "diff", label: "Diff" });
+  const [tab, setTab] = useState<CockpitTab>("terminal");
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
       <div style={{ marginBottom: 6, display: "flex", gap: 6 }}>
-        {(["terminal", "transcript"] as const).map((t) => (
-          <Button key={t} variant={tab === t ? "primary" : "default"} onClick={() => setTab(t)}>
-            {t === "terminal" ? "Terminal" : "Transcript"}
-          </Button>
+        {tabs.map((t) => (
+          <Button key={t.key} variant={tab === t.key ? "primary" : "default"} onClick={() => setTab(t.key)}>{t.label}</Button>
         ))}
       </div>
-      <div style={{ height: 440, minHeight: 0 }}>
-        {tab === "terminal" ? <TerminalPane sessionId={sessionId} /> : <TranscriptPane sessionId={sessionId} />}
-      </div>
+      {/* Terminal/Transcript live behind a fixed-height pane; the relocated Timeline/Diff panels bring
+          their own bounded scroll (below), so they're rendered outside the fixed pane. */}
+      {(tab === "terminal" || tab === "transcript") && (
+        <div style={{ height: 440, minHeight: 0 }}>
+          {tab === "terminal" ? <TerminalPane sessionId={sessionId} /> : <TranscriptPane sessionId={sessionId} />}
+        </div>
+      )}
+      {tab === "timeline" && <ManagerTimeline managerId={sessionId} />}
+      {tab === "diff" && <WorkerDiffPanel workerId={sessionId} />}
       <SessionWakes sessionId={sessionId} />
       <SessionQueue sessionId={sessionId} />
       <Composer sessionId={sessionId} />
     </div>
+  );
+}
+
+// Relocated from the retired Orchestration page: the manager's own orchestration_events timeline. Polls
+// so it stays live while the manager drills its workers. Mounted only when the Timeline tab is active
+// (single-open cockpit), so it never fans out a query per manager. Reuses the shared EventRow.
+function ManagerTimeline({ managerId }: { managerId: string }) {
+  const events = useQuery({ queryKey: ["orchEvents", managerId], queryFn: () => api.orchestrationEvents(managerId), refetchInterval: 2000, placeholderData: keepPreviousData });
+  const list = events.data ?? [];
+  return (
+    <Panel grid style={{ maxHeight: 440, overflow: "auto" }}>
+      {list.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No events yet.</span>}
+      {list.map((e) => <EventRow key={e.id} e={e} />)}
+    </Panel>
+  );
+}
+
+// Relocated from the retired Orchestration page: the worker's branch diff (live, incl. uncommitted; or
+// the landed diff once merged). The manager→worker→live-diff drill-down that the Orchestration page owned
+// now lives here, reached by expanding a worker row under its manager. Mounted only when the Diff tab is
+// active. On error (no branch / merged-away) it says so rather than showing an empty pane.
+function WorkerDiffPanel({ workerId }: { workerId: string }) {
+  const diff = useQuery({ queryKey: ["workerDiff", workerId], queryFn: () => api.workerDiff(workerId), placeholderData: keepPreviousData });
+  return (
+    <Panel style={{ maxHeight: 440, overflow: "auto" }}>
+      {diff.isLoading && <span style={{ color: color.textMuted, fontSize: 12 }}>Loading diff…</span>}
+      {diff.isError && <span style={{ color: color.red, fontSize: 12 }}>No diff (worker has no branch, or it was merged/removed).</span>}
+      {diff.data && (
+        <>
+          <div style={{ fontFamily: font.mono, fontSize: 12, color: color.cyan, marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <span>{diff.data.filesChanged} file(s) · +{diff.data.insertions} −{diff.data.deletions}</span>
+            {diff.data.uncommitted && <Badge tone="amber">live · incl. uncommitted</Badge>}
+            {diff.data.merged && <Badge tone="phosphor">merged → landed diff</Badge>}
+          </div>
+          <DiffView patch={diff.data.patch || "(no changes vs HEAD)"} />
+        </>
+      )}
+    </Panel>
   );
 }
 

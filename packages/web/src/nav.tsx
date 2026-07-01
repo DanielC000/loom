@@ -9,7 +9,6 @@ import Archive from "./pages/Archive";
 import Terminals from "./pages/Terminals";
 import Board from "./pages/Board";
 import Runs from "./pages/Runs";
-import Orchestration from "./pages/Orchestration";
 import Vault from "./pages/Vault";
 import Git from "./pages/Git";
 import Skills from "./pages/Skills";
@@ -53,9 +52,9 @@ export type NavPage = {
 //
 // `scoped` was determined from `git grep -l useActiveProject packages/web/src/pages` and then
 // VERIFIED per page (does switching the active project actually rescope it?): Overview, Board,
-// Runs, Orchestration, Vault, Git, Schedules (per-project agents), Settings (edits the active
-// project's config override). Archive imports nothing scoped (its `projectId` fields are its own
-// grouping type), and Workspace has its OWN project picker — both intentionally NOT scoped.
+// Runs, Vault, Git, Schedules (per-project agents), Settings (edits the active project's config
+// override). Archive imports nothing scoped (its `projectId` fields are its own grouping type),
+// and Workspace has its OWN project picker — both intentionally NOT scoped.
 export const NAV_PAGES: NavPage[] = [
   // ── Primary tabs (header), in display order ──────────────────────────────────
   { label: "Mission Control", nav: "Mission", to: "/", end: true, element: <MissionControl />, group: "system", primary: true },
@@ -90,10 +89,10 @@ export const NAV_PAGES: NavPage[] = [
   // it stays right here under More ▾ · Config.
   { label: "Companion", to: "/companion", element: <Companion />, group: "config" },
   { label: "Schedules", to: "/schedules", element: <Schedules />, group: "config", scoped: true },
-  // Orchestration (UI-audit finding #11): the manager→worker→diff drill-down, not a standalone
-  // destination — demoted out of Project into Config (last slot) since the global pause/kill cluster
-  // that used to live here now lives ONLY on Mission Control (finding #6).
-  { label: "Orchestration", to: "/orchestration", element: <Orchestration />, group: "config", scoped: true },
+  // The standalone Orchestration page (its manager→worker→diff drill-down) was REMOVED (card bde7957f):
+  // its two unique views — the per-manager orchestration_events timeline + the worker branch-diff — now
+  // live as role-scoped tabs in the Overview fleet-card expansion (FleetAccordion → SessionCockpit), so
+  // the drill-down is reached from the fleet card rather than a duplicate top-level destination.
   // ── More ▾ · System ──────────────────────────────────────────────────────────
   { label: "Usage", to: "/usage", element: <Usage />, group: "system" },
   { label: "Settings", to: "/settings", element: <Settings />, group: "system", scoped: true },

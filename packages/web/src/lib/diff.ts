@@ -239,7 +239,7 @@ export function hunkLineKind(ln: string): DiffLineKind {
   }
 }
 
-// Classifier for a RAW unified patch rendered line-by-line (the Orchestration view's whole-patch
+// Classifier for a RAW unified patch rendered line-by-line (the fleet-card expansion's worker branch-diff
 // DiffView), which legitimately CONTAINS the `diff --git`/`index `/`+++ b/`/`--- a/` file headers and
 // dims them as "meta". This header-dimming is WRONG for FileHunks (header-stripped content), which uses
 // hunkLineKind — the two callers have opposite needs and must stay separate (the merge-gate render-bug

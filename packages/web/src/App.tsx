@@ -50,8 +50,8 @@ function Bell() {
 }
 
 // Header active-project selector. Persists the one project that scopes the detail pages
-// (the nav items marked with a scope dot — Overview / Board / Runs / Orchestration / Vault /
-// Git / Schedules / Settings). Mission Control, Terminals and the other god-eye pages ignore it
+// (the nav items marked with a scope dot — Overview / Board / Runs / Vault / Git / Schedules /
+// Settings). Mission Control, Terminals and the other god-eye pages ignore it
 // — hence the quiet tooltip rather than hiding the control per route. Lives on the LEFT, right
 // after the logo, so the active scope reads before the destinations it scopes.
 function ActiveProjectControl() {

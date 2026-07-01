@@ -1,7 +1,7 @@
 import type { Session, ProcessState, SessionRole } from "@loom/shared";
 
 // The ONE shared session ordering, applied at every session-list tier (Workspace, Terminals,
-// Mission Control, Orchestration) so a session's place in a list is consistent everywhere.
+// Mission Control, the Overview fleet accordion) so a session's place in a list is consistent everywhere.
 //
 // Order: (1) liveness first — live/starting rank above exited/none; (2) lastActivity DESC — the
 // most-recently-active float up; (3) createdAt as a stable tiebreak (spawn order). Applied WITHIN

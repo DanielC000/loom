@@ -14,8 +14,9 @@ const KIND_COLOR: Record<DiffLineKind, string> = {
   meta: color.textMuted,
 };
 
-// Unified diff with green additions / red deletions / cyan hunk headers. Kept for the Orchestration
-// view's raw whole-patch render; the review pane uses the per-file FileDiffBlock below.
+// Unified diff with green additions / red deletions / cyan hunk headers. Kept for the fleet-card
+// expansion's worker branch-diff raw whole-patch render; the review pane uses the per-file
+// FileDiffBlock below.
 export function DiffView({ patch }: { patch: string }) {
   const lines = patch.split("\n");
   return (
