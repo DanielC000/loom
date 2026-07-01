@@ -5,11 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node test/terminal-chrome.mjs && node --experimental-strip-types test/diff.mjs && node --experimental-strip-types test/companion.mjs && node --experimental-strip-types test/companionChat.mjs && tsc -p tsconfig.json --noEmit && vite build",
+    "build": "node test/terminal-chrome.mjs && node --experimental-strip-types test/diff.mjs && node --experimental-strip-types test/companion.mjs && node --experimental-strip-types test/companionChat.mjs && node --experimental-strip-types test/archive-invalidate.mjs && tsc -p tsconfig.json --noEmit && vite build",
     "test:terminal-chrome": "node test/terminal-chrome.mjs",
     "test:diff": "node --experimental-strip-types test/diff.mjs",
     "test:companion": "node --experimental-strip-types test/companion.mjs",
     "test:companion-chat": "node --experimental-strip-types test/companionChat.mjs",
+    "test:archive-invalidate": "node --experimental-strip-types test/archive-invalidate.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "preview": "vite preview"
   },

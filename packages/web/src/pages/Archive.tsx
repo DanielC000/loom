@@ -6,6 +6,7 @@ import { useActiveProject } from "../lib/activeProject";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { Panel, Button, Input, SectionLabel, StatusPill, Chip, Badge } from "../components/ui";
 import { color, font, tone, sessionRoleTone as roleTone } from "../theme";
+import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
 
 // Per-project Archive: every STOPPED session of the header's active project (sessions auto-archive on
 // exit, so Archive = all stopped sessions). Structured as a searchable manager → worker fold-out tree:
@@ -30,10 +31,7 @@ export default function Archive() {
   });
 
   const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["archive"] });    // this page (every project scope)
-    qc.invalidateQueries({ queryKey: ["allArchived"] }); // god-eye archive views
-    qc.invalidateQueries({ queryKey: ["allSessions"] }); // god-eye live views
-    qc.invalidateQueries({ queryKey: ["sessions"] });    // every agent's rail
+    ARCHIVE_INVALIDATE_KEYS.forEach((queryKey) => qc.invalidateQueries({ queryKey }));
   };
   const restore = useMutation({
     mutationFn: (id: string) => api.restoreSession(id),
