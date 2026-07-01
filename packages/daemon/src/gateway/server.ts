@@ -49,6 +49,8 @@ import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge,
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME } from "../setup/seed.js";
+import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
+import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from "../skills/companion-store.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -939,6 +941,74 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       await deps.companion?.reconcile(); // return the live companion to whatever the DB now reflects (OFF)
       return reply.code(500).send({ error: `companion provision failed and was rolled back: ${(e as Error).message}` });
     }
+  });
+
+  // --- Companion PERSONA + SELF-AUTHORED SKILLS: the companion's "brain" (card follow-up to the epic).
+  // HUMAN-ONLY loopback REST, INTENTIONALLY NO MCP path (of ANY router) — same trust posture as every other
+  // writer in this companion section: a chat-reachable, injection-exposed companion agent must never read
+  // or rewrite its own standing instructions, or curate its own skill library, through a path a human didn't
+  // drive. Both resolve "the companion" by sessionId (mirroring /api/companion/config/:sessionId above).
+  //
+  // PROMPT: GET/PUT the agent's own editable `startupPrompt` — the `own` half composeAssistantStartupPrompt
+  // (sessions/assistant-prompt.ts) layers UNDER the server-owned ASSISTANT_BASE_BRIEF. The brief itself (the
+  // companion's identity + untrusted-input posture + chat_reply doctrine) is a CODE CONSTANT — never read
+  // from the DB or accepted from a request body — so it stays read-only BY CONSTRUCTION; GET returns it
+  // alongside the editable prompt purely so the UI can preview the full composed opening.
+  //
+  // SKILLS: read (list + single) + curate (delete) over the SAME isolated per-companion store the companion
+  // authors over MCP (skills/companion-store.ts, <LOOM_HOME>/companion-skills/<sessionId>/). Authoring stays
+  // the companion's own on-demand job (skill_author over MCP) — no human REST create/edit here, only review
+  // + prune.
+  type ResolvedCompanionAgent =
+    | { ok: true; agent: Agent }
+    | { ok: false; code: number; error: string };
+  const resolveCompanionAgent = (sessionId: string): ResolvedCompanionAgent => {
+    const session = deps.db.getSession(sessionId);
+    if (!session) return { ok: false, code: 404, error: "session not found" };
+    if (session.role !== "assistant") return { ok: false, code: 400, error: "not a companion (assistant-role) session" };
+    const agent = deps.db.getAgent(session.agentId);
+    if (!agent) return { ok: false, code: 404, error: "agent not found" };
+    return { ok: true, agent };
+  };
+  app.get("/api/companion/prompt/:sessionId", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    return { sessionId, startupPrompt: r.agent.startupPrompt, baseBrief: ASSISTANT_BASE_BRIEF };
+  });
+  app.put("/api/companion/prompt/:sessionId", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const b = (req.body ?? {}) as { startupPrompt?: unknown };
+    if (typeof b.startupPrompt !== "string" || b.startupPrompt.length > COMPANION_PROMPT_MAX) {
+      return reply.code(400).send({ error: `startupPrompt must be a string of at most ${COMPANION_PROMPT_MAX} characters` });
+    }
+    deps.db.updateAgent(r.agent.id, { startupPrompt: b.startupPrompt });
+    return { sessionId, startupPrompt: b.startupPrompt, baseBrief: ASSISTANT_BASE_BRIEF };
+  });
+
+  app.get("/api/companion/skills/:sessionId", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    return { skills: listCompanionSkills(sessionId) };
+  });
+  app.get("/api/companion/skills/:sessionId/:name", async (req, reply) => {
+    const { sessionId, name } = req.params as { sessionId: string; name: string };
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const content = readCompanionSkill(sessionId, name);
+    if (content == null) return reply.code(404).send({ error: `no skill "${name}"` });
+    return { name, content };
+  });
+  app.delete("/api/companion/skills/:sessionId/:name", async (req, reply) => {
+    const { sessionId, name } = req.params as { sessionId: string; name: string };
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const result = removeCompanionSkill(sessionId, name);
+    if (!result.ok) return reply.code(404).send({ error: result.error });
+    return { ok: true, skills: result.skills };
   });
 
   // --- Hook relay target (loopback only) ---
