@@ -1211,8 +1211,11 @@ export class PtyHost {
     // already-trusted fast path is lock-free and covers the steady state.
     ensureTrusted(opts.cwd);
     // Mirror Loom's managed skills into <cwd>/.claude/skills (project-local; shadow personal). Never
-    // let a skills hiccup block a spawn — a session must boot even if skill delivery fails.
-    try { injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null, opts.role); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
+    // let a skills hiccup block a spawn — a session must boot even if skill delivery fails. The Obsidian
+    // signal rides opts.sessionEnv (set by obsidianSessionEnv ONLY when obsidian.autoStart is on) — the
+    // local `env` isn't built yet here, so derive it from opts.sessionEnv. Off ⇒ byte-identical injection.
+    const obsidianEnabled = opts.sessionEnv?.LOOM_OBSIDIAN_AUTOSTART === "1";
+    try { injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null, opts.role, obsidianEnabled); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
     // Both managers AND workers get the orchestration MCP — but a role-gated surface: managers
     // get the full coordination tools, workers get only worker_report + the read-only my_context
     // (resolved server-side). A

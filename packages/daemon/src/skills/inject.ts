@@ -1,9 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { SessionRole } from "@loom/shared";
-import { SKILLS_DIR } from "../paths.js";
+import { SKILLS_DIR, OBSIDIAN_PREFLIGHT_FRAGMENT } from "../paths.js";
 
 const MANIFEST = ".loom-skills.json"; // records which skill names EACH session injected into a .claude/skills
+
+/** The skills whose injected SKILL.md gets the Obsidian "vault preflight" fragment appended — and ONLY
+ *  these — when the session's project has `obsidian.autoStart` on. Every other skill is untouched. */
+const OBSIDIAN_FRAGMENT_SKILLS = new Set(["pickup", "session-end"]);
 
 /** Map a Loom-DRIVEN session role to its operating-doctrine skill name in the store. A role here MUST get
  *  its doctrine skill no matter what the profile's pinned subset says (a subset that omits "worker" must
@@ -72,6 +76,37 @@ function copySkillAtomic(src: string, dest: string): boolean {
 }
 
 /**
+ * Append the Obsidian "vault preflight" fragment to a JUST-injected skill's SKILL.md, after its whole body
+ * and NEVER into the top frontmatter block. Called ONLY when a session's project has `obsidian.autoStart`
+ * on (the additive-when-off invariant: with it off this is never reached, so the injected file is
+ * byte-identical to the store base). Uses the SAME atomic tmp+swap discipline as copySkillAtomic. Because
+ * copySkillAtomic re-copies the fresh store base on every inject BEFORE this runs, the append is not
+ * idempotency-sensitive — each inject starts from a fragment-free base and appends exactly once.
+ * Best-effort: the fragment is a pure enhancement (the base skill is fully functional without it), so a
+ * failure is logged and the session runs with the short base skill rather than blocking the spawn.
+ */
+function appendObsidianFragment(skillDir: string, fragment: string): void {
+  const skillMd = path.join(skillDir, "SKILL.md");
+  let body: string;
+  try { body = fs.readFileSync(skillMd, "utf8"); }
+  catch { return; } // no SKILL.md to extend (a fragment-target skill with no SKILL.md) — nothing to do
+  // Exactly the store base bytes, then a single blank-line separator, then the fragment verbatim. This is
+  // the ONLY delta from the off (byte-identical) case, so the test can reconstruct it deterministically.
+  const combined = `${body.endsWith("\n") ? body : `${body}\n`}\n${fragment}`;
+  const tmp = `${skillMd}.loom-frag-tmp`;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      fs.writeFileSync(tmp, combined);
+      fs.renameSync(tmp, skillMd); // atomic swap over the fresh base copy (rename replaces on win32 + posix)
+      return;
+    } catch (e) { lastErr = e; }
+  }
+  try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+  console.log(`[skills] failed to append obsidian preflight to ${skillMd} after 3 attempts: ${(lastErr as Error)?.message}`);
+}
+
+/**
  * Deliver Loom's managed skills to a session by mirroring ~/.loom/skills/<name> into
  * <cwd>/.claude/skills/<name>. Claude discovers these as PROJECT-LOCAL skills (bare names), and they
  * SHADOW the user's personal ~/.claude/skills (validated spike) — so Loom owns its skill names
@@ -101,8 +136,15 @@ function copySkillAtomic(src: string, dest: string): boolean {
  *    follows the junction and deletes the STORE's SKILL.md contents, nuking ~/.loom/skills for every
  *    later session. A copy is deleted with the worktree without ever reaching the store.
  *  - Hides the injected skills from git via .git/info/exclude (local only; never edits a tracked .gitignore).
+ *
+ * `obsidianEnabled` (per session, from `opts.sessionEnv?.LOOM_OBSIDIAN_AUTOSTART === "1"` at the spawn
+ * seam): when TRUE, the Obsidian "vault preflight" fragment is appended to the injected pickup/session-end
+ * SKILL.md (after its body; frontmatter untouched). Default FALSE ⇒ NO fragment read, NO append — every
+ * injected file is byte-identical to the store base (the additive-when-off invariant, mirroring
+ * browserTesting/documentConversion). Only pickup + session-end are affected; all other skills are
+ * byte-identical regardless.
  */
-export function injectSkills(cwd: string, sessionId: string, subset?: string[] | null, role?: SessionRole | null): void {
+export function injectSkills(cwd: string, sessionId: string, subset?: string[] | null, role?: SessionRole | null, obsidianEnabled = false): void {
   let storeNames: string[];
   try {
     storeNames = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
@@ -126,6 +168,16 @@ export function injectSkills(cwd: string, sessionId: string, subset?: string[] |
   const otherClaimed = new Set<string>();
   for (const [sid, ns] of Object.entries(manifest)) if (sid !== sessionId) for (const n of ns) otherClaimed.add(n);
 
+  // Read the Obsidian preflight fragment ONCE, and ONLY when the project enabled it AND a fragment-target
+  // skill is actually being delivered — so with obsidian.autoStart off (the default) this asset is never
+  // touched and every injected file is byte-identical to the store base. A missing/unreadable fragment
+  // degrades to the short base skill (best-effort; the fragment is a pure enhancement).
+  let obsidianFragment: string | null = null;
+  if (obsidianEnabled && want.some((n) => OBSIDIAN_FRAGMENT_SKILLS.has(n))) {
+    try { obsidianFragment = fs.readFileSync(OBSIDIAN_PREFLIGHT_FRAGMENT, "utf8"); }
+    catch (e) { console.log(`[skills] obsidian preflight fragment unavailable at ${OBSIDIAN_PREFLIGHT_FRAGMENT}: ${(e as Error).message}`); }
+  }
+
   const placed: string[] = [];
   const failed: string[] = [];
   for (const name of want) {
@@ -140,8 +192,12 @@ export function injectSkills(cwd: string, sessionId: string, subset?: string[] |
     // it into the store and delete the store's SKILL.md (see header). An independent copy is self-contained.
     // A copy that ultimately fails is recorded (`failed`) and surfaced below — NOT silently skipped, which
     // would let the session run WITHOUT its pinned doctrine skill.
-    if (copySkillAtomic(src, dest)) placed.push(name);
-    else failed.push(name);
+    if (copySkillAtomic(src, dest)) {
+      placed.push(name);
+      // ONLY the fragment-target skills, and ONLY when enabled + the fragment loaded. Runs after the fresh
+      // base copy (copySkillAtomic re-copies the fragment-free store base first), so the append lands once.
+      if (obsidianFragment && OBSIDIAN_FRAGMENT_SKILLS.has(name)) appendObsidianFragment(dest, obsidianFragment);
+    } else failed.push(name);
   }
 
   // Prune ONLY skills I previously injected that I no longer want — and only when no OTHER session still

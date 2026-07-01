@@ -99,6 +99,14 @@ export const VAULT_LINT_SCRIPT = path.join(__dirname, "..", "assets", "vault-lin
  */
 export const ENSURE_OBSIDIAN_SCRIPT = path.join(__dirname, "..", "assets", "scripts", "ensure-obsidian.mjs");
 
+/**
+ * The Obsidian "vault preflight" skill fragment — appended (live-read from the package dir) to the
+ * injected pickup/session-end SKILL.md ONLY when a session's project has `obsidian.autoStart` on. Kept
+ * OUT of the store SKILL.md so the base skills stay short + Obsidian-free (byte-identical when off); see
+ * skills/inject.ts. Read live like the other assets, so an asset edit applies on the next spawn.
+ */
+export const OBSIDIAN_PREFLIGHT_FRAGMENT = path.join(__dirname, "..", "assets", "skill-fragments", "obsidian-preflight.md");
+
 export const PORT = Number(process.env.LOOM_PORT || 4317);
 
 /**

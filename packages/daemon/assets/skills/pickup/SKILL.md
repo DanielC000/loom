@@ -27,19 +27,6 @@ project id anywhere; it's derived server-side.
    block; skim the latest design/task notes under `<vaultRoot>/Projects/<Project>/` (by absolute path,
    never Glob) for decisions and rationale.
 
-## Vault preflight (optional — only when Obsidian auto-start is enabled)
-
-The vault is just a **folder of `.md` files**. Read it by absolute path with the ordinary file tools (the
-steps above) — **no Obsidian app is needed**, and this is the default. Obsidian is an optional enhancement,
-never a requirement.
-
-Only when a step actually uses the `obsidian` CLI (it needs the Obsidian DESKTOP app running, not just the
-REST API) does a preflight apply: if the env var **`LOOM_OBSIDIAN_PREFLIGHT`** is set — which happens only
-when the project opted into `obsidian.autoStart` — run it FIRST, `node "$LOOM_OBSIDIAN_PREFLIGHT"`, to
-self-heal a down Obsidian (launch + poll-until-ready, bounded). It's **skipped by default** and
-**default-safe**: on disabled/headless/not-installed/timeout it prints a non-`ready` status and you simply
-fall back to **direct filesystem** reads of the vault by path — never block on it.
-
 ## Brief
 
 Summarize concisely — only what's needed to resume, not an exhaustive report:
