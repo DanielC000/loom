@@ -115,11 +115,21 @@ export class ChatGateway {
     this.addBinding(binding);
   }
 
-  /** Remove ALL of a session's bindings from the live routing map (mirrors deleteCompanionBinding, which
-   *  deletes by session_id; the admin REST DELETE calls this so a revoked session stops routing immediately
-   *  — no stale in-memory binding until restart). */
-  unbind(sessionId: string): void {
-    this.bindingsBySession.delete(sessionId);
+  /** Remove ALL of a session's bindings from the live routing map, or (when `channel` is given) only that
+   *  ONE channel's entry — leaving the session's other channel bindings routing unaffected (mirrors
+   *  deleteCompanionBinding's per-channel delete). If removing that entry empties the array, the session
+   *  key is dropped too (matches the all-bindings teardown). The admin REST DELETE calls this so a
+   *  revoked binding stops routing immediately — no stale in-memory binding until restart. */
+  unbind(sessionId: string, channel?: string): void {
+    if (channel === undefined) {
+      this.bindingsBySession.delete(sessionId);
+      return;
+    }
+    const arr = this.bindingsBySession.get(sessionId);
+    if (!arr) return;
+    const next = arr.filter((b) => b.channel !== channel);
+    if (next.length === 0) this.bindingsBySession.delete(sessionId);
+    else this.bindingsBySession.set(sessionId, next);
   }
 
   /** Insert-or-replace a binding into the session's array, one entry per channel (the (session, channel)

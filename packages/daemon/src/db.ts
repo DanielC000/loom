@@ -1201,8 +1201,14 @@ export class Db {
     ).run(b);
     return b;
   }
-  /** Delete a binding by session id (idempotent — a missing id matches nothing). */
-  deleteCompanionBinding(sessionId: string): void {
+  /** Delete a binding by session id, or (when `channel` is given) only that session's binding on that ONE
+   *  channel — the other channels' bindings are untouched. Idempotent either way (a missing id/channel
+   *  matches nothing, a safe no-op). */
+  deleteCompanionBinding(sessionId: string, channel?: string): void {
+    if (channel !== undefined) {
+      this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ? AND channel = ?").run(sessionId, channel);
+      return;
+    }
     this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ?").run(sessionId);
   }
   /** A session's per-binding allowlisted senders (the group-scope allowlist). Ordered for a stable list. */

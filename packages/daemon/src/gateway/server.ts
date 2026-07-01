@@ -585,10 +585,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deps.companion?.bind({ sessionId: binding.sessionId, channel: binding.channel, chatId: binding.chatId, scope: binding.scope });
     return reply.code(201).send(binding);
   });
-  app.delete("/api/companion/bindings/:sessionId", async (req) => {
+  app.delete("/api/companion/bindings/:sessionId", async (req, reply) => {
     const sessionId = (req.params as { sessionId: string }).sessionId;
-    deps.db.deleteCompanionBinding(sessionId);
-    deps.companion?.unbind(sessionId); // stop routing immediately (no stale in-memory binding until restart)
+    const q = (req.query ?? {}) as { channel?: unknown };
+    let channel: string | undefined;
+    if (q.channel !== undefined) {
+      if (!isNonBlankStr(q.channel)) return reply.code(400).send({ error: "channel must be a non-empty string" });
+      channel = q.channel.trim();
+    }
+    // channel omitted → unchanged delete-ALL behavior; channel given → scope both the durable delete and
+    // the live routing-map removal to that ONE channel, leaving the session's other channel(s) untouched.
+    deps.db.deleteCompanionBinding(sessionId, channel);
+    deps.companion?.unbind(sessionId, channel); // stop routing immediately (no stale in-memory binding until restart)
     return { ok: true };
   });
 

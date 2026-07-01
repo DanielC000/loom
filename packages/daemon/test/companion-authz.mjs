@@ -39,6 +39,7 @@ const { Db } = await import("../dist/db.js");
 const { ChatGateway } = await import("../dist/companion/chat-gateway.js");
 const { createDbCompanionAuth, allowIfDmMatch } = await import("../dist/companion/auth.js");
 const { readCompanionConfig } = await import("../dist/companion/config.js");
+const { IN_APP_CHANNEL } = await import("../dist/companion/in-app.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -212,7 +213,7 @@ try {
     const db = new Db(dbFile("p5.db"));
     const bound = [], unbound = [];
     const stub = {};
-    const companion = { bind: (b) => bound.push(b), unbind: (id) => unbound.push(id) };
+    const companion = { bind: (b) => bound.push(b), unbind: (id, channel) => unbound.push({ sessionId: id, channel }) };
     const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub, companion });
 
     // FIX [1]: scope is REQUIRED on the REST bind endpoint.
@@ -249,9 +250,32 @@ try {
     const delHome = await app.inject({ method: "DELETE", url: "/api/companion/home" });
     check("REST home: DELETE clears it (proactive falls back to OFF)", delHome.statusCode === 200 && db.getCompanionHome() === null);
 
-    // DELETE a binding → the live map is unbound too.
+    // DELETE a binding (no channel) → the live map is unbound too (channel undefined ⇒ omit path).
     await app.inject({ method: "DELETE", url: "/api/companion/bindings/s1" });
-    check("REST bind DELETE: removed the row + unbound the live map", db.listCompanionBindings().length === 0 && unbound.includes("s1"));
+    check("REST bind DELETE: removed the row + unbound the live map", db.listCompanionBindings().length === 0
+      && unbound.some((u) => u.sessionId === "s1" && u.channel === undefined));
+
+    // ---- card 7bf124c8: the PER-CHANNEL unbind ROUTE ITSELF (query-param parse → isNonBlankStr guard →
+    // .trim() → scoped db.deleteCompanionBinding/companion.unbind calls) — driven end-to-end via app.inject,
+    // never bypassing the route wiring the connect-Telegram UI will actually call. ----
+    db.upsertCompanionBinding({ sessionId: "s3", channel: IN_APP_CHANNEL, chatId: "s3", scope: "dm" });
+    db.upsertCompanionBinding({ sessionId: "s3", channel: "telegram", chatId: "tg-s3", scope: "dm" });
+    check("REST bind DELETE ?channel=: both channel bindings present before delete", db.listCompanionBindings().filter((b) => b.sessionId === "s3").length === 2);
+
+    const delTelegram = await app.inject({ method: "DELETE", url: "/api/companion/bindings/s3?channel=telegram" });
+    check("REST bind DELETE ?channel=telegram: 200 ok", delTelegram.statusCode === 200 && JSON.parse(delTelegram.payload).ok === true);
+    const s3After = db.listCompanionBindings().filter((b) => b.sessionId === "s3");
+    check("REST bind DELETE ?channel=telegram: ONLY telegram removed, in-app SURVIVES", s3After.length === 1 && s3After[0].channel === IN_APP_CHANNEL);
+    check("REST bind DELETE ?channel=telegram: the route threaded the channel into companion.unbind",
+      unbound.some((u) => u.sessionId === "s3" && u.channel === "telegram"));
+
+    const delBlank = await app.inject({ method: "DELETE", url: "/api/companion/bindings/s3?channel=" });
+    check("REST bind DELETE ?channel= (blank): 400 before any db write", delBlank.statusCode === 400);
+    check("REST bind DELETE ?channel= (blank): the surviving in-app binding is untouched", db.listCompanionBindings().filter((b) => b.sessionId === "s3").length === 1);
+
+    const delAll = await app.inject({ method: "DELETE", url: "/api/companion/bindings/s3" });
+    check("REST bind DELETE (no channel param): still 200", delAll.statusCode === 200);
+    check("REST bind DELETE (no channel param): removes ALL remaining bindings — omit path unchanged at the HTTP layer", db.listCompanionBindings().filter((b) => b.sessionId === "s3").length === 0);
 
     await app.close();
     db.close();

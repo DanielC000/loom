@@ -49,8 +49,9 @@ export interface HeartbeatHandle {
 export interface CompanionControl {
   /** Live-sync a new/edited binding into the running gateway's routing map (no-op when OFF). */
   bind(binding: SessionBinding): void;
-  /** Live-remove a binding from the running gateway's routing map (no-op when OFF). */
-  unbind(sessionId: string): void;
+  /** Live-remove a binding from the running gateway's routing map (no-op when OFF). When `channel` is
+   *  given, removes only that ONE channel's entry, leaving the session's other channel(s) routing. */
+  unbind(sessionId: string, channel?: string): void;
   /** Reconcile the live companion to the CURRENT DB config after a REST config write (the hot path). */
   reconcile(): Promise<void>;
   /**
@@ -142,8 +143,8 @@ export class CompanionController implements CompanionControl {
     this.gateway?.bind(binding);
   }
 
-  unbind(sessionId: string): void {
-    this.gateway?.unbind(sessionId);
+  unbind(sessionId: string, channel?: string): void {
+    this.gateway?.unbind(sessionId, channel);
   }
 
   stop(): Promise<void> {

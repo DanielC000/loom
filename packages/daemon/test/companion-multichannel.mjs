@@ -16,6 +16,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (f) the TABLE-REBUILD migration on a DB seeded with the OLD single-PK schema + an existing binding
 //       preserves that row losslessly AND allows adding a 2nd-channel binding after (impossible under the
 //       old session_id PRIMARY KEY), idempotently, with the UNIQUE route index still enforced.
+//   (g) PER-CHANNEL unbind (card 7bf124c8): removing ONE channel's binding (db.deleteCompanionBinding +
+//       gw.unbind, both given a channel) leaves the session's OTHER channel binding/routing/authz fully
+//       intact — proven by a subsequent inbound on the surviving channel still accepting + reply-routing
+//       correctly — while the removed channel is genuinely unbound (its inbound now rejects). Delete-ALL
+//       (channel omitted) stays byte-identical to the pre-existing behavior, and removing an already-unbound
+//       or never-bound channel is a safe no-op (no throw).
 // Sibling coverage: the pure pty route-keyed coalescing (cross-route ⇒ distinct turns; no-route worker path
 // byte-identical) is in pty-route-coalesce.mjs; heartbeat→HOME via the route in companion-heartbeat.mjs;
 // provision-writes-BOTH-bindings in companion-provision.mjs (Part 2).
@@ -213,11 +219,76 @@ try {
     check("(f) migration is idempotent (reopen keeps every row)", db2.listCompanionBindings().filter((b) => b.sessionId === "legacy-sess").length === 2);
     db2.close();
   }
+  // ============ Part 5 — PER-CHANNEL unbind (card 7bf124c8): remove ONE channel, the other SURVIVES + still
+  // routes; delete-ALL (channel omitted) is unchanged; removing an unbound/non-existent channel is a no-op ============
+  {
+    const db = new Db(dbFile("p5.db"));
+    const sid = "sess-unbind";
+    db.upsertCompanionBinding({ sessionId: sid, channel: IN_APP_CHANNEL, chatId: sid, scope: "dm" });
+    db.upsertCompanionBinding({ sessionId: sid, channel: TELEGRAM, chatId: "tg-chat-5", scope: "dm" });
+    check("(g) both channel bindings durably stored before unbind", db.listCompanionBindings().filter((b) => b.sessionId === sid).length === 2);
+
+    const host = new TestPtyHost(ptyEvents);
+    host.spawn({ sessionId: sid, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 }, sessionEnv: {} });
+    host.deliverHook(sid, { hook_event_name: "SessionStart" });
+    const inApp = fakeAdapter(IN_APP_CHANNEL);
+    const tg = fakeAdapter(TELEGRAM);
+    const gw = new ChatGateway(
+      (s, text, route) => host.enqueueStdin(s, text, "system", undefined, route),
+      db.listCompanionBindings().filter((b) => b.sessionId === sid).map((b) => ({ sessionId: b.sessionId, channel: b.channel, chatId: b.chatId, scope: b.scope })),
+      undefined, undefined,
+      (s) => host.getActiveTurnOrigin(s),
+    );
+    gw.registerAdapter(inApp);
+    gw.registerAdapter(tg);
+
+    // Remove ONLY the telegram channel (mirrors DELETE /api/companion/bindings/:sessionId?channel=telegram).
+    db.deleteCompanionBinding(sid, TELEGRAM);
+    gw.unbind(sid, TELEGRAM);
+    check("(g) db: telegram binding gone, in-app SURVIVES", (() => {
+      const rows = db.listCompanionBindings().filter((b) => b.sessionId === sid);
+      return rows.length === 1 && rows[0].channel === IN_APP_CHANNEL;
+    })());
+
+    // The surviving in-app channel's routing/authz is undisturbed: a subsequent inbound is still accepted and
+    // its reply still routes back in-app.
+    const inA = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sid, body: "still here via cockpit" });
+    check("(g) in-app inbound still accepted + routes to the session after telegram unbind", inA.accepted === true && inA.sessionId === sid);
+    const rA = await gw.deliverReply(sid, "reply after telegram unbind");
+    check("(g) reply still delivers IN-APP after telegram unbind", rA.delivered === true && inApp.sent.some((s) => s.text === "reply after telegram unbind"));
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // The removed telegram channel is now genuinely UNBOUND: an inbound on it is rejected, never submitted.
+    const inT = await gw.handleInbound({ channel: TELEGRAM, chatId: "tg-chat-5", body: "ghost telegram msg" });
+    check("(g) telegram inbound after unbind is REJECTED (no binding), not submitted", inT.accepted === false && inT.reason === "chat-not-allowlisted" && tg.sent.length === 0);
+
+    // Re-removing an already-unbound channel is a SAFE NO-OP — no throw, in-app stays untouched.
+    let threwUnbind = false;
+    try { db.deleteCompanionBinding(sid, TELEGRAM); gw.unbind(sid, TELEGRAM); } catch { threwUnbind = true; }
+    check("(g) re-removing an already-unbound channel is a safe no-op (no throw)", threwUnbind === false);
+    check("(g) in-app binding untouched by the no-op re-removal", db.listCompanionBindings().filter((b) => b.sessionId === sid).length === 1);
+
+    // Unbinding a channel on a session with NO bindings at all is also a safe no-op.
+    let threwUnbound = false;
+    try { db.deleteCompanionBinding("sess-never-bound", TELEGRAM); gw.unbind("sess-never-bound", TELEGRAM); } catch { threwUnbound = true; }
+    check("(g) unbinding a channel on a never-bound session is a safe no-op (no throw)", threwUnbound === false);
+
+    // Delete-ALL (channel omitted) behaves EXACTLY as before: every remaining binding is removed.
+    db.deleteCompanionBinding(sid);
+    gw.unbind(sid);
+    check("(g) delete-ALL (no channel) removes every remaining binding — unchanged behavior", db.listCompanionBindings().filter((b) => b.sessionId === sid).length === 0);
+    const inA2 = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sid, body: "post delete-all" });
+    check("(g) after delete-ALL, in-app inbound is rejected too (no binding left)", inA2.accepted === false);
+
+    try { host.stop(sid, "hard"); } catch { /* ignore */ }
+    await sleep(50);
+    db.close();
+  }
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a companion reachable on in-app + Telegram AT ONCE: each turn's chat_reply goes back on the channel that turn came from (proven end-to-end through the real pty, INTERLEAVED with no swap and no cross-wire), a turn with no origin delivers nowhere (no-target), per-binding sender authz gates each channel independently, and the table-rebuild migration turns the legacy single-PK bindings table multi-channel losslessly + idempotently."
+  ? "\n✅ ALL PASS — a companion reachable on in-app + Telegram AT ONCE: each turn's chat_reply goes back on the channel that turn came from (proven end-to-end through the real pty, INTERLEAVED with no swap and no cross-wire), a turn with no origin delivers nowhere (no-target), per-binding sender authz gates each channel independently, the table-rebuild migration turns the legacy single-PK bindings table multi-channel losslessly + idempotently, and PER-CHANNEL unbind removes one channel while the other survives + keeps routing (delete-ALL unchanged, re-removal a safe no-op)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
