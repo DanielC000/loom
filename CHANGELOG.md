@@ -7,6 +7,46 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-07-01
+
+**Session usage telemetry** — your real billed spend, over time, collected token-free — plus a **Vault
+document reader** upgrade (collapsible sections + in-doc find) and usage-sampler correctness/performance
+hardening.
+
+### Added
+- **Session usage telemetry — your real billed usage, over time, collected token-free.** The Usage page gains
+  an **Interactive sessions** plane: a daemon-sampled time-series of every session's cumulative billed tokens
+  + cost, charted by day and broken down by project and by agent, with page-local **Project** and **Window**
+  scope controls. It reads the transcripts the engine already writes — **no agent tokens are spent** measuring
+  usage — and stays deliberately distinct from live context-occupancy and the Agent Runs plane (the page never
+  sums across the three). A one-time boot backfill seeds history from transcripts still on disk, so the page
+  isn't empty on day one. The By-agent breakdown disambiguates same-named agents across projects.
+- **Vault document reader — collapsible header sections.** Every markdown header in the Vault doc viewer gets a
+  chevron to collapse/expand its section (down to the next same-or-higher header), so a long design note folds
+  to a scannable outline. Keyboard-accessible.
+- **Vault document reader — in-document find (Ctrl+F).** With focus in the doc view, Ctrl+F opens a scoped find
+  bar — match highlighting, next/prev, a match count, and Esc to close — that leaves the browser's native find
+  untouched everywhere else. A match inside a collapsed section auto-expands it.
+
+### Changed
+- **Runs moved into the More menu.** The top-level Runs nav item now lives under **More › Operate**, tidying the
+  primary header.
+- **Cleaner end-user skills.** The shipped skill set drops Loom's own self-hosting / dev-only content (kept in
+  the repo for Loom's own development) and omits the install-specific research skill from the npm package, so an
+  installed Loom's skills describe only what a user's workspace does.
+- **The usage sampler reads transcripts incrementally, off the event loop.** At fleet scale the sampler no longer
+  re-reads every live session's full transcript synchronously each tick — it parses only newly-appended bytes
+  asynchronously (serialized against session-exit sampling), keeping the daemon responsive as fleets and
+  transcripts grow. Accounting is unchanged and exact.
+
+### Fixed
+- **Usage samples no longer double-count across a daemon restart.** A resumed session's already-recorded usage is
+  no longer re-counted on the first sampler tick after a restart — the first-sight baseline is now DB-aware, so
+  totals stay exact across restarts. A one-shot corrective reset scrubs any historical inflation from before the
+  fix.
+- **The unpriced-model cost warning no longer spams.** A model with no recorded price logs its warning once, not
+  once per session per sampler tick.
+
 ## [0.12.0] — 2026-06-29
 
 A **session & run audit log** with a replayable, diffable timeline; the **review/merge gate** becomes the
