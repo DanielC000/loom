@@ -41,7 +41,7 @@ import { rateLimitDeadline, rateLimitedUntil } from "./orchestration/usage-limit
 import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent } from "./orchestration/restart.js";
 import { startVaultVersioners, type VaultVersioner } from "./vault/versioner.js";
 import { buildServer } from "./gateway/server.js";
-import { readCompanionConfig } from "./companion/config.js";
+import { resolveCompanionConfig } from "./companion/store.js";
 import { createCompanionGateway } from "./companion/factory.js";
 import { CompanionHeartbeatWatcher } from "./companion/heartbeat.js";
 import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
@@ -312,16 +312,15 @@ async function main(): Promise<void> {
   // route the agent's chat_reply through deliverReply); the long-poll adapters are started after `listen`
   // below. INBOUND submits a turn via the EXISTING pty.enqueueStdin primitive (busy-gating / composer-defer
   // / FIFO coalesce / rate-limit park all reused) as a 'system' source.
-  const companionCfg = readCompanionConfig(process.env);
+  // The effective CompanionConfig is now built from the DURABLE companion_config DB row (token decrypted
+  // via the envelope helper), with LOOM_COMPANION_* env as the BOOTSTRAP/override: env, when set, seeds/
+  // overrides the DB row (token encrypted) AND lays the app_meta home target if unset, BEFORE this resolve
+  // returns — so env wins, a REST-configured companion with no env still boots, and no env + no enabled
+  // row ⇒ null ⇒ every path below is byte-identical to an unconfigured daemon (default-OFF).
+  const companionCfg = resolveCompanionConfig(db, process.env);
   const companion = companionCfg
     ? createCompanionGateway(companionCfg, (sid, text) => pty.enqueueStdin(sid, text, "system"), db)
     : null;
-  // Companion authz layer: lay the HOME channel target (the proactive card 9488951e reads it) from env
-  // on first boot, if unset. Gated on companionCfg — an unconfigured daemon never touches app_meta, so
-  // default-OFF stays byte-identical. Human REST (PUT /api/companion/home) can override it later.
-  if (companionCfg && !db.getCompanionHome()) {
-    db.setCompanionHome({ channel: companionCfg.homeChannel, chatId: companionCfg.homeChatId });
-  }
 
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after. The
   // companion hooks gate chat_reply to the single bound session (additive; every other spawn unchanged).

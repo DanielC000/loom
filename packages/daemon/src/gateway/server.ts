@@ -26,6 +26,8 @@ import type { SetupMcpRouter } from "../mcp/setup.js";
 import type { RunMcpRouter } from "../mcp/run.js";
 import type { ChatGateway } from "../companion/chat-gateway.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
+import { maskCompanionConfig } from "../companion/store.js";
+import { encryptSecret } from "../keys/envelope.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validateColumnLayout } from "../mcp/platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
@@ -641,6 +643,125 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       Date.now(),
     );
     return reply.code(201).send({ codeId: minted.codeId, code: minted.code, expiresAt: minted.expiresAt });
+  });
+
+  // --- Companion RUN config (Companion epic Phase 3): the DB-backed "how to RUN this companion" layer —
+  // bot token (ENCRYPTED at rest via the envelope helper), channel, cadence, home, enabled — keyed by the
+  // bound session id. HUMAN-ONLY loopback REST, INTENTIONALLY NO MCP path (of ANY router): a chat-reachable,
+  // injection-exposed companion agent must NEVER be able to read or write its own bot token (same trust
+  // posture as the bindings/allowlist/home writers + the git/vault/api_keys human-only writers). SECURITY:
+  // the token is NEVER returned in clear or logged — every read is MASKED (configured + last-4 only). Config
+  // applies on the next daemon (re)start; the HOT live-reconfigure path is a SEPARATE follow-up card. ---
+  const COMPANION_TOKEN_MAX = 4096;
+  const COMPANION_PROMPT_MAX = 10_000;
+  const COMPANION_CADENCE_MAX = 525_600; // one year in minutes — a generous upper bound, not a working value
+  const homeOf = () => deps.db.getCompanionHome();
+  // Validate + merge a config body against any existing row, returning either an error string (→ 400) or the
+  // resolved upsert input (token encrypted). `requireCreateFields` is true for POST-create/PUT where the
+  // full record must be present; on update the caller keeps existing values for omitted fields.
+  const buildCompanionUpsert = (
+    body: Record<string, unknown>,
+    sessionId: string,
+    existing: import("../db.js").CompanionConfigRow | undefined,
+  ): { error: string } | {
+    sessionId: string; botTokenBlob: string; channel: string; allowedChatId: string;
+    chatScope: "dm" | "group"; heartbeatIntervalMinutes: number; heartbeatPrompt: string | null; enabled: boolean;
+  } => {
+    // Bot token: required to CREATE (no existing row); on update, an omitted token keeps the stored blob.
+    let botTokenBlob: string;
+    if (isNonBlankStr(body.botToken, COMPANION_TOKEN_MAX)) {
+      botTokenBlob = encryptSecret(body.botToken.trim());
+    } else if (body.botToken !== undefined && body.botToken !== null) {
+      return { error: `botToken must be a non-empty string of at most ${COMPANION_TOKEN_MAX} characters` };
+    } else if (existing) {
+      botTokenBlob = existing.botTokenBlob; // tokenless update — keep the encrypted token already stored
+    } else {
+      return { error: "botToken is required to create a companion config" };
+    }
+    // allowedChatId: required to create; kept on a partial update.
+    let allowedChatId: string;
+    if (isNonBlankStr(body.allowedChatId)) allowedChatId = body.allowedChatId.trim();
+    else if (body.allowedChatId !== undefined) return { error: "allowedChatId must be a non-empty string" };
+    else if (existing) allowedChatId = existing.allowedChatId;
+    else return { error: "allowedChatId is required to create a companion config" };
+    // channel: optional, defaults to the stored value or telegram.
+    let channel: string;
+    if (isNonBlankStr(body.channel)) channel = body.channel.trim();
+    else if (body.channel !== undefined) return { error: "channel must be a non-empty string" };
+    else channel = existing?.channel ?? TELEGRAM_CHANNEL;
+    // chatScope: optional 'dm' | 'group'.
+    let chatScope: "dm" | "group";
+    if (body.chatScope === "dm" || body.chatScope === "group") chatScope = body.chatScope;
+    else if (body.chatScope !== undefined) return { error: "chatScope must be 'dm' or 'group'" };
+    else chatScope = existing?.chatScope ?? "dm";
+    // heartbeatIntervalMinutes: optional non-negative integer (0 = off).
+    let heartbeatIntervalMinutes: number;
+    if (body.heartbeatIntervalMinutes !== undefined) {
+      const n = body.heartbeatIntervalMinutes;
+      if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > COMPANION_CADENCE_MAX) {
+        return { error: `heartbeatIntervalMinutes must be an integer in [0, ${COMPANION_CADENCE_MAX}]` };
+      }
+      heartbeatIntervalMinutes = n;
+    } else heartbeatIntervalMinutes = existing?.heartbeatIntervalMinutes ?? 0;
+    // heartbeatPrompt: optional string (null/blank clears back to the default).
+    let heartbeatPrompt: string | null;
+    if (body.heartbeatPrompt === undefined) heartbeatPrompt = existing?.heartbeatPrompt ?? null;
+    else if (body.heartbeatPrompt === null) heartbeatPrompt = null;
+    else if (typeof body.heartbeatPrompt !== "string" || body.heartbeatPrompt.length > COMPANION_PROMPT_MAX) {
+      return { error: `heartbeatPrompt must be a string of at most ${COMPANION_PROMPT_MAX} characters` };
+    } else heartbeatPrompt = body.heartbeatPrompt.trim() || null;
+    // enabled: optional boolean.
+    let enabled: boolean;
+    if (typeof body.enabled === "boolean") enabled = body.enabled;
+    else if (body.enabled !== undefined) return { error: "enabled must be a boolean" };
+    else enabled = existing?.enabled ?? true;
+    return { sessionId, botTokenBlob, channel, allowedChatId, chatScope, heartbeatIntervalMinutes, heartbeatPrompt, enabled };
+  };
+  // Optional home update carried on a config write — writes app_meta (the single source), returns error|null.
+  const applyHomeIfPresent = (body: Record<string, unknown>): string | null => {
+    if (body.home === undefined || body.home === null) return null;
+    const h = body.home as { channel?: unknown; chatId?: unknown };
+    if (!isNonBlankStr(h.channel) || !isNonBlankStr(h.chatId)) return "home must be { channel, chatId } non-empty strings";
+    deps.db.setCompanionHome({ channel: h.channel.trim(), chatId: h.chatId.trim() });
+    return null;
+  };
+
+  app.get("/api/companion/config", async () => {
+    const home = homeOf();
+    return deps.db.listCompanionConfigs().map((row) => maskCompanionConfig(row, home, process.env));
+  });
+  app.get("/api/companion/config/:sessionId", async (req, reply) => {
+    const row = deps.db.getCompanionConfig((req.params as { sessionId: string }).sessionId);
+    if (!row) return reply.code(404).send({ error: "no companion config for that session" });
+    return maskCompanionConfig(row, homeOf(), process.env);
+  });
+  app.post("/api/companion/config", async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    if (!isNonBlankStr(b.sessionId)) return reply.code(400).send({ error: "sessionId must be a non-empty string" });
+    const sessionId = b.sessionId.trim();
+    const existing = deps.db.getCompanionConfig(sessionId);
+    const built = buildCompanionUpsert(b, sessionId, existing);
+    if ("error" in built) return reply.code(400).send({ error: built.error });
+    const homeErr = applyHomeIfPresent(b);
+    if (homeErr) return reply.code(400).send({ error: homeErr });
+    const row = deps.db.upsertCompanionConfig(built);
+    return reply.code(existing ? 200 : 201).send(maskCompanionConfig(row, homeOf(), process.env));
+  });
+  app.put("/api/companion/config/:sessionId", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const existing = deps.db.getCompanionConfig(sessionId);
+    if (!existing) return reply.code(404).send({ error: "no companion config for that session" });
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const built = buildCompanionUpsert(b, sessionId, existing);
+    if ("error" in built) return reply.code(400).send({ error: built.error });
+    const homeErr = applyHomeIfPresent(b);
+    if (homeErr) return reply.code(400).send({ error: homeErr });
+    const row = deps.db.upsertCompanionConfig(built);
+    return maskCompanionConfig(row, homeOf(), process.env);
+  });
+  app.delete("/api/companion/config/:sessionId", async (req) => {
+    deps.db.deleteCompanionConfig((req.params as { sessionId: string }).sessionId);
+    return { ok: true };
   });
 
   // --- Hook relay target (loopback only) ---

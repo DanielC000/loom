@@ -53,6 +53,25 @@ export type PairingRedeemResult =
   | { outcome: "bound"; sessionId: string; channel: string; chatId: string; scope: "dm" | "group" }
   | { outcome: "sender-added"; sessionId: string };
 
+/**
+ * A durable Companion RUN config row (Companion epic Phase 3) as stored/read at the DB layer. Carries the
+ * ENCRYPTED bot token (`botTokenBlob`, envelope ciphertext) for the boot resolver to decrypt — this shape
+ * is DAEMON-INTERNAL and must NEVER be returned over REST (the REST layer masks to CompanionConfigMasked,
+ * exposing only configured + last-4). Home is deliberately absent — it stays in app_meta (single source).
+ */
+export interface CompanionConfigRow {
+  sessionId: string;
+  botTokenBlob: string;
+  channel: string;
+  allowedChatId: string;
+  chatScope: "dm" | "group";
+  heartbeatIntervalMinutes: number;
+  heartbeatPrompt: string | null;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
@@ -410,6 +429,28 @@ CREATE TABLE IF NOT EXISTS companion_pairing_attempts (
   window_start INTEGER NOT NULL,     -- epoch ms — start of the current failed-attempt window
   locked_until INTEGER,              -- epoch ms — locked out until this instant (NULL = not locked)
   PRIMARY KEY (channel, sender_id)
+);
+-- Companion RUN config (Companion epic Phase 3) — the "how to RUN this companion" layer keyed by the
+-- bound assistant session_id, so a human can configure a companion WITHOUT editing a .env and restarting.
+-- The bot token is stored ENCRYPTED-at-rest (keys/envelope.ts, AES-256-GCM; the confidentiality rests on
+-- a NEVER-backed-up local key file) as bot_token_blob — NEVER plaintext, NEVER logged, and NEVER
+-- returned in clear over REST (the masked read exposes only configured + last-4). HUMAN-managed only over
+-- loopback REST — INTENTIONALLY NO MCP path (an injection-exposed companion must not read/write its own
+-- token). Brand-new table ⇒ CREATE TABLE IF NOT EXISTS is itself the additive migration (an existing DB
+-- gains an empty table on boot; no row ⇒ companion OFF, byte-identical). Home is DELIBERATELY NOT stored
+-- here — it stays the single source of truth in app_meta (get/setCompanionHome), surfaced in the masked
+-- read by joining that value, so there are never two conflicting home stores.
+CREATE TABLE IF NOT EXISTS companion_config (
+  session_id TEXT PRIMARY KEY,               -- the bound companion session id this run-config keys on
+  bot_token_blob TEXT NOT NULL,              -- envelope ciphertext (v1:iv:tag:ct) — NEVER plaintext
+  channel TEXT NOT NULL DEFAULT 'telegram',  -- transport channel
+  allowed_chat_id TEXT NOT NULL,             -- owner/allowlisted chat id (bootstraps the binding, like LOOM_COMPANION_CHAT_ID)
+  chat_scope TEXT NOT NULL DEFAULT 'dm',     -- boot-binding authz scope ('dm' | 'group')
+  heartbeat_interval_minutes INTEGER NOT NULL DEFAULT 0, -- proactive cadence in minutes (0 = off)
+  heartbeat_prompt TEXT,                      -- framed proactive-prompt text (NULL ⇒ DEFAULT_HEARTBEAT_PROMPT)
+  enabled INTEGER NOT NULL DEFAULT 1,         -- a disabled config is treated as OFF at boot
+  created_at TEXT,
+  updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id, created_at);
@@ -1263,6 +1304,51 @@ export class Db {
   /** Upsert the home channel target (a single app_meta JSON key). */
   setCompanionHome(home: { channel: string; chatId: string }): void {
     this.setMeta(COMPANION_HOME_KEY, JSON.stringify({ channel: home.channel, chatId: home.chatId }));
+  }
+
+  // --- companion RUN config (Companion epic Phase 3): the "how to RUN this companion" layer, keyed by
+  // session_id, with the bot token ENCRYPTED at rest. HUMAN-managed only (loopback REST); NO MCP path.
+  // The stored `botTokenBlob` is envelope ciphertext — accessors carry it for the boot resolver to decrypt,
+  // but the REST layer NEVER returns it (masked read). Mirrors the binding/allowlist accessor shape. ---
+  /** Every stored run-config (GLOBAL / daemon-wide), ordered by created_at for a stable admin list. */
+  listCompanionConfigs(): CompanionConfigRow[] {
+    return (this.db.prepare("SELECT * FROM companion_config ORDER BY created_at, rowid").all() as Row[]).map(toCompanionConfigRow);
+  }
+  /** Read one run-config by session id (with the ciphertext blob), or undefined when absent. */
+  getCompanionConfig(sessionId: string): CompanionConfigRow | undefined {
+    const r = this.db.prepare("SELECT * FROM companion_config WHERE session_id = ?").get(sessionId) as Row | undefined;
+    return r ? toCompanionConfigRow(r) : undefined;
+  }
+  /**
+   * Upsert a run-config KEYED ON session_id. The caller passes an ALREADY-ENCRYPTED `botTokenBlob` (this
+   * layer never sees the plaintext token — encryption happens at the REST/boot edge via the envelope
+   * helper). Stamps created_at on first insert, keeps it on update; always bumps updated_at. Returns the
+   * stored row.
+   */
+  upsertCompanionConfig(input: {
+    sessionId: string; botTokenBlob: string; channel: string; allowedChatId: string;
+    chatScope: "dm" | "group"; heartbeatIntervalMinutes: number; heartbeatPrompt: string | null; enabled: boolean;
+  }): CompanionConfigRow {
+    const existing = this.db.prepare("SELECT created_at FROM companion_config WHERE session_id = ?").get(input.sessionId) as Row | undefined;
+    const now = new Date().toISOString();
+    const row: CompanionConfigRow = {
+      sessionId: input.sessionId, botTokenBlob: input.botTokenBlob, channel: input.channel,
+      allowedChatId: input.allowedChatId, chatScope: input.chatScope,
+      heartbeatIntervalMinutes: input.heartbeatIntervalMinutes, heartbeatPrompt: input.heartbeatPrompt,
+      enabled: input.enabled, createdAt: (existing?.created_at as string) ?? now, updatedAt: now,
+    };
+    this.db.prepare(
+      `INSERT INTO companion_config (session_id, bot_token_blob, channel, allowed_chat_id, chat_scope, heartbeat_interval_minutes, heartbeat_prompt, enabled, created_at, updated_at)
+       VALUES (@sessionId, @botTokenBlob, @channel, @allowedChatId, @chatScope, @heartbeatIntervalMinutes, @heartbeatPrompt, @enabledInt, @createdAt, @updatedAt)
+       ON CONFLICT(session_id) DO UPDATE SET
+         bot_token_blob = @botTokenBlob, channel = @channel, allowed_chat_id = @allowedChatId, chat_scope = @chatScope,
+         heartbeat_interval_minutes = @heartbeatIntervalMinutes, heartbeat_prompt = @heartbeatPrompt, enabled = @enabledInt, updated_at = @updatedAt`,
+    ).run({ ...row, enabledInt: row.enabled ? 1 : 0 });
+    return row;
+  }
+  /** Delete a run-config by session id (idempotent — a missing id matches nothing). */
+  deleteCompanionConfig(sessionId: string): void {
+    this.db.prepare("DELETE FROM companion_config WHERE session_id = ?").run(sessionId);
   }
 
   // --- agents ---
@@ -2754,6 +2840,18 @@ function toCompanionAllowedSender(r0: unknown): CompanionAllowedSender {
     id: r.id as string, sessionId: r.session_id as string, channel: r.channel as string,
     senderId: r.sender_id as string, label: (r.label as string | null) ?? null,
     createdAt: (r.created_at as string) ?? "",
+  };
+}
+function toCompanionConfigRow(r0: unknown): CompanionConfigRow {
+  const r = r0 as Row;
+  return {
+    sessionId: r.session_id as string, botTokenBlob: r.bot_token_blob as string,
+    channel: (r.channel as string) ?? "telegram", allowedChatId: r.allowed_chat_id as string,
+    chatScope: (r.chat_scope as CompanionConfigRow["chatScope"]) ?? "dm",
+    heartbeatIntervalMinutes: (r.heartbeat_interval_minutes as number) ?? 0,
+    heartbeatPrompt: (r.heartbeat_prompt as string | null) ?? null,
+    enabled: (r.enabled as number) !== 0,
+    createdAt: (r.created_at as string) ?? "", updatedAt: (r.updated_at as string) ?? "",
   };
 }
 function toPresetPromptSuggestion(r0: unknown): PresetPromptSuggestion {

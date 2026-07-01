@@ -765,6 +765,47 @@ export interface CompanionAllowedSender {
 }
 
 /**
+ * The MASKED, human-facing view of a durable Companion RUN config (Companion epic Phase 3 — the
+ * `companion_config` DB row that says HOW to run a companion: which bot token, cadence, home, enabled).
+ * This is the ONLY shape the REST surface ever returns and the web cockpit ever sees — the bot token
+ * itself is ENCRYPTED at rest (envelope) and NEVER leaves the daemon: a read exposes `configured:true`
+ * plus the last 4 characters only (`tokenLast4`, for human confirmation), never the token. There is
+ * intentionally NO MCP path (same human-only trust posture as the binding/allowlist/git/vault writers):
+ * a chat-reachable, injection-exposed companion agent must never be able to read or write its own token.
+ * See `[[Companion Design]]`.
+ */
+export interface CompanionConfigMasked {
+  /** The bound companion session id this run-config keys on. */
+  sessionId: SessionId;
+  /** Always true for a returned config (a missing config is a 404 / absent from the list, not `configured:false`). */
+  configured: true;
+  /** The last 4 characters of the bot token, for human confirmation — NEVER the token itself. */
+  tokenLast4: string;
+  /** The transport channel (e.g. "telegram"). */
+  channel: string;
+  /** The owner/allowlisted chat id this companion is bootstrapped against. */
+  allowedChatId: string;
+  /** The boot-binding authorization scope. */
+  chatScope: "dm" | "group";
+  /** Proactive heartbeat cadence in minutes (0 = off). */
+  heartbeatIntervalMinutes: number;
+  /** The framed proactive-prompt text used on each heartbeat turn. */
+  heartbeatPrompt: string;
+  /** The proactive HOME channel target (app_meta-backed, daemon-global), or null when unset. */
+  home: { channel: string; chatId: string } | null;
+  /** Whether this config is enabled — a disabled config is treated as OFF at boot. */
+  enabled: boolean;
+  /**
+   * True when a LOOM_COMPANION_* env config is currently set for THIS row's sessionId — i.e. env would
+   * OVERRIDE this row on the next daemon restart (the "env wins" bootstrap ruling). A human-visibility
+   * flag so the UI can show "pinned by env" rather than silently reverting a REST edit on next boot.
+   */
+  envPinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
  * A cron-triggered schedule (phase-2 Pillar B). On its minute boundary the daemon Scheduler
  * boots a manager session in `agentId` (the agent's startupPrompt is the kickoff), which then
  * runs the Pillar-A loop. `nextFireAt` is recomputed on create/update and after each fire.
