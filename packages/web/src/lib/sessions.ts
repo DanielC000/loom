@@ -64,6 +64,28 @@ export function byManagerThenCreated(a: SessionRoleOrder, b: SessionRoleOrder): 
   return byCreatedStable(a, b);
 }
 
+/** The minimal shape the id-dedupe needs — just a stable id. Session and SessionListItem both satisfy it. */
+export type SessionIdentified = Pick<Session, "id">;
+
+/**
+ * Dedupe a merged session list by id, keeping the FIRST occurrence of each id. The Overview fleet
+ * accordion folds the project's ARCHIVED rows in alongside the LIVE ones (`[...live, ...archived]`);
+ * during a live→archived transition the same session id can briefly appear in BOTH source lists, which
+ * renders two sibling rows with the same React key (the duplicate-key warning — card efd191ea). Because
+ * the caller spreads live-first, keep-first keeps the LIVE row. Purely presentational: it only drops a
+ * genuine duplicate and never changes which distinct sessions show.
+ */
+export function dedupeSessionsById<T extends SessionIdentified>(list: readonly T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const s of list) {
+    if (seen.has(s.id)) continue;
+    seen.add(s.id);
+    out.push(s);
+  }
+  return out;
+}
+
 /** The minimal shape the resume gate needs — Session and SessionListItem both satisfy it. */
 export type SessionResumeGate = Pick<Session, "processState" | "resumability"> & { archivedAt?: string | null };
 

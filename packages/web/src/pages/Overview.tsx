@@ -5,7 +5,7 @@ import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole 
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/attention";
-import { bySessionActivity, byCreatedStable, byManagerThenCreated } from "../lib/sessions";
+import { bySessionActivity, byCreatedStable, byManagerThenCreated, dedupeSessionsById } from "../lib/sessions";
 import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
 import Board from "./Board";
 import { TerminalPane } from "../components/Terminal";
@@ -95,8 +95,11 @@ export default function Overview() {
   // worstContext are deliberately fed the running set only, per lib/fleet.ts).
   const archivedManagers = archived.data?.filter((s) => s.role === "manager") ?? [];
   const archivedWorkers = archived.data?.filter((s) => s.role === "worker") ?? [];
-  const accordionManagers = [...managers, ...archivedManagers].sort(byCreatedStable);
-  const accordionWorkers = [...workers, ...archivedWorkers];
+  // Dedupe the live+archived merge by id (live-first ⇒ keep the LIVE row): a session mid-transition
+  // live→archived can appear in BOTH source lists, and rendering both yields a duplicate React key
+  // (card efd191ea). Presentational only — drops the duplicate, never changes which sessions show.
+  const accordionManagers = dedupeSessionsById([...managers, ...archivedManagers]).sort(byCreatedStable);
+  const accordionWorkers = dedupeSessionsById([...workers, ...archivedWorkers]);
   const accordionLooseWorkers = accordionWorkers
     .filter((w) => !accordionManagers.some((m) => m.id === w.parentSessionId))
     .sort(bySessionActivity);
@@ -287,6 +290,14 @@ function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRol
 // All mutations already exist (mirrors Workspace's wiring) and invalidate the shared ["allSessions"]
 // query the page reads — ZERO new daemon/REST. The manager-archive worker-count confirm is built per
 // row here, matching Workspace exactly.
+// The outer row-list is CAPPED at this height and scrolls internally past it, so a project with many
+// sessions can't grow the card into an unbounded wall (card 3fd4d245). Live/recent rows stay reachable
+// because the caller feeds the list live-first (the shared byCreatedStable/bySessionActivity order); you
+// scroll to reach the older tail. Each row's OWN cockpit stays independently bounded (maxHeight 440) — a
+// clamp on the collapsed list, not a re-cap of the inner cockpit. Kept viewport-relative (min(vh, px)) so
+// the card never eats the whole screen on a short viewport.
+const FLEET_LIST_MAX_HEIGHT = "min(60vh, 620px)";
+
 function FleetAccordion({ managers, workers, looseWorkers }: {
   managers: SessionListItem[]; workers: SessionListItem[]; looseWorkers: SessionListItem[];
 }) {
@@ -315,24 +326,34 @@ function FleetAccordion({ managers, workers, looseWorkers }: {
     onClearRateLimit: () => clearRl.mutate(s.id), clearingRateLimit: clearRl.isPending,
   });
 
+  // Rows shown = every manager + every worker (nested + loose partition workers exactly). A subtle
+  // count sits pinned above the scroll region as the "showing N" affordance.
+  const rowCount = managers.length + workers.length;
   return (
-    <Panel>
-      {managers.map((m) => (
-        <div key={m.id} style={{ marginBottom: 8 }}>
-          <FleetCockpitRow s={m} star open={openId === m.id} onToggle={() => toggle(m.id)} actions={actionsFor(m)} />
-          {workers.filter((w) => w.parentSessionId === m.id).sort(byCreatedStable).map((w) => (
-            <div key={w.id} style={{ paddingLeft: 16 }}>
-              <FleetCockpitRow s={w} open={openId === w.id} onToggle={() => toggle(w.id)} actions={actionsFor(w)} />
-            </div>
-          ))}
-        </div>
-      ))}
-      {looseWorkers.map((w) => (
-        <FleetCockpitRow key={w.id} s={w} open={openId === w.id} onToggle={() => toggle(w.id)} actions={actionsFor(w)} />
-      ))}
-      {managers.length === 0 && looseWorkers.length === 0 && (
-        <span style={{ color: color.textMuted, fontSize: 12 }}>idle — no live manager</span>
+    <Panel style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {rowCount > 0 && (
+        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+          {rowCount} session{rowCount === 1 ? "" : "s"}
+        </span>
       )}
+      <div style={{ maxHeight: FLEET_LIST_MAX_HEIGHT, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+        {managers.map((m) => (
+          <div key={m.id} style={{ marginBottom: 8 }}>
+            <FleetCockpitRow s={m} star open={openId === m.id} onToggle={() => toggle(m.id)} actions={actionsFor(m)} />
+            {workers.filter((w) => w.parentSessionId === m.id).sort(byCreatedStable).map((w) => (
+              <div key={w.id} style={{ paddingLeft: 16 }}>
+                <FleetCockpitRow s={w} open={openId === w.id} onToggle={() => toggle(w.id)} actions={actionsFor(w)} />
+              </div>
+            ))}
+          </div>
+        ))}
+        {looseWorkers.map((w) => (
+          <FleetCockpitRow key={w.id} s={w} open={openId === w.id} onToggle={() => toggle(w.id)} actions={actionsFor(w)} />
+        ))}
+        {managers.length === 0 && looseWorkers.length === 0 && (
+          <span style={{ color: color.textMuted, fontSize: 12 }}>idle — no live manager</span>
+        )}
+      </div>
     </Panel>
   );
 }
