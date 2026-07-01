@@ -25,6 +25,19 @@ const IN_APP_CHANNEL = "in-app";
 // REST accepts. Kept in sync so the guided connect flow rejects an over-long token inline, not at a 400.
 export const COMPANION_TOKEN_MAX = 4096;
 
+// Mirror of the daemon's COMPANION_PROMPT_MAX (gateway/server.ts) — the max length the persona-prompt PUT
+// accepts for the companion's editable startupPrompt. Kept in sync so the Manage persona editor rejects an
+// over-long prompt inline instead of round-tripping to a 400.
+export const COMPANION_PROMPT_MAX = 10_000;
+
+// Validate the persona prompt before the PUT — bounds only (an EMPTY prompt is allowed; the read-only base
+// brief still layers under it). Returns an error string or null. Mirrors the daemon's `.length` guard.
+export function validatePersonaPrompt(startupPrompt: string): string | null {
+  if (typeof startupPrompt !== "string") return "The persona prompt must be text.";
+  if (startupPrompt.length > COMPANION_PROMPT_MAX) return `The persona prompt must be at most ${COMPANION_PROMPT_MAX} characters.`;
+  return null;
+}
+
 // The default external channel label (matches the daemon's TELEGRAM_CHANNEL). The guided connect flow is
 // Telegram-specific; a custom channel still goes through the manual "Add binding" advanced control.
 export const TELEGRAM_CHANNEL = "telegram";

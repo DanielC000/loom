@@ -4,7 +4,7 @@ import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Se
 import { api, type ProfileFieldResolution, type PythonProvisioning, type PythonProvisioningReason } from "../lib/api";
 import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components/ui";
 import { color, font, radius, tone, sessionRoleTone as roleTone, type Tone } from "../theme";
-import { PROFILE_ROLE_OPTIONS } from "../lib/profileRoles";
+import { PROFILE_ROLE_OPTIONS, agentProfiles } from "../lib/profileRoles";
 
 // A profile's role, as a coloured pill. null = a plain (non-orchestration) session — today's default.
 function RoleBadge({ role }: { role: SessionRole | null }) {
@@ -79,7 +79,9 @@ export default function Profiles() {
           prompt comes from the agent. Human-managed only; edits apply on the next spawn.
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {profiles.data?.map((p) => (
+          {/* The companion's assistant-role rig is HIDDEN here — companion config lives entirely under
+              Companion → Manage now, so it never shows among the agent rigs. */}
+          {agentProfiles(profiles.data ?? []).map((p) => (
             <Button key={p.id} variant={p.id === selected ? "primary" : "default"} style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8 }}
               onClick={() => setSelected(p.id)} title={p.description || p.name}>
               {p.icon && <span>{p.icon}</span>}
@@ -88,7 +90,7 @@ export default function Profiles() {
               <span style={{ fontSize: 10, color: p.role ? tone[roleTone[p.role]] : color.textMuted, fontFamily: font.mono }}>{p.role ?? "plain"}</span>
             </Button>
           ))}
-          {profiles.data?.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No profiles yet.</span>}
+          {agentProfiles(profiles.data ?? []).length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No profiles yet.</span>}
         </div>
         <div style={{ marginTop: 12, display: "flex", gap: 6 }}>
           <Input placeholder="new profile name" value={newName} onChange={(e) => setNewName(e.target.value)} style={{ flex: 1 }} />

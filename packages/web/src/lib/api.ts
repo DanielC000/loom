@@ -4,6 +4,13 @@ import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListIt
 // salted hash). The human relays `code` to the person being enrolled; it is never recoverable after.
 export interface CompanionPairingCode { codeId: string; code: string; expiresAt: string; }
 
+// The companion's "brain", served over human-only REST (Companion epic — Manage tab). PROMPT: the agent's
+// own editable `startupPrompt` (bounded 10k) layered UNDER the server-owned, read-only `baseBrief`
+// (ASSISTANT_BASE_BRIEF, echoed verbatim for context — a request body can never override it). SKILL: one
+// self-authored skill entry — the companion authors these over MCP; this surface only reads + curates.
+export interface CompanionPrompt { sessionId: string; startupPrompt: string; baseBrief: string; }
+export interface CompanionSkillEntry { name: string; description: string; }
+
 // Per-conflict resolution for a profile adopt-update: pick the user's value or the shipped value,
 // wholesale (the field-level analog of the skills resolver's per-hunk mine/shipped choice).
 export type ProfileFieldResolution = "mine" | "shipped";
@@ -600,4 +607,22 @@ export const api = {
   setCompanionHome: (b: { channel: string; chatId: string }) =>
     putErr<{ channel: string; chatId: string } | null>("/api/companion/home", b),
   clearCompanionHome: () => del<{ ok: boolean }>("/api/companion/home"),
+
+  // --- Companion "brain": persona prompt + self-authored skills (Companion epic — the Manage tab's home
+  // for everything companion). HUMAN-only loopback REST, resolved by sessionId, same trust posture as the
+  // config/bindings writers above (NO agent MCP path). PROMPT: GET reads the editable startupPrompt + the
+  // read-only baseBrief; PUT writes only startupPrompt (bounded 10k → 400 with a reason, surfaced via
+  // putErr). SKILLS: read (list + single content) + curate (delete) over the companion's OWN isolated skill
+  // store — authoring stays the companion's on-demand MCP job, this surface only reviews + prunes. delete
+  // returns the updated list (404 with a reason on an unknown skill, surfaced via delErr). ---
+  companionPrompt: (sessionId: string) =>
+    getErr<CompanionPrompt>(`/api/companion/prompt/${encodeURIComponent(sessionId)}`),
+  updateCompanionPrompt: (sessionId: string, startupPrompt: string) =>
+    putErr<CompanionPrompt>(`/api/companion/prompt/${encodeURIComponent(sessionId)}`, { startupPrompt }),
+  companionSkills: (sessionId: string) =>
+    get<{ skills: CompanionSkillEntry[] }>(`/api/companion/skills/${encodeURIComponent(sessionId)}`).then((r) => r.skills),
+  companionSkill: (sessionId: string, name: string) =>
+    getErr<{ name: string; content: string }>(`/api/companion/skills/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
+  deleteCompanionSkill: (sessionId: string, name: string) =>
+    delErr<{ ok: boolean; skills: CompanionSkillEntry[] }>(`/api/companion/skills/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
 };

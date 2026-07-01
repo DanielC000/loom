@@ -1,14 +1,14 @@
 import { useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
 import type { CompanionConfigMasked, CompanionBinding, SessionListItem } from "@loom/shared";
-import { api, type CompanionProvisionError } from "../lib/api";
+import { api, type CompanionProvisionError, type CompanionSkillEntry } from "../lib/api";
 import {
   bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, emptyConfigForm,
   emptyTelegramForm, formFromMasked, hasChannelBinding, maskedToken, provisionBody, provisionErrorMessage,
-  validateBinding, validatePairing, validateSender, TELEGRAM_CHANNEL,
+  validateBinding, validatePairing, validateSender, validatePersonaPrompt, COMPANION_PROMPT_MAX, TELEGRAM_CHANNEL,
   type CompanionConfigForm, type CompanionTelegramForm,
 } from "../lib/companion";
+import { companionProfile } from "../lib/profileRoles";
 import { Panel, Button, Input, Select, SectionLabel, Badge, StatusPill, Chip } from "../components/ui";
 import { CompanionChat } from "../components/CompanionChat";
 import { TerminalPane } from "../components/Terminal";
@@ -402,16 +402,10 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
           style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <ConfigSection companion={companion} onChanged={onChanged} onDeleted={onDeleted} />
           <ChannelsSection companion={companion} onChanged={onChanged} />
+          <PersonaSection sessionId={companion.sessionId} />
+          <SkillsSection sessionId={companion.sessionId} />
+          <RestrictToolsSection />
           <PairingSection sessionId={companion.sessionId} />
-
-          <Panel style={{ padding: 12, background: color.panel2 }}>
-            <SectionLabel style={{ margin: "0 0 6px" }}>Restrict this companion's tools</SectionLabel>
-            <p style={{ ...hint, margin: 0 }}>
-              A chat-reachable agent is high blast-radius. Confine what it can do with the{" "}
-              <strong style={{ color: color.text }}>restricted / confirm-gated</strong> tool toggle on its Profile —{" "}
-              <Link to="/profiles" style={{ color: color.cyan }}>open Profiles →</Link>
-            </p>
-          </Panel>
         </div>
       )}
     </div>
@@ -808,6 +802,228 @@ function AllowedSenders({ sessionId, channel }: { sessionId: string; channel: st
       </div>
       {(localErr || add.error) && <span style={errStyle}>{localErr ?? (add.error as Error).message}</span>}
     </div>
+  );
+}
+
+// A read-only content block (the persona prompt, the base brief, a skill's SKILL.md) — a bounded,
+// scrollable, wrap-preserving mono panel. `dim` softens it for the read-only base brief.
+function ReadonlyBlock({ children, dim }: { children: ReactNode; dim?: boolean }) {
+  return (
+    <pre style={{
+      margin: 0, maxHeight: 320, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word",
+      fontFamily: font.mono, fontSize: 12, lineHeight: 1.6, color: dim ? color.textMuted : color.text,
+      background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.base, padding: "10px 12px",
+    }}>
+      {children}
+    </pre>
+  );
+}
+
+// ── Persona / prompt: the companion's editable startupPrompt + the read-only base brief ──────────────
+// The persona PROMPT is the agent's OWN `startupPrompt` — the editable half that layers UNDER the
+// server-owned ASSISTANT_BASE_BRIEF (shown read-only for context; a request body can never change it).
+// Human-only REST, resolved by sessionId. Edits apply on the companion's next (re)start.
+function PersonaSection({ sessionId }: { sessionId: string }) {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["companionPrompt", sessionId], queryFn: () => api.companionPrompt(sessionId) });
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [localErr, setLocalErr] = useState<string | null>(null);
+  const [showBrief, setShowBrief] = useState(false);
+
+  const save = useMutation({
+    mutationFn: (startupPrompt: string) => api.updateCompanionPrompt(sessionId, startupPrompt),
+    onSuccess: (r) => { qc.setQueryData(["companionPrompt", sessionId], r); setEditing(false); setLocalErr(null); },
+  });
+
+  const beginEdit = () => { setDraft(q.data?.startupPrompt ?? ""); setLocalErr(null); setEditing(true); };
+  const submit = () => {
+    const err = validatePersonaPrompt(draft);
+    if (err) { setLocalErr(err); return; }
+    save.mutate(draft);
+  };
+
+  const promptText = (q.data?.startupPrompt ?? "").trim();
+  const over = draft.length > COMPANION_PROMPT_MAX;
+
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <SectionLabel style={{ margin: 0 }}>Persona / prompt</SectionLabel>
+        <span style={{ flex: 1 }} />
+        {!editing && q.data && <Button variant="primary" onClick={beginEdit}>Edit</Button>}
+      </div>
+      <p style={{ ...hint, margin: 0 }}>
+        The companion's own persona — layered UNDER Loom's read-only base brief (its identity + safety
+        posture). Edits apply on the companion's next restart.
+      </p>
+
+      {q.isLoading ? (
+        <span style={hint}>Loading…</span>
+      ) : q.isError ? (
+        <span style={errStyle}>{(q.error as Error).message}</span>
+      ) : editing ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={10} spellCheck={false}
+            data-testid="companion-persona-input"
+            style={{
+              background: color.panel2, color: color.text, border: `1px solid ${over ? color.red : color.borderStrong}`,
+              borderRadius: radius.base, padding: "8px 10px", fontFamily: font.mono, fontSize: 13, lineHeight: 1.5, resize: "vertical",
+            }} />
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ ...hint, color: over ? color.red : color.textMuted }}>
+              {draft.length.toLocaleString()} / {COMPANION_PROMPT_MAX.toLocaleString()}
+            </span>
+            <span style={{ flex: 1 }} />
+            <Button variant="primary" disabled={save.isPending} onClick={submit}>{save.isPending ? "Saving…" : "Save prompt"}</Button>
+            <Button variant="ghost" disabled={save.isPending} onClick={() => { setEditing(false); save.reset(); setLocalErr(null); }}>Cancel</Button>
+          </div>
+          {(localErr || save.error) && <span style={errStyle}>{localErr ?? (save.error as Error).message}</span>}
+        </div>
+      ) : (
+        <>
+          {promptText
+            ? <ReadonlyBlock>{promptText}</ReadonlyBlock>
+            : <p style={hint}>No persona prompt set — <strong style={{ color: color.text }}>Edit</strong> to give this companion its own voice.</p>}
+          <div>
+            <Button onClick={() => setShowBrief((v) => !v)}>{showBrief ? "Hide base brief" : "Show base brief"}</Button>
+          </div>
+          {showBrief && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ ...hint, color: color.textDim }}>Loom's base brief — read-only, prepended to every companion.</span>
+              <ReadonlyBlock dim>{q.data?.baseBrief ?? ""}</ReadonlyBlock>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+// ── Skills: the companion's SELF-AUTHORED skill store (review + prune) ────────────────────────────────
+// The companion authors these on demand over MCP (skill_author); this human-only surface lists them, reads
+// one's full SKILL.md, and DELETES one for curation/dedup. There is deliberately NO create/edit here.
+function SkillsSection({ sessionId }: { sessionId: string }) {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["companionSkills", sessionId], queryFn: () => api.companionSkills(sessionId) });
+  const skills = q.data ?? [];
+
+  const del = useMutation({
+    mutationFn: (name: string) => api.deleteCompanionSkill(sessionId, name),
+    onSuccess: (r) => { qc.setQueryData(["companionSkills", sessionId], r.skills); },
+  });
+
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <SectionLabel style={{ margin: 0 }}>Skills</SectionLabel>
+      <p style={{ ...hint, margin: 0 }}>
+        Skills this companion wrote for itself. It authors them on its own; here you can read one or delete
+        one to keep the set tidy.
+      </p>
+      {q.isLoading ? (
+        <span style={hint}>Loading…</span>
+      ) : q.isError ? (
+        <span style={errStyle}>{(q.error as Error).message}</span>
+      ) : skills.length === 0 ? (
+        <p style={hint}>No skills yet — this companion hasn't authored any.</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {skills.map((s) => (
+            <SkillRow key={s.name} sessionId={sessionId} skill={s}
+              onDelete={() => del.mutate(s.name)} deleting={del.isPending && del.variables === s.name} />
+          ))}
+        </div>
+      )}
+      {del.error && <span style={errStyle}>{(del.error as Error).message}</span>}
+    </section>
+  );
+}
+
+// One skill row: its name + description, a Read toggle (lazily fetches the SKILL.md), and a Delete with an
+// inline confirm (mirrors ChannelRow's remove pattern).
+function SkillRow({ sessionId, skill, onDelete, deleting }: { sessionId: string; skill: CompanionSkillEntry; onDelete: () => void; deleting: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const content = useQuery({ queryKey: ["companionSkill", sessionId, skill.name], queryFn: () => api.companionSkill(sessionId, skill.name), enabled: open });
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <code style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{skill.name}</code>
+        {skill.description && <span style={{ ...hint, margin: 0 }}>{skill.description}</span>}
+        <span style={{ flex: 1 }} />
+        <Button onClick={() => setOpen((v) => !v)}>{open ? "Hide" : "Read"}</Button>
+        {confirm ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={errStyle}>Delete this skill?</span>
+            <Button variant="danger" disabled={deleting} onClick={onDelete}>{deleting ? "Deleting…" : "Confirm"}</Button>
+            <Button variant="ghost" onClick={() => setConfirm(false)}>Cancel</Button>
+          </div>
+        ) : (
+          <Button variant="danger" onClick={() => setConfirm(true)}>Delete</Button>
+        )}
+      </div>
+      {open && (
+        content.isLoading ? <span style={hint}>Loading…</span>
+        : content.isError ? <span style={errStyle}>{(content.error as Error).message}</span>
+        : <ReadonlyBlock>{content.data?.content ?? ""}</ReadonlyBlock>
+      )}
+    </div>
+  );
+}
+
+// ── Restrict tools: the blast-radius toggle, INLINE (was a link-out to Profiles) ──────────────────────
+// A chat-reachable companion driven by untrusted input is high blast-radius. This toggles `restrictedTools`
+// on the companion's assistant-role Profile — removing the dangerous native tools (shell / host-writes /
+// subagent delegation / network egress) from its tool list. HUMAN-only (like the Profiles surface it
+// replaces). All companions share the one bundled Companion rig, so this edits that shared profile.
+function RestrictToolsSection() {
+  const qc = useQueryClient();
+  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const profile = companionProfile(profiles.data ?? []);
+
+  const save = useMutation({
+    mutationFn: (restrictedTools: boolean) => api.updateProfile(profile!.id, { restrictedTools }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["profiles"] });
+      if (profile) qc.invalidateQueries({ queryKey: ["profile", profile.id] });
+    },
+  });
+
+  // Optimistic display: reflect the in-flight value immediately, else the persisted profile value.
+  const on = save.isPending ? !!save.variables : (profile?.restrictedTools ?? false);
+
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <SectionLabel style={{ margin: 0 }}>Restrict tools</SectionLabel>
+      {profiles.isLoading ? (
+        <span style={hint}>Loading…</span>
+      ) : !profile ? (
+        <p style={hint}>No companion rig found to restrict.</p>
+      ) : (
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: save.isPending ? "default" : "pointer" }}>
+          <input type="checkbox" checked={on} disabled={save.isPending}
+            onChange={(e) => save.mutate(e.target.checked)} style={{ marginTop: 3 }} data-testid="companion-restricted-tools" />
+          <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <span style={{ ...fieldLabel, color: color.text }}>
+              Restricted tools <span style={{ fontWeight: 400, letterSpacing: 0, color: on ? color.phosphor : color.textMuted }}>· {on ? "on" : "off"}</span>
+            </span>
+            <span style={{ ...hint, margin: 0 }}>
+              Remove the dangerous native tools — shell (Bash), host writes (Edit / Write / NotebookEdit /
+              MultiEdit), subagent delegation (Task / Agent), and network egress (WebFetch / WebSearch) —
+              from this companion's tool list. Read / Glob / Grep and the Loom tools stay. Keep it ON for a
+              companion reachable from untrusted chat.
+            </span>
+          </span>
+        </label>
+      )}
+      {save.error && <span style={errStyle}>{(save.error as Error).message}</span>}
+      <p style={{ ...hint, margin: 0 }}>
+        Edits the shared Companion rig — it takes effect when a companion is{" "}
+        <strong style={{ color: color.text }}>provisioned</strong>. A companion that's already running keeps
+        its current setting until it's re-provisioned.
+      </p>
+    </section>
   );
 }
 
