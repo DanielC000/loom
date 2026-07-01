@@ -25,7 +25,31 @@ export interface CompanionConfig {
    */
   homeChannel: string;
   homeChatId: string;
+  /**
+   * Proactive HEARTBEAT cadence, in minutes (card 9488951e). 0 (the DEFAULT — unset/blank/non-numeric)
+   * means OFF: no heartbeat watcher is ever armed and every existing path is byte-identical. A positive
+   * value opts the companion into a periodic daemon-driven proactive turn that runs and (only if there's
+   * something worth saying) `chat_reply`s the HOME channel. Keep it CONSERVATIVE so a companion never
+   * starves the fleet's rate-limit budget — e.g. 360 (6h). From LOOM_COMPANION_HEARTBEAT_INTERVAL_MINUTES.
+   */
+  heartbeatIntervalMinutes: number;
+  /**
+   * The framed proactive-prompt text injected on each heartbeat turn. TRUSTED daemon text (clearly
+   * framed, NOT untrusted chat). Defaults to DEFAULT_HEARTBEAT_PROMPT. From LOOM_COMPANION_HEARTBEAT_PROMPT.
+   */
+  heartbeatPrompt: string;
 }
+
+/**
+ * The default proactive-prompt text (TRUSTED daemon text — the heartbeat watcher frames it as
+ * `[loom:heartbeat] …`, distinct from untrusted inbound chat). It instructs a brief proactive check and
+ * a reply ONLY when there's something worth surfacing, so a conservative cadence stays quiet by default.
+ */
+export const DEFAULT_HEARTBEAT_PROMPT =
+  "Proactive check-in. Briefly review anything you are tracking for the owner (running work, follow-ups, " +
+  "reminders, things you said you would get back to them on). If — and only if — there is something " +
+  "genuinely worth surfacing, send it with chat_reply. If there is nothing worth saying, stay quiet and " +
+  "do nothing. Don't message just because you were pinged.";
 
 /**
  * Read the companion config from env (spike scope). Returns null when the bot token is UNSET → the whole
@@ -50,5 +74,9 @@ export function readCompanionConfig(env: NodeJS.ProcessEnv): CompanionConfig | n
   // Home channel target: channel defaults to Telegram (the only channel today), chatId to the owner's chat.
   const homeChannel = env.LOOM_COMPANION_HOME_CHANNEL?.trim() || TELEGRAM_CHANNEL;
   const homeChatId = env.LOOM_COMPANION_HOME_CHAT_ID?.trim() || allowedChatId;
-  return { botToken, allowedChatId, sessionId, chatScope, homeChannel, homeChatId };
+  // Proactive heartbeat: OFF unless a POSITIVE cadence is set (unset/blank/0/non-numeric ⇒ 0 ⇒ off).
+  const rawInterval = Number(env.LOOM_COMPANION_HEARTBEAT_INTERVAL_MINUTES);
+  const heartbeatIntervalMinutes = Number.isFinite(rawInterval) && rawInterval > 0 ? rawInterval : 0;
+  const heartbeatPrompt = env.LOOM_COMPANION_HEARTBEAT_PROMPT?.trim() || DEFAULT_HEARTBEAT_PROMPT;
+  return { botToken, allowedChatId, sessionId, chatScope, homeChannel, homeChatId, heartbeatIntervalMinutes, heartbeatPrompt };
 }

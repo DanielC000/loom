@@ -588,7 +588,18 @@ export type OrchestrationEventKind =
   // event; a queued event with NO matching delivered event is "still undelivered" (the boot scan's work
   // set). Also filed by the boot scan to RETIRE a queued event whose recipient is gone/superseded (carried
   // forward by recycle, or unrecoverable) so the undelivered set can't grow without bound (detail.reason).
-  | "session_message_delivered";
+  | "session_message_delivered"
+  // ── Companion proactive heartbeat (CompanionHeartbeatWatcher, card 9488951e) ───────────────────────
+  // A daemon-driven proactive turn was injected into the long-lived companion session: the watcher's
+  // cadence came due and the session was LIVE + not rate-limit-parked, so a framed `[loom:heartbeat]`
+  // turn was enqueued. Filed under the companion session (managerSessionId = the companion sessionId);
+  // `detail` carries { intervalMinutes }. DEFAULT-OFF (no watcher armed unless a cadence is configured).
+  | "companion_heartbeat_fired"
+  // The heartbeat was DUE but SUPPRESSED rather than fired — `detail.reason` discriminates: "rate-limited"
+  // (the session is parked on the usage cap → defer to the reset, never spam) or "pending" (a prior
+  // heartbeat is still queued/unconsumed → don't stack a second). No turn is enqueued; the cadence retries
+  // next due. The proactive twin of the wake-defer discipline; filed under the companion session.
+  | "companion_heartbeat_deferred";
 
 export interface OrchestrationEvent {
   id: string;

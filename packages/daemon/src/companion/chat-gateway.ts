@@ -71,12 +71,18 @@ export class ChatGateway {
    * @param pairing     the injected DM-pairing coordinator (Companion DM-pairing). Defaults to the no-op
    *                    (redemption never fires ⇒ every existing construction is byte-identical); the daemon
    *                    injects the db-backed impl.
+   * @param homeResolver  the injected proactive HOME-channel resolver (card 9488951e). Returns the
+   *                    configured companion home {channel, chatId} or null. Used by deliverReply as a
+   *                    FALLBACK when a session has NO binding (a proactive/heartbeat turn still reaches the
+   *                    owner). Defaults to undefined (no fallback ⇒ every existing construction is
+   *                    byte-identical); the daemon injects `() => db.getCompanionHome()`.
    */
   constructor(
     private readonly submitTurn: SubmitTurn,
     bindings: SessionBinding[] = [],
     private readonly auth: CompanionAuth = allowIfDmMatch(),
     private readonly pairing: CompanionPairing = noPairing(),
+    private readonly homeResolver: (() => { channel: string; chatId: string } | null) | undefined = undefined,
   ) {
     for (const b of bindings) this.bindingsBySession.set(b.sessionId, b);
   }
@@ -206,18 +212,30 @@ export class ChatGateway {
    * — the chat_reply MCP handler stays symmetric and never throws out.
    */
   async deliverReply(sessionId: string, text: string): Promise<DeliverResult> {
+    // Binding WINS when present (inbound-reply routing unchanged). With NO binding, FALL BACK to the
+    // configured companion HOME (card 9488951e) so a PROACTIVE/heartbeat turn on an unbound session still
+    // reaches the owner. No binding + no home ⇒ unknown-session (byte-identical to the pre-fallback path).
     const binding = this.bindingsBySession.get(sessionId);
-    if (!binding) return { delivered: false, reason: "unknown-session" };
-    const adapter = this.adapters.get(binding.channel);
+    const target = binding
+      ? { channel: binding.channel, chatId: binding.chatId }
+      : this.resolveHome();
+    if (!target) return { delivered: false, reason: "unknown-session" };
+    const adapter = this.adapters.get(target.channel);
     if (!adapter) return { delivered: false, reason: "no-adapter" };
     const parts = adapter.maxMessageLength ? chunkText(text, adapter.maxMessageLength) : [text];
     try {
-      for (const part of parts) await adapter.send(binding.chatId, part);
+      for (const part of parts) await adapter.send(target.chatId, part);
       return { delivered: true, chunks: parts.length };
     } catch (err) {
       this.debug(`deliverReply send failed for ${sessionId}: ${describeError(err)}`);
       return { delivered: false, reason: "send-failed" };
     }
+  }
+
+  /** The configured companion home {channel, chatId} or null — the proactive deliverReply fallback.
+   *  A throwing resolver degrades to null (never breaks a reply path). */
+  private resolveHome(): { channel: string; chatId: string } | null {
+    try { return this.homeResolver?.() ?? null; } catch { return null; }
   }
 
   /** Start every registered adapter (called after the daemon's server is listening). */

@@ -60,6 +60,7 @@ const HERMETIC = [
   "companion-pairing", // Loom Companion (SECURITY): DM-pairing enrollment — owner-minted, single-use, TTL + rate-limited codes bind the AUTHENTICATED chat.id (dm-bind) or allowlist the AUTHENTICATED sender (group-sender); mint is human-only REST (plaintext once, salted hash at rest); no pairing oracle; the code text never reaches submitTurn; anti-spoof + cross-session guard
   "companion-telegram", // Loom Companion Phase 1: the Telegram adapter — grammY update normalization + send routing via an injected fake bot + inbound error boundary + reconnect-on-drop wiring
   "companion-skills", // Loom Companion Phase 2: SELF-AUTHORED skills — isolated per-companion store (never the global SKILLS_DIR / never injected), on-demand list/read, refine-in-place, redundancy guard against near-dup NEW names, path-traversal confinement, and the tools gated to the single bound companion session
+  "companion-heartbeat", // Loom Companion (card 9488951e): proactive HEARTBEAT watcher — due/live-fire (framed [loom:heartbeat] + lastFiredAt + fired-event), cadence not-due, rate-limit PARK defer, not-live skip (never resumes), no pending-heartbeat stacking, DEFAULT-OFF (0 cadence + config default), and the deliverReply HOME fallback (unbound→home, bound→binding)
   "assistant-role", // Loom Companion Phase 1: the long-lived `assistant` SessionRole — non-worktree spawn+persist, resume carrying the role, base brief injection, human-prompt disallow (others byte-identical), and the minimal resolveRole surface (my_context + companion-gated chat_reply)
 ];
 

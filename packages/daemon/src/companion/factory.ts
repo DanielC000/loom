@@ -20,6 +20,8 @@ import type { CompanionBinding } from "@loom/shared";
 export interface CompanionBindingStore extends AllowlistReader, PairingStore {
   listCompanionBindings(): CompanionBinding[];
   upsertCompanionBinding(input: { sessionId: string; channel: string; chatId: string; scope?: "dm" | "group" }): CompanionBinding;
+  /** The proactive HOME channel target (card 9488951e) — the deliverReply fallback for an unbound session. */
+  getCompanionHome(): { channel: string; chatId: string } | null;
 }
 
 /** Drop the db-only createdAt — the gateway's routing map wants just the SessionBinding shape. */
@@ -41,7 +43,10 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // DM-pairing coordinator: the db-backed redemption path with the real wall clock (epoch ms). Default
   // rate-limit/lockout policy (5 attempts / 10-min window / 15-min lockout) — tests inject a fake clock.
   const pairing = createDbCompanionPairing(db, { now: () => Date.now() });
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing);
+  // Home-channel fallback (card 9488951e): a proactive/heartbeat turn on an unbound session still reaches
+  // the owner via the configured companion home. Read LIVE (a human REST PUT /api/companion/home takes
+  // effect with no restart), like the binding routing map.
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, () => db.getCompanionHome());
   // The adapter normalizes each Telegram update, then hands it to the gateway (route → authz → submit).
   // handleInbound is fire-and-forget, so BACKSTOP its promise with .catch(): even though the gateway
   // already contains a synchronous submit throw, any future rejection here must never become an unhandled

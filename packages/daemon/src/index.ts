@@ -43,6 +43,7 @@ import { startVaultVersioners, type VaultVersioner } from "./vault/versioner.js"
 import { buildServer } from "./gateway/server.js";
 import { readCompanionConfig } from "./companion/config.js";
 import { createCompanionGateway } from "./companion/factory.js";
+import { CompanionHeartbeatWatcher } from "./companion/heartbeat.js";
 import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 
@@ -421,6 +422,23 @@ async function main(): Promise<void> {
     console.log("[boot] Loom Companion off (set LOOM_COMPANION_BOT_TOKEN + LOOM_COMPANION_CHAT_ID + LOOM_COMPANION_SESSION_ID)");
   }
 
+  // Companion proactive HEARTBEAT watcher (card 9488951e) — a daemon-driven, conservative-cadence proactive
+  // turn woken into the EXISTING long-lived companion session (never a fresh spawn/resume). DEFAULT-OFF:
+  // armed ONLY when the companion is configured AND a positive cadence is set — with no cadence, no watcher
+  // exists and every path is byte-identical. Reuses pty.enqueueStdin + the rate-limit-park DEFER discipline;
+  // does NOT touch the shared Scheduler or the WakeService.
+  let heartbeatWatcher: CompanionHeartbeatWatcher | null = null;
+  if (companionCfg && companionCfg.heartbeatIntervalMinutes > 0) {
+    heartbeatWatcher = new CompanionHeartbeatWatcher({
+      db, pty, sessionId: companionCfg.sessionId,
+      intervalMinutes: companionCfg.heartbeatIntervalMinutes, prompt: companionCfg.heartbeatPrompt,
+    });
+    heartbeatWatcher.start();
+    console.log(`[boot] Companion heartbeat on (every ${companionCfg.heartbeatIntervalMinutes}m, session ${companionCfg.sessionId.slice(0, 8)})`);
+  } else if (companionCfg) {
+    console.log("[boot] Companion heartbeat off (set LOOM_COMPANION_HEARTBEAT_INTERVAL_MINUTES to a positive value)");
+  }
+
   // Pillar B: the cron trigger layer. Boots a manager (interactive pty, never headless) on each
   // due schedule's tick. OPT-IN (autonomy earned gate-by-gate): only start when enabled via the
   // platform config OR the LOOM_SCHEDULER_ENABLED=1 env override. LOOM_SCHEDULER_INTERVAL_MS tunes
@@ -644,7 +662,7 @@ async function main(): Promise<void> {
     } catch { /* never block the exit */ }
     // Best-effort courtesy stop of the companion long-poll (no-op when off); it dies with the process anyway.
     if (companion) { void companion.stop().catch(() => { /* never block the exit */ }); }
-    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop();
+    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); heartbeatWatcher?.stop();
     console.log(`[shutdown] graceful stop (${reason})`);
     process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
   };
