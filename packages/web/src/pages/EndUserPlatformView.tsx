@@ -108,11 +108,11 @@ export function EndUserPlatformView() {
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           Operator history
           <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
-            every operator run — when it ran, context cost, duration; expand to read the transcript
+            every operator session — when it ran, context cost, duration; expand to read the transcript
           </span>
         </SectionLabel>
         <RunHistory reservedProjectId={project.id} sessions={homeSessions} role="setup"
-          emptyLabel="No operator runs yet — Platform hasn’t run." />
+          emptyLabel="No operator sessions yet — Platform hasn’t run." />
       </section>
 
       {/* --- Auditor run history — every Review RUN (workspace-auditor session), newest-first; each Review mints a fresh run --- */}

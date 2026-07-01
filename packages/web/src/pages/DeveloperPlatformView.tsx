@@ -90,17 +90,17 @@ export function DeveloperPlatformView() {
       {/* --- 5a. Lead history — every Lead RUN (role:"platform" session), newest-first, live+exited+archived.
               Collapsed by default (history runs long; tuck it away until the human wants it). --- */}
       <CollapsibleHistory title="Lead history"
-        hint="every Lead run — when it ran, context cost, duration; expand to read the transcript">
+        hint="every Lead session — when it ran, context cost, duration; expand to read the transcript">
         <RunHistory reservedProjectId={project.id} sessions={platformSessions} role="platform"
-          emptyLabel="No Lead runs yet — the Platform Lead hasn’t run." />
+          emptyLabel="No Lead sessions yet — the Platform Lead hasn’t run." />
       </CollapsibleHistory>
 
       {/* --- 5b. Auditor history — every audit RUN (auditor session), newest-first, live+exited+archived.
               Collapsed by default (same as Lead history). --- */}
       <CollapsibleHistory title="Auditor history"
-        hint="every audit run — trigger, context cost, findings filed; expand to read the transcript">
+        hint="every audit session — trigger, context cost, findings filed; expand to read the transcript">
         <RunHistory reservedProjectId={project.id} sessions={platformSessions} role="auditor"
-          emptyLabel="No audit runs yet — the Auditor hasn’t run." showFindings />
+          emptyLabel="No audit sessions yet — the Auditor hasn’t run." showFindings />
       </CollapsibleHistory>
 
       {/* --- 3. The Platform board — findings + escalations backlog (reused Board component) --- */}

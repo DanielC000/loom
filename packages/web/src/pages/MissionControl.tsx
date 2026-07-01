@@ -226,7 +226,7 @@ export default function MissionControl() {
         </div>
       </div>
 
-      {/* Run replay — scrub a wave/session's durable audit timeline + diff it against another run. The
+      {/* Wave replay — scrub a wave/session's durable audit timeline + diff it against another run. The
           observability surface for "what actually happened" once a wave is several agents deep. Roots are
           managers, live first then by recency, so the default subject is the wave you're driving now. */}
       <AuditReplayPanel managers={replayRoots} />

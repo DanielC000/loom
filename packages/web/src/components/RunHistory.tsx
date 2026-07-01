@@ -127,7 +127,7 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle }:
   const end = live ? new Date().toISOString() : run.lastActivity;
   return (
     <Panel style={{ padding: 0 }}>
-      <div onClick={onToggle} title={open ? "Collapse" : "Expand to read this run’s transcript"}
+      <div onClick={onToggle} title={open ? "Collapse" : "Expand to read this session’s transcript"}
         style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", cursor: "pointer", flexWrap: "wrap" }}>
         <span style={{ color: open ? color.phosphor : color.textDim, fontFamily: font.mono, fontSize: 12 }}>{open ? "▾" : "▸"}</span>
         <StatusPill tone={status.tone} glow={status.glow} label={status.label} />
@@ -142,7 +142,7 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle }:
         {canResume && (
           <Button variant="ghost" disabled={resumeM.isPending}
             onClick={(e) => { e.stopPropagation(); resumeM.mutate(); }}
-            title="Resume this exited run (brings it back live)"
+            title="Resume this exited session (brings it back live)"
             style={{ padding: "2px 8px", fontSize: 11, color: color.cyan, borderColor: color.border }}>
             {resumeM.isPending ? "resuming…" : "Resume"}
           </Button>

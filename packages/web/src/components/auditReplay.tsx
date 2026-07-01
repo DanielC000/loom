@@ -262,7 +262,7 @@ export function AuditReplayPanel({ managers }: { managers: SessionListItem[] }) 
   if (managers.length === 0) {
     return (
       <div>
-        <SectionLabel>Run replay</SectionLabel>
+        <SectionLabel>Wave replay</SectionLabel>
         <Panel><span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No manager waves to replay yet.</span></Panel>
       </div>
     );
@@ -270,7 +270,7 @@ export function AuditReplayPanel({ managers }: { managers: SessionListItem[] }) 
 
   return (
     <div>
-      <SectionLabel>Run replay</SectionLabel>
+      <SectionLabel>Wave replay</SectionLabel>
       <Panel style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {/* Subject + scope + compare controls */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
