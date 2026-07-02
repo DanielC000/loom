@@ -1,11 +1,12 @@
 import { useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { CompanionConfigMasked, CompanionBinding, SessionListItem } from "@loom/shared";
-import { api, restartCompanionSession, type CompanionProvisionError, type CompanionSkillEntry, type CompanionMemoryEntry } from "../lib/api";
+import { api, restartCompanionSession, type CompanionProvisionError, type CompanionSkillEntry, type CompanionMemoryEntry, type CompanionReminderEntry } from "../lib/api";
 import {
   bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, emptyConfigForm,
   emptyTelegramForm, formFromMasked, hasChannelBinding, maskedToken, provisionBody, provisionErrorMessage,
   validateBinding, validatePairing, validateSender, validatePersonaPrompt, COMPANION_PROMPT_MAX, TELEGRAM_CHANNEL,
+  reminderTitle, humanCron, reminderNextFireAt,
   type CompanionConfigForm, type CompanionTelegramForm,
 } from "../lib/companion";
 import { Panel, Button, Input, Select, SectionLabel, Badge, StatusPill, Chip } from "../components/ui";
@@ -404,6 +405,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
           <PersonaSection sessionId={companion.sessionId} />
           <SkillsSection sessionId={companion.sessionId} />
           <MemorySection sessionId={companion.sessionId} />
+          <RemindersSection sessionId={companion.sessionId} />
           <RestrictToolsSection sessionId={companion.sessionId} />
           <PairingSection sessionId={companion.sessionId} />
         </div>
@@ -1042,6 +1044,86 @@ function MemoryRow({ sessionId, memory, onDelete, deleting }: { sessionId: strin
         : content.isError ? <span style={errStyle}>{(content.error as Error).message}</span>
         : <ReadonlyBlock>{content.data?.content ?? ""}</ReadonlyBlock>
       )}
+    </div>
+  );
+}
+
+// ── Reminders: the companion's SELF-AUTHORED recurring reminders (review + prune) ─────────────────────
+// The sibling of MemorySection over the companion's OWN `companion_reminders` rows. The companion authors
+// these on its own (a reminder_* MCP tool); this human-only surface lists them (label / cron / prompt /
+// enabled state / next fire) and DELETES one to curate. Read + prune only — no authoring, no create/edit.
+function RemindersSection({ sessionId }: { sessionId: string }) {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["companionReminders", sessionId], queryFn: () => api.companionReminders(sessionId) });
+  const reminders = q.data ?? [];
+
+  const del = useMutation({
+    mutationFn: (id: string) => api.deleteCompanionReminder(sessionId, id),
+    onSuccess: (r) => { qc.setQueryData(["companionReminders", sessionId], r.reminders); },
+  });
+
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <SectionLabel style={{ margin: 0 }}>Reminders</SectionLabel>
+      <p style={{ ...hint, margin: 0 }}>
+        Recurring nudges this companion set for itself — each fires a proactive check-in on its own schedule.
+        It authors them on its own; here you can review one or delete one to keep the set tidy.
+      </p>
+      {q.isLoading ? (
+        <span style={hint}>Loading…</span>
+      ) : q.isError ? (
+        <span style={errStyle}>{(q.error as Error).message}</span>
+      ) : reminders.length === 0 ? (
+        <p style={hint}>No reminders yet — this companion hasn't scheduled any.</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {reminders.map((rem) => (
+            <ReminderRow key={rem.id} reminder={rem}
+              onDelete={() => del.mutate(rem.id)} deleting={del.isPending && del.variables === rem.id} />
+          ))}
+        </div>
+      )}
+      {del.error && <span style={errStyle}>{(del.error as Error).message}</span>}
+    </section>
+  );
+}
+
+// One reminder row: its label (or a prompt-derived fallback) + a human cron, the enabled/disabled state (a
+// disabled row is dimmed and badged), the next-fire time (shown ONLY when enabled — nextFireAt is populated
+// even for a disabled row), the prompt in a read-only block, and a Delete with an inline confirm — mirrors
+// MemoryRow's structure exactly (no create/edit; prune curates the companion's own set).
+function ReminderRow({ reminder, onDelete, deleting }: { reminder: CompanionReminderEntry; onDelete: () => void; deleting: boolean }) {
+  const [confirm, setConfirm] = useState(false);
+  const nextFire = reminderNextFireAt(reminder);
+  const disabled = !reminder.enabled;
+
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", gap: 8, padding: 10,
+      border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2,
+      opacity: disabled ? 0.6 : 1,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <strong style={{ fontFamily: font.head, fontSize: 13, color: color.text }}>{reminderTitle(reminder)}</strong>
+        <Badge tone={reminder.enabled ? "phosphor" : "muted"}>{reminder.enabled ? "enabled" : "disabled"}</Badge>
+        <span style={{ flex: 1 }} />
+        {confirm ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={errStyle}>Delete this reminder?</span>
+            <Button variant="danger" disabled={deleting} onClick={onDelete}>{deleting ? "Deleting…" : "Confirm"}</Button>
+            <Button variant="ghost" onClick={() => setConfirm(false)}>Cancel</Button>
+          </div>
+        ) : (
+          <Button variant="danger" onClick={() => setConfirm(true)}>Delete</Button>
+        )}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <Chip label="schedule" value={humanCron(reminder.cron)} tone="cyan" />
+        {nextFire
+          ? <Chip label="next fire" value={new Date(nextFire).toLocaleString()} tone="phosphor" />
+          : <Chip label="next fire" value={disabled ? "paused" : "—"} tone="muted" />}
+      </div>
+      <ReadonlyBlock>{reminder.prompt}</ReadonlyBlock>
     </div>
   );
 }

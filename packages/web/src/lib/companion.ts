@@ -9,6 +9,9 @@
 //     keeps the stored encrypted token (a "replace token" is the ONLY way a new token is ever sent).
 
 import type { CompanionBinding, CompanionConfigMasked, SessionListItem } from "@loom/shared";
+// Type-only (erased under the strip-types test runner, so it pulls NO runtime code from api.ts) — the
+// reminder helpers below format a CompanionReminderEntry for display.
+import type { CompanionReminderEntry } from "./api";
 
 // Mirror of the daemon's COMPANION_ID_MAX (gateway/server.ts) — the max length the REST surface accepts
 // for chat/sender ids + sender labels. Kept in sync here so the UI rejects an over-long value inline
@@ -308,4 +311,69 @@ export function withCompanionNavGating<T extends { to: string; primary?: boolean
   companionActive: boolean,
 ): T[] {
   return pages.map((p) => (p.to === "/companion" ? { ...p, primary: companionActive } : p));
+}
+
+// ── Companion reminders: pure display helpers behind the Manage → Reminders section ──────────────────
+// VIEW-only formatting for a CompanionReminderEntry (the companion authors reminders itself over MCP; the
+// UI only lists + prunes). Extracted here so the row's rendering logic — the label fallback, the cheap
+// cron humanizing, and the enabled-gated next-fire — is hermetically testable (test/companion-manage.mjs).
+
+// The row's title: the reminder's own label when it set one, else a sensible fallback derived from the
+// first non-empty line of its prompt (trimmed to a readable length), else a plain "Reminder". A reminder
+// with neither a label nor a prompt still renders a stable, non-empty title.
+export function reminderTitle(rem: Pick<CompanionReminderEntry, "label" | "prompt">): string {
+  const label = rem.label?.trim();
+  if (label) return label;
+  const firstLine = (rem.prompt ?? "").split("\n").map((l) => l.trim()).find(Boolean);
+  if (!firstLine) return "Reminder";
+  return firstLine.length > 60 ? `${firstLine.slice(0, 57)}…` : firstLine;
+}
+
+// A cheap human rendering of a 5-field cron (min hour dom mon dow) for the common cadences a companion
+// tends to author; anything outside these patterns falls back to the RAW cron string verbatim (never a
+// wrong guess). Kept deliberately small — a full cron humanizer is not worth a dep here.
+export function humanCron(cron: string): string {
+  const raw = (cron ?? "").trim();
+  const parts = raw.split(/\s+/);
+  if (parts.length !== 5) return raw; // not a 5-field cron — show it as-is
+  const [min = "", hour = "", dom = "", mon = "", dow = ""] = parts;
+  const everyField = (f: string) => f === "*";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const time = (h: string, m: string) => {
+    const hn = Number(h), mn = Number(m);
+    if (!Number.isInteger(hn) || !Number.isInteger(mn) || hn < 0 || hn > 23 || mn < 0 || mn > 59) return null;
+    return `${pad(hn)}:${pad(mn)}`;
+  };
+  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+  // every minute
+  if (parts.every(everyField)) return "every minute";
+  // every N minutes (*/N * * * *)
+  const stepMin = /^\*\/(\d+)$/.exec(min);
+  if (stepMin && everyField(hour) && everyField(dom) && everyField(mon) && everyField(dow)) {
+    return `every ${stepMin[1]} minutes`;
+  }
+  // hourly at :MM (M * * * *)
+  if (/^\d+$/.test(min) && everyField(hour) && everyField(dom) && everyField(mon) && everyField(dow)) {
+    return Number(min) === 0 ? "every hour" : `hourly at :${pad(Number(min))}`;
+  }
+  // daily at HH:MM (M H * * *)
+  if (/^\d+$/.test(min) && /^\d+$/.test(hour) && everyField(dom) && everyField(mon) && everyField(dow)) {
+    const t = time(hour, min);
+    if (t) return `daily at ${t}`;
+  }
+  // weekly on <day> at HH:MM (M H * * D)
+  if (/^\d+$/.test(min) && /^\d+$/.test(hour) && everyField(dom) && everyField(mon) && /^\d+$/.test(dow)) {
+    const d = Number(dow) % 7; // cron allows 0 or 7 for Sunday
+    const t = time(hour, min);
+    if (t && days[d]) return `weekly on ${days[d]} at ${t}`;
+  }
+  return raw; // uncommon shape — fall back to the raw cron
+}
+
+// The next-fire ISO to display, GATED on enabled: the server populates nextFireAt even for a disabled
+// row (it's just the theoretical next tick), but a disabled reminder never actually fires, so the UI must
+// not imply an upcoming fire. Returns null when disabled or when the cron couldn't be parsed server-side.
+export function reminderNextFireAt(rem: Pick<CompanionReminderEntry, "enabled" | "nextFireAt">): string | null {
+  return rem.enabled ? rem.nextFireAt : null;
 }

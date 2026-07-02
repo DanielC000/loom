@@ -11,6 +11,15 @@ export interface CompanionPairingCode { codeId: string; code: string; expiresAt:
 export interface CompanionPrompt { sessionId: string; startupPrompt: string; baseBrief: string; }
 export interface CompanionSkillEntry { name: string; description: string; }
 export interface CompanionMemoryEntry { name: string; description: string; pinned: boolean; }
+// One recurring reminder the companion authored for itself over MCP (a cron job that fires a proactive
+// turn into its own session). The human-only REST list shape: the `companion_reminders` row minus its
+// server-internal `route`, plus a SERVER-COMPUTED `nextFireAt` (null when the cron can't be parsed).
+// `nextFireAt` is populated even for a DISABLED row, so the UI must gate the "next fire" display on
+// `enabled`. This surface only reads + curates (list / delete) — authoring stays the companion's own job.
+export interface CompanionReminderEntry {
+  id: string; cron: string; prompt: string; label: string | null;
+  enabled: boolean; createdAt: string; nextFireAt: string | null;
+}
 // The session-ROW restrictedTools flag (blast-radius control) — DISTINCT from the Profile's
 // restrictedTools default: this is what a running companion's PTY was actually spawned with, and what a
 // restart re-applies from. See db.setRestrictedTools + sessions/service.ts resolveAgentSpawn.
@@ -639,6 +648,14 @@ export const api = {
     getErr<{ name: string; content: string }>(`/api/companion/memory/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
   deleteCompanionMemory: (sessionId: string, name: string) =>
     delErr<{ ok: boolean; memories: CompanionMemoryEntry[] }>(`/api/companion/memory/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
+
+  // REMINDERS: the sibling read/curate surface over the companion's OWN `companion_reminders` rows — same
+  // VIEW + PRUNE posture as MEMORY/SKILLS (authoring is the companion's own MCP job; this only lists +
+  // deletes). List unwraps { reminders }; DELETE returns the post-prune { ok, reminders } to refresh the cache.
+  companionReminders: (sessionId: string) =>
+    get<{ reminders: CompanionReminderEntry[] }>(`/api/companion/reminders/${encodeURIComponent(sessionId)}`).then((r) => r.reminders),
+  deleteCompanionReminder: (sessionId: string, reminderId: string) =>
+    delErr<{ ok: boolean; reminders: CompanionReminderEntry[] }>(`/api/companion/reminders/${encodeURIComponent(sessionId)}/${encodeURIComponent(reminderId)}`),
 
   // Session-ROW restrictedTools (live-apply fix): GET/PUT the flag the running companion's PTY actually
   // spawned with — distinct from the Profile default, and re-read on every resume. A write here needs a

@@ -19,7 +19,10 @@
 //   node --experimental-strip-types packages/web/test/companion-manage.mjs
 import assert from "node:assert/strict";
 import { agentProfiles, companionProfile } from "../src/lib/profileRoles.ts";
-import { validatePersonaPrompt, COMPANION_PROMPT_MAX } from "../src/lib/companion.ts";
+import {
+  validatePersonaPrompt, COMPANION_PROMPT_MAX,
+  reminderTitle, humanCron, reminderNextFireAt,
+} from "../src/lib/companion.ts";
 // api.ts has only a type-only `@loom/shared` import (erased under --experimental-strip-types), so it loads
 // here with no daemon/build — letting us drive the companion prompt/skills client against a mocked fetch.
 import { api, restartCompanionSession } from "../src/lib/api.ts";
@@ -296,6 +299,99 @@ await acheck("restartCompanionSession: throws (and NEVER calls resume) if the se
   }
   assert.ok(threw && /didn.t stop in time/i.test(threw.message), "throws a readable 'didn't stop in time' error, not a silent success");
   assert.equal(resumeCalled, false, "resume() is NEVER called when the session never exited — the silent-failure guard the security review flagged");
+});
+
+// ── Reminders: the pure row-display helpers (label fallback, cheap cron humanizing, enabled-gated next) ──
+// The sibling of the MEMORY section — VIEW + PRUNE over the companion's OWN companion_reminders rows. The
+// web package has no React renderer in test (same as MEMORY above), so the section is covered by its pure
+// display helpers plus the api-client GET/DELETE mirror below (the empty-state, the populated list, and the
+// per-row delete's wire shape).
+
+check("reminderTitle: uses the label when set (trimmed)", () => {
+  assert.equal(reminderTitle({ label: "  Morning standup  ", prompt: "irrelevant" }), "Morning standup");
+});
+
+check("reminderTitle: falls back to the prompt's first non-empty line when label is null", () => {
+  assert.equal(reminderTitle({ label: null, prompt: "\n  Check the deploy queue\nand report\n" }), "Check the deploy queue");
+});
+
+check("reminderTitle: truncates a long fallback and ends with an ellipsis", () => {
+  const long = "x".repeat(100);
+  const t = reminderTitle({ label: "", prompt: long });
+  assert.equal(t.length, 58, "57 chars + the ellipsis");
+  assert.ok(t.endsWith("…"));
+});
+
+check("reminderTitle: a reminder with neither a label nor a prompt still gets a stable title", () => {
+  assert.equal(reminderTitle({ label: null, prompt: "" }), "Reminder");
+  assert.equal(reminderTitle({ label: "   ", prompt: "   \n  " }), "Reminder");
+});
+
+check("humanCron: renders the common cadences a companion tends to author", () => {
+  assert.equal(humanCron("* * * * *"), "every minute");
+  assert.equal(humanCron("*/15 * * * *"), "every 15 minutes");
+  assert.equal(humanCron("0 * * * *"), "every hour");
+  assert.equal(humanCron("30 * * * *"), "hourly at :30");
+  assert.equal(humanCron("0 9 * * *"), "daily at 09:00");
+  assert.equal(humanCron("15 14 * * *"), "daily at 14:15");
+  assert.equal(humanCron("0 9 * * 1"), "weekly on Monday at 09:00");
+  assert.equal(humanCron("0 9 * * 0"), "weekly on Sunday at 09:00");
+  assert.equal(humanCron("0 9 * * 7"), "weekly on Sunday at 09:00", "cron allows 7 for Sunday too");
+});
+
+check("humanCron: falls back to the RAW cron for an uncommon shape or a malformed field (never a wrong guess)", () => {
+  assert.equal(humanCron("0 0 1 * *"), "0 0 1 * *", "monthly (dom set) isn't in the cheap set — show it raw");
+  assert.equal(humanCron("99 9 * * *"), "99 9 * * *", "an out-of-range minute is not humanized");
+  assert.equal(humanCron("not a cron"), "not a cron");
+  assert.equal(humanCron("* * * *"), "* * * *", "a 4-field string is not a 5-field cron");
+});
+
+check("reminderNextFireAt: gates the next-fire on enabled (populated even for a disabled row server-side)", () => {
+  assert.equal(reminderNextFireAt({ enabled: true, nextFireAt: "2026-07-02T09:00:00.000Z" }), "2026-07-02T09:00:00.000Z");
+  assert.equal(reminderNextFireAt({ enabled: false, nextFireAt: "2026-07-02T09:00:00.000Z" }), null, "a disabled reminder never implies an upcoming fire");
+  assert.equal(reminderNextFireAt({ enabled: true, nextFireAt: null }), null, "an unparseable cron leaves it null even when enabled");
+});
+
+// ── The REMINDERS client mirror — GET (populated + EMPTY state) + per-row DELETE (the prune wire shape) ──
+
+await acheck("companionReminders: GETs the list endpoint and UNWRAPS { reminders } (populated)", async () => {
+  let captured = null;
+  globalThis.fetch = async (url, opts) => {
+    captured = { url, opts };
+    return { ok: true, status: 200, json: async () => ({ reminders: [
+      { id: "r1", cron: "0 9 * * *", prompt: "Morning check-in", label: "standup", enabled: true, createdAt: "2026-07-01T00:00:00.000Z", nextFireAt: "2026-07-02T09:00:00.000Z" },
+      { id: "r2", cron: "0 18 * * 5", prompt: "Weekly wrap", label: null, enabled: false, createdAt: "2026-07-01T00:00:00.000Z", nextFireAt: "2026-07-03T18:00:00.000Z" },
+    ] }) };
+  };
+  const reminders = await api.companionReminders("sess 1");
+  assert.equal(captured.url, "/api/companion/reminders/sess%201", "sessionId is URL-encoded into the path");
+  assert.ok(!captured.opts || captured.opts.method === undefined || captured.opts.method === "GET");
+  assert.ok(Array.isArray(reminders), "the client unwraps { reminders } to the bare array");
+  assert.equal(reminders.length, 2);
+  assert.equal(reminders[0].id, "r1");
+  assert.equal(reminders[1].label, null, "a null label survives the unwrap so the row can fall back");
+  assert.equal(reminders[1].enabled, false, "the enabled flag survives so a disabled row can dim + gate next-fire");
+});
+
+await acheck("companionReminders: an EMPTY list unwraps to [] (the section's empty state)", async () => {
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ reminders: [] }) });
+  const reminders = await api.companionReminders("s");
+  assert.deepEqual(reminders, [], "no reminders → the section renders its empty state");
+});
+
+await acheck("deleteCompanionReminder: DELETEs by id, returns the updated { ok, reminders }, surfaces a 404 reason", async () => {
+  let captured = null;
+  globalThis.fetch = async (url, opts) => { captured = { url, opts }; return { ok: true, status: 200, json: async () => ({ ok: true, reminders: [] }) }; };
+  const r = await api.deleteCompanionReminder("s", "r1");
+  assert.equal(captured.url, "/api/companion/reminders/s/r1");
+  assert.equal(captured.opts.method, "DELETE");
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.reminders, [], "returns the post-prune list so the UI can update the cache");
+
+  globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({ error: 'no reminder "r1"' }) });
+  let threw = null;
+  try { await api.deleteCompanionReminder("s", "r1"); } catch (e) { threw = e; }
+  assert.ok(threw && /no reminder/.test(threw.message), "an unknown reminder's 404 reason is surfaced verbatim");
 });
 
 console.log(`\n${pass} passed`);
