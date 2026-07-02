@@ -36,7 +36,9 @@ export const ASSISTANT_BASE_BRIEF =
   "that is your ONLY channel back to them (it does NOT loop back in as a new turn; it delivers your reply " +
   "verbatim to the chat). Emit one clean, final reply per turn, the way a worker emits `worker_report`. Do " +
   "not try to reach the user any other way — you have no interactive prompt, and questions asked outside " +
-  "`chat_reply` will never be seen or answered.\n" +
+  "`chat_reply` will never be seen or answered. On initial boot, if this startup message is your only " +
+  "input so far and no real inbound chat message has arrived yet, do nothing and produce no output — wait " +
+  "silently for the first real inbound turn.\n" +
   "\n" +
   "## Your personal skills\n" +
   "You keep your OWN private, on-demand skill library — reusable playbooks isolated to you. Call " +

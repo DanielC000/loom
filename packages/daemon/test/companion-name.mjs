@@ -99,6 +99,17 @@ try {
     withNameAndBrief.indexOf("---") < withNameAndBrief.indexOf("MY BRIEF"));
   check("(a) name is trimmed before injection", composeAssistantStartupPrompt(undefined, "  Aria  ").includes("Your name is Aria."));
 
+  // =================== (a) fresh-boot silence (card 2ecef3c5) ===================
+  // No inbound chat message on a fresh boot ⇒ the base brief must tell the model to stay silent instead of
+  // burning a wasted "standing by" turn. Lives in "How you talk to the user", ahead of "Your personal skills".
+  check("(a) the base brief instructs silence on a fresh boot with no inbound message",
+    ASSISTANT_BASE_BRIEF.includes("do nothing and produce no output"));
+  check("(a) the boot-silence instruction sits under 'How you talk to the user', before 'Your personal skills'",
+    ASSISTANT_BASE_BRIEF.indexOf("do nothing and produce no output") > ASSISTANT_BASE_BRIEF.indexOf("## How you talk to the user") &&
+    ASSISTANT_BASE_BRIEF.indexOf("do nothing and produce no output") < ASSISTANT_BASE_BRIEF.indexOf("## Your personal skills"));
+  check("(a) the heading is unchanged ('# Loom Companion\\n\\n' verbatim, for the name-injection startsWith check)",
+    ASSISTANT_BASE_BRIEF.startsWith("# Loom Companion\n\n"));
+
   // =================== (b) companion_config persists `name` ===================
   {
     const db = new Db(path.join(tmpHome, "b-fresh.db")); dbs.push(db);
