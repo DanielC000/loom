@@ -1039,6 +1039,33 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true, memories: result.memories };
   });
 
+  // REMINDERS: read (list) + curate (delete) over the companion's OWN `companion_reminders` rows
+  // (Companion Memory & Reminders Design, Surface 2 s3 engine — companion/reminders.ts). Same posture as
+  // MEMORY/SKILLS above: VIEW + PRUNE only, no human REST create/edit here — a reminder's own MCP
+  // authoring tool (s4, a sibling card) is the only writer. DELETE needs no controller rearm: the watcher
+  // re-reads `listEnabledCompanionReminders` fresh every tick (companion/reminders.ts `tick`), so a
+  // deleted row is simply absent from the very next tick's query — nothing to re-arm.
+  const companionReminderList = (sessionId: string) => deps.db.listCompanionRemindersForSession(sessionId).map((rem) => {
+    let next: string | null = null;
+    try { next = nextFireAt(rem.cron, new Date()); } catch { /* corrupt cron on the row — omit, don't 500 */ }
+    return { id: rem.id, cron: rem.cron, prompt: rem.prompt, label: rem.label, enabled: rem.enabled, createdAt: rem.createdAt, nextFireAt: next };
+  });
+  app.get("/api/companion/reminders/:sessionId", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    return { reminders: companionReminderList(sessionId) };
+  });
+  app.delete("/api/companion/reminders/:sessionId/:reminderId", async (req, reply) => {
+    const { sessionId, reminderId } = req.params as { sessionId: string; reminderId: string };
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const reminder = deps.db.getCompanionReminder(reminderId);
+    if (!reminder || reminder.sessionId !== sessionId) return reply.code(404).send({ error: `no reminder "${reminderId}"` });
+    deps.db.deleteCompanionReminder(reminderId);
+    return { ok: true, reminders: companionReminderList(sessionId) };
+  });
+
   // --- Companion RESTRICTED TOOLS (blast-radius control, live-apply fix): restrictedTools is a SPAWN-TIME
   // property re-read from the SESSION ROW on every resume/fork/recycle (sessions/service.ts resolveAgentSpawn's
   // comment; `restrictedTools` on the row, NOT re-resolved from the Profile) — the Manage toggle used to edit
