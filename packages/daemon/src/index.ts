@@ -449,9 +449,9 @@ async function main(): Promise<void> {
   };
 
   const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus, companion: companionController, inApp: inAppChannel, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"), updateStatus: () => updateCheck.current(), beginSelfUpdate });
-  await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
+  const boundAddress = await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
-  console.log(`Loom daemon v${loomVersion()} listening on http://127.0.0.1:${PORT}`);
+  console.log(`Loom daemon v${loomVersion()} listening on ${boundAddress}`); // boundAddress reflects the OS-assigned port when PORT is 0
 
   // Loom Companion: start the initial companion now that the server is up (chat_reply routes back through
   // this process). The controller builds+starts the Telegram long-poll, arms the proactive heartbeat if a

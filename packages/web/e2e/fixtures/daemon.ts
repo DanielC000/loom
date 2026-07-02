@@ -9,10 +9,11 @@
 //   1. `pnpm build` must already have run (this fixture only READS dist/ — it never builds).
 //   2. Pre-stamp the first-run marker (prestamp.mjs, run as its own child process) so a fresh empty
 //      LOOM_HOME never auto-launches the Setup Assistant — a REAL claude — on daemon boot.
-//   3. Boot `packages/daemon/dist/index.js` with a scratch LOOM_HOME, a non-default LOOM_PORT,
-//      LOOM_WEB_DIST pointed at the built web app, LOOM_DEV=0, LOOM_SCHEDULER_ENABLED=0,
-//      LOOM_PYTHON_NO_PROVISION=1. The daemon's own listen line is parsed for the real bound URL —
-//      never assume the port bound.
+//   3. Boot `packages/daemon/dist/index.js` with a scratch LOOM_HOME, `LOOM_PORT=0` (an OS-assigned
+//      free port — collision-proof even across concurrent `playwright test` invocations, not just
+//      concurrent workers within one run), LOOM_WEB_DIST pointed at the built web app, LOOM_DEV=0,
+//      LOOM_SCHEDULER_ENABLED=0, LOOM_PYTHON_NO_PROVISION=1. The daemon's own listen line is parsed
+//      for the real bound URL — never assume the port bound.
 //   4. Assert the boot log carries the listen line and NEVER `[pty] spawn` / `first-run: auto-launched`
 //      — fail the fixture loudly if a real claude would have spawned, rather than let a spec run
 //      against a compromised boot.
@@ -118,7 +119,7 @@ export interface LoomDaemon {
 
 export const test = base.extend<{ loomPage: Page }, { loomDaemon: LoomDaemon }>({
   // eslint-disable-next-line no-empty-pattern
-  loomDaemon: [async ({}, use, workerInfo) => {
+  loomDaemon: [async ({}, use) => {
     if (!existsSync(DAEMON_INDEX)) {
       throw new Error(`daemon dist not found at ${DAEMON_INDEX} — run "pnpm build" first (turbo builds shared -> web -> daemon).`);
     }
@@ -138,15 +139,17 @@ export const test = base.extend<{ loomPage: Page }, { loomDaemon: LoomDaemon }>(
       stdio: "pipe",
     });
 
-    // Non-default port, offset per worker so a future multi-worker run doesn't collide.
-    const port = 4399 + workerInfo.parallelIndex;
+    // LOOM_PORT=0 asks the daemon to bind an OS-assigned free port — never a fixed number, so
+    // concurrent `playwright test` invocations on the same machine (not just concurrent workers
+    // within one run) can never collide on it. The daemon's listen line reports the real bound
+    // port (index.ts logs fastify's resolved `listeningOrigin`, not the raw LOOM_PORT env value).
 
     let log = "";
     const child = spawn(process.execPath, [DAEMON_INDEX], {
       env: {
         ...process.env,
         LOOM_HOME: loomHome,
-        LOOM_PORT: String(port),
+        LOOM_PORT: "0",
         LOOM_WEB_DIST: WEB_DIST,
         LOOM_DEV: "0",
         LOOM_SCHEDULER_ENABLED: "0",
