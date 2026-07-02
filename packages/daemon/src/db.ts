@@ -73,6 +73,9 @@ export interface CompanionConfigRow {
   heartbeatIntervalMinutes: number;
   heartbeatPrompt: string | null;
   enabled: boolean;
+  /** The companion's given (human-friendly) name, or "" when never named. Baked into the assistant's
+   *  startup prompt at creation (composeAssistantStartupPrompt) — not re-injected on resume. */
+  name: string;
   /**
    * Provision provenance: TRUE ⇒ the `/api/companion/provision` endpoint minted the bound session, so
    * deleting this config also retires that session. FALSE (env bootstrap / a human-bound pre-existing
@@ -471,6 +474,7 @@ CREATE TABLE IF NOT EXISTS companion_config (
   heartbeat_prompt TEXT,                      -- framed proactive-prompt text (NULL ⇒ DEFAULT_HEARTBEAT_PROMPT)
   enabled INTEGER NOT NULL DEFAULT 1,         -- a disabled config is treated as OFF at boot
   provisioned INTEGER NOT NULL DEFAULT 0,     -- 1 ⇒ the provision endpoint minted the session (delete retires it)
+  name TEXT NOT NULL DEFAULT '',              -- the companion's given name (baked into its startup prompt at creation)
   created_at TEXT,
   updated_at TEXT
 );
@@ -637,6 +641,9 @@ const COMPANION_CONFIG_ADDED_COLUMNS: Record<string, string> = {
   // Provision provenance. NOT NULL + constant DEFAULT 0 is legal on ALTER TABLE ADD COLUMN, so every
   // legacy config row backfills to provisioned=0 (env/human-bound — a delete never retires its session).
   provisioned: "INTEGER NOT NULL DEFAULT 0",
+  // The companion's given name. NOT NULL + constant DEFAULT '' backfills every legacy row to unnamed,
+  // matching a fresh CREATE TABLE — an existing companion's prompt stays byte-identical until re-named.
+  name: "TEXT NOT NULL DEFAULT ''",
 };
 
 /** Columns added to `wakes` after its initial ship (route-aware wake engine); applied to existing DBs
@@ -1490,8 +1497,11 @@ export class Db {
     /** Provision provenance (see CompanionConfigRow.provisioned). OMITTED ⇒ PRESERVE the stored value on an
      *  update (env-bootstrap / REST-config writes leave it untouched), defaulting to false on first insert. */
     provisioned?: boolean;
+    /** The companion's given name. OMITTED ⇒ PRESERVE the stored value on an update (mirrors `provisioned`),
+     *  defaulting to "" (unnamed) on first insert. */
+    name?: string;
   }): CompanionConfigRow {
-    const existing = this.db.prepare("SELECT created_at, provisioned FROM companion_config WHERE session_id = ?").get(input.sessionId) as Row | undefined;
+    const existing = this.db.prepare("SELECT created_at, provisioned, name FROM companion_config WHERE session_id = ?").get(input.sessionId) as Row | undefined;
     const now = new Date().toISOString();
     const row: CompanionConfigRow = {
       sessionId: input.sessionId, botTokenBlob: input.botTokenBlob, channel: input.channel,
@@ -1500,15 +1510,17 @@ export class Db {
       enabled: input.enabled,
       // Explicit value wins; else keep what's stored (an update never silently clears provenance); else false.
       provisioned: input.provisioned ?? (existing?.provisioned as number | undefined) === 1,
+      // Same preserve-on-omit pattern as provisioned: a config write that doesn't mention name never clears it.
+      name: input.name ?? (existing?.name as string | undefined) ?? "",
       createdAt: (existing?.created_at as string) ?? now, updatedAt: now,
     };
     this.db.prepare(
-      `INSERT INTO companion_config (session_id, bot_token_blob, channel, allowed_chat_id, chat_scope, heartbeat_interval_minutes, heartbeat_prompt, enabled, provisioned, created_at, updated_at)
-       VALUES (@sessionId, @botTokenBlob, @channel, @allowedChatId, @chatScope, @heartbeatIntervalMinutes, @heartbeatPrompt, @enabledInt, @provisionedInt, @createdAt, @updatedAt)
+      `INSERT INTO companion_config (session_id, bot_token_blob, channel, allowed_chat_id, chat_scope, heartbeat_interval_minutes, heartbeat_prompt, enabled, provisioned, name, created_at, updated_at)
+       VALUES (@sessionId, @botTokenBlob, @channel, @allowedChatId, @chatScope, @heartbeatIntervalMinutes, @heartbeatPrompt, @enabledInt, @provisionedInt, @name, @createdAt, @updatedAt)
        ON CONFLICT(session_id) DO UPDATE SET
          bot_token_blob = @botTokenBlob, channel = @channel, allowed_chat_id = @allowedChatId, chat_scope = @chatScope,
          heartbeat_interval_minutes = @heartbeatIntervalMinutes, heartbeat_prompt = @heartbeatPrompt, enabled = @enabledInt,
-         provisioned = @provisionedInt, updated_at = @updatedAt`,
+         provisioned = @provisionedInt, name = @name, updated_at = @updatedAt`,
     ).run({ ...row, enabledInt: row.enabled ? 1 : 0, provisionedInt: row.provisioned ? 1 : 0 });
     return row;
   }
@@ -3083,6 +3095,7 @@ function toCompanionConfigRow(r0: unknown): CompanionConfigRow {
     heartbeatPrompt: (r.heartbeat_prompt as string | null) ?? null,
     enabled: (r.enabled as number) !== 0,
     provisioned: (r.provisioned as number) === 1,
+    name: (r.name as string | null) ?? "",
     createdAt: (r.created_at as string) ?? "", updatedAt: (r.updated_at as string) ?? "",
   };
 }

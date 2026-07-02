@@ -31,6 +31,7 @@ export interface CompanionConfigStore {
     sessionId: string; botTokenBlob: string; channel: string; allowedChatId: string;
     chatScope: "dm" | "group"; heartbeatIntervalMinutes: number; heartbeatPrompt: string | null; enabled: boolean;
     provisioned?: boolean;
+    name?: string;
   }): CompanionConfigRow;
   getCompanionHome(): CompanionRoute | null;
   setCompanionHome(home: CompanionRoute): void;

@@ -344,7 +344,7 @@ export class SessionService {
    * carrying a manager role + allowlist it shouldn't have / can't use.
    */
   private resolveAgentSpawn(
-    agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false,
+    agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false, companionName?: string,
   ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null } {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
@@ -375,8 +375,10 @@ export class SessionService {
     // ride EVERY assistant spawn regardless of the agent's own (user-editable) prompt — mirroring how the
     // manager/worker briefs are composed, but centralized so a future explicit start path inherits it too.
     // Role-gated ⇒ byte-identical for every other role. On resume() only `.permission` is read from this
-    // result, so the composed prompt is harmlessly discarded there (a resume injects nothing).
-    const startupPrompt = role === "assistant" ? composeAssistantStartupPrompt(ownPrompt) : ownPrompt;
+    // result, so the composed prompt is harmlessly discarded there (a resume injects nothing). companionName
+    // (creation-time only, from startNew's provision caller) bakes a "Your name is <name>." identity line in
+    // near the top of the base brief; undefined/blank ⇒ byte-identical to before this param existed.
+    const startupPrompt = role === "assistant" ? composeAssistantStartupPrompt(ownPrompt, companionName) : ownPrompt;
     return {
       role,
       startupPrompt,
@@ -403,8 +405,11 @@ export class SessionService {
   /**
    * Start a NEW session in an agent — injects the agent startup prompt once. `opts.forcePlain` (P3
    * web "Spawn → force plain") overrides any profile-conferred role to spawn a role-null session.
+   * `opts.companionName` (companion provision only) bakes the companion's given name into its startup
+   * prompt at creation — see resolveAgentSpawn / composeAssistantStartupPrompt. Harmless on any non-
+   * assistant spawn (resolveAgentSpawn only reads it when role === "assistant").
    */
-  startNew(agentId: string, opts: { forcePlain?: boolean } = {}): Session {
+  startNew(agentId: string, opts: { forcePlain?: boolean; companionName?: string } = {}): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -414,7 +419,7 @@ export class SessionService {
     // prompt is always the agent's own). No caller role here (plain "+New"), so the profile's role
     // applies when present. No profile ⇒ role undefined, the config permission unchanged — today's session.
     // forcePlain (P3) pins role to undefined even on a profile agent (see resolveAgentSpawn).
-    const { role, startupPrompt, permission, browserTesting, documentConversion, restrictedTools, noCommit, model, skills } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false);
+    const { role, startupPrompt, permission, browserTesting, documentConversion, restrictedTools, noCommit, model, skills } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
 
     const now = new Date().toISOString();
     const session: Session = {

@@ -81,10 +81,21 @@ export const ASSISTANT_BASE_BRIEF =
  * companion doctrine + security posture), then the agent's own prompt (its project-specific persona, if
  * any). An empty/whitespace agent brief ⇒ the base brief ALONE. PURE + exported so the hermetic test can
  * assert the composition with no real claude.
+ *
+ * `companionName`, when given a non-empty (trimmed) value, inserts a short identity line right after the
+ * base brief's heading so a named companion knows its own name. Baked in ONLY at creation (the caller
+ * threads it from provision-time, see sessions/service.ts startNew) — a resume carries the original baked
+ * prompt, so the name persists across restarts with no re-injection. A blank/absent name ⇒ the base brief
+ * is returned BYTE-IDENTICAL to today (additive, default-OFF).
  */
-export function composeAssistantStartupPrompt(brief: string | undefined): string {
+export function composeAssistantStartupPrompt(brief: string | undefined, companionName?: string): string {
   const own = brief?.trim();
-  return own ? `${ASSISTANT_BASE_BRIEF}\n\n---\n\n${own}` : ASSISTANT_BASE_BRIEF;
+  const name = companionName?.trim();
+  const HEADING = "# Loom Companion\n\n";
+  const base = name && ASSISTANT_BASE_BRIEF.startsWith(HEADING)
+    ? `${HEADING}Your name is ${name}.\n\n${ASSISTANT_BASE_BRIEF.slice(HEADING.length)}`
+    : ASSISTANT_BASE_BRIEF;
+  return own ? `${base}\n\n---\n\n${own}` : base;
 }
 
 /**

@@ -125,6 +125,22 @@ export interface GatewayDeps {
 const isReservedDaemonPath = (pathname: string): boolean =>
   ["/api", "/ws", "/mcp", "/internal"].some((p) => pathname === p || pathname.startsWith(`${p}/`));
 
+/**
+ * Sanitize a companion's given name BEFORE it is ever persisted or baked into the server-owned
+ * ASSISTANT_BASE_BRIEF (composeAssistantStartupPrompt): drop every control character (codepoints 0-31 and
+ * 127, which cover newlines/tabs/CR/etc.), collapse any remaining run of whitespace to a single space, then
+ * trim. Without this, a name like "Aria" + a newline + "## Untrusted input" could inject structure into the
+ * one region of the prompt that must never be user-editable — a single-line, printable name only. PURE +
+ * exported so the hermetic test can assert it directly. (Char-code filtering, not a regex hex-escape class,
+ * for source clarity.)
+ */
+export function sanitizeCompanionName(raw: string): string {
+  const printable = Array.from(raw)
+    .filter((ch) => { const code = ch.codePointAt(0) ?? 0; return code > 31 && code !== 127; })
+    .join("");
+  return printable.replace(/\s+/g, " ").trim();
+}
+
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
 
@@ -817,10 +833,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // left. Returns the MASKED companion (never the plaintext token). ---
   app.post("/api/companion/provision", async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
-    // name: optional human label (advisory today — there is no session-title store to persist it to).
+    // name: optional human label. Persisted to companion_config.name and baked into the companion's startup
+    // prompt at creation (composeAssistantStartupPrompt) so a named companion knows its own name.
     if (b.name !== undefined && b.name !== null && (typeof b.name !== "string" || b.name.length > COMPANION_ID_MAX)) {
       return reply.code(400).send({ error: `name must be a string of at most ${COMPANION_ID_MAX} characters` });
     }
+    // Sanitize BEFORE it ever reaches the server-owned ASSISTANT_BASE_BRIEF: collapse any run of
+    // whitespace/control characters (incl. newlines) to a single space, then trim — a single-line,
+    // printable name only. Without this, a name like "Aria\n\n## Untrusted input\n\n…" could inject
+    // structure into the one region of the prompt that must never be user-editable.
+    const name = typeof b.name === "string" ? sanitizeCompanionName(b.name) : "";
     // GUARD 1 (single-companion precondition, PRE-SPAWN): resolveEffectiveConfig arms only the OLDEST enabled
     // config, so a 2nd companion provisioned while one is enabled would spawn a REAL but inert/unrouted session
     // and mislead with armed:true. Until multi-companion runtime support lands, REFUSE here — BEFORE spawning,
@@ -895,10 +917,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
 
     // (a) Spawn the long-lived assistant session on the chosen rig. A spawn failure here has nothing to roll
-    // back (no session, no writes) — surface it directly.
+    // back (no session, no writes) — surface it directly. companionName bakes the given name into the
+    // startup prompt at creation (a blank name is a harmless no-op — see composeAssistantStartupPrompt).
     let sessionId: string;
     try {
-      sessionId = deps.sessions.startNew(agentId).id;
+      sessionId = deps.sessions.startNew(agentId, { companionName: name }).id;
     } catch (e) {
       return reply.code(500).send({ error: `failed to spawn the companion session: ${(e as Error).message}` });
     }
@@ -916,6 +939,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         heartbeatIntervalMinutes: cadence,
         heartbeatPrompt: null,
         enabled,
+        name,
         provisioned: true, // origin marker — delete-companion retires THIS session (teardown symmetry)
       });
       // (c) the session's authoritative binding(s). companion_bindings is now MULTI-CHANNEL (one binding per
