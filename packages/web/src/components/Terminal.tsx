@@ -25,8 +25,12 @@ import "./Terminal.css";
  * chat surface, not raw stdin — so the terminal is purely an observation window. Copy (select + Ctrl-C)
  * still works; only writing to the session is suppressed.
  */
-export function TerminalPane({ sessionId, resizable = false, readOnly = false }: { sessionId: string; resizable?: boolean; readOnly?: boolean }) {
+export function TerminalPane({ sessionId, resizable = false, readOnly = false, heightBudget }: { sessionId: string; resizable?: boolean; readOnly?: boolean; heightBudget?: number }) {
   const ref = useRef<HTMLDivElement>(null);
+  // Kept in a ref so a budget change is picked up on the next resize WITHOUT re-running the effect
+  // (which would tear down + re-attach the websocket). It's constant per page in practice.
+  const budgetRef = useRef(heightBudget);
+  budgetRef.current = heightBudget;
 
   useEffect(() => {
     if (!ref.current) return;
@@ -109,7 +113,11 @@ export function TerminalPane({ sessionId, resizable = false, readOnly = false }:
     const applyFontSize = () => {
       if (!cols || !rows) return;
       const cw = el.clientWidth;
-      const ch = el.clientHeight;
+      // HUG mode (heightBudget set): scale against a FIXED budget rather than the element's own height,
+      // then size the element to the rendered grid below. Using the budget (not clientHeight) keeps the
+      // fit responsive to width WITHOUT locking onto the shrunk height we're about to apply.
+      const budget = budgetRef.current;
+      const ch = budget != null ? budget : el.clientHeight;
       if (cw <= 0 || ch <= 0) return;
 
       const curFont = term.options.fontSize ?? 13;
@@ -126,6 +134,15 @@ export function TerminalPane({ sessionId, resizable = false, readOnly = false }:
       // Largest font that fits both axes; 1-decimal floor so we never round up into overflow.
       const next = Math.max(6, Math.floor(Math.min(fitW, fitH) * 10) / 10);
       if (next !== curFont) term.options.fontSize = next;
+
+      // HUG mode: shrink the pane to the grid it actually renders, so a stacked composer sits FLUSH
+      // beneath it instead of below a letterbox band (a width-bound 120×40 grid is shorter than the
+      // pane). Height is derived from the (now current) font — never exceeds the budget — so the tile
+      // hugs the terminal on narrow/width-bound layouts and is a no-op when it already fills height.
+      if (budget != null) {
+        const gridH = Math.min(budget, Math.ceil(rows * cellHPerPx * (term.options.fontSize ?? next)));
+        el.style.height = `${gridH}px`;
+      }
     };
 
     const decoder = new TextDecoder();
@@ -207,5 +224,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly = false }:
 
   // overflow:hidden so the xterm canvas is clipped to this box — a font rescale (applyFontSize, fired
   // on container resize) can briefly overshoot the cell math; this stops the canvas painting outside.
-  return <div ref={ref} style={{ height: "100%", width: "100%", overflow: "hidden" }} />;
+  // HUG mode seeds the height to the budget so the pane isn't collapsed before the first geometry frame
+  // (its parent is content-sized); applyFontSize then trims it to the actual grid height.
+  return <div ref={ref} style={{ height: heightBudget != null ? heightBudget : "100%", width: "100%", overflow: "hidden" }} />;
 }

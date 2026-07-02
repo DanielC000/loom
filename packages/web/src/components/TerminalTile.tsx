@@ -105,13 +105,28 @@ export function TerminalTile({
       </div>
     </div>
   );
-  const body = (
+  // HUG (non-maximized): the pinned 120×40 grid, scaled to fit a narrow tile's WIDTH, is shorter than a
+  // fixed pane — which used to leave a large letterbox band between the terminal and the composer (owner
+  // report). Instead of a fixed-height pane, give the TerminalPane a height BUDGET and let it shrink to
+  // the grid it actually renders, so the composer sits flush beneath and the card hugs the terminal. The
+  // budget = the tile height minus the header + composer/footer chrome, so the card never grows past its
+  // old height and same-width tiles keep equal heights. Maximized keeps the fill-the-overlay behavior.
+  //
+  // HUG is gated to NUMERIC heights only — the small grid tiles (Overview + /terminals, `height` 520/540)
+  // that actually have the gap. A STRING height (e.g. `/session/:id` passes "76vh") is a fill-the-space
+  // page terminal that MUST keep the old `flex:1` + `height` fill (no budget) — clamping it to a fixed
+  // px budget would shrink it (the regression this guard prevents).
+  const hug = typeof height === "number";
+  const CHROME_RESERVE = 112; // header + composer + status line + panel padding (approx, generous)
+  const renderBody = (hugMode: boolean) => (
     <>
       {task && <SessionTaskCard task={task} />}
       {/* overflow:hidden clips xterm's canvas to the pane box — when a Composer state change (e.g.
           toggling Voice) resizes the pane, the font rescale can momentarily overflow; this guarantees
           the terminal can NEVER paint over the composer below. xterm scrolls via its own .xterm-viewport. */}
-      <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}><TerminalPane sessionId={s.id} /></div>
+      <div style={{ ...(hugMode ? null : { flex: 1 }), minHeight: 0, overflow: "hidden" }}>
+        <TerminalPane sessionId={s.id} heightBudget={hugMode ? (height as number) - CHROME_RESERVE : undefined} />
+      </div>
       <SessionWakes sessionId={s.id} />
       <SessionQueue sessionId={s.id} />
       <Composer sessionId={s.id} />
@@ -128,7 +143,7 @@ export function TerminalTile({
         <div onClick={(e) => e.stopPropagation()} style={{ width: "90vw", height: "88vh", maxWidth: 1500 }}>
           <Panel style={{ height: "100%", padding: 6, display: "flex", flexDirection: "column" }}>
             {header}
-            {body}
+            {renderBody(false)}
           </Panel>
         </div>
       </div>
@@ -136,9 +151,9 @@ export function TerminalTile({
   }
 
   return (
-    <Panel style={{ height, padding: 6, display: "flex", flexDirection: "column" }}>
+    <Panel style={{ ...(hug ? { maxHeight: height } : { height }), padding: 6, display: "flex", flexDirection: "column" }}>
       {header}
-      {body}
+      {renderBody(hug)}
     </Panel>
   );
 }
