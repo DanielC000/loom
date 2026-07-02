@@ -24,6 +24,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (d) RECYCLED/SUPERSEDED — a worker with a successor (hasSuccessor) records NOTHING (its successor owns
 //       the task; the recycle stop is intended anyway).
 //   (e) NON-WORKER / PARENTLESS — a manager (or a parentless/taskless session) exit records NOTHING.
+//   (f) REDIRECTWORKER RACE (card 6101d7f7) — notifyManagerOfIdleWorker, driven directly, skips the
+//       [loom:worker-idle] nudge when the worker still has direction queued in its pending FIFO (the
+//       redirectWorker-on-a-busy-worker race: enqueue then busy-clear, in one tick, before the drain);
+//       a worker with NO pending direction still gets the genuine-strand nudge.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -47,15 +51,17 @@ function makeEnv() {
 
   // Recording fake PtyHost: an idle-LIVE manager takes the turn (delivered:true); anything else does not.
   const enqueued = [];
+  const pendingBySession = new Map();
   const pty = {
     enqueueStdin: (id, text) => {
       enqueued.push({ id, text });
       const s = db.getSession(id);
       return s?.processState === "live" ? { delivered: true } : { delivered: false, position: 1 };
     },
+    getPendingEntries: (id) => pendingBySession.get(id) ?? [],
   };
   const sessions = new SessionService(db, pty, new OrchestrationControl());
-  return { dbFile, db, projId, agentId, enqueued, sessions };
+  return { dbFile, db, projId, agentId, enqueued, sessions, pendingBySession };
 }
 
 function seedSession(e, id, { role = "worker", processState = "exited", parentSessionId = null, taskId = null, branch = null, recycledFrom = null } = {}) {
@@ -167,7 +173,37 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ============================ (f) notifyManagerOfIdleWorker: redirectWorker race guard (card 6101d7f7) ============================
+// redirectWorker on a BUSY worker enqueues its redirect into live.pending FIRST, then — in the same tick —
+// clears busy and drains it. The busy->false clear fires notifyManagerOfIdleWorker SYNCHRONOUSLY, BEFORE
+// the drain hands the redirect over, so at that instant the worker looks stranded even though it has
+// authoritative direction about to land as its very next turn. Guard: a worker with a non-empty pending
+// FIFO is not stranded — skip the [loom:worker-idle] nudge. A genuinely stranded worker (no pending) must
+// still nudge.
+{
+  const e = makeEnv();
+  seedSession(e, "mgr-f1", { role: "manager", processState: "live" });
+  seedTask(e, "tk-f1");
+  seedSession(e, "wkr-f1", { role: "worker", processState: "live", parentSessionId: "mgr-f1", taskId: "tk-f1", branch: "loom/tk-f1" });
+  // Simulate the redirectWorker race: a redirect is sitting in the worker's pending FIFO when busy clears.
+  e.pendingBySession.set("wkr-f1", [{ id: "m1", text: "[loom:from-manager:redirect]\ndo X instead", source: "system" }]);
+
+  e.sessions.notifyManagerOfIdleWorker("wkr-f1");
+  check("(f) NO [loom:worker-idle] nudge when the worker has queued direction about to drain",
+    !e.enqueued.some((x) => x.id === "mgr-f1" && /worker-idle/.test(x.text)));
+
+  seedSession(e, "mgr-f2", { role: "manager", processState: "live" });
+  seedTask(e, "tk-f2");
+  seedSession(e, "wkr-f2", { role: "worker", processState: "live", parentSessionId: "mgr-f2", taskId: "tk-f2", branch: "loom/tk-f2" });
+  // No pending direction queued — this IS a genuine strand (ended a turn, did not report, nothing incoming).
+
+  e.sessions.notifyManagerOfIdleWorker("wkr-f2");
+  const idleNudge = e.enqueued.find((x) => x.id === "mgr-f2" && /worker-idle/.test(x.text));
+  check("(f) a genuinely stranded worker (no pending direction) STILL nudges its manager", !!idleNudge);
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a worker that exits without ever calling worker_report (task still in_progress) yields a DISTINCT, durable worker_exited_without_report event + a [loom:worker-exited] manager nudge; a worker that DID report (task moved) yields no duplicate; an intended stop, a recycled/superseded worker, and a non-worker/parentless exit all record nothing."
+  ? "\n✅ ALL PASS — a worker that exits without ever calling worker_report (task still in_progress) yields a DISTINCT, durable worker_exited_without_report event + a [loom:worker-exited] manager nudge; a worker that DID report (task moved) yields no duplicate; an intended stop, a recycled/superseded worker, and a non-worker/parentless exit all record nothing; notifyManagerOfIdleWorker skips the nudge when direction is genuinely queued (the redirectWorker race) but still nudges a genuine strand."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

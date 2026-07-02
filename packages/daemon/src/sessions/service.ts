@@ -2877,10 +2877,17 @@ export class SessionService {
    * if this is a worker still sitting in `in_progress` (worker_report would have moved it to
    * review/waiting), push a [loom:worker-idle] nudge to its manager via the same enqueue channel.
    * No-op for non-workers, parentless sessions, or workers that already reported/merged.
+   *
+   * SPURIOUS-NUDGE GUARD (card 6101d7f7): `redirectWorker` on a BUSY worker enqueues its redirect into
+   * `live.pending` FIRST, then — in the SAME tick — clears busy and drains it. That clear fires this
+   * method synchronously, BEFORE the drain hands the redirect over, so at this instant the worker looks
+   * stranded even though it has authoritative direction about to land as its very next turn. If the
+   * worker still has queued direction sitting in its pending FIFO, it is not stranded — skip the nudge.
    */
   notifyManagerOfIdleWorker(workerSessionId: string): void {
     const w = this.db.getSession(workerSessionId);
     if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return;
+    if (this.pty.getPendingEntries(workerSessionId).length > 0) return; // direction queued, about to drain
     const task = this.db.getTask(w.taskId);
     // Still sitting in the `active` lane ⇒ hasn't reported (worker_report would have moved it out).
     const activeKey = this.columnKeyForProjectRole(w.projectId, "active");
