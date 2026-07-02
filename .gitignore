@@ -12,5 +12,10 @@ dist-npm/
 # Playwright-MCP artifact dir that appears at the repo root
 .playwright-mcp/
 
+# @playwright/test e2e harness (packages/web/e2e) run artifacts
+test-results/
+playwright-report/
+blob-report/
+
 # Local spike scratch dir (was only in .git/info/exclude → unprotected on a fresh clone)
 spike/

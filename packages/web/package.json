@@ -21,7 +21,8 @@
     "test:overview-stats": "node --experimental-strip-types test/overview-stats.mjs",
     "test:run-label-copy": "node test/run-label-copy.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:e2e": "playwright test --config=e2e/playwright.config.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.0",
@@ -37,6 +38,7 @@
     "unist-util-visit": "^5.1.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.49.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
