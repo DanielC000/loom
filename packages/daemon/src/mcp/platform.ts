@@ -891,11 +891,13 @@ export class PlatformMcpRouter {
           "Update a card on ANOTHER project's board by explicit projectId + taskId — the Lead's cross-project " +
           "move/edit/re-prioritize (PATCH: only the keys you pass are applied). title?, body?, columnKey? (a " +
           "MOVE — validated to be an EXISTING column on that project's board, rejected otherwise so a move can " +
-          "never orphan the card), position?, priority? (p0|p1|p2|p3). Reuses the SAME backing path + column " +
-          "validation as the in-project loom-tasks tasks_update. A taskId not on the named project resolves to " +
-          "not-found. projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). " +
-          "Returns the updated Task row. Error if the project is unknown or an ambiguous prefix (the error " +
-          "names the candidate ids).",
+          "never orphan the card), position?, priority? (p0|p1|p2|p3), held? (the owner-gated 'don't nag' flag " +
+          "the idle watchdog discounts — this is the sanctioned cross-project path to set/clear it on a card " +
+          "that isn't on the Lead's own home board; omit to leave it untouched). Reuses the SAME backing path + " +
+          "column validation as the in-project loom-tasks tasks_update. A taskId not on the named project " +
+          "resolves to not-found. projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors " +
+          "project_get). Returns the updated Task row. Error if the project is unknown or an ambiguous prefix " +
+          "(the error names the candidate ids).",
         inputSchema: {
           projectId: z.string(),
           taskId: z.string(),
@@ -904,6 +906,7 @@ export class PlatformMcpRouter {
           columnKey: z.string().optional(),
           position: z.number().optional(),
           priority: prioritySchema.optional(),
+          held: z.boolean().optional(),
         },
       },
       // Spread only the keys the caller PROVIDED (zod omits absent optionals) — mirrors the in-project
