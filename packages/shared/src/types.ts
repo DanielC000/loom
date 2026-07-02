@@ -600,7 +600,19 @@ export type OrchestrationEventKind =
   // (the session is parked on the usage cap → defer to the reset, never spam) or "pending" (a prior
   // heartbeat is still queued/unconsumed → don't stack a second). No turn is enqueued; the cadence retries
   // next due. The proactive twin of the wake-defer discipline; filed under the companion session.
-  | "companion_heartbeat_deferred";
+  | "companion_heartbeat_deferred"
+  // ── Companion RECURRING reminders (CompanionReminderWatcher, Companion Memory & Reminders Design
+  // Surface 2 s3) ── the N-reminder generalization of companion_heartbeat_fired/deferred: a named cron
+  // reminder came due and fired a framed `[loom:reminder]` turn (carrying its own route, or none) into
+  // the companion session. `detail` carries { reminderId, cron, label }. Filed under the companion
+  // session (managerSessionId = sessionId); also the RESTART-SEED source (seedLastFired reads the most
+  // recent one per reminderId so a daemon restart never double-fires).
+  | "companion_reminder_fired"
+  // The twin of companion_heartbeat_deferred, per-reminder: a due reminder was SUPPRESSED rather than
+  // fired — `detail.reason` is "rate-limited" or "pending" (a prior turn for the SAME reminder id is
+  // still queued/unconsumed). `detail.reminderId` discriminates which reminder deferred. Emitted at most
+  // once per defer streak per reminder (bounded log growth, mirroring the heartbeat).
+  | "companion_reminder_deferred";
 
 export interface OrchestrationEvent {
   id: string;

@@ -40,6 +40,10 @@ import type {
 } from "@loom/shared";
 import { isOwnerHeldTaskTitle } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken } from "./keys/hash.js";
+// Type-only — companion/types.ts has zero runtime imports, so this can never form a runtime cycle with
+// the companion/* modules that import `Db` from here. CompanionReminder.route reuses THIS module's
+// CompanionRoute (never a duplicate route type, unlike Wake/CompanionBinding's shared/types.ts twins).
+import type { CompanionReminder } from "./companion/types.js";
 
 /**
  * The atomic result of a companion pairing-code redemption (db layer). A single silent `rejected` covers
@@ -470,6 +474,28 @@ CREATE TABLE IF NOT EXISTS companion_config (
   created_at TEXT,
   updated_at TEXT
 );
+-- Companion RECURRING reminders (Companion Memory & Reminders Design, Surface 2 s3): N named cron jobs
+-- that fire a proactive turn into the companion's OWN long-lived session — generalizes the single
+-- heartbeat cadence+prompt to many independently-cadenced, independently-routed reminders. Reuses the
+-- SAME cron validation / next-fire computation as schedules (orchestration/cron.ts) but NOT the
+-- Scheduler's fresh-session boot — a reminder always targets an EXISTING session_id. Brand-new table =>
+-- CREATE TABLE IF NOT EXISTS is itself the additive migration (an existing DB gains an empty table on
+-- boot; zero rows => every existing path, heartbeat included, is byte-identical — DEFAULT-OFF). route
+-- mirrors wakes.route: nullable JSON {channel,chatId}; NULL means a fired reminder has nowhere to
+-- chat_reply, same as an unconfigured heartbeat home. enabled pauses a reminder without deleting it.
+-- created_at anchors the FIRST-fire computation (nextFireAt(cron, created_at)) for a reminder that has
+-- never yet fired, so a brand-new reminder waits for its real next cron boundary instead of firing on
+-- the very next tick.
+CREATE TABLE IF NOT EXISTS companion_reminders (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  cron TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  label TEXT,
+  route TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, created_at);
@@ -480,6 +506,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_samples_ts ON session_usage_samples(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_samples_project ON session_usage_samples(project_id, ts);
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_fire_at);
 CREATE INDEX IF NOT EXISTS idx_wakes_due ON wakes(wake_at);
+CREATE INDEX IF NOT EXISTS idx_companion_reminders_session ON companion_reminders(session_id, enabled);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id, last_activity DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, column_key, position);
 CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_session_id, ts);
@@ -1030,6 +1057,7 @@ export class Db {
     this.db.transaction(() => {
       for (const sid of sessionIds) {
         this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(sid);
         // orchestration_events is session-keyed (manager OR worker) with no project_id — drop per session id.
         this.db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ?").run(sid, sid);
       }
@@ -1559,6 +1587,7 @@ export class Db {
     this.db.transaction(() => {
       for (const sid of sessionIds) {
         this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ?").run(sid, sid);
       }
       // run_events is project/run-keyed (not agent-keyed) — drop only the rows for THIS agent's runs.
@@ -2276,9 +2305,10 @@ export class Db {
     this.setMeta(HELD_BACKFILL_KEY, new Date().toISOString()); // stamp last — the one-shot guarantee
     return changed;
   }
-  /** Permanently delete a session row (the Archive tab's Delete). Also drops its pending wakes. */
+  /** Permanently delete a session row (the Archive tab's Delete). Also drops its pending wakes + reminders. */
   deleteSession(id: string): void {
     this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(id);
+    this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
   }
   insertSession(s: Session): void {
@@ -2832,6 +2862,42 @@ export class Db {
   countPendingWakes(sessionId: string): number {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM wakes WHERE session_id = ?").get(sessionId) as { c: number }).c;
   }
+
+  // --- companion reminders (Companion Memory & Reminders Design, Surface 2 s3 — the recurring engine) ---
+  insertCompanionReminder(r: CompanionReminder): void {
+    this.db.prepare(
+      `INSERT INTO companion_reminders (id,session_id,cron,prompt,label,route,enabled,created_at)
+       VALUES (@id,@sessionId,@cron,@prompt,@label,@route,@enabled,@createdAt)`,
+    ).run({
+      id: r.id, sessionId: r.sessionId, cron: r.cron, prompt: r.prompt,
+      label: r.label ?? null, route: r.route ? JSON.stringify(r.route) : null,
+      enabled: r.enabled ? 1 : 0, createdAt: r.createdAt,
+    });
+  }
+  getCompanionReminder(id: string): CompanionReminder | undefined {
+    const r = this.db.prepare("SELECT * FROM companion_reminders WHERE id = ?").get(id) as Row | undefined;
+    return r ? toCompanionReminder(r) : undefined;
+  }
+  /** A session's reminders (any enabled state), chronological — the management/REST read (not yet wired). */
+  listCompanionRemindersForSession(sessionId: string): CompanionReminder[] {
+    return (this.db.prepare("SELECT * FROM companion_reminders WHERE session_id = ? ORDER BY created_at, rowid")
+      .all(sessionId) as Row[]).map(toCompanionReminder);
+  }
+  /** Enabled reminders — the watcher's work set. Scoped to ONE session when given, else every session's
+   *  (a future multi-companion reconcile-all; today there is only ever one live companion). */
+  listEnabledCompanionReminders(sessionId?: string): CompanionReminder[] {
+    if (sessionId !== undefined) {
+      return (this.db.prepare("SELECT * FROM companion_reminders WHERE session_id = ? AND enabled = 1 ORDER BY created_at, rowid")
+        .all(sessionId) as Row[]).map(toCompanionReminder);
+    }
+    return (this.db.prepare("SELECT * FROM companion_reminders WHERE enabled = 1 ORDER BY created_at, rowid").all() as Row[]).map(toCompanionReminder);
+  }
+  deleteCompanionReminder(id: string): void {
+    this.db.prepare("DELETE FROM companion_reminders WHERE id = ?").run(id);
+  }
+  setCompanionReminderEnabled(id: string, enabled: boolean): void {
+    this.db.prepare("UPDATE companion_reminders SET enabled = ? WHERE id = ?").run(enabled ? 1 : 0, id);
+  }
 }
 
 function toProject(r0: unknown): Project {
@@ -3044,5 +3110,15 @@ function toWake(r0: unknown): Wake {
     id: r.id as string, sessionId: r.session_id as string,
     wakeAt: r.wake_at as string, note: r.note as string, createdAt: r.created_at as string,
     ...(routeJson ? { route: JSON.parse(routeJson) as Wake["route"] } : {}),
+  };
+}
+function toCompanionReminder(r0: unknown): CompanionReminder {
+  const r = r0 as Row;
+  const routeJson = r.route as string | null | undefined;
+  return {
+    id: r.id as string, sessionId: r.session_id as string, cron: r.cron as string,
+    prompt: r.prompt as string, label: (r.label as string | null) ?? null,
+    route: routeJson ? (JSON.parse(routeJson) as CompanionReminder["route"]) : null,
+    enabled: (r.enabled as number) === 1, createdAt: r.created_at as string,
   };
 }

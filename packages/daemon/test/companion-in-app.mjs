@@ -127,7 +127,10 @@ const inAppBinding = (sessionId) => ({ sessionId, channel: IN_APP_CHANNEL, chatI
   };
   const hooks = { companionSessionId: null };
   const controller = new CompanionController({
-    db: {}, // unused: resolveEffective + buildGateway are both injected
+    // unused by the injected resolveEffective + buildGateway; listEnabledCompanionReminders is the one
+    // method the controller's reconcile path itself calls (rearmReminders' existence check) — every
+    // reconcile in this test has zero reminders, so this stub just needs to answer "none".
+    db: { listEnabledCompanionReminders: () => [] },
     submitTurn: submitSpy,
     pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
     hooks,

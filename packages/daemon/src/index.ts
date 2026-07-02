@@ -471,6 +471,14 @@ async function main(): Promise<void> {
     } else {
       console.log("[boot] Companion heartbeat off (set LOOM_COMPANION_HEARTBEAT_INTERVAL_MINUTES to a positive value)");
     }
+    // Recurring reminders (Companion Memory & Reminders Design, Surface 2 s3): armed by the SAME
+    // startInitial → controller.applyDesired call above (rearmReminders), not a separate boot path — this
+    // is purely an observability log, mirroring the heartbeat one. Zero rows (the common case today; s4
+    // ships the reminder_* MCP tools) ⇒ this always reads 0, byte-identical to no watcher having existed.
+    const reminderCount = db.listEnabledCompanionReminders(companionCfg.sessionId).length;
+    if (reminderCount > 0) {
+      console.log(`[boot] Companion reminders on (${reminderCount} enabled, session ${companionCfg.sessionId.slice(0, 8)})`);
+    }
   } else {
     console.log("[boot] Loom Companion off (set LOOM_COMPANION_BOT_TOKEN + LOOM_COMPANION_CHAT_ID + LOOM_COMPANION_SESSION_ID)");
   }

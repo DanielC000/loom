@@ -32,6 +32,7 @@ import type { Db } from "../db.js";
 import type { ChatGateway } from "./chat-gateway.js";
 import { createCompanionGateway } from "./factory.js";
 import { CompanionHeartbeatWatcher, type HeartbeatPty } from "./heartbeat.js";
+import { CompanionReminderWatcher } from "./reminders.js";
 import { resolveEffectiveConfig } from "./store.js";
 import { normalizeInAppMessage, type InAppChannel } from "./in-app.js";
 import type { CompanionConfig } from "./config.js";
@@ -40,6 +41,13 @@ import type { CompanionRoute, DeliverResult, InboundResult, SessionBinding, Subm
 /** The minimal lifecycle handle the controller needs from a heartbeat watcher (satisfied by
  *  CompanionHeartbeatWatcher; narrowed so a test can inject a spy). */
 export interface HeartbeatHandle {
+  start(): void;
+  stop(): void;
+}
+
+/** The minimal lifecycle handle the controller needs from a reminder watcher (satisfied by
+ *  CompanionReminderWatcher; narrowed so a test can inject a spy) — same shape as HeartbeatHandle. */
+export interface ReminderHandle {
   start(): void;
   stop(): void;
 }
@@ -100,6 +108,9 @@ export interface CompanionControllerDeps {
   /** Build the heartbeat watcher for an effective config (test seam — defaults to a CompanionHeartbeatWatcher
    *  over db+pty). Returns it NOT started; the controller calls start(). */
   buildHeartbeat?: (cfg: CompanionConfig) => HeartbeatHandle;
+  /** Build the reminder watcher for a companion session id (test seam — defaults to a
+   *  CompanionReminderWatcher over db+pty). Returns it NOT started; the controller calls start(). */
+  buildReminders?: (sessionId: string) => ReminderHandle;
   /** Resolve the effective desired config from db+env (test seam — defaults to resolveEffectiveConfig). */
   resolveEffective?: (db: Db, env: NodeJS.ProcessEnv, keyPath?: string) => CompanionConfig | null;
 }
@@ -107,6 +118,7 @@ export interface CompanionControllerDeps {
 export class CompanionController implements CompanionControl {
   private gateway: ChatGateway | null = null;
   private heartbeat: HeartbeatHandle | null = null;
+  private reminders: ReminderHandle | null = null;
   /** The config the live state currently reflects (null ⇒ OFF). The diff source for a reconcile. */
   private cfg: CompanionConfig | null = null;
   /** Serializes reconciles so a burst of REST writes can't interleave a teardown with a start. */
@@ -216,6 +228,7 @@ export class CompanionController implements CompanionControl {
       await this.stopGateway(); // defensive (invariant: no gateway when cfg is null) — never stack
       this.startGateway(desired);
       this.rearmHeartbeat(desired);
+      this.rearmReminders(desired.sessionId);
       this.cfg = desired;
       this.deps.hooks.companionSessionId = desired.sessionId;
       return;
@@ -241,6 +254,12 @@ export class CompanionController implements CompanionControl {
       desired.heartbeatIntervalMinutes !== current.heartbeatIntervalMinutes ||
       desired.heartbeatPrompt !== current.heartbeatPrompt;
     if (hbChanged) this.rearmHeartbeat(desired);
+    // Reminders: reconcile on EVERY live config change (not gated like hbChanged) — the reminder SET
+    // lives in its own table, independent of CompanionConfig fields, so a rearm is the only way this
+    // path picks up a reminder CRUD write (s4's concern) that landed since the last reconcile. Cheap +
+    // idempotent: rearmReminders re-reads the current enabled rows and reseeds lastFiredAt from durable
+    // fired-events, so a rearm with an unchanged reminder set never double-fires or loses cadence state.
+    this.rearmReminders(desired.sessionId);
     this.cfg = desired;
     this.deps.hooks.companionSessionId = desired.sessionId;
   }
@@ -293,10 +312,36 @@ export class CompanionController implements CompanionControl {
     }
   }
 
-  /** Full teardown → the OFF state: stop the adapter long-poll, disarm the heartbeat, flip chat_reply OFF. */
+  /** Disarm any existing reminder watcher and (re-)arm a fresh one targeting `sessionId`, but ONLY when
+   *  the session has at least one ENABLED reminder row — the reminder-set analog of rearmHeartbeat's
+   *  cadence>0 gate (a config with cadence 0 never builds/starts a heartbeat watcher either). Called
+   *  unconditionally on every live reconcile (unlike rearmHeartbeat's cfg-diff gate): the reminder set
+   *  lives in its own table, independent of CompanionConfig, so THIS is the reconcile point a future
+   *  reminder CRUD write (s4) needs — see the ON→ON call site's comment. The one-row-existence check is
+   *  a single cheap read; with zero rows (every companion today, until s4 ships) it is the ONLY db touch
+   *  this path makes — no watcher is built or started, so DEFAULT-OFF stays truly byte-identical.
+   */
+  private rearmReminders(sessionId: string): void {
+    this.stopReminders();
+    if (this.deps.db.listEnabledCompanionReminders(sessionId).length === 0) return;
+    const build = this.deps.buildReminders ?? ((sid: string) => new CompanionReminderWatcher({ db: this.deps.db, pty: this.deps.pty, sessionId: sid }));
+    this.reminders = build(sessionId);
+    this.reminders.start();
+  }
+
+  private stopReminders(): void {
+    if (this.reminders) {
+      this.reminders.stop();
+      this.reminders = null;
+    }
+  }
+
+  /** Full teardown → the OFF state: stop the adapter long-poll, disarm the heartbeat + reminders, flip
+   *  chat_reply OFF. */
   private async teardown(): Promise<void> {
     await this.stopGateway();
     this.stopHeartbeat();
+    this.stopReminders();
     this.cfg = null;
     this.deps.hooks.companionSessionId = null;
   }

@@ -71,6 +71,32 @@ export interface CompanionRoute {
 }
 
 /**
+ * A RECURRING companion reminder (Companion Memory & Reminders Design, Surface 2 s3) — a named cron job
+ * that fires a proactive turn into its OWN companion session, generalizing the single heartbeat
+ * cadence+prompt to N independently-scheduled, independently-routed reminders. Row shape of the
+ * `companion_reminders` table (db.ts); `route` reuses THIS module's CompanionRoute (never a new type) so
+ * a fired reminder's chat_reply carries the exact same shape the heartbeat's home route and a wake's
+ * captured route already use.
+ */
+export interface CompanionReminder {
+  id: string;
+  /** The companion session this reminder targets — its OWN long-lived session (never a fresh spawn). */
+  sessionId: string;
+  /** 5-field cron expression (validated + next-fire computed via orchestration/cron.ts, like Schedule). */
+  cron: string;
+  /** The framed proactive prompt text fired into the session on each due tick. */
+  prompt: string;
+  /** Human-facing name (management/REST — not yet wired by this card), or null. */
+  label: string | null;
+  /** SERVER-DERIVED chat route to carry on fire, or null (a fired reminder then has nowhere to chat_reply). */
+  route: CompanionRoute | null;
+  /** A disabled reminder is skipped by the watcher without being deleted. */
+  enabled: boolean;
+  /** ISO; anchors the FIRST-fire computation (nextFireAt(cron, createdAt)) before any real fire exists. */
+  createdAt: string;
+}
+
+/**
  * Submit inbound text as a TURN into a live session — the EXISTING PTY primitive (pty.enqueueStdin),
  * injected so the gateway stays free of the pty host. `route` is the ORIGINATING (channel, chatId): the pty
  * pins it to the formed turn so chat_reply delivers back there. Returns the primitive's contract:
