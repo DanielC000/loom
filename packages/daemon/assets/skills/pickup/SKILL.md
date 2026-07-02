@@ -28,6 +28,10 @@ project id anywhere; it's derived server-side.
    use it to locate the design/task notes you need **instead of Globbing** (a broad Glob from home times
    out). Notes live in a shallow, one-level taxonomy folder per the project's `CLAUDE.md` "Vault
    structure" section; fixed-path docs stay pinned at the vault root.
+   - **If the owner says they edited or left notes in a file out-of-band**, force a fresh read of it: the
+     harness `Read` "unchanged since last read" guard is arg-scoped (keyed off the last-read args, blind
+     to an external edit) and can falsely return "unchanged" — vary the range (a different offset) so you
+     pick up the owner's content, not a stale prior read.
 
 ## Brief
 
