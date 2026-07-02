@@ -19,6 +19,7 @@ import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt } from "./manager-prompt.js";
+import { composePlatformLeadStartupPrompt, lineageRootId, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
 import { composeWorkerStartupPrompt } from "./worker-prompt.js";
 import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
@@ -588,6 +589,10 @@ export class SessionService {
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
+    // Card 2fed1663: a fresh Spawn always opens a NEW lineage (no recycledFrom yet) — its own id IS the
+    // lineageId. Resolve the (base or per-lineage, seeded-if-absent) resume-doc path and inject it as a
+    // "Where things live" pre-block, mirroring the manager's composeManagerStartupPrompt seam.
+    const leadResumeDocPath = resolvePlatformLeadResumeDocPath(this.db, project.vaultPath, session.id);
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd,
@@ -595,7 +600,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      startupPrompt,
+      startupPrompt: composePlatformLeadStartupPrompt(startupPrompt, leadResumeDocPath),
       role,
       browserTesting,
       documentConversion,
@@ -3223,11 +3228,16 @@ export class SessionService {
     });
 
     const warmup = agent?.startupPrompt?.trim();
-    const startupPrompt =
+    const continuation =
       (warmup ? warmup + "\n\n---\n" : "") +
       `[loom:continuation] You are the successor to a previous Platform Lead session that recycled as it neared its ` +
       `context limit. Continue its cross-project work from this handoff — read your living resume doc + the platform ` +
       `board to re-orient (a normal pickup). Predecessor's handoff:\n\n${continuationPrompt}`;
+    // Card 2fed1663: the successor inherits its PREDECESSOR's lineage (walk old's recycledFrom chain to
+    // the root), so it resolves to the SAME resume-doc path the lineage has always used — never a fresh
+    // one, and never another lineage's file.
+    const leadResumeDocPath = resolvePlatformLeadResumeDocPath(this.db, project.vaultPath, lineageRootId(this.db, old));
+    const startupPrompt = composePlatformLeadStartupPrompt(continuation, leadResumeDocPath);
 
     const now = new Date().toISOString();
     const fresh: Session = {

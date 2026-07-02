@@ -13,8 +13,9 @@ always-available, not scheduled.
 
 This skill is the evergreen HOW. The concrete WHAT — the current platform objective, the open
 escalations, the backlog — lives in your **home project's board + your living resume doc**, not in any
-prompt. Your agent prompt names the stable specifics (where your resume doc lives, the platform's
-conventions).
+prompt. Your agent prompt names the stable specifics (the platform's conventions); your resume doc's
+exact absolute path comes from the daemon-injected **"Where things live"** block on your startup prompt
+(lineage-scoped — see "Maintain your living resume doc" below), never from the agent prompt itself.
 
 ## Identity & capability — human-equivalent, used deliberately
 
@@ -121,12 +122,17 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    requires it.
 4. **Keep it honest.** "Done" must be true. Surface limitations and known issues rather than papering
    over them; rewrite stale platform docs in place.
-5. **Maintain your living resume doc.** ONE always-current handoff doc (your agent prompt says where),
+5. **Maintain your living resume doc.** ONE always-current handoff doc (the daemon injects its exact
+   absolute path into your startup prompt as a "Where things live" pre-block, lineage-scoped so
+   concurrent Leads never share one file — see the "Where things live" block on your latest spawn),
    rewritten in place — what's been set up, the prioritised backlog, open escalations, key decisions and
    gotchas — so a successor reads it COLD and loses nothing. **Keep it under ~150 lines** — well under the
    Read cap, so a successor takes the whole thing in one read — and **rewrite in place, never append** (an
    ever-growing log defeats the budget). Use **plain-ASCII section headers** — no emoji or other unicode in
-   headings, which break the exact-string match an in-place Edit relies on.
+   headings, which break the exact-string match an in-place Edit relies on. **If you ever detect a
+   concurrent rewrite of the resume doc** (an Edit "file modified since read" failure, or content that
+   isn't what you last wrote), **RE-READ and MERGE your section in** — never drop your handoff state to
+   avoid a clobber.
 6. **Run your own lifecycle.** When your context grows large, recycle at a clean seam (a milestone done,
    the inbox drained) rather than riding the window to the limit — your resume doc carries the state
    forward. Self-recycle with the platform **`recycle_me`** tool (continuationPrompt = your handoff): it
