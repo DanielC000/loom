@@ -20,7 +20,9 @@ import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../r
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt } from "./manager-prompt.js";
 import { composeWorkerStartupPrompt } from "./worker-prompt.js";
-import { composeAssistantStartupPrompt } from "./assistant-prompt.js";
+import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
+import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
+import { buildFramedMemoryRecall } from "../companion/memory-recall.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
@@ -439,6 +441,14 @@ export class SessionService {
     // M5: flip to live BEFORE wiring the pty, so onExit ('exited') from a fast-failing spawn always
     // wins — there is no post-spawn 'live' write left to clobber it back to live.
     this.db.setProcessState(session.id, "live");
+    // Companion memory RECALL (fresh half, companion/memory-recall.ts): an assistant session's OWN
+    // MEMORY.md store is keyed by ITS session id (companionMemoryDir), so it is normally empty on a truly
+    // fresh spawn — but this stays correct for any future path that seeds memory ahead of first spawn.
+    // Appended via assistant-prompt.ts so the compose logic lives in one place; null (no memories) ⇒
+    // startupPrompt returned byte-identical, so a fresh companion with empty memory is unchanged.
+    const finalStartupPrompt = role === "assistant"
+      ? appendMemoryRecallToStartupPrompt(startupPrompt!, buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name)))
+      : startupPrompt;
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd,
@@ -446,7 +456,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      startupPrompt,
+      startupPrompt: finalStartupPrompt,
       role,
       browserTesting,
       documentConversion,
@@ -896,6 +906,22 @@ export class SessionService {
     // busy=true carried in the DB across the restart. Without this the session shows/acts "busy"
     // forever, so enqueued worker reports queue instead of submitting and the idle guard can't fire.
     this.db.setBusy(session.id, false);
+    // Companion memory RECALL (resume half, companion/memory-recall.ts) — a DELIBERATE, DOCUMENTED
+    // exception to "resume injects no prompt" above: an assistant session's own durable memory
+    // (memory_write) would otherwise stay mute on every resume forever, since a long-lived companion may
+    // not see a fresh spawn again for months. Enqueued via the ordinary enqueueStdin turn-injection
+    // primitive — ready-gated in host.ts, so it becomes the companion's FIRST turn once the resumed engine
+    // is ready, ahead of anything queued below (the redelivered messages) or by a caller after resume()
+    // returns (e.g. a wake's own note). No extra "recalled once" bookkeeping needed: resume() only reaches
+    // this point once per activation (the isAlive short-circuit above skips it on an already-live session),
+    // so building + enqueueing inline here is naturally exactly-once. Empty memory ⇒ buildFramedMemoryRecall
+    // returns null ⇒ no enqueue — a companion with no memory, and every non-assistant resume (this whole
+    // block is role-gated), stay byte-identical to today. The frame itself tells the model to stay SILENT
+    // (never chat_reply just because this turn arrived) — see memory-recall.ts.
+    if (session.role === "assistant") {
+      const recall = buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name));
+      if (recall) this.pty.enqueueStdin(session.id, recall, "system");
+    }
     // Live-flip re-drive (card 225559e5): this recipient just transitioned to live, so re-drive any durable
     // queued messages addressed to it that the ONE-SHOT boot scan couldn't deliver because it wasn't live
     // when that scan ran (a later resume, a wake/crash-recovery resume, or a crash boot with no restart
