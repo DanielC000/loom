@@ -10,6 +10,7 @@ export interface CompanionPairingCode { codeId: string; code: string; expiresAt:
 // self-authored skill entry — the companion authors these over MCP; this surface only reads + curates.
 export interface CompanionPrompt { sessionId: string; startupPrompt: string; baseBrief: string; }
 export interface CompanionSkillEntry { name: string; description: string; }
+export interface CompanionMemoryEntry { name: string; description: string; pinned: boolean; }
 // The session-ROW restrictedTools flag (blast-radius control) — DISTINCT from the Profile's
 // restrictedTools default: this is what a running companion's PTY was actually spawned with, and what a
 // restart re-applies from. See db.setRestrictedTools + sessions/service.ts resolveAgentSpawn.
@@ -629,6 +630,15 @@ export const api = {
     getErr<{ name: string; content: string }>(`/api/companion/skills/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
   deleteCompanionSkill: (sessionId: string, name: string) =>
     delErr<{ ok: boolean; skills: CompanionSkillEntry[] }>(`/api/companion/skills/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
+
+  // MEMORY: the sibling read/curate surface over the companion's OWN isolated MEMORY.md store — same
+  // posture as SKILLS above (authoring stays the companion's own on-demand job, this only reviews + prunes).
+  companionMemories: (sessionId: string) =>
+    get<{ memories: CompanionMemoryEntry[] }>(`/api/companion/memory/${encodeURIComponent(sessionId)}`).then((r) => r.memories),
+  companionMemory: (sessionId: string, name: string) =>
+    getErr<{ name: string; content: string }>(`/api/companion/memory/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
+  deleteCompanionMemory: (sessionId: string, name: string) =>
+    delErr<{ ok: boolean; memories: CompanionMemoryEntry[] }>(`/api/companion/memory/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
 
   // Session-ROW restrictedTools (live-apply fix): GET/PUT the flag the running companion's PTY actually
   // spawned with — distinct from the Profile default, and re-read on every resume. A write here needs a

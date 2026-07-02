@@ -51,6 +51,7 @@ import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME } from "../setup/seed.js";
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
 import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from "../skills/companion-store.js";
+import { listCompanionMemories, readCompanionMemory, removeCompanionMemory } from "../skills/companion-memory-store.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -1009,6 +1010,33 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const result = removeCompanionSkill(sessionId, name);
     if (!result.ok) return reply.code(404).send({ error: result.error });
     return { ok: true, skills: result.skills };
+  });
+
+  // MEMORY: read (list + single) + curate (delete) over the companion's OWN isolated MEMORY.md store
+  // (skills/companion-memory-store.ts, <LOOM_HOME>/companion-memory/<sessionId>/) — the sibling of SKILLS
+  // above, same posture: authoring stays the companion's own on-demand job (a future memory-MCP surface),
+  // no human REST create/edit here, only review + prune.
+  app.get("/api/companion/memory/:sessionId", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    return { memories: listCompanionMemories(sessionId) };
+  });
+  app.get("/api/companion/memory/:sessionId/:name", async (req, reply) => {
+    const { sessionId, name } = req.params as { sessionId: string; name: string };
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const content = readCompanionMemory(sessionId, name);
+    if (content == null) return reply.code(404).send({ error: `no memory "${name}"` });
+    return { name, content };
+  });
+  app.delete("/api/companion/memory/:sessionId/:name", async (req, reply) => {
+    const { sessionId, name } = req.params as { sessionId: string; name: string };
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const result = removeCompanionMemory(sessionId, name);
+    if (!result.ok) return reply.code(404).send({ error: result.error });
+    return { ok: true, memories: result.memories };
   });
 
   // --- Companion RESTRICTED TOOLS (blast-radius control, live-apply fix): restrictedTools is a SPAWN-TIME
