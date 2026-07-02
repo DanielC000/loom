@@ -254,7 +254,9 @@ taxonomy — not a flat wall of notes. **Fixed-path / canonical docs stay pinned
 including the ones this `CLAUDE.md` references by exact path (`Architecture.md`, `Vision & Architecture.md`,
 `Setup Assistant Design.md`), which is *why* they're pinned: moving them would break those refs. The
 root-pinned set: `Architecture.md`, `Vision & Architecture.md`, `Setup Assistant Design.md`,
-`Companion Design.md`, `Loom.md`, `Platform Manager.md`, `Orchestrator Log.md`, `Platform Lead Resume.md`.
+`Companion Design.md`, `Loom.md`, `Platform Manager.md`, `Orchestrator Log.md`. (The Platform Lead's
+living resume doc is **not** a vault note — it's a LOOM_HOME operational file at
+`~/.loom/PLATFORM-LEAD-RESUME.md`, injected into each Lead spawn.)
 **Every other note lives in a taxonomy folder:** `Design/`, `Operations/`, `Roadmap/`, `Release/`,
 `Spikes/`. An **`_Index.md`** map-of-content at the vault root lists every note by group — **read it to
 locate a note instead of Globbing, and update its line when you add or move a note.** Wikilinks resolve by
