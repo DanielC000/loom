@@ -241,6 +241,11 @@ fixing.)
    blocks it — and don't hand-roll a web server per render cycle. Serve its directory over loopback with
    the bundled helper and open the printed URL: `node .claude/skills/orchestrate/scripts/serve-static.mjs <dir>`.
 
+   To keep a screenshot **as a file** (to attach or diff), don't rely on claude-in-chrome `save_to_disk` —
+   it renders the inline base64 but writes no reachable file (Claude Code issue #40141). Use Playwright
+   `page.screenshot({ path })` against the loopback page (launch with `{ channel: 'chrome' }` to reuse
+   system Chrome and skip a download), or decode the base64 from the transcript for a shot already captured.
+
    **A render-only eyeball is necessary but not sufficient for an interactive control.** For every NEW
    interactive control (toggle, button, input, menu) the verification must **EXERCISE it** and confirm
    an **observable state change** — the DOM/network/text differs before vs. after the interaction — not

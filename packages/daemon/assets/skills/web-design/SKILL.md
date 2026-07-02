@@ -129,7 +129,11 @@ testing available (the Loom "Web Designer" / QA-capable profile spawns with a Pl
    per render cycle. Serve its directory over loopback with the bundled helper and open the printed
    URL instead: `node .claude/skills/web-design/scripts/serve-static.mjs <dir>`.
 2. **Screenshot it and actually look** — squint test, hierarchy, spacing rhythm, contrast, the eight
-   states, dark mode, a narrow (mobile) viewport.
+   states, dark mode, a narrow (mobile) viewport. To persist a shot **as a file** (to attach or diff),
+   don't rely on claude-in-chrome `save_to_disk` — it renders the inline base64 but writes no reachable
+   file (Claude Code issue #40141). Use Playwright `page.screenshot({ path })` against the loopback page
+   (launch with `{ channel: 'chrome' }` to reuse system Chrome and skip a download), or decode the base64
+   from the transcript for a shot you already captured.
 3. Compare what you see against the fundamentals and the don't-list.
 4. Fix what's visibly wrong and repeat. One or two iteration loops catch what reading the code never
    will.

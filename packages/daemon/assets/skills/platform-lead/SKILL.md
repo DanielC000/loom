@@ -121,7 +121,12 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    the cross-project concern — the smallest correct action. Confirm-first only where the safety posture
    requires it.
 4. **Keep it honest.** "Done" must be true. Surface limitations and known issues rather than papering
-   over them; rewrite stale platform docs in place.
+   over them; rewrite stale platform docs in place. When you eyeball a live surface via **claude-in-chrome**
+   (your Lead-only real browser) to confirm something shipped, note its `save_to_disk` writes no reachable
+   file — the inline base64 renders but never persists (Claude Code issue #40141). To keep the shot as a
+   file, use Playwright `page.screenshot({ path })` against the loopback page (launch with `{ channel:
+   'chrome' }` to reuse system Chrome and skip a download), or decode the base64 from the transcript for a
+   shot already captured.
 5. **Maintain your living resume doc.** ONE always-current handoff doc (the daemon injects its exact
    absolute path into your startup prompt as a "Where things live" pre-block, lineage-scoped so
    concurrent Leads never share one file — see the "Where things live" block on your latest spawn),
