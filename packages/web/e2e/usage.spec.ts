@@ -2,17 +2,21 @@
 // separate planes — INTERACTIVE SESSIONS (est. consumption, from session_usage_samples), LIVE OCCUPANCY
 // (a snapshot over /api/sessions), and AGENT RUNS (billed totals, from the `runs` table).
 //
-// SEEDING GAP (reported up to the manager): neither usage plane has a seed path reachable from this harness.
+// SEEDING GAP (card 32fd6f4c — CLOSED): neither usage plane had a seed path reachable from this harness —
 //   • `session_usage_samples` is written ONLY by the internal daemon sampler (db.insertUsageSample) — there
-//     is no REST endpoint to append a sample.
+//     was no REST endpoint to append a sample.
 //   • the `runs` table fills ONLY via the key-authed POST /api/runs, which STARTS A REAL agent (spawns a
 //     real claude) — forbidden in the isolated fixture, which asserts no real claude ever spawns.
-//   • the fixture's LOOM_HOME is private to the fixture closure, so opening the daemon's SQLite Db directly
-//     from a seed helper isn't possible without editing e2e/fixtures/daemon.ts (out of scope for this card).
-// So this spec asserts the DEFAULT / EMPTY state renders with the correct wording (the card's fallback), and
-// makes that substantive by driving the two scope controls (Window + Project) and asserting an OBSERVABLE
-// before/after change in the empty-state copy — proving the page and its controls are actually wired, not
-// just that a blank page loads. When a REST/DB seed path lands, a follow-up can assert seeded numbers render.
+// The test-only POST /internal/test/seed (mounted ONLY under LOOM_TEST=1, which this fixture's daemon
+// always sets) now closes this: it inserts rows directly via the daemon's own Db handle, bypassing
+// SessionService.startRun/PTY entirely, so no agent ever spawns. `loomDaemon.seedUsageSample` (in
+// fixtures/daemon.ts) wraps it for the Interactive-sessions plane. See
+// Projects/Loom/Design/E2E Test Suite Design.md for the pattern (also usable for `runs` rows).
+//
+// The FIRST spec below still asserts the DEFAULT / EMPTY state renders with the correct wording, made
+// substantive by driving the two scope controls (Window + Project) and asserting an OBSERVABLE before/after
+// change in the empty-state copy. The SECOND spec seeds a real usage sample and asserts the plane renders
+// actual numbers instead of the empty state.
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures/daemon";
 
@@ -67,4 +71,32 @@ test("usage page renders its three consumption planes with the correct empty-sta
   await projectSelect(page).selectOption({ label: project.name });
   await expect(page.getByText(new RegExp(`recorded for ${project.name}`)).first()).toBeVisible();
   await expect(page.getByText(/recorded for all projects/)).toHaveCount(0);
+});
+
+test("usage page renders a seeded interactive-session usage sample instead of the empty state", async ({
+  page,
+  loomDaemon,
+}) => {
+  const project = await loomDaemon.createProject(`usage-seeded-${Date.now()}`);
+  await loomDaemon.seedUsageSample({
+    projectId: project.id,
+    model: "claude-sonnet-5",
+    inputTokens: 12_000,
+    outputTokens: 3_000,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 0,
+    costUsd: 4.56,
+  });
+
+  await page.goto(`${loomDaemon.baseURL}/usage`);
+  await projectSelect(page).selectOption({ label: project.name });
+
+  // The empty-state copy for the Interactive-sessions plane is gone, replaced by the seeded totals.
+  await expect(page.getByText("No interactive-session usage in this window")).toHaveCount(0);
+  await expect(page.getByText("$4.56", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("samples", { exact: true }).first()).toBeVisible();
+
+  // The Agent Runs plane is untouched by a usage-sample seed (a distinct, never-summed plane) — its
+  // empty state still holds, proving the seed landed in the RIGHT table only.
+  await expect(page.getByText("No agent runs in this window", { exact: true })).toBeVisible();
 });

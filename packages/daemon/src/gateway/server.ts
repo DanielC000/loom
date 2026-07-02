@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus } from "@loom/shared";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -14,6 +14,7 @@ import { nextFireAt } from "../orchestration/cron.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, engineTranscriptExists, deleteArchivedTranscript, deleteProjectArchives } from "../sessions/transcript.js";
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
 import type { Db } from "../db.js";
+import { inTestMode } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
@@ -1160,6 +1161,59 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     setTimeout(() => deps.beginSelfUpdate?.(), 50);
     return reply.code(202).send({ ok: true, updating: true });
   });
+
+  // --- Test-only data seeding (card 32fd6f4c) — closes the e2e seeding gap for the two write paths an
+  // isolated e2e spec cannot otherwise reach: `session_usage_samples` (written ONLY by the internal usage
+  // sampler) and `runs` (filled ONLY by the real-spawn-triggering POST /api/runs above, forbidden in the
+  // e2e fixture). Gated on BOTH `inTestMode()` (LOOM_TEST=1, which the e2e fixture already sets) AND
+  // loopback, so this NEVER mounts against — and is unreachable even by IP against — a real daemon; zero
+  // prod surface, same posture as the other /internal/* routes with an extra fail-closed layer. Inserts
+  // rows directly via deps.db (insertUsageSample/insertRun), bypassing SessionService.startRun/PTY
+  // entirely — no agent ever spawns. THE pattern for seeding daemon-only data from an e2e spec (see
+  // Projects/Loom/Design/E2E Test Suite Design.md). ---
+  if (inTestMode()) {
+    app.post("/internal/test/seed", async (req, reply) => {
+      if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
+      const b = (req.body ?? {}) as {
+        usageSamples?: Partial<UsageSample>[];
+        runs?: Partial<AgentRun>[];
+      };
+      const usageSampleIds: string[] = [];
+      for (const s of b.usageSamples ?? []) {
+        if (typeof s.projectId !== "string" || typeof s.sessionId !== "string") {
+          return reply.code(400).send({ error: "usageSamples[].projectId and sessionId are required strings" });
+        }
+        const id = randomUUID();
+        deps.db.insertUsageSample({
+          id, sessionId: s.sessionId, projectId: s.projectId,
+          agentId: s.agentId ?? null, model: s.model ?? null,
+          ts: s.ts ?? new Date().toISOString(),
+          inputTokens: s.inputTokens ?? 0, outputTokens: s.outputTokens ?? 0,
+          cacheCreationTokens: s.cacheCreationTokens ?? 0, cacheReadTokens: s.cacheReadTokens ?? 0,
+          costUsd: s.costUsd ?? 0,
+        });
+        usageSampleIds.push(id);
+      }
+      const runIds: string[] = [];
+      for (const r of b.runs ?? []) {
+        if (typeof r.projectId !== "string" || typeof r.agentId !== "string") {
+          return reply.code(400).send({ error: "runs[].projectId and agentId are required strings" });
+        }
+        const id = randomUUID();
+        const createdAt = r.createdAt ?? new Date().toISOString();
+        deps.db.insertRun({
+          id, projectId: r.projectId, agentId: r.agentId, sessionId: r.sessionId ?? null,
+          keyId: r.keyId ?? null, status: (r.status as RunStatus) ?? "completed",
+          input: r.input ?? null, schema: r.schema ?? null, result: r.result ?? null,
+          usage: r.usage ?? null, transcriptRef: r.transcriptRef ?? null, error: r.error ?? null,
+          webhookUrl: r.webhookUrl ?? null, idempotencyKey: r.idempotencyKey ?? null,
+          createdAt, startedAt: r.startedAt ?? createdAt, endedAt: r.endedAt ?? createdAt,
+        });
+        runIds.push(id);
+      }
+      return reply.code(201).send({ ok: true, usageSampleIds, runIds });
+    });
+  }
 
   // --- REST: read ---
   app.get("/api/projects", async () => deps.db.listProjects());

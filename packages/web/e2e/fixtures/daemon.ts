@@ -115,6 +115,23 @@ export interface LoomDaemon {
     projectId: string,
     task: { title: string; body?: string; columnKey?: string; priority?: "p0" | "p1" | "p2" | "p3" },
   ) => Promise<SeededTask>;
+  /**
+   * Seed one `session_usage_samples` row via the test-only POST /internal/test/seed (card 32fd6f4c) — the
+   * ONLY way an e2e spec can put data on the Usage page's "Interactive sessions" plane, since that table
+   * is otherwise written ONLY by the internal daemon sampler. `LOOM_TEST=1` (set on this fixture's daemon)
+   * is what mounts the endpoint; it's entirely absent on a real daemon. Returns the inserted sample id.
+   */
+  seedUsageSample: (sample: {
+    projectId: string;
+    sessionId?: string;
+    agentId?: string;
+    model?: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheCreationTokens?: number;
+    cacheReadTokens?: number;
+    costUsd?: number;
+  }) => Promise<string>;
 }
 
 export const test = base.extend<{ loomPage: Page }, { loomDaemon: LoomDaemon }>({
@@ -188,7 +205,14 @@ export const test = base.extend<{ loomPage: Page }, { loomDaemon: LoomDaemon }>(
     const createTask: LoomDaemon["createTask"] = (projectId, task) =>
       apiPost<SeededTask>(baseURL, `/api/projects/${projectId}/tasks`, task);
 
-    await use({ baseURL, createProject, createTask });
+    const seedUsageSample: LoomDaemon["seedUsageSample"] = async (sample) => {
+      const res = await apiPost<{ usageSampleIds: string[] }>(baseURL, "/internal/test/seed", {
+        usageSamples: [{ sessionId: `e2e-session-${randomUUID()}`, ...sample }],
+      });
+      return res.usageSampleIds[0];
+    };
+
+    await use({ baseURL, createProject, createTask, seedUsageSample });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.

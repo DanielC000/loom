@@ -12,7 +12,7 @@ import { DB_PATH } from "./paths.js";
 const REAL_PROD_DB = path.resolve(path.join(os.homedir(), ".loom", "loom.db"));
 
 /** True when this process is marked as a test run (the test guard / `test:daemon` wrapper sets these). */
-function inTestMode(): boolean {
+export function inTestMode(): boolean {
   return process.env.LOOM_TEST === "1" || process.env.NODE_ENV === "test";
 }
 
