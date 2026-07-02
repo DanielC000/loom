@@ -1,7 +1,7 @@
 import { useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { CompanionConfigMasked, CompanionBinding, SessionListItem } from "@loom/shared";
-import { api, restartCompanionSession, type CompanionProvisionError, type CompanionSkillEntry } from "../lib/api";
+import { api, restartCompanionSession, type CompanionProvisionError, type CompanionSkillEntry, type CompanionMemoryEntry } from "../lib/api";
 import {
   bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, emptyConfigForm,
   emptyTelegramForm, formFromMasked, hasChannelBinding, maskedToken, provisionBody, provisionErrorMessage,
@@ -403,6 +403,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
           <ChannelsSection companion={companion} onChanged={onChanged} />
           <PersonaSection sessionId={companion.sessionId} />
           <SkillsSection sessionId={companion.sessionId} />
+          <MemorySection sessionId={companion.sessionId} />
           <RestrictToolsSection sessionId={companion.sessionId} />
           <PairingSection sessionId={companion.sessionId} />
         </div>
@@ -955,6 +956,80 @@ function SkillRow({ sessionId, skill, onDelete, deleting }: { sessionId: string;
         {confirm ? (
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={errStyle}>Delete this skill?</span>
+            <Button variant="danger" disabled={deleting} onClick={onDelete}>{deleting ? "Deleting…" : "Confirm"}</Button>
+            <Button variant="ghost" onClick={() => setConfirm(false)}>Cancel</Button>
+          </div>
+        ) : (
+          <Button variant="danger" onClick={() => setConfirm(true)}>Delete</Button>
+        )}
+      </div>
+      {open && (
+        content.isLoading ? <span style={hint}>Loading…</span>
+        : content.isError ? <span style={errStyle}>{(content.error as Error).message}</span>
+        : <ReadonlyBlock>{content.data?.content ?? ""}</ReadonlyBlock>
+      )}
+    </div>
+  );
+}
+
+// ── Memory: the companion's SELF-AUTHORED memory store (review + prune) ───────────────────────────────
+// The sibling of SkillsSection over the companion's OWN isolated MEMORY.md store. The companion writes
+// these on its own (the memory_* MCP tools); this human-only surface lists them (a pin indicator for the
+// pinned ones), reads one's full MEMORY.md, and DELETES one to curate. Read + prune only — no authoring.
+function MemorySection({ sessionId }: { sessionId: string }) {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["companionMemories", sessionId], queryFn: () => api.companionMemories(sessionId) });
+  const memories = q.data ?? [];
+
+  const del = useMutation({
+    mutationFn: (name: string) => api.deleteCompanionMemory(sessionId, name),
+    onSuccess: (r) => { qc.setQueryData(["companionMemories", sessionId], r.memories); },
+  });
+
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <SectionLabel style={{ margin: 0 }}>Memory</SectionLabel>
+      <p style={{ ...hint, margin: 0 }}>
+        What this companion remembers across chats. It writes these for itself; here you can read one or
+        delete one to keep the set tidy. Pinned entries are always in its context.
+      </p>
+      {q.isLoading ? (
+        <span style={hint}>Loading…</span>
+      ) : q.isError ? (
+        <span style={errStyle}>{(q.error as Error).message}</span>
+      ) : memories.length === 0 ? (
+        <p style={hint}>No memories yet — this companion hasn't remembered anything.</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {memories.map((m) => (
+            <MemoryRow key={m.name} sessionId={sessionId} memory={m}
+              onDelete={() => del.mutate(m.name)} deleting={del.isPending && del.variables === m.name} />
+          ))}
+        </div>
+      )}
+      {del.error && <span style={errStyle}>{(del.error as Error).message}</span>}
+    </section>
+  );
+}
+
+// One memory row: its name (with a pin indicator when pinned) + description, a Read toggle (lazily fetches
+// the full MEMORY.md), and a Delete with an inline confirm — mirrors SkillRow's structure exactly.
+function MemoryRow({ sessionId, memory, onDelete, deleting }: { sessionId: string; memory: CompanionMemoryEntry; onDelete: () => void; deleting: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const content = useQuery({ queryKey: ["companionMemory", sessionId, memory.name], queryFn: () => api.companionMemory(sessionId, memory.name), enabled: open });
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <code style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{memory.name}</code>
+        {memory.pinned && <span title="pinned — always in this companion's context"><Badge tone="amber">pinned</Badge></span>}
+        {memory.description && <span style={{ ...hint, margin: 0 }}>{memory.description}</span>}
+        <span style={{ flex: 1 }} />
+        <Button onClick={() => setOpen((v) => !v)}>{open ? "Hide" : "Read"}</Button>
+        {confirm ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={errStyle}>Delete this memory?</span>
             <Button variant="danger" disabled={deleting} onClick={onDelete}>{deleting ? "Deleting…" : "Confirm"}</Button>
             <Button variant="ghost" onClick={() => setConfirm(false)}>Cancel</Button>
           </div>

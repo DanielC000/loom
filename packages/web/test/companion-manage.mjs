@@ -5,9 +5,9 @@
 //      running companion's live settings — those are pinned per-session, see restricted-tools below).
 //   2. Persona-prompt bounds (lib/companion.ts): validatePersonaPrompt / COMPANION_PROMPT_MAX mirror the
 //      daemon's 10k guard so the editor rejects an over-long prompt inline, not at a 400.
-//   3. The api.ts client mirrors for the NEW human-only REST — prompt (GET/PUT), skills (GET list/single,
-//      DELETE), and session-row restricted-tools (GET/PUT) — driven against a mocked global fetch: request
-//      shapes + response unwrapping.
+//   3. The api.ts client mirrors for the NEW human-only REST — prompt (GET/PUT), skills + memory (GET
+//      list/single, DELETE), and session-row restricted-tools (GET/PUT) — driven against a mocked global
+//      fetch: request shapes + response unwrapping.
 //   4. restartCompanionSession (api.ts): stop → poll until truly exited → resume, and — the live-apply
 //      fix's silent-failure guard — it THROWS instead of calling resume() if the session is still
 //      live/starting at the poll deadline (a resume() against a still-alive pty is a server-side no-op, so
@@ -164,6 +164,49 @@ await acheck("deleteCompanionSkill: DELETEs by name, returns the updated { ok, s
   let threw = null;
   try { await api.deleteCompanionSkill("s", "git-flow"); } catch (e) { threw = e; }
   assert.ok(threw && /no skill/.test(threw.message), "an unknown skill's 404 reason is surfaced verbatim");
+});
+
+// ── The MEMORY client mirrors — sibling of skills (list unwrap, single read, delete → post-prune list) ──
+
+await acheck("companionMemories: GETs the list endpoint and UNWRAPS { memories } (carrying the pinned flag)", async () => {
+  let captured = null;
+  globalThis.fetch = async (url, opts) => {
+    captured = { url, opts };
+    return { ok: true, status: 200, json: async () => ({ memories: [
+      { name: "owner-prefs", description: "how the owner likes replies", pinned: true },
+      { name: "misc", description: "one-off note", pinned: false },
+    ] }) };
+  };
+  const memories = await api.companionMemories("sess 1");
+  assert.equal(captured.url, "/api/companion/memory/sess%201", "sessionId is URL-encoded into the path");
+  assert.ok(!captured.opts || captured.opts.method === undefined || captured.opts.method === "GET");
+  assert.ok(Array.isArray(memories), "the client unwraps { memories } to the bare array");
+  assert.equal(memories[0].name, "owner-prefs");
+  assert.equal(memories[0].pinned, true, "the pinned flag survives the unwrap so the row can mark it");
+  assert.equal(memories[1].pinned, false);
+});
+
+await acheck("companionMemory: GETs a single memory's MEMORY.md by name (name URL-encoded)", async () => {
+  let captured = null;
+  globalThis.fetch = async (url, opts) => { captured = { url, opts }; return { ok: true, status: 200, json: async () => ({ name: "owner prefs", content: "# body" }) }; };
+  const r = await api.companionMemory("s", "owner prefs");
+  assert.equal(captured.url, "/api/companion/memory/s/owner%20prefs", "the memory name is URL-encoded into the path");
+  assert.equal(r.content, "# body");
+});
+
+await acheck("deleteCompanionMemory: DELETEs by name, returns the updated { ok, memories }, surfaces a 404 reason", async () => {
+  let captured = null;
+  globalThis.fetch = async (url, opts) => { captured = { url, opts }; return { ok: true, status: 200, json: async () => ({ ok: true, memories: [] }) }; };
+  const r = await api.deleteCompanionMemory("s", "owner-prefs");
+  assert.equal(captured.url, "/api/companion/memory/s/owner-prefs");
+  assert.equal(captured.opts.method, "DELETE");
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.memories, [], "returns the post-delete list so the UI can update the cache");
+
+  globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({ error: 'no memory "owner-prefs"' }) });
+  let threw = null;
+  try { await api.deleteCompanionMemory("s", "owner-prefs"); } catch (e) { threw = e; }
+  assert.ok(threw && /no memory/.test(threw.message), "an unknown memory's 404 reason is surfaced verbatim");
 });
 
 // ── Session-ROW restrictedTools (live-apply fix): resolved by sessionId, distinct from the shared Profile ──
