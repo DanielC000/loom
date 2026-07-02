@@ -78,6 +78,7 @@ const HERMETIC = [
   "companion-unbind-pairing-codes", // Loom Companion (SECURITY): unbind ALSO cascade-clears unconsumed companion_pairing_codes (two-path asymmetry fix vs deleteCompanionConfig) — an outstanding code for the unbound (session, channel) can no longer be redeemed and a re-bind's allowlist stays empty despite it, delete-ALL clears every code for the session (other channels/sessions untouched), and a companion_pairing_attempts lockout row SURVIVES unbind (deliberately left, unlike pairing_codes)
 
   "assistant-role", // Loom Companion Phase 1: the long-lived `assistant` SessionRole — non-worktree spawn+persist, resume carrying the role, base brief injection, human-prompt disallow (others byte-identical), and the minimal resolveRole surface (my_context + companion-gated chat_reply)
+  "companion-reminders-brief", // Loom Companion Reminders s2: ASSISTANT_BASE_BRIEF teaches wake_me/wake_list/wake_cancel + the act-on-it [loom:reminder] framing, kept distinct from the silent [loom:memory] recall framing — doc-only, no MCP/allowlist change
 ];
 
 // NOT run here (require a human-started isolated daemon and/or a real `claude` login, or are helpers):
