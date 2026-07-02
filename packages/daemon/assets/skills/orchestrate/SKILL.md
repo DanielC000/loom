@@ -237,6 +237,10 @@ fixing.)
    startup line, never assume a default. Hold both when you review a browser-capable worker's
    "verified live."
 
+   To eyeball a **static on-disk HTML artifact** (no dev server), don't navigate `file://` — Playwright
+   blocks it — and don't hand-roll a web server per render cycle. Serve its directory over loopback with
+   the bundled helper and open the printed URL: `node .claude/skills/orchestrate/scripts/serve-static.mjs <dir>`.
+
    **A render-only eyeball is necessary but not sufficient for an interactive control.** For every NEW
    interactive control (toggle, button, input, menu) the verification must **EXERCISE it** and confirm
    an **observable state change** — the DOM/network/text differs before vs. after the interaction — not

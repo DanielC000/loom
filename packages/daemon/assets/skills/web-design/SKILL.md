@@ -124,6 +124,10 @@ testing available (the Loom "Web Designer" / QA-capable profile spawns with a Pl
    port from the framework's startup line (e.g. vite's `Local: http://…:PORT`); never assume a default
    port. If that port is already held by another process, the dev server binds another port or fails, so
    eyeballing the default would render the wrong, *stale* server.
+   For a **static on-disk HTML file** with no dev server (a CV, a rendered report), don't navigate
+   `file://` — Playwright's `browser_navigate` blocks it outright — and don't hand-roll a web server
+   per render cycle. Serve its directory over loopback with the bundled helper and open the printed
+   URL instead: `node .claude/skills/web-design/scripts/serve-static.mjs <dir>`.
 2. **Screenshot it and actually look** — squint test, hierarchy, spacing rhythm, contrast, the eight
    states, dark mode, a narrow (mobile) viewport.
 3. Compare what you see against the fundamentals and the don't-list.

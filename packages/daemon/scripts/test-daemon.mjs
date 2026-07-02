@@ -83,6 +83,8 @@ const HERMETIC = [
   "assistant-role", // Loom Companion Phase 1: the long-lived `assistant` SessionRole — non-worktree spawn+persist, resume carrying the role, base brief injection, human-prompt disallow (others byte-identical), and the minimal resolveRole surface (my_context + companion-gated chat_reply)
   "companion-reminders-brief", // Loom Companion Reminders s2: ASSISTANT_BASE_BRIEF teaches wake_me/wake_list/wake_cancel + the act-on-it [loom:reminder] framing, kept distinct from the silent [loom:memory] recall framing — doc-only, no MCP/allowlist change
   "companion-reminder-tools", // Loom Companion Reminders s4: reminder_create/reminder_list/reminder_cancel MCP tools — single-companion-session gate, boundary cron validation (no watcher-catch reliance), SERVER-DERIVED route capture (mirrors wake_me), ARM-ON-CREATE (a create alone (re)arms the live reminder watcher, no other config write needed) + disarm-on-empty, and cancel scoped to the caller's OWN session
+
+  "serve-static", // card fcded408: the dependency-free assets/skills/{web-design,orchestrate}/scripts/serve-static.mjs helper — loopback-only static serving (nested files, 404 on miss, traversal-safe) + the two skill-local copies stay byte-identical
 ];
 
 // NOT run here (require a human-started isolated daemon and/or a real `claude` login, or are helpers):
