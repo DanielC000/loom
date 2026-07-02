@@ -54,7 +54,7 @@ export class TaskMcpRouter {
     server.registerTool(
       "tasks_get",
       {
-        description: "Read ONE full task (title + body) by id; project-scoped.",
+        description: "Read ONE full task (title + body) by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get).",
         inputSchema: { id: z.string() },
       },
       async ({ id }) => ok(getProjectTask(db, projectId, id)),
@@ -70,7 +70,7 @@ export class TaskMcpRouter {
     server.registerTool(
       "tasks_update",
       {
-        description: "Update a task by id; project-scoped. priority p0|p1|p2|p3 (low number = higher priority). held=true marks an owner-gated card the idle watchdog won't nag about.",
+        description: "Update a task by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). priority p0|p1|p2|p3 (low number = higher priority). held=true marks an owner-gated card the idle watchdog won't nag about.",
         inputSchema: {
           id: z.string(),
           title: z.string().optional(),

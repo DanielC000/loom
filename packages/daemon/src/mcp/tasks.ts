@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Task, TaskPriority } from "@loom/shared";
 import { DEFAULT_TASK_PRIORITY, resolveConfig, columnKeyForRole } from "@loom/shared";
 import type { Db } from "../db.js";
+import { resolveIdPrefix } from "../id-prefix.js";
 
 // Task-tool business logic. EVERY function takes the projectId resolved SERVER-SIDE from the
 // session id — the agent never passes a projectId, so cross-project access is impossible.
@@ -79,13 +80,29 @@ export function listProjectTasks(
 }
 
 /**
+ * card 342e433d: resolve `taskId` against this project's OWN tasks as EITHER a full id OR an
+ * unambiguous id-PREFIX (mirrors id-prefix.ts › getByIdPrefix, generalized to tasks — the
+ * candidate list is `db.listTasks(projectId)`, so prefix-scanning IS the ownership check: a
+ * cross-project id can never appear in the candidate set). An ambiguous prefix names BOTH
+ * candidate ids rather than silently picking one; kept HERE so getProjectTask/updateProjectTask
+ * (and their platform cross-project callers) resolve identically.
+ */
+function resolveProjectTaskId(db: Db, projectId: string, taskId: string): Task | { error: string } {
+  const r = resolveIdPrefix(db.listTasks(projectId), taskId);
+  if (r.kind === "found") return r.record;
+  if (r.kind === "ambiguous") {
+    return { error: `ambiguous task id-prefix '${taskId}' — it matches ${r.ids.join(", ")}; pass more characters or the full id` };
+  }
+  return { error: "task not found in this project" };
+}
+
+/**
  * Read ONE full task (title + body) by id, project-scoped: a cross-project id resolves to
- * not-found (same server-side guard posture as updateProjectTask).
+ * not-found (same server-side guard posture as updateProjectTask). `taskId` accepts the full id
+ * OR an unambiguous 8-char id-prefix (mirrors project_get / worker_spawn's agentId).
  */
 export function getProjectTask(db: Db, projectId: string, taskId: string): Task | { error: string } {
-  const t = db.getTask(taskId);
-  if (!t || t.projectId !== projectId) return { error: "task not found in this project" };
-  return t;
+  return resolveProjectTaskId(db, projectId, taskId);
 }
 
 export function createProjectTask(
@@ -123,9 +140,11 @@ export function updateProjectTask(
   db: Db, projectId: string, taskId: string,
   patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held">>,
 ): Task | { error: string } {
-  // Guard: the task must belong to this project (defense even though id is opaque).
-  const owned = db.listTasks(projectId).find((t) => t.id === taskId);
-  if (!owned) return { error: "task not found in this project" };
+  // Guard: the task must belong to this project — and taskId may be a full id OR an unambiguous
+  // 8-char id-prefix (card 342e433d). Resolve to the FULL id before writing: `db.updateTask` takes
+  // an exact id, so a prefix must never be written straight through.
+  const owned = resolveProjectTaskId(db, projectId, taskId);
+  if ("error" in owned) return owned;
   // Column-move guard: a move must target a column that EXISTS on this project's board, so a move can never
   // orphan a card onto a non-existent key (the HARD INVARIANT board-column lifecycle code upholds). Applied
   // in the SHARED backing function, so the in-project tasks_update and the cross-project project_task_update
@@ -136,14 +155,14 @@ export function updateProjectTask(
       return { error: `unknown column "${patch.columnKey}" on this project's board (valid: ${cols.map((c) => c.key).join(", ")})` };
     }
   }
-  db.updateTask(taskId, patch);
+  db.updateTask(owned.id, patch);
   return { ...owned, ...patch, updatedAt: new Date().toISOString() };
 }
 
 /** Tool descriptors (name/description/input shape) for wiring to the MCP SDK. */
 export const TASK_TOOL_DESCRIPTORS = [
   { name: "tasks_list", description: "List the current project's board tasks. Defaults to a lightweight summary (no body) with done cards excluded; pass includeBody:true or use tasks_get(id) for bodies." },
-  { name: "tasks_get", description: "Read ONE full task (title + body) by id, within the current project." },
+  { name: "tasks_get", description: "Read ONE full task (title + body) by id, within the current project. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get)." },
   { name: "tasks_create", description: "Create a task on the current project's board (title, body?, columnKey?, priority?). priority is p0|p1|p2|p3 (low number = higher priority), default p2." },
-  { name: "tasks_update", description: "Update a task (title?, body?, columnKey?, position?, priority?, held?) by id, within the current project. priority is p0|p1|p2|p3; held=true is the owner-gated 'don't nag' flag the idle watchdog discounts." },
+  { name: "tasks_update", description: "Update a task (title?, body?, columnKey?, position?, priority?, held?) by id, within the current project. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). priority is p0|p1|p2|p3; held=true is the owner-gated 'don't nag' flag the idle watchdog discounts." },
 ] as const;
