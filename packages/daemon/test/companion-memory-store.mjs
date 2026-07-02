@@ -1,9 +1,13 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Loom Companion memory store — the STORAGE LAYER ONLY (no MCP, no recall, no REST — those are later
-// sub-cards). Fully hermetic: a temp LOOM_HOME + the parameterized per-companion store driven directly.
-// The isolation invariant is load-bearing: a companion's memory entries must NEVER touch the global
-// SKILLS_DIR and must NEVER escape their per-session base dir. These assert CRUD, the redundancy (curation)
-// guard, and confinement against path traversal / absolute / percent-encoded names.
+// Loom Companion memory store — the STORAGE LAYER (CRUD + isolation + curation) PLUS the AGENT MCP
+// SURFACE (memory_write/memory_list/memory_read/memory_remove), gated to the single bound companion
+// session exactly like the sibling skill tools. Still NO recall/turn-formation wiring (a separate card) —
+// a memory entry authored here is not yet injected into any prompt. Fully hermetic: a temp LOOM_HOME +
+// the parameterized per-companion store driven directly, plus the real OrchestrationMcpRouter buildServer
+// to prove the tools are companion-session-gated. NO network, NO real claude, NO daemon. The isolation
+// invariant is load-bearing: a companion's memory entries must NEVER touch the global SKILLS_DIR and must
+// NEVER escape their per-session base dir. These assert CRUD, the redundancy (curation) guard, confinement
+// against path traversal / absolute / percent-encoded names, and the MCP tool gating + wiring.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-memory-store.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -29,6 +33,13 @@ const {
   authorCompanionMemory, listCompanionMemories, readCompanionMemory, removeCompanionMemory,
   NEAR_DUP_THRESHOLD, MIN_DEDUP_UNION_TOKENS,
 } = await import("../dist/skills/companion-memory-store.js");
+const { Db } = await import("../dist/db.js");
+const { PtyHost } = await import("../dist/pty/host.js");
+const { SessionService } = await import("../dist/sessions/service.js");
+const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 
 const SESS = "companion-sess";
 const memoryMd = (sessionId, name) => path.join(companionMemoryDir(sessionId), name, "MEMORY.md");
@@ -181,11 +192,63 @@ try {
     check("remove: the removed dir is gone", !fs.existsSync(path.join(companionMemoryDir(SESS), "user-pet")));
     check("remove: removing a non-existent entry errors", removeCompanionMemory(SESS, "ghost").ok === false);
   }
+
+  // ============ Part 7 — the tools are COMPANION-SESSION-GATED on the MCP surface ============
+  {
+    const db = new Db(path.join(tmpHome, "p7.db"));
+    class SeamHost extends PtyHost {
+      createPty() { return { pid: 1, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+      stop() {}
+    }
+    const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
+    const svc = new SessionService(db, host, new OrchestrationControl());
+    const orch = new OrchestrationMcpRouter(db, svc, { companionSessionId: SESS, deliverReply: async () => ({ delivered: true }) });
+
+    const connect = async (server) => {
+      const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverT);
+      const client = new Client({ name: "companion-memory-test", version: "0" });
+      await client.connect(clientT);
+      return client;
+    };
+    const listOf = async (server) => { const c = await connect(server); const names = (await c.listTools()).tools.map((t) => t.name); await c.close(); return names; };
+
+    const MEMORY_TOOLS = ["memory_write", "memory_list", "memory_read", "memory_remove"];
+    const companionTools = await listOf(orch.buildServer(SESS, "assistant"));
+    check("gate: the BOUND companion assistant HAS all four memory tools", MEMORY_TOOLS.every((t) => companionTools.includes(t)));
+
+    const otherAssistant = await listOf(orch.buildServer("other-sess", "assistant"));
+    check("gate: a DIFFERENT assistant session has NONE of the memory tools", MEMORY_TOOLS.every((t) => !otherAssistant.includes(t)));
+
+    const manager = await listOf(orch.buildServer("mgr-sess", "manager"));
+    check("gate: a non-companion manager has NONE of the memory tools", MEMORY_TOOLS.every((t) => !manager.includes(t)));
+
+    const worker = await listOf(orch.buildServer("wkr-sess", "worker"));
+    check("gate: a non-companion worker has NONE of the memory tools", MEMORY_TOOLS.every((t) => !worker.includes(t)));
+
+    // End-to-end through the MCP tool wiring: write via the tool, then list/read/remove via the tools.
+    const c = await connect(orch.buildServer(SESS, "assistant"));
+    const content = "---\nname: user-nickname\ndescription: what the user likes to be called\npinned: false\n---\n\n# user-nickname\n\nThe user goes by Dee.";
+    const written = JSON.parse((await c.callTool({ name: "memory_write", arguments: { name: "user-nickname", content } })).content[0].text);
+    check("wiring: memory_write over MCP authored the entry", written.authored === "user-nickname" && written.memories.some((m) => m.name === "user-nickname"));
+    const listed = JSON.parse((await c.callTool({ name: "memory_list", arguments: {} })).content[0].text);
+    check("wiring: memory_list over MCP returns the compact entry", listed.memories.some((m) => m.name === "user-nickname" && m.description === "what the user likes to be called" && m.pinned === false));
+    const readBack = JSON.parse((await c.callTool({ name: "memory_read", arguments: { name: "user-nickname" } })).content[0].text);
+    check("wiring: memory_read over MCP returns the full content", readBack.name === "user-nickname" && readBack.content.includes("The user goes by Dee."));
+    const removed = JSON.parse((await c.callTool({ name: "memory_remove", arguments: { name: "user-nickname" } })).content[0].text);
+    check("wiring: memory_remove over MCP removed the entry", removed.removed === "user-nickname" && !removed.memories.some((m) => m.name === "user-nickname"));
+    const missing = JSON.parse((await c.callTool({ name: "memory_read", arguments: { name: "user-nickname" } })).content[0].text);
+    check("wiring: memory_read over MCP for a removed entry errors", missing.error != null);
+    await c.close();
+    // And that end-to-end write STILL touched only the companion memory store, not the global skill store.
+    check("wiring: the MCP-authored memory stayed out of the global SKILLS_DIR", !fs.existsSync(path.join(SKILLS_DIR, "user-nickname")));
+    db.close();
+  }
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — companion self-authored memory entries are ISOLATED (persist under <LOOM_HOME>/companion-memory/<sessionId>/, never the global SKILLS_DIR), CRUD'd (author/list/read/remove) with name+description+pinned frontmatter, refined in place, curated (remove), guarded against near-duplicate NEW names, and confined against path traversal / absolute / percent-encoded names."
+  ? "\n✅ ALL PASS — companion self-authored memory entries are ISOLATED (persist under <LOOM_HOME>/companion-memory/<sessionId>/, never the global SKILLS_DIR), CRUD'd (author/list/read/remove) with name+description+pinned frontmatter, refined in place, curated (remove), guarded against near-duplicate NEW names, confined against path traversal / absolute / percent-encoded names, and exposed as memory_write/memory_list/memory_read/memory_remove gated to the single bound companion session on the MCP surface."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -13,6 +13,12 @@ import {
   readCompanionSkill,
   removeCompanionSkill,
 } from "../skills/companion-store.js";
+import {
+  authorCompanionMemory,
+  listCompanionMemories,
+  readCompanionMemory,
+  removeCompanionMemory,
+} from "../skills/companion-memory-store.js";
 
 // Same envelope as the task MCP server (mcp/server.ts).
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -227,6 +233,75 @@ export class OrchestrationMcpRouter {
     );
   }
 
+  /**
+   * Loom Companion (epic Phase 2): self-authored DURABLE MEMORY — the sibling surface of
+   * registerCompanionSkillTools (SAME single-companion-session gate), backed by companion-memory-store.ts
+   * (MEMORY.md entries, isolated per companion under <LOOM_HOME>/companion-memory/<sessionId>/, never the
+   * global SKILLS_DIR). Agent surface ONLY — this card does NOT touch recall/turn-formation; a memory
+   * entry authored here is not yet injected into any prompt.
+   */
+  private registerCompanionMemoryTools(server: McpServer, sessionId: string): void {
+    const companionId = this.companion.companionSessionId;
+    if (!companionId || sessionId !== companionId) return;
+
+    server.registerTool(
+      "memory_write",
+      {
+        description:
+          "Author or REFINE one of YOUR OWN durable memory entries (a fact worth remembering across " +
+          "conversations, private to you). `content` is the FULL MEMORY.md (frontmatter `name`/" +
+          "`description`/`pinned` + body). Authoring an EXISTING `name` REWRITES it in place — supply the " +
+          "whole refined content (no appending, keep it bounded and self-consistent). A NEW name that " +
+          "closely duplicates an existing memory is REJECTED with a note telling you to refine the " +
+          "existing one instead. Returns the updated compact memory list, or {error}.",
+        inputSchema: { name: z.string(), content: z.string() },
+      },
+      async ({ name, content }) => {
+        const r = authorCompanionMemory(sessionId, name, content);
+        return ok(r.ok ? { authored: name, memories: r.memories } : { error: r.error });
+      },
+    );
+
+    server.registerTool(
+      "memory_list",
+      {
+        description:
+          "List YOUR OWN durable memory entries as compact {name, description, pinned} entries. Consult " +
+          "this to see what you already remember before authoring a new entry or answering from memory.",
+        inputSchema: {},
+      },
+      async () => ok({ memories: listCompanionMemories(sessionId) }),
+    );
+
+    server.registerTool(
+      "memory_read",
+      {
+        description:
+          "Read the FULL MEMORY.md of one of YOUR OWN durable memory entries by name. Returns {name, " +
+          "content}, or {error} if there's no such entry.",
+        inputSchema: { name: z.string() },
+      },
+      async ({ name }) => {
+        const content = readCompanionMemory(sessionId, name);
+        return ok(content == null ? { error: `no memory "${name}"` } : { name, content });
+      },
+    );
+
+    server.registerTool(
+      "memory_remove",
+      {
+        description:
+          "Remove one of YOUR OWN durable memory entries by name (curation/dedup). Returns the updated " +
+          "compact memory list, or {error} if there's no such entry.",
+        inputSchema: { name: z.string() },
+      },
+      async ({ name }) => {
+        const r = removeCompanionMemory(sessionId, name);
+        return ok(r.ok ? { removed: name, memories: r.memories } : { error: r.error });
+      },
+    );
+  }
+
   private buildServer(sessionId: string, role: SessionRole): McpServer {
     const db = this.db;
     const sessions = this.sessions;
@@ -236,6 +311,8 @@ export class OrchestrationMcpRouter {
     this.registerChatReplyIfCompanion(server, sessionId);
     // Companion Phase 2: additive, single-session-gated self-authored skill tools (SAME gate as chat_reply).
     this.registerCompanionSkillTools(server, sessionId);
+    // Companion Phase 2: additive, single-session-gated self-authored durable memory tools (SAME gate).
+    this.registerCompanionMemoryTools(server, sessionId);
 
     // Companion (epic Phase 1): the long-lived `assistant` role gets a MINIMAL surface — the read-only
     // my_context PLUS (only when this IS the bound companion session) the chat_reply registered just above.
