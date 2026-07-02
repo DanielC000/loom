@@ -56,6 +56,14 @@ branches, review their diffs, and merge. It even self-hosts: Loom is built using
 - **❯ The terminal cockpit.** A stateless React/Vite web viewport attaches over WebSockets and
   detaches freely: Mission Control, the task board, live terminals, runs, and git — one
   phosphor-on-dark instrument panel.
+- **💬 A chat-native personal companion.** Spin up a long-lived **companion** agent you talk to over
+  **Telegram** or an in-app web chat — the same durable, real-`claude` runtime, now reachable from your
+  phone. Give it a name and it holds the thread across restarts: it keeps a **durable memory** of what
+  matters to you (recalled automatically at the start of each chat), sets **one-shot and recurring
+  reminders** that ping you back on your own channel, authors its own private skills, and can proactively
+  check in. You manage it from one **Companion** page — chat plus config, channels, memory, reminders, and
+  its persona — behind a fail-closed security model: an encrypted bot token, sender allowlists, DM pairing
+  codes, and human-only configuration.
 - **🌐 Opt-in per-worker browser testing.** A worker profile can be granted its own isolated headless
   Playwright browser, so QA-style sessions can drive a running app and verify UI before reporting back.
 - **🚀 Guided setup + a standing Platform operator.** A built-in **Platform** operator greets you on
@@ -211,6 +219,26 @@ The monorepo (pnpm + Turbo) is three packages:
 - **`packages/daemon`** — owns everything durable: SQLite, the PTY host, the gateway, the
   project-scoped task MCP server, read-only git, and the vault auto-committer.
 - **`packages/web`** — the stateless React/Vite viewport.
+
+## Your companion
+
+Beyond the orchestration fleet, Loom can run a **companion** — a single long-lived agent you chat with
+directly, over **Telegram** or an in-app web chat, on the same daemon-owned real-`claude` runtime. It's a
+personal assistant rather than a project worker: it stays running across restarts, holds the thread of an
+ongoing conversation, and reaches you on the channel you started from.
+
+The companion grows with you. It curates a **durable memory** of what matters — your preferences, ongoing
+context, things it said it would follow up on — and recalls it silently at the start of each conversation.
+It sets its own **reminders**, both one-shot ("remind me in 20 minutes") and recurring (on a cron
+schedule), which fire back to your chat as a nudge. It writes its own private **skills** for tasks worth
+repeating, and — when you enable a cadence — proactively checks in only when there's something genuinely
+worth surfacing.
+
+You set it up and run it from a single **Companion** page: chat on one side; configuration, channels,
+memory, reminders, and its editable persona on the other. Every inbound message is treated as untrusted
+input, the bot token is encrypted at rest, senders are allowlisted, enrollment uses one-time DM pairing
+codes, and all configuration is human-only — never something the chat-reachable agent can change about
+itself.
 
 ## Screenshots
 
