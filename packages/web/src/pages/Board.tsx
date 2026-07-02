@@ -9,6 +9,7 @@ import { color, font, tone, roleTone, type Tone } from "../theme";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
 import { useVoiceLang } from "../lib/useVoiceLang";
 import { isDoneColumn } from "../lib/columnSort";
+import { taskMatchesSearch } from "../lib/taskFilter";
 // Priority chip + metadata live in one place so the board and the /terminals task card never drift.
 import { PRIORITY_META, PriorityChip, prio } from "../components/priority";
 
@@ -143,9 +144,10 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   const openTask = board.data?.tasks.find((t) => t.id === openTaskId) ?? null;
 
   // ── Client-side view filter (no server round-trip) ───────────────────────────
-  // Search matches title+body (case-insensitive substring); priority + column are multi-select
-  // (empty set = no constraint). All three AND together. Non-matching cards vanish from every
-  // column; the column header count and the "N of M shown" affordance reflect the filtered view.
+  // Search matches id+title+body (case-insensitive substring — a full card id or any prefix finds the
+  // card by its primary handle); priority + column are multi-select (empty set = no constraint). All
+  // three AND together. Non-matching cards vanish from every column; the column header count and the
+  // "N of M shown" affordance reflect the filtered view.
   const [search, setSearch] = useState("");
   const [priFilter, setPriFilter] = useState<Set<TaskPriority>>(() => new Set());
   const [colFilter, setColFilter] = useState<Set<string>>(() => new Set());
@@ -156,7 +158,7 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   const filterActive = q !== "" || priFilter.size > 0 || colFilter.size > 0;
   const allTasks = board.data?.tasks ?? [];
   const shownTasks = allTasks.filter((t) =>
-    (q === "" || `${t.title} ${t.body ?? ""}`.toLowerCase().includes(q)) &&
+    taskMatchesSearch(t, q) &&
     (priFilter.size === 0 || priFilter.has(prio(t))) &&
     (colFilter.size === 0 || colFilter.has(t.columnKey)));
 
@@ -449,7 +451,7 @@ function FilterBar({ search, onSearch, columns, priFilter, onTogglePri, colFilte
         <div style={{ position: "relative", display: "flex", alignItems: "center", flex: "1 1 240px", maxWidth: 460 }}>
           <span aria-hidden style={{ position: "absolute", left: 8, color: color.textMuted, fontSize: 13, pointerEvents: "none" }}>⌕</span>
           <Input value={search} onChange={(e) => onSearch(e.target.value)}
-            aria-label="Search tasks by title or description" placeholder="search tasks…"
+            aria-label="Search tasks by id, title, or description" placeholder="search tasks by id or text…"
             onKeyDown={(e) => { if (e.key === "Escape" && search) { e.stopPropagation(); onSearch(""); } }}
             style={{ width: "100%", paddingLeft: 26, paddingRight: search ? 26 : 8 }} />
           {search && (
