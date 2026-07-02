@@ -50,15 +50,14 @@ interface CompanionRow { sessionId: string; config?: CompanionConfigMasked; bind
 
 export default function Companion() {
   const qc = useQueryClient();
-  const [selected, setSelected] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
 
   const configs = useQuery({ queryKey: ["companionConfigs"], queryFn: api.companionConfigs });
   const bindings = useQuery({ queryKey: ["companionBindings"], queryFn: api.companionBindings });
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
 
-  // Merge configs + bindings into the companion list, keyed by session id. A session may have MANY bindings
-  // (one per channel), so we collect them into a list per companion rather than overwriting a single slot.
+  // Merge configs + bindings into the companion, keyed by session id. A session may hold MANY bindings
+  // (one per channel), so collect them into a list. Only ONE companion can ever exist (single-companion),
+  // so this list is 0 or 1 in practice — we take the first.
   const companions = useMemo<CompanionRow[]>(() => {
     const byId = new Map<string, CompanionRow>();
     for (const c of configs.data ?? []) byId.set(c.sessionId, { sessionId: c.sessionId, config: c, bindings: [] });
@@ -85,92 +84,54 @@ export default function Companion() {
     qc.invalidateQueries({ queryKey: ["companionBindings"] });
   };
 
-  // The simple, in-app-first create: POST /api/companion/provision { name } mints a working IN-APP-ONLY
-  // companion — one call spawns the assistant session, writes the in-app binding, and arms it, with ZERO
-  // external config. On success we select the new companion; its detail defaults to the Chat surface, so
-  // the user can talk to it immediately. The single-companion guard (409) is surfaced in the create card as
-  // a calm precondition (see provisionErrorMessage), not a raw error.
+  // Single-companion: provisioning mints the ONE in-app companion (spawns the assistant session, writes the
+  // in-app binding, arms it — ZERO external config). On success we just refresh; the page then renders that
+  // companion directly (Chat is its default face), so the user can talk to it at once. The single-companion
+  // guard (409) is surfaced inline in the create box as a calm precondition (provisionErrorMessage), never a
+  // raw alert.
   const provision = useMutation({
     mutationFn: (name: string) => api.provisionCompanion(provisionBody(name)),
-    onSuccess: (row) => { invalidateAll(); setSelected(row.sessionId); setCreating(false); },
-    // The create card renders its OWN inline error (the 409 single-companion guard as a calm Callout), so
-    // opt out of the global blocking window.alert (main.tsx) — a raw modal is exactly the alarming surface
-    // this flow avoids.
+    onSuccess: () => { invalidateAll(); },
     meta: { inlineError: true },
   });
 
-  const current = companions.find((c) => c.sessionId === selected) ?? null;
+  // Exactly one companion can exist — render THAT one directly (no list, no selector). None yet → the
+  // create box IS the page. This structurally enforces single-companion: there is no "new" affordance once a
+  // companion exists (the provision endpoint 409-guards a second server-side too).
+  const current = companions[0] ?? null;
+  const loading = configs.isLoading || bindings.isLoading;
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16, maxWidth: 1180 }}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 16, alignSelf: "start" }}>
-      <Panel>
-        <SectionLabel>Companions</SectionLabel>
-        <p style={{ ...hint, margin: "0 0 10px" }}>
-          Personal <code>claude</code> agents you talk to right here in the app — in-app chat is a
-          companion's default face. Human-managed; connect Telegram optionally (its bot token is stored
-          encrypted and never shown).
-        </p>
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {companions.map((c) => {
-            const on = c.config?.enabled ?? false;
-            return (
-              <Button key={c.sessionId} variant={c.sessionId === selected ? "primary" : "default"}
-                style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8 }}
-                onClick={() => { setSelected(c.sessionId); setCreating(false); }}
-                title={c.sessionId}>
-                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {sessionLabel(c.sessionId)}
-                </span>
-                {c.config && c.bindings.length === 0 && (
-                  <span style={{ fontSize: 9, color: color.amber, fontFamily: font.mono }} title="provisioned but no chat binding — not reachable yet">NO ROUTE</span>
-                )}
-                {c.config
-                  ? <span style={{ fontSize: 9, color: on ? color.phosphor : color.textMuted, fontFamily: font.mono }}>{on ? "ON" : "OFF"}</span>
-                  : <span style={{ fontSize: 9, color: color.cyan, fontFamily: font.mono }} title="access binding only — no run config yet">BIND</span>}
-              </Button>
-            );
-          })}
-          {companions.length === 0 && !configs.isLoading && (
-            <span style={{ color: color.textMuted, fontSize: 12 }}>No companions yet.</span>
-          )}
-        </div>
-        <div style={{ marginTop: 12 }}>
-          <Button variant="primary" style={{ width: "100%" }} onClick={() => { setCreating(true); setSelected(null); }}>+ New companion</Button>
-        </div>
-      </Panel>
-      <GlobalHome />
-      </div>
-
+    <div style={{ maxWidth: 1180 }}>
       <Panel style={{ minHeight: "72vh", padding: 14 }}>
-        {creating ? (
-          <CompanionCreate
-            onCreate={(name) => provision.mutate(name)}
-            pending={provision.isPending}
-            error={provision.error as CompanionProvisionError | null}
-            onCancel={() => { setCreating(false); provision.reset(); }}
-          />
-        ) : current ? (
+        {current ? (
           <CompanionDetail
             key={current.sessionId}
             companion={current}
             label={sessionLabel(current.sessionId)}
             onChanged={invalidateAll}
-            onDeleted={() => { invalidateAll(); setSelected(null); }}
+            onDeleted={invalidateAll}
           />
+        ) : loading ? (
+          <p style={{ color: color.textMuted, padding: 12 }}>Loading…</p>
         ) : (
-          <p style={{ color: color.textMuted, padding: 12 }}>Select a companion to manage it, or create a new one.</p>
+          <CompanionCreate
+            onCreate={(name) => provision.mutate(name)}
+            pending={provision.isPending}
+            error={provision.error as CompanionProvisionError | null}
+          />
         )}
       </Panel>
     </div>
   );
 }
 
-// ── Global proactive home ───────────────────────────────────────────────────────
-// The proactive HOME is a daemon-GLOBAL value (app_meta), NOT per-companion — so it lives here in the
-// sidebar, managed on its own, rather than buried in a per-companion form where editing one companion
-// would silently redirect every companion's heartbeats (the footgun this control removes).
-function GlobalHome() {
+// ── Proactive home (Manage-tab section) ──────────────────────────────────────────
+// The proactive HOME is a daemon-GLOBAL value (app_meta), NOT per-companion. With exactly one companion, it
+// lives inside that companion's Manage tab (alongside run config / channels / persona / …) rather than a
+// standalone sidebar card. Behavior is unchanged — set / change / clear the ONE shared home; changing it
+// moves every heartbeat. Styled as a Manage `<section>` to match its siblings (no nested card).
+function ProactiveHomeSection() {
   const qc = useQueryClient();
   const home = useQuery({ queryKey: ["companionHome"], queryFn: api.companionHome });
   const [editing, setEditing] = useState(false);
@@ -205,11 +166,11 @@ function GlobalHome() {
   };
 
   return (
-    <Panel>
-      <SectionLabel>Proactive home</SectionLabel>
-      <p style={{ ...hint, margin: "0 0 10px" }}>
-        Daemon-<strong style={{ color: color.text }}>global</strong> — the one chat every companion's
-        heartbeats post to. Not per companion; changing it here moves them all.
+    <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <SectionLabel style={{ margin: 0 }}>Proactive home</SectionLabel>
+      <p style={{ ...hint, margin: 0 }}>
+        Daemon-<strong style={{ color: color.text }}>global</strong> — the one chat this companion's
+        heartbeats post to (shared by every companion; changing it moves them all).
       </p>
       {editing ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -231,7 +192,7 @@ function GlobalHome() {
           {clear.error && <span style={errStyle}>{(clear.error as Error).message}</span>}
         </div>
       )}
-    </Panel>
+    </section>
   );
 }
 
@@ -248,7 +209,7 @@ function CompanionCreate({ onCreate, pending, error, onCancel }: {
   onCreate: (name: string) => void;
   pending: boolean;
   error: CompanionProvisionError | null;
-  onCancel: () => void;
+  onCancel?: () => void; // optional — when the create box IS the page (no companion yet), there's nothing to cancel back to
 }) {
   const [name, setName] = useState("");
   const submit = () => { if (!pending) onCreate(name); };
@@ -286,7 +247,7 @@ function CompanionCreate({ onCreate, pending, error, onCancel }: {
 
       <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
         <Button variant="primary" disabled={pending} onClick={submit}>{pending ? "Creating…" : "Create companion"}</Button>
-        <Button variant="ghost" onClick={onCancel} disabled={pending}>Cancel</Button>
+        {onCancel && <Button variant="ghost" onClick={onCancel} disabled={pending}>Cancel</Button>}
       </div>
     </div>
   );
@@ -401,6 +362,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
         <div role="tabpanel" id="companion-panel-manage" aria-labelledby="companion-tab-manage"
           style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <ConfigSection companion={companion} onChanged={onChanged} onDeleted={onDeleted} />
+          <ProactiveHomeSection />
           <ChannelsSection companion={companion} onChanged={onChanged} />
           <PersonaSection sessionId={companion.sessionId} />
           <SkillsSection sessionId={companion.sessionId} />
@@ -548,7 +510,7 @@ function ConfigSection({ companion, onChanged, onDeleted }: { companion: Compani
           <p style={{ ...hint, margin: 0 }}>Changes apply on the next daemon restart.</p>
           <p style={{ ...hint, margin: 0 }}>
             The proactive <strong style={{ color: color.text }}>home</strong> is daemon-global (shared by every
-            companion) — manage it under <strong style={{ color: color.text }}>Proactive home</strong> in the sidebar.
+            companion) — manage it under <strong style={{ color: color.text }}>Proactive home</strong> below in this Manage tab.
           </p>
           <div>
             {confirmDel ? (
