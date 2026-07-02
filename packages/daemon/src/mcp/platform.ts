@@ -849,7 +849,8 @@ export class PlatformMcpRouter {
           "title (required), body?, priority? (p0|p1|p2|p3, low number = higher priority, default p2), and an " +
           "optional columnKey (omit to land in the project's role-resolved defaultLanding column). Reuses the " +
           "SAME create path the in-project loom-tasks tasks_create uses, so columns/priorities behave identically. " +
-          "Validates the projectId exists (404 otherwise). Returns the created Task row.",
+          "projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Error if the " +
+          "id is unknown or an ambiguous prefix (the error names the candidate ids). Returns the created Task row.",
         inputSchema: {
           projectId: z.string(),
           title: z.string(),
@@ -859,8 +860,9 @@ export class PlatformMcpRouter {
         },
       },
       async ({ projectId, title, body, priority, columnKey }) => {
-        if (!db.getProject(projectId)) return ok({ error: "project not found" });
-        return ok(createProjectTask(db, projectId, { title, body, priority, columnKey }));
+        const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+        if ("error" in project) return ok(project);
+        return ok(createProjectTask(db, project.id, { title, body, priority, columnKey }));
       },
     );
 
@@ -870,12 +872,15 @@ export class PlatformMcpRouter {
         description:
           "Read ONE full task (title + body) by id on ANOTHER project's board, by explicit projectId + taskId. " +
           "Reuses the SAME project-scoped read the in-project loom-tasks tasks_get uses, so a taskId that " +
-          "doesn't belong to the named project resolves to not-found. Read-only. Error if unknown.",
+          "doesn't belong to the named project resolves to not-found. projectId accepts the full id OR an " +
+          "unambiguous 8-char id-prefix (mirrors project_get). Read-only. Error if unknown or an ambiguous " +
+          "prefix (the error names the candidate ids).",
         inputSchema: { projectId: z.string(), taskId: z.string() },
       },
       async ({ projectId, taskId }) => {
-        if (!db.getProject(projectId)) return ok({ error: "project not found" });
-        return ok(getProjectTask(db, projectId, taskId));
+        const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+        if ("error" in project) return ok(project);
+        return ok(getProjectTask(db, project.id, taskId));
       },
     );
 
@@ -888,7 +893,9 @@ export class PlatformMcpRouter {
           "MOVE — validated to be an EXISTING column on that project's board, rejected otherwise so a move can " +
           "never orphan the card), position?, priority? (p0|p1|p2|p3). Reuses the SAME backing path + column " +
           "validation as the in-project loom-tasks tasks_update. A taskId not on the named project resolves to " +
-          "not-found. Returns the updated Task row. 404 if the project is unknown.",
+          "not-found. projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). " +
+          "Returns the updated Task row. Error if the project is unknown or an ambiguous prefix (the error " +
+          "names the candidate ids).",
         inputSchema: {
           projectId: z.string(),
           taskId: z.string(),
@@ -902,8 +909,9 @@ export class PlatformMcpRouter {
       // Spread only the keys the caller PROVIDED (zod omits absent optionals) — mirrors the in-project
       // tasks_update `{ id, ...patch }`, so an undefined value never clobbers an unspecified field.
       async ({ projectId, taskId, ...patch }) => {
-        if (!db.getProject(projectId)) return ok({ error: "project not found" });
-        return ok(updateProjectTask(db, projectId, taskId, patch));
+        const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+        if ("error" in project) return ok(project);
+        return ok(updateProjectTask(db, project.id, taskId, patch));
       },
     );
 
