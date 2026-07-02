@@ -7,6 +7,49 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-07-03
+
+**The Companion** — a chat-native personal agent on the same durable, real-`claude` PTY runtime as your
+project fleet. Talk to it in the cockpit (in-app, the default) or over Telegram; it holds the thread across
+restarts, remembers what matters to you, sets its own reminders, writes its own skills, and can proactively
+check in — behind a fail-closed security model. Plus a broad cockpit-UX pass and a platform-quality batch.
+
+### Added
+- **The Companion — a chat-native personal agent.** A long-lived assistant you converse with directly,
+  reachable from an **in-app cockpit chat** (the default, loopback-authenticated) and optionally over
+  **Telegram**. One **Companion** page hosts it all: chat, plus a **Manage** tab for configuration, channels,
+  memory, reminders, its editable persona, and a live-terminal view of the companion's own PTY.
+- **Companion durable memory.** The companion curates its own memory store — facts about you and your
+  ongoing relationship — and silently recalls it at the start of each conversation. View/prune it in Manage.
+- **Companion reminders.** One-shot ("remind me in 20 minutes") and recurring (cron) reminders that fire
+  back to the chat you set them from. View/prune in Manage.
+- **Companion self-authored skills** — the companion writes and refines its own private, on-demand skills.
+- **Companion proactive heartbeat** — an optional periodic check-in that speaks only when there's something
+  genuinely worth surfacing.
+- **Fail-closed companion security** — bot token encrypted at rest (AES-256-GCM), sender allowlists, one-time
+  DM pairing codes (single-use / TTL / rate-limited), a restricted-tools profile, and human-only configuration
+  so the chat-reachable agent can never reconfigure itself.
+- **The companion learns its own given name**, and its base brief was strengthened (identity, an
+  anti-fabrication rule, a declarative-not-imperative memory rule, and a hardened untrusted-input posture).
+
+### Changed
+- **The companion is managed as a companion, not a profile row** — its config, channels, memory, reminders,
+  and persona live on the single Companion page (decoupled from Profiles), shown only when a companion is active.
+- **Cockpit UX pass** — the Orchestration page folds into an expandable fleet-card drill-down; archived
+  sessions render inside fleet cards; Usage session cost reframed as consumption wording (the $ estimate kept);
+  clearer Overview stats; a disambiguated "run" vocabulary.
+- **`held` is now the single human brake** — the `blocked` column is retired; a held card is the owner's
+  don't-work / don't-nag flag in any column.
+
+### Fixed
+- A **platform + quality batch**: task-tool id resolution accepts unambiguous 8-char id prefixes (projects
+  and tasks, on both the worker and platform surfaces); Board search matches by card id; the Platform Lead
+  resume doc is lineage-scoped so concurrent Leads can't clobber it; a loopback `serve-static` helper replaces
+  hand-rolled servers for eyeballing static HTML; the companion no longer burns a "standing by" turn on a
+  fresh boot; and `worker_redirect` no longer fires a spurious idle nudge.
+- **Sonnet-5 context window** sized to its real 1M window (was mis-sized).
+- Companion unbind fully tears down per-channel bindings, allowed senders, and unconsumed pairing codes.
+
 ## [0.13.0] — 2026-07-01
 
 **Session usage telemetry** — your real billed spend, over time, collected token-free — plus a **Vault
