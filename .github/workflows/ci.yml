@@ -37,3 +37,32 @@ jobs:
 
       - name: Run daemon test suite (hermetic)
         run: pnpm --filter @loom/daemon test:daemon
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.6.4 # match the repo's packageManager (package.json)
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Install Playwright browsers (Chromium)
+        run: pnpm --filter @loom/web exec playwright install --with-deps chromium
+
+      - name: Run e2e suite
+        run: pnpm --filter @loom/web test:e2e
