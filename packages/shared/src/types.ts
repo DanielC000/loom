@@ -810,6 +810,8 @@ export interface CompanionConfigMasked {
   provisioned: boolean;
   /** The last 4 characters of the bot token, for human confirmation — NEVER the token itself. */
   tokenLast4: string;
+  /** The companion's given (human-friendly) name, or "" when never named. */
+  name: string;
   /** The transport channel (e.g. "telegram"). */
   channel: string;
   /** The owner/allowlisted chat id this companion is bootstrapped against. */

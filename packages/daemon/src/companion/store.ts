@@ -169,6 +169,7 @@ export function maskCompanionConfig(
     tokenConfigured,
     provisioned: row.provisioned,
     tokenLast4,
+    name: row.name,
     channel: row.channel,
     allowedChatId: row.allowedChatId,
     chatScope: row.chatScope,

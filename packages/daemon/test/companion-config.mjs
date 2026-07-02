@@ -95,6 +95,13 @@ try {
     check("masked: configured:true", masked.configured === true);
     check("masked: exposes ONLY the last-4 of the token", masked.tokenLast4 === LAST4);
     check("masked: carries channel/cadence/scope/enabled", masked.channel === "telegram" && masked.heartbeatIntervalMinutes === 360 && masked.chatScope === "dm" && masked.enabled === true);
+    check("masked: name is empty string when never named", masked.name === "");
+    // name round-trip: a config given a name surfaces it in the masked read (the read-back fix under test).
+    const named = db.upsertCompanionConfig({
+      sessionId: "sess-1", botTokenBlob: blob, channel: "telegram", allowedChatId: "chat-1",
+      chatScope: "dm", heartbeatIntervalMinutes: 360, heartbeatPrompt: null, enabled: true, name: "Ada",
+    });
+    check("masked: a set name round-trips through maskCompanionConfig", maskCompanionConfig(named, db.getCompanionHome()).name === "Ada");
     const maskedJson = JSON.stringify(masked);
     check("masked: the plaintext token is ABSENT from the masked JSON", !maskedJson.includes(PLAINTEXT));
     check("masked: no property named like a token blob leaked", !maskedJson.includes("botToken") && !maskedJson.includes("v1:"));
