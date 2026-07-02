@@ -3,7 +3,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { spawn, type IPty } from "node-pty";
-import type { PermissionPolicy, PtyGeometry, SessionRole } from "@loom/shared";
+import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
 import { writeSessionSettings } from "./claude-settings.js";
@@ -685,13 +685,14 @@ interface Subscriber {
  */
 export type QueueSource = "human" | "system";
 /**
- * An originating chat ROUTE pinned to a turn (Loom Companion multi-channel reply routing). Structurally the
- * companion's `CompanionRoute`; kept as a local type so the pty host takes NO dependency on the companion
- * layer (it's a lower-level primitive shared by ALL sessions). Optional on QueuedMessage: a message with NO
- * route is a plain non-companion turn (every existing caller ⇒ undefined ⇒ byte-identical). The route also
- * KEYS drainPending's coalescing so cross-route messages never merge into one turn (see drainPending).
+ * An originating chat ROUTE pinned to a turn (Loom Companion multi-channel reply routing). An ALIAS of
+ * `@loom/shared`'s canonical `CompanionRoute` — importing FROM shared, never from the companion layer, so
+ * the pty host takes NO dependency on the companion module (it's a lower-level primitive shared by ALL
+ * sessions). Optional on QueuedMessage: a message with NO route is a plain non-companion turn (every
+ * existing caller ⇒ undefined ⇒ byte-identical). The route also KEYS drainPending's coalescing so
+ * cross-route messages never merge into one turn (see drainPending).
  */
-export type TurnRoute = { channel: string; chatId: string };
+export type TurnRoute = CompanionRoute;
 export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute };
 
 interface Live {

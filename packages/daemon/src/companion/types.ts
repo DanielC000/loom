@@ -9,6 +9,7 @@
  * Clean-room: the adapter → normalized-message split is modelled on OpenClaw/Hermes' Channel-Adapter
  * normalization pattern (learned, not copied).
  */
+import type { CompanionRoute as SharedCompanionRoute } from "@loom/shared";
 
 /** A non-text payload carried by an inbound update (Phase 1 carries the SHAPE; ingestion is a later card). */
 export interface InboundAttachment {
@@ -64,11 +65,11 @@ export interface ChannelAdapter {
  * An originating chat ROUTE — WHICH chat on WHICH channel a turn came from (companion inbound) or is
  * addressed to (proactive/heartbeat home). Threaded per-turn through the pty host so an agent's chat_reply
  * resolves DAEMON-side to the exact route of the turn it is answering — never a shared/guessed channel.
+ * ALIAS, not a duplicate: the canonical shape lives in `@loom/shared` (shared is the dependency leaf and
+ * can't import this module back, so it can't be the one importing FROM here) — keeping the local name so
+ * every existing `./types.js` importer is unchanged.
  */
-export interface CompanionRoute {
-  channel: string;
-  chatId: string;
-}
+export type CompanionRoute = SharedCompanionRoute;
 
 /**
  * A RECURRING companion reminder (Companion Memory & Reminders Design, Surface 2 s3) — a named cron job

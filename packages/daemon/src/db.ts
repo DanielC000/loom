@@ -33,7 +33,7 @@ import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PresetPrompt, PresetPromptSuggestion,
-  CompanionBinding, CompanionAllowedSender,
+  CompanionBinding, CompanionAllowedSender, CompanionRoute,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
@@ -54,7 +54,7 @@ import type { CompanionReminder } from "./companion/types.js";
  */
 export type PairingRedeemResult =
   | { outcome: "rejected" }
-  | { outcome: "bound"; sessionId: string; channel: string; chatId: string; scope: "dm" | "group" }
+  | ({ outcome: "bound"; sessionId: string; scope: "dm" | "group" } & CompanionRoute)
   | { outcome: "sender-added"; sessionId: string };
 
 /**
@@ -1243,7 +1243,7 @@ export class Db {
    * (the caller/REST surfaces this as a 409). Stamps created_at on first insert; keeps it on update
    * (ON CONFLICT touches only chat_id/scope — channel is part of the conflict key). Returns the stored row.
    */
-  upsertCompanionBinding(input: { sessionId: string; channel: string; chatId: string; scope?: "dm" | "group" }): CompanionBinding {
+  upsertCompanionBinding(input: { sessionId: string; scope?: "dm" | "group" } & CompanionRoute): CompanionBinding {
     const existing = this.db.prepare("SELECT created_at FROM companion_bindings WHERE session_id = ? AND channel = ?").get(input.sessionId, input.channel) as Row | undefined;
     const createdAt = (existing?.created_at as string) ?? new Date().toISOString();
     const b: CompanionBinding = {
@@ -1447,7 +1447,7 @@ export class Db {
   // Durable over the EXISTING app_meta key/value store (single JSON key, NO new table) — mirrors
   // getPlatformConfig/setPlatformConfig. Phase 1 only LAYS this; the proactive card (9488951e) reads it.
   /** The stored home channel target, or null when unset/corrupt (never throws). */
-  getCompanionHome(): { channel: string; chatId: string } | null {
+  getCompanionHome(): CompanionRoute | null {
     const raw = this.getMeta(COMPANION_HOME_KEY);
     if (!raw) return null;
     try {
@@ -1457,7 +1457,7 @@ export class Db {
     return null;
   }
   /** Upsert the home channel target (a single app_meta JSON key). */
-  setCompanionHome(home: { channel: string; chatId: string }): void {
+  setCompanionHome(home: CompanionRoute): void {
     this.setMeta(COMPANION_HOME_KEY, JSON.stringify({ channel: home.channel, chatId: home.chatId }));
   }
   /** Clear the home channel target (drop the app_meta key) — proactive delivery falls back to OFF. */

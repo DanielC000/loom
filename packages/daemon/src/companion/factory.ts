@@ -20,10 +20,10 @@ import type { CompanionBinding } from "@loom/shared";
  *  + the pairing-code redemption txn (for DM-pairing). */
 export interface CompanionBindingStore extends AllowlistReader, PairingStore {
   listCompanionBindings(): CompanionBinding[];
-  upsertCompanionBinding(input: { sessionId: string; channel: string; chatId: string; scope?: "dm" | "group" }): CompanionBinding;
+  upsertCompanionBinding(input: { sessionId: string; scope?: "dm" | "group" } & CompanionRoute): CompanionBinding;
   /** The proactive HOME channel target (card 9488951e) — carried explicitly on the heartbeat's submitted
    *  turn (as its per-turn route), not consulted by deliverReply. */
-  getCompanionHome(): { channel: string; chatId: string } | null;
+  getCompanionHome(): CompanionRoute | null;
 }
 
 /** Drop the db-only createdAt — the gateway's routing map wants just the SessionBinding shape. */

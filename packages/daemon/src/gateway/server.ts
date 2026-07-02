@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute } from "@loom/shared";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -887,7 +887,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (typeof b.enabled === "boolean") enabled = b.enabled;
     else if (b.enabled !== undefined && b.enabled !== null) return reply.code(400).send({ error: "enabled must be a boolean" });
     // home: optional { channel, chatId } proactive target.
-    let home: { channel: string; chatId: string } | null = null;
+    let home: CompanionRoute | null = null;
     if (b.home !== undefined && b.home !== null) {
       const h = b.home as { channel?: unknown; chatId?: unknown };
       if (!isNonBlankStr(h.channel) || !isNonBlankStr(h.chatId)) return reply.code(400).send({ error: "home must be { channel, chatId } non-empty strings" });

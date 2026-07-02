@@ -821,7 +821,7 @@ export interface CompanionConfigMasked {
   /** The framed proactive-prompt text used on each heartbeat turn. */
   heartbeatPrompt: string;
   /** The proactive HOME channel target (app_meta-backed, daemon-global), or null when unset. */
-  home: { channel: string; chatId: string } | null;
+  home: CompanionRoute | null;
   /** Whether this config is enabled — a disabled config is treated as OFF at boot. */
   enabled: boolean;
   /**
@@ -862,10 +862,12 @@ export interface Schedule {
 }
 
 /**
- * An originating chat ROUTE — WHICH chat on WHICH channel. Mirrors daemon/src/companion/types.ts'
- * `CompanionRoute` verbatim (duplicated here, not imported: `shared` has no dependency on the daemon's
- * companion subsystem); the two are structurally identical so a daemon `TurnRoute`/`CompanionRoute`
- * value is assignable to this shape with no conversion.
+ * An originating chat ROUTE — WHICH chat on WHICH channel. THE canonical definition (shared is the
+ * dependency leaf and can't import back from the daemon, so this is where the shape has to live).
+ * The daemon's `CompanionRoute` (companion/types.ts) and `TurnRoute` (pty/host.ts) both ALIAS this
+ * type via `import type { CompanionRoute } from "@loom/shared"` — daemon → shared is an allowed
+ * dependency direction — so the two names stay structurally identical by construction, not by
+ * convention.
  */
 export interface CompanionRoute {
   channel: string;

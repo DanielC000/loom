@@ -21,7 +21,7 @@ import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { readCompanionConfig, DEFAULT_HEARTBEAT_PROMPT, type CompanionConfig } from "./config.js";
 import { TELEGRAM_CHANNEL } from "./telegram.js";
 import type { CompanionConfigRow } from "../db.js";
-import type { CompanionConfigMasked } from "@loom/shared";
+import type { CompanionConfigMasked, CompanionRoute } from "@loom/shared";
 
 /** The narrow db surface the resolver needs — the run-config accessors + the app_meta home store. */
 export interface CompanionConfigStore {
@@ -32,8 +32,8 @@ export interface CompanionConfigStore {
     chatScope: "dm" | "group"; heartbeatIntervalMinutes: number; heartbeatPrompt: string | null; enabled: boolean;
     provisioned?: boolean;
   }): CompanionConfigRow;
-  getCompanionHome(): { channel: string; chatId: string } | null;
-  setCompanionHome(home: { channel: string; chatId: string }): void;
+  getCompanionHome(): CompanionRoute | null;
+  setCompanionHome(home: CompanionRoute): void;
 }
 
 /**
@@ -146,7 +146,7 @@ export function resolveEffectiveConfig(
  */
 export function maskCompanionConfig(
   row: CompanionConfigRow,
-  home: { channel: string; chatId: string } | null,
+  home: CompanionRoute | null,
   env?: NodeJS.ProcessEnv,
   keyPath?: string,
 ): CompanionConfigMasked {

@@ -21,6 +21,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Db } from "../db.js";
+import type { CompanionRoute } from "@loom/shared";
 
 /** The trusted-daemon framing tag — also the marker the no-stacking guard matches in the pending queue. */
 export const HEARTBEAT_TAG = "[loom:heartbeat]";
@@ -42,7 +43,7 @@ export interface HeartbeatPty {
     text: string,
     source?: "human" | "system",
     onDeliver?: () => void,
-    route?: { channel: string; chatId: string },
+    route?: CompanionRoute,
   ): { delivered: boolean; position?: number };
   /** The session's queued message texts (FIFO) — the no-stacking guard checks for an unconsumed heartbeat. */
   getPending(sessionId: string): string[];
