@@ -1522,6 +1522,9 @@ export class Db {
    * self-expires — a lockout window must survive a config churn so it can't be reset by delete/recreate).
    */
   deleteCompanionConfig(sessionId: string): void {
+    // Deliberately does NOT cascade companion_reminders: reminders are SESSION-scoped (not config-scoped),
+    // so they survive a config disable/re-enable on the same session — only a session delete cleans them
+    // (see the session-delete cascades elsewhere in this file).
     this.db.transaction(() => {
       this.db.prepare("DELETE FROM companion_config WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ?").run(sessionId);

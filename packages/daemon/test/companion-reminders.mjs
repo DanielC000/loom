@@ -55,6 +55,10 @@ function makeEnv(opts = {}) {
   return {
     dbFile, db, projId, agentId, sessId, alive, enqueued, watcher,
     clearPending: () => { pendingQueue = []; },
+    // Consume ONLY the pending turn(s) containing `needle`, leaving any other reminder's turn untouched —
+    // simulates ONE reminder's turn draining while another's stays stacked (the collision-guard test needs
+    // this asymmetry; clearPending() alone can't produce it).
+    dropPendingContaining: (needle) => { pendingQueue = pendingQueue.filter((t) => !t.includes(needle)); },
   };
 }
 function cleanupEnv(e) {
@@ -215,7 +219,76 @@ function addReminder(e, over = {}) {
   cleanupEnv(e);
 }
 
+// --- 10. No-stacking guard is COLLISION-PROOF across lexically-prefixing ids ("1" vs "10") ---
+{
+  const e = makeEnv();
+  const id1 = addReminder(e, { id: "1", prompt: "ONE" });
+  const id10 = addReminder(e, { id: "10", prompt: "TEN" });
+  const t0 = new Date();
+  e.watcher.tick(t0); // both fire; both stay pending (never consumed)
+  check("collision-setup: both ids fire once each", e.enqueued.length === 2);
+  // Consume id "1"'s OWN turn only — id "10"'s turn stays pending in the FIFO. Pre-fix, id "1"'s guard
+  // `t.startsWith(reminderMarker("1"))` also matched id "10"'s still-pending text (since
+  // "[loom:reminder]:10 …" starts with the UNTERMINATED "[loom:reminder]:1"), wrongly re-suppressing it.
+  e.dropPendingContaining(`${reminderMarker(id1)} `);
+  const boundary = nextBoundary(EVERY_MINUTE, t0);
+  e.watcher.tick(boundary);
+  check(
+    "collision-proof: id \"1\" is NOT falsely suppressed by id \"10\"'s still-pending turn (fires again)",
+    e.enqueued.filter((en) => en.text.startsWith(`${reminderMarker(id1)} `)).length === 2,
+  );
+  check(
+    "collision-proof: id \"10\" still correctly defers on its OWN genuinely-pending turn",
+    e.enqueued.filter((en) => en.text.startsWith(`${reminderMarker(id10)} `)).length === 1,
+  );
+  cleanupEnv(e);
+}
+
+// --- 11. BOUNDED-DEFER: repeated PARKED ticks emit exactly ONE deferred event for the whole streak ---
+{
+  const e = makeEnv({ parked: true });
+  addReminder(e);
+  const t0 = new Date();
+  e.watcher.tick(t0);
+  check("bounded-defer(parked): the first due parked tick emits exactly one deferred event", events(e, "companion_reminder_deferred").length === 1);
+  // A 2nd AND 3rd CONSECUTIVE parked tick — still due (createdAt is an hour in the past) — must add NO
+  // further deferred event (bounded log growth, one event per defer STREAK, not per tick).
+  e.watcher.tick(new Date(t0.getTime() + 1_000));
+  e.watcher.tick(new Date(t0.getTime() + 2_000));
+  check("bounded-defer(parked): a 2nd AND 3rd consecutive parked tick emit NO additional deferred event", events(e, "companion_reminder_deferred").length === 1);
+  check("bounded-defer(parked): still nothing ever enqueued", e.enqueued.length === 0);
+  cleanupEnv(e);
+}
+
+// --- 12. BOUNDED-DEFER: repeated PENDING (no-stacking) ticks emit exactly ONE deferred event for the streak ---
+{
+  const e = makeEnv();
+  addReminder(e);
+  const t0 = new Date();
+  e.watcher.tick(t0); // fires; the turn is never consumed (stays pending) for the rest of this test
+  const boundary = nextBoundary(EVERY_MINUTE, t0);
+  e.watcher.tick(boundary); // due again, still pending → the 1st deferred event of the streak
+  check("bounded-defer(pending): the first re-due pending tick emits exactly one deferred event", events(e, "companion_reminder_deferred").length === 1);
+  e.watcher.tick(new Date(boundary.getTime() + 1));
+  e.watcher.tick(new Date(boundary.getTime() + 2));
+  check("bounded-defer(pending): a 2nd AND 3rd consecutive pending tick emit NO additional deferred event", events(e, "companion_reminder_deferred").length === 1);
+  check("bounded-defer(pending): still exactly the one initial fire", e.enqueued.length === 1);
+  cleanupEnv(e);
+}
+
+// --- 13. INVALID-CRON: a malformed cron hits isDue's catch branch — tick() never throws, never fires ---
+{
+  const e = makeEnv();
+  addReminder(e, { cron: "not-a-cron" });
+  let threw = false;
+  try { e.watcher.tick(new Date()); } catch { threw = true; }
+  check("invalid-cron: tick() does not throw on a malformed cron expression", !threw);
+  check("invalid-cron: a malformed-cron reminder never fires", e.enqueued.length === 0);
+  check("invalid-cron: no fired or deferred event either", events(e, "companion_reminder_fired").length === 0 && events(e, "companion_reminder_deferred").length === 0);
+  cleanupEnv(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — CompanionReminderWatcher fires each due/live/enabled reminder exactly once (carrying its own route), defers under park (once per streak, per reminder), skips a stopped companion, never stacks a reminder against its OWN unconsumed turn (distinct reminders don't cross-suppress), restart-seeds per reminder id (no double-fire), never fires a disabled row, and stays fully inert with zero rows."
+  ? "\n✅ ALL PASS — CompanionReminderWatcher fires each due/live/enabled reminder exactly once (carrying its own route), defers under park (once per streak, per reminder, bounded across repeated ticks), skips a stopped companion, never stacks a reminder against its OWN unconsumed turn (distinct reminders don't cross-suppress, even across lexically-prefixing ids), restart-seeds per reminder id (no double-fire), never fires a disabled row, survives a malformed cron with no throw and no fire, and stays fully inert with zero rows."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -41,6 +41,29 @@ export function framedReminder(reminder: Pick<CompanionReminder, "id" | "prompt"
   return `${reminderMarker(reminder.id)} ${reminder.prompt}`;
 }
 
+/**
+ * A reminder's next scheduled fire time (ISO), for DISPLAY (the reminder_create/reminder_list MCP tools —
+ * s4's concern), mirroring the watcher's OWN due-ness anchor: strictly after its most recent durable
+ * `companion_reminder_fired` event, or its `createdAt` when it has never fired (the SAME anchor isDue
+ * uses, scanned from the durable event log the same way seedLastFired does on restart). Returns null on an
+ * invalid cron — defensive; reminder_create validates at the boundary so this should never be reached from
+ * a row this engine created.
+ */
+export function reminderNextFireAt(db: Db, reminder: Pick<CompanionReminder, "id" | "sessionId" | "cron" | "createdAt">): string | null {
+  let from = new Date(reminder.createdAt);
+  for (const e of db.listEvents(reminder.sessionId)) {
+    if (e.kind !== "companion_reminder_fired") continue;
+    if ((e.detail as { reminderId?: string } | undefined)?.reminderId !== reminder.id) continue;
+    const ms = new Date(e.ts).getTime();
+    if (!Number.isNaN(ms) && ms > from.getTime()) from = new Date(ms);
+  }
+  try {
+    return nextFireAt(reminder.cron, from);
+  } catch {
+    return null;
+  }
+}
+
 export interface ReminderWatcherDeps {
   db: Db;
   pty: HeartbeatPty;
@@ -88,8 +111,12 @@ export class CompanionReminderWatcher {
         this.deferOnce(reminder.id, now, { reason: "rate-limited", until: session.rateLimitedUntil });
         continue;
       }
-      // No-stacking: a prior unconsumed turn for THIS SAME reminder → don't stack a second.
-      if (pending.some((t) => t.startsWith(reminderMarker(reminder.id)))) {
+      // No-stacking: a prior unconsumed turn for THIS SAME reminder → don't stack a second. Matched WITH
+      // the trailing space `framedReminder` always emits after the marker (never a bare `reminderMarker`
+      // prefix) so this stays collision-proof once ids can be lexical prefixes of one another (e.g. id "1"
+      // vs id "10": "[loom:reminder]:10 …" does NOT start with "[loom:reminder]:1 ", only with the
+      // unterminated "[loom:reminder]:1").
+      if (pending.some((t) => t.startsWith(`${reminderMarker(reminder.id)} `))) {
         this.deferOnce(reminder.id, now, { reason: "pending" });
         continue;
       }

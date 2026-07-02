@@ -346,6 +346,11 @@ async function main(): Promise<void> {
   const companionHooks: CompanionReplyHooks = {
     companionSessionId: companionCfg?.sessionId ?? null,
     deliverReply: (sid, text) => companionController.deliverReply(sid, text),
+    // reminder_create's route capture (mirrors wake_me's schedule-time getActiveTurnOrigin read).
+    getActiveTurnOrigin: (sid) => pty.getActiveTurnOrigin(sid),
+    // ARM-ON-CREATE: reminder_create/cancel drive the SAME reconcile a config write already triggers, so a
+    // reminder CRUD write's rearmReminders (controller.ts) picks up the new/removed row with no restart.
+    rearmReminders: () => companionController.reconcile(),
   };
   // The IN-APP channel (default companion transport): a STABLE transport hub, constructed ALWAYS (even when
   // the companion is OFF at boot) so the /ws/companion route + every built gateway share ONE client registry

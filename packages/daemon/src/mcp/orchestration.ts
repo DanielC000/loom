@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -7,6 +8,9 @@ import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript } from "../sessions/transcript.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
+import { nextFireAt } from "../orchestration/cron.js";
+import { reminderNextFireAt } from "../companion/reminders.js";
+import type { CompanionReminder, CompanionRoute } from "../companion/types.js";
 import {
   authorCompanionSkill,
   listCompanionSkills,
@@ -44,6 +48,18 @@ export interface CompanionHooks {
   companionSessionId?: string | null;
   /** Deliver the agent's chat_reply(text) back OUT to the chat bound to the session (companion/chat-gateway.ts). */
   deliverReply?: (sessionId: string, text: string) => Promise<{ delivered: boolean; reason?: string }>;
+  /**
+   * SERVER-DERIVED route capture for reminder_create — the current turn's originating companion route (or
+   * null), read at schedule time exactly like wake_me (orchestration/wake.ts). The agent never passes a
+   * route/channel.
+   */
+  getActiveTurnOrigin?: (sessionId: string) => CompanionRoute | null;
+  /**
+   * (Re)arm/disarm the live reminder watcher for the bound companion session — ARM-ON-CREATE. Called after
+   * reminder_create/reminder_cancel writes so a freshly-created reminder starts firing immediately instead
+   * of waiting for an unrelated config write to reconcile (companion/controller.ts CompanionReplyHooks).
+   */
+  rearmReminders?: () => Promise<void>;
 }
 
 export class OrchestrationMcpRouter {
@@ -302,6 +318,83 @@ export class OrchestrationMcpRouter {
     );
   }
 
+  /**
+   * Loom Companion Reminders (Companion Memory & Reminders Design, Surface 2 s4): the RECURRING reminders
+   * engine's agent surface — the sibling of registerCompanionMemoryTools/registerCompanionSkillTools (SAME
+   * single-companion-session gate). Unlike those, there is NO spawn surface here either: a reminder only
+   * ever targets the companion's OWN session (server-derived sessionId, never agent-passed — mirrors "the
+   * agent never passes a projectId"). Cron is validated AT THE BOUNDARY (never relying on the watcher's
+   * defensive catch), the route is captured SERVER-SIDE exactly like wake_me, and create/cancel drive
+   * ARM-ON-CREATE via the injected `rearmReminders` hook so a freshly-created reminder starts firing
+   * immediately instead of waiting on an unrelated config write's reconcile.
+   */
+  private registerCompanionReminderTools(server: McpServer, sessionId: string): void {
+    const companionId = this.companion.companionSessionId;
+    if (!companionId || sessionId !== companionId) return;
+    const db = this.db;
+
+    server.registerTool(
+      "reminder_create",
+      {
+        description:
+          "Create a RECURRING reminder that fires a proactive [loom:reminder] turn into YOUR OWN session on " +
+          "a cron schedule (5-field cron expression) — distinct from the one-shot wake_me. `prompt` is what " +
+          "you'll be re-prompted with EVERY time it fires; `label` is an optional human-facing name. The " +
+          "reply route is captured SERVER-SIDE from your current turn (you never pass one), so a later fire " +
+          "can chat_reply back to the SAME chat. Starts armed immediately. Returns {reminderId, nextFireAt}, " +
+          "or {error} on an invalid cron expression.",
+        inputSchema: { cron: z.string(), prompt: z.string(), label: z.string().optional() },
+      },
+      async ({ cron, prompt, label }) => {
+        const now = new Date();
+        try {
+          nextFireAt(cron, now); // validate AT THE BOUNDARY — never rely on the watcher's defensive catch.
+        } catch {
+          return ok({ error: `invalid cron expression: ${cron}` });
+        }
+        const route = this.companion.getActiveTurnOrigin?.(sessionId) ?? null;
+        const reminder: CompanionReminder = {
+          id: randomUUID(), sessionId, cron, prompt, label: label ?? null,
+          route, enabled: true, createdAt: now.toISOString(),
+        };
+        db.insertCompanionReminder(reminder);
+        await this.companion.rearmReminders?.(); // ARM-ON-CREATE — must fire without a later config write.
+        return ok({ reminderId: reminder.id, nextFireAt: reminderNextFireAt(db, reminder) });
+      },
+    );
+
+    server.registerTool(
+      "reminder_list",
+      {
+        description:
+          "List YOUR OWN recurring reminders (any enabled state) as {id, cron, prompt, label, enabled, " +
+          "nextFireAt}.",
+        inputSchema: {},
+      },
+      async () => ok(db.listCompanionRemindersForSession(sessionId).map((r) => ({
+        id: r.id, cron: r.cron, prompt: r.prompt, label: r.label, enabled: r.enabled,
+        nextFireAt: reminderNextFireAt(db, r),
+      }))),
+    );
+
+    server.registerTool(
+      "reminder_cancel",
+      {
+        description:
+          "Cancel one of YOUR OWN recurring reminders by id (scoped — can never touch another session's " +
+          "reminder). Returns {cancelled}.",
+        inputSchema: { reminderId: z.string() },
+      },
+      async ({ reminderId }) => {
+        const r = db.getCompanionReminder(reminderId);
+        if (!r || r.sessionId !== sessionId) return ok({ cancelled: false });
+        db.deleteCompanionReminder(reminderId);
+        await this.companion.rearmReminders?.(); // disarm too — a now-empty reminder set tears the watcher down.
+        return ok({ cancelled: true });
+      },
+    );
+  }
+
   private buildServer(sessionId: string, role: SessionRole): McpServer {
     const db = this.db;
     const sessions = this.sessions;
@@ -313,6 +406,8 @@ export class OrchestrationMcpRouter {
     this.registerCompanionSkillTools(server, sessionId);
     // Companion Phase 2: additive, single-session-gated self-authored durable memory tools (SAME gate).
     this.registerCompanionMemoryTools(server, sessionId);
+    // Companion Reminders s4: additive, single-session-gated RECURRING reminder tools (SAME gate).
+    this.registerCompanionReminderTools(server, sessionId);
 
     // Companion (epic Phase 1): the long-lived `assistant` role gets a MINIMAL surface — the read-only
     // my_context PLUS (only when this IS the bound companion session) the chat_reply registered just above.

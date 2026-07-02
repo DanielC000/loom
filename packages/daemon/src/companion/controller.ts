@@ -79,6 +79,20 @@ export interface CompanionControl {
 export interface CompanionReplyHooks {
   companionSessionId: string | null;
   deliverReply?: (sessionId: string, text: string) => Promise<{ delivered: boolean; reason?: string }>;
+  /**
+   * Server-derived route capture for the reminder_create MCP tool (mirrors wake_me's getActiveTurnOrigin) —
+   * consumed by the orchestration MCP router, not by this controller.
+   */
+  getActiveTurnOrigin?: (sessionId: string) => CompanionRoute | null;
+  /**
+   * (Re)arm/disarm the live reminder watcher after a reminder_create/cancel MCP write — ARM-ON-CREATE
+   * (Companion Memory & Reminders Design, Surface 2 s4). Wired to `() => controller.reconcile()`: a
+   * reminder CRUD write lands in its own table, independent of CompanionConfig, so re-running the SAME
+   * reconcile a config write already triggers is the only way this path picks up the new/removed row
+   * (see rearmReminders' unconditional call in applyDesired). Consumed by the orchestration MCP router,
+   * not by this controller.
+   */
+  rearmReminders?: () => Promise<void>;
 }
 
 export interface CompanionControllerDeps {
@@ -320,6 +334,13 @@ export class CompanionController implements CompanionControl {
    *  reminder CRUD write (s4) needs — see the ON→ON call site's comment. The one-row-existence check is
    *  a single cheap read; with zero rows (every companion today, until s4 ships) it is the ONLY db touch
    *  this path makes — no watcher is built or started, so DEFAULT-OFF stays truly byte-identical.
+   *
+   *  KNOWN TRADE-OFF: this rearm is UNGATED (unlike rearmHeartbeat's cfg-diff gate) and stop+rebuilds the
+   *  watcher on EVERY reconcile, resetting its in-memory tick PHASE (the next setInterval tick is a fresh
+   *  tickMs away, not continuous from the prior watcher's cadence) — never lost due-ness (seedLastFired
+   *  reseeds lastFiredAt from durable fired-events either way), just possible jitter of up to one tick.
+   *  Acceptable because reconciles are rare (a human config write or a reminder_create/cancel MCP call),
+   *  not a hot path.
    */
   private rearmReminders(sessionId: string): void {
     this.stopReminders();
