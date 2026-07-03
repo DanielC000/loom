@@ -16,6 +16,7 @@ const read = (rel) => readFileSync(path.join(dir, rel), "utf8");
 const navSrc = read("../src/nav.tsx");
 const appSrc = read("../src/App.tsx");
 const overviewSrc = read("../src/pages/Overview.tsx");
+const terminalCardSrc = read("../src/components/TerminalCard.tsx");
 const missionControlSrc = read("../src/pages/MissionControl.tsx");
 const paletteSrc = read("../src/components/CommandPalette.tsx");
 
@@ -51,11 +52,17 @@ check("the events-timeline + branch-diff are relocated into the Overview fleet-c
 
 check("the relocated views are role-scoped tabs in the session cockpit", () => {
   // Manager rows gain a Timeline tab; worker rows gain a Diff tab — the manager→worker→live-diff drill-down.
-  assert.ok(/role === "manager"[\s\S]*?"timeline"|"timeline"[\s\S]*?role === "manager"/.test(overviewSrc)
-    || overviewSrc.includes('{ key: "timeline", label: "Timeline" }'), "Timeline tab must be manager-scoped");
-  assert.ok(overviewSrc.includes('{ key: "diff", label: "Diff" }'), "Diff tab must be a cockpit tab");
-  assert.ok(overviewSrc.includes('if (role === "manager") tabs.push({ key: "timeline"'), "Timeline tab is pushed only for managers");
-  assert.ok(overviewSrc.includes('if (role === "worker") tabs.push({ key: "diff"'), "Diff tab is pushed only for workers");
+  // As of terminal-unification stage 3, SessionCockpit renders via the shared <TerminalCard>: the base owns
+  // the Terminal/Transcript/Timeline/Diff tab bar, and SessionCockpit passes the role-scoped panels to its
+  // `tabs` prop (a MANAGER contributes a Timeline node, a WORKER a Diff node).
+  assert.match(overviewSrc, /session\.role === "manager"[\s\S]*?timeline:\s*<ManagerTimeline/,
+    "the Timeline panel must be manager-scoped in SessionCockpit");
+  assert.match(overviewSrc, /session\.role === "worker"[\s\S]*?diff:\s*<WorkerDiffPanel/,
+    "the Diff panel must be worker-scoped in SessionCockpit");
+  assert.ok(overviewSrc.includes("tabs={tabs}"), "SessionCockpit must pass the role-scoped tabs to <TerminalCard>");
+  // The Timeline/Diff tab labels now live in the shared base (lifted out of the inline cockpit).
+  assert.ok(terminalCardSrc.includes('label: "Timeline"'), "TerminalCard must define the Timeline tab");
+  assert.ok(terminalCardSrc.includes('label: "Diff"'), "TerminalCard must define the Diff tab");
 });
 
 check("Mission Control still owns the global kill/pause/resume cluster (unchanged by this move)", () => {

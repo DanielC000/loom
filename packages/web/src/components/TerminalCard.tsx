@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
 import { TerminalPane } from "./Terminal";
+import { TranscriptPane } from "./TranscriptPane";
 import { Composer } from "./Composer";
 import { SessionQueue } from "./SessionQueue";
 import { SessionWakes } from "./SessionWakes";
@@ -24,13 +25,25 @@ import { font, color } from "../theme";
 // follow in later stages (see the plan).
 //
 // DEFERRED from the plan's full prop surface, by design, to the stages that actually exercise them (so
-// stage 1 ships no untested branches): `tabs` (terminal+transcript, role-scoped timeline/diff — only
-// SessionCockpit has these today; land with stage 3) and the `statusMode` variants beyond "busy"
-// ("static"/"conn" — land with the Shell/Companion stage 4). The enums are typed here so the downstream
-// call sites are already shaped; only the "busy" path is implemented. Reported up in the stage-1 note.
+// each branch lands only once a consumer tests it): the `statusMode` variants beyond "busy"
+// ("static"/"conn" — land with the Shell/Companion stage 4). The enum is typed here so the downstream
+// call sites are already shaped; only the "busy" path is implemented. The `tabs` prop (Terminal +
+// Transcript always, role-scoped Timeline/Diff) IS wired as of STAGE 3 — the Overview `SessionCockpit`
+// is its first consumer (lifted from its old hand-rolled inline tab bar). No-tabs stays byte-identical.
 
 export type TerminalLifecycle = "stop" | "kill" | "none";
 export type TerminalStatusMode = "busy" | "static" | "conn";
+export type TerminalTab = "terminal" | "transcript" | "timeline" | "diff";
+
+// Optional role-scoped tab bar. When provided, the body gains a Terminal + Transcript tab bar (both
+// owned by the base — the shared TerminalPane / TranscriptPane), plus a Timeline and/or Diff tab ONLY
+// when the caller passes that panel node (a manager passes `timeline`, a worker passes `diff` — same
+// role scoping the inline SessionCockpit had). The extra panels are Overview-specific (orchestration
+// events / branch diff), so they arrive as ready-rendered nodes rather than being wired into the base.
+export interface TerminalTabs {
+  timeline?: ReactNode; // manager-only: the orchestration-events timeline panel
+  diff?: ReactNode; // worker-only: the branch-diff panel
+}
 
 export interface TerminalSubPanels {
   presets?: boolean; // PresetPrompts button in the header action cluster
@@ -89,6 +102,7 @@ export function TerminalCard({
   maximizable = true,
   statusMode = "busy",
   subPanels,
+  tabs,
   renderBody,
   actionsExtra,
 }: {
@@ -113,6 +127,8 @@ export function TerminalCard({
   maximizable?: boolean;
   statusMode?: TerminalStatusMode;
   subPanels?: TerminalSubPanels;
+  /** Add a Terminal + Transcript tab bar (+ role-scoped Timeline/Diff when the panel node is passed). */
+  tabs?: TerminalTabs;
   /** Replace the default session body (TerminalPane + sub-panels) — for raw-shell / companion bodies. */
   renderBody?: (ctx: { maximized: boolean; hug: boolean; heightBudget?: number }) => ReactNode;
   /** Extra buttons appended after the standard action cluster. */
@@ -120,6 +136,20 @@ export function TerminalCard({
 }) {
   void statusMode; // only "busy" is wired in stage 1 (title carries the pill); see header note above.
   const [maximized, setMaximized] = useState(false);
+
+  // Role-scoped tab bar (opt-in via `tabs`). Terminal + Transcript are always offered; Timeline/Diff
+  // appear only when the caller supplies that panel node. `activeTab` guards against a stale selection
+  // (e.g. the "diff" tab if a caller ever stopped passing a diff node) by falling back to "terminal".
+  const [tab, setTab] = useState<TerminalTab>("terminal");
+  const tabDefs: { key: TerminalTab; label: string }[] = tabs
+    ? [
+        { key: "terminal", label: "Terminal" },
+        { key: "transcript", label: "Transcript" },
+        ...(tabs.timeline != null ? ([{ key: "timeline", label: "Timeline" }] as const) : []),
+        ...(tabs.diff != null ? ([{ key: "diff", label: "Diff" }] as const) : []),
+      ]
+    : [];
+  const activeTab: TerminalTab = tabDefs.some((t) => t.key === tab) ? tab : "terminal";
 
   // Resolve the board task this session is bound to and render the slim bar in the body, so every call
   // site shows it without re-wiring. Keyed ["tasks", projectId] (staleTime 4000) so React Query DEDUPES
@@ -179,12 +209,34 @@ export function TerminalCard({
   const sessionBody = (hugMode: boolean, heightBudget?: number) => (
     <>
       {task && <SessionTaskCard task={task} />}
-      {/* overflow:hidden clips xterm's canvas to the pane box — when a Composer state change (e.g.
-          toggling Voice) resizes the pane, the font rescale can momentarily overflow; this guarantees
-          the terminal can NEVER paint over the composer below. xterm scrolls via its own .xterm-viewport. */}
-      <div style={{ ...(hugMode ? null : { flex: 1 }), minHeight: 0, overflow: "hidden" }}>
-        <TerminalPane sessionId={session.id} readOnly={readOnly} resizable={resizable} heightBudget={heightBudget} />
-      </div>
+      {tabs && (
+        <div style={{ marginBottom: 6, display: "flex", gap: 6, flexShrink: 0 }}>
+          {tabDefs.map((t) => (
+            <Button key={t.key} variant={activeTab === t.key ? "primary" : "default"}
+              onClick={() => setTab(t.key)}>{t.label}</Button>
+          ))}
+        </div>
+      )}
+      {/* Terminal (default) OR — with tabs — the active pane. TerminalPane is mounted ONLY on the
+          Terminal tab so a card viewing Transcript/Timeline/Diff holds no live pty websocket (single
+          live terminal, mirroring the old SessionCockpit). overflow:hidden clips xterm's canvas to the
+          pane box — a Composer state change (e.g. toggling Voice) can momentarily overflow the font
+          rescale; this guarantees the terminal can NEVER paint over the composer below. xterm scrolls
+          via its own .xterm-viewport. */}
+      {(!tabs || activeTab === "terminal") && (
+        <div style={{ ...(hugMode ? null : { flex: 1 }), minHeight: 0, overflow: "hidden" }}>
+          <TerminalPane sessionId={session.id} readOnly={readOnly} resizable={resizable} heightBudget={heightBudget} />
+        </div>
+      )}
+      {tabs && activeTab === "transcript" && (
+        // Transcript has no grid to hug: in HUG mode it takes a fixed box (the terminal's budget) and
+        // scrolls internally; in FILL mode it flexes like the pane it replaces.
+        <div style={{ ...(hugMode ? { height: heightBudget } : { flex: 1 }), minHeight: 0, overflow: "hidden" }}>
+          <TranscriptPane sessionId={session.id} />
+        </div>
+      )}
+      {tabs && activeTab === "timeline" && tabs.timeline}
+      {tabs && activeTab === "diff" && tabs.diff}
       {subPanels?.wakes && <SessionWakes sessionId={session.id} />}
       {subPanels?.queue && <SessionQueue sessionId={session.id} />}
       {!readOnly && <Composer sessionId={session.id} />}

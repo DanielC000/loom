@@ -60,8 +60,12 @@ check("the outer FleetCockpitRow list is bounded + internally scrollable", () =>
 });
 
 check("the inner session cockpit stays independently bounded (not re-capped by this change)", () => {
-  // The row's own cockpit pane keeps its pre-existing 440 bound — we cap the OUTER list, not the inner.
-  assert.ok(overviewSrc.includes("height: 440"), "the inner cockpit pane must retain its own 440 bound");
+  // The row's own cockpit now renders via <TerminalCard> (terminal-unification stage 3): its bound moved
+  // from the old inline `height: 440` pane onto the base's numeric `height` prop (which drives the HUG
+  // budget). Assert the cockpit still passes a bounded NUMERIC height, so the inner pane stays
+  // independently capped — this change caps the OUTER list, it does NOT remove the inner bound.
+  assert.match(overviewSrc, /<TerminalCard[\s\S]*?\bheight=\{\d+\}/,
+    "the inner cockpit must pass a bounded numeric height to <TerminalCard>");
 });
 
 console.log(`\n${pass} passed`);

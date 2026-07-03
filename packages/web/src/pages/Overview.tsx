@@ -8,12 +8,8 @@ import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/atte
 import { bySessionActivity, byCreatedStable, byManagerThenCreated, dedupeSessionsById } from "../lib/sessions";
 import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
 import Board from "./Board";
-import { TerminalPane } from "../components/Terminal";
 import { TerminalTile } from "../components/TerminalTile";
-import { TranscriptPane } from "../components/TranscriptPane";
-import { Composer } from "../components/Composer";
-import { SessionWakes } from "../components/SessionWakes";
-import { SessionQueue } from "../components/SessionQueue";
+import { TerminalCard, type TerminalTabs } from "../components/TerminalCard";
 import { SessionActions } from "../components/SessionActions";
 import { SpawnControls } from "../components/SpawnControls";
 import { DiffView } from "../components/Diff";
@@ -378,51 +374,37 @@ function FleetCockpitRow({ s, star, open, onToggle, actions }: {
       </div>
       {open && (
         <div style={{ marginLeft: 10, marginTop: 6, paddingLeft: 10, borderLeft: `1px solid ${color.phosphor}` }}>
-          <SessionCockpit sessionId={s.id} role={s.role} />
+          <SessionCockpit session={s} />
         </div>
       )}
     </div>
   );
 }
 
-// A single session's inline cockpit — Terminal⇄Transcript tabs over a bounded pane, plus the session's
-// wakes / queued turns / composer. Reuses the standalone components AS-IS; mirrors Workspace's
-// right-hand cockpit. Mounted only by an OPEN FleetCockpitRow, so its TerminalPane is the one live
-// terminal on the page (single-open). The pane height is fixed (the page itself scrolls).
-//
-// The retired Orchestration page's two unique drill-down views are folded in here as role-scoped tabs,
-// so the manager→worker→live-diff drill-down survives its removal: a MANAGER row gains a "Timeline" tab
-// (its own orchestration_events), a WORKER row gains a "Diff" tab (its branch diff). Both panels are
-// bounded + internally scrollable so they don't unbalance the accordion.
-function SessionCockpit({ sessionId, role }: { sessionId: string; role: SessionListItem["role"] }) {
-  type CockpitTab = "terminal" | "transcript" | "timeline" | "diff";
-  const tabs: { key: CockpitTab; label: string }[] = [
-    { key: "terminal", label: "Terminal" },
-    { key: "transcript", label: "Transcript" },
-  ];
-  if (role === "manager") tabs.push({ key: "timeline", label: "Timeline" });
-  if (role === "worker") tabs.push({ key: "diff", label: "Diff" });
-  const [tab, setTab] = useState<CockpitTab>("terminal");
+// A single session's inline cockpit — now a thin binding over the shared <TerminalCard> base (terminal-
+// unification epic, stage 3). It renders the SAME Terminal⇄Transcript tabs over a bounded pane plus the
+// session's wakes / queued turns / composer, and — via the base — GAINS the standard card chrome the
+// hand-rolled version lacked: PresetPrompts + Maximize in the header and the slim bound-task bar. The
+// role-scoped Timeline/Diff drill-downs (relocated from the retired Orchestration page) are passed to
+// the base's `tabs` prop as ready-rendered panel nodes: a MANAGER contributes a "Timeline" tab (its own
+// orchestration_events), a WORKER a "Diff" tab (its branch diff) — both bounded + internally scrollable.
+// Lifecycle (Fork/Stop/Resume) stays on the parent FleetCockpitRow's SessionActions cluster, so the card
+// itself takes `lifecycle="none"`. Mounted only by an OPEN FleetCockpitRow, so its TerminalPane is the
+// one live terminal on the page (single-open); the base mounts the pane only on the Terminal tab.
+function SessionCockpit({ session }: { session: SessionListItem }) {
+  const tabs: TerminalTabs = {
+    ...(session.role === "manager" ? { timeline: <ManagerTimeline managerId={session.id} /> } : null),
+    ...(session.role === "worker" ? { diff: <WorkerDiffPanel workerId={session.id} /> } : null),
+  };
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      <div style={{ marginBottom: 6, display: "flex", gap: 6 }}>
-        {tabs.map((t) => (
-          <Button key={t.key} variant={tab === t.key ? "primary" : "default"} onClick={() => setTab(t.key)}>{t.label}</Button>
-        ))}
-      </div>
-      {/* Terminal/Transcript live behind a fixed-height pane; the relocated Timeline/Diff panels bring
-          their own bounded scroll (below), so they're rendered outside the fixed pane. */}
-      {(tab === "terminal" || tab === "transcript") && (
-        <div style={{ height: 440, minHeight: 0 }}>
-          {tab === "terminal" ? <TerminalPane sessionId={sessionId} /> : <TranscriptPane sessionId={sessionId} />}
-        </div>
-      )}
-      {tab === "timeline" && <ManagerTimeline managerId={sessionId} />}
-      {tab === "diff" && <WorkerDiffPanel workerId={sessionId} />}
-      <SessionWakes sessionId={sessionId} />
-      <SessionQueue sessionId={sessionId} />
-      <Composer sessionId={sessionId} />
-    </div>
+    <TerminalCard
+      session={session}
+      height={500}
+      lifecycle="none"
+      maximizable
+      subPanels={{ presets: true, queue: true, wakes: true, taskCard: true }}
+      tabs={tabs}
+    />
   );
 }
 
