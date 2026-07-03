@@ -262,6 +262,10 @@ function ConfigFields({ form, set, mode, currentToken }: {
 }) {
   return (
     <>
+      <Field label="Name" sub="optional · applies on the companion's next spawn, not a bare resume">
+        <Input value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. Ada" spellCheck={false} />
+      </Field>
+
       <Field label="Bot token" sub={mode === "edit" ? "write-only · leave blank to keep the stored token" : "from BotFather"}>
         {mode === "edit" && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
@@ -504,6 +508,7 @@ function ConfigSection({ companion, onChanged, onDeleted }: { companion: Compani
       ) : cfg ? (
         <>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <Chip label="name" value={cfg.name || "unnamed"} tone={cfg.name ? undefined : "muted"} />
             <Chip label="token" value={maskedToken(cfg)} />
             <Chip label="channel" value={cfg.channel} tone="cyan" />
             <Chip label="scope" value={cfg.chatScope} />

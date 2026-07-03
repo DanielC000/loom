@@ -108,6 +108,22 @@ check("channel defaults to telegram when left blank", () => {
   assert.equal(buildConfigBody({ ...baseForm(), channel: "" }, "create").body.channel, "telegram");
 });
 
+// ── The Manage-tab rename field: name flows form ↔ body, trimmed, bounded ───────────────────────────
+check("formFromMasked seeds `name` from the masked config (blank when never named)", () => {
+  assert.equal(formFromMasked(maskedRow()).name, "", "maskedRow() carries no name by default");
+  assert.equal(formFromMasked({ ...maskedRow(), name: "Ada" }).name, "Ada");
+});
+
+check("buildConfigBody: name is trimmed and always sent (edit sends '' to clear, not omit)", () => {
+  assert.equal(buildConfigBody({ ...baseForm(), name: "  Ada  " }, "create").body.name, "Ada");
+  assert.equal(buildConfigBody({ ...baseForm(), name: "" }, "edit").body.name, "", "a blank name is sent as '' — an intentional clear, unlike the write-only token");
+});
+
+check("buildConfigBody: an over-long name errors, at-the-max passes", () => {
+  assert.ok("error" in buildConfigBody({ ...baseForm(), name: "x".repeat(COMPANION_ID_MAX + 1) }, "create"));
+  assert.ok(!("error" in buildConfigBody({ ...baseForm(), name: "x".repeat(COMPANION_ID_MAX) }, "create")));
+});
+
 // ── Access binding + sender + pairing validators ────────────────────────────────────────────────────
 
 check("validateBinding: requires sessionId/channel/chatId and a real scope", () => {

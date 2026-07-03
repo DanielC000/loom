@@ -58,6 +58,9 @@ export interface CompanionConfigForm {
   heartbeatIntervalMinutes: string;
   heartbeatPrompt: string;
   enabled: boolean;
+  // The companion's given (human-friendly) name — baked into its base-brief identity line on its NEXT
+  // spawn (composeAssistantStartupPrompt), not re-injected by a bare resume. Blank = unnamed.
+  name: string;
 }
 
 // A blank form for the create flow, pre-seeded with a session id + the telegram default channel.
@@ -71,6 +74,7 @@ export function emptyConfigForm(sessionId = ""): CompanionConfigForm {
     heartbeatIntervalMinutes: "",
     heartbeatPrompt: "",
     enabled: true,
+    name: "",
   };
 }
 
@@ -86,6 +90,7 @@ export function formFromMasked(cfg: CompanionConfigMasked): CompanionConfigForm 
     heartbeatIntervalMinutes: cfg.heartbeatIntervalMinutes ? String(cfg.heartbeatIntervalMinutes) : "",
     heartbeatPrompt: cfg.heartbeatPrompt ?? "",
     enabled: cfg.enabled,
+    name: cfg.name ?? "",
   };
 }
 
@@ -120,12 +125,16 @@ export function buildConfigBody(form: CompanionConfigForm, mode: "create" | "edi
     heartbeatIntervalMinutes = n;
   }
 
+  const name = form.name.trim();
+  if (name.length > COMPANION_ID_MAX) return { error: `Name must be at most ${COMPANION_ID_MAX} characters.` };
+
   const body: Record<string, unknown> = {
     channel: form.channel.trim() || "telegram",
     chatScope: form.chatScope,
     heartbeatIntervalMinutes,
     heartbeatPrompt: form.heartbeatPrompt.trim() || null,
     enabled: form.enabled,
+    name,
   };
   if (mode === "create") body.sessionId = sessionId;
   // allowedChatId: always send on create; on edit send only when non-blank (blank keeps the stored value).

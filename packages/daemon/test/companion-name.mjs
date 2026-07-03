@@ -17,6 +17,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       reaches the server-owned ASSISTANT_BASE_BRIEF, so a name carrying "\n\n## …" structure can't inject
 //       into the one region of the prompt that must never be user-editable — proven both as a pure-function
 //       unit check and end to end through POST /api/companion/provision.
+//   (e) the Manage-tab RENAME path: PUT /api/companion/config/:sessionId (buildCompanionUpsert) also accepts
+//       + sanitizes + persists `name` — the masked read-back surfaces the new name, omitting `name` on a PUT
+//       preserves the stored value (mirrors the db-layer preserve-on-omit), an explicit "" clears it, and a
+//       malicious name is sanitized the SAME way as provision (no separate/weaker path).
 // Run: 1) build (turbo builds shared first), 2) node test/companion-name.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -236,6 +240,51 @@ try {
     check("(d) the ONLY newline-preceded '## ' headings in the prompt are the base brief's own (name injected none)",
       headingOccurrences === (ASSISTANT_BASE_BRIEF.match(/\n## /g) ?? []).length);
   }
+
+  // =================== (e) the Manage-tab rename path: PUT /api/companion/config/:sessionId ===================
+  {
+    const rig = await makeRig("e-rename.db"); apps.push(rig.app);
+
+    // Create a config (POST) with no name — matches the create-flow contract (name is optional there too).
+    const created = await rig.app.inject({
+      method: "POST", url: "/api/companion/config",
+      payload: { sessionId: "sess-rename", botToken: "123456:test-token", allowedChatId: "999" },
+    });
+    check("(e) POST create -> 201, no name yet", created.statusCode === 201 && JSON.parse(created.payload).name === "");
+
+    // PUT a name -> persisted + surfaced in the masked read-back.
+    const renamed = await rig.app.inject({
+      method: "PUT", url: "/api/companion/config/sess-rename", payload: { name: "  Ada  " },
+    });
+    check("(e) PUT { name } -> 200, masked read-back carries the TRIMMED name", renamed.statusCode === 200 && JSON.parse(renamed.payload).name === "Ada");
+    check("(e) the config row persists the name", rig.db.getCompanionConfig("sess-rename")?.name === "Ada");
+
+    // A PUT that OMITS name preserves the stored value (mirrors the db-layer preserve-on-omit).
+    const cadenceOnly = await rig.app.inject({
+      method: "PUT", url: "/api/companion/config/sess-rename", payload: { heartbeatIntervalMinutes: 30 },
+    });
+    check("(e) PUT omitting `name` preserves the stored name", cadenceOnly.statusCode === 200 && JSON.parse(cadenceOnly.payload).name === "Ada");
+
+    // An explicit "" clears it (an intentional rename-to-blank, not an omission) — same contract as the db layer.
+    const cleared = await rig.app.inject({
+      method: "PUT", url: "/api/companion/config/sess-rename", payload: { name: "" },
+    });
+    check("(e) PUT { name: \"\" } clears the stored name", cleared.statusCode === 200 && JSON.parse(cleared.payload).name === "");
+
+    // An over-long name is rejected (mirrors provision's bound) — no partial write.
+    const tooLong = await rig.app.inject({
+      method: "PUT", url: "/api/companion/config/sess-rename", payload: { name: "x".repeat(201) },
+    });
+    check("(e) an over-long name -> 400, no partial write", tooLong.statusCode === 400 && rig.db.getCompanionConfig("sess-rename")?.name === "");
+
+    // The SAME sanitization as provision applies here — no separate/weaker path for the edit surface.
+    const sanitizedPut = await rig.app.inject({
+      method: "PUT", url: "/api/companion/config/sess-rename", payload: { name: MALICIOUS_NAME },
+    });
+    const putStoredName = rig.db.getCompanionConfig("sess-rename")?.name;
+    check("(e) a malicious name via PUT is sanitized the same way as provision (no newline/CR/tab persisted)",
+      sanitizedPut.statusCode === 200 && !!putStoredName && putStoredName === sanitizeCompanionName(MALICIOUS_NAME));
+  }
 } finally {
   for (const app of apps) { try { await app.close(); } catch { /* ignore */ } }
   for (const db of dbs) { try { db.close(); } catch { /* ignore */ } }
@@ -244,6 +293,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — composeAssistantStartupPrompt injects a 'Your name is <name>.' identity line near the top of the base brief when a name is given and is byte-identical when absent/blank; companion_config persists `name` (additive migration on a pre-existing DB, preserve-on-omit, explicit-clear); POST /api/companion/provision writes the trimmed name and bakes it into the spawned session's startup prompt end to end; and sanitizeCompanionName strips control characters/newlines BEFORE persistence so a name can't inject markdown structure into the un-editable base brief, proven both as a pure unit check and end to end — claude-free."
+  ? "\n✅ ALL PASS — composeAssistantStartupPrompt injects a 'Your name is <name>.' identity line near the top of the base brief when a name is given and is byte-identical when absent/blank; companion_config persists `name` (additive migration on a pre-existing DB, preserve-on-omit, explicit-clear); POST /api/companion/provision writes the trimmed name and bakes it into the spawned session's startup prompt end to end; PUT /api/companion/config/:sessionId (the Manage-tab rename path) accepts/sanitizes/persists `name` with the SAME preserve-on-omit + explicit-clear + sanitization contract as provision; and sanitizeCompanionName strips control characters/newlines BEFORE persistence so a name can't inject markdown structure into the un-editable base brief, proven both as a pure unit check and end to end — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

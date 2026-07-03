@@ -709,6 +709,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   ): { error: string } | {
     sessionId: string; botTokenBlob: string; channel: string; allowedChatId: string;
     chatScope: "dm" | "group"; heartbeatIntervalMinutes: number; heartbeatPrompt: string | null; enabled: boolean;
+    name?: string;
   } => {
     // Bot token: required to CREATE (no existing row); on update, an omitted token keeps the stored blob.
     let botTokenBlob: string;
@@ -758,7 +759,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (typeof body.enabled === "boolean") enabled = body.enabled;
     else if (body.enabled !== undefined) return { error: "enabled must be a boolean" };
     else enabled = existing?.enabled ?? true;
-    return { sessionId, botTokenBlob, channel, allowedChatId, chatScope, heartbeatIntervalMinutes, heartbeatPrompt, enabled };
+    // name: optional given-name edit (Manage tab). OMITTED ⇒ leave undefined so db.upsertCompanionConfig's
+    // own preserve-on-omit keeps the stored value; an explicit "" clears it (mirrors provision's contract).
+    // Sanitized the SAME way as provision — this name reaches the identical composeAssistantStartupPrompt
+    // injection on the companion's next spawn, so it must never carry structure-injecting control chars.
+    let name: string | undefined;
+    if (body.name !== undefined && body.name !== null) {
+      if (typeof body.name !== "string" || body.name.length > COMPANION_ID_MAX) {
+        return { error: `name must be a string of at most ${COMPANION_ID_MAX} characters` };
+      }
+      name = sanitizeCompanionName(body.name);
+    }
+    return { sessionId, botTokenBlob, channel, allowedChatId, chatScope, heartbeatIntervalMinutes, heartbeatPrompt, enabled, name };
   };
   // Optional home update carried on a config write — writes app_meta (the single source), returns error|null.
   const applyHomeIfPresent = (body: Record<string, unknown>): string | null => {
