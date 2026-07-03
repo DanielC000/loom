@@ -175,4 +175,31 @@ export function isLoomDev(): boolean {
 
 export function ensureDirs(): void {
   for (const d of [LOOM_HOME, SETTINGS_DIR, LOGS_DIR, WORKTREES_DIR, RUNS_DIR, SKILLS_DIR, SKILL_BASE_DIR, WORKSPACE_ROOT]) fs.mkdirSync(d, { recursive: true });
+  ensureLoomHomeGitignore();
+}
+
+/**
+ * Defense-in-depth (p3): a fresh LOOM_HOME has NO git history of its own by default, but a user who
+ * `git init`s their home dir (or a tool that does it on their behalf) could otherwise commit
+ * SECRET_KEY_PATH (the AES-256 envelope master key, see above) or any stray private-key/cert material
+ * dropped alongside it. The acute vector (the auto-vault-versioner walking into LOOM_HOME) is already
+ * closed elsewhere (`versioner.ts` › `isOperationalVaultDir`) — this is a belt-and-suspenders default
+ * ignore so a fresh install never has to discover that gap by hand. Idempotent: appends only the
+ * entries missing from an existing `.gitignore`, never touches or reorders a user's own lines.
+ */
+const DEFAULT_GITIGNORE_ENTRIES = ["secret.key", "*.key", "*.pem"];
+
+function ensureLoomHomeGitignore(): void {
+  const gitignorePath = path.join(LOOM_HOME, ".gitignore");
+  let existing = "";
+  try {
+    existing = fs.readFileSync(gitignorePath, "utf8");
+  } catch {
+    existing = "";
+  }
+  const existingLines = new Set(existing.split(/\r?\n/).map((l) => l.trim()));
+  const missing = DEFAULT_GITIGNORE_ENTRIES.filter((e) => !existingLines.has(e));
+  if (missing.length === 0) return;
+  const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
+  fs.appendFileSync(gitignorePath, `${needsLeadingNewline ? "\n" : ""}${missing.join("\n")}\n`);
 }
