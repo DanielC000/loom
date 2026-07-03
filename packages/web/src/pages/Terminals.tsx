@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, ShellTerminal } from "@loom/shared";
 import { api } from "../lib/api";
 import { byManagerThenCreated, groupSessionRows, type SessionRowGroup } from "../lib/sessions";
+import { useStopSession, useForkSession } from "../lib/useSessionActions";
 import { TerminalPane } from "../components/Terminal";
 import { TerminalTile } from "../components/TerminalTile";
 import { TerminalCard } from "../components/TerminalCard";
@@ -24,20 +25,9 @@ type SessionRow = SessionRowGroup<SessionListItem>;
 export default function Terminals() {
   const [filter, setFilter] = useState<string>("");      // projectName filter ("" = all)
 
-  const qc = useQueryClient();
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 4000 });
-  // Manual graceful stop (Ctrl-C ×2 — clean + resumable). On success the session leaves the live set,
-  // so its tile drops out (and its overlay, if maximized, closes with it); refetch confirms.
-  const stop = useMutation({
-    mutationFn: (id: string) => api.stopSession(id, "graceful"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
-  });
-  // Fork an idle session: branch its conversation into a fresh divergent session (appears as a new
-  // tile). Idle-only — the button is disabled while the source is busy.
-  const fork = useMutation({
-    mutationFn: (id: string) => api.forkSession(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
-  });
+  const stop = useStopSession();
+  const fork = useForkSession();
   // Companion (assistant-role) sessions are EXCLUDED here at the source: a companion is driven ONLY
   // through its chat surface (/companion, over /ws/companion/:id), never a raw pty tile + STDIN
   // Composer. Filtering at `live` keeps them out of every downstream view — the project dropdown, the

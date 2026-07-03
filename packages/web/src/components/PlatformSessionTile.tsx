@@ -1,6 +1,5 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
-import { api } from "../lib/api";
+import { useStopSession } from "../lib/useSessionActions";
 import { TerminalCard } from "./TerminalCard";
 
 // The SHARED tile for ALL THREE Platform session surfaces — the DEV view's PlatformSessions grid + the
@@ -30,11 +29,7 @@ export function PlatformSessionTile({
   maxWidth?: number | string;
   stopTitle?: string;
 }) {
-  const qc = useQueryClient();
-  const stop = useMutation({
-    mutationFn: (id: string) => api.stopSession(id, "graceful"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
-  });
+  const stop = useStopSession();
 
   return (
     <TerminalCard

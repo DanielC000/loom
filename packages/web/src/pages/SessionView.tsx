@@ -1,8 +1,9 @@
 import { useParams, useNavigate } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
+import { useStopSession, useForkSession } from "../lib/useSessionActions";
 import { TerminalTile } from "../components/TerminalTile";
 import { Panel, Button, SectionLabel, StatusPill } from "../components/ui";
 import { color, font } from "../theme";
@@ -16,7 +17,6 @@ import { color, font } from "../theme";
 export default function SessionView() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
-  const qc = useQueryClient();
   const { setProjectId } = useActiveProject();
 
   // Resolve from the LIVE feed first (the common case — the alert is about a running session), then fall
@@ -32,14 +32,8 @@ export default function SessionView() {
 
   // Fork/Stop wired exactly like the Terminals page: graceful stop (Ctrl-C ×2, clean + resumable) and
   // fork (branch an idle conversation into a new session), both invalidating the live feed on success.
-  const stop = useMutation({
-    mutationFn: () => api.stopSession(id, "graceful"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
-  });
-  const fork = useMutation({
-    mutationFn: () => api.forkSession(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
-  });
+  const stop = useStopSession();
+  const fork = useForkSession();
 
   const header = (label: string) => (
     <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
@@ -73,8 +67,8 @@ export default function SessionView() {
       <div>
         {header("Session")}
         <TerminalTile s={session} height="76vh" showProject
-          onFork={() => fork.mutate()} forkPending={fork.isPending}
-          onStop={() => stop.mutate()} stopPending={stop.isPending} />
+          onFork={() => fork.mutate(id)} forkPending={fork.isPending}
+          onStop={() => stop.mutate(id)} stopPending={stop.isPending} />
       </div>
     );
   }

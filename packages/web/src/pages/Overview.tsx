@@ -7,6 +7,7 @@ import { useActiveProject } from "../lib/activeProject";
 import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/attention";
 import { bySessionActivity, byCreatedStable, byManagerThenCreated, dedupeSessionsById } from "../lib/sessions";
 import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
+import { useStopSession, useForkSession } from "../lib/useSessionActions";
 import Board from "./Board";
 import { TerminalTile } from "../components/TerminalTile";
 import { TerminalCard, type TerminalTabs } from "../components/TerminalCard";
@@ -452,17 +453,8 @@ function WorkerDiffPanel({ workerId }: { workerId: string }) {
 // tile (a full-viewport overlay), so this grid carries no maximize state. Project-scoped, so the tile
 // title omits the project name (showProject left off).
 function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
-  const qc = useQueryClient();
-  const stop = useMutation({
-    mutationFn: (id: string) => api.stopSession(id, "graceful"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
-  });
-  // Fork an idle session: branch its conversation into a fresh divergent session (appears as a new
-  // tile). Idle-only — the button is disabled while the source is busy.
-  const fork = useMutation({
-    mutationFn: (id: string) => api.forkSession(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
-  });
+  const stop = useStopSession();
+  const fork = useForkSession();
   // Manager-first STABLE order (managers first/left, then createdAt DESC within each bucket) shared with
   // the Terminals page — the orchestrator pins to the front and its workers follow to the right, and a
   // session keeps its slot whether busy or idle so the grid never reshuffles on the 3s poll.
