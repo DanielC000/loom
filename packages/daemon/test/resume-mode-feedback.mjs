@@ -105,6 +105,16 @@ function simulate(modes, target, maxPresses) {
   const r = simulate(["acceptEdits", "plan", "default", "acceptEdits", "plan", "default"], "auto", 4);
   check("press count is bounded by the cap on any non-converging sequence", r.presses <= 4 && r.action === "giveup");
 }
+// card b99d3d67: the RAW cycler's give-up CAN land on `plan`, not acceptEdits — the 1st press registers
+// (acceptEdits→plan) but every FURTHER press never registers (footer stays stuck at plan). This is the
+// exact failure the cycler's own worst case does NOT structurally avoid — it's why host.ts's role-gated
+// plan auto-heal (logLandedMode) exists as an independent backstop for a Loom-driven role that can never
+// call ExitPlanMode itself (see the runtime proof in test/pty-mode-convergence.mjs).
+{
+  const r = simulate(["acceptEdits", "plan", "plan", "plan", "plan"], "auto", 4);
+  check("a stuck-at-plan sequence gives up AT plan (not acceptEdits) — the case the auto-heal backstop exists for",
+    r.presses === 4 && r.action === "giveup" && r.final === "plan");
+}
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — the resume cycle map (acceptEdits-relative order) and the bounded press-until-target decision are correct: acceptEdits→auto takes 2 presses, a stuck footer gives up at the cap (never infinite-loops), and the press count is always bounded — claude-free."

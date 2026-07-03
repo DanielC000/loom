@@ -220,15 +220,16 @@ export function modeAfterCyclesFromAcceptEdits(cycles: number): LandedMode {
   return ACCEPT_EDITS_CYCLE_ORDER[(((n % 4) + 4) % 4)] ?? "acceptEdits";
 }
 
-/** One step of the resume feedback cycler: at the target → stop; out of presses → stop; else press once. */
+/** One step of the feedback cycler: at the target → stop; out of presses → stop; else press once. */
 export type CycleAction = "done" | "press" | "giveup";
 /**
- * PURE decision for the RESUME mode-convergence loop (cycleResumeToMode): given the footer mode we just
- * read, the target, and how many Shift+Tabs we've already issued, decide whether to stop (reached the
- * target), give up (hit the bounded press cap — leave the session as-is), or press one more Shift+Tab.
- * Exported so the table-driven hermetic test can assert the press count + stop conditions with no real
- * claude. The loop NEVER presses twice without first observing the footer change (see cycleResumeToMode),
- * so feeding the sequence of observed modes through this function reproduces the exact press sequence.
+ * PURE decision for the mode-convergence loop (cycleToMode, shared by fresh spawn + resume): given the
+ * footer mode we just read, the target, and how many Shift+Tabs we've already issued, decide whether to
+ * stop (reached the target), give up (hit the bounded press cap — leave the session as-is), or press one
+ * more Shift+Tab. Exported so the table-driven hermetic test can assert the press count + stop conditions
+ * with no real claude. The loop NEVER presses twice without first observing the footer change (see
+ * cycleToMode), so feeding the sequence of observed modes through this function reproduces the exact
+ * press sequence.
  */
 export function nextCycleAction(o: { current: LandedMode; target: LandedMode; presses: number; maxPresses: number }): CycleAction {
   if (o.current === o.target) return "done";
@@ -244,17 +245,15 @@ const MODE_CYCLE_SETTLE_MS = 700;
  */
 const MODE_LOG_POLL_MS = 500;
 const MODE_LOG_MAX_ATTEMPTS = 8; // ≤ ~4s of best-effort polling, then log whatever we have
-/** Gap between successive Shift+Tab presses so each cycle registers as a distinct key event. */
-const MODE_CYCLE_INTERVAL_MS = 120;
 /**
- * RESUME mode-convergence loop (cycleResumeToMode, card f05e4897). Unlike the FRESH path's blind
- * relative cycling, RESUME drives the footer to the target ABSOLUTELY: press one Shift+Tab, then poll
- * the footer until it CHANGES (the press registered) before deciding again — so a laggy repaint can
- * never trick us into overshooting. Polling cadence + the per-press change-wait cap (≈3s) and the total
- * press cap. Sized so the whole loop (worst case ≈ MAX_PRESSES × CHANGE_MAX_POLLS × POLL_MS + settle ≈
- * 13–14s) finishes COMFORTABLY under READY_FALLBACK_MS (20s) — the readiness fallback must not fire
- * mid-cycle and release queued injections before the mode settles (the 2026-06-03 strand bug). From the
- * acceptEdits boot mode, auto is reached in 2 presses; the cap is headroom (a full period is 4). */
+ * Mode-convergence loop (cycleToMode, card f05e4897 / generalized in b99d3d67). Drives the footer to the
+ * target ABSOLUTELY for BOTH a fresh spawn and a resume: press one Shift+Tab, then poll the footer until
+ * it CHANGES (the press registered) before deciding again — so a laggy repaint can never trick us into
+ * overshooting. Polling cadence + the per-press change-wait cap (≈3s) and the total press cap. Sized so
+ * the whole loop (worst case ≈ MAX_PRESSES × CHANGE_MAX_POLLS × POLL_MS + settle ≈ 13–14s) finishes
+ * COMFORTABLY under READY_FALLBACK_MS (20s) — the readiness fallback must not fire mid-cycle and release
+ * queued injections before the mode settles (the 2026-06-03 strand bug). From the acceptEdits boot mode,
+ * auto is reached in 2 presses; the cap is headroom (a full period is 4). */
 const RESUME_MODE_READ_POLL_MS = Number(process.env.LOOM_RESUME_MODE_POLL_MS) || 200;
 const RESUME_MODE_CHANGE_MAX_POLLS = Number(process.env.LOOM_RESUME_MODE_MAX_POLLS) || 15;
 const RESUME_MODE_MAX_PRESSES = Number(process.env.LOOM_RESUME_MODE_MAX_PRESSES) || 4;
@@ -747,9 +746,13 @@ interface Live {
   resumeGateScan: string;     // bounded rolling buffer scanned for that gate (separate from bootScan)
   isResume: boolean;          // spawned with --resume (vs a fresh spawn) — for the landed-mode log only
   modeLogged: boolean;        // guard: log the landed permission mode at most once per session (observability)
-  // RESUME ONLY: the permission mode to feedback-cycle the footer to after SessionStart (the mode a
-  // fresh spawn of this config reaches — default auto). null = the FRESH path (blind startupModeCycles).
+  // RESUME ONLY: the EXPLICIT permission mode to feedback-cycle the footer to after SessionStart (set by
+  // SessionService.resume). null on a fresh spawn — host.ts instead DERIVES the equivalent target from
+  // startupModeCycles (see the SessionStart handler); both converge via the same cycleToMode primitive.
   resumeModeTarget: LandedMode | null;
+  // The session's role — used ONLY by logLandedMode's auto-heal to know whether ExitPlanMode is
+  // disallowed for this session (see disallowedToolsForRole). null for a shell / a role-less spawn.
+  role: SessionRole | null;
 }
 
 export interface SpawnOpts {
@@ -1094,6 +1097,7 @@ export class PtyHost {
       isResume: !!opts.resumeId,
       modeLogged: false,
       resumeModeTarget: opts.resumeModeTarget ?? null,
+      role: opts.role ?? null,
     };
     this.live.set(opts.sessionId, live);
 
@@ -1210,6 +1214,7 @@ export class PtyHost {
       resumeGateHandled: true, resumeGateScan: "",
       isResume: false, modeLogged: true, // a shell has no claude footer/permission mode to read
       resumeModeTarget: null, // a shell never cycles a permission mode
+      role: null, // a shell has no role; unreachable anyway (modeLogged:true skips the auto-heal read)
     };
     this.live.set(opts.id, live);
     // Shell onData is minimal: NO boot-prompt / resume-gate scanning (those are Claude-TUI artifacts).
@@ -1414,24 +1419,25 @@ export class PtyHost {
         // Claude is up → cycle the permission mode off the gate-free boot default into the target mode
         // (the human Shift+Tab step), once per (re)spawn. BOTH a fresh spawn and a `--resume` boot at the
         // gate-free `mode` (acceptEdits) — `claude --resume` HONOURS `--permission-mode` and does NOT
-        // restore the persisted mode (probe-verified on 2.1.163; card f05e4897). Two strategies:
-        //   • FRESH spawn → BLIND relative cycling: the config's `startupModeCycles` (default 2) Shift+Tabs
-        //     step acceptEdits → … → target (auto). Proven, byte-identical to before.
-        //   • RESUME (resumeModeTarget set) → ABSOLUTE feedback cycling: drive the footer to the target
-        //     mode by reading it and pressing Shift+Tab until it lands (cycleResumeToMode). A blind count
-        //     is unreliable on the resume/summary-gate path (the old blind-2 half-landed on plan — the
-        //     2026-06-03 strand bug; Fix A's blind-0 left it one short, stuck at acceptEdits), so resume
-        //     converges by feedback instead. Bounded + graceful (worst case stays at acceptEdits).
-        // The session is marked READY (which releases any queued injection) only AFTER the cycles land —
+        // restore the persisted mode (probe-verified on 2.1.163; card f05e4897). Both FRESH and RESUME now
+        // share ONE strategy — ABSOLUTE feedback cycling (cycleToMode, card b99d3d67): derive the target
+        // mode and drive the footer to it by reading it and pressing Shift+Tab until it lands, instead of
+        // FRESH's old BLIND relative cycling (a dropped/mistimed press could half-land on `plan` and stay
+        // there — a worker has no `ExitPlanMode` tool to self-exit). RESUME already carries an explicit
+        // absolute `resumeModeTarget` (set by SessionService.resume); FRESH derives the equivalent target
+        // from the SAME `startupModeCycles` config count a blind cycle would have used
+        // (modeAfterCyclesFromAcceptEdits — default 2 → auto), so both converge to the identical target a
+        // fresh spawn of the config reaches. Bounded + graceful (see cycleToMode); `startupModeCycles:0`
+        // means "leave the boot mode" — no cycling at all, straight to ready.
+        // The session is marked READY (which releases any queued injection) only AFTER the cycle lands —
         // so a boot-recovery nudge can't interleave with the Shift+Tabs. That interleave was the
         // 2026-06-03 restart bug: the nudge stranded un-submitted in the composer and the mode stuck
         // mid-cycle on plan.
         if (!live.startupCyclesDone) {
           live.startupCyclesDone = true;
-          if (live.resumeModeTarget) {
-            this.cycleResumeToMode(sessionId, live.resumeModeTarget, () => this.markReady(sessionId));
-          } else if (live.startupModeCycles > 0) {
-            this.sendModeCycles(sessionId, live.startupModeCycles, () => this.markReady(sessionId));
+          const target = live.resumeModeTarget ?? (live.startupModeCycles > 0 ? modeAfterCyclesFromAcceptEdits(live.startupModeCycles) : null);
+          if (target) {
+            this.cycleToMode(sessionId, target, () => this.markReady(sessionId));
           } else {
             this.markReady(sessionId);
           }
@@ -1854,22 +1860,6 @@ export class PtyHost {
     this.broadcastControl(live, { type: "busy", busy });
   }
 
-  /**
-   * Inject `count` Shift+Tab presses to cycle the permission mode (the human step), spaced so each
-   * registers as a distinct key event. Pure key writes — not turns — so they bypass the busy queue:
-   * the mode cycle must land even while the startup-prompt turn is in flight (acceptEdits → target).
-   */
-  private sendModeCycles(sessionId: string, count: number, onDone?: () => void): void {
-    const tick = (i: number): void => {
-      const live = this.live.get(sessionId);
-      if (!live?.alive) return;            // pty gone → drop the sequence (and onDone); nothing to ready
-      if (i >= count) { onDone?.(); return; } // all cycles landed → let the caller proceed (markReady)
-      live.pty.write(SHIFT_TAB);
-      setTimeout(() => tick(i + 1), MODE_CYCLE_INTERVAL_MS);
-    };
-    setTimeout(() => tick(0), MODE_CYCLE_SETTLE_MS);
-  }
-
   /** Read the current permission mode off the tail of a session's output ring (the repainted footer). */
   private readFooterMode(live: Live): LandedMode {
     const recent = Buffer.concat(live.ring.chunks).toString("utf8").slice(-8192);
@@ -1877,22 +1867,28 @@ export class PtyHost {
   }
 
   /**
-   * RESUME-path permission-mode convergence (card f05e4897) — supersedes Fix A's blind startupModeCycles:0.
-   * A `--resume` boots at the gate-free acceptEdits mode (it honours --permission-mode; probe-verified on
-   * 2.1.163), so it lands ONE Shift+Tab short of where a fresh manager lands (auto). Rather than cycle a
-   * fixed COUNT (unreliable on the resume/summary-gate path), drive the footer to `target` ABSOLUTELY:
-   * read the mode, and while it isn't the target press ONE Shift+Tab and then WAIT for the footer to
-   * actually CHANGE before deciding again — so a laggy repaint can never trick us into over-pressing past
-   * the target. The per-step decision is the pure `nextCycleAction`; this method only supplies the timing
-   * + the footer reads (the real-claude probe validates the live sequencing).
+   * GENERAL permission-mode convergence primitive (card f05e4897, generalized off resume-only in card
+   * b99d3d67) — used by BOTH a fresh spawn and a `--resume` to drive the footer to an ABSOLUTE `target`
+   * mode. Both boot at the gate-free acceptEdits mode (`--resume` honours `--permission-mode` and does
+   * NOT restore the persisted mode; probe-verified on 2.1.163), so both need the SAME climb off that boot
+   * default. Rather than cycle a fixed COUNT (unreliable — a dropped/mistimed press half-lands mid-cycle
+   * and stays there; that was the FRESH path's old blind `sendModeCycles`, and the resume/summary-gate
+   * path's original blind approach before this), drive the footer to `target` ABSOLUTELY: read the mode,
+   * and while it isn't the target press ONE Shift+Tab and then WAIT for the footer to actually CHANGE
+   * before deciding again — so a laggy repaint can never trick us into over-pressing past the target. The
+   * per-step decision is the pure `nextCycleAction`; this method only supplies the timing + the footer
+   * reads (the real-claude probe validates the live sequencing).
    *
    * BOUNDED + GRACEFUL — it NEVER infinite-loops and NEVER wedges boot: every terminating branch (reached
    * the target / hit the press cap / footer unreadable / a press didn't move the footer / pty gone) calls
-   * `onDone` exactly once (markReady), so queued injections are released only AFTER the mode settles, and
-   * the worst case simply leaves the session at its acceptEdits boot mode (today's behaviour). Total time
-   * is sized to finish well under READY_FALLBACK_MS so the readiness fallback can't fire mid-cycle.
+   * `onDone` exactly once (markReady), so queued injections are released only AFTER the mode settles.
+   * Total time is sized to finish well under READY_FALLBACK_MS so the readiness fallback can't fire
+   * mid-cycle. A give-up branch can, in a rare worst case, leave the session resting in an intermediate
+   * mode (incl. `plan`) rather than the target — `logLandedMode`'s role-gated auto-heal is the backstop
+   * that catches a Loom-driven role (no `ExitPlanMode` tool) left stranded there; this primitive itself is
+   * intentionally unchanged behaviour for the resume caller (do not add path-specific corrections here).
    */
-  private cycleResumeToMode(sessionId: string, target: LandedMode, onDone: () => void): void {
+  private cycleToMode(sessionId: string, target: LandedMode, onDone: () => void): void {
     let presses = 0;
     let finished = false;
     const finish = (reason: string, mode: LandedMode): void => {
@@ -1949,26 +1945,36 @@ export class PtyHost {
     if (!live?.alive || live.ready) return;
     live.ready = true;
     this.drainPending(sessionId); // deliver the first queued injection now that the composer is live
-    this.logLandedMode(sessionId); // OBSERVABILITY: record what permission mode we actually landed in
+    this.logLandedMode(sessionId); // record the landed mode + the role-gated plan auto-heal backstop
   }
 
   /**
-   * OBSERVABILITY ONLY (card f05e4897) — record, to the daemon log, what permission mode a (re)spawned
-   * session actually LANDED in once it settled (mode-cycles/gate handling done + markReady). PURELY a
-   * READ + LOG: it never writes to the pty, never cycles or changes the mode, and never touches the
-   * readiness/busy/drain/gate machinery — boot behavior is byte-identical with or without it. It exists
-   * so a real prod `--resume` (esp. the large-session summary-gate path) gives ground truth on whether
-   * the session lands in plan vs acceptEdits/auto, instead of us guessing.
+   * OBSERVABILITY + defense-in-depth plan auto-heal (card f05e4897 / b99d3d67) — record, to the daemon
+   * log, what permission mode a (re)spawned session actually LANDED in once it settled (mode-cycles/gate
+   * handling done + markReady), and — the auto-heal — if a Loom-DRIVEN role with `ExitPlanMode`
+   * disallowed (worker/setup/auditor/workspace-auditor — {@link disallowedToolsForRole}) is found resting
+   * in `plan`, press ONE Shift+Tab to correct it. `plan` is the one landed mode such a role can NEVER
+   * self-exit (its `ExitPlanMode` tool is structurally removed at spawn), so a session stranded there —
+   * by either cycleToMode's rare give-up-mid-cycle worst case, or anything else that ever leaves it in
+   * plan — would otherwise sit inert forever. This is a BACKSTOP, independent of cycleToMode's own
+   * convergence logic (which stays byte-identical for the resume caller — see cycleToMode's doc comment):
+   * it fires off the mode ACTUALLY read from the footer, regardless of why the session ended up there.
+   * A manager/platform session is structurally excluded (`disallowedToolsForRole` returns `[]` for those
+   * roles), so this never fights a manager's legitimate, human-approved entry into plan mode.
    *
    * Best-effort + bounded: polls the ring (the existing rolling output buffer) a few times to let the
-   * footer repaint into its final state, logs as soon as a mode is read, and gives up after a short cap
-   * (logging mode=unknown). Fires at most once per session (modeLogged guard). Shells are excluded.
+   * footer repaint into its final state, logs as soon as a mode is read (or gives up at the cap, logging
+   * mode=unknown — no correction is attempted without a definite read), and corrects at most once per
+   * session (modeLogged guard, claimed up front). Shells are excluded. The corrective press itself is
+   * fire-and-forget (mirrors the existing single-shot Esc/arrow dismissals elsewhere in this file) — not
+   * re-verified, since this is already the last-resort backstop.
    */
   private logLandedMode(sessionId: string): void {
     const live = this.live.get(sessionId);
     if (!live || live.kind !== "claude" || live.modeLogged) return;
     live.modeLogged = true; // claim it once, up front — a repeat markReady won't re-schedule this
     const isResume = live.isResume;
+    const role = live.role;
     let attempts = 0;
     const tryRead = (): void => {
       const l = this.live.get(sessionId);
@@ -1985,6 +1991,11 @@ export class PtyHost {
       const snippet = collapseFooter(recent).slice(-160); // short, ANSI-free evidence for the log
       // eslint-disable-next-line no-console
       console.log(`[resume-mode] ${sessionId} kind=${isResume ? "resume" : "fresh"} mode=${mode} matched=${matchedToken ?? "-"} footer=${JSON.stringify(snippet)}`);
+      if (mode === "plan" && l.alive && disallowedToolsForRole(role).includes("ExitPlanMode")) {
+        // eslint-disable-next-line no-console
+        console.log(`[resume-mode] ${sessionId} auto-heal: role=${role ?? "-"} landed in plan (ExitPlanMode disallowed) — pressing Shift+Tab off plan`);
+        l.pty.write(SHIFT_TAB);
+      }
     };
     setTimeout(tryRead, MODE_LOG_POLL_MS);
   }

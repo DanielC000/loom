@@ -29,6 +29,7 @@ const tmpHome = path.join(os.tmpdir(), `loom-readytest-${Date.now()}-${process.p
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 process.env.LOOM_READY_FALLBACK_MS = "2500";
+process.env.LOOM_RESUME_MODE_POLL_MS = "40"; // fast footer polling for scenario 2's feedback cycle
 
 const { PtyHost, isResumeSummaryGate } = await import("../dist/pty/host.js");
 
@@ -90,16 +91,27 @@ try {
   check("1: busy re-armed for the drained turn", busyLog[busyLog.length - 1] === true);
 
   // ============ 2) Ordering: on resume the mode-cycles land BEFORE the injection submits ============
+  // Card b99d3d67: the mode-cycle is now FEEDBACK-driven (reads the footer), not blind timing — so this
+  // scenario must feed a realistic footer progression for the cycle to actually converge. (No resumeId
+  // here would also route through the same feedback cycler via startupModeCycles; resumeId is kept to
+  // preserve this block's original "a resumed session" framing, but the routing is now identical either
+  // way — see host.ts's SessionStart handler.)
   const B = "sess-resume-B";
   host.spawn({ sessionId: B, cwd: tmpHome, resumeId: "engine-B",
     permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 2 }, geometry: { cols: 120, rows: 40 }, sessionEnv: {} });
   const fb = fakes[fakes.length - 1];
+  fb.feed("accept edits on (shift+tab to cycle)"); // boot footer already painted before SessionStart fires
   host.enqueueStdin(B, "NUDGE_B");
-  host.deliverHook(B, { hook_event_name: "SessionStart" }); // starts the 2 mode-cycles; ready only after they land
-  check("2: NOT ready immediately after SessionStart — cycles in flight, nudge still queued", countIn(fb, PASTE_START) === 0);
-  await sleep(1400); // > MODE_CYCLE_SETTLE_MS(700) + 2*MODE_CYCLE_INTERVAL_MS(120) + slack
+  host.deliverHook(B, { hook_event_name: "SessionStart" }); // starts the feedback cycle; ready only after it lands
+  check("2: NOT ready immediately after SessionStart — cycle in flight, nudge still queued", countIn(fb, PASTE_START) === 0);
+  await sleep(750); // > MODE_CYCLE_SETTLE_MS(700) — first footer read (acceptEdits) → press #1
+  check("2: NOT ready mid-cycle either — still queued after the first (unconfirmed) press", countIn(fb, PASTE_START) === 0);
+  fb.feed("plan mode on (shift+tab to cycle)"); // press #1 registered: footer repaints to plan
+  await sleep(150); // > overridden poll (40ms) × a few ticks — the change is observed → press #2
+  fb.feed("auto mode on (shift+tab to cycle)"); // press #2 registered: footer repaints to auto (the target)
+  await sleep(150);
   check("2: both Shift+Tab mode-cycles were sent", countIn(fb, SHIFT_TAB) === 2);
-  check("2: the nudge submitted exactly once after the cycles", countIn(fb, PASTE_START) === 1);
+  check("2: the nudge submitted exactly once after the cycle converged", countIn(fb, PASTE_START) === 1);
   check("2: ORDERING — the Shift+Tabs were written BEFORE the bracketed paste",
     writtenOf(fb).indexOf(SHIFT_TAB) >= 0 && writtenOf(fb).indexOf(SHIFT_TAB) < writtenOf(fb).indexOf(PASTE_START));
 
