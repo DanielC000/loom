@@ -416,12 +416,17 @@ export async function deleteBranch(repoPath: string, branch: string, deps: Bound
  * keeps occupying one libuv threadpool slot until/unless the handle releases. Acceptable vs. a wedged
  * daemon: the realistic count is the 1-2 inert orphans, not a slot leak that starves the pool. The fs
  * remove is injectable via {@link BoundedGitDeps.rm} so a test can prove the bound on a never-releasing handle.
+ *
+ * Returns `true` when `worktreePath` is confirmed GONE from disk afterward, `false` when it's still there
+ * (the swallowed-timeout case above) — so a caller can tell "fully removed" from "left for a later GC"
+ * WITHOUT re-deriving the same `fs.existsSync` check itself, and decide whether to hand the dir off to a
+ * retry (see {@link WorktreeGc} in `worktree-gc.ts`, which reuses this function verbatim for its retries).
  */
 export async function removeWorktree(
   repoPath: string,
   worktreePath: string,
   deps: BoundedGitDeps = {},
-): Promise<void> {
+): Promise<boolean> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
     await withTimeout(git.raw(["worktree", "remove", worktreePath, "--force"]), timeoutMs, "git worktree remove");
@@ -445,6 +450,7 @@ export async function removeWorktree(
     // A hung/failed prune must NOT throw past removeWorktree (which would re-introduce the boot hang
     // via finalizeMerge / Pass B). A stale admin record is harmless — createWorktree prunes on reuse.
   }
+  return !fs.existsSync(worktreePath);
 }
 
 /**

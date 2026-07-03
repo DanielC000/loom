@@ -57,7 +57,9 @@ try {
     engineTranscriptPath(worktreePath, "x") !== engineTranscriptPath(repo, "x"));
 
   // (e) removeWorktree → dir gone, no longer listed (branch NOT deleted here — that's the merge's job).
-  await removeWorktree(repo, worktreePath);
+  //     Its boolean return (bd9fc808 — the worktree-gc.ts retry queue's success signal) is TRUE here.
+  const removedE = await removeWorktree(repo, worktreePath);
+  check("(e) removeWorktree returns true on a successful removal", removedE === true);
   check("(e) worktree dir removed", !fs.existsSync(worktreePath));
   check("(e) git worktree list no longer lists it", !git(repo, "worktree list").includes(key));
   check("(e) removeWorktree did NOT delete the branch", git(repo, `branch --list ${branch}`).includes(branch));
@@ -202,12 +204,17 @@ try {
     const neverRm = () => new Promise(() => {}); // a stuck dir handle: this remove never settles
     const tinyMs = 250;
     const stuckPath = path.join(process.env.LOOM_HOME, `stuck-${Date.now()}`); // Date.now() here = unique path, not a duration
+    fs.mkdirSync(stuckPath, { recursive: true }); // real dir on disk so the "left behind" signal below is meaningful
     const t0 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
     let resolved = false;
+    let removedL;
     await removeWorktree(repo, stuckPath,
-      { gitFactory: stubFastGit, rm: neverRm, timeoutMs: tinyMs }).then(() => { resolved = true; });
+      { gitFactory: stubFastGit, rm: neverRm, timeoutMs: tinyMs }).then((r) => { resolved = true; removedL = r; });
     const elapsed = performance.now() - t0;
     check("(l) removeWorktree RETURNS despite a never-resolving fs.rm (stuck dir handle, not an infinite hang)", resolved);
+    check("(l) returns FALSE — the dir is left on disk (the signal worktree-gc.ts's background retry queues on)",
+      removedL === false && fs.existsSync(stuckPath));
+    fs.rmSync(stuckPath, { recursive: true, force: true }); // cleanup (neverRm never actually removed it)
     check(`(l) bounded by the timeout — returned in ${Math.round(elapsed)}ms (fs backstop capped at ${tinyMs}ms)`,
       elapsed >= tinyMs - TIMER_SLACK_MS && elapsed < tinyMs * 8 + 1500);
   }
