@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session } from "@loom/shared";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -52,7 +52,7 @@ import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME } from "../setup/seed.js";
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
 import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from "../skills/companion-store.js";
-import { listCompanionMemories, readCompanionMemory, removeCompanionMemory } from "../skills/companion-memory-store.js";
+import { listCompanionMemories, readCompanionMemory, removeCompanionMemory, authorCompanionMemory } from "../skills/companion-memory-store.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -1162,21 +1162,34 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return reply.code(202).send({ ok: true, updating: true });
   });
 
-  // --- Test-only data seeding (card 32fd6f4c) — closes the e2e seeding gap for the two write paths an
-  // isolated e2e spec cannot otherwise reach: `session_usage_samples` (written ONLY by the internal usage
-  // sampler) and `runs` (filled ONLY by the real-spawn-triggering POST /api/runs above, forbidden in the
-  // e2e fixture). Gated on BOTH `inTestMode()` (LOOM_TEST=1, which the e2e fixture already sets) AND
-  // loopback, so this NEVER mounts against — and is unreachable even by IP against — a real daemon; zero
-  // prod surface, same posture as the other /internal/* routes with an extra fail-closed layer. Inserts
-  // rows directly via deps.db (insertUsageSample/insertRun), bypassing SessionService.startRun/PTY
-  // entirely — no agent ever spawns. THE pattern for seeding daemon-only data from an e2e spec (see
-  // Projects/Loom/Design/E2E Test Suite Design.md). ---
+  // --- Test-only data seeding (card 32fd6f4c, extended by card 0954ed9c for the Companion Manage e2e
+  // spec) — closes the e2e seeding gap for write paths an isolated e2e spec cannot otherwise reach:
+  // `session_usage_samples` (written ONLY by the internal usage sampler), `runs` (filled ONLY by the
+  // real-spawn-triggering POST /api/runs above, forbidden in the e2e fixture), and now a companion's
+  // config/session/memory/reminders (writable in prod ONLY via `/api/companion/provision` — spawns a real
+  // assistant session — or `/api/companion/config` — calls `reconcile()` and ARMS the runtime — both
+  // forbidden in the e2e fixture's no-spawn-guard world). Gated on BOTH `inTestMode()` (LOOM_TEST=1,
+  // which the e2e fixture already sets) AND loopback, so this NEVER mounts against — and is unreachable
+  // even by IP against — a real daemon; zero prod surface, same posture as the other /internal/* routes
+  // with an extra fail-closed layer. Inserts rows directly via deps.db (insertUsageSample/insertRun/
+  // insertSession/upsertCompanionConfig/insertCompanionReminder) + the memory FILE store
+  // (authorCompanionMemory), bypassing SessionService.startRun/PTY and companion reconcile entirely — no
+  // agent ever spawns, no runtime ever arms. THE pattern for seeding daemon-only data from an e2e spec
+  // (see Projects/Loom/Design/E2E Test Suite Design.md). ---
   if (inTestMode()) {
     app.post("/internal/test/seed", async (req, reply) => {
       if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
       const b = (req.body ?? {}) as {
         usageSamples?: Partial<UsageSample>[];
         runs?: Partial<AgentRun>[];
+        companionSessions?: { id?: string; projectId: string; agentId: string; title?: string }[];
+        companionConfigs?: {
+          sessionId: string; enabled?: boolean; name?: string; botToken?: string; channel?: string;
+          allowedChatId?: string; chatScope?: "dm" | "group";
+          heartbeatIntervalMinutes?: number; heartbeatPrompt?: string | null;
+        }[];
+        companionMemories?: { sessionId: string; name: string; content: string }[];
+        companionReminders?: { sessionId: string; cron?: string; prompt?: string; label?: string | null; enabled?: boolean }[];
       };
       const usageSampleIds: string[] = [];
       for (const s of b.usageSamples ?? []) {
@@ -1211,7 +1224,79 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         });
         runIds.push(id);
       }
-      return reply.code(201).send({ ok: true, usageSampleIds, runIds });
+      // Companion session: a plain, NOT-LIVE (`exited`/`dead`) row on the assistant role — the minimal
+      // shape resolveCompanionAgent (the Manage-tab reads) needs: a session whose agentId resolves to a
+      // real agent. cwd defaults to the owning project's repoPath (mirrors a real spawn's cwd).
+      const companionSessionIds: string[] = [];
+      for (const s of b.companionSessions ?? []) {
+        if (typeof s.projectId !== "string" || typeof s.agentId !== "string") {
+          return reply.code(400).send({ error: "companionSessions[].projectId and agentId are required strings" });
+        }
+        const project = deps.db.getProject(s.projectId);
+        if (!project) return reply.code(400).send({ error: `companionSessions[]: no project ${s.projectId}` });
+        const id = typeof s.id === "string" && s.id ? s.id : randomUUID();
+        const now = new Date().toISOString();
+        const row: Session = {
+          id, projectId: s.projectId, agentId: s.agentId, engineSessionId: null,
+          title: s.title ?? null, cwd: project.repoPath, processState: "exited", resumability: "dead",
+          busy: false, createdAt: now, lastActivity: now, lastError: null, role: "assistant",
+        };
+        deps.db.insertSession(row);
+        companionSessionIds.push(id);
+      }
+      // Companion config row: same upsert the real (human-only) config writer uses, but skipping the
+      // `deps.companion?.reconcile()` call that arms the live runtime. An optional `botToken` is encrypted
+      // exactly like the real write path so the masked read-back (`tokenConfigured`/`tokenLast4`) behaves
+      // identically to a production companion.
+      const companionConfigSessionIds: string[] = [];
+      for (const c of b.companionConfigs ?? []) {
+        if (typeof c.sessionId !== "string") {
+          return reply.code(400).send({ error: "companionConfigs[].sessionId is required" });
+        }
+        deps.db.upsertCompanionConfig({
+          sessionId: c.sessionId,
+          botTokenBlob: typeof c.botToken === "string" && c.botToken ? encryptSecret(c.botToken) : "",
+          channel: c.channel ?? IN_APP_CHANNEL,
+          allowedChatId: c.allowedChatId ?? "",
+          chatScope: c.chatScope ?? "dm",
+          heartbeatIntervalMinutes: c.heartbeatIntervalMinutes ?? 0,
+          heartbeatPrompt: c.heartbeatPrompt ?? null,
+          enabled: c.enabled ?? true,
+          name: c.name ?? "",
+        });
+        companionConfigSessionIds.push(c.sessionId);
+      }
+      // Companion memory: authored straight into the companion's OWN MEMORY.md file store (there is no
+      // DB table — companion-memory-store.ts is filesystem-backed), the same writer the companion's own
+      // memory_author MCP tool calls.
+      const companionMemoryNames: string[] = [];
+      for (const m of b.companionMemories ?? []) {
+        if (typeof m.sessionId !== "string" || typeof m.name !== "string" || typeof m.content !== "string") {
+          return reply.code(400).send({ error: "companionMemories[].sessionId, name, and content are required strings" });
+        }
+        const r = authorCompanionMemory(m.sessionId, m.name, m.content);
+        if (!r.ok) return reply.code(400).send({ error: r.error });
+        companionMemoryNames.push(m.name);
+      }
+      // Companion reminders: a direct companion_reminders row (the real writer is the companion's own
+      // reminder_* MCP tool — never REST). `route` is left null (no live binding to derive one from);
+      // the Manage → Reminders view never reads route, only cron/prompt/label/enabled/nextFireAt.
+      const companionReminderIds: string[] = [];
+      for (const rem of b.companionReminders ?? []) {
+        if (typeof rem.sessionId !== "string") {
+          return reply.code(400).send({ error: "companionReminders[].sessionId is required" });
+        }
+        const id = randomUUID();
+        deps.db.insertCompanionReminder({
+          id, sessionId: rem.sessionId, cron: rem.cron ?? "0 9 * * *", prompt: rem.prompt ?? "Daily check-in — anything worth surfacing?",
+          label: rem.label ?? null, route: null, enabled: rem.enabled ?? true, createdAt: new Date().toISOString(),
+        });
+        companionReminderIds.push(id);
+      }
+      return reply.code(201).send({
+        ok: true, usageSampleIds, runIds,
+        companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds,
+      });
     });
   }
 

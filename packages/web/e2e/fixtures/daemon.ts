@@ -105,6 +105,14 @@ export interface SeededTask {
   title: string;
 }
 
+export interface SeededCompanion {
+  projectId: string;
+  agentId: string;
+  sessionId: string;
+  memoryName: string;
+  reminderLabel: string;
+}
+
 export interface LoomDaemon {
   /** The isolated daemon's actual bound origin, e.g. http://127.0.0.1:4399 — parsed from its boot log. */
   baseURL: string;
@@ -132,6 +140,24 @@ export interface LoomDaemon {
     cacheReadTokens?: number;
     costUsd?: number;
   }) => Promise<string>;
+  /**
+   * Seed a full companion (card 0954ed9c: the Companion Manage e2e spec) via the test-only
+   * POST /internal/test/seed — a NOT-LIVE assistant-role session bound to a fresh project+agent, a
+   * companion config row (with a bot token, so the Manage tab's masked read-back has something to mask),
+   * one authored memory entry, and one reminder. NEVER calls `/api/companion/provision` (spawns a real
+   * assistant session) or `/api/companion/config` (arms the runtime via `reconcile()`) — both would trip
+   * this fixture's `[pty] spawn` no-spawn guard. Returns the ids the seeded rows carry, plus the seeded
+   * memory/reminder's own names for spec assertions.
+   */
+  seedCompanion: (opts?: {
+    name?: string;
+    botToken?: string;
+    allowedChatId?: string;
+    memoryName?: string;
+    memoryContent?: string;
+    reminderLabel?: string;
+    reminderPrompt?: string;
+  }) => Promise<SeededCompanion>;
 }
 
 export const test = base.extend<{ loomPage: Page }, { loomDaemon: LoomDaemon }>({
@@ -212,7 +238,34 @@ export const test = base.extend<{ loomPage: Page }, { loomDaemon: LoomDaemon }>(
       return res.usageSampleIds[0];
     };
 
-    await use({ baseURL, createProject, createTask, seedUsageSample });
+    const seedCompanion: LoomDaemon["seedCompanion"] = async (opts = {}) => {
+      const project = await createProject(`companion-${randomUUID()}`);
+      const name = opts.name ?? "Ada";
+      // The agent's own `name` is what the Companion page's header label actually renders (via the
+      // seeded session's `agentName`) — the companion CONFIG's own `name` field (below) is stored +
+      // returned masked over REST but has no dedicated display in the Manage tab today. Using the same
+      // name for both means a spec asserting "the companion's name is visible" holds either way.
+      const agent = await apiPost<{ id: string }>(baseURL, `/api/projects/${project.id}/agents`, { name });
+      const sessionId = `e2e-companion-${randomUUID()}`;
+      const memoryName = opts.memoryName ?? "user-preferences";
+      const reminderLabel = opts.reminderLabel ?? "Morning check-in";
+      await apiPost(baseURL, "/internal/test/seed", {
+        companionSessions: [{ id: sessionId, projectId: project.id, agentId: agent.id }],
+        companionConfigs: [{
+          sessionId, enabled: true, name,
+          botToken: opts.botToken ?? "123456:e2e-test-token",
+          allowedChatId: opts.allowedChatId ?? "999",
+        }],
+        companionMemories: [{
+          sessionId, name: memoryName,
+          content: opts.memoryContent ?? "---\ndescription: seeded for the Companion Manage e2e spec\n---\nLikes concise answers.",
+        }],
+        companionReminders: [{ sessionId, label: reminderLabel, prompt: opts.reminderPrompt ?? "Anything worth surfacing?" }],
+      });
+      return { projectId: project.id, agentId: agent.id, sessionId, memoryName, reminderLabel };
+    };
+
+    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.

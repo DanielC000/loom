@@ -1,12 +1,16 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// The test-only internal seed endpoint (card 32fd6f4c) — POST /internal/test/seed. Closes the e2e
-// seeding gap: `session_usage_samples` (written ONLY by the internal usage sampler) and `runs` (filled
-// ONLY via the real-spawn-triggering POST /api/runs) had no path an isolated e2e spec could seed. This
-// endpoint inserts rows directly via deps.db, bypassing SessionService.startRun/PTY entirely.
+// The test-only internal seed endpoint (card 32fd6f4c, extended by card 0954ed9c) — POST
+// /internal/test/seed. Closes the e2e seeding gap: `session_usage_samples` (written ONLY by the
+// internal usage sampler), `runs` (filled ONLY via the real-spawn-triggering POST /api/runs), and a
+// companion's config/session/memory/reminders (writable in prod ONLY via `/api/companion/provision` —
+// spawns a real assistant session — or `/api/companion/config` — ARMS the runtime via reconcile()) had
+// no path an isolated e2e spec could seed. This endpoint inserts rows directly via deps.db (+ the
+// companion memory FILE store), bypassing SessionService.startRun/PTY and companion reconcile entirely.
 // HERMETIC + CLAUDE-FREE + NETWORK-FREE (Db + buildServer via app.inject). Proves the contract:
 //   (a) in NORMAL (non-test) mode the route is entirely ABSENT (404) — zero prod surface;
-//   (b) under LOOM_TEST=1 the route is PRESENT, loopback-gated (403 otherwise), inserts a usage sample
-//       and a run row that round-trip through the Db's own readers, and 400s on a malformed payload.
+//   (b) under LOOM_TEST=1 the route is PRESENT, loopback-gated (403 otherwise), inserts a usage sample,
+//       a run row, and a companion session/config/memory/reminder that round-trip through the Db's own
+//       readers (and the companion's own REST reads), and 400s on a malformed payload.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -109,6 +113,68 @@ try {
     const run = db.getRun(seedBody.runIds[0]);
     check("(b) seeded run round-trips with the given projectId/agentId/status",
       run?.projectId === "proj-1" && run?.agentId === "agent-1" && run?.status === "completed");
+
+    // --- Companion seed kinds (card 0954ed9c: the Companion Manage e2e spec's no-real-claude fixture) ---
+
+    // Malformed companionSessions entry (missing agentId) -> 400, no row inserted.
+    const badCompanionSession = await testApp.inject({
+      method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+      payload: { companionSessions: [{ projectId: "proj-1" }] },
+    });
+    check("(b) malformed companionSessions entry -> 400", badCompanionSession.statusCode === 400);
+
+    // A companion-role agent to bind the seeded session to.
+    db.insertAgent({
+      id: "companion-agent-1", projectId: "proj-1", name: "seed-test-companion", startupPrompt: "",
+      position: 1, profileId: null, endpoint: false, ioSchema: null,
+    });
+
+    // Seed a full companion in one call: a NOT-LIVE assistant session, a config row (with a bot token —
+    // proving the masked read-back), a memory entry, and a reminder.
+    const companionSeed = await testApp.inject({
+      method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+      payload: {
+        companionSessions: [{ id: "companion-sess-1", projectId: "proj-1", agentId: "companion-agent-1" }],
+        companionConfigs: [{
+          sessionId: "companion-sess-1", enabled: true, name: "Ada", botToken: "123456:test-token",
+          allowedChatId: "999",
+        }],
+        companionMemories: [{
+          sessionId: "companion-sess-1", name: "user-preferences",
+          content: "---\ndescription: seeded test memory\n---\nLikes concise answers.",
+        }],
+        companionReminders: [{ sessionId: "companion-sess-1", label: "Morning check-in", prompt: "Anything worth surfacing?" }],
+      },
+    });
+    check("(b) seeding a companion session + config + memory + reminder -> 201", companionSeed.statusCode === 201);
+    const companionSeedBody = companionSeed.json();
+    check("(b) response echoes the companion session/config/memory/reminder ids",
+      companionSeedBody.companionSessionIds.length === 1 && companionSeedBody.companionConfigSessionIds.length === 1 &&
+      companionSeedBody.companionMemoryNames.length === 1 && companionSeedBody.companionReminderIds.length === 1);
+
+    // Round-trip #1: the session is a real, NOT-LIVE assistant-role row (never armed a real pty).
+    const companionSession = db.getSession("companion-sess-1");
+    check("(b) seeded companion session round-trips as a NOT-LIVE assistant-role row",
+      companionSession?.role === "assistant" && companionSession?.processState === "exited" && companionSession?.busy === false);
+
+    // Round-trip #2: the config is readable (masked) over the SAME REST the Manage tab reads, with the
+    // token masked (never plaintext) and the name surfaced.
+    const configRead = await testApp.inject({ method: "GET", url: "/api/companion/config" });
+    const configRow = configRead.json().find((c) => c.sessionId === "companion-sess-1");
+    check("(b) seeded companion config round-trips masked (tokenConfigured, last-4, name, no plaintext token)",
+      !!configRow && configRow.tokenConfigured === true && configRow.tokenLast4 === "oken" &&
+      configRow.name === "Ada" && configRow.enabled === true && !("botToken" in configRow) && !("botTokenBlob" in configRow));
+
+    // Round-trip #3: the memory is readable over the Manage → Memory REST (proves the FILE store write +
+    // resolveCompanionAgent's session/agent resolution both worked — no DB table involved).
+    const memoryRead = await testApp.inject({ method: "GET", url: "/api/companion/memory/companion-sess-1" });
+    check("(b) seeded companion memory round-trips over GET /api/companion/memory/:sessionId",
+      memoryRead.json().memories.some((m) => m.name === "user-preferences"));
+
+    // Round-trip #4: the reminder is readable over the Manage → Reminders REST.
+    const remindersRead = await testApp.inject({ method: "GET", url: "/api/companion/reminders/companion-sess-1" });
+    check("(b) seeded companion reminder round-trips over GET /api/companion/reminders/:sessionId",
+      remindersRead.json().reminders.some((r) => r.label === "Morning check-in"));
   } finally {
     await testApp.close();
   }
