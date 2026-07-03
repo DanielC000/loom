@@ -42,6 +42,14 @@ export function TerminalPane({ sessionId, resizable = false, readOnly = false, h
       disableStdin: readOnly,
       scrollback: 5000,
       theme: { background: "#0b0b0c" },
+      // xterm maintains a visually-hidden `.xterm-accessibility-tree` (one row element per grid row, kept
+      // in sync with the rendered buffer) ONLY when this is on — an always-in-sync extra DOM tree per
+      // terminal, which the cockpit can render MANY of live, so PROD stays byte-identical (off) rather
+      // than paying that cost unconditionally. Gated on the e2e fixture's own flag (card a53e6bc9's
+      // canned-pty replay spec): fixtures/daemon.ts sets `loom.e2e` before any page script runs, so tests
+      // get the real, Canvas-rendered rows/text with no window.WebSocket monkeypatch, while prod terminals
+      // are entirely unaffected.
+      screenReaderMode: typeof localStorage !== "undefined" && localStorage.getItem("loom.e2e") === "1",
     });
     const fit = resizable ? new FitAddon() : null;
     if (fit) term.loadAddon(fit);

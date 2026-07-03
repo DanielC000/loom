@@ -196,6 +196,13 @@ export interface LoomDaemon {
    * + its worker for the fleet grouping / role-scoped tabs). Optionally binds a board task (`task`, so the
    * SessionTaskCard sub-panel renders) and/or a pending wake (`wake`, so the SessionWakes sub-panel renders
    * — both draw nothing when empty). Returns the seeded ids + names/titles for assertions.
+   *
+   * `ptyGeometry`/`ptyBytes` (card a53e6bc9): register a canned, no-process pty entry (PtyHost.seedCanned)
+   * alongside the DB row, so — UNLIKE a plain seeded session, whose `/ws/term` attach is a genuine no-op —
+   * a client actually attaching this session's terminal WS replays the pinned cols/rows + the given bytes
+   * verbatim. Lets a spec prove faithful terminal RENDERING (letterbox / oscillation bugs) with no real
+   * claude spawn and no client-side monkeypatching. Either key alone is enough to register the entry;
+   * omitted `ptyGeometry` falls back to the project's own resolved pty config.
    */
   seedLiveSession: (opts?: {
     project?: SeededProject;
@@ -208,6 +215,8 @@ export interface LoomDaemon {
     title?: string;
     task?: { title?: string; body?: string; columnKey?: string; priority?: "p0" | "p1" | "p2" | "p3" };
     wake?: { note?: string };
+    ptyGeometry?: { cols: number; rows: number };
+    ptyBytes?: string;
   }) => Promise<SeededLiveSession>;
   /**
    * Spawn ONE real, LIVE host shell via `POST /api/terminals` (card ShellTile-e2e) — the ONLY way to make a
@@ -254,7 +263,14 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
   // themselves.
   context: async ({ context }, use) => {
     await context.addInitScript(() => {
-      try { localStorage.setItem("loom.setupWelcomeDismissed", "1"); } catch { /* storage may be unavailable */ }
+      try {
+        localStorage.setItem("loom.setupWelcomeDismissed", "1");
+        // Card a53e6bc9: flip Terminal.tsx's xterm instances into screenReaderMode for e2e ONLY — prod
+        // stays byte-identical (off). Read by Terminal.tsx before any WS/xterm setup, so it's live for
+        // every terminal a spec's page ever mounts (incl. terminal-canned-pty.spec.ts's accessibility-tree
+        // assertions).
+        localStorage.setItem("loom.e2e", "1");
+      } catch { /* storage may be unavailable */ }
     });
     await use(context);
   },
@@ -410,6 +426,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
         liveSessions: [{
           id: sessionId, projectId: project.id, agentId, role, busy: opts.busy ?? false,
           parentSessionId: opts.parentSessionId, taskId, branch: opts.branch, title: opts.title,
+          ptyGeometry: opts.ptyGeometry, ptyBytes: opts.ptyBytes,
         }],
         wakes: opts.wake ? [{ sessionId, note: wakeNote }] : [],
       });

@@ -1,18 +1,23 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// The test-only internal seed endpoint (card 32fd6f4c, extended by cards 0954ed9c + d01311b6) — POST
-// /internal/test/seed. Closes the e2e seeding gap: `session_usage_samples` (written ONLY by the
+// The test-only internal seed endpoint (card 32fd6f4c, extended by cards 0954ed9c + d01311b6 + a53e6bc9) —
+// POST /internal/test/seed. Closes the e2e seeding gap: `session_usage_samples` (written ONLY by the
 // internal usage sampler), `runs` (filled ONLY via the real-spawn-triggering POST /api/runs), a
 // companion's config/session/memory/reminders (writable in prod ONLY via `/api/companion/provision` —
-// spawns a real assistant session — or `/api/companion/config` — ARMS the runtime via reconcile()), and a
+// spawns a real assistant session — or `/api/companion/config` — ARMS the runtime via reconcile()), a
 // live-but-NO-PTY session row + a pending wake (a real live session would spawn a claude via
-// SessionService.startRun) had no path an isolated e2e spec could seed. This endpoint inserts rows
-// directly via deps.db (+ the companion memory FILE store), bypassing SessionService.startRun/PTY and
-// companion reconcile entirely. HERMETIC + CLAUDE-FREE + NETWORK-FREE (Db + buildServer via app.inject).
+// SessionService.startRun), and a pinned-geometry + canned-bytes pty replay (card a53e6bc9 — the
+// faithful-terminal-RENDERING gap the plain live-session row alone can't close) had no path an isolated
+// e2e spec could seed. This endpoint inserts rows directly via deps.db (+ the companion memory FILE
+// store) and registers canned pty entries via deps.pty.seedCanned, bypassing SessionService.startRun/a
+// real spawn and companion reconcile entirely. HERMETIC + CLAUDE-FREE + NETWORK-FREE (Db + a REAL PtyHost
+// (no real claude/shell process — only the seedCanned/dropCanned + subscribe seam is exercised) +
+// buildServer via app.inject).
 // Proves the contract:
 //   (a) in NORMAL (non-test) mode the route is entirely ABSENT (404) — zero prod surface;
 //   (b) under LOOM_TEST=1 the route is PRESENT, loopback-gated (403 otherwise), inserts a usage sample,
-//       a run row, a companion session/config/memory/reminder, and live sessions + a wake that round-trip
-//       through the Db's own readers (and the companion's own REST reads), and 400s on a malformed payload.
+//       a run row, a companion session/config/memory/reminder, live sessions + a wake, and a canned pty
+//       replay that all round-trip through the Db's own readers / PtyHost.subscribe (and the companion's
+//       own REST reads), and 400s on a malformed payload.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -28,18 +33,30 @@ const sandboxHome = path.join(TMP, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX
+// seedCanned opens a per-session log under LOGS_DIR (= $LOOM_HOME/logs, mirrors a real pty's log) — create
+// it up front so that createWriteStream succeeds (paths.ts reads LOOM_HOME at import time, below).
+fs.mkdirSync(path.join(TMP, "logs"), { recursive: true });
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
+const { PtyHost } = await import("../dist/pty/host.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 const stub = {};
 const db = new Db(path.join(TMP, "loom.db"));
+// A REAL PtyHost (no real claude/shell spawn ever happens — only seedCanned/dropCanned/subscribe are
+// exercised in this file) so the ptyGeometry/ptyBytes seed kind round-trips through the actual replay
+// path a WS attach uses, not a hand-rolled fake. Every PtyHostEvents callback is a no-op: none of them
+// fire for a canned (process-less) entry.
+const pty = new PtyHost({
+  onEngineSessionId: () => {}, onBusy: () => {}, onContextStats: () => {},
+  onRateLimited: () => {}, onExit: () => {},
+});
 const baseDeps = {
-  db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub,
+  db, pty, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub,
   userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub,
   requestShutdown: () => {},
 };
@@ -232,18 +249,84 @@ try {
     check("(b) seeded wake round-trips via listWakesForSession",
       wakesForMgr.length === 1 && wakesForMgr[0].note === "seeded wake — e2e");
 
+    // --- Canned pty replay seed kind (card a53e6bc9: pinned geometry + canned bytes for faithful
+    // terminal-RENDERING e2e specs — the gap the plain liveSessions row above can't close, since ITS
+    // WS attach is a genuine no-op with no live pty to subscribe to) ---
+
+    // A liveSessions entry with NEITHER ptyGeometry NOR ptyBytes registers NO canned pty entry (the
+    // byte-identical-when-omitted invariant) — subscribing never fires onData/onControl.
+    const plainOnlySeed = await testApp.inject({
+      method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+      payload: { liveSessions: [{ id: "live-plain-nopty-1", projectId: "proj-1", agentId: "agent-1", role: "plain" }] },
+    });
+    check("(b) a plain liveSessions entry (no ptyGeometry/ptyBytes) -> 201", plainOnlySeed.statusCode === 201);
+    {
+      let fired = false;
+      const unsub = pty.subscribe("live-plain-nopty-1", { onData: () => { fired = true; }, onControl: () => { fired = true; } });
+      check("(b) subscribing to a plain (no-canned) liveSessions row fires nothing (no live pty entry)", fired === false);
+      unsub();
+    }
+
+    // A liveSessions entry WITH ptyGeometry + ptyBytes registers a canned entry: subscribing replays the
+    // pinned geometry control frame + the canned bytes verbatim — the exact path a `/ws/term` attach uses.
+    const cannedSeed = await testApp.inject({
+      method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+      payload: {
+        liveSessions: [{
+          id: "live-canned-1", projectId: "proj-1", agentId: "agent-1", role: "plain",
+          ptyGeometry: { cols: 60, rows: 20 }, ptyBytes: "hello from a canned pty\r\n",
+        }],
+      },
+    });
+    check("(b) a liveSessions entry with ptyGeometry + ptyBytes -> 201", cannedSeed.statusCode === 201);
+    {
+      const dataChunks = [];
+      const controls = [];
+      const unsub = pty.subscribe("live-canned-1", {
+        onData: (buf) => dataChunks.push(buf),
+        onControl: (e) => controls.push(e),
+      });
+      check("(b) attaching replays the canned bytes verbatim",
+        Buffer.concat(dataChunks).toString("utf8") === "hello from a canned pty\r\n");
+      check("(b) attaching replays a geometry control frame at the PINNED cols/rows",
+        controls.some((e) => e.type === "geometry" && e.cols === 60 && e.rows === 20));
+      unsub();
+    }
+
+    // ptyBytes alone (no ptyGeometry) falls back to the project's OWN resolved pty geometry — proving the
+    // fallback wiring, not a hardcoded default.
+    const cannedNoGeomSeed = await testApp.inject({
+      method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+      payload: { liveSessions: [{ id: "live-canned-2", projectId: "proj-1", agentId: "agent-1", ptyBytes: "no geometry given" }] },
+    });
+    check("(b) a liveSessions entry with ptyBytes only (no ptyGeometry) -> 201", cannedNoGeomSeed.statusCode === 201);
+    {
+      const controls = [];
+      const unsub = pty.subscribe("live-canned-2", { onData: () => {}, onControl: (e) => controls.push(e) });
+      check("(b) omitted ptyGeometry falls back to the project's resolved pty config",
+        controls.some((e) => e.type === "geometry" && Number.isInteger(e.cols) && Number.isInteger(e.rows)));
+      unsub();
+    }
+
     // Cleanup directive: archiving a seeded live session removes it from the live rail (its row stays
     // addressable by id, archived). This is how a spec keeps the SHARED e2e daemon's live rail clean.
+    // Also DROPS any canned pty entry (dropCanned) so it can't leak into a later spec's shared daemon.
     const archiveRes = await testApp.inject({
       method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
-      payload: { archiveSessions: ["live-mgr-1", "live-wkr-1", "live-plain-1"] },
+      payload: { archiveSessions: ["live-mgr-1", "live-wkr-1", "live-plain-1", "live-plain-nopty-1", "live-canned-1", "live-canned-2"] },
     });
     check("(b) archiveSessions directive -> 201 echoing the ids",
-      archiveRes.statusCode === 201 && archiveRes.json().archivedSessionIds.length === 3);
+      archiveRes.statusCode === 201 && archiveRes.json().archivedSessionIds.length === 6);
     check("(b) archived sessions left the live rail",
       db.listAllSessions().every((s) => !["live-mgr-1", "live-wkr-1", "live-plain-1"].includes(s.id)));
     check("(b) an archived session is still addressable by id (row not deleted)",
       db.getSession("live-mgr-1")?.archivedAt != null);
+    {
+      let fired = false;
+      const unsub = pty.subscribe("live-canned-1", { onData: () => { fired = true; }, onControl: () => { fired = true; } });
+      check("(b) archiveSessions drops the canned pty entry too — a re-subscribe fires nothing", fired === false);
+      unsub();
+    }
   } finally {
     await testApp.close();
   }

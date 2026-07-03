@@ -703,7 +703,10 @@ interface Live {
   // "shell" = a plain human-spawned interactive shell (pwsh/cmd/bash) — RAW passthrough only; ALL the
   // Claude-only logic (deliverHook/readiness/drain/reconcile/boot-reconcile) SKIPS it. A shell is NOT a
   // DB Session, so the orchestration watchers (which iterate DB sessions) never see it either.
-  kind: "claude" | "shell";
+  // "canned" = a TEST-ONLY no-process entry (seedCanned) that pre-loads the ring with recorded bytes so
+  // `/ws/term` attach replays a faithful screen at a pinned geometry with no real spawn (card a53e6bc9).
+  // Shares the shell's Claude-only-skip exemptions but is excluded from listShells (not a real terminal).
+  kind: "claude" | "shell" | "canned";
   command?: string;   // shell only: the executable spawned (for GET /api/terminals)
   label?: string;     // shell only: human label for the tile
   geometry: PtyGeometry; // claude: the pinned grid (info only, never resized). shell: current size, resizable.
@@ -1239,6 +1242,56 @@ export class PtyHost {
   }
 
   /**
+   * TEST-ONLY (card a53e6bc9): register a no-process "live" entry so `/ws/term` attach replays a pinned
+   * geometry + recorded bytes with NO real claude/shell spawn — closing the gap left by the seed
+   * endpoint's plain `liveSessions` DB row (card d01311b6), whose WS attach is a genuine no-op (no pty to
+   * subscribe to) and so can only prove card CHROME, never faithful terminal RENDERING. `subscribe()`
+   * doesn't care that `pty` is a stub — it only reads `ring`/`geometry`/`engineSessionId`/`alive` — so the
+   * existing replay-then-stream path (ring replay + a `geometry` control frame on attach) serves the
+   * canned bytes verbatim with no new WS code path and no client-side monkeypatching. Nothing ever calls
+   * the stub's write/resize/kill (a canned entry outlives the spec; cleanup is `dropCanned`), so it stays
+   * static for its whole life.
+   */
+  seedCanned(opts: { id: string; cwd: string; geometry: PtyGeometry; bytes: Buffer }): void {
+    const stub: IPty = {
+      pid: -1, cols: opts.geometry.cols, rows: opts.geometry.rows, process: "canned",
+      handleFlowControl: false,
+      onData: () => ({ dispose: () => {} }),
+      onExit: () => ({ dispose: () => {} }),
+      resize: () => {}, clear: () => {}, write: () => {}, kill: () => {}, pause: () => {}, resume: () => {},
+    };
+    const live: Live = {
+      pty: stub, pid: stub.pid, cwd: opts.cwd,
+      kind: "canned", geometry: opts.geometry,
+      role: null, // a canned entry has no role; unreachable anyway (modeLogged:true skips the auto-heal read)
+      engineSessionId: null,
+      ring: { chunks: [], bytes: 0 },
+      subscribers: new Set(),
+      alive: true,
+      logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.id}.log`)),
+      busy: false, ready: true, busySince: null,
+      lastOutputAt: Date.now(), composerLen: 0,
+      pending: [], stopping: false, rateLimited: false, lastPrompt: null,
+      activeTurnRoute: null, lastPromptRoute: null,
+      startupModeCycles: 0, startupCyclesDone: true,
+      mcpPromptHandled: true, bootScan: "",
+      resumeGateHandled: true, resumeGateScan: "",
+      isResume: false, modeLogged: true,
+      resumeModeTarget: null,
+    };
+    if (opts.bytes.length) this.appendRing(live, opts.bytes);
+    this.live.set(opts.id, live);
+  }
+
+  /** TEST-ONLY: drop a `seedCanned` entry (no process to kill — just forget the map entry + close its log). */
+  dropCanned(id: string): void {
+    const live = this.live.get(id);
+    if (!live || live.kind !== "canned") return;
+    try { live.logStream.end(); } catch { /* ignore */ }
+    this.live.delete(id);
+  }
+
+  /**
    * Resize a SHELL terminal's pty to fit the viewer's pane. Enabled for shells only — Claude ptys are
    * pinned (the fixed 120×40 / no-resize invariant exists for alt-screen repaint; a resize would garble
    * the Ink TUI), so this is a no-op for kind:"claude". Idempotent and best-effort.
@@ -1403,7 +1456,7 @@ export class PtyHost {
   ): void {
     const live = this.live.get(sessionId);
     if (!live) return;
-    if (live.kind === "shell") return; // shells have no hook relay; the busy/readiness machine is Claude-only
+    if (live.kind !== "claude") return; // shells/canned entries have no hook relay; the busy/readiness machine is Claude-only
     // eslint-disable-next-line no-console
     console.log(`[hook] ${sessionId} ${hook.hook_event_name ?? "?"} session_id=${hook.session_id ?? "-"}`);
     switch (hook.hook_event_name) {
@@ -1791,7 +1844,7 @@ export class PtyHost {
    */
   reconcile(): void {
     for (const [sessionId, live] of this.live) {
-      if (!live.alive || live.kind === "shell") continue; // shells have no busy/queue to heal or drain
+      if (!live.alive || live.kind !== "claude") continue; // shells/canned entries have no busy/queue to heal or drain
       this.healIfStuck(live, sessionId);
       this.drainPending(sessionId);
     }

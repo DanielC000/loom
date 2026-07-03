@@ -1175,10 +1175,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // --- Test-only data seeding (card 32fd6f4c, extended by card 0954ed9c for the Companion Manage e2e
-  // spec, and by card d01311b6 for the unified terminal / sessions e2e spec — the `liveSessions` + `wakes`
+  // spec, by card d01311b6 for the unified terminal / sessions e2e spec — the `liveSessions` + `wakes`
   // kinds seed a live-but-NO-PTY session row + a pending wake so the unified <TerminalCard> chrome + the
-  // SessionWakes sub-panel render with no real claude) — closes the e2e seeding gap for write paths an
-  // isolated e2e spec cannot otherwise reach:
+  // SessionWakes sub-panel render with no real claude — and by card a53e6bc9, which adds `ptyGeometry`/
+  // `ptyBytes` to `liveSessions[]` so a WS attach can ALSO replay a pinned geometry + canned bytes via
+  // `deps.pty.seedCanned` (no real spawn, no in-browser monkeypatching) — closes the e2e seeding gap for
+  // write paths an isolated e2e spec cannot otherwise reach:
   // `session_usage_samples` (written ONLY by the internal usage sampler), `runs` (filled ONLY by the
   // real-spawn-triggering POST /api/runs above, forbidden in the e2e fixture), and now a companion's
   // config/session/memory/reminders (writable in prod ONLY via `/api/companion/provision` — spawns a real
@@ -1209,6 +1211,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           role?: SessionRole | "plain" | null;
           parentSessionId?: string; taskId?: string; title?: string;
           busy?: boolean; branch?: string; model?: string; processState?: ProcessState;
+          // (card a53e6bc9) Pinned terminal geometry + canned bytes to REPLAY on `/ws/term` attach — the
+          // faithful-render gap the plain row above can't close (its WS attach is a genuine no-op). Either
+          // key alone is enough to register a `deps.pty.seedCanned` entry keyed to this session's id;
+          // omitted geometry falls back to the project's OWN resolved pty config (same default a real
+          // spawn would use), and omitted bytes just replay the pinned geometry over a blank screen.
+          ptyGeometry?: { cols: number; rows: number };
+          ptyBytes?: string;
         }[];
         // A pending scheduled wake for a session — the ONLY way an e2e spec can make the SessionWakes
         // sub-panel render (it draws nothing when empty). DB-backed (insertWake), so it round-trips
@@ -1358,6 +1367,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         };
         deps.db.insertSession(row);
         liveSessionIds.push(id);
+        // (card a53e6bc9) Register a canned no-process pty entry ONLY when the caller asked for faithful
+        // replay — a plain chrome-only seed (d01311b6's original shape) stays byte-identical (no pty
+        // entry, WS attach still a no-op). Geometry falls back to this project's resolved default so a
+        // spec that only cares about bytes doesn't have to know the project's config.
+        if (s.ptyGeometry || typeof s.ptyBytes === "string") {
+          deps.pty.seedCanned({
+            id, cwd: project.repoPath,
+            geometry: s.ptyGeometry ?? resolveConfig(project.config).pty,
+            bytes: Buffer.from(s.ptyBytes ?? "", "utf8"),
+          });
+        }
       }
       // Pending wakes — a direct wakes row so the SessionWakes sub-panel has something to render. `wakeAt`
       // defaults ~1h out (a future, uncancelled wake); `route` null (no live companion turn to derive one).
@@ -1375,11 +1395,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         deps.db.insertWake(wake);
         wakeIds.push(id);
       }
-      // Cleanup: archive the named sessions (idempotent; a missing row is a no-op).
+      // Cleanup: archive the named sessions (idempotent; a missing row is a no-op). Also drop any
+      // `seedCanned` pty entry (card a53e6bc9) — the e2e worker daemon is SHARED across spec files, so a
+      // lingering canned entry would otherwise outlive its spec; a session with none is a harmless no-op.
       const archivedSessionIds: string[] = [];
       for (const sid of b.archiveSessions ?? []) {
         if (typeof sid !== "string") continue;
         deps.db.archiveSession(sid);
+        deps.pty.dropCanned(sid);
         archivedSessionIds.push(sid);
       }
       return reply.code(201).send({
