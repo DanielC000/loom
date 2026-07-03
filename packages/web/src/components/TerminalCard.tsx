@@ -71,6 +71,13 @@ export interface TerminalSubPanels {
 // per variant and grows/shrinks as a task binds or messages queue), so the card is truly content-sized.
 const CHROME_RESERVE = 112;
 
+// Slack (px) kept between the measured content and the `height` cap. The budget parks the terminal grid a
+// few px BELOW `maxHeight` instead of exactly on it, so the panel's border-box never sits on the overflow
+// boundary where a 1px overshoot could toggle a scrollbar on an ancestor container — the width change that
+// used to feed the font/grid oscillation. 2px of it covers the panel's 1px top+bottom border (not in
+// scrollHeight); the rest is genuine off-the-threshold slack.
+const BUDGET_SLACK = 6;
+
 // ── Shared header pieces ──────────────────────────────────────────────────────────────────────────
 // The action-cluster buttons + the identity/status title. They live here (the base's home) so every
 // terminal-card variant renders the same controls; TerminalTile re-exports them for its call sites.
@@ -161,10 +168,11 @@ export function TerminalCard({
   // Content-dynamic HUG budget. The pinned 120×40 grid scaled to a tile's WIDTH is usually shorter than a
   // fixed pane, and the surrounding chrome (task card / tab bar / wakes / queued turns / composer) grows and
   // shrinks — so a FIXED reserve either leaves dead space or clips the composer. Instead we MEASURE the real
-  // chrome and hand the terminal exactly the leftover space up to the `height` cap. `chrome = panel.scrollHeight
-  // − pane.offsetHeight` is invariant to the pane's own height (both move together), so this converges rather
-  // than oscillating. `belowRef` (wakes/queue/composer) is observed too so a message queuing while the card is
-  // already at its cap still re-measures (the Panel's border-box is clamped there, so it alone wouldn't fire).
+  // chrome (`chrome = panel.scrollHeight − pane.offsetHeight`, invariant to the pane's own height since both
+  // move together) and hand the terminal exactly the leftover space, minus `BUDGET_SLACK`, up to the `height`
+  // cap. Only `belowRef` (wakes/queue/composer — the chrome that GROWS at runtime without a prop change) is
+  // observed; the panel that CONTAINS the pane is deliberately NOT, so the pane resizing itself can never
+  // re-fire the measure (that was the ff002d9 oscillation — see the measure effect for the full loop).
   const paneWrapRef = useRef<HTMLDivElement>(null);
   const belowRef = useRef<HTMLDivElement>(null);
   const [measuredBudget, setMeasuredBudget] = useState<number | undefined>(undefined);
@@ -212,9 +220,19 @@ export function TerminalCard({
   }, [maximizable, maximized]);
 
   // Measure the actual non-terminal chrome and derive the terminal's height budget (HUG, non-maximized
-  // only — a FILL/string height fills its slot; a maximized card fills the overlay). Re-runs on the props
-  // that add/remove chrome, and a ResizeObserver on the panel + below-strip catches dynamic changes (queue
-  // grows, composer's large editor opens). See the budget note near `paneWrapRef` for why it's stable.
+  // only — a FILL/string height fills its slot; a maximized card fills the overlay).
+  //
+  // OSCILLATION FIX (ff002d9 regression): we must NEVER observe an element that contains the terminal pane.
+  // The old effect did `ro.observe(panelEl)`, which closed a feedback loop: measure → setMeasuredBudget →
+  // TerminalPane.applyFontSize sets the pane's height (`el.style.height = gridH`) → the panel reflows → the
+  // ResizeObserver on the panel re-fires → measure. With the budget parked EXACTLY at `maxHeight`, a 1px
+  // overshoot could toggle an ancestor scrollbar → the pane's clientWidth shifts → the width-driven font
+  // (`min(fitW,fitH)`) and gridH change → it re-crosses the threshold → fast oscillation (acute on Platform:
+  // tight 440px + queue/wakes/task chrome). Two independent guards kill it: (1) we observe ONLY `belowRef`
+  // (wakes/queue/composer — chrome that grows at runtime and does NOT contain the pane), so the pane's own
+  // resize can no longer feed `measure`; and (2) `BUDGET_SLACK` keeps the content off the overflow boundary
+  // so no residual width coupling remains. Re-runs on the props that add/remove chrome (header/task/tab
+  // heights change only via those, so they need no observer of their own).
   useLayoutEffect(() => {
     if (!hug || maximized) return;
     const measure = () => {
@@ -222,15 +240,16 @@ export function TerminalCard({
       const panelEl = pane?.parentElement; // Panel doesn't forward a ref; the pane's parent IS the panel body
       if (!pane || !panelEl) return;
       // scrollHeight reports the FULL content even when the panel's border-box is clamped at maxHeight, so
-      // this stays accurate at the cap. chrome includes the panel's padding; the −2 covers its 1px border.
+      // this stays accurate at the cap. chrome includes the panel's padding; BUDGET_SLACK covers the 1px
+      // border AND keeps the grid a few px below the cap (see its declaration).
       const chrome = panelEl.scrollHeight - pane.offsetHeight;
-      const next = Math.max(120, (height as number) - chrome - 2);
+      const next = Math.max(120, (height as number) - chrome - BUDGET_SLACK);
       setMeasuredBudget((cur) => (cur != null && Math.abs(cur - next) <= 1 ? cur : next));
     };
     measure();
+    // Observe ONLY the below-strip — NEVER the panel (which contains the pane) — so the pane resizing itself
+    // can never re-trigger measure. A queued turn / opened large editor grows belowRef and re-measures.
     const ro = new ResizeObserver(measure);
-    const panelEl = paneWrapRef.current?.parentElement;
-    if (panelEl) ro.observe(panelEl);
     if (belowRef.current) ro.observe(belowRef.current);
     return () => ro.disconnect();
   }, [hug, maximized, height, activeTab, !!task, readOnly, !!tabs,
