@@ -113,6 +113,25 @@ export interface SeededCompanion {
   reminderLabel: string;
 }
 
+/** A role for a seeded live session: "plain" is the role-less standalone session (stored as NULL role). */
+export type SeededLiveRole = "plain" | "manager" | "worker" | "setup" | "workspace-auditor" | "auditor" | "platform" | "assistant";
+
+/** The rows a {@link LoomDaemon.seedLiveSession} call created + the names/titles a spec asserts on. */
+export interface SeededLiveSession {
+  project: SeededProject;
+  projectId: string;
+  projectName: string;
+  agentId: string;
+  agentName: string;
+  sessionId: string;
+  role: SeededLiveRole;
+  /** The bound board task (present only when `task` was requested) — its id + title for assertions. */
+  taskId?: string;
+  taskTitle?: string;
+  /** The seeded wake's note (present only when `wake` was requested) — the SessionWakes chip text. */
+  wakeNote?: string;
+}
+
 export interface LoomDaemon {
   /** The isolated daemon's actual bound origin, e.g. http://127.0.0.1:4399 — parsed from its boot log. */
   baseURL: string;
@@ -158,6 +177,38 @@ export interface LoomDaemon {
     reminderLabel?: string;
     reminderPrompt?: string;
   }) => Promise<SeededCompanion>;
+  /**
+   * Seed a LIVE-but-NO-PTY session (card d01311b6: the unified terminal / sessions e2e spec) via the
+   * test-only POST /internal/test/seed — a `processState:"live"` session row inserted directly through
+   * `deps.db.insertSession`, so it renders as live in the session list + the unified <TerminalCard> chrome
+   * mounts, while the /ws/term attach is a genuine no-op (no pty). NEVER calls startSession (which spawns a
+   * real claude and would trip this fixture's `[pty] spawn` no-spawn guard). By default it mints its OWN
+   * fresh project + agent; pass `project`/`agentId` to place several sessions in ONE project (e.g. a manager
+   * + its worker for the fleet grouping / role-scoped tabs). Optionally binds a board task (`task`, so the
+   * SessionTaskCard sub-panel renders) and/or a pending wake (`wake`, so the SessionWakes sub-panel renders
+   * — both draw nothing when empty). Returns the seeded ids + names/titles for assertions.
+   */
+  seedLiveSession: (opts?: {
+    project?: SeededProject;
+    agentId?: string;
+    agentName?: string;
+    role?: SeededLiveRole;
+    busy?: boolean;
+    parentSessionId?: string;
+    branch?: string;
+    title?: string;
+    task?: { title?: string; body?: string; columnKey?: string; priority?: "p0" | "p1" | "p2" | "p3" };
+    wake?: { note?: string };
+  }) => Promise<SeededLiveSession>;
+  /**
+   * Archive every session seeded by {@link LoomDaemon.seedLiveSession} OR {@link LoomDaemon.seedCompanion} so
+   * far (sets archived_at via the test-only seed endpoint), removing them from the session rail. Call in an
+   * afterEach: the e2e worker daemon is SHARED across spec files, so a lingering session row (a `live`
+   * terminal OR a non-archived exited companion) would pollute a LATER spec's global "no live sessions"
+   * empty-state — the Usage page's Live-occupancy plane counts EVERY non-archived session, not just live
+   * ones. Idempotent (an already-archived / unknown id is a no-op).
+   */
+  archiveSeededSessions: () => Promise<void>;
 }
 
 export const test = base.extend<{ loomPage: Page }, { loomDaemon: LoomDaemon }>({
@@ -231,6 +282,10 @@ export const test = base.extend<{ loomPage: Page }, { loomDaemon: LoomDaemon }>(
     const createTask: LoomDaemon["createTask"] = (projectId, task) =>
       apiPost<SeededTask>(baseURL, `/api/projects/${projectId}/tasks`, task);
 
+    // Track every seeded session id (live terminals + companions) so afterEach can archive them off the
+    // shared daemon's rail (any non-archived row pollutes a later spec's global "no live sessions" state).
+    const seededSessionIds: string[] = [];
+
     const seedUsageSample: LoomDaemon["seedUsageSample"] = async (sample) => {
       const res = await apiPost<{ usageSampleIds: string[] }>(baseURL, "/internal/test/seed", {
         usageSamples: [{ sessionId: `e2e-session-${randomUUID()}`, ...sample }],
@@ -262,10 +317,55 @@ export const test = base.extend<{ loomPage: Page }, { loomDaemon: LoomDaemon }>(
         }],
         companionReminders: [{ sessionId, label: reminderLabel, prompt: opts.reminderPrompt ?? "Anything worth surfacing?" }],
       });
+      // Track for archiveSeededSessions: a seeded companion is a non-archived (exited) session row, so it too
+      // counts in a later spec's global "no live sessions" plane if it isn't cleaned up.
+      seededSessionIds.push(sessionId);
       return { projectId: project.id, agentId: agent.id, sessionId, memoryName, reminderLabel };
     };
 
-    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion });
+    const seedLiveSession: LoomDaemon["seedLiveSession"] = async (opts = {}) => {
+      const project = opts.project ?? await createProject(`live-${randomUUID().slice(0, 8)}`);
+      const agentName = opts.agentName ?? "Seeded Agent";
+      const agentId = opts.agentId
+        ?? (await apiPost<{ id: string }>(baseURL, `/api/projects/${project.id}/agents`, { name: agentName })).id;
+      const role = opts.role ?? "plain";
+
+      let taskId: string | undefined;
+      let taskTitle: string | undefined;
+      if (opts.task) {
+        const t = await createTask(project.id, {
+          title: opts.task.title ?? `bound-task-${randomUUID().slice(0, 8)}`,
+          body: opts.task.body,
+          columnKey: opts.task.columnKey ?? "in_progress",
+          priority: opts.task.priority,
+        });
+        taskId = t.id;
+        taskTitle = t.title;
+      }
+
+      const sessionId = `e2e-live-${randomUUID()}`;
+      const wakeNote = opts.wake ? (opts.wake.note ?? "seeded wake — e2e") : undefined;
+      await apiPost(baseURL, "/internal/test/seed", {
+        liveSessions: [{
+          id: sessionId, projectId: project.id, agentId, role, busy: opts.busy ?? false,
+          parentSessionId: opts.parentSessionId, taskId, branch: opts.branch, title: opts.title,
+        }],
+        wakes: opts.wake ? [{ sessionId, note: wakeNote }] : [],
+      });
+      seededSessionIds.push(sessionId);
+      return {
+        project, projectId: project.id, projectName: project.name,
+        agentId, agentName, sessionId, role, taskId, taskTitle, wakeNote,
+      };
+    };
+
+    const archiveSeededSessions: LoomDaemon["archiveSeededSessions"] = async () => {
+      if (seededSessionIds.length === 0) return;
+      const ids = seededSessionIds.splice(0); // clear as we archive — already-archived ids are no-ops
+      await apiPost(baseURL, "/internal/test/seed", { archiveSessions: ids });
+    };
+
+    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedLiveSession, archiveSeededSessions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.

@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake } from "@loom/shared";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -1163,7 +1163,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // --- Test-only data seeding (card 32fd6f4c, extended by card 0954ed9c for the Companion Manage e2e
-  // spec) — closes the e2e seeding gap for write paths an isolated e2e spec cannot otherwise reach:
+  // spec, and by card d01311b6 for the unified terminal / sessions e2e spec — the `liveSessions` + `wakes`
+  // kinds seed a live-but-NO-PTY session row + a pending wake so the unified <TerminalCard> chrome + the
+  // SessionWakes sub-panel render with no real claude) — closes the e2e seeding gap for write paths an
+  // isolated e2e spec cannot otherwise reach:
   // `session_usage_samples` (written ONLY by the internal usage sampler), `runs` (filled ONLY by the
   // real-spawn-triggering POST /api/runs above, forbidden in the e2e fixture), and now a companion's
   // config/session/memory/reminders (writable in prod ONLY via `/api/companion/provision` — spawns a real
@@ -1182,6 +1185,28 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const b = (req.body ?? {}) as {
         usageSamples?: Partial<UsageSample>[];
         runs?: Partial<AgentRun>[];
+        // A plain, live-but-NO-PTY session row (terminal-unification stage 6, card d01311b6): boot-reconcile
+        // only resumes live sessions at boot on the EMPTY DB, so a row inserted POST-boot is never
+        // reconciled — no real claude spawns. It renders as `live` in the session list + the unified
+        // <TerminalCard> chrome mounts; the /ws/term attach is a genuine no-op (pty.subscribe over a
+        // non-existent live entry). `role:"plain"` (or null) is a role-less standalone session; any
+        // SessionRole (manager/worker/setup/…) is stored verbatim so the fleet grouping + role-scoped
+        // tabs behave. Assert on the CHROME/metadata, never a live pty stream.
+        liveSessions?: {
+          id?: string; projectId: string; agentId: string;
+          role?: SessionRole | "plain" | null;
+          parentSessionId?: string; taskId?: string; title?: string;
+          busy?: boolean; branch?: string; model?: string; processState?: ProcessState;
+        }[];
+        // A pending scheduled wake for a session — the ONLY way an e2e spec can make the SessionWakes
+        // sub-panel render (it draws nothing when empty). DB-backed (insertWake), so it round-trips
+        // through listWakesForSession / GET /api/sessions/:id/wakes with no live pty.
+        wakes?: { sessionId: string; wakeAt?: string; note?: string }[];
+        // CLEANUP: archive (leave the live rail) seeded live sessions once a spec is done with them — the
+        // e2e worker daemon is SHARED across spec files, so a lingering `live` row would pollute a later
+        // spec's GLOBAL "no live sessions" empty-state (e.g. the Usage page's Live-occupancy plane). Sets
+        // archived_at (db.archiveSession); an unknown id is a harmless no-op.
+        archiveSessions?: string[];
         companionSessions?: { id?: string; projectId: string; agentId: string; title?: string }[];
         companionConfigs?: {
           sessionId: string; enabled?: boolean; name?: string; botToken?: string; channel?: string;
@@ -1293,9 +1318,62 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         });
         companionReminderIds.push(id);
       }
+      // Live-but-no-PTY session rows (stage 6): inserted directly via deps.db.insertSession — NEVER
+      // SessionService.startRun (which spawns a real claude). processState defaults to "live" so it
+      // surfaces on the live rail (listAllSessions) + the ProjectTerminals/Terminals live filters;
+      // resumability "resumable" mirrors a real live row. `role:"plain"` collapses to NULL (a role-less
+      // standalone session).
+      const liveSessionIds: string[] = [];
+      for (const s of b.liveSessions ?? []) {
+        if (typeof s.projectId !== "string" || typeof s.agentId !== "string") {
+          return reply.code(400).send({ error: "liveSessions[].projectId and agentId are required strings" });
+        }
+        const project = deps.db.getProject(s.projectId);
+        if (!project) return reply.code(400).send({ error: `liveSessions[]: no project ${s.projectId}` });
+        const id = typeof s.id === "string" && s.id ? s.id : randomUUID();
+        const now = new Date().toISOString();
+        const row: Session = {
+          id, projectId: s.projectId, agentId: s.agentId, engineSessionId: null,
+          title: s.title ?? null, cwd: project.repoPath,
+          processState: (s.processState as ProcessState | undefined) ?? "live",
+          resumability: "resumable", busy: s.busy ?? false,
+          createdAt: now, lastActivity: now, lastError: null,
+          role: s.role && s.role !== "plain" ? (s.role as SessionRole) : null,
+          parentSessionId: s.parentSessionId ?? null,
+          taskId: s.taskId ?? null,
+          branch: s.branch ?? null,
+          model: s.model ?? null,
+        };
+        deps.db.insertSession(row);
+        liveSessionIds.push(id);
+      }
+      // Pending wakes — a direct wakes row so the SessionWakes sub-panel has something to render. `wakeAt`
+      // defaults ~1h out (a future, uncancelled wake); `route` null (no live companion turn to derive one).
+      const wakeIds: string[] = [];
+      for (const w of b.wakes ?? []) {
+        if (typeof w.sessionId !== "string") {
+          return reply.code(400).send({ error: "wakes[].sessionId is required" });
+        }
+        const id = randomUUID();
+        const wake: Wake = {
+          id, sessionId: w.sessionId,
+          wakeAt: w.wakeAt ?? new Date(Date.now() + 3_600_000).toISOString(),
+          note: w.note ?? "seeded wake — e2e", createdAt: new Date().toISOString(),
+        };
+        deps.db.insertWake(wake);
+        wakeIds.push(id);
+      }
+      // Cleanup: archive the named sessions (idempotent; a missing row is a no-op).
+      const archivedSessionIds: string[] = [];
+      for (const sid of b.archiveSessions ?? []) {
+        if (typeof sid !== "string") continue;
+        deps.db.archiveSession(sid);
+        archivedSessionIds.push(sid);
+      }
       return reply.code(201).send({
         ok: true, usageSampleIds, runIds,
         companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds,
+        liveSessionIds, wakeIds, archivedSessionIds,
       });
     });
   }

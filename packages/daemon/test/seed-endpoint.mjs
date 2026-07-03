@@ -1,16 +1,18 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// The test-only internal seed endpoint (card 32fd6f4c, extended by card 0954ed9c) — POST
+// The test-only internal seed endpoint (card 32fd6f4c, extended by cards 0954ed9c + d01311b6) — POST
 // /internal/test/seed. Closes the e2e seeding gap: `session_usage_samples` (written ONLY by the
-// internal usage sampler), `runs` (filled ONLY via the real-spawn-triggering POST /api/runs), and a
+// internal usage sampler), `runs` (filled ONLY via the real-spawn-triggering POST /api/runs), a
 // companion's config/session/memory/reminders (writable in prod ONLY via `/api/companion/provision` —
-// spawns a real assistant session — or `/api/companion/config` — ARMS the runtime via reconcile()) had
-// no path an isolated e2e spec could seed. This endpoint inserts rows directly via deps.db (+ the
-// companion memory FILE store), bypassing SessionService.startRun/PTY and companion reconcile entirely.
-// HERMETIC + CLAUDE-FREE + NETWORK-FREE (Db + buildServer via app.inject). Proves the contract:
+// spawns a real assistant session — or `/api/companion/config` — ARMS the runtime via reconcile()), and a
+// live-but-NO-PTY session row + a pending wake (a real live session would spawn a claude via
+// SessionService.startRun) had no path an isolated e2e spec could seed. This endpoint inserts rows
+// directly via deps.db (+ the companion memory FILE store), bypassing SessionService.startRun/PTY and
+// companion reconcile entirely. HERMETIC + CLAUDE-FREE + NETWORK-FREE (Db + buildServer via app.inject).
+// Proves the contract:
 //   (a) in NORMAL (non-test) mode the route is entirely ABSENT (404) — zero prod surface;
 //   (b) under LOOM_TEST=1 the route is PRESENT, loopback-gated (403 otherwise), inserts a usage sample,
-//       a run row, and a companion session/config/memory/reminder that round-trip through the Db's own
-//       readers (and the companion's own REST reads), and 400s on a malformed payload.
+//       a run row, a companion session/config/memory/reminder, and live sessions + a wake that round-trip
+//       through the Db's own readers (and the companion's own REST reads), and 400s on a malformed payload.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -175,6 +177,73 @@ try {
     const remindersRead = await testApp.inject({ method: "GET", url: "/api/companion/reminders/companion-sess-1" });
     check("(b) seeded companion reminder round-trips over GET /api/companion/reminders/:sessionId",
       remindersRead.json().reminders.some((r) => r.label === "Morning check-in"));
+
+    // --- Live-session + wake seed kinds (card d01311b6: the unified terminal / sessions e2e spec) ---
+
+    // Malformed liveSessions entry (missing agentId) -> 400, no row inserted.
+    const badLive = await testApp.inject({
+      method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+      payload: { liveSessions: [{ projectId: "proj-1" }] },
+    });
+    check("(b) malformed liveSessions entry -> 400", badLive.statusCode === 400);
+
+    // Malformed wakes entry (missing sessionId) -> 400.
+    const badWake = await testApp.inject({
+      method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+      payload: { wakes: [{ note: "no session" }] },
+    });
+    check("(b) malformed wakes entry -> 400", badWake.statusCode === 400);
+
+    // Seed a LIVE manager session (+ a plain worker under it) and a pending wake in ONE call.
+    const nSessBefore = db.listAllSessions().length;
+    const liveSeed = await testApp.inject({
+      method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+      payload: {
+        liveSessions: [
+          { id: "live-mgr-1", projectId: "proj-1", agentId: "agent-1", role: "manager", taskId: "task-x" },
+          { id: "live-wkr-1", projectId: "proj-1", agentId: "agent-1", role: "worker", parentSessionId: "live-mgr-1", busy: true },
+          { id: "live-plain-1", projectId: "proj-1", agentId: "agent-1", role: "plain" },
+        ],
+        wakes: [{ sessionId: "live-mgr-1", note: "seeded wake — e2e" }],
+      },
+    });
+    check("(b) seeding live sessions + a wake -> 201", liveSeed.statusCode === 201);
+    const liveBody = liveSeed.json();
+    check("(b) response echoes three liveSessionIds + one wakeId",
+      liveBody.liveSessionIds.length === 3 && liveBody.wakeIds.length === 1);
+
+    // Round-trip #1: all three rows surface on the LIVE rail (listAllSessions, archived-excluded) — a real
+    // live claude never spawned; these are pure DB rows.
+    check("(b) three live sessions joined the live rail", db.listAllSessions().length === nSessBefore + 3);
+
+    // Round-trip #2: the manager row carries processState "live" + role "manager"; the worker its
+    // role/parent/busy; the "plain" role collapses to NULL.
+    const mgr = db.getSession("live-mgr-1");
+    const wkr = db.getSession("live-wkr-1");
+    const plain = db.getSession("live-plain-1");
+    check("(b) manager row is live + role manager + bound to its task",
+      mgr?.processState === "live" && mgr?.role === "manager" && mgr?.taskId === "task-x" && mgr?.resumability === "resumable");
+    check("(b) worker row is live + role worker + parented + busy",
+      wkr?.processState === "live" && wkr?.role === "worker" && wkr?.parentSessionId === "live-mgr-1" && wkr?.busy === true);
+    check("(b) plain role collapses to a NULL role", plain?.processState === "live" && plain?.role === null);
+
+    // Round-trip #3: the wake round-trips through the SAME reader GET /api/sessions/:id/wakes uses.
+    const wakesForMgr = db.listWakesForSession("live-mgr-1");
+    check("(b) seeded wake round-trips via listWakesForSession",
+      wakesForMgr.length === 1 && wakesForMgr[0].note === "seeded wake — e2e");
+
+    // Cleanup directive: archiving a seeded live session removes it from the live rail (its row stays
+    // addressable by id, archived). This is how a spec keeps the SHARED e2e daemon's live rail clean.
+    const archiveRes = await testApp.inject({
+      method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+      payload: { archiveSessions: ["live-mgr-1", "live-wkr-1", "live-plain-1"] },
+    });
+    check("(b) archiveSessions directive -> 201 echoing the ids",
+      archiveRes.statusCode === 201 && archiveRes.json().archivedSessionIds.length === 3);
+    check("(b) archived sessions left the live rail",
+      db.listAllSessions().every((s) => !["live-mgr-1", "live-wkr-1", "live-plain-1"].includes(s.id)));
+    check("(b) an archived session is still addressable by id (row not deleted)",
+      db.getSession("live-mgr-1")?.archivedAt != null);
   } finally {
     await testApp.close();
   }
@@ -186,6 +255,6 @@ try {
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — POST /internal/test/seed is ABSENT in normal mode, and under LOOM_TEST=1 is loopback-gated, validates its payload, and seeds usage samples + run rows that round-trip through the Db."
+  ? "\n✅ ALL PASS — POST /internal/test/seed is ABSENT in normal mode, and under LOOM_TEST=1 is loopback-gated, validates its payload, and seeds usage samples + run rows + a companion + live sessions/wakes that round-trip through the Db."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
