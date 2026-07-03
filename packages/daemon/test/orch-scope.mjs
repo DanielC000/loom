@@ -65,10 +65,11 @@ const tools = toolList.map((t) => t.name).sort();
 // the worker_* coordination surface + my_context (own-occupancy self-assessment, any role) + the
 // manager self-management tools (daemon_restart self-deploy, idle_report for the asleep-at-the-wheel
 // watcher, inbox_pull fast-drain, recycle_me for context-recycle) + the manager self-service management
-// surface (agent_list read-only directory, agent_assign_profile/agent_update, project_update/project_archive,
+// surface (agent_list read-only directory, agent_assign_profile/agent_update, agent_delete/profile_delete
+// (own-project + shared-profile-safe DELETE, task 2c9b2960), project_update/project_archive,
 // schedule_create/schedule_update — Task 3de74275) + platform_escalate (the one upward channel to the
 // Platform Lead). Keep in sync as the manager-MCP surface grows.
-const expected = "agent_assign_profile,agent_list,agent_update,daemon_restart,idle_report,inbox_pull,my_context,platform_escalate,project_archive,project_update,recycle_me,schedule_create,schedule_update,worker_list,worker_merge,worker_merge_confirm,worker_message,worker_recycle,worker_set_mode,worker_spawn,worker_status,worker_stop,worker_transcript";
+const expected = "agent_assign_profile,agent_delete,agent_list,agent_update,daemon_restart,idle_report,inbox_pull,my_context,platform_escalate,profile_delete,project_archive,project_update,recycle_me,schedule_create,schedule_update,worker_list,worker_merge,worker_merge_confirm,worker_message,worker_recycle,worker_set_mode,worker_spawn,worker_status,worker_stop,worker_transcript";
 check(`tools = ${expected}  (got ${tools.join(",")})`, tools.join(",") === expected);
 
 // 1b) H3: worker_spawn's advertised schema carries taskId + kickoffPrompt but NOT the removed,

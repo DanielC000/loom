@@ -12,7 +12,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       manager/worker/plain → null (no surface). (platform-scope.mjs proves the live-HTTP 404 too.)
 //   (c) session_spawn REJECTS role:"platform" AND role:"worker" (and any other) — the single most
 //       important invariant — and creates NO session; it SUCCEEDS only for manager|plain;
-//   (d) project_archive REFUSES a reserved/system project (the Lead can't archive its own home).
+//   (d) project_archive REFUSES a reserved/system project (the Lead can't archive its own home);
+//   (e) profile_delete / agent_delete (task 2c9b2960) mirror the human DELETE /api/profiles/:id and
+//       /api/agents/:id EXACTLY: profile_delete has NO in-use guard (an assigned profileId just dangles
+//       safely); agent_delete refuses while the agent has a LIVE session; both 404 on an unknown id.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-mgmt-surface.mjs
 import fs from "node:fs";
@@ -113,7 +116,7 @@ try {
   const tools = (await client.listTools()).tools.map((t) => t.name);
   const expected = [
     "list_all_projects", "list_all_agents", "list_all_sessions",
-    "profile_create", "profile_update", "profile_assign",
+    "profile_create", "profile_update", "profile_assign", "profile_delete", "agent_delete",
     "session_spawn", "session_stop", "project_update", "project_archive",
     "schedule_create", "schedule_update",
   ];
@@ -161,6 +164,39 @@ try {
   check("profile_assign: persists to the agent row", db.getAgent("agentWork")?.profileId === "profQA");
   check("profile_assign: 404 on an unknown agent", (await call("profile_assign", { agentId: "ghost", profileId: "profQA" })).error === "agent not found");
   check("profile_assign: 404 on an unknown profile (never mints one)", (await call("profile_assign", { agentId: "agentWork", profileId: "ghost" })).error === "profile not found");
+
+  // ===================== profile_delete / agent_delete (task 2c9b2960) =====================
+  // Unused profile → deletes cleanly (reuses db.deleteProfile, same as the human REST path).
+  db.insertProfile({ id: "profUnused", name: "Unused", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
+  const pd = await call("profile_delete", { profileId: "profUnused" });
+  check("profile_delete: an unused profile deletes cleanly", pd.deleted === true && pd.profileId === "profUnused" && !db.getProfile("profUnused"));
+  check("profile_delete: 404 on an unknown id", (await call("profile_delete", { profileId: "ghost" })).error === "profile not found");
+  // Mirrors the human DELETE /api/profiles/:id EXACTLY: NO in-use guard — an agent still assigned the
+  // profile (agentWork → profQA, assigned above) does NOT block deletion; the profileId just dangles
+  // and resolves to the plain backstop (resolveProfile), per db.deleteProfile's doc comment.
+  const pdInUse = await call("profile_delete", { profileId: "profQA" });
+  check("profile_delete: an IN-USE profile still deletes (matches the human path's cascade-to-null, no refuse)",
+    pdInUse.deleted === true && !db.getProfile("profQA"));
+  check("profile_delete: the assigned agent's profileId is left dangling (safe backstop), not force-cleared",
+    db.getAgent("agentWork")?.profileId === "profQA");
+
+  // agent_delete: an agent with no live sessions deletes cleanly (cascades sessions/schedules/runs).
+  db.insertAgent({ id: "agentDel", projectId: "pOrd", name: "ToDelete", startupPrompt: "", position: 2, profileId: null });
+  const ad = await call("agent_delete", { agentId: "agentDel" });
+  check("agent_delete: an agent with no live sessions deletes cleanly", ad.deleted === true && ad.agentId === "agentDel" && !db.getAgent("agentDel"));
+  check("agent_delete: 404 on an unknown id", (await call("agent_delete", { agentId: "ghost" })).error === "agent not found");
+  // Live-session guard: mirrors the human DELETE /api/agents/:id — refuses while a session is LIVE.
+  db.insertAgent({ id: "agentLive", projectId: "pOrd", name: "LiveAgent", startupPrompt: "", position: 3, profileId: null });
+  const liveSessId = "sessLive-agentLive";
+  db.insertSession({
+    id: liveSessId, projectId: "pOrd", agentId: "agentLive", engineSessionId: null, title: null, cwd: repo,
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+    role: null, parentSessionId: null,
+  });
+  const adLive = await call("agent_delete", { agentId: "agentLive" });
+  check("agent_delete: an agent with a LIVE session is REFUSED (stop the fleet first)",
+    typeof adLive.error === "string" && /live sessions/.test(adLive.error) && !adLive.deleted);
+  check("agent_delete: the refused agent + its live session both survive", !!db.getAgent("agentLive") && !!db.getSession(liveSessId));
 
   // ===================== (c) session_spawn — the load-bearing invariant =====================
   const nSessBefore = db.listAllSessions().length;

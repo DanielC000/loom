@@ -14,6 +14,7 @@ import { writeVaultFile } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
+import { deleteArchivedTranscript } from "../sessions/transcript.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
@@ -510,6 +511,30 @@ export class PlatformMcpRouter {
     );
 
     server.registerTool(
+      "agent_delete",
+      {
+        description:
+          "PERMANENTLY delete an agent by id (cross-project). Reuses the human DELETE /api/agents/:id " +
+          "service path exactly (db.deleteAgent) — CASCADES the agent's sessions (+ their wakes/companion " +
+          "reminders/orchestration events), schedules, and runs (+ run_events), and best-effort drops each " +
+          "deleted session's transcript snapshot. Refuses while any of the agent's sessions is still LIVE " +
+          "(\"stop the fleet first\") — stop it first, same guard as the REST path (db.countLiveSessionsForAgent). " +
+          "404 (\"agent not found\") if the id is unknown — a no-op write is avoided. FULL id required (no " +
+          "8-char prefix, like agent_create/agent_update). Returns { deleted:true, agentId, sessions:<n> }.",
+        inputSchema: { agentId: z.string() },
+      },
+      async ({ agentId }) => {
+        const agent = db.getAgent(agentId);
+        if (!agent) return ok({ error: "agent not found" });
+        const live = db.countLiveSessionsForAgent(agentId);
+        if (live > 0) return ok({ error: `cannot delete an agent with live sessions — stop the fleet first (${live} still live)` });
+        const { sessionIds } = db.deleteAgent(agentId);
+        for (const sid of sessionIds) deleteArchivedTranscript(agent.projectId, sid); // best-effort snapshot cleanup
+        return ok({ deleted: true, agentId, sessions: sessionIds.length });
+      },
+    );
+
+    server.registerTool(
       "project_configure",
       {
         description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, obsidian, python. As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–1800000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). UNSET/REPLACE: pass unset:[\"orchestration.gateCommand\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset.",
@@ -715,6 +740,27 @@ export class PlatformMcpRouter {
         if (!db.getProfile(profileId)) return ok({ error: "profile not found" });
         db.updateAgent(agentId, { profileId });
         return ok(db.getAgent(agentId));
+      },
+    );
+
+    server.registerTool(
+      "profile_delete",
+      {
+        description:
+          "PERMANENTLY delete a cross-project Profile (rig) by id — profiles are global, not project-bound. " +
+          "Reuses the human DELETE /api/profiles/:id service path exactly (db.deleteProfile): SAFE for any " +
+          "agent still assigned it — NO in-use guard, a dangling profileId simply resolves to the plain " +
+          "backstop (resolveProfile), and a bundled profile re-seeds on next boot, so this is non-destructive " +
+          "to assigned agents (matches the REST path — it does not refuse an in-use profile). 404 (\"profile " +
+          "not found\") if the id is unknown — a no-op write is avoided (the schedule_delete precedent; the " +
+          "raw REST endpoint itself is a blind idempotent delete). FULL id required (no 8-char prefix, like " +
+          "profile_create/profile_update). Returns { deleted:true, profileId }.",
+        inputSchema: { profileId: z.string() },
+      },
+      async ({ profileId }) => {
+        if (!db.getProfile(profileId)) return ok({ error: "profile not found" });
+        db.deleteProfile(profileId);
+        return ok({ deleted: true, profileId });
       },
     );
 

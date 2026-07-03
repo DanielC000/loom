@@ -3685,6 +3685,55 @@ export class SessionService {
   }
 
   /**
+   * PERMANENTLY delete one of the manager's OWN-project agents — reuses db.deleteAgent (the same
+   * cascade the human DELETE /api/agents/:id and the Platform Lead's agent_delete call) plus the
+   * SAME live-session guard (db.countLiveSessionsForAgent — "stop the fleet first"). requireOwnProject
+   * rejects a target outside the caller's project BEFORE any write (a manager has no cross-project reach).
+   */
+  deleteAgentAsManager(managerSessionId: string, agentId: string): { deleted: true; agentId: string; sessions: number } {
+    this.requireManager(managerSessionId, "agent_delete");
+    const agent = this.db.getAgent(agentId);
+    if (!agent) throw new Error("agent not found");
+    this.requireOwnProject(managerSessionId, agent.projectId, "agent_delete");
+    const live = this.db.countLiveSessionsForAgent(agentId);
+    if (live > 0) throw new Error(`cannot delete an agent with live sessions — stop the fleet first (${live} still live)`);
+    const { sessionIds } = this.db.deleteAgent(agentId);
+    for (const sid of sessionIds) deleteArchivedTranscript(agent.projectId, sid); // best-effort snapshot cleanup
+    this.auditManage(managerSessionId, "agent_delete", { agentId, sessions: sessionIds.length });
+    return { deleted: true, agentId, sessions: sessionIds.length };
+  }
+
+  /**
+   * PERMANENTLY delete a cross-project Profile (rig) — but ONLY if no agent OUTSIDE the caller's own
+   * project references it. Profiles are shared/global (unlike agents), so a single-project manager could
+   * otherwise delete a rig another project depends on; this guard is ADDITIVE on top of the human/Lead
+   * path (which has NO in-use guard at all — db.deleteProfile is a blind, safe-by-design delete, since a
+   * dangling profileId just resolves to the plain backstop). A reference confined to the caller's OWN
+   * project is fine (mirrors the human path's cascade-to-null for those agents) and does not block delete.
+   *
+   * The external-project scan covers BOTH live (listAllProjects) AND archived (listArchivedProjects)
+   * projects — archived is a soft, RESTORABLE state (not gone), so an agent in an archived foreign
+   * project still counts as an external reference; skipping it would let a manager delete a rig that
+   * silently dangles the instant that project is restored.
+   */
+  deleteProfileAsManager(managerSessionId: string, profileId: string): { deleted: true; profileId: string } {
+    this.requireManager(managerSessionId, "profile_delete");
+    if (!this.db.getProfile(profileId)) throw new Error("profile not found");
+    const ownProjectId = this.db.getSession(managerSessionId)?.projectId;
+    if (!ownProjectId) throw new Error("no project for this session");
+    const external = [...this.db.listAllProjects(), ...this.db.listArchivedProjects()]
+      .filter((p) => p.id !== ownProjectId)
+      .flatMap((p) => this.db.listAgents(p.id).filter((a) => a.profileId === profileId).map((a) => ({ agent: a, project: p })));
+    if (external.length > 0) {
+      const blockers = external.map(({ agent, project }) => `${agent.name} (${agent.id}) in project ${project.name} (${project.id})`).join(", ");
+      throw new Error(`profile_delete: profile is still referenced by agents outside your project — ${blockers}`);
+    }
+    this.db.deleteProfile(profileId);
+    this.auditManage(managerSessionId, "profile_delete", { profileId });
+    return { deleted: true, profileId };
+  }
+
+  /**
    * Create a cron schedule that boots a manager in `agentId` on each tick (autonomous wake — agents
    * already self-`wake_me`, so this is low-risk). next_fire_at is computed here (strictly-after);
    * an invalid cron expression is rejected.

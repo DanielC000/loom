@@ -952,6 +952,52 @@ export class OrchestrationMcpRouter {
     );
 
     server.registerTool(
+      "agent_delete",
+      {
+        description:
+          "PERMANENTLY delete one of YOUR project's agents (an agentId outside your project is REJECTED — " +
+          "reuses sessions.deleteAgentAsManager, which calls the SAME service path as the human DELETE " +
+          "/api/agents/:id and the Platform Lead's agent_delete: db.deleteAgent cascades the agent's " +
+          "sessions/schedules/runs and best-effort drops their transcript snapshots). Refuses while any of " +
+          "the agent's sessions is still LIVE (\"stop the fleet first\" — same guard as the human path); stop " +
+          "it first. 404 (\"agent not found\") if the id is unknown. FULL id required (no 8-char prefix, like " +
+          "agent_update). Returns { deleted:true, agentId, sessions:<n> }.",
+        inputSchema: { agentId: z.string() },
+      },
+      async ({ agentId }) => {
+        try {
+          return ok(sessions.deleteAgentAsManager(managerSessionId, agentId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
+      "profile_delete",
+      {
+        description:
+          "PERMANENTLY delete a Profile (rig) by id — HAZARD: profiles are SHARED across projects, so this " +
+          "REFUSES (naming the blocking agents/projects) unless the profile is referenced ONLY by agents in " +
+          "YOUR OWN project (or by none at all) — a single-project manager can never delete a rig another " +
+          "project depends on. The scan covers ARCHIVED foreign projects too (archived is soft/restorable, " +
+          "not gone — a reference there still blocks). Reuses sessions.deleteProfileAsManager, which calls the SAME db.deleteProfile " +
+          "the human DELETE /api/profiles/:id and the Platform Lead's profile_delete use — a reference confined " +
+          "to your own project does NOT block delete (matches the human path's safe-by-design cascade: a " +
+          "dangling profileId resolves to the plain backstop). 404 (\"profile not found\") if the id is unknown. " +
+          "FULL id required (no 8-char prefix). Returns { deleted:true, profileId }.",
+        inputSchema: { profileId: z.string() },
+      },
+      async ({ profileId }) => {
+        try {
+          return ok(sessions.deleteProfileAsManager(managerSessionId, profileId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
       "project_update",
       {
         description:
