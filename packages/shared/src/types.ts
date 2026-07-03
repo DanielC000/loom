@@ -612,7 +612,15 @@ export type OrchestrationEventKind =
   // fired — `detail.reason` is "rate-limited" or "pending" (a prior turn for the SAME reminder id is
   // still queued/unconsumed). `detail.reminderId` discriminates which reminder deferred. Emitted at most
   // once per defer streak per reminder (bounded log growth, mirroring the heartbeat).
-  | "companion_reminder_deferred";
+  | "companion_reminder_deferred"
+  // Manager-driven ABSOLUTE permission-mode override (orchestration `worker_set_mode`, card 610abe29) —
+  // the manual belt-and-suspenders recovery affordance above the spawn/resume auto-convergence
+  // (cycleToMode) and the plan auto-heal (logLandedMode): a worker can never change its own mode
+  // (Shift+Tab is a human TUI keystroke; ExitPlanMode/EnterPlanMode are disallowed for a worker), so a
+  // manager drives it directly. Parent-scoped exactly like message_worker/stop_worker. `detail` carries
+  // { target, landed } — the requested mode and the feedback-VERIFIED mode the cycle actually settled on
+  // (may differ from target if the cycle gave up early). Filed under the owning MANAGER.
+  | "set_worker_mode";
 
 export interface OrchestrationEvent {
   id: string;

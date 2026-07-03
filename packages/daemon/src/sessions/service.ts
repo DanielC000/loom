@@ -10,7 +10,7 @@ import {
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
-import type { PtyHost, QueuedMessage } from "../pty/host.js";
+import type { PtyHost, QueuedMessage, LandedMode } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
 import { WorktreeGc } from "../git/worktree-gc.js";
@@ -42,6 +42,14 @@ import { resolveIdPrefix, looksLikeId, MIN_ID_PREFIX_LEN } from "../id-prefix.js
 /** Floor (1s) for any threaded git-op timeout — a sub-second misconfig must never make every git op
  *  fail-fast (mirrors GitWriter's GIT_TIMEOUT_FLOOR_MS). Applied where the resolved value is threaded. */
 const GIT_TIMEOUT_FLOOR_MS = 1_000;
+
+/**
+ * worker_set_mode's mode ALLOWLIST (card 610abe29) — the security boundary for `setWorkerMode`.
+ * DELIBERATELY excludes `bypassPermissions` (disables the acceptEdits+allowlist sandbox a worker is
+ * spawned into — an agent must never be able to escalate a worker out of it) and `default`/`unknown`.
+ */
+type WorkerSettableMode = "acceptEdits" | "auto" | "plan";
+const WORKER_SETTABLE_MODES: ReadonlySet<string> = new Set<WorkerSettableMode>(["acceptEdits", "auto", "plan"]);
 
 /**
  * PL Auditor finding #10: slugify an agent name for the worker_spawn `agentId` name/slug path — lowercase,
@@ -2194,6 +2202,40 @@ export class SessionService {
       detail: { delivered: r.delivered, superseded: flushed.length },
     });
     return r;
+  }
+
+  /**
+   * Manager-driven ABSOLUTE permission-mode override (worker_set_mode, card 610abe29) — the manual
+   * recovery affordance for a worker landed in (or pushed into) a bad mode: a worker can never change its
+   * own mode (Shift+Tab is a human TUI keystroke; ExitPlanMode/EnterPlanMode are disallowed for a worker —
+   * see disallowedToolsForRole), so mode changes must be daemon-driven. Parent-scoped exactly like
+   * stopWorker/messageWorker/redirectWorker (mirrors their "not your worker" gate).
+   *
+   * SECURITY BOUNDARY — fails closed: `mode` must be one of `WORKER_SETTABLE_MODES`
+   * (acceptEdits|auto|plan) or this throws before touching the pty. In particular `bypassPermissions` must
+   * NEVER reach `pty.setPermissionMode` — it disables the acceptEdits+allowlist sandbox a worker is spawned
+   * into, and an agent (a manager calling this tool) must never be able to escalate a worker out of that
+   * sandbox. `default`/`unknown`/any other string is rejected the same way.
+   *
+   * Drives the footer via `pty.setPermissionMode`, which reuses the SAME feedback-verified `cycleToMode`
+   * primitive the spawn/resume convergence uses (press Shift+Tab, wait for the footer to actually change) —
+   * pure keystroke injection, bypassing the busy/turn queue (~0 worker tokens). Returns the FEEDBACK-
+   * VERIFIED landed mode, which may differ from `mode` if the cycle gave up early (the caller sees the
+   * truth, not an assumed success).
+   */
+  async setWorkerMode(managerSessionId: string, workerSessionId: string, mode: string): Promise<LandedMode> {
+    if (!WORKER_SETTABLE_MODES.has(mode)) {
+      throw new Error(`mode must be one of acceptEdits|auto|plan (got "${mode}")`);
+    }
+    const worker = this.db.getSession(workerSessionId);
+    if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
+    const landed = await this.pty.setPermissionMode(workerSessionId, mode as WorkerSettableMode);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "set_worker_mode",
+      detail: { target: mode, landed },
+    });
+    return landed;
   }
 
   /**

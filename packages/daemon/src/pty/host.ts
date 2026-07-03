@@ -2332,6 +2332,27 @@ export class PtyHost {
     }, REDIRECT_SETTLE_MS);
   }
 
+  /**
+   * Manager-driven ABSOLUTE mode override (worker_set_mode, card 610abe29) — the manual belt-and-suspenders
+   * complement to `cycleToMode`'s automatic spawn/resume convergence and `logLandedMode`'s plan auto-heal:
+   * lets a manager recover a worker stuck in (or deliberately push it into) a permission mode directly,
+   * since a worker can never change its own mode itself (Shift+Tab is a human TUI keystroke; ExitPlanMode/
+   * EnterPlanMode are disallowed for a worker). Reuses `cycleToMode` VERBATIM — same press-and-wait-for-
+   * change feedback loop, same bounds — so a manual override behaves identically to the automatic paths;
+   * this does not hand-roll its own keystroke cycling. Resolves with the FEEDBACK-VERIFIED landed mode read
+   * fresh off the footer once the cycle settles (which may differ from `target` if it gave up early — the
+   * caller sees the truth, not an assumed success), or "unknown" if the session isn't live.
+   */
+  setPermissionMode(sessionId: string, target: LandedMode): Promise<LandedMode> {
+    return new Promise((resolve) => {
+      if (!this.live.get(sessionId)?.alive) { resolve("unknown"); return; }
+      this.cycleToMode(sessionId, target, () => {
+        const live = this.live.get(sessionId);
+        resolve(live?.alive ? this.readFooterMode(live) : "unknown");
+      });
+    });
+  }
+
   isAlive(sessionId: string): boolean {
     return this.live.get(sessionId)?.alive ?? false;
   }

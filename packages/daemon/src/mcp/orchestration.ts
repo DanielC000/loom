@@ -589,6 +589,30 @@ export class OrchestrationMcpRouter {
     );
 
     server.registerTool(
+      "worker_set_mode",
+      {
+        description:
+          "Drive one of your workers' permission mode to an ABSOLUTE target — the manual recovery override " +
+          "for when a worker has landed in (or been pushed into) a bad mode. A worker can NEVER change its " +
+          "own mode (Shift+Tab is a human TUI keystroke; ExitPlanMode/EnterPlanMode are disallowed for a " +
+          "worker), so messaging it can't fix a bad mode — this is daemon-driven instead. mode is ONE of " +
+          "acceptEdits|auto|plan (bypassPermissions and anything else are REJECTED — a worker must never be " +
+          "escalated out of its sandbox). Pure keystroke injection: bypasses the busy/turn queue (~0 worker " +
+          "tokens), does not submit a turn. Returns the FEEDBACK-VERIFIED landed mode (read off the footer " +
+          "after the cycle settles) — may differ from `mode` if the cycle gave up early.",
+        inputSchema: { workerSessionId: z.string(), mode: z.enum(["acceptEdits", "auto", "plan"]) },
+      },
+      async ({ workerSessionId, mode }) => {
+        try {
+          const landed = await sessions.setWorkerMode(managerSessionId, workerSessionId, mode);
+          return ok({ landed });
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
       "worker_message",
       {
         description: "Send a message to one of your workers. Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn. If several messages stack up while it's busy, they're COALESCED and delivered together as ONE turn (FIFO order, newest last) — so a later message supersedes/augments earlier ones in the same turn rather than replaying one-per-turn.",
