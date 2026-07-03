@@ -82,7 +82,7 @@ export class TaskMcpRouter {
     server.registerTool(
       "tasks_update",
       {
-        description: "Update a task by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). priority p0|p1|p2|p3 (low number = higher priority). held=true marks an owner-gated card the idle watchdog won't nag about.",
+        description: "Update a task by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). priority p0|p1|p2|p3 (low number = higher priority). held=true marks an owner-gated card the idle watchdog won't nag about. deferred=true is YOUR OWN sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but (unlike held) never blocks worker_spawn.",
         inputSchema: {
           id: z.string(),
           title: z.string().optional(),
@@ -91,6 +91,7 @@ export class TaskMcpRouter {
           position: z.number().optional(),
           priority: prioritySchema.optional(),
           held: z.boolean().optional(),
+          deferred: z.boolean().optional(),
         },
       },
       async ({ id, ...patch }) => ok(updateProjectTask(db, projectId, id, patch)),

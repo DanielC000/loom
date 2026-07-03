@@ -142,20 +142,23 @@ export class IdleWatcher {
       }
 
       // Count ALL actionable cards (role-resolved), not just the workReady lane: a task is actionable when
-      // its column is NOT the terminal lane AND it is NOT held — every other non-held lane
-      // (intake/defaultLanding/workReady/active/review/parked) is pending work a manager should be driving.
-      // Counting only workReady mis-told an idle manager "0 todo" while actionable cards sat in inbox/active/
-      // review. Mirrors resumeFleetOnBoot's "pending board work" definition (sessions/service.ts) so the two
-      // stay consistent. `held` (Board Hold Model redesign) is the SOLE owner brake now, checked in ANY
-      // column — a legit card titled with uppercase HOLD/CONFIRM is counted/nudges unless explicitly flagged
-      // held (card 788274a9 hardened the old OWNER_HELD_TITLE_RE false-positive away).
+      // its column is NOT the terminal lane AND it is NOT held AND it is NOT deferred — every other
+      // non-held/non-deferred lane (intake/defaultLanding/workReady/active/review/parked) is pending work a
+      // manager should be driving. Counting only workReady mis-told an idle manager "0 todo" while actionable
+      // cards sat in inbox/active/review. Mirrors resumeFleetOnBoot's "pending board work" definition
+      // (sessions/service.ts) so the two stay consistent. `held` (Board Hold Model redesign) is the SOLE owner
+      // brake now, checked in ANY column — a legit card titled with uppercase HOLD/CONFIRM is counted/nudges
+      // unless explicitly flagged held (card 788274a9 hardened the old OWNER_HELD_TITLE_RE false-positive
+      // away). `deferred` is the manager's OWN sequencing marker (orthogonal to `held`, never checked by
+      // worker_spawn) — discounted from the count the same way, so a manager's deliberate defer never
+      // triggers a recurring idle nudge.
       const cols = resolveConfig(project.config).kanbanColumns;
       const terminalKey = columnKeyForRole(cols, "terminal");
       const nonTerminal = db.listTasks(m.projectId).filter((t) => t.columnKey !== terminalKey);
-      const openCards = nonTerminal.filter((t) => t.held !== true);
-      // If EVERY non-terminal card is held (≥1 exists, 0 genuinely-actionable), the manager has nothing it
-      // can action and no way to clear the gate → skip silently instead of deadlock-nudging. A truly empty
-      // board (no cards at all) still nudges — the manager should `idle_report 'done'`.
+      const openCards = nonTerminal.filter((t) => t.held !== true && t.deferred !== true);
+      // If EVERY non-terminal card is held/deferred (≥1 exists, 0 genuinely-actionable), the manager has
+      // nothing it can action and no way to clear the gate → skip silently instead of deadlock-nudging. A
+      // truly empty board (no cards at all) still nudges — the manager should `idle_report 'done'`.
       if (nonTerminal.length > 0 && openCards.length === 0) continue;
       const openTodos = openCards.length;
       const n = Math.round((nowMs - lastActivityMs) / 60_000);

@@ -671,6 +671,14 @@ export interface Task {
    * lane) — `held` is the "parked-in-todo, owner-gated, don't nag" signal. Owner-settable only.
    */
   held?: boolean;
+  /**
+   * Manager-settable DEFERRED flag: a card the MANAGER is intentionally sequencing behind other work —
+   * its own dependency-gating/ordering marker, orthogonal to `held` (the owner's SOLE brake). The idle
+   * watchdog discounts a deferred card from its "actionable" count (same treatment as `held`), but
+   * UNLIKE `held`, `worker_spawn` never refuses a deferred card — it's not a brake. Additive + default
+   * false; manager-settable (NOT owner-gated, unlike `held`) via `tasks_update`.
+   */
+  deferred?: boolean;
   createdAt: string;
   updatedAt: string;
 }

@@ -84,6 +84,12 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
 - Don't ask "what should I do next?" and don't hand the human a menu for routine sequencing. Decide
   the order and execute it. The moment a task clears the gate, pick up the next — spawn → review →
   merge → repeat. Parallelize independent tasks; sequence dependent ones.
+- **Sequence or defer your OWN work with `deferred`, never `held`** — `tasks_update` a card
+  `deferred:true` to mark it as intentionally sequenced behind other work; it stays off the idle
+  watchdog's nag count but never blocks dispatch. `held` is the owner's SOLE brake and refuses
+  `worker_spawn` outright — setting it yourself to sequence your own queue silences the nag at the cost
+  of blocking your own dispatch onto that card. Clear `deferred` (`deferred:false`) when you pick the
+  card back up.
 - **Work you discover is work you own — a card you file is the backlog refilling, not a finish line.**
   Bugs you found, tickets you filed, follow-ups you identified: as long as an actionable, non-gated
   card sits on the board, you keep working it — spawn the fix → review → merge → repeat. Never file

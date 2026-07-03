@@ -71,10 +71,12 @@ function seedCard(e, columnKey) {
   e.db.insertTask({ id: `tk-${columnKey}-${Math.random().toString(36).slice(2, 6)}`, projectId: e.projId,
     title: columnKey, body: "", columnKey, position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
 }
-// Seed one card with an explicit title (for the owner-held/HOLD discount test) and an optional `held` flag.
-function seedTitled(e, columnKey, title, held = false) {
+// Seed one card with an explicit title (for the owner-held/HOLD discount test) and optional `held`/
+// `deferred` flags (deferred: card 77d33266 — the manager's own sequencing marker, discounted the
+// same way as held).
+function seedTitled(e, columnKey, title, held = false, deferred = false) {
   e.db.insertTask({ id: `tk-${columnKey}-${Math.random().toString(36).slice(2, 6)}`, projectId: e.projId,
-    title, body: "", columnKey, held, position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+    title, body: "", columnKey, held, deferred, position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
 }
 function cleanup(e) {
   try { e.db.close(); } catch { /* ignore */ }
@@ -165,6 +167,41 @@ function cleanup(e) {
   seedManager(e, "mgr-empty-board");
   e.watcher.tick(NOW);
   check("(1c) an empty board (0 cards, none held) STILL nudges (report 'done' path unchanged)", e.enqueued.length === 1 && e.enqueued[0].text.includes("0 actionable"));
+  cleanup(e);
+}
+
+// ===== (1e) manager-set `deferred` cards are DISCOUNTED from the actionable count, same as `held` =====
+// (card 77d33266 — deferred is the MANAGER's own sequencing marker, orthogonal to the owner's `held`
+// brake: it must never block worker_spawn, but IS excluded from the idle nag count exactly like held.)
+{
+  // A deferred=true card as the SOLE open card → NO nudge, same treatment as a held-only card.
+  const e = makeEnv();
+  seedManager(e, "mgr-deferred-only");
+  seedTitled(e, "todo", "manager is sequencing this behind other work", false, true); // deferred=true
+  e.watcher.tick(NOW);
+  check("(1e) a deferred=true card as the sole todo → NO idle nudge (discounted like held)", e.enqueued.length === 0);
+  cleanup(e);
+}
+{
+  // A genuinely-actionable card alongside a deferred one → STILL nudges, and the count EXCLUDES the deferred card.
+  const e = makeEnv();
+  seedManager(e, "mgr-deferred-mixed");
+  seedTitled(e, "todo", "sequenced behind other work", false, true);          // deferred=true → discounted
+  seedTitled(e, "todo", "fix(web): real actionable task", false, false);      // neither → counted
+  e.watcher.tick(NOW);
+  check("(1e) a deferred + a genuine card → STILL nudged (genuine work exists)", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-deferred-mixed");
+  check("(1e) the reported actionable count EXCLUDES the deferred card (1, not 2)", e.enqueued[0]?.text.includes("1 actionable"));
+  cleanup(e);
+}
+{
+  // held + deferred are BOTH independently discounted — a card carrying only one of the two flags is
+  // still excluded, and a board with one held-only + one deferred-only card (both discounted) nudges 0.
+  const e = makeEnv();
+  seedManager(e, "mgr-held-and-deferred");
+  seedTitled(e, "todo", "owner-held card", true, false);      // held=true, deferred=false → discounted
+  seedTitled(e, "todo", "manager-deferred card", false, true); // held=false, deferred=true → discounted
+  e.watcher.tick(NOW);
+  check("(1e) a held-only card AND a deferred-only card together → NO nudge (both discounted independently)", e.enqueued.length === 0);
   cleanup(e);
 }
 

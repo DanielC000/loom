@@ -220,8 +220,10 @@ test("a held card shows as held, and releasing the hold in the drawer clears it"
   await expect(lane(page, "To Do").getByText("held", { exact: true })).toBeVisible();
 
   // Release the hold through the UI: open the drawer, flip the Hold switch off, Save.
+  // Scoped by name — the drawer has a second switch (Defer, card 77d33266), so an unscoped
+  // getByRole("switch") would now be ambiguous.
   await cardInLane(page, "To Do", title).click();
-  const holdSwitch = page.getByRole("switch"); // the drawer's Hold toggle is the only switch on the board
+  const holdSwitch = page.getByRole("switch", { name: /held/i });
   await expect(holdSwitch).toHaveAttribute("aria-checked", "true");
   await holdSwitch.click();
   await expect(holdSwitch).toHaveAttribute("aria-checked", "false");
@@ -235,6 +237,51 @@ test("a held card shows as held, and releasing the hold in the drawer clears it"
       const res = await fetch(`${loomDaemon.baseURL}/api/projects/${project.id}/tasks`);
       const tasks = (await res.json()) as Array<{ id: string; held?: boolean }>;
       return tasks.find((t) => t.id === task.id)?.held ?? false;
+    })
+    .toBe(false);
+});
+
+test("a deferred card shows as deferred (distinct from held), and un-deferring in the drawer clears it", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`board-deferred-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+
+  const title = uniq("deferred-card");
+  const task = await loomDaemon.createTask(project.id, { title, columnKey: "todo" });
+  // `deferred` has no REST create field — set it through the same PATCH the drawer's Defer switch uses.
+  {
+    const res = await fetch(`${loomDaemon.baseURL}/api/tasks/${task.id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deferred: true }),
+    });
+    expect(res.ok).toBeTruthy();
+  }
+
+  await page.goto(`${loomDaemon.baseURL}/board`);
+
+  // BEFORE: the card wears the "deferred" badge — a DISTINCT marker from "held" (never rendered here).
+  await expect(cardInLane(page, "To Do", title)).toBeVisible();
+  await expect(lane(page, "To Do").getByText("deferred", { exact: true })).toBeVisible();
+  await expect(lane(page, "To Do").getByText("held", { exact: true })).toHaveCount(0);
+
+  // Clear the defer through the UI: open the drawer, flip the Defer switch off, Save.
+  await cardInLane(page, "To Do", title).click();
+  const deferSwitch = page.getByRole("switch", { name: /deferred/i });
+  await expect(deferSwitch).toHaveAttribute("aria-checked", "true");
+  // The Hold switch stays untouched (off) — proves the two markers are independent controls.
+  await expect(page.getByRole("switch", { name: /held/i })).toHaveAttribute("aria-checked", "false");
+  await deferSwitch.click();
+  await expect(deferSwitch).toHaveAttribute("aria-checked", "false");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+
+  // AFTER (observable #1): the badge is gone from the board.
+  await expect(lane(page, "To Do").getByText("deferred", { exact: true })).toHaveCount(0);
+  // AFTER (observable #2): the release persisted to the store.
+  await expect
+    .poll(async () => {
+      const res = await fetch(`${loomDaemon.baseURL}/api/projects/${project.id}/tasks`);
+      const tasks = (await res.json()) as Array<{ id: string; deferred?: boolean }>;
+      return tasks.find((t) => t.id === task.id)?.deferred ?? false;
     })
     .toBe(false);
 });

@@ -300,6 +300,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- owner-gated HOLD flag (idle-watchdog discount signal). Added to existing DBs via migrateTasks(); the
   -- NOT NULL + constant DEFAULT 0 backfills every legacy task row to "not held" in place.
   held INTEGER NOT NULL DEFAULT 0,
+  -- manager-settable DEFERRED flag (idle-watchdog discount signal, orthogonal to held -- never checked
+  -- by worker_spawn). Added to existing DBs via migrateTasks(); the NOT NULL + constant DEFAULT 0
+  -- backfills every legacy task row to "not deferred" in place.
+  deferred INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -633,6 +637,9 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   // Owner-gated HOLD flag. NOT NULL + constant DEFAULT 0 backfills every legacy row to "not held" in place;
   // intentionally-held legacy cards are seeded true post-migration by backfillHeldFromTitlesOnce().
   held: "INTEGER NOT NULL DEFAULT 0",
+  // Manager-settable DEFERRED flag. NOT NULL + constant DEFAULT 0 backfills every legacy row to
+  // "not deferred" in place — byte-identical to a fresh CREATE TABLE default.
+  deferred: "INTEGER NOT NULL DEFAULT 0",
 };
 
 /** Columns added to `companion_config` after its initial ship; applied to existing DBs by
@@ -2735,18 +2742,18 @@ export class Db {
   }
   insertTask(t: Task): void {
     this.db.prepare(
-      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,created_at,updated_at)
-       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@createdAt,@updatedAt)`,
-    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0 }); // defaults when an (untyped) caller omits them
+      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,created_at,updated_at)
+       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@createdAt,@updatedAt)`,
+    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0 }); // defaults when an (untyped) caller omits them
   }
-  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held">>): void {
+  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred">>): void {
     const cur = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     if (!cur) return;
     const t = toTask(cur);
     const next = { ...t, ...patch, updatedAt: new Date().toISOString() };
     this.db.prepare(
-      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, updated_at=@updatedAt WHERE id=@id",
-    ).run({ ...next, held: next.held ? 1 : 0 });
+      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, updated_at=@updatedAt WHERE id=@id",
+    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0 });
   }
   /** PERMANENTLY delete a task card. Idempotent on a missing id (DELETE … WHERE matches nothing). HUMAN-only
    * (no MCP path) — an agent can only move a card to done; the REST route enforces the live-session guard. */
@@ -3064,6 +3071,7 @@ function toTask(r0: unknown): Task {
     body: r.body as string, columnKey: r.column_key as string, position: r.position as number,
     priority: (r.priority as Task["priority"]) ?? "p2",
     held: (r.held as number) === 1,
+    deferred: (r.deferred as number) === 1,
     createdAt: r.created_at as string, updatedAt: r.updated_at as string,
   };
 }
