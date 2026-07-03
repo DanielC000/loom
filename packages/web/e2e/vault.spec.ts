@@ -37,10 +37,9 @@ test.afterAll(() => {
 const uniq = (p: string) => `${p}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
 async function pinActiveProject(page: Page, projectId: string) {
-  await page.addInitScript((id) => {
-    localStorage.setItem("loom.projectId", id);
-    localStorage.setItem("loom.setupWelcomeDismissed", "1"); // belt-and-braces: never let a welcome modal cover the UI
-  }, projectId);
+  // The FirstRunWelcome overlay is dismissed globally by the fixture (fixtures/daemon.ts), so this only
+  // pins the active project.
+  await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
 }
 
 // Seed a project whose vaultPath is a real on-disk dir containing `notes` (relative path → markdown text),

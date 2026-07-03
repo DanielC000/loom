@@ -27,23 +27,11 @@
 import { expect, test } from "./fixtures/daemon";
 import type { Page } from "@playwright/test";
 
-// A fresh isolated daemon has no ordinary projects, so App.tsx pops the full-screen FirstRunWelcome modal
-// (a fixed overlay that intercepts pointer events). Pre-set its real dismissal flag before any page script
-// runs — mirrors board.spec.ts / platform.spec.ts.
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
-    try { localStorage.setItem("loom.setupWelcomeDismissed", "1"); } catch { /* storage may be unavailable */ }
-  });
-});
-
-// The e2e worker daemon is SHARED across spec files, so archive every seeded live session after each test —
-// a lingering `live` row would pollute a later spec's global "no live sessions" empty-state (usage.spec).
-// Also hard-kill any real shell a test spawned (the live-ShellTile case) so it can't leak a host pty into a
-// sibling spec's Shells lane.
-test.afterEach(async ({ loomDaemon }) => {
-  await loomDaemon.killSpawnedShells();
-  await loomDaemon.archiveSeededSessions();
-});
+// Isolation is baked into the fixture (fixtures/daemon.ts): the FirstRunWelcome overlay is dismissed
+// globally, and after each test every seeded live session is archived + every spawned host shell is
+// hard-killed — so a lingering `live` row can't pollute a later spec's global "no live sessions"
+// empty-state (usage.spec) and a live ShellTile can't leak a host pty into a sibling's Shells lane. This
+// spec re-derives neither.
 
 async function pinActiveProject(page: Page, projectId: string) {
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);

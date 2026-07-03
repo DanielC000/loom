@@ -23,14 +23,8 @@
 import { expect, test } from "./fixtures/daemon";
 
 test.describe("platform view (end-user edition)", () => {
-  // A fresh isolated daemon has no ordinary projects, so App.tsx pops the full-screen FirstRunWelcome
-  // modal (a fixed overlay that intercepts pointer events). Pre-set its real dismissal flag before any
-  // page script runs so the overlay never mounts and in-page clicks land on the actual controls.
-  test.beforeEach(async ({ page }) => {
-    await page.addInitScript(() => {
-      try { localStorage.setItem("loom.setupWelcomeDismissed", "1"); } catch { /* storage may be unavailable */ }
-    });
-  });
+  // The first-run "Welcome to Loom" overlay is dismissed globally by the fixture (fixtures/daemon.ts), so
+  // no spec re-derives it — in-page clicks land on the actual controls regardless of spec order.
 
   test("renders the operator, auditor and board sections it presents", async ({ page, loomDaemon }) => {
     await page.goto(`${loomDaemon.baseURL}/platform`);

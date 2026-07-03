@@ -15,7 +15,7 @@
 // addInitScript localStorage `loom.projectId` (see lib/activeProject) BEFORE navigating, so it never races
 // another test's project; profiles are addressed by a unique name/id, never by list position. The first-run
 // "Welcome to Loom" overlay (App.tsx › FirstRunWelcome, a fixed pointer-intercepting layer) is suppressed
-// via the `loom.setupWelcomeDismissed` flag, mirroring skills.spec.ts / settings.spec.ts.
+// globally by the fixture (fixtures/daemon.ts), so no spec re-derives the dismissal.
 //
 // This spec only ever CREATES new agents/profiles (uniquely named) and never mutates a BUNDLED profile, so
 // the shared store stays clean for other specs — no reset step is needed (unlike skills.spec.ts, which
@@ -65,11 +65,8 @@ const agentRow = (page: Page, name: string) => page.getByRole("button").filter({
 const profileSelect = (page: Page) => page.locator("select").filter({ hasText: "— none —" });
 
 test.describe("profiles & agents", () => {
-  test.beforeEach(async ({ page }) => {
-    await page.addInitScript(() => {
-      try { localStorage.setItem("loom.setupWelcomeDismissed", "1"); } catch { /* storage may be unavailable */ }
-    });
-  });
+  // The first-run "Welcome to Loom" overlay is dismissed globally by the fixture (fixtures/daemon.ts) — no
+  // spec re-derives it.
 
   test("the Agents panel lists the REST-seeded agents", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`agents-list-${Date.now()}`);

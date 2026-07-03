@@ -22,14 +22,9 @@
 // positive proof that nothing spawned.
 import { expect, test } from "./fixtures/daemon";
 
-// A fresh isolated daemon may have NO ordinary projects, so the client shows the one-time first-run
-// "Welcome to Loom" modal (App.tsx › FirstRunWelcome) — a full-viewport overlay that intercepts every
-// click. It is gated on the `loom.setupWelcomeDismissed` localStorage flag, so pre-set it before any
-// navigation. This also makes the spec deterministic regardless of whether a sibling spec (the daemon is
-// worker-scoped and shared) already seeded an ordinary project. Mirrors skills.spec.ts.
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem("loom.setupWelcomeDismissed", "1"));
-});
+// The one-time first-run "Welcome to Loom" modal (App.tsx › FirstRunWelcome, a full-viewport overlay that
+// intercepts every click on a projectless daemon) is dismissed globally by the fixture (fixtures/daemon.ts),
+// so this spec is deterministic regardless of spec order and re-derives nothing.
 
 test("the Platform nav tab reaches the shipping onboarding surface", async ({ page, loomDaemon }) => {
   await page.goto(`${loomDaemon.baseURL}/`);

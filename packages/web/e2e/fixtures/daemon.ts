@@ -226,23 +226,53 @@ export interface LoomDaemon {
     label: string;
   }>;
   /**
-   * Hard-kill (`DELETE /api/terminals/:id`) every shell spawned by {@link LoomDaemon.spawnShell} so far. Call
-   * in an afterEach: a leaked live shell would keep a real host pty alive and pollute a sibling spec's Shells
-   * lane. Idempotent (an already-gone id is a no-op on the daemon side).
+   * Hard-kill (`DELETE /api/terminals/:id`) every shell spawned by {@link LoomDaemon.spawnShell} so far. The
+   * `autoIsolation` auto fixture calls this after EVERY test, so specs no longer need their own afterEach: a
+   * leaked live shell would keep a real host pty alive and pollute a sibling spec's Shells lane. Idempotent
+   * (an already-gone id is a no-op on the daemon side).
    */
   killSpawnedShells: () => Promise<void>;
   /**
    * Archive every session seeded by {@link LoomDaemon.seedLiveSession} OR {@link LoomDaemon.seedCompanion} so
-   * far (sets archived_at via the test-only seed endpoint), removing them from the session rail. Call in an
-   * afterEach: the e2e worker daemon is SHARED across spec files, so a lingering session row (a `live`
-   * terminal OR a non-archived exited companion) would pollute a LATER spec's global "no live sessions"
-   * empty-state — the Usage page's Live-occupancy plane counts EVERY non-archived session, not just live
-   * ones. Idempotent (an already-archived / unknown id is a no-op).
+   * far (sets archived_at via the test-only seed endpoint), removing them from the session rail. The
+   * `autoIsolation` auto fixture calls this after EVERY test, so specs no longer need their own afterEach:
+   * the e2e worker daemon is SHARED across spec files, so a lingering session row (a `live` terminal OR a
+   * non-archived exited companion) would pollute a LATER spec's global "no live sessions" empty-state — the
+   * Usage page's Live-occupancy plane counts EVERY non-archived session, not just live ones. Idempotent (an
+   * already-archived / unknown id is a no-op).
    */
   archiveSeededSessions: () => Promise<void>;
 }
 
-export const test = base.extend<{ loomPage: Page }, { loomDaemon: LoomDaemon }>({
+export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomDaemon: LoomDaemon }>({
+  // INVARIANT 1 — the first-run "Welcome to Loom" modal is dismissed for EVERY spec, baked in here so no
+  // spec re-derives it. App.tsx › FirstRunWelcome (WELCOME_DISMISSED_KEY = "loom.setupWelcomeDismissed")
+  // is a full-viewport overlay that intercepts pointer events on a fresh daemon (no ordinary projects)
+  // until dismissed — an un-dismissed modal makes every spec's first click time out. Overriding `context`
+  // (rather than each spec's own beforeEach) applies the init script to every page the context creates,
+  // including the built-in `page` fixture derived from it. Specs must NOT depend on dismissing it
+  // themselves.
+  context: async ({ context }, use) => {
+    await context.addInitScript(() => {
+      try { localStorage.setItem("loom.setupWelcomeDismissed", "1"); } catch { /* storage may be unavailable */ }
+    });
+    await use(context);
+  },
+
+  // INVARIANT 2 — per-spec isolation cleanup, baked in as an auto fixture so it runs after EVERY test
+  // without a spec writing its own afterEach. The `loomDaemon` is worker-scoped + SHARED across all spec
+  // files (playwright.config.ts: workers:1, fullyParallel:false), so a session a spec seeds (a live
+  // terminal OR an exited companion) lingers into the NEXT spec and pollutes its global-visible empty
+  // states — the Usage page's Live-occupancy plane counts EVERY non-archived session, not just live ones
+  // (the pre-existing companion→usage leak). Archiving seeded sessions + hard-killing spawned host shells
+  // after each test closes that forward leak centrally. Idempotent: an already-archived / already-killed
+  // id is a no-op, so a spec that also cleans up explicitly is harmless.
+  autoIsolation: [async ({ loomDaemon }, use) => {
+    await use();
+    await loomDaemon.killSpawnedShells();
+    await loomDaemon.archiveSeededSessions();
+  }, { auto: true }],
+
   // eslint-disable-next-line no-empty-pattern
   loomDaemon: [async ({}, use) => {
     if (!existsSync(DAEMON_INDEX)) {

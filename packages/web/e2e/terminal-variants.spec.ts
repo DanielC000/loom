@@ -13,17 +13,10 @@
 // `[pty] spawn` no-spawn guard stays clean. Assertions are on the card chrome, never a live pty stream.
 import { expect, test } from "./fixtures/daemon";
 
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
-    try { localStorage.setItem("loom.setupWelcomeDismissed", "1"); } catch { /* storage may be unavailable */ }
-  });
-});
-
-// Archive the seeded live session after each test — the worker daemon is shared across spec files, so a
-// lingering `live` row would pollute a later spec's global "no live sessions" empty-state (usage.spec).
-test.afterEach(async ({ loomDaemon }) => {
-  await loomDaemon.archiveSeededSessions();
-});
+// Isolation is baked into the fixture (fixtures/daemon.ts): the FirstRunWelcome overlay is dismissed
+// globally, and the seeded live/companion sessions are archived automatically after each test — so a
+// lingering row can't pollute a later spec's global "no live sessions" empty-state (usage.spec). This spec
+// re-derives neither.
 
 // ── PlatformSessionTile (via the End-User Platform Operator session) ─────────────────────────────────
 test.describe("PlatformSessionTile (Operator session)", () => {

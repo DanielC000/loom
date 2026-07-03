@@ -21,11 +21,10 @@
 // from.
 import { expect, test } from "./fixtures/daemon";
 
-// A fresh isolated daemon has no ordinary projects, so the first-run "Welcome to Loom" overlay would
-// intercept every click — suppress it up front, mirroring skills.spec.ts / settings.spec.ts / profiles-agents.spec.ts.
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem("loom.setupWelcomeDismissed", "1"));
-});
+// Isolation is baked into the fixture (fixtures/daemon.ts): the first-run "Welcome to Loom" overlay is
+// dismissed globally, and the seeded companion (a non-archived assistant-role session that would otherwise
+// leak into a sibling spec's global "no live sessions" empty state — the companion→usage leak) is archived
+// automatically after each test. This spec re-derives neither.
 
 test("shows the seeded companion (not the empty create-box) with Chat + Manage tabs, no selector", async ({ page, loomDaemon }) => {
   await loomDaemon.seedCompanion();

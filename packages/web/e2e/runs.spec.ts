@@ -15,8 +15,8 @@
 // Determinism: `loomDaemon` is worker-scoped (one daemon for the whole run), so many projects/runs coexist.
 // Every test seeds its OWN project and PINS it active via addInitScript localStorage `loom.projectId` BEFORE
 // navigating, so the /runs list is scoped to exactly this test's seeded rows; runs are addressed by their
-// returned id, never by list position. The first-run "Welcome to Loom" overlay is suppressed via
-// `loom.setupWelcomeDismissed` (mirrors profiles-agents.spec.ts / settings.spec.ts). Timestamps are rendered
+// returned id, never by list position. The first-run "Welcome to Loom" overlay is dismissed globally by the
+// fixture (fixtures/daemon.ts), so no spec re-derives it. Timestamps are rendered
 // with toLocaleString (locale/TZ-dependent), so assertions target stable values only — status, ids, agent
 // name, input/result/usage content, the "internal" key label — never the formatted date text.
 import type { Page } from "@playwright/test";
@@ -66,11 +66,8 @@ const short = (id: string) => id.slice(0, 8);
 const PAST_ISO = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString();
 
 test.describe("runs", () => {
-  test.beforeEach(async ({ page }) => {
-    await page.addInitScript(() => {
-      try { localStorage.setItem("loom.setupWelcomeDismissed", "1"); } catch { /* storage may be unavailable */ }
-    });
-  });
+  // The first-run "Welcome to Loom" overlay is dismissed globally by the fixture (fixtures/daemon.ts) — no
+  // spec re-derives it.
 
   test("the runs list renders the seeded run rows with their status, agent, and outcome", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`runs-list-${Date.now()}`);

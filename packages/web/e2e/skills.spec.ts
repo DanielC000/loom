@@ -25,13 +25,9 @@ function skillButton(page: import("@playwright/test").Page, name: string) {
   return page.getByRole("button").filter({ hasText: name }).first();
 }
 
-// A fresh isolated daemon has no ordinary projects, so the client shows the one-time first-run "Welcome to
-// Loom" modal (App.tsx › FirstRunWelcome) — a full-viewport overlay that intercepts every click. It is
-// gated on the `loom.setupWelcomeDismissed` localStorage flag, so pre-set it before any navigation (this
-// harness never creates an ordinary project). Mirrors settings.spec.ts's addInitScript-before-goto pattern.
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem("loom.setupWelcomeDismissed", "1"));
-});
+// The one-time first-run "Welcome to Loom" modal (App.tsx › FirstRunWelcome, a full-viewport overlay that
+// intercepts every click on a projectless daemon) is dismissed globally by the fixture (fixtures/daemon.ts),
+// so no spec re-derives it.
 
 test("the skills list renders the seeded bundled skills", async ({ page, loomDaemon }) => {
   await page.goto(`${loomDaemon.baseURL}/skills`);
