@@ -24,16 +24,29 @@ import { font, color } from "../theme";
 // migration; `PlatformSessionTile`, the Overview `SessionCockpit`, `ShellTile` and `CompanionTerminal`
 // follow in later stages (see the plan).
 //
-// DEFERRED from the plan's full prop surface, by design, to the stages that actually exercise them (so
-// each branch lands only once a consumer tests it): the `statusMode` variants beyond "busy"
-// ("static"/"conn" — land with the Shell/Companion stage 4). The enum is typed here so the downstream
-// call sites are already shaped; only the "busy" path is implemented. The `tabs` prop (Terminal +
-// Transcript always, role-scoped Timeline/Diff) IS wired as of STAGE 3 — the Overview `SessionCockpit`
-// is its first consumer (lifted from its old hand-rolled inline tab bar). No-tabs stays byte-identical.
+// The `tabs` prop (Terminal + Transcript always, role-scoped Timeline/Diff) is wired as of STAGE 3 — the
+// Overview `SessionCockpit` is its first consumer (lifted from its old hand-rolled inline tab bar).
+// No-tabs stays byte-identical.
+//
+// STAGE 4 (`ShellTile` + `CompanionTerminal`) resolved the deferred non-"busy" status question in favor
+// of the `title` OVERRIDE rather than implementing the `statusMode` "static"/"conn" branches: a raw shell
+// and a read-only companion window are not DB Sessions with a live busy signal, so each supplies its own
+// header node (a "shell" / "read-only" StatusPill) via `title`. `statusMode` therefore stays typed (the
+// enum keeps the call sites shaped) with only the "busy" path implemented; no consumer needs the others.
 
 export type TerminalLifecycle = "stop" | "kill" | "none";
 export type TerminalStatusMode = "busy" | "static" | "conn";
 export type TerminalTab = "terminal" | "transcript" | "timeline" | "diff";
+
+// The base reads only a small subset off `session`: the default `TileTitle` needs the identity/status
+// quartet (busy/project/agent/role/id) and the taskCard query needs the project/task ids — never a full
+// DB Session. Narrowing to this lets a NON-DB-Session surface (a raw `ShellTile` shell, a `CompanionTerminal`
+// watch window) mount the SAME frame by passing just `{ id }`, with its own `title` + `renderBody`, instead
+// of faking a `Session` row. Every existing consumer still passes a full `SessionListItem` — structurally
+// assignable, so those call sites are byte-identical. `id` is the only field a title-override + renderBody
+// consumer actually surfaces; the rest are optional and consumed only by the default title/task paths.
+export type TerminalCardSession = Pick<SessionListItem, "id"> &
+  Partial<Pick<SessionListItem, "projectId" | "taskId" | "busy" | "role" | "agentName" | "projectName">>;
 
 // Optional role-scoped tab bar. When provided, the body gains a Terminal + Transcript tab bar (both
 // owned by the base — the shared TerminalPane / TranscriptPane), plus a Timeline and/or Diff tab ONLY
@@ -78,7 +91,7 @@ export function StopButton({ onStop, stopping }: { onStop: () => void; stopping:
   );
 }
 
-export function TileTitle({ s, showProject }: { s: SessionListItem; showProject?: boolean }) {
+export function TileTitle({ s, showProject }: { s: TerminalCardSession; showProject?: boolean }) {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
       <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} />
@@ -109,7 +122,7 @@ export function TerminalCard({
   renderBody,
   actionsExtra,
 }: {
-  session: SessionListItem;
+  session: TerminalCardSession;
   height: number | string;
   maxWidth?: number | string;
   showProject?: boolean;
@@ -137,7 +150,7 @@ export function TerminalCard({
   /** Extra buttons appended after the standard action cluster. */
   actionsExtra?: ReactNode;
 }) {
-  void statusMode; // only "busy" is wired in stage 1 (title carries the pill); see header note above.
+  void statusMode; // only "busy" is wired; non-busy variants carry a "title" override pill (see header note).
   const [maximized, setMaximized] = useState(false);
 
   // HUG (numeric height) vs FILL (string height, e.g. "76vh"). HUG cards hug their content up to a MAX cap
@@ -176,8 +189,11 @@ export function TerminalCard({
   // when the task-card panel is enabled; an id that doesn't resolve leaves `task` undefined → no bar.
   const wantTaskCard = !!subPanels?.taskCard;
   const tasks = useQuery({
+    // `?? ""` satisfies the narrowed session type (projectId is optional so a non-DB shell can pass just
+    // `{ id }`); it never actually fetches with an empty id because `enabled` also requires a taskId, which
+    // only a real project session carries — and such a session always has a projectId.
     queryKey: ["tasks", session.projectId],
-    queryFn: () => api.tasks(session.projectId),
+    queryFn: () => api.tasks(session.projectId ?? ""),
     staleTime: 4000,
     enabled: wantTaskCard && !!session.taskId,
   });
@@ -232,7 +248,7 @@ export function TerminalCard({
       {title ?? <TileTitle s={session} showProject={showProject} />}
       <div style={{ display: "flex", gap: 4 }}>
         {subPanels?.presets && <PresetPromptsButton sessionId={session.id} />}
-        {offerFork && <ForkButton onFork={() => onFork?.()} busy={session.busy} pending={forkPending} />}
+        {offerFork && <ForkButton onFork={() => onFork?.()} busy={session.busy ?? false} pending={forkPending} />}
         {lifecycleButton}
         {actionsExtra}
         {maximizable && (

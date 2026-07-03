@@ -11,7 +11,7 @@ import {
 } from "../lib/companion";
 import { Panel, Button, Input, Select, SectionLabel, Badge, StatusPill, Chip } from "../components/ui";
 import { CompanionChat } from "../components/CompanionChat";
-import { TerminalPane } from "../components/Terminal";
+import { TerminalCard } from "../components/TerminalCard";
 import { IN_APP_CHANNEL, isArmedInApp } from "../lib/companionChat";
 import { color, font, radius } from "../theme";
 
@@ -413,26 +413,30 @@ function ModeToggle({ mode, onMode }: { mode: CompanionMode; onMode: (m: Compani
 // ── Terminal: a READ-ONLY window onto the companion's OWN pty session ──────────────
 // Companions are DELIBERATELY hidden from the Terminals page + project grids (they're driven through
 // chat, never a raw stdin composer — the load-bearing filter in lib/sessions.ts groupSessionRows). This
-// view is the one sanctioned exception, scoped to a single companion: it reuses the same xterm attach
-// component (TerminalPane over /ws/term/:sessionId) but in `readOnly` mode, so you can watch the agent's
-// real Claude TUI stream without a way to type into it. It never un-hides companions anywhere else.
+// view is the one sanctioned exception, scoped to a single companion: a watch-only window onto the agent's
+// real Claude TUI stream with no way to type into it. It never un-hides companions anywhere else.
+//
+// On the shared <TerminalCard> frame (terminal-unification epic, stage 4): `readOnly` makes the base
+// disable stdin (xterm) AND withhold the turn-Composer — exactly the watch-only shape — and it gains
+// **Maximize** (was missing). Lifecycle "none" + Fork withheld: the companion is driven through Chat, not
+// stopped/forked from here. The base's identity/status title is overridden with the "read-only" pill (a
+// companion has no worker busy chrome to surface here); the explanatory hint sits above the card.
 function CompanionTerminal({ sessionId }: { sessionId: string }) {
   return (
     <>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <StatusPill tone="cyan" label="read-only" />
-        <span style={{ ...hint, margin: 0 }}>
-          A live window onto this companion's own <code>claude</code> session — watch it work. Talk to it
-          under <strong style={{ color: color.text }}>Chat</strong>; typing here is disabled.
-        </span>
-      </div>
-      {/* overflow:hidden clips xterm's canvas to the framed box; the pane scales the pinned grid to fill it. */}
-      <div style={{
-        flex: 1, minHeight: 0, overflow: "hidden", background: "#0b0b0c",
-        border: `1px solid ${color.border}`, borderRadius: radius.base,
-      }}>
-        <TerminalPane sessionId={sessionId} readOnly />
-      </div>
+      <span style={{ ...hint, margin: 0 }}>
+        A live window onto this companion's own <code>claude</code> session — watch it work. Talk to it
+        under <strong style={{ color: color.text }}>Chat</strong>; typing here is disabled.
+      </span>
+      <TerminalCard
+        session={{ id: sessionId }}
+        height="62vh"
+        readOnly
+        offerFork={false}
+        lifecycle="none"
+        maximizable
+        title={<StatusPill tone="cyan" label="read-only" />}
+      />
     </>
   );
 }

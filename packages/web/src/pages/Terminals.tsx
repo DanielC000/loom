@@ -5,7 +5,8 @@ import { api } from "../lib/api";
 import { byManagerThenCreated, groupSessionRows, type SessionRowGroup } from "../lib/sessions";
 import { TerminalPane } from "../components/Terminal";
 import { TerminalTile } from "../components/TerminalTile";
-import { Panel, Button, Select, Input, StatusPill, SectionLabel } from "../components/ui";
+import { TerminalCard } from "../components/TerminalCard";
+import { Button, Select, Input, StatusPill, SectionLabel } from "../components/ui";
 import { color, font } from "../theme";
 
 // Tiles flow horizontally then wrap; reused per manager row and the catch-all rows. alignItems:"start" so
@@ -145,33 +146,52 @@ function ShellsSection() {
   );
 }
 
+// A plain shell terminal, on the shared <TerminalCard> frame (terminal-unification epic, stage 4). A raw
+// shell is NOT a DB Session — it takes keystrokes straight into xterm — so it keeps its DISTINCT body via
+// `renderBody` (a resizable FitAddon pane, no turn-Composer / queue / wakes / task) and its DISTINCT
+// lifecycle: hard **Kill** (confirm-gated), never graceful Stop. It gains **Maximize** from the base (was
+// missing). Fork is withheld (a shell has no conversation to branch). The base's default identity/status
+// title is overridden with the shell's own "shell" pill (no live `busy` signal); the Kill/confirm cluster
+// rides in `actionsExtra` so the base's built-in confirm-less kill button never doubles it up. FILL height
+// ("460px") keeps the old fixed-box pane that the resizable grid fits to — a shell has no grid to hug.
 function ShellTile({ t, onKill, killing }: { t: ShellTerminal; onKill: () => void; killing: boolean }) {
   // Kill hard-terminates the process tree, so gate it behind an inline confirm — mirrors the
   // Schedules/Profiles/Skills delete pattern (a confirm/cancel pair in place of the action button).
   const [confirmKill, setConfirmKill] = useState(false);
+  const killCluster = confirmKill ? (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>kill shell?</span>
+      <Button variant="danger" style={{ padding: "0 8px" }} disabled={killing}
+        onClick={(ev) => { ev.stopPropagation(); onKill(); }}>Confirm</Button>
+      <Button style={{ padding: "0 8px" }}
+        onClick={(ev) => { ev.stopPropagation(); setConfirmKill(false); }}>Cancel</Button>
+    </span>
+  ) : (
+    <Button variant="danger" style={{ padding: "0 8px" }} disabled={killing}
+      title="Kill this shell — hard terminate the process tree"
+      onClick={(ev) => { ev.stopPropagation(); setConfirmKill(true); }}>Kill</Button>
+  );
+
   return (
-    <Panel style={{ height: 460, padding: 6, display: "flex", flexDirection: "column" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+    <TerminalCard
+      session={{ id: t.id }}
+      height="460px"
+      offerFork={false}
+      lifecycle="none"
+      maximizable
+      title={
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
           <StatusPill tone="phosphor" label="shell" />
           <span title={`${t.command}\n${t.cwd}`}>{t.label} · {t.id.slice(0, 8)}</span>
         </span>
-        {confirmKill ? (
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>kill shell?</span>
-            <Button variant="danger" style={{ padding: "0 8px" }} disabled={killing}
-              onClick={(ev) => { ev.stopPropagation(); onKill(); }}>Confirm</Button>
-            <Button style={{ padding: "0 8px" }}
-              onClick={(ev) => { ev.stopPropagation(); setConfirmKill(false); }}>Cancel</Button>
-          </span>
-        ) : (
-          <Button variant="danger" style={{ padding: "0 8px" }} disabled={killing}
-            title="Kill this shell — hard terminate the process tree"
-            onClick={(ev) => { ev.stopPropagation(); setConfirmKill(true); }}>Kill</Button>
-        )}
-      </div>
-      <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={t.id} resizable /></div>
-    </Panel>
+      }
+      actionsExtra={killCluster}
+      renderBody={() => (
+        // A resizable shell fits the pane to its box (FitAddon) — NOT readOnly (that disables stdin; a
+        // shell must take keystrokes) and no Composer (it's not a turn-based DB Session).
+        <div style={{ flex: 1, minHeight: 0 }}><TerminalPane sessionId={t.id} resizable /></div>
+      )}
+    />
   );
 }
 
