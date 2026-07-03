@@ -157,9 +157,8 @@ A short gate — not an exhaustive audit. Run it before calling any screen done:
 10. **Responsive** — single-column mobile works; nothing overflows or touches the viewport edge.
 11. **A11y** — headings not skipped, images have alt text, touch targets ≥44px.
 12. **Eyeballed** — you looked at the rendered result, not just the code.
-13. **E2E** — a new or changed user-facing feature ships with (or updates) a Playwright e2e spec on the
-    `loomDaemon` harness fixture (`packages/web/e2e/`); `pnpm --filter @loom/web test:e2e` runs green.
-    See `Projects/Loom/Design/E2E Test Suite Design.md`.
+13. **E2E** — if the project has an end-to-end test suite, a new or changed screen ships with (or
+    updates) a test in it, run green — see the project's own docs for the harness.
 
 ## Provenance
 
