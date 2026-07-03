@@ -6,10 +6,13 @@ import { RESUME_NUDGE_TAIL } from "./resume-nudge.js";
 
 /**
  * Session roles the crash-recovery watchdog covers — coordination/work sessions worth auto-recovering.
- * EXCLUDES plain (role null), ephemeral `run` (never resume — a restart fails them clean), and `auditor`
- * (a fire-once read-and-file session). Managers are IN scope: the motivating incident was a dead manager.
+ * EXCLUDES plain (role null), ephemeral `run` (never resume — a restart fails them clean), `auditor`
+ * (a fire-once read-and-file session), `setup`, and `workspace-auditor`. Managers are IN scope: the
+ * motivating incident was a dead manager. `assistant` (an isolated Companion session) is IN scope too:
+ * an unresumed dead Companion sits silently dark with no Mission Control signal until a full daemon
+ * restart — see recordUnexpectedExit.
  */
-const RECOVERABLE_ROLES: SessionRole[] = ["manager", "worker", "platform"];
+const RECOVERABLE_ROLES: SessionRole[] = ["manager", "worker", "platform", "assistant"];
 
 /**
  * Stability window: a resumed session must stay LIVE this long (since its last crash-recovery activity)
@@ -131,6 +134,36 @@ export function recordUnexpectedExit(db: Db, sessionId: string, intended: boolea
     kind: "session_died", detail: { role: s.role },
   });
   return true;
+}
+
+/**
+ * Is `session` presently crash-recovery ELIGIBLE — would the watchdog's next tick attempt (or is it still
+ * within its bound to attempt) an auto-resume of it, given its CURRENT event history? Shared by the tick
+ * loop's own bookkeeping and by SessionService.notifyManagerOfExitedWorker (card 289586c7): a worker the
+ * watchdog is about to try to save must NOT ALSO get the definitive "will NOT come back, re-dispatch"
+ * nudge — the two raced in production (worker a1c71a86: the false nudge landed immediately before three
+ * auto-recovery re-confirmation worker_reports from that SAME worker). Mirrors the tick's own gates
+ * (role/resumability/successor/project-config/pause/attempt-cap) without requiring a trigger to already be
+ * filed. Pure DB read, never throws.
+ */
+export function isCrashRecoveryEligible(
+  db: Db,
+  control: OrchestrationControl,
+  session: { id: string; role?: SessionRole | null; parentSessionId?: string | null; projectId: string; engineSessionId?: string | null; resumability?: string },
+): boolean {
+  if (!session.role || !RECOVERABLE_ROLES.includes(session.role)) return false;
+  if (!session.engineSessionId || session.resumability === "dead") return false;
+  if (db.hasSuccessor(session.id)) return false;
+  const project = db.getProject(session.projectId);
+  if (!project) return false;
+  const maxAttempts = resolveConfig(project.config).orchestration.crashRecoveryMaxAttempts;
+  if (maxAttempts <= 0) return false;
+  if (control.isPaused(session.id) || (session.parentSessionId && control.isPaused(session.parentSessionId))) return false;
+  const events = db.listEventsForWorker(session.id);
+  const lastRecovered = lastOfKind(events, "session_recovered");
+  const episodeStart = lastRecovered?.ts ?? "";
+  const attempts = events.filter((e) => e.kind === "session_resume_attempt" && e.ts > episodeStart).length;
+  return attempts < maxAttempts; // at/over the cap ⇒ the watchdog has abandoned (or is about to) — not eligible
 }
 
 /**
@@ -280,6 +313,9 @@ export class CrashRecoveryWatcher {
           ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — your worktree WIP is ` +
             `intact. Continue your assigned task from where you left off. If you had already finished, call ` +
             `worker_report (done/blocked) so your manager isn't left waiting.`
+          : s.role === "assistant"
+          ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — pick up where you left ` +
+            `off with the human.`
           : lastTrigger.kind === "worker_report_undelivered"
           ? `[loom:auto-recovered] Loom resumed you because a worker reported while you were stopped — its report ` +
             `reached nobody and its branch is waiting. Call worker_list: one or more workers are awaiting your ` +

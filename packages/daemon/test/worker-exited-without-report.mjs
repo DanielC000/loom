@@ -40,13 +40,13 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 const NOW = new Date();
 
-function makeEnv() {
+function makeEnv({ projectConfig = {} } = {}) {
   const dbFile = path.join(os.tmpdir(), `loom-exitnorep-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const projId = `ep-${Math.random().toString(36).slice(2, 8)}`;
   const agentId = `ea-${Math.random().toString(36).slice(2, 8)}`;
   const now = NOW.toISOString();
-  db.insertProject({ id: projId, name: "ExitNoReport", repoPath: projId, vaultPath: projId, config: {}, createdAt: now, archivedAt: null });
+  db.insertProject({ id: projId, name: "ExitNoReport", repoPath: projId, vaultPath: projId, config: projectConfig, createdAt: now, archivedAt: null });
   db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "orchestrate", position: 0 });
 
   // Recording fake PtyHost: an idle-LIVE manager takes the turn (delivered:true); anything else does not.
@@ -107,8 +107,14 @@ function cleanup(e) {
 }
 
 // ============================ (b) GENUINE NO REPORT → DISTINCT durable event + manager nudge ============================
+// crashRecoveryMaxAttempts=0 here (card 289586c7): with crash recovery ON (the project default), a fresh
+// unexpected exit is now crash-recovery ELIGIBLE, so notifyManagerOfExitedWorker reworks its nudge to a
+// provisional "auto-resume in flight" heads-up instead of the definitive "will NOT come back" copy this
+// test asserts — see crash-recovery-coordination.mjs for that coordination behavior. Disabling recovery
+// for THIS project keeps this test's scope crisp: the exited-without-report event + definitive nudge
+// mechanism (board card 84151b99) for a worker that is genuinely, unrecoverably gone.
 {
-  const e = makeEnv();
+  const e = makeEnv({ projectConfig: { orchestration: { crashRecoveryMaxAttempts: 0 } } });
   seedSession(e, "mgr-b", { role: "manager", processState: "live" });
   seedTask(e, "tk-b");
   // The worker exited (intended:false) while its task is STILL in_progress — it never called worker_report.

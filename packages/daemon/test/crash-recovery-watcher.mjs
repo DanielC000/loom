@@ -255,7 +255,35 @@ function cleanup(e) {
   check("(9) a negative crashRecoveryMaxAttempts is rejected", bad.ok === false);
 }
 
+// ============================ (10) ASSISTANT role is RECOVERABLE (card 289586c7) ============================
+// An isolated Companion (role assistant) PTY death used to be invisible: RECOVERABLE_ROLES excluded
+// "assistant", so recordUnexpectedExit filed no session_died and the watchdog never resumed it — only a
+// full daemon restart brought it back. Prove it now behaves exactly like a worker/manager death. Two
+// separate envs, matching the file's own CLOCK NOTE: recordUnexpectedExit's real-time event is asserted
+// on its own (counts/fields only, like test (1)); the tick-driven auto-resume uses ONLY the controlled-
+// clock die() helper (like test (2)), never mixed with a real-time event in the same episode.
+{
+  const e = makeEnv();
+  seedSession(e, "asst-10a", { role: "assistant" });
+  const wrote = recordUnexpectedExit(e.db, "asst-10a", /*intended*/ false);
+  check("(10) an unexpected assistant death records ONE session_died (assistant is now recoverable)",
+    wrote === true && evKinds(e, "asst-10a", "session_died").length === 1);
+  cleanup(e);
+}
+{
+  const e = makeEnv();
+  seedSession(e, "asst-10b", { role: "assistant" });
+  die(e, "asst-10b", NOW);
+  e.watcher.tick(at(100));
+  check("(10) a dead assistant session IS auto-resumed on tick (Mission Control is no longer dark)", e.resumes.includes("asst-10b"));
+  check("(10) the resume attempt is recorded for the assistant session", evKinds(e, "asst-10b", "session_resume_attempt").length === 1);
+  const nudge = e.enqueued.find((x) => x.id === "asst-10b");
+  check("(10) the assistant gets an auto-recovered continuation nudge tailored to it (not the manager/worker copy)",
+    !!nudge && /auto-recovered/.test(nudge.text) && !/re-dispatch|worker_report/.test(nudge.text));
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — CrashRecoveryWatcher records session_died ONLY for an UNEXPECTED death of a resumable coordination/work session (intended stops + out-of-scope roles untouched); bounded-auto-resumes a dead session, CAPS attempts at crashRecoveryMaxAttempts and ESCALATES (one session_recovery_abandoned + a [loom:crash-loop] lastError) instead of looping past the cap; resets the counter on a stable, still-live resume; and is silent when disabled(0) / human-paused / superseded. zod accepts crashRecoveryMaxAttempts (negatives rejected)."
+  ? "\n✅ ALL PASS — CrashRecoveryWatcher records session_died ONLY for an UNEXPECTED death of a resumable coordination/work session (intended stops + out-of-scope roles untouched); bounded-auto-resumes a dead session, CAPS attempts at crashRecoveryMaxAttempts and ESCALATES (one session_recovery_abandoned + a [loom:crash-loop] lastError) instead of looping past the cap; resets the counter on a stable, still-live resume; and is silent when disabled(0) / human-paused / superseded. zod accepts crashRecoveryMaxAttempts (negatives rejected). An `assistant` (Companion) death is now equally recoverable — recorded, auto-resumed, and nudged."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

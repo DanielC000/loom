@@ -29,7 +29,7 @@ import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeE
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
 import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
-import { recordUndeliveredReport } from "../orchestration/crash-recovery-watcher.js";
+import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
 import { RESUME_NUDGE_TAIL } from "../orchestration/resume-nudge.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
@@ -2690,6 +2690,31 @@ export class SessionService {
     const managerSessionId = worker.parentSessionId ?? null;
     const taskId = worker.taskId ?? null;
 
+    // AUTO-RECOVERY RE-CONFIRMATION DEDUPE (card 289586c7): the crash-recovery resume nudge invites a
+    // recovered worker to "call worker_report (done/blocked) if you had already finished" — so a worker
+    // that crash-loops N times can call worker_report N times with BYTE-IDENTICAL content (incident:
+    // worker a1c71a86 filed the SAME done report 3× after 3 auto-recovery resumes, each re-nudging the
+    // manager). Collapse to the FIRST: if the LAST recorded worker_report for this task is identical to
+    // THIS one, AND a session_resume_attempt happened in between (so this is a stale post-recovery
+    // re-confirmation, not fresh work), ack it WITHOUT re-recording the event or re-nudging the manager.
+    if (taskId) {
+      const history = this.db.listEventsForWorker(workerSessionId);
+      let lastReport: OrchestrationEvent | undefined;
+      let resumedSince = false;
+      for (let i = history.length - 1; i >= 0; i--) {
+        const e = history[i]!;
+        if (e.kind === "session_resume_attempt") resumedSince = true;
+        else if (e.kind === "worker_report" && e.taskId === taskId) { lastReport = e; break; }
+      }
+      if (lastReport && resumedSince) {
+        const d = lastReport.detail as { status?: string; summary?: string; prUrl?: string; needs?: string } | undefined;
+        const identical =
+          d?.status === report.status && d?.summary === report.summary &&
+          (d?.prUrl ?? undefined) === report.prUrl && (d?.needs ?? undefined) === report.needs;
+        if (identical) return { reported: true, deliveryStatus: "dropped" };
+      }
+    }
+
     // DONE PRE-CHECK (board card 907b9f50): catch a worker that forgot to commit AT THE SOURCE, before
     // its task is moved to review. The merge gate only ever sees COMMITTED work on the assigned branch,
     // so a "done" with uncommitted work otherwise bounces back a wasted round-trip later. INDEPENDENT of
@@ -2919,6 +2944,15 @@ export class SessionService {
    * must review its branch or re-dispatch. No-op for non-workers, parentless/taskless sessions, an
    * intended stop, a recycled/superseded worker (its successor took over — intended), or a worker that
    * already reported (its task moved out of in_progress).
+   *
+   * CRASH-RECOVERY COORDINATION (card 289586c7): worker ∈ RECOVERABLE_ROLES, so the CrashRecoveryWatcher
+   * may ALSO be about to auto-resume this exact exit — firing the definitive "will NOT come back,
+   * re-dispatch" nudge here would be actively WRONG in that case and races the resume (incident: worker
+   * a1c71a86 got the false nudge immediately before three auto-recovery re-confirmation worker_reports
+   * from that SAME worker). So when the worker is still crash-recovery ELIGIBLE (isCrashRecoveryEligible),
+   * this rewords to a provisional heads-up instead — the definitive "will NOT come back" nudge is left to
+   * the watchdog itself, fired ONLY once it actually gives up (session_recovery_abandoned; see
+   * crash-recovery-watcher's own pty.enqueueStdin at that point).
    */
   notifyManagerOfExitedWorker(workerSessionId: string, intended: boolean): void {
     if (intended) return; // a deliberate Loom stop() (worker_stop / recycle / merge-stop) — not a strand
@@ -2939,7 +2973,10 @@ export class SessionService {
       managerSessionId: w.parentSessionId, workerSessionId, taskId: w.taskId,
       kind: "worker_exited_without_report", detail: { branch: w.branch ?? null },
     });
-    const msg = `[loom:worker-exited] worker ${workerSessionId} (task ${w.taskId}) EXITED without ever calling worker_report — its task is still in_progress and it will NOT come back on its own. Any work it committed is on branch ${w.branch ?? "(unknown)"}. Pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review/merge any committed work, or re-dispatch the task.`;
+    const eligible = isCrashRecoveryEligible(this.db, this.control, w);
+    const msg = eligible
+      ? `[loom:worker-exited] worker ${workerSessionId} (task ${w.taskId}) died unexpectedly — its task is still in_progress. Loom's crash-recovery watchdog will attempt to auto-resume it; no action needed yet. Its worktree/branch (${w.branch ?? "(unknown)"}) is intact — if recovery is later abandoned you'll get a follow-up nudge.`
+      : `[loom:worker-exited] worker ${workerSessionId} (task ${w.taskId}) EXITED without ever calling worker_report — its task is still in_progress and it will NOT come back on its own. Any work it committed is on branch ${w.branch ?? "(unknown)"}. Pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review/merge any committed work, or re-dispatch the task.`;
     try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live — the durable event stands */ }
   }
 
