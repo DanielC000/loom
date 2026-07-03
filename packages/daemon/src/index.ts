@@ -294,20 +294,6 @@ async function main(): Promise<void> {
   // on a normal boot.
   const restartIntent = readRestartIntent();
   const protectedSessionIds = restartIntent ? protectedIdsFromIntent(restartIntent) : new Set<string>();
-  // Boot-time orchestration reconcile (#22 run-2 + audit M4): finish any merge whose bookkeeping was
-  // interrupted (branch merged but task/worktree not reconciled) and GC orphaned worktrees from
-  // crashed workers. Runs AFTER recoverStaleSessions (no live pty holds a worktree) — pure git + db.
-  // Best-effort cleanup: it must NEVER gate startup, so any unexpected failure is warned and swallowed
-  // (a deterministic throw here would otherwise crash-loop the boot, since merging self-restarts the
-  // dev daemon — and that would also block usage-limit auto-resume).
-  try {
-    const reconciled = await sessions.reconcileOrchestrationOnBoot(protectedSessionIds);
-    if (reconciled.mergesFinished || reconciled.mergesFailed || reconciled.staleMergesResolved || reconciled.worktreesPruned || reconciled.worktreesKept) {
-      console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${reconciled.mergesFailed} failed (retry next boot), resolved ${reconciled.staleMergesResolved} branch-gone dangling merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s), kept ${reconciled.worktreesKept} holding unmerged/uncommitted work`);
-    }
-  } catch (err) {
-    console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);
-  }
   // Agent Runs R2: fail any run interrupted by a crash/restart (runs are ephemeral and do NOT resume) and
   // sweep orphaned run-snapshot dirs. Pure DB + fs, best-effort — never gate boot. recoverStaleSessions
   // already marked each interrupted run's `run` session exited, so this only finalizes the run rows.
@@ -452,6 +438,28 @@ async function main(): Promise<void> {
   const boundAddress = await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon v${loomVersion()} listening on ${boundAddress}`); // boundAddress reflects the OS-assigned port when PORT is 0
+
+  // Boot-time orchestration reconcile (#22 run-2 + audit M4): finish any merge whose bookkeeping was
+  // interrupted (branch merged but task/worktree not reconciled) and GC orphaned worktrees from
+  // crashed workers. Runs AFTER recoverStaleSessions (no live pty holds a worktree) — pure git + db.
+  // Best-effort cleanup: it must NEVER gate startup, so any unexpected failure is warned and swallowed
+  // (a deterministic throw here would otherwise crash-loop the boot, since merging self-restarts the
+  // dev daemon — and that would also block usage-limit auto-resume).
+  // Kicked here, AFTER listen and NOT awaited (perf card 460d3178): the fs-heavy worktree removals
+  // (Pass A finalizeMerge->removeWorktree, Pass B removeWorktree) run in serial `await`ed loops, and each
+  // stuck Windows dir handle blocks the full GIT_OP_TIMEOUT_MS (15s) before its withTimeout swallows and
+  // moves on — N danglers serialize to N*15s. Awaiting this before listen left port PORT unbound for the
+  // whole span. Nothing between the old await site and listen reads its result, so backgrounding it is
+  // pure ordering — the reconcile logic (guards, serial removal, summary log) is unchanged; it just runs
+  // fire-and-forget instead of gating the port bind. A merge briefly showing un-finalized on the board
+  // for the run's duration is a self-healing cosmetic cost, not a correctness one.
+  void sessions.reconcileOrchestrationOnBoot(protectedSessionIds).then((reconciled) => {
+    if (reconciled.mergesFinished || reconciled.mergesFailed || reconciled.staleMergesResolved || reconciled.worktreesPruned || reconciled.worktreesKept) {
+      console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${reconciled.mergesFailed} failed (retry next boot), resolved ${reconciled.staleMergesResolved} branch-gone dangling merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s), kept ${reconciled.worktreesKept} holding unmerged/uncommitted work`);
+    }
+  }).catch((err) => {
+    console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);
+  });
 
   // Loom Companion: start the initial companion now that the server is up (chat_reply routes back through
   // this process). The controller builds+starts the Telegram long-poll, arms the proactive heartbeat if a
