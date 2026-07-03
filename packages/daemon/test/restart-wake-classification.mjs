@@ -84,17 +84,23 @@ try {
   const projX = `rwc-X-${sfx}`, xAg = `rwc-X-ag-${sfx}`;
   const projY = `rwc-Y-${sfx}`, yAg = `rwc-Y-ag-${sfx}`; // an affected bystander's project (pending board)
   const projZ = `rwc-Z-${sfx}`, zAg = `rwc-Z-ag-${sfx}`; // an affected platform (Lead) session's project
+  const projW = `rwc-W-${sfx}`, wAg = `rwc-W-ag-${sfx}`; // a deferred-only-board manager's project (card 345b1dcc)
   mkProject(home, PLATFORM_PROJECT_NAME, true); mkAgent(homeAg, home);
   mkProject(projX, projX); mkAgent(xAg, projX);
   mkProject(projY, projY); mkAgent(yAg, projY);
   mkProject(projZ, projZ); mkAgent(zAg, projZ);
+  mkProject(projW, projW); mkAgent(wAg, projW);
   mkTask(`rwc-Y-pending-${sfx}`, projY, "in_progress"); // projY has a PENDING card → its mgr is affected
   mkTask(`rwc-Z-pending-${sfx}`, projZ, "in_progress"); // projZ has a PENDING card → its Lead is affected
+  // projW's ONLY card is `deferred` (the manager's own sequencing marker, card 77d33266) — discounted from
+  // the pending-board-work check the SAME as `held`, so its manager must classify unaffected (card 345b1dcc).
+  db.insertTask({ id: `rwc-W-deferred-${sfx}`, projectId: projW, title: "sequenced behind other work",
+    body: "", columnKey: "in_progress", deferred: true, position: 1, createdAt: now, updatedAt: now });
 
   const id = {
     lead: `rwc-lead-${sfx}`, deployer: `rwc-deployer-${sfx}`,
     bystander: `rwc-bystander-${sfx}`, affMgr: `rwc-affMgr-${sfx}`, affWkr: `rwc-affWkr-${sfx}`,
-    pendMgr: `rwc-pendMgr-${sfx}`, affLead: `rwc-affLead-${sfx}`,
+    pendMgr: `rwc-pendMgr-${sfx}`, affLead: `rwc-affLead-${sfx}`, deferredMgr: `rwc-deferredMgr-${sfx}`,
     idleReviewer: `rwc-idleRev-${sfx}`, busyReviewer: `rwc-busyRev-${sfx}`,
   };
   mkSession({ id: id.lead, projId: home, agentId: homeAg, role: "platform" });
@@ -104,6 +110,7 @@ try {
   mkSession({ id: id.affWkr, projId: projX, agentId: xAg, role: "worker", parentSessionId: id.affMgr });
   mkSession({ id: id.pendMgr, projId: projY, agentId: yAg, role: "manager" });    // 0 workers, PENDING board
   mkSession({ id: id.affLead, projId: projZ, agentId: zAg, role: "platform" });   // 0 workers, PENDING board
+  mkSession({ id: id.deferredMgr, projId: projW, agentId: wAg, role: "manager" }); // 0 workers, board is deferred-only
   // Two standing reviewers (Platform Auditors) — one IDLE at capture, one BUSY at capture (card b5664b5b
   // Problem B): the idle one must resume SILENTLY (its schedule/wake re-engages it), the busy one is nudged.
   mkSession({ id: id.idleReviewer, projId: home, agentId: homeAg, role: "auditor" });
@@ -120,6 +127,7 @@ try {
       { sessionId: id.affWkr, role: "worker", parentSessionId: id.affMgr },
       { sessionId: id.pendMgr, role: "manager", parentSessionId: null },
       { sessionId: id.affLead, role: "platform", parentSessionId: null },
+      { sessionId: id.deferredMgr, role: "manager", parentSessionId: null },
       // busy flag mirrors liveFleetResumeSet's capture (omitted ⇒ falsy ⇒ idle).
       { sessionId: id.idleReviewer, role: "auditor", parentSessionId: null, busy: false },
       { sessionId: id.busyReviewer, role: "auditor", parentSessionId: null, busy: true },
@@ -153,6 +161,11 @@ try {
   check("(1) the affected Lead nudge re-orients from the board + resume doc, NOT manager/worktree/worker phrasing",
     /re-orient from your home board and your living resume doc/i.test(q(id.affLead)[0]) &&
     !/worktree/i.test(q(id.affLead)[0]) && !/your workers/i.test(q(id.affLead)[0]) && !/orchestrating/i.test(q(id.affLead)[0]));
+  // card 345b1dcc: a non-causal manager whose board's ONLY card is `deferred` (manager's own sequencing
+  // marker, discounted the same as `held`) resumes SILENTLY — NOT classified affected, same as an empty
+  // board. Without the fix this manager would wrongly get the full re-check nudge like pendMgr above.
+  check("(1) a non-causal manager with an only-deferred board resumes SILENTLY — NO enqueued turn",
+    q(id.deferredMgr).length === 0);
   // The deploy requester is NEVER short-circuited.
   check("(1) the deploy requester gets the full 'code is live' nudge",
     q(id.deployer).length === 1 && q(id.deployer)[0].includes("now LIVE") && !/no action is needed/i.test(q(id.deployer)[0]));

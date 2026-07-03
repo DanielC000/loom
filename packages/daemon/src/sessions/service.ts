@@ -1131,11 +1131,13 @@ export class SessionService {
     // bystander no-ops cheaply (isNoOpManagerWake) instead of burning a full re-check turn.
     const liveWorkerCount = (managerId: string): number =>
       entries.filter((e) => e.role === "worker" && e.parentSessionId === managerId).length;
-    // Actionable board work: a task whose column is NOT the terminal lane AND is NOT held (every other
-    // non-held lane — intake/defaultLanding/workReady/active/review/parked — is pending work a manager
-    // should drive; a held card is the owner's brake and never counts, in any column). It FORCES the full
+    // Actionable board work: a task whose column is NOT the terminal lane AND is NOT held AND is NOT
+    // deferred (every other non-held/non-deferred lane — intake/defaultLanding/workReady/active/review/
+    // parked — is pending work a manager should drive; a held card is the owner's brake and `deferred`
+    // is the manager's own sequencing marker, neither ever counts, in any column). It FORCES the full
     // nudge: the idle-watcher skips a snoozed/suppressed manager, so the restart re-check is its only
-    // re-engagement — a cheap no-op would silently strand the queue.
+    // re-engagement — a cheap no-op would silently strand the queue. Mirrors the idle-watcher's
+    // actionable-count definition (orchestration/idle-watcher.ts) so the two stay consistent.
     const hasPendingBoardWork = (id: string): boolean => {
       try {
         const projectId = this.db.getSession(id)?.projectId;
@@ -1145,7 +1147,7 @@ export class SessionService {
         const cols = resolveConfig(project.config).kanbanColumns;
         const terminalKey = columnKeyForRole(cols, "terminal");
         return this.db.listTasks(projectId).some(
-          (t) => t.columnKey !== terminalKey && !t.held,
+          (t) => t.columnKey !== terminalKey && !t.held && t.deferred !== true,
         );
       } catch {
         return true; // defensive: a board-read fault must never produce a false "no-op" stall
