@@ -8,8 +8,10 @@ import { TerminalTile } from "../components/TerminalTile";
 import { Panel, Button, Select, Input, StatusPill, SectionLabel } from "../components/ui";
 import { color, font } from "../theme";
 
-// Tiles flow horizontally then wrap; reused per manager row and the catch-all rows.
-const gridStyle: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12 };
+// Tiles flow horizontally then wrap; reused per manager row and the catch-all rows. alignItems:"start" so
+// each tile hugs its own content up to its cap rather than being stretched to the tallest tile in the row
+// (which padded a bare card out below its composer). Content-dynamic per-card height is the intended shape.
+const gridStyle: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12, alignItems: "start" };
 
 // One rendered row of the Claude-sessions grid. A "manager" row = its manager tile first then the
 // workers it parented; "orphans"/"standalone" are the trailing catch-all rows. The grouping itself

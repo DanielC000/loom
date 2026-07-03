@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode, useEffect, useState } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
@@ -52,7 +52,10 @@ export interface TerminalSubPanels {
   taskCard?: boolean; // slim bound-board-task bar above the terminal
 }
 
-// header + composer + status line + panel padding (approx, generous) — the HUG budget reserve.
+// The HUG budget reserve — a FALLBACK estimate (header + composer + panel padding) used ONLY for the
+// first paint, before the layout effect measures the ACTUAL chrome. Once measured, the terminal budget is
+// derived from the real header + task-card + tab-bar + wakes + queue + composer height (which now varies
+// per variant and grows/shrinks as a task binds or messages queue), so the card is truly content-sized.
 const CHROME_RESERVE = 112;
 
 // ── Shared header pieces ──────────────────────────────────────────────────────────────────────────
@@ -137,6 +140,22 @@ export function TerminalCard({
   void statusMode; // only "busy" is wired in stage 1 (title carries the pill); see header note above.
   const [maximized, setMaximized] = useState(false);
 
+  // HUG (numeric height) vs FILL (string height, e.g. "76vh"). HUG cards hug their content up to a MAX cap
+  // (`maxHeight: height`); FILL cards flex to fill a page slot. Declared up here so the height-budget
+  // measurement effect below can gate on it.
+  const hug = typeof height === "number";
+
+  // Content-dynamic HUG budget. The pinned 120×40 grid scaled to a tile's WIDTH is usually shorter than a
+  // fixed pane, and the surrounding chrome (task card / tab bar / wakes / queued turns / composer) grows and
+  // shrinks — so a FIXED reserve either leaves dead space or clips the composer. Instead we MEASURE the real
+  // chrome and hand the terminal exactly the leftover space up to the `height` cap. `chrome = panel.scrollHeight
+  // − pane.offsetHeight` is invariant to the pane's own height (both move together), so this converges rather
+  // than oscillating. `belowRef` (wakes/queue/composer) is observed too so a message queuing while the card is
+  // already at its cap still re-measures (the Panel's border-box is clamped there, so it alone wouldn't fire).
+  const paneWrapRef = useRef<HTMLDivElement>(null);
+  const belowRef = useRef<HTMLDivElement>(null);
+  const [measuredBudget, setMeasuredBudget] = useState<number | undefined>(undefined);
+
   // Role-scoped tab bar (opt-in via `tabs`). Terminal + Transcript are always offered; Timeline/Diff
   // appear only when the caller supplies that panel node. `activeTab` guards against a stale selection
   // (e.g. the "diff" tab if a caller ever stopped passing a diff node) by falling back to "terminal".
@@ -176,6 +195,31 @@ export function TerminalCard({
     return () => window.removeEventListener("keydown", onKey);
   }, [maximizable, maximized]);
 
+  // Measure the actual non-terminal chrome and derive the terminal's height budget (HUG, non-maximized
+  // only — a FILL/string height fills its slot; a maximized card fills the overlay). Re-runs on the props
+  // that add/remove chrome, and a ResizeObserver on the panel + below-strip catches dynamic changes (queue
+  // grows, composer's large editor opens). See the budget note near `paneWrapRef` for why it's stable.
+  useLayoutEffect(() => {
+    if (!hug || maximized) return;
+    const measure = () => {
+      const pane = paneWrapRef.current;
+      const panelEl = pane?.parentElement; // Panel doesn't forward a ref; the pane's parent IS the panel body
+      if (!pane || !panelEl) return;
+      // scrollHeight reports the FULL content even when the panel's border-box is clamped at maxHeight, so
+      // this stays accurate at the cap. chrome includes the panel's padding; the −2 covers its 1px border.
+      const chrome = panelEl.scrollHeight - pane.offsetHeight;
+      const next = Math.max(120, (height as number) - chrome - 2);
+      setMeasuredBudget((cur) => (cur != null && Math.abs(cur - next) <= 1 ? cur : next));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    const panelEl = paneWrapRef.current?.parentElement;
+    if (panelEl) ro.observe(panelEl);
+    if (belowRef.current) ro.observe(belowRef.current);
+    return () => ro.disconnect();
+  }, [hug, maximized, height, activeTab, !!task, readOnly, !!tabs,
+      subPanels?.queue, subPanels?.wakes, subPanels?.taskCard, subPanels?.presets]);
+
   const lifecycleButton = lifecycle === "kill"
     ? <Button variant="danger" style={{ padding: "0 8px" }} disabled={stopPending}
         title={stopTitle ?? "Kill this session"} onClick={(ev) => { ev.stopPropagation(); onStop?.(); }}>Kill</Button>
@@ -201,11 +245,10 @@ export function TerminalCard({
 
   // HUG (non-maximized, numeric height): the pinned 120×40 grid scaled to a narrow tile's WIDTH is
   // shorter than a fixed pane — which used to leave a large letterbox band between the terminal and the
-  // composer. Give the TerminalPane a height BUDGET and let it shrink to the grid it actually renders,
-  // so the composer sits flush beneath and the card hugs the terminal. HUG is gated to NUMERIC heights
-  // only: a STRING height (e.g. "76vh") is a fill-the-space page terminal that keeps the old `flex:1` +
-  // `height` fill (no budget) — clamping it to a fixed px budget would shrink it. Maximized always fills.
-  const hug = typeof height === "number";
+  // composer. Give the TerminalPane a height BUDGET (the measured leftover space, see above) and let it
+  // shrink to the grid it actually renders, so the composer sits flush beneath and the card hugs the
+  // terminal. HUG is gated to NUMERIC heights only: a STRING height (e.g. "76vh") is a fill-the-space page
+  // terminal that keeps the old `flex:1` + `height` fill (no budget). Maximized always fills.
   const sessionBody = (hugMode: boolean, heightBudget?: number) => (
     <>
       {task && <SessionTaskCard task={task} />}
@@ -224,27 +267,34 @@ export function TerminalCard({
           rescale; this guarantees the terminal can NEVER paint over the composer below. xterm scrolls
           via its own .xterm-viewport. */}
       {(!tabs || activeTab === "terminal") && (
-        <div style={{ ...(hugMode ? null : { flex: 1 }), minHeight: 0, overflow: "hidden" }}>
+        <div ref={paneWrapRef} style={{ ...(hugMode ? null : { flex: 1 }), minHeight: 0, overflow: "hidden" }}>
           <TerminalPane sessionId={session.id} readOnly={readOnly} resizable={resizable} heightBudget={heightBudget} />
         </div>
       )}
       {tabs && activeTab === "transcript" && (
         // Transcript has no grid to hug: in HUG mode it takes a fixed box (the terminal's budget) and
         // scrolls internally; in FILL mode it flexes like the pane it replaces.
-        <div style={{ ...(hugMode ? { height: heightBudget } : { flex: 1 }), minHeight: 0, overflow: "hidden" }}>
+        <div ref={paneWrapRef} style={{ ...(hugMode ? { height: heightBudget } : { flex: 1 }), minHeight: 0, overflow: "hidden" }}>
           <TranscriptPane sessionId={session.id} />
         </div>
       )}
       {tabs && activeTab === "timeline" && tabs.timeline}
       {tabs && activeTab === "diff" && tabs.diff}
-      {subPanels?.wakes && <SessionWakes sessionId={session.id} />}
-      {subPanels?.queue && <SessionQueue sessionId={session.id} />}
-      {!readOnly && <Composer sessionId={session.id} />}
+      {/* Below-terminal strip. Observed by the budget measurement (belowRef) so a queued turn / opened
+          large editor re-measures even when the card is already at its height cap. flexShrink:0 keeps the
+          composer + strips at natural height — the terminal is the element that gives up space. */}
+      <div ref={belowRef} style={{ flexShrink: 0 }}>
+        {subPanels?.wakes && <SessionWakes sessionId={session.id} />}
+        {subPanels?.queue && <SessionQueue sessionId={session.id} />}
+        {!readOnly && <Composer sessionId={session.id} />}
+      </div>
     </>
   );
   const body = (maximizedNow: boolean) => {
     const hugMode = !maximizedNow && hug;
-    const heightBudget = hugMode ? (height as number) - CHROME_RESERVE : undefined;
+    // Prefer the MEASURED leftover space; fall back to the fixed reserve for the first paint (before the
+    // layout effect runs). Non-HUG (fill) passes no budget — the pane flexes to fill its slot.
+    const heightBudget = hugMode ? (measuredBudget ?? (height as number) - CHROME_RESERVE) : undefined;
     return renderBody
       ? renderBody({ maximized: maximizedNow, hug: hugMode, heightBudget })
       : sessionBody(hugMode, heightBudget);

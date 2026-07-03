@@ -469,7 +469,10 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
   const live = sessions.filter((s) => s.processState === "live").slice().sort(byManagerThenCreated);
   if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>No live sessions in this project. Spawn the manager above.</p>;
 
-  const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12 };
+  // alignItems:"start" so each tile sizes to ITS OWN content — a bare card stays short instead of being
+  // stretched to the tallest card in its row (which left dead space below its composer). Cards in a row may
+  // now differ in height; that's the intended, owner-requested content-dynamic behavior.
+  const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12, alignItems: "start" };
   return (
     <div style={grid}>
       {live.map((s) => (
