@@ -83,15 +83,18 @@ try {
   const home = `rwc-home-${sfx}`, homeAg = `rwc-home-ag-${sfx}`;
   const projX = `rwc-X-${sfx}`, xAg = `rwc-X-ag-${sfx}`;
   const projY = `rwc-Y-${sfx}`, yAg = `rwc-Y-ag-${sfx}`; // an affected bystander's project (pending board)
+  const projZ = `rwc-Z-${sfx}`, zAg = `rwc-Z-ag-${sfx}`; // an affected platform (Lead) session's project
   mkProject(home, PLATFORM_PROJECT_NAME, true); mkAgent(homeAg, home);
   mkProject(projX, projX); mkAgent(xAg, projX);
   mkProject(projY, projY); mkAgent(yAg, projY);
+  mkProject(projZ, projZ); mkAgent(zAg, projZ);
   mkTask(`rwc-Y-pending-${sfx}`, projY, "in_progress"); // projY has a PENDING card → its mgr is affected
+  mkTask(`rwc-Z-pending-${sfx}`, projZ, "in_progress"); // projZ has a PENDING card → its Lead is affected
 
   const id = {
     lead: `rwc-lead-${sfx}`, deployer: `rwc-deployer-${sfx}`,
     bystander: `rwc-bystander-${sfx}`, affMgr: `rwc-affMgr-${sfx}`, affWkr: `rwc-affWkr-${sfx}`,
-    pendMgr: `rwc-pendMgr-${sfx}`,
+    pendMgr: `rwc-pendMgr-${sfx}`, affLead: `rwc-affLead-${sfx}`,
     idleReviewer: `rwc-idleRev-${sfx}`, busyReviewer: `rwc-busyRev-${sfx}`,
   };
   mkSession({ id: id.lead, projId: home, agentId: homeAg, role: "platform" });
@@ -100,6 +103,7 @@ try {
   mkSession({ id: id.affMgr, projId: projX, agentId: xAg, role: "manager" });     // has a live worker
   mkSession({ id: id.affWkr, projId: projX, agentId: xAg, role: "worker", parentSessionId: id.affMgr });
   mkSession({ id: id.pendMgr, projId: projY, agentId: yAg, role: "manager" });    // 0 workers, PENDING board
+  mkSession({ id: id.affLead, projId: projZ, agentId: zAg, role: "platform" });   // 0 workers, PENDING board
   // Two standing reviewers (Platform Auditors) — one IDLE at capture, one BUSY at capture (card b5664b5b
   // Problem B): the idle one must resume SILENTLY (its schedule/wake re-engages it), the busy one is nudged.
   mkSession({ id: id.idleReviewer, projId: home, agentId: homeAg, role: "auditor" });
@@ -115,6 +119,7 @@ try {
       { sessionId: id.affMgr, role: "manager", parentSessionId: null },
       { sessionId: id.affWkr, role: "worker", parentSessionId: id.affMgr },
       { sessionId: id.pendMgr, role: "manager", parentSessionId: null },
+      { sessionId: id.affLead, role: "platform", parentSessionId: null },
       // busy flag mirrors liveFleetResumeSet's capture (omitted ⇒ falsy ⇒ idle).
       { sessionId: id.idleReviewer, role: "auditor", parentSessionId: null, busy: false },
       { sessionId: id.busyReviewer, role: "auditor", parentSessionId: null, busy: true },
@@ -136,6 +141,18 @@ try {
   // skips a snoozed/suppressed manager). This is the safety carve-out that survives the reframing.
   check("(1) a non-causal manager with a PENDING board still gets the FULL re-check (no stranding)",
     q(id.pendMgr).length === 1 && /re-check your workers/i.test(q(id.pendMgr)[0]) && /board has pending work/i.test(q(id.pendMgr)[0]) && !/no action is needed/i.test(q(id.pendMgr)[0]));
+  // The manager-shaped "affected" nudge text stays BYTE-IDENTICAL to before the platform split.
+  check("(1) the affected manager nudge is the unchanged manager-shaped text (worktrees/orchestrating/workers)",
+    q(id.pendMgr)[0].includes("your worktrees are intact") &&
+    q(id.pendMgr)[0].includes("Resume orchestrating from where you left off") &&
+    q(id.pendMgr)[0].includes("re-check your workers' state; some may have just been resumed too"));
+  // card 46a961a4: a non-causal PLATFORM (Lead) session with pending board work also gets the FULL re-check,
+  // but with LEAD-appropriate text — NO manager/worktree/worker phrasing (a Lead has neither).
+  check("(1) an affected platform (Lead) with a PENDING board gets a re-check nudge with the impact clause",
+    q(id.affLead).length === 1 && q(id.affLead)[0].includes("[loom:daemon-restarted]") && /board has pending work/i.test(q(id.affLead)[0]) && !/no action is needed/i.test(q(id.affLead)[0]));
+  check("(1) the affected Lead nudge re-orients from the board + resume doc, NOT manager/worktree/worker phrasing",
+    /re-orient from your home board and your living resume doc/i.test(q(id.affLead)[0]) &&
+    !/worktree/i.test(q(id.affLead)[0]) && !/your workers/i.test(q(id.affLead)[0]) && !/orchestrating/i.test(q(id.affLead)[0]));
   // The deploy requester is NEVER short-circuited.
   check("(1) the deploy requester gets the full 'code is live' nudge",
     q(id.deployer).length === 1 && q(id.deployer)[0].includes("now LIVE") && !/no action is needed/i.test(q(id.deployer)[0]));

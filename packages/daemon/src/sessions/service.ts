@@ -1205,12 +1205,26 @@ export class SessionService {
             impact.queuedIoReplayed > 0 ? `${impact.queuedIoReplayed} queued message(s) were replayed to you` : null,
             impact.pendingBoardWork ? `your board has pending work` : null,
           ].filter(Boolean).join("; ");
-          this.pty.enqueueStdin(
-            e.sessionId,
-            `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
-            `were resumed — your worktrees are intact (${affected}). Resume orchestrating from where you left ` +
-            `off (re-check your workers' state; some may have just been resumed too).` + RESUME_NUDGE_TAIL,
-          );
+          if (e.role === "platform") {
+            // Lead-appropriate text: a Platform Lead has no worktrees and no workers, so the manager-shaped
+            // "your worktrees are intact / resume orchestrating your workers" phrasing is nonsense it has to
+            // reason away on EVERY restart (aggravated: `pendingBoardWork` fires on mere backlog, so a Lead's
+            // near-always-nonempty home board classifies it as "affected" almost every time). Re-orient it
+            // from the board + its own living resume doc instead.
+            this.pty.enqueueStdin(
+              e.sessionId,
+              `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
+              `were resumed (${affected}). Re-orient from your home board and your living resume doc, then ` +
+              `continue your platform work from where you left off.` + RESUME_NUDGE_TAIL,
+            );
+          } else {
+            this.pty.enqueueStdin(
+              e.sessionId,
+              `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
+              `were resumed — your worktrees are intact (${affected}). Resume orchestrating from where you left ` +
+              `off (re-check your workers' state; some may have just been resumed too).` + RESUME_NUDGE_TAIL,
+            );
+          }
         }
       } else if (e.role === "auditor" || e.role === "workspace-auditor" || e.role === "setup" || e.role === "assistant") {
         // A scheduled/standing role (Platform Auditor, Workspace Auditor, Setup Assistant, Companion) gets
