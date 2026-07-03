@@ -2719,23 +2719,31 @@ export class SessionService {
     const managerSessionId = worker.parentSessionId ?? null;
     const taskId = worker.taskId ?? null;
 
-    // AUTO-RECOVERY RE-CONFIRMATION DEDUPE (card 289586c7): the crash-recovery resume nudge invites a
-    // recovered worker to "call worker_report (done/blocked) if you had already finished" — so a worker
-    // that crash-loops N times can call worker_report N times with BYTE-IDENTICAL content (incident:
-    // worker a1c71a86 filed the SAME done report 3× after 3 auto-recovery resumes, each re-nudging the
-    // manager). Collapse to the FIRST: if the LAST recorded worker_report for this task is identical to
-    // THIS one, AND a session_resume_attempt happened in between (so this is a stale post-recovery
-    // re-confirmation, not fresh work), ack it WITHOUT re-recording the event or re-nudging the manager.
+    // AUTO-RECOVERY RE-CONFIRMATION DEDUPE (card 289586c7, bounded p2 0b795bf4): the crash-recovery resume
+    // nudge invites a recovered worker to "call worker_report (done/blocked) if you had already finished" —
+    // so a worker that crash-loops N times can call worker_report N times with BYTE-IDENTICAL content
+    // (incident: worker a1c71a86 filed the SAME done report 3× after 3 auto-recovery resumes, each
+    // re-nudging the manager). Collapse to the FIRST ONLY when this is a PURE re-confirmation: the LAST
+    // recorded worker_report for this task is identical to THIS one, a session_resume_attempt happened in
+    // between, AND no manager direction (message_worker / redirect_worker) landed in between either. That
+    // last guard is load-bearing — without it a genuine strand slips through: worker reports done (delivered)
+    // → manager sends new direction (worker_message/worker_redirect) → worker crashes → auto-resume →
+    // worker re-reports the SAME "done" text (because the report itself didn't change) → the dedupe would
+    // otherwise drop it, and the manager never learns the worker is back. So ANY direction-bearing event
+    // since the prior identical report makes this a genuine re-report, not a stale post-recovery echo — ack
+    // it and re-nudge the manager like normal.
     if (taskId) {
       const history = this.db.listEventsForWorker(workerSessionId);
       let lastReport: OrchestrationEvent | undefined;
       let resumedSince = false;
+      let directionSince = false;
       for (let i = history.length - 1; i >= 0; i--) {
         const e = history[i]!;
         if (e.kind === "session_resume_attempt") resumedSince = true;
+        else if (e.kind === "message_worker" || e.kind === "redirect_worker") directionSince = true;
         else if (e.kind === "worker_report" && e.taskId === taskId) { lastReport = e; break; }
       }
-      if (lastReport && resumedSince) {
+      if (lastReport && resumedSince && !directionSince) {
         const d = lastReport.detail as { status?: string; summary?: string; prUrl?: string; needs?: string } | undefined;
         const identical =
           d?.status === report.status && d?.summary === report.summary &&

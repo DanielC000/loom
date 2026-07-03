@@ -53,6 +53,8 @@ function makeEnv({ projectConfig = {} } = {}) {
       return s?.processState === "live" ? { delivered: true } : { delivered: false, position: 1 };
     },
     getPendingEntries: () => [],
+    flushPending: () => [],
+    interruptForRedirect: () => {},
   };
   const control = new OrchestrationControl();
   const sessions = new SessionService(db, pty, control);
@@ -198,6 +200,45 @@ function cleanup(e) {
   check("(C) an identical report with NO resume attempt in between is NOT deduped (ordinary duplicate call)",
     evKinds(e2, "wkr-c2", "worker_report").length === 2);
   cleanup(e2);
+
+  // NEW manager direction (worker_message) landing between the prior report and the identical re-report
+  // must NOT be swallowed by the dedupe (task 0b795bf4, the strand this subsystem exists to prevent):
+  // report done → manager sends worker_message → worker crashes → auto-resume → worker re-reports the
+  // SAME "done" text → the re-report must be delivered, not dropped.
+  const e3 = makeEnv();
+  seedSession(e3, "mgr-c3", { role: "manager", processState: "live" });
+  seedTask(e3, "tk-c3");
+  seedSession(e3, "wkr-c3", { role: "worker", processState: "live", parentSessionId: "mgr-c3", taskId: "tk-c3", branch: "loom/tk-c3" });
+
+  const r1c3 = await e3.sessions.workerReport("wkr-c3", { status: "done", summary: "SAME-DONE" });
+  check("(C) [new-direction case] the first done report is recorded + delivered normally", r1c3.reported === true && r1c3.deliveryStatus === "delivered-live");
+
+  e3.sessions.messageWorker("mgr-c3", "wkr-c3", "new instructions before you finish");
+  attempt(e3, "wkr-c3", 1);
+  const r2c3 = await e3.sessions.workerReport("wkr-c3", { status: "done", summary: "SAME-DONE" });
+  check("(C) an identical re-report is NOT deduped when a worker_message landed in between — it's delivered",
+    r2c3.reported === true && r2c3.deliveryStatus !== "dropped");
+  check("(C) the re-report after new direction IS recorded as a second worker_report event",
+    evKinds(e3, "wkr-c3", "worker_report").length === 2);
+  cleanup(e3);
+
+  // Same shape but with redirectWorker (the "land it NOW" escalation) as the intervening direction.
+  const e4 = makeEnv();
+  seedSession(e4, "mgr-c4", { role: "manager", processState: "live" });
+  seedTask(e4, "tk-c4");
+  seedSession(e4, "wkr-c4", { role: "worker", processState: "live", parentSessionId: "mgr-c4", taskId: "tk-c4", branch: "loom/tk-c4" });
+
+  const r1c4 = await e4.sessions.workerReport("wkr-c4", { status: "done", summary: "SAME-DONE" });
+  check("(C) [redirect case] the first done report is recorded + delivered normally", r1c4.reported === true && r1c4.deliveryStatus === "delivered-live");
+
+  e4.sessions.redirectWorker("mgr-c4", "wkr-c4", "land this differently now");
+  attempt(e4, "wkr-c4", 1);
+  const r2c4 = await e4.sessions.workerReport("wkr-c4", { status: "done", summary: "SAME-DONE" });
+  check("(C) an identical re-report is NOT deduped when a worker_redirect landed in between — it's delivered",
+    r2c4.reported === true && r2c4.deliveryStatus !== "dropped");
+  check("(C) the re-report after a redirect IS recorded as a second worker_report event",
+    evKinds(e4, "wkr-c4", "worker_report").length === 2);
+  cleanup(e4);
 }
 
 console.log(failures === 0
