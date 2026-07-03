@@ -61,15 +61,16 @@ pnpm --filter @loom/daemon build        # tests import dist/, so build first
 pnpm --filter @loom/daemon test:daemon  # scripts/test-daemon.mjs
 ```
 
-The runner (`packages/daemon/scripts/test-daemon.mjs`) executes the curated `HERMETIC` list. Each
-test runs **isolated by construction**: its own fresh temp `LOOM_HOME`, a non-4317 `LOOM_PORT`, and
-`LOOM_TEST=1` — so running the tests can never touch your real `~/.loom/loom.db` or a daemon on
-`:4317`. Tests spawn no real `claude` and boot no external daemon.
+The runner (`packages/daemon/scripts/test-daemon.mjs`) DISCOVERS tests by glob over `test/*.mjs`
+(mirrors the web suite) — a new hermetic test file needs no edit here. Each test runs **isolated by
+construction**: its own fresh temp `LOOM_HOME`, a non-4317 `LOOM_PORT`, and `LOOM_TEST=1` — so running
+the tests can never touch your real `~/.loom/loom.db` or a daemon on `:4317`. Tests spawn no real
+`claude` and boot no external daemon.
 
 A few tests are **not** in the hermetic runner because they need a human-started isolated daemon
-and/or a real `claude` login (e.g. `integration-e2e`, `orchestration-e2e`, `manager-live`). Run those
-manually per the header comment in each file. If you add a new hermetic test, add it to the
-`HERMETIC` array in `scripts/test-daemon.mjs`.
+and/or a real `claude` login (e.g. `integration-e2e`, `orchestration-e2e`, `manager-live`) — they're
+excluded via the small `NOT_HERMETIC` denylist in `scripts/test-daemon.mjs`. Run those manually per
+the header comment in each file.
 
 ## Conventions
 
