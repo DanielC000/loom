@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -11,6 +13,9 @@ import { UsageLimitError } from "../orchestration/usage-awareness.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { reminderNextFireAt } from "../companion/reminders.js";
 import type { CompanionReminder, CompanionRoute } from "../companion/types.js";
+import { resolveIdPrefix } from "../id-prefix.js";
+import { resolveWebDistDir } from "../paths.js";
+import { loomVersion } from "../version.js";
 import {
   authorCompanionSkill,
   listCompanionSkills,
@@ -701,6 +706,36 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    // GAP 2: a deploy/served-state read so post-daemon_restart verification doesn't need curl. Minimal by
+    // design — just what's trivially available server-side: the umbrella package version, the served web
+    // bundle's asset filename (Vite hashes it, e.g. "index-Ab12Cd34.js", so a changed hash after a restart
+    // proves the NEW web build actually went live — null if the dist isn't built/found), this daemon
+    // process's uptime, and a cross-project live-session count (a coarse "the fleet is still here"
+    // sanity check, not a per-project breakdown — worker_list/worker_status already cover that scoped view).
+    server.registerTool(
+      "served_status",
+      {
+        description:
+          "Read what THIS daemon process is actually serving right now — for post-daemon_restart " +
+          "verification without falling back to curl. Returns {version (the loom/loomctl package version), " +
+          "webBundle (the served assets/index-<hash>.js filename, or null if the web dist isn't built/found " +
+          "— a changed hash after a restart proves the new web build is live), uptimeSeconds (this process's), " +
+          "liveSessionCount (ACROSS ALL projects — a coarse sanity signal; use worker_list for your own " +
+          "fleet)}.",
+        inputSchema: {},
+      },
+      async () => {
+        const webDist = resolveWebDistDir();
+        let webBundle: string | null = null;
+        try {
+          const assetsDir = path.join(webDist, "assets");
+          webBundle = fs.readdirSync(assetsDir).find((f) => /^index-.*\.js$/.test(f)) ?? null;
+        } catch { /* dist not built / no assets dir — webBundle stays null */ }
+        const liveSessionCount = db.listAllSessions().filter((s) => s.processState === "live").length;
+        return ok({ version: loomVersion(), webBundle, uptimeSeconds: Math.round(process.uptime()), liveSessionCount });
+      },
+    );
+
     server.registerTool(
       "recycle_me",
       {
@@ -787,6 +822,43 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    // Single-record FULL read (Task GAP 1): agent_list's summary deliberately drops startupPrompt (some
+    // are large, e.g. ~6.6KB for a Code Reviewer rig — inlining every prompt into the fleet view would
+    // bloat it), so a manager needing to SEE one agent's full prompt before a safe read-modify-write
+    // (agent_update) previously had to fall back to curl'ing the human REST surface. agentId resolution
+    // mirrors worker_spawn/agent_list: exact id, else an unambiguous 8-char id-PREFIX (resolveIdPrefix) —
+    // both scoped to THIS manager's OWN project (agents.find/resolveIdPrefix search only db.listAgents
+    // (projectId) results), so an id from another project simply doesn't match (falls through to
+    // "agent not found", never leaking cross-project existence).
+    server.registerTool(
+      "agent_get",
+      {
+        description:
+          "Read ONE agent in YOUR project — the FULL record INCLUDING its startupPrompt (agent_list's " +
+          "summary deliberately drops it — some prompts are large, e.g. ~6.6KB for a Code Reviewer rig). " +
+          "Use this before a safe read-modify-write via agent_update (its appendToStartupPrompt mode lets " +
+          "you add to what you read here without retyping the whole prompt). agentId accepts the full id OR " +
+          "an unambiguous 8-char id-prefix (same resolution as worker_spawn/agent_list). Your project is " +
+          "derived SERVER-SIDE (you pass no projectId) — an agent outside YOUR project resolves as " +
+          "not-found, same scoping as worker_list/agent_list. Error if unknown or an ambiguous prefix (the " +
+          "error names the candidate ids).",
+        inputSchema: { agentId: z.string() },
+      },
+      async ({ agentId }) => {
+        const projectId = db.getSession(managerSessionId)?.projectId;
+        if (!projectId) return ok({ error: "no project for this session" });
+        const agents = db.listAgents(projectId);
+        const exact = agents.find((a) => a.id === agentId);
+        if (exact) return ok(exact);
+        const r = resolveIdPrefix(agents, agentId);
+        if (r.kind === "found") return ok(r.record);
+        if (r.kind === "ambiguous") {
+          return ok({ error: `ambiguous agent id-prefix '${agentId}' — it matches ${r.ids.join(", ")}; pass more characters or the full id` });
+        }
+        return ok({ error: "agent not found" });
+      },
+    );
+
     server.registerTool(
       "agent_assign_profile",
       {
@@ -815,13 +887,21 @@ export class OrchestrationMcpRouter {
           "Update an agent's name (title) and/or startupPrompt (the project-specific brief that LEADS the " +
           "opening of its next NEW session — prepended ahead of any dynamic kickoff/handoff; an empty brief " +
           "leaves the opening as the dynamic part alone). Structural edit only — to change the agent's rig use " +
-          "agent_assign_profile. The target agent must be in YOUR project (an agent outside it is REJECTED). " +
-          "Omitted fields are left as-is.",
-        inputSchema: { agentId: z.string(), name: z.string().optional(), startupPrompt: z.string().optional() },
+          "agent_assign_profile. Two ways to touch startupPrompt: `startupPrompt` REPLACES it wholesale (as " +
+          "before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line) " +
+          "so you never have to round-trip the full text for a small addition — read the current prompt first " +
+          "with agent_get. Passing BOTH in the same call is REJECTED (pick one). The target agent must be in " +
+          "YOUR project (an agent outside it is REJECTED). Omitted fields are left as-is.",
+        inputSchema: {
+          agentId: z.string(),
+          name: z.string().optional(),
+          startupPrompt: z.string().optional(),
+          appendToStartupPrompt: z.string().optional(),
+        },
       },
-      async ({ agentId, name, startupPrompt }) => {
+      async ({ agentId, name, startupPrompt, appendToStartupPrompt }) => {
         try {
-          return ok(sessions.updateAgentPreset(managerSessionId, agentId, { name, startupPrompt }));
+          return ok(sessions.updateAgentPreset(managerSessionId, agentId, { name, startupPrompt, appendToStartupPrompt }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

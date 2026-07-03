@@ -3431,15 +3431,27 @@ export class SessionService {
    * Update an agent's structural fields — its name (title) and/or startupPrompt (the injected
    * project-specifics). Capability-conferring fields (the profile) are NOT settable here; profile
    * assignment is the separate, validated assignAgentProfile path.
+   *
+   * `startupPrompt` REPLACES the whole prompt (the original contract, unchanged). `appendToStartupPrompt`
+   * is the additive alternative (GAP 1): it CONCATENATES onto the agent's EXISTING prompt (joined with a
+   * blank line — or used bare when the existing prompt is empty) so a manager never has to round-trip the
+   * full text for a small addition. Passing BOTH is rejected — mutually exclusive, checked before any write.
    */
   updateAgentPreset(
-    managerSessionId: string, agentId: string, patch: { name?: string; startupPrompt?: string },
+    managerSessionId: string, agentId: string,
+    patch: { name?: string; startupPrompt?: string; appendToStartupPrompt?: string },
   ): Agent {
     this.requireManager(managerSessionId, "agent_update");
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     this.requireOwnProject(managerSessionId, agent.projectId, "agent_update");
-    this.db.updateAgent(agentId, { name: patch.name, startupPrompt: patch.startupPrompt });
+    if (patch.startupPrompt !== undefined && patch.appendToStartupPrompt !== undefined) {
+      throw new Error("agent_update: pass startupPrompt (full replace) OR appendToStartupPrompt (append), not both");
+    }
+    const startupPrompt = patch.appendToStartupPrompt !== undefined
+      ? (agent.startupPrompt ? `${agent.startupPrompt}\n\n${patch.appendToStartupPrompt}` : patch.appendToStartupPrompt)
+      : patch.startupPrompt;
+    this.db.updateAgent(agentId, { name: patch.name, startupPrompt });
     this.auditManage(managerSessionId, "agent_update", { agentId, fields: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined) });
     return this.db.getAgent(agentId)!;
   }

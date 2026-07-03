@@ -50,6 +50,8 @@ const HERMETIC = [
   "humanhold-migration", // Board Hold Model: the one-shot migrateHumanHoldToHeld boot migration — humanHold card promotion + idempotent column drop
   "worker-spawn-agent-name", // PL Auditor finding #10 (card 03615ee0): worker_spawn agentId by NAME/slug + "did you mean" nearest-match + lowest-position collision rule
   "agent-id-prefix", // card f9412b5e: unambiguous agent id-PREFIX resolves in worker_spawn + agent_get; ambiguous errors w/ candidates; id-shaped miss never names a wrong agent
+  "agent-get-append", // manager-tooling GAP 1: loom-orchestration agent_get (exact/prefix/ambiguous/unknown/cross-project) + agent_update's appendToStartupPrompt (concatenates, bare-when-empty, full-replace regression, both-rejected)
+  "served-status", // manager-tooling GAP 2: loom-orchestration served_status — served webBundle filename (or null, no throw), version, uptimeSeconds, cross-project liveSessionCount
   "worker-report-delivery-status", // card fc9a27d5: worker_report/platform_escalate DeliveryStatus enum + parked-parent wake
   "no-commit-reviewer", // card 14434d6b: a declared no-commit worker (Profile noCommit) auto-retires on 0-commit done (frees the cap slot, no worker_stop) + the forgot-to-commit warning is suppressed; a normal 0-commit worker still warns + stays live
   "merge-orphaned-to-main",
