@@ -19,7 +19,7 @@ import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt } from "./manager-prompt.js";
-import { composePlatformLeadStartupPrompt, lineageRootId, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
+import { composePlatformLeadStartupPrompt, lineageRootId, liveLineageSuccessor, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
 import { composeWorkerStartupPrompt } from "./worker-prompt.js";
 import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
@@ -2250,30 +2250,44 @@ export class SessionService {
    * Returns a `deliveryStatus` (delivered-live | queued | boarded) so the Lead gets an HONEST outcome:
    *  - LIVE target → the durable stdin-enqueue channel (submitted as a turn if idle = delivered-live;
    *    held FIFO if busy = queued).
-   *  - NOT-LIVE target → it has no PTY to take a turn, so instead of THROWING (which silently dropped the
-   *    Lead's message), we BOARD a durable note onto the target's OWN project board — the same durable-board
-   *    fallback platformEscalate uses for an offline Lead — and return `boarded`. The message is never lost.
+   *  - NOT-LIVE target whose recycle lineage has a LIVE successor (card 5519559c) → route to the successor
+   *    via the SAME durable channel instead of boarding: the target id was superseded, not gone, so the
+   *    Lead's message reaches whoever is actually doing the work now. `routedTo` names the successor so
+   *    the caller can see the redirect. This is DISTINCT from card 2ca18433 (a still-live recipient that
+   *    recycles AFTER a message is already queued) — here the target is already dead at send time.
+   *  - NOT-LIVE target with NO live successor anywhere in its lineage → it has no PTY to take a turn, so
+   *    instead of THROWING (which silently dropped the Lead's message), we BOARD a durable note onto the
+   *    target's OWN project board — the same durable-board fallback platformEscalate uses for an offline
+   *    Lead — and return `boarded`. The message is never lost.
    */
   messageSessionAsPlatform(
     sessionId: string, text: string, senderSessionId?: string,
-  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string } {
+  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string } {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
     const framed = `[loom:from-platform]\n${text}`;
-    if (session.processState === "live") {
+    const deliverLive = (target: typeof session) => {
       // Durable-tracked (card 2ca18433): a busy recipient holds it FIFO + we persist it, so the Lead's
       // cross-project dispatch survives a sender death / daemon restart before the recipient's next turn.
       // The sender is the Lead's own session id (threaded from the router) so an undelivered dispatch can be
       // surfaced back to it on resume; "platform" is a sentinel fallback if no caller id was provided.
-      const r = this.enqueueDurableMessage(sessionId, framed, { sender: senderSessionId ?? "platform", taskId: session.taskId ?? null });
+      const r = this.enqueueDurableMessage(target.id, framed, { sender: senderSessionId ?? "platform", taskId: target.taskId ?? null });
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
-        managerSessionId: "", workerSessionId: sessionId, taskId: session.taskId ?? null, kind: "session_message",
+        managerSessionId: "", workerSessionId: target.id, taskId: target.taskId ?? null, kind: "session_message",
       });
       return { deliveryStatus: this.deliveryStatusFor(r), position: r.position };
-    }
-    // NOT LIVE: board a durable note onto the target's project board (mirrors platformEscalate's structured
-    // board task). The card is the durable source of truth, so the message survives until someone reads it.
+    };
+    if (session.processState === "live") return deliverLive(session);
+
+    // NOT LIVE: before boarding, resolve to the live end of the target's recycle lineage — the target may
+    // simply have been recycled, with a successor already doing the work under a new session id.
+    const successor = liveLineageSuccessor(this.db, sessionId);
+    if (successor) return { ...deliverLive(successor), routedTo: successor.id };
+
+    // No live successor anywhere in the lineage: board a durable note onto the target's project board
+    // (mirrors platformEscalate's structured board task). The card is the durable source of truth, so the
+    // message survives until someone reads it.
     const now = new Date().toISOString();
     const body = [
       "**Message from the Platform Lead** (boarded because the target session was not live).",

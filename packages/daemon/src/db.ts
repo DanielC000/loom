@@ -2622,6 +2622,12 @@ export class Db {
   hasSuccessor(sessionId: string): boolean {
     return !!this.db.prepare("SELECT 1 FROM sessions WHERE recycled_from = ? LIMIT 1").get(sessionId);
   }
+  /** The session (if any) whose `recycled_from` points at `sessionId` — the FORWARD counterpart to
+   *  `hasSuccessor`'s boolean check, returning the actual successor row so a caller can walk the chain. */
+  getSuccessor(sessionId: string): Session | undefined {
+    const r = this.db.prepare("SELECT * FROM sessions WHERE recycled_from = ? LIMIT 1").get(sessionId) as Row | undefined;
+    return r ? toSession(r) : undefined;
+  }
   /** Count of currently-LIVE manager sessions — the Scheduler's manager-cap gate (§19a hardening). */
   countLiveManagers(): number {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE role = 'manager' AND process_state = 'live'")

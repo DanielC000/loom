@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Db } from "../db.js";
+import type { Session } from "@loom/shared";
 
 /**
  * Card 2fed1663 — lineage-scope the Platform Lead resume doc so concurrent Leads never contend on one
@@ -47,6 +48,26 @@ export function lineageRootId(db: Db, session: { id: string; recycledFrom?: stri
     current = prev;
   }
   return current.id;
+}
+
+/**
+ * Walk a session's recycle-successor chain FORWARD, starting from `sessionId`, to find the LIVE end
+ * of its lineage — the complement to {@link lineageRootId} (which walks BACKWARD to the root). At each
+ * step it follows `db.getSuccessor` (the session, if any, whose `recycledFrom` points at the current
+ * one) until it finds a live session or the chain runs out. Cycle-guarded (defensive; a real chain
+ * never cycles). Returns null if `sessionId` doesn't exist or no live session exists anywhere forward
+ * in its lineage.
+ */
+export function liveLineageSuccessor(db: Db, sessionId: string): Session | null {
+  let current: Session | undefined = db.getSession(sessionId);
+  const seen = new Set<string>();
+  while (current) {
+    if (current.processState === "live") return current;
+    if (seen.has(current.id)) return null;
+    seen.add(current.id);
+    current = db.getSuccessor(current.id);
+  }
+  return null;
 }
 
 /**

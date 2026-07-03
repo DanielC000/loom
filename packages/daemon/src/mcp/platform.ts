@@ -1025,10 +1025,12 @@ export class PlatformMcpRouter {
           "Message ANY session by id, cross-project (the Lead is above the manager/worker tree, so there is " +
           "NO parent/child scoping). Returns a deliveryStatus so you get an HONEST outcome: a LIVE target gets " +
           "the message submitted as a turn if idle (delivered-live) or queued FIFO + delivered on its next turn " +
-          "boundary if mid-turn (queued); a NOT-LIVE target has no session to receive a turn, so the message is " +
-          "BOARDED as a durable card on that target's project board (boarded) — never silently dropped — and " +
-          "the returned taskId names it. Framed [loom:from-platform] so a live receiver knows the source. " +
-          "DELIVERY ONLY — this never spawns anything. 404 only if the session id is unknown.",
+          "boundary if mid-turn (queued); a NOT-LIVE target whose recycle lineage has a LIVE successor is " +
+          "routed there instead (deliveryStatus reflects the successor's delivery, and routedTo names it); a " +
+          "NOT-LIVE target with no live successor anywhere in its lineage is BOARDED as a durable card on that " +
+          "target's project board (boarded) — never silently dropped — and the returned taskId names it. " +
+          "Framed [loom:from-platform] so a live receiver knows the source. DELIVERY ONLY — this never spawns " +
+          "anything. 404 only if the session id is unknown.",
         inputSchema: { sessionId: z.string(), text: z.string() },
       },
       async ({ sessionId, text }) => {
