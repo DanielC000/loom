@@ -219,6 +219,17 @@ export interface LoomDaemon {
     ptyBytes?: string;
   }) => Promise<SeededLiveSession>;
   /**
+   * Seed a raw orchestration_events audit row via POST /internal/test/seed (card 12204d22) — the ONLY way
+   * an e2e spec can drive an attention item that's derived from a manager's event stream (e.g. a
+   * `merge_request`, which the project Overview's Attention section renders as a rich Review-queue card).
+   * Inserted straight through the daemon's appendEvent writer; it NEVER runs a real review or merge.
+   * Returns the inserted event id.
+   */
+  seedOrchestrationEvent: (evt: {
+    managerSessionId: string; kind: string;
+    workerSessionId?: string; taskId?: string; detail?: Record<string, unknown>;
+  }) => Promise<string>;
+  /**
    * Spawn ONE real, LIVE host shell via `POST /api/terminals` (card ShellTile-e2e) — the ONLY way to make a
    * live ShellTile render, since a raw shell is an ephemeral PtyHost process, not a DB Session row (so it can
    * NOT be seeded through /internal/test/seed like a live session). This logs `[pty] spawnShell …`, which the
@@ -437,6 +448,13 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       };
     };
 
+    const seedOrchestrationEvent: LoomDaemon["seedOrchestrationEvent"] = async (evt) => {
+      const res = await apiPost<{ orchestrationEventIds: string[] }>(baseURL, "/internal/test/seed", {
+        orchestrationEvents: [evt],
+      });
+      return res.orchestrationEventIds[0];
+    };
+
     const archiveSeededSessions: LoomDaemon["archiveSeededSessions"] = async () => {
       if (seededSessionIds.length === 0) return;
       const ids = seededSessionIds.splice(0); // clear as we archive — already-archived ids are no-ops
@@ -465,7 +483,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedLiveSession, spawnShell, killSpawnedShells, archiveSeededSessions });
+    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedLiveSession, seedOrchestrationEvent, spawnShell, killSpawnedShells, archiveSeededSessions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.

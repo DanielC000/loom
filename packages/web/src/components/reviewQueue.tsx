@@ -16,7 +16,10 @@ import { color, font, radius, tone } from "../theme";
 // Partition seam: this is the diff/merge review pane's home in Mission Control. The sibling
 // fleet-observability / audit-replay card owns the Fleet + Activity regions below — keep them apart.
 
-export function ReviewQueue({ workerIds }: { workerIds: string[] }) {
+// showLabel (default true) — Mission Control keeps the "Review queue (N)" SectionLabel; the project
+// Overview reuses this SAME component to restyle its Attention merge cards but suppresses the label,
+// so the cards nest directly under Overview's own "Attention" heading without stacking two headers.
+export function ReviewQueue({ workerIds, showLabel = true }: { workerIds: string[]; showLabel?: boolean }) {
   const navigate = useNavigate();
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
   const all = sessions.data ?? [];
@@ -49,7 +52,7 @@ export function ReviewQueue({ workerIds }: { workerIds: string[] }) {
 
   return (
     <div>
-      <SectionLabel>Review queue ({workerIds.length})</SectionLabel>
+      {showLabel && <SectionLabel>Review queue ({workerIds.length})</SectionLabel>}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 12, alignItems: "start" }}>
         {cards.map((c) => (
           <ReviewCard key={c.id} workerId={c.id} worker={c.worker} analysis={c.analysis} loading={c.loading} error={c.error}

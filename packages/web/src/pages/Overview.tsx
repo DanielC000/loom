@@ -18,6 +18,7 @@ import { Panel, Button, SectionLabel, StatusPill, Badge, Chip, Meter } from "../
 import {
   Stat, FleetCard, FleetRow, AttentionRow, EventRow, fleetRollup, worstContext,
 } from "../components/fleet";
+import { ReviewQueue } from "../components/reviewQueue";
 import { color, font, tone, sessionRoleTone as roleTone } from "../theme";
 
 // PROJECT OVERVIEW — the project-scoped analog of the Platform page: one scrolling cockpit for the
@@ -73,6 +74,12 @@ export default function Overview() {
     const s = sid ? all.find((x) => x.id === sid) : undefined;
     return !!s;
   });
+  // Pending merges get pulled out of the flat AttentionRow list and rendered as the SAME rich review
+  // cards Mission Control's Review queue uses (the shared ReviewQueue component — diff stats, risk
+  // badge, top-risk files, Review → / Approve & merge), so the Overview's merge cards match Mission.
+  // Everything else keeps the compact AttentionRow treatment.
+  const reviewWorkerIds = projAttention.filter((i) => i.kind === "MERGE REQUEST" && i.workerSessionId).map((i) => i.workerSessionId!);
+  const otherAttention = projAttention.filter((i) => i.kind !== "MERGE REQUEST");
 
   // Fleet: collapsed → the compact per-project FleetCard summary; expanded (default) → the full
   // managers→workers FleetRow hierarchy. Persisted per project, mirroring Mission Control's expand set.
@@ -158,7 +165,40 @@ export default function Overview() {
         )}
       </section>
 
-      {/* --- Fleet (compact card ⇄ full managers→workers hierarchy) --- */}
+      {/* --- Attention (promoted into the slot Fleet vacated) — pending merges render as the SAME rich
+             review cards Mission Control uses (ReviewQueue, label suppressed so they nest under this
+             heading); every other alert keeps the compact AttentionRow. --- */}
+      <section>
+        <SectionLabel>Attention ({projAttention.length})</SectionLabel>
+        {projAttention.length === 0 && <Panel><span style={{ color: color.textMuted }}>Nothing in this project needs you right now.</span></Panel>}
+        {reviewWorkerIds.length > 0 && (
+          <div style={{ marginBottom: otherAttention.length > 0 ? 12 : 0 }}>
+            <ReviewQueue workerIds={reviewWorkerIds} showLabel={false} />
+          </div>
+        )}
+        {otherAttention.map((item) => (
+          <AttentionRow key={item.key} item={item}
+            onOpen={(() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()}
+            onDismiss={item.dismissKey ? () => dismissAttention(item.dismissKey!) : undefined} />
+        ))}
+      </section>
+
+      {/* --- Live terminals (the project's live sessions) --- */}
+      <section>
+        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          Terminals
+          <span style={{ color: color.textMuted, fontWeight: 400 }}>({all.filter((s) => s.processState === "live").length} live)</span>
+        </SectionLabel>
+        <ProjectTerminals sessions={all} />
+      </section>
+
+      {/* --- Board (the project's kanban — same component, project-scoped) --- */}
+      <section>
+        <SectionLabel>Board</SectionLabel>
+        <Board projectId={projectId} />
+      </section>
+
+      {/* --- Fleet (moved BELOW Board) — compact card ⇄ full managers→workers hierarchy --- */}
       <section>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           Fleet
@@ -178,21 +218,6 @@ export default function Overview() {
         )}
       </section>
 
-      {/* --- Live terminals (the project's live sessions) --- */}
-      <section>
-        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          Terminals
-          <span style={{ color: color.textMuted, fontWeight: 400 }}>({all.filter((s) => s.processState === "live").length} live)</span>
-        </SectionLabel>
-        <ProjectTerminals sessions={all} />
-      </section>
-
-      {/* --- Board (the project's kanban — same component, project-scoped) --- */}
-      <section>
-        <SectionLabel>Board</SectionLabel>
-        <Board projectId={projectId} />
-      </section>
-
       {/* --- Schedules (the project's cron schedules, by agent→project) --- */}
       <section>
         <SectionLabel>Schedules</SectionLabel>
@@ -200,25 +225,14 @@ export default function Overview() {
           agentName={(id) => agents.data?.find((a) => a.id === id)?.name ?? id.slice(0, 8)} />
       </section>
 
-      {/* --- Attention + Activity --- */}
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 16 }}>
-        <section>
-          <SectionLabel>Attention ({projAttention.length})</SectionLabel>
-          {projAttention.length === 0 && <Panel><span style={{ color: color.textMuted }}>Nothing in this project needs you right now.</span></Panel>}
-          {projAttention.map((item) => (
-            <AttentionRow key={item.key} item={item}
-              onOpen={(() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()}
-              onDismiss={item.dismissKey ? () => dismissAttention(item.dismissKey!) : undefined} />
-          ))}
-        </section>
-        <section>
-          <SectionLabel>Activity</SectionLabel>
-          <Panel grid style={{ maxHeight: "60vh", overflow: "auto" }}>
-            {allEvents.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No events yet.</span>}
-            {allEvents.slice(0, 100).map((e) => <EventRow key={e.id} e={e} />)}
-          </Panel>
-        </section>
-      </div>
+      {/* --- Activity (the project's manager event feed) --- */}
+      <section>
+        <SectionLabel>Activity</SectionLabel>
+        <Panel grid style={{ maxHeight: "60vh", overflow: "auto" }}>
+          {allEvents.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No events yet.</span>}
+          {allEvents.slice(0, 100).map((e) => <EventRow key={e.id} e={e} />)}
+        </Panel>
+      </section>
     </div>
   );
 }

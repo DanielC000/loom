@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, OrchestrationEventKind } from "@loom/shared";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -1236,6 +1236,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         }[];
         companionMemories?: { sessionId: string; name: string; content: string }[];
         companionReminders?: { sessionId: string; cron?: string; prompt?: string; label?: string | null; enabled?: boolean }[];
+        // A direct orchestration_events audit row (card 12204d22: the Overview attention merge-card e2e).
+        // The ONLY way an e2e spec can drive a `MERGE REQUEST` attention item — useAttention derives it from
+        // a LIVE manager's `merge_request` event whose worker is live (lib/attention.ts), which the Overview
+        // Attention section now renders as a rich Review-queue card. Inserted via deps.db.appendEvent (the
+        // same writer the orchestration MCP uses); NEVER runs a real review/merge. `ts` defaults to now.
+        orchestrationEvents?: {
+          managerSessionId: string; kind: OrchestrationEventKind;
+          workerSessionId?: string | null; taskId?: string | null; detail?: Record<string, unknown>;
+        }[];
       };
       const usageSampleIds: string[] = [];
       for (const s of b.usageSamples ?? []) {
@@ -1405,10 +1414,25 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         deps.pty.dropCanned(sid);
         archivedSessionIds.push(sid);
       }
+      // Orchestration audit events — appended straight through deps.db.appendEvent (no review/merge runs).
+      // `ts` defaults to now; the attention derivation only needs the newest merge_request per worker.
+      const orchestrationEventIds: string[] = [];
+      for (const e of b.orchestrationEvents ?? []) {
+        if (typeof e.managerSessionId !== "string" || typeof e.kind !== "string") {
+          return reply.code(400).send({ error: "orchestrationEvents[].managerSessionId and kind are required strings" });
+        }
+        const id = randomUUID();
+        deps.db.appendEvent({
+          id, ts: new Date().toISOString(),
+          managerSessionId: e.managerSessionId, workerSessionId: e.workerSessionId ?? null,
+          taskId: e.taskId ?? null, kind: e.kind, detail: e.detail,
+        });
+        orchestrationEventIds.push(id);
+      }
       return reply.code(201).send({
         ok: true, usageSampleIds, runIds,
         companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds,
-        liveSessionIds, wakeIds, archivedSessionIds,
+        liveSessionIds, wakeIds, archivedSessionIds, orchestrationEventIds,
       });
     });
   }
