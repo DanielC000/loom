@@ -11,13 +11,14 @@ import { resolveWebDistDir, isLoomDev } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { readTranscript, readArchivedTranscript, archivedTranscriptExists, engineTranscriptExists, deleteArchivedTranscript, deleteProjectArchives } from "../sessions/transcript.js";
+import { readTranscript, readArchivedTranscript, archivedTranscriptExists, engineTranscriptExists, deleteProjectArchives } from "../sessions/transcript.js";
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
 import type { Db } from "../db.js";
 import { inTestMode } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
+import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
@@ -1933,13 +1934,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // agent's sessions is live ("stop the fleet first"). The web hides this for the reserved project's agents.
   app.delete("/api/agents/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    const a = deps.db.getAgent(id);
-    if (!a) return reply.code(404).send({ error: "agent not found" });
-    const live = deps.db.countLiveSessionsForAgent(id);
-    if (live > 0) return reply.code(400).send({ error: `cannot delete an agent with live sessions — stop the fleet first (${live} still live)` });
-    const { sessionIds } = deps.db.deleteAgent(id);
-    for (const sid of sessionIds) deleteArchivedTranscript(a.projectId, sid); // best-effort snapshot cleanup
-    return { ok: true, deleted: { agent: id, sessions: sessionIds.length } };
+    try {
+      const result = deleteAgentCore(deps.db, id);
+      return { ok: true, deleted: { agent: id, sessions: result.sessions } };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === "agent not found") return reply.code(404).send({ error: message });
+      return reply.code(400).send({ error: message });
+    }
   });
 
   // Set a project's config override (the machine-writable config, schema-validated). Mirrors the

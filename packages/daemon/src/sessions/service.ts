@@ -14,6 +14,7 @@ import type { PtyHost, QueuedMessage, LandedMode } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
+import { deleteAgentCore } from "./delete-agent-core.js";
 import { readRunUsage, readRunUsageFromFile } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
@@ -3685,22 +3686,19 @@ export class SessionService {
   }
 
   /**
-   * PERMANENTLY delete one of the manager's OWN-project agents — reuses db.deleteAgent (the same
-   * cascade the human DELETE /api/agents/:id and the Platform Lead's agent_delete call) plus the
-   * SAME live-session guard (db.countLiveSessionsForAgent — "stop the fleet first"). requireOwnProject
-   * rejects a target outside the caller's project BEFORE any write (a manager has no cross-project reach).
+   * PERMANENTLY delete one of the manager's OWN-project agents — layers requireOwnProject (rejects a
+   * target outside the caller's project BEFORE any write; a manager has no cross-project reach) and
+   * auditManage on top of the shared deleteAgentCore (delete-agent-core.ts — also reused by the human
+   * REST handler and the Platform Lead's agent_delete tool).
    */
   deleteAgentAsManager(managerSessionId: string, agentId: string): { deleted: true; agentId: string; sessions: number } {
     this.requireManager(managerSessionId, "agent_delete");
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     this.requireOwnProject(managerSessionId, agent.projectId, "agent_delete");
-    const live = this.db.countLiveSessionsForAgent(agentId);
-    if (live > 0) throw new Error(`cannot delete an agent with live sessions — stop the fleet first (${live} still live)`);
-    const { sessionIds } = this.db.deleteAgent(agentId);
-    for (const sid of sessionIds) deleteArchivedTranscript(agent.projectId, sid); // best-effort snapshot cleanup
-    this.auditManage(managerSessionId, "agent_delete", { agentId, sessions: sessionIds.length });
-    return { deleted: true, agentId, sessions: sessionIds.length };
+    const result = deleteAgentCore(this.db, agentId);
+    this.auditManage(managerSessionId, "agent_delete", { agentId, sessions: result.sessions });
+    return result;
   }
 
   /**

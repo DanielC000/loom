@@ -14,7 +14,7 @@ import { writeVaultFile } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
-import { deleteArchivedTranscript } from "../sessions/transcript.js";
+import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
@@ -524,13 +524,11 @@ export class PlatformMcpRouter {
         inputSchema: { agentId: z.string() },
       },
       async ({ agentId }) => {
-        const agent = db.getAgent(agentId);
-        if (!agent) return ok({ error: "agent not found" });
-        const live = db.countLiveSessionsForAgent(agentId);
-        if (live > 0) return ok({ error: `cannot delete an agent with live sessions — stop the fleet first (${live} still live)` });
-        const { sessionIds } = db.deleteAgent(agentId);
-        for (const sid of sessionIds) deleteArchivedTranscript(agent.projectId, sid); // best-effort snapshot cleanup
-        return ok({ deleted: true, agentId, sessions: sessionIds.length });
+        try {
+          return ok(deleteAgentCore(db, agentId));
+        } catch (err) {
+          return ok({ error: err instanceof Error ? err.message : String(err) });
+        }
       },
     );
 
