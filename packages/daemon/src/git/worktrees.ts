@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { simpleGit, type SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
@@ -32,11 +32,12 @@ export interface BoundedGitDeps {
   gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw">;
   timeoutMs?: number;
   /**
-   * Injectable filesystem remove for removeWorktree's backstop (defaults to the bounded recursive
-   * `fs.promises.rm`). Lets a test simulate a stuck Windows directory handle — an `fs.rm` that NEVER
-   * resolves (handle held by a separate process) — and prove the call still returns within `timeoutMs`.
+   * Injectable KILLABLE directory removal for removeWorktree's backstop (defaults to
+   * {@link killableRemoveDir}). Lets a test simulate either a CLEAN reject (settles fast, `removed:false,
+   * killed:false` — the transient EBUSY/EPERM handle-lag case) or a genuine HANG (a promise that never
+   * resolves) and prove removeWorktree still returns within `timeoutMs` either way.
    */
-  rm?: (target: string) => Promise<void>;
+  removeDir?: (target: string, timeoutMs: number) => Promise<RemoveDirResult>;
 }
 
 /** Build the bounded git instance + resolve the timeout for one op, applying the seam's defaults. */
@@ -229,7 +230,7 @@ function detectPackageManager(worktreePath: string): PackageManager | null {
  * SAFE-BY-CONSTRUCTION removal: every supported install (pnpm/npm/yarn) gives the worktree its OWN
  * independent node_modules WITHIN the worktree — pnpm hardlinks into the shared content-addressable store
  * plus an internal `.pnpm` virtual store; npm/yarn write a self-contained `./node_modules`. None is a
- * junction/symlink into the main checkout, so removeWorktree's recursive `fs.rm` only ever deletes the
+ * junction/symlink into the main checkout, so removeWorktree's recursive removal only ever deletes the
  * worktree's own tree and can NEVER recurse into the main checkout's node_modules (the skill-store-nuke /
  * junction-follow class of bug — see removeWorktree). The companion test proves this. NEVER
  * share/symlink/junction node_modules across worktrees — native modules + concurrent install-state across
@@ -383,6 +384,87 @@ export async function deleteBranch(repoPath: string, branch: string, deps: Bound
   }
 }
 
+/** Result of one {@link killableRemoveDir} attempt. */
+export interface RemoveDirResult {
+  /** `target` is confirmed GONE from disk after this attempt. */
+  removed: boolean;
+  /**
+   * The removal child was force-KILLED because it exceeded its timeout — i.e. genuinely WEDGED, as
+   * opposed to a clean/settled failure (the child exited on its own, just not successfully: a transient
+   * EBUSY/EPERM handle-lag). Callers use this to distinguish "worth a short, fast bounded retry right
+   * here" (false) from "not worth retrying again THIS call — hand it to a slower, longer-lived retry
+   * policy instead" (true; SessionService tracks it and retries it on a SLOW cadence, not forever-skip).
+   */
+  killed: boolean;
+}
+
+/** Injectable seam for the removal child itself (defaults to {@link defaultSpawnRemoveChild}). Lets a
+ *  test substitute a REAL OS process that hangs forever — standing in for a genuinely wedged `rmdir`/
+ *  `rm -rf` — so the KILL mechanism itself (not just removeWorktree's bounding) is proven end-to-end. */
+export type SpawnRemoveChild = (target: string) => ChildProcess;
+
+/** The real removal child: `rmdir /s /q` via cmd on win32 (a cmd built-in — no subprocess tree to
+ *  track), `rm -rf` on posix. Args passed as an array (never a shell string) so `target` needs no
+ *  manual quoting/escaping. */
+function defaultSpawnRemoveChild(target: string): ChildProcess {
+  return process.platform === "win32"
+    ? spawn("cmd.exe", ["/c", "rmdir", "/s", "/q", target], { stdio: "ignore", windowsHide: true })
+    : spawn("rm", ["-rf", target], { stdio: "ignore" });
+}
+
+/** Force-kill the removal child. `taskkill /T /F` on win32 additionally kills the process TREE (belt-
+ *  and-suspenders in case the platform command ever spawns a subprocess); `SIGKILL` on posix cannot be
+ *  caught/ignored, so both give an unconditional, immediate OS-level termination. */
+function killRemoveChild(child: ChildProcess): void {
+  if (process.platform === "win32" && child.pid) {
+    try { spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" }); } catch { /* best effort */ }
+  }
+  try { child.kill("SIGKILL"); } catch { /* already gone / no permission */ }
+}
+
+/**
+ * KILLABLE directory removal — the fix for bd9fc808's leak. The prior backstop (`fs.promises.rm`) runs
+ * on the libuv THREADPOOL; a wedged directory handle makes that call hang past any timeout we impose
+ * from JS (`withTimeout` only stops US waiting — the detached call keeps occupying a threadpool slot
+ * FOREVER, and there is no API to cancel an in-flight threadpool task). With only 4 threads by default,
+ * a handful of wedged dirs starves fs/dns/crypto process-wide (the incident this task exists to fix).
+ *
+ * This instead runs the removal in a SEPARATE OS PROCESS. A wedged handle blocks only that child, never
+ * a daemon thread, and on timeout we FORCE-KILL it (`killRemoveChild`) — an OS-level TerminateProcess/
+ * SIGKILL that works regardless of what the child is blocked on, unlike a threadpool task with no kill
+ * primitive at all. A killed child releases everything it held; NEVER settles false, NEVER rejects, so
+ * every path (found already-gone / removed / clean failure / killed) resolves within `timeoutMs`.
+ */
+export function killableRemoveDir(
+  target: string, timeoutMs: number, spawnChild: SpawnRemoveChild = defaultSpawnRemoveChild,
+): Promise<RemoveDirResult> {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(target)) { resolve({ removed: true, killed: false }); return; }
+    let settled = false;
+    const finish = (killed: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ removed: !fs.existsSync(target), killed });
+    };
+    const child = spawnChild(target);
+    const timer = setTimeout(() => { killRemoveChild(child); finish(true); }, timeoutMs);
+    child.on("error", () => finish(false));
+    child.on("exit", () => finish(false));
+  });
+}
+
+/** `await`able delay — used only for the short bounded clean-reject retry in {@link removeWorktree}. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Attempts for a CLEAN (settled, non-hang) removal reject — a transient EBUSY/EPERM handle-lag right
+ *  after a worker exits, which SETTLES quickly and is worth a couple of short retries. A genuinely
+ *  wedged (killed) removal is NEVER looped — see {@link removeWorktree}. */
+const REMOVE_DIR_CLEAN_RETRY_ATTEMPTS = 3;
+const REMOVE_DIR_CLEAN_RETRY_DELAY_MS = 500;
+
 /**
  * Remove a worker's worktree and prune the admin record. Branch deletion (after merge) is
  * #16's concern, not here.
@@ -393,9 +475,8 @@ export async function deleteBranch(repoPath: string, branch: string, deps: Bound
  * then fails ("failed to delete '…': Permission denied") and is NOT idempotent — it can drop the
  * worktree's admin record while leaving the dir on disk, so retrying the same command fails with
  * "is not a working tree". So: attempt the clean git removal once (best-effort), then back it up
- * with a filesystem delete that retries the EBUSY/EPERM lag (fs.rm maxRetries — built for exactly
- * this), then prune any stale admin record. When nothing holds the dir (merge-gate's no-pty rows)
- * the git removal succeeds and the backstop is a no-op.
+ * with the killable filesystem removal below, then prune any stale admin record. When nothing holds
+ * the dir (merge-gate's no-pty rows) the git removal succeeds and the backstop is a no-op.
  *
  * BOUNDED (priority reliability fix): a busy/locked worktree dir makes `git worktree remove` HANG
  * INDEFINITELY rather than throw, and boot-reconcile's Pass B calls this DURING daemon boot — so one
@@ -405,23 +486,30 @@ export async function deleteBranch(repoPath: string, branch: string, deps: Bound
  * — the dir is left on disk for a later GC (boot-reconcile Pass B), NEVER an infinite hang. The
  * git instance/timeout is injectable via {@link BoundedGitDeps} so a test can prove the bound.
  *
- * The FILESYSTEM backstop is bounded too: boot-reconcile Pass B (reconcileOrchestrationOnBoot in
- * index.ts) runs this DURING boot, BEFORE app.listen(), so an unbounded hang here wedges the WHOLE
- * daemon — exactly the 2026-06-04 outage, where the recursive `fs.rm` on a worktree dir with a stuck
- * Windows directory handle (held by a SEPARATE process — the documented inert orphans) blocked on the
- * libuv threadpool and never returned, so boot never reached `listen` (port 4317 unbound ~5-6 min).
- * The 2026-06-03 fix bounded only the git ops; this fs `rm` slipped through. It now runs through the
- * same {@link withTimeout} race: on timeout we SWALLOW and leave the dir on disk for a later GC rather
- * than block the caller. THREADPOOL CAVEAT: withTimeout only stops US waiting — the detached `fs.rm`
- * keeps occupying one libuv threadpool slot until/unless the handle releases. Acceptable vs. a wedged
- * daemon: the realistic count is the 1-2 inert orphans, not a slot leak that starves the pool. The fs
- * remove is injectable via {@link BoundedGitDeps.rm} so a test can prove the bound on a never-releasing handle.
+ * THE FILESYSTEM BACKSTOP is now KILLABLE ({@link killableRemoveDir}) instead of the un-killable
+ * threadpool `fs.promises.rm` that leaked libuv threadpool threads on a wedged dir (bd9fc808, reverted
+ * 2026-07-03 after it stuck the daemon — see the docstring on {@link killableRemoveDir}). Each attempt
+ * is additionally wrapped in {@link withTimeout} so an INJECTED test seam that never resolves is still
+ * bounded (the real `killableRemoveDir` always resolves on its own); that outer bound fails SAFE by
+ * treating a never-settling seam as WEDGED (`killed:true`), never as a clean reject — a hang must never
+ * be looped, injected or real. Two distinct failure shapes:
+ *   - a CLEAN reject (settled, `killed:false`) — a transient EBUSY/EPERM handle-lag — gets up to
+ *     {@link REMOVE_DIR_CLEAN_RETRY_ATTEMPTS} short, bounded retries (it SETTLES, so it never risks
+ *     hanging a thread; this is the ONLY case worth retrying in-session).
+ *   - a KILLED timeout (`killed:true`) — genuinely wedged — is NEVER retried HERE, in this one call (a
+ *     fast in-process loop on a hang would be exactly the bd9fc808 defect again). The caller
+ *     (SessionService) instead tracks it and retries it on a SLOW cadence (once per boot + a
+ *     low-frequency background sweep, tens of minutes apart) — most wedges are eventually resolvable (a
+ *     held handle releases, a junction-choked `fs.rm` case a plain `rmdir` clears), so it is NOT
+ *     abandoned; only a long give-up bound stops the retries.
+ * Returns `{removed, wedged}` so the caller can decide how to track/retry it, without re-deriving the
+ * same `fs.existsSync` check itself.
  */
 export async function removeWorktree(
   repoPath: string,
   worktreePath: string,
   deps: BoundedGitDeps = {},
-): Promise<void> {
+): Promise<{ removed: boolean; wedged: boolean }> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
     await withTimeout(git.raw(["worktree", "remove", worktreePath, "--force"]), timeoutMs, "git worktree remove");
@@ -429,15 +517,24 @@ export async function removeWorktree(
     // A hang (timeout-kill), a busy handle, or git already de-registering the worktree without
     // deleting the dir — all fall through to the filesystem backstop.
   }
-  const rm = deps.rm ?? ((p) => fs.promises.rm(p, { recursive: true, force: true, maxRetries: 40, retryDelay: 200 }));
-  try {
-    await withTimeout(rm(worktreePath), timeoutMs, "fs.rm worktree");
-  } catch (e) {
-    // A stuck directory handle (held by a separate process) makes the recursive remove block on the
-    // libuv threadpool forever — it never throws on its own. Bounded by withTimeout above: SWALLOW and
-    // leave the dir on disk for a later GC rather than wedge boot. See the threadpool caveat in the docstring.
+  const removeDir = deps.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
+  let removed = true;
+  let wedged = false;
+  for (let attempt = 1; attempt <= REMOVE_DIR_CLEAN_RETRY_ATTEMPTS; attempt++) {
+    // Only skip a RETRY (attempt > 1) if the dir vanished between attempts (e.g. removed some other way) —
+    // the first attempt always calls removeDir unconditionally, mirroring the pre-existing force-remove
+    // semantics (a target that's already gone is simply a no-op removal, not specially short-circuited).
+    if (attempt > 1 && !fs.existsSync(worktreePath)) { removed = true; wedged = false; break; }
+    const result = await withTimeout(removeDir(worktreePath, timeoutMs), timeoutMs, "removeDir worktree")
+      .catch((): RemoveDirResult => ({ removed: false, killed: true })); // an injected/broken seam that itself never settles ⇒ fail SAFE as WEDGED (never loop a hang)
+    removed = result.removed;
+    if (removed) { wedged = false; break; }
+    if (result.killed) { wedged = true; break; } // genuinely wedged — hand to the caller's slow-retry policy, NEVER loop a hang HERE
+    if (attempt < REMOVE_DIR_CLEAN_RETRY_ATTEMPTS) await delay(REMOVE_DIR_CLEAN_RETRY_DELAY_MS); // clean reject → short bounded retry
+  }
+  if (!removed) {
     // eslint-disable-next-line no-console
-    console.warn(`[worktree] could not remove dir ${worktreePath} (left on disk for a later GC): ${(e as Error).message}`);
+    console.warn(`[worktree] could not remove dir ${worktreePath} (${wedged ? "genuinely wedged — caller retries it slowly" : "left on disk for a later GC"})`);
   }
   try {
     await withTimeout(git.raw(["worktree", "prune"]), timeoutMs, "git worktree prune");
@@ -445,6 +542,7 @@ export async function removeWorktree(
     // A hung/failed prune must NOT throw past removeWorktree (which would re-introduce the boot hang
     // via finalizeMerge / Pass B). A stale admin record is harmless — createWorktree prunes on reuse.
   }
+  return { removed, wedged };
 }
 
 /**

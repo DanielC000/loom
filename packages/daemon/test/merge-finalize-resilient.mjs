@@ -2,21 +2,27 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // finalizeMerge worktree-removal resilience test. REAL git on a temp repo, NO claude and NO live
 // daemon — drives SessionService.confirmWorkerMerge() directly against an isolated LOOM_HOME (mirrors
 // boot-reconcile.mjs's in-process style). Regression for the Windows handle-release bug: a worker's
-// worktree dir can stay busy past fs.rm's retry budget right after a hard-stop, so worktree removal
-// FAILS even though the `git merge` already committed. removeWorktree is the FIRST step of
-// finalizeMerge, so an unguarded failure there used to abort the rest — branch not deleted, task left
-// in_progress, no merge_done — and worker_merge_confirm returned an ERROR for an already-landed merge.
-// (removeWorktree itself now SWALLOWS+warns the fs.rm failure — the boot-hang hardening in
+// worktree dir can stay busy right after a hard-stop, so worktree removal FAILS even though the
+// `git merge` already committed. removeWorktree is the FIRST step of finalizeMerge, so an unguarded
+// failure there used to abort the rest — branch not deleted, task left in_progress, no merge_done —
+// and worker_merge_confirm returned an ERROR for an already-landed merge.
+// (removeWorktree itself now SWALLOWS+warns a failed removal — the boot-hang hardening in
 // git/worktrees.ts — leaving the dir for boot-reconcile Pass B instead of throwing; finalizeMerge's
 // own try/catch stays as a belt-and-suspenders second guard. Either way the merge must still finalize.)
+//
+// The busy-handle race is now simulated via SessionService's `removeDir` test seam (task dea6728e):
+// the killable removal backstop runs in a SEPARATE OS PROCESS, not `fs.promises.rm`, so monkeypatching
+// a Node fs API can no longer fake a "busy" dir into it — the seam replaces the whole backstop for one
+// target path instead, deterministically and hermetically (see worktrees.mjs for the mechanism's OWN
+// direct proof, incl. the real hang/kill case).
 //
 // Proves:
 //   (1) HAPPY path  — normal removal works: merged:true, worktree gone, branch deleted, task done,
 //                     merge_done recorded.
-//   (2) BUSY-DIR path — when worktree removal FAILS (we force fs.promises.rm to reject, simulating the
-//                     busy-handle race), confirmWorkerMerge STILL returns merged:true, the branch is
-//                     deleted, the task moves to done, a merge_done event is recorded, and a warning is
-//                     emitted (dir left on disk for boot-reconcile Pass B to GC).
+//   (2) BUSY-DIR path — when worktree removal FAILS (the seam returns a CLEAN reject for X's worktree
+//                     only), confirmWorkerMerge STILL returns merged:true, the branch is deleted, the
+//                     task moves to done, a merge_done event is recorded, and a warning is emitted (dir
+//                     left on disk for boot-reconcile Pass B to GC).
 // Run: 1) build daemon (pnpm build), 2) node test/merge-finalize-resilient.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -29,7 +35,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { createWorktree, removeWorktree } = await import("../dist/git/worktrees.js");
+const { createWorktree, removeWorktree, killableRemoveDir } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -41,7 +47,12 @@ const db = new Db();
 // confirmWorkerMerge only calls pty.stop / pty.isAlive / pty.enqueueStdin on this path. A no-pty
 // worker row (processState 'exited') means isAlive is false anyway; a stub keeps it hermetic.
 const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
-const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
+// removeDir seam: a CLEAN reject (settled, not removed, not killed) for X's worktree only — everything
+// else (H's happy path) goes through the real killable removal unchanged. `X.worktreePath` is read
+// lazily at call time (assigned later by setupBusyWorker), so declaring the closure before X exists is fine.
+const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+  removeDir: async (target, ms) => (target === X.worktreePath ? { removed: false, killed: false } : killableRemoveDir(target, ms)),
+});
 
 const mergeDoneCount = (mgrId) => db.listEvents(mgrId).filter((e) => e.kind === "merge_done").length;
 
@@ -97,7 +108,6 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const H = { projId: `mfr-h-proj-${sfx}`, agentId: `mfr-h-top-${sfx}`, taskId: `mfr-h-task-${sfx}`, mgrId: `mfr-h-mgr-${sfx}`, workerId: `mfr-h-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mfr-happy-${sfx}`), file: "happy.txt" };
 const X = { projId: `mfr-x-proj-${sfx}`, agentId: `mfr-x-top-${sfx}`, taskId: `mfr-x-task-${sfx}`, mgrId: `mfr-x-mgr-${sfx}`, workerId: `mfr-x-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mfr-busy-${sfx}`), file: "busy.txt" };
 
-const realRm = fs.promises.rm;
 try {
   await setupWorker(H);
   await setupBusyWorker(X);
@@ -129,21 +139,19 @@ try {
   check("(happy) merge_done event recorded (exactly 1)", mergeDoneCount(H.mgrId) === 1);
 
   // --- (2) BUSY-DIR path: force worktree removal to fail, prove the merge still finalizes. ---
-  // removeWorktree tries `git worktree remove` (swallowed), then falls back to fs.promises.rm; we make
-  // THAT reject (the busy-handle race fs.rm can't outwait) — exactly the Windows symptom. removeWorktree
-  // now SWALLOWS that rejection internally (the boot-hang hardening) and warns `[worktree] could not
-  // remove dir … left on disk for a later GC`, so finalizeMerge runs to completion; its own try/catch is
-  // the second guard. The merge bookkeeping must finish AND a warning about the un-removed dir must fire.
-  // Scoped to this one call, then restored.
+  // removeWorktree tries `git worktree remove` (swallowed), then falls back to the killable removal —
+  // the removeDir seam returns a CLEAN reject for X's worktree only (see the SessionService construction
+  // above), simulating the busy-handle race. removeWorktree SWALLOWS that (after its bounded clean-reject
+  // retries) and warns `[worktree] could not remove dir … left on disk for a later GC`, so finalizeMerge
+  // runs to completion; its own try/catch is the second guard. The merge bookkeeping must finish AND a
+  // warning about the un-removed dir must fire. Scoped to this one call, then restored.
   const warnings = [];
   const realWarn = console.warn;
   console.warn = (...a) => { warnings.push(a.join(" ")); };
-  fs.promises.rm = async () => { const e = new Error("EBUSY: resource busy or locked (simulated)"); e.code = "EBUSY"; throw e; };
   let confirmX;
   try {
     confirmX = await sessions.confirmWorkerMerge(X.mgrId, X.workerId);
   } finally {
-    fs.promises.rm = realRm;
     console.warn = realWarn;
   }
 
@@ -156,7 +164,6 @@ try {
   check("(busy) a warning about the un-removed worktree (left on disk for GC) was emitted",
     warnings.some((w) => w.includes(X.worktreePath) && /left on disk|boot-reconcile|Pass B|GC/i.test(w)));
 } finally {
-  fs.promises.rm = realRm;
   db.close();
   for (const p of [H, X]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }

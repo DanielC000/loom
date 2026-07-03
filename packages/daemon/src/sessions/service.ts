@@ -256,6 +256,33 @@ export class SessionService {
    */
   private readonly gitOpMs: number | undefined;
   private readonly provisionMs: number | undefined;
+  /**
+   * Test-only seam for {@link removeWorktree}'s killable-removal backstop (task dea6728e). `undefined` in
+   * production ⇒ removeWorktree falls back to its own real {@link killableRemoveDir}. Lets a test drive
+   * gcWorktreeDir/finalizeMerge through a deterministic CLEAN-reject or genuinely-WEDGED (killed) outcome
+   * without needing a real busy OS handle (which the new child-process removal — unlike the old
+   * `fs.promises.rm` — can no longer be faked into by monkeypatching a Node fs API).
+   */
+  private readonly removeDirOverride: ((target: string, timeoutMs: number) => Promise<{ removed: boolean; killed: boolean }>) | undefined;
+  /**
+   * SLOW-retry policy for a wedged worktree (task dea6728e — the owner-directed refinement: "quarantine"
+   * must not mean "dangles forever"). A wedge is usually eventually-resolvable (a held OS-indexer/
+   * Defender-scan handle releases, or a pnpm-junction structure `rmdir` succeeds where `fs.rm` choked), so
+   * SessionService keeps retrying it — once per boot (Pass B) plus this low-frequency in-session sweep —
+   * rather than skipping it forever. Safe at ANY cadence because every retry is the SAME killable removal
+   * (never a threadpool op, never able to hang a thread) — this is NOT bd9fc808's reverted 30s loop, both
+   * because the removal itself can't leak AND because the cadence here is ~1000x slower. Only past
+   * {@link wedgeGiveUpAttempts}/{@link wedgeGiveUpMs} does a dir flip to `needsHuman` and stop retrying.
+   * All three are test-overridable (opts) so a test can prove the give-up bound without real days/attempts.
+   */
+  private readonly wedgeSweepIntervalMs: number;
+  private readonly wedgeGiveUpAttempts: number;
+  private readonly wedgeGiveUpMs: number;
+  private static readonly DEFAULT_WEDGE_SWEEP_INTERVAL_MS = 45 * 60_000; // 45min — inside the owner's 30-60min band
+  private static readonly DEFAULT_WEDGE_GIVE_UP_ATTEMPTS = 50;
+  private static readonly DEFAULT_WEDGE_GIVE_UP_MS = 7 * 24 * 60 * 60_000; // 7 days
+  /** The armed background sweep timer, or null when nothing is currently wedged (self-arms/disarms). */
+  private wedgeSweepTimer: ReturnType<typeof setInterval> | null = null;
   /** Agent Runs R3 run-webhook delivery (injectable for tests; defaults to a bounded fetch + 5s cap). */
   private readonly runWebhookPost: RunWebhookPoster;
   private readonly runWebhookTimeoutMs: number;
@@ -312,10 +339,18 @@ export class SessionService {
   private readonly redriveInFlightMsgIds = new Set<string>();
   constructor(
     private db: Db, private pty: PtyHost, private control: OrchestrationControl,
-    opts?: { gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number; runTimeoutMs?: number },
+    opts?: {
+      gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number; runTimeoutMs?: number;
+      removeDir?: (target: string, timeoutMs: number) => Promise<{ removed: boolean; killed: boolean }>;
+      wedgeSweepIntervalMs?: number; wedgeGiveUpAttempts?: number; wedgeGiveUpMs?: number;
+    },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
     this.provisionMs = opts?.provisionMs;
+    this.removeDirOverride = opts?.removeDir;
+    this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
+    this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
+    this.wedgeGiveUpMs = opts?.wedgeGiveUpMs ?? SessionService.DEFAULT_WEDGE_GIVE_UP_MS;
     this.runWebhookPost = opts?.runWebhookPost ?? defaultRunWebhookPost;
     this.runWebhookTimeoutMs = opts?.runWebhookTimeoutMs ?? RUN_WEBHOOK_TIMEOUT_MS;
     this.runTimeoutMs = opts?.runTimeoutMs ?? RUN_TIMEOUT_MS;
@@ -3973,6 +4008,76 @@ export class SessionService {
   }
 
   /**
+   * Slow-retry-aware wrapper around {@link removeWorktree} — the single removal chokepoint shared by
+   * finalizeMerge, boot-reconcile Pass B's two GC sites, and the background wedge sweep (task dea6728e).
+   * A worktree that's given up on (`needsHuman`, past the long give-up bound) is SKIPPED entirely — no
+   * removal is even attempted. Everything else ALWAYS attempts the removal: most wedges are eventually
+   * resolvable (a held OS-indexer/Defender-scan handle releases on its own, or a pnpm-junction structure
+   * `rmdir` succeeds where the old `fs.rm` choked), so a dir that was wedged before is NOT skipped here —
+   * it's retried, safely, because every attempt is the same killable removal (never a threadpool op).
+   * On success, any wedge tracking for the path is cleared. On a fresh/repeat wedge, the attempt is
+   * recorded and — past {@link wedgeGiveUpAttempts}/{@link wedgeGiveUpMs} — flipped to `needsHuman` and
+   * loudly surfaced; short of that bound it's surfaced as "still wedged, retrying slowly" and the
+   * low-frequency background sweep is armed so it keeps getting retried even between boots.
+   */
+  private async gcWorktreeDir(repoPath: string, worktreePath: string): Promise<"removed" | "wedged" | "left-on-disk" | "needs-human-skip"> {
+    if (this.db.getWedgedWorktree(worktreePath)?.needsHuman) return "needs-human-skip";
+    const { removed, wedged } = await removeWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs, removeDir: this.removeDirOverride });
+    if (removed) {
+      this.db.clearWedgedWorktree(worktreePath);
+      return "removed";
+    }
+    if (wedged) {
+      const entry = this.db.recordWorktreeWedgeAttempt(worktreePath, repoPath, "killable removal was force-killed on timeout (handle still held)");
+      const ageMs = Date.now() - new Date(entry.firstWedgedAt).getTime();
+      if (entry.attempts >= this.wedgeGiveUpAttempts || ageMs >= this.wedgeGiveUpMs) {
+        this.db.markWorktreeNeedsHuman(worktreePath);
+        // eslint-disable-next-line no-console
+        console.warn(`[worktree] ${worktreePath} has been wedged for ${Math.round(ageMs / 86_400_000)} day(s) across ${entry.attempts} attempt(s) — ` +
+          `giving up automatic retry. Needs a human to investigate (reboot to force-release a stuck handle) and delete it manually.`);
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(`[worktree] ${worktreePath} still wedged (attempt ${entry.attempts}) — retrying slowly ` +
+          `(next: a later boot, or the background sweep in ≤${Math.round(this.wedgeSweepIntervalMs / 60_000)}min). Not abandoned.`);
+        this.armWedgeSweep();
+      }
+      return "wedged";
+    }
+    return "left-on-disk";
+  }
+
+  /** Arm the low-frequency background wedge-retry sweep if it isn't already running. Self-disarms (see
+   *  {@link sweepWedgedWorktreesOnce}) once nothing remains to retry, so an idle daemon (the common case)
+   *  never pays for a standing timer. `.unref()`'d so it can never keep the process alive on its own. */
+  private armWedgeSweep(): void {
+    if (this.wedgeSweepTimer) return;
+    const timer = setInterval(() => { void this.sweepWedgedWorktreesOnce(); }, this.wedgeSweepIntervalMs);
+    timer.unref?.();
+    this.wedgeSweepTimer = timer;
+  }
+
+  /**
+   * One retry pass over every currently-wedged, not-yet-given-up worktree. SLOW cadence in production
+   * (~45min default, always in the owner-directed 30-60min band) — safe at ANY cadence because each
+   * attempt is the SAME killable removal used everywhere else (a separate OS process, force-killed on
+   * timeout — never a threadpool op, never able to leak/stick the daemon). This is explicitly NOT
+   * bd9fc808's reverted 30s loop: the cadence here is ~1000x slower AND the removal itself can no longer
+   * hang a thread even if retried far more often than this. Exposed (not private) so a test can drive a
+   * sweep deterministically instead of waiting on a real timer.
+   */
+  async sweepWedgedWorktreesOnce(): Promise<void> {
+    const pending = this.db.listWedgedWorktrees().filter((e) => !e.needsHuman);
+    for (const entry of pending) {
+      await this.gcWorktreeDir(entry.repoPath, entry.worktreePath);
+    }
+    const stillPending = this.db.listWedgedWorktrees().some((e) => !e.needsHuman);
+    if (!stillPending && this.wedgeSweepTimer) {
+      clearInterval(this.wedgeSweepTimer);
+      this.wedgeSweepTimer = null;
+    }
+  }
+
+  /**
    * The post-merge bookkeeping shared by confirmWorkerMerge (the interactive merge path) and
    * reconcileOrchestrationOnBoot (orphaned-merge recovery): retire the worktree, finish the task,
    * record `merge_done`, then delete the now-merged branch. Factored out so the two callers can't
@@ -4010,8 +4115,15 @@ export class SessionService {
     // Sessions has already marked prior-run ptys exited, so the task has no live siblings).
     await this.retireSiblingSessionsForTask(args.taskId, args.workerSessionId);
     try {
-      await removeWorktree(args.repoPath, args.worktreePath, { timeoutMs: this.gitOpMs });
+      const outcome = await this.gcWorktreeDir(args.repoPath, args.worktreePath);
+      if (outcome !== "removed") {
+        // eslint-disable-next-line no-console
+        console.warn(`[finalizeMerge] worktree ${args.worktreePath} not removed (${outcome}); ` +
+          `merge already landed — finishing bookkeeping regardless.`);
+      }
     } catch (e) {
+      // gcWorktreeDir/removeWorktree are themselves best-effort and should never throw; stay defensive
+      // anyway so an unexpected throw can't abort the rest of finalizeMerge's bookkeeping.
       // eslint-disable-next-line no-console
       console.warn(`[finalizeMerge] could not remove worktree ${args.worktreePath} (dir busy?); ` +
         `merge already landed — finishing bookkeeping, boot-reconcile Pass B will GC the dir: ${(e as Error).message}`);
@@ -4066,7 +4178,7 @@ export class SessionService {
    *     the branch here — any committed work stays on it and createWorktree re-attaches a fresh
    *     worktree to it on a re-task.
    */
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     const handledWorktrees = new Set<string>();
@@ -4075,6 +4187,7 @@ export class SessionService {
     let staleMergesResolved = 0;
     let worktreesPruned = 0;
     let worktreesKept = 0;
+    let worktreesNeedsHuman = 0;
 
     // A. Finish orphaned merges. Best-effort PER SESSION: finalizeMerge now swallows a removeWorktree
     // throw internally (so a busy dir won't even abort the per-session finalize), but the try/catch
@@ -4170,8 +4283,8 @@ export class SessionService {
       // worktrees stays byte-intact). Scope: only the no-`.git` case — NOT the rarer "`.git` exists but
       // gitdir pruned" variant.
       if (!fs.existsSync(path.join(worktreePath, ".git"))) {
-        try { await removeWorktree(project.repoPath, worktreePath, { timeoutMs: this.gitOpMs }); } catch { /* best-effort */ }
-        worktreesPruned++;
+        const outcome = await this.gcWorktreeDir(project.repoPath, worktreePath).catch(() => "left-on-disk" as const);
+        if (outcome === "needs-human-skip") worktreesNeedsHuman++; else worktreesPruned++;
         continue;
       }
       if (await worktreeHasWork(project.repoPath, worktreePath, s.branch ?? null, "HEAD", { timeoutMs: this.gitOpMs })) {
@@ -4180,10 +4293,26 @@ export class SessionService {
         worktreesKept++;
         continue;
       }
-      try { await removeWorktree(project.repoPath, worktreePath, { timeoutMs: this.gitOpMs }); } catch { /* best-effort */ }
-      worktreesPruned++;
+      const outcome = await this.gcWorktreeDir(project.repoPath, worktreePath).catch(() => "left-on-disk" as const);
+      if (outcome === "needs-human-skip") worktreesNeedsHuman++; else worktreesPruned++;
     }
 
-    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept };
+    // Surface what's still wedged-but-retryable (armWedgeSweep already fired per-entry above; this is the
+    // aggregate boot-level visibility) and what's been given up on entirely — both logged, never silent.
+    const stillWedged = this.db.listWedgedWorktrees().filter((e) => !e.needsHuman);
+    if (stillWedged.length > 0) {
+      this.armWedgeSweep(); // belt-and-suspenders: guarantees the sweep is armed after every boot that leaves work pending
+      // eslint-disable-next-line no-console
+      console.warn(`[reconcile] ${stillWedged.length} worktree(s) still wedged, retrying slowly (next boot + background sweep) — ` +
+        `not abandoned. Paths: ${stillWedged.map((e) => e.worktreePath).join(", ")}`);
+    }
+    if (worktreesNeedsHuman > 0) {
+      const paths = this.db.listWedgedWorktrees().filter((e) => e.needsHuman).map((e) => e.worktreePath);
+      // eslint-disable-next-line no-console
+      console.warn(`[reconcile] ${paths.length} worktree(s) gave up automatic retry (wedged too long) — ` +
+        `needs a human to investigate + delete manually. Paths: ${paths.join(", ")}`);
+    }
+
+    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman };
   }
 }

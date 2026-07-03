@@ -540,6 +540,36 @@ const HELD_BACKFILL_KEY = "task_held_title_backfill_done";
  */
 const COMPANION_HOME_KEY = "companion_home";
 
+/**
+ * app_meta key for the wedged-worktree tracking set (task dea6728e — the threadpool-safe redo of
+ * bd9fc808). A single JSON array of {@link WedgedWorktreeEntry}, daemon-GLOBAL, mirroring
+ * getCompanionHome's single-JSON-key pattern (NO new table for what is expected to stay a handful of
+ * entries). Read/written by listWedgedWorktrees/recordWorktreeWedgeAttempt/markWorktreeNeedsHuman/
+ * clearWedgedWorktree.
+ */
+const WORKTREE_WEDGED_KEY = "worktree_wedged";
+
+/**
+ * One worktree dir whose killable removal was force-KILLED on timeout (genuinely wedged, not a clean
+ * reject) — see removeWorktree/killableRemoveDir in git/worktrees.ts. This is NOT a permanent quarantine:
+ * the owner pushed back that "wedged" must not mean "dangles forever" — most wedges are eventually
+ * resolvable (a held OS-indexer/Defender-scan handle releases on its own, or a pnpm-junction structure
+ * `fs.rm` chokes on but `rmdir /s /q` actually deletes), so SessionService retries it on a SLOW cadence
+ * (once per boot + a low-frequency in-session sweep) rather than skipping it forever. `needsHuman` flips
+ * true only past a long give-up bound (many attempts over days) — the rare truly-permanent case — at
+ * which point auto-retry stops and it's surfaced for a human to investigate/delete manually.
+ */
+export interface WedgedWorktreeEntry {
+  worktreePath: string;
+  /** the canonical repo path, carried so the background sweep can retry it without a session lookup. */
+  repoPath: string;
+  firstWedgedAt: string;
+  lastAttemptAt: string;
+  attempts: number;
+  reason: string;
+  needsHuman: boolean;
+}
+
 /** Columns added to `sessions` after phase-1; applied to existing DBs by migrateSessions(). */
 const SESSION_ADDED_COLUMNS: Record<string, string> = {
   role: "TEXT",
@@ -1477,6 +1507,63 @@ export class Db {
   /** Clear the home channel target (drop the app_meta key) — proactive delivery falls back to OFF. */
   clearCompanionHome(): void {
     this.deleteMeta(COMPANION_HOME_KEY);
+  }
+
+  // --- wedged-worktree tracking (task dea6728e; app_meta JSON array) — SLOW retry, not permanent skip ---
+  /** Every currently-tracked wedged worktree dir. Corrupt/missing blob → empty (never throws). */
+  listWedgedWorktrees(): WedgedWorktreeEntry[] {
+    const raw = this.getMeta(WORKTREE_WEDGED_KEY);
+    if (!raw) return [];
+    try {
+      const v: unknown = JSON.parse(raw);
+      if (Array.isArray(v)) {
+        return v.filter(
+          (e): e is WedgedWorktreeEntry =>
+            !!e && typeof e.worktreePath === "string" && typeof e.repoPath === "string" &&
+            typeof e.firstWedgedAt === "string" && typeof e.lastAttemptAt === "string" &&
+            typeof e.attempts === "number" && typeof e.reason === "string" && typeof e.needsHuman === "boolean",
+        );
+      }
+    } catch { /* corrupt blob ⇒ empty (like getPlatformConfig) */ }
+    return [];
+  }
+  /** The tracked entry for `worktreePath`, or undefined if it isn't (currently) wedged. */
+  getWedgedWorktree(worktreePath: string): WedgedWorktreeEntry | undefined {
+    return this.listWedgedWorktrees().find((e) => e.worktreePath === worktreePath);
+  }
+  /**
+   * Record ONE more failed (killed/timed-out) removal attempt against `worktreePath` — upsert: a first
+   * sighting creates the entry (`attempts:1`, `needsHuman:false`); a repeat bumps `attempts` and
+   * `lastAttemptAt` while keeping the original `firstWedgedAt` (so age-based give-up policy in the
+   * caller can measure how long it's been wedged). Returns the updated entry so the caller can decide
+   * (using its own give-up thresholds) whether to call {@link markWorktreeNeedsHuman}. Pure bookkeeping —
+   * this method itself never decides give-up; that policy lives in SessionService.
+   */
+  recordWorktreeWedgeAttempt(worktreePath: string, repoPath: string, reason: string): WedgedWorktreeEntry {
+    const now = new Date().toISOString();
+    const list = this.listWedgedWorktrees();
+    const existing = list.find((e) => e.worktreePath === worktreePath);
+    const updated: WedgedWorktreeEntry = existing
+      ? { ...existing, repoPath, lastAttemptAt: now, attempts: existing.attempts + 1, reason }
+      : { worktreePath, repoPath, firstWedgedAt: now, lastAttemptAt: now, attempts: 1, reason, needsHuman: false };
+    this.setMeta(WORKTREE_WEDGED_KEY, JSON.stringify([...list.filter((e) => e.worktreePath !== worktreePath), updated]));
+    return updated;
+  }
+  /** Flip `worktreePath` to `needsHuman:true` (the long give-up bound was crossed) — auto-retry stops for
+   *  it from here on; a no-op if it isn't currently tracked. */
+  markWorktreeNeedsHuman(worktreePath: string): void {
+    const list = this.listWedgedWorktrees();
+    const entry = list.find((e) => e.worktreePath === worktreePath);
+    if (!entry || entry.needsHuman) return;
+    this.setMeta(WORKTREE_WEDGED_KEY, JSON.stringify([...list.filter((e) => e.worktreePath !== worktreePath), { ...entry, needsHuman: true }]));
+  }
+  /** Drop `worktreePath` from wedged tracking (a no-op if it wasn't tracked) — called once a removal
+   *  actually succeeds, at any point (first try, a slow retry, or out-of-band). */
+  clearWedgedWorktree(worktreePath: string): void {
+    const before = this.listWedgedWorktrees();
+    const after = before.filter((e) => e.worktreePath !== worktreePath);
+    if (after.length === before.length) return; // wasn't tracked ⇒ nothing to clear
+    this.setMeta(WORKTREE_WEDGED_KEY, JSON.stringify(after));
   }
 
   // --- companion RUN config (Companion epic Phase 3): the "how to RUN this companion" layer, keyed by

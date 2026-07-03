@@ -9,8 +9,8 @@
 //   (1) STRUCTURAL — dist/index.js actually calls app.listen() before reconcileOrchestrationOnBoot, and
 //       the call is NOT `await`ed (fire-and-forget), while the cheap reconcileRunsOnBoot (pure DB) stays
 //       synchronous BEFORE listen; the background `.then`/`.catch` still logs the same summary/warn lines.
-//   (2) BEHAVIORAL — reusing the SAME BoundedGitDeps.rm seam worktrees.mjs already proves bounded, drive
-//       N never-resolving "stuck handle" removeWorktree calls SERIALLY through the exact
+//   (2) BEHAVIORAL — reusing the SAME BoundedGitDeps.removeDir seam worktrees.mjs already proves bounded,
+//       drive N never-resolving "stuck handle" removeWorktree calls SERIALLY through the exact
 //       `void chain().then().catch()` idiom index.ts now uses, and prove the caller's next synchronous
 //       statement (standing in for app.listen() returning) runs BEFORE any of the N removals settle, while
 //       the background chain still completes all N, serially (elapsed ~= N * tinyMs, not ~= tinyMs).
@@ -60,16 +60,16 @@ const TIMER_SLACK_MS = 50;
 {
   const N = 8; // mirrors the owner's reported 8-dangler outage
   const tinyMs = 120; // small but nonzero: distinguishes "returned instantly" from "waited ~the bound"
-  const stubFastGit = () => ({ raw: async () => "" }); // git ops succeed fast → only the fs.rm hangs
-  const neverRm = () => new Promise(() => {}); // a stuck dir handle: this remove never settles
+  const stubFastGit = () => ({ raw: async () => "" }); // git ops succeed fast → only the removal hangs
+  const neverRemoveDir = () => new Promise(() => {}); // a stuck dir handle: this removal never settles
   const repoDummy = path.dirname(fileURLToPath(import.meta.url)); // never touched: git ops are stubbed
 
-  // Mirrors reconcile's Pass B loop: SERIAL `await`ed removeWorktree calls (never parallelized — the
-  // libuv threadpool-slot caveat means each hung fs.rm occupies one slot until release).
+  // Mirrors reconcile's Pass B loop: SERIAL `await`ed removeWorktree calls (never parallelized — each
+  // removal now runs in its own OS process, but Pass B still processes worktrees one at a time).
   async function serialPassB() {
     let processed = 0;
     for (let i = 0; i < N; i++) {
-      await removeWorktree(repoDummy, path.join(repoDummy, `stuck-${i}`), { gitFactory: stubFastGit, rm: neverRm, timeoutMs: tinyMs });
+      await removeWorktree(repoDummy, path.join(repoDummy, `stuck-${i}`), { gitFactory: stubFastGit, removeDir: neverRemoveDir, timeoutMs: tinyMs });
       processed++;
     }
     return processed;

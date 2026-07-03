@@ -4,12 +4,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wt-home-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
-const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged, findLandedSquashCommit, toConventionalSubject } = await import("../dist/git/worktrees.js");
+const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged, findLandedSquashCommit, toConventionalSubject, killableRemoveDir } = await import("../dist/git/worktrees.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 
 let failures = 0;
@@ -190,26 +190,81 @@ try {
     check("(k2) default per-op block timeout is 15000ms", delDefMs === 15000);
   }
 
-  // (l) BOUNDED FILESYSTEM backstop — the 2026-06-04 outage fix. Even with the git ops bounded, the
-  //     recursive `fs.rm` backstop was UNBOUNDED: a worktree dir with a stuck Windows directory handle
-  //     (held by a SEPARATE process) makes the recursive remove block on the libuv threadpool FOREVER —
-  //     it never throws on its own. boot-reconcile Pass B calls removeWorktree DURING boot, before
-  //     app.listen(), so that hang wedged the whole daemon (port 4317 unbound ~5-6 min). Inject an `rm`
+  // (l) BOUNDED FILESYSTEM backstop — the 2026-06-04 outage fix, re-proven against the killable-removal
+  //     mechanism (task dea6728e replaced the un-killable `fs.promises.rm` backstop entirely — see (l2)
+  //     below for the mechanism's OWN direct proof against a REAL hanging child process). boot-reconcile
+  //     Pass B calls removeWorktree DURING boot, before app.listen(), so an unbounded backstop hang would
+  //     wedge the whole daemon (port 4317 unbound ~5-6 min, the original outage). Inject a `removeDir`
   //     that NEVER resolves (a stuck handle) with a tiny timeout and prove removeWorktree still RETURNS
-  //     within the window — the stuck dir is left on disk + logged, never an infinite hang.
+  //     within the window, treating the never-settling seam as WEDGED (never retried) — the stuck dir is
+  //     left on disk + logged, never an infinite hang, and never looped.
   {
-    const stubFastGit = (_p, _ms) => ({ raw: async () => "" }); // git ops succeed fast → only the fs.rm hangs
-    const neverRm = () => new Promise(() => {}); // a stuck dir handle: this remove never settles
+    const stubFastGit = (_p, _ms) => ({ raw: async () => "" }); // git ops succeed fast → only the removal hangs
+    const neverRemoveDir = () => new Promise(() => {}); // a stuck dir handle: this removal never settles
     const tinyMs = 250;
     const stuckPath = path.join(process.env.LOOM_HOME, `stuck-${Date.now()}`); // Date.now() here = unique path, not a duration
     const t0 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
     let resolved = false;
+    let outcome;
     await removeWorktree(repo, stuckPath,
-      { gitFactory: stubFastGit, rm: neverRm, timeoutMs: tinyMs }).then(() => { resolved = true; });
+      { gitFactory: stubFastGit, removeDir: neverRemoveDir, timeoutMs: tinyMs }).then((r) => { resolved = true; outcome = r; });
     const elapsed = performance.now() - t0;
-    check("(l) removeWorktree RETURNS despite a never-resolving fs.rm (stuck dir handle, not an infinite hang)", resolved);
-    check(`(l) bounded by the timeout — returned in ${Math.round(elapsed)}ms (fs backstop capped at ${tinyMs}ms)`,
-      elapsed >= tinyMs - TIMER_SLACK_MS && elapsed < tinyMs * 8 + 1500);
+    check("(l) removeWorktree RETURNS despite a never-resolving removeDir (stuck dir handle, not an infinite hang)", resolved);
+    check(`(l) bounded by the timeout — returned in ${Math.round(elapsed)}ms (fs backstop capped at ${tinyMs}ms, NOT retried)`,
+      elapsed >= tinyMs - TIMER_SLACK_MS && elapsed < tinyMs * 4 + 1500);
+    check("(l) a never-settling removal is reported as WEDGED (killed:true), not a clean reject", outcome.removed === false && outcome.wedged === true);
+  }
+
+  // (l2) THE KILLABLE-REMOVAL MECHANISM ITSELF, end-to-end against a REAL never-exiting child process —
+  //     the exact gap that let bd9fc808 through: its reverted test only ever injected an `rm` that
+  //     REJECTED (settled, just with an error), never one that truly HUNG, so it never proved the
+  //     un-killable `fs.promises.rm` backstop couldn't be bounded. Here the removal child is a REAL OS
+  //     process that would run forever if not killed (standing in for a genuinely wedged `rmdir`/`rm -rf`).
+  //     Proves: killableRemoveDir returns within the timeout, the child is ACTUALLY terminated (not left
+  //     running), and — the leak class this task exists to close — repeating the hang N times in a row
+  //     terminates every single child and does not accumulate any un-settled work (each round takes
+  //     ~the same bounded time; nothing piles up across rounds).
+  {
+    const HANG_TIMEOUT_MS = 300;
+    const spawnedChildren = [];
+    const hangingChild = () => {
+      // A real, separate OS process that never exits on its own (stands in for a wedged rmdir/rm -rf).
+      const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 999999)"], { stdio: "ignore" });
+      spawnedChildren.push(child);
+      return child;
+    };
+
+    const ROUNDS = 4;
+    const perRoundElapsed = [];
+    for (let i = 0; i < ROUNDS; i++) {
+      const target = path.join(process.env.LOOM_HOME, `hang-target-${i}`);
+      fs.mkdirSync(target, { recursive: true }); // must EXIST — killableRemoveDir short-circuits an absent target
+      const t0 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
+      const result = await killableRemoveDir(target, HANG_TIMEOUT_MS, hangingChild);
+      perRoundElapsed.push(performance.now() - t0);
+      check(`(l2) round ${i}: killableRemoveDir reports KILLED (genuinely wedged), not removed`,
+        result.killed === true && result.removed === false);
+    }
+
+    check(`(l2) EVERY round bounded — none exceeded ~${HANG_TIMEOUT_MS}ms (no accumulation across repeats): ${perRoundElapsed.map((e) => Math.round(e)).join(", ")}ms`,
+      perRoundElapsed.every((e) => e >= HANG_TIMEOUT_MS - TIMER_SLACK_MS && e < HANG_TIMEOUT_MS * 4 + 1500));
+
+    // The child is FORCE-KILLED, not merely asked nicely — confirm every one of them actually exited
+    // (no orphaned process left running). A short grace wait lets the OS finish tearing it down.
+    await new Promise((r) => setTimeout(r, 500));
+    check(`(l2) all ${spawnedChildren.length} hanging children were ACTUALLY terminated (no orphans left running)`,
+      spawnedChildren.length === ROUNDS && spawnedChildren.every((c) => c.exitCode !== null || c.signalCode !== null));
+
+    for (let i = 0; i < ROUNDS; i++) fs.rmSync(path.join(process.env.LOOM_HOME, `hang-target-${i}`), { recursive: true, force: true });
+  }
+
+  // (l3) killableRemoveDir on a target that's already gone → instant no-op success, no child spawned.
+  {
+    let spawnCalls = 0;
+    const shouldNeverSpawn = () => { spawnCalls++; return spawn(process.execPath, ["-e", ""]); };
+    const goneTarget = path.join(process.env.LOOM_HOME, `already-gone-${Date.now()}`);
+    const result = await killableRemoveDir(goneTarget, 5000, shouldNeverSpawn);
+    check("(l3) an already-absent target resolves removed:true without spawning a child", result.removed === true && result.killed === false && spawnCalls === 0);
   }
 
   // (m) findLandedSquashCommit — the deterministic trailer detector that REPLACES isBranchMerged under

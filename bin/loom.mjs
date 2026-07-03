@@ -23,6 +23,16 @@ import http from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { CHANNELS, isValidChannel, installSpecFor, readChannel, writeChannel } from "./update-config.mjs";
 
+// UV_THREADPOOL_SIZE (task dea6728e, defense-in-depth): the default libuv pool is only 4 threads, so a
+// small handful of wedged fs ops could starve fs/dns/crypto process-wide. `startDetached`/`loom service`
+// spawn a FRESH node process for the daemon, where setting this on that child's env reliably works.
+// `startForeground` instead runs the daemon IN-PROCESS (the OS-service path: `loom start --no-open`) via
+// a dynamic import — by the time that import runs, this process's own ESM module loading has likely
+// already touched the threadpool, so this assignment is BEST-EFFORT for that path only, never a
+// guarantee (libuv reads the env var once, lazily, on first threadpool use — there is no in-process way
+// to resize it after the fact). Never overrides an operator's own explicit setting.
+if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = "16";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkgRoot = path.resolve(here, ".."); // the installed `loom` package root (holds the umbrella package.json)
 const DEFAULT_PORT = 4317;

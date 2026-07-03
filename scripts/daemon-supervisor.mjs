@@ -72,7 +72,15 @@ for (;;) {
   // LOOM_DEV defaults ON here: `daemon:stable` is the SELF-HOSTING / dogfooding entry point (regular
   // loomctl users run the packaged bin/loom.mjs, never this), so the dev-only Platform layer should seed.
   // Defaulted (not hardcoded) so an explicit `LOOM_DEV=0 pnpm daemon:stable` can still test the non-dev path.
-  const runCode = sh("node dist/index.js", daemonDir, { LOOM_SUPERVISED: "1", LOOM_DEV: process.env.LOOM_DEV ?? "1" });
+  // UV_THREADPOOL_SIZE (task dea6728e, defense-in-depth): the default libuv pool is only 4 threads, so a
+  // small handful of wedged fs ops could still starve fs/dns/crypto process-wide even with removeWorktree's
+  // killable removal (which no longer uses the threadpool at all, but other daemon code still does).
+  // Widened here since this spawns a FRESH node process — set BEFORE the daemon starts, which is the only
+  // point a bump actually takes effect (libuv reads it once, lazily, on first threadpool use). Never
+  // overrides an operator's own explicit setting.
+  const runCode = sh("node dist/index.js", daemonDir, {
+    LOOM_SUPERVISED: "1", LOOM_DEV: process.env.LOOM_DEV ?? "1", UV_THREADPOOL_SIZE: process.env.UV_THREADPOOL_SIZE ?? "16",
+  });
   if (runCode === RESTART_EXIT_CODE) {
     console.log("[supervisor] daemon requested restart — rebuilding and relaunching…");
     continue;
