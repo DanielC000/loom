@@ -877,18 +877,19 @@ export class SessionService {
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd, // SAME cwd — Claude keys sessions to the project dir
-      // RESUME mode convergence (card f05e4897) — SUPERSEDES Fix A's blind startupModeCycles:0. A
-      // `claude --resume` HONOURS `--permission-mode acceptEdits` and boots at acceptEdits — the SAME
-      // gate-free mode a fresh spawn boots in (probe-verified on 2.1.163; it does NOT restore the
-      // persisted mode, the opposite of Fix A's premise). A fresh spawn then blind-cycles the config's
-      // `startupModeCycles` (2) Shift+Tabs to the target (auto). On the resume path a blind count is
-      // unreliable (the old blind-2 half-landed on plan on the summary-gate path — the 2026-06-03 strand
-      // bug; Fix A's blind-0 left it ONE short, stuck at acceptEdits). So resume converges ABSOLUTELY:
-      // pass the target mode and host.ts feedback-cycles the footer to it (bounded + graceful — worst
-      // case stays at today's acceptEdits). The target is wherever a FRESH spawn of THIS config lands
-      // (modeAfterCyclesFromAcceptEdits of the same startupModeCycles → auto by default), so a resumed
-      // session matches a fresh one exactly. startupModeCycles is moot on this path (the feedback cycler,
-      // not the blind count, moves the mode) — pin it 0 so the FRESH blind branch stays inert here.
+      // RESUME mode convergence (card f05e4897, generalized to fresh spawns too by b99d3d67) —
+      // SUPERSEDES Fix A's blind startupModeCycles:0. A `claude --resume` HONOURS `--permission-mode
+      // acceptEdits` and boots at acceptEdits — the SAME gate-free mode a fresh spawn boots in
+      // (probe-verified on 2.1.163; it does NOT restore the persisted mode, the opposite of Fix A's
+      // premise). Both a fresh spawn AND a resume now converge via the SAME feedback-verified cycler
+      // (cycleToMode in host.ts): read the footer and press Shift+Tab until it lands on the target,
+      // instead of a fixed blind press count (the old blind-2 half-landed on plan on the summary-gate
+      // path — the 2026-06-03 strand bug; Fix A's blind-0 left it ONE short, stuck at acceptEdits). Resume
+      // passes its target here EXPLICITLY via `resumeModeTarget` — wherever a FRESH spawn of THIS config
+      // lands (modeAfterCyclesFromAcceptEdits of the same startupModeCycles → auto by default), so a
+      // resumed session matches a fresh one exactly. `startupModeCycles` itself is moot on this path:
+      // host.ts prefers `resumeModeTarget` when set (`??`), so pin it 0 here defensively rather than
+      // relying on that precedence.
       permission: { ...resumePermission, startupModeCycles: 0 },
       resumeModeTarget: modeAfterCyclesFromAcceptEdits(config.permission.startupModeCycles ?? 0),
       geometry: config.pty,

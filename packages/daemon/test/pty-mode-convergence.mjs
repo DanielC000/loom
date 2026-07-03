@@ -14,8 +14,10 @@
 //   2. When a press doesn't register (the footer never advances past `plan`), the cycle gives up WITHOUT
 //      overshooting — but (per resume-mode-feedback.mjs's new "stuck at plan" case) that raw give-up CAN
 //      leave the session resting in `plan`, not `acceptEdits`. The role-gated auto-heal in logLandedMode
-//      then catches it for a Loom-driven role with ExitPlanMode disallowed (worker): one corrective
-//      Shift+Tab, fired exactly once.
+//      then catches it for a Loom-driven role with ExitPlanMode disallowed (worker): it now drives the
+//      correction through the SAME feedback-verified cycleToMode primitive (card 1658fc22) rather than a
+//      single blind press, fired at most once per session (see pty-mode-heal-retry.mjs for the case where
+//      the heal's own corrective press doesn't register on the first read).
 //   3. The auto-heal is role-scoped: a manager (ExitPlanMode NOT disallowed) resting in `plan` after the
 //      same stuck sequence is left alone — the backstop never fights a legitimate human-approved plan.
 //
@@ -115,7 +117,10 @@ try {
   await sleep(400); // > change-wait cap; the raw cycler has now finished (give-up), landed mode = plan
   check("2: the RAW cycler gave up WITHOUT a 3rd blind press (bounded, never infinite/overshooting)",
     countShiftTabs(fb) === 2);
-  await sleep(700); // MODE_LOG_POLL_MS(500) + slack for logLandedMode's read + the auto-heal write
+  // The heal now routes through cycleToMode (card 1658fc22), which adds its OWN MODE_CYCLE_SETTLE_MS
+  // (700ms, fixed) settle delay before its first read — on top of logLandedMode's MODE_LOG_POLL_MS(500)
+  // read delay — before the corrective press is issued.
+  await sleep(1500); // MODE_LOG_POLL_MS(500) + MODE_CYCLE_SETTLE_MS(700) + slack for both reads + the write
   check("2: AUTO-HEAL fired a 3rd Shift+Tab — a worker is NEVER left stranded in plan",
     countShiftTabs(fb) === 3);
   const healCountAtFirstRead = countShiftTabs(fb);

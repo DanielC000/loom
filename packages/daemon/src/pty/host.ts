@@ -2002,25 +2002,31 @@ export class PtyHost {
   }
 
   /**
-   * OBSERVABILITY + defense-in-depth plan auto-heal (card f05e4897 / b99d3d67) — record, to the daemon
-   * log, what permission mode a (re)spawned session actually LANDED in once it settled (mode-cycles/gate
-   * handling done + markReady), and — the auto-heal — if a Loom-DRIVEN role with `ExitPlanMode`
-   * disallowed (worker/setup/auditor/workspace-auditor — {@link disallowedToolsForRole}) is found resting
-   * in `plan`, press ONE Shift+Tab to correct it. `plan` is the one landed mode such a role can NEVER
-   * self-exit (its `ExitPlanMode` tool is structurally removed at spawn), so a session stranded there —
-   * by either cycleToMode's rare give-up-mid-cycle worst case, or anything else that ever leaves it in
-   * plan — would otherwise sit inert forever. This is a BACKSTOP, independent of cycleToMode's own
-   * convergence logic (which stays byte-identical for the resume caller — see cycleToMode's doc comment):
-   * it fires off the mode ACTUALLY read from the footer, regardless of why the session ended up there.
-   * A manager/platform session is structurally excluded (`disallowedToolsForRole` returns `[]` for those
+   * OBSERVABILITY + defense-in-depth plan auto-heal (card f05e4897 / b99d3d67 / 1658fc22) — record, to
+   * the daemon log, what permission mode a (re)spawned session actually LANDED in once it settled
+   * (mode-cycles/gate handling done + markReady), and — the auto-heal — if a Loom-DRIVEN role with
+   * `ExitPlanMode` disallowed (any role `disallowedToolsForRole` disallows it for — worker, setup,
+   * auditor, workspace-auditor, run, assistant) is found resting in `plan`, drive it off plan via the
+   * SAME feedback-verified `cycleToMode` primitive the main convergence path uses (target `auto`), not a
+   * single blind press. `plan` is the one landed mode such a role can NEVER self-exit (its `ExitPlanMode`
+   * tool is structurally removed at spawn), so a session stranded there — by either cycleToMode's rare
+   * give-up-mid-cycle worst case, or anything else that ever leaves it in plan — would otherwise sit
+   * inert forever. A single blind corrective press has the same drop risk as the failure it's healing
+   * (card 1658fc22): if IT also drops under load, the session stays stranded with no further retry.
+   * Routing through cycleToMode instead reads the footer and retries (bounded) until it's off plan or the
+   * pty dies, exactly like the main path — so a dropped press just costs one more poll, not a permanent
+   * strand. This is a BACKSTOP, independent of cycleToMode's own convergence logic invoked from the main
+   * SessionStart path (which stays unchanged for that caller — see cycleToMode's doc comment): it fires
+   * off the mode ACTUALLY read from the footer, regardless of why the session ended up there. A
+   * manager/platform session is structurally excluded (`disallowedToolsForRole` returns `[]` for those
    * roles), so this never fights a manager's legitimate, human-approved entry into plan mode.
    *
    * Best-effort + bounded: polls the ring (the existing rolling output buffer) a few times to let the
    * footer repaint into its final state, logs as soon as a mode is read (or gives up at the cap, logging
    * mode=unknown — no correction is attempted without a definite read), and corrects at most once per
-   * session (modeLogged guard, claimed up front). Shells are excluded. The corrective press itself is
-   * fire-and-forget (mirrors the existing single-shot Esc/arrow dismissals elsewhere in this file) — not
-   * re-verified, since this is already the last-resort backstop.
+   * session (modeLogged guard, claimed up front, so a repeat markReady never re-triggers the heal even
+   * mid-cycle). Shells are excluded. `cycleToMode` is itself bounded (see its doc comment), so the whole
+   * heal — this poll-for-a-read plus the cycle — stays comfortably under READY_FALLBACK_MS.
    */
   private logLandedMode(sessionId: string): void {
     const live = this.live.get(sessionId);
@@ -2046,8 +2052,8 @@ export class PtyHost {
       console.log(`[resume-mode] ${sessionId} kind=${isResume ? "resume" : "fresh"} mode=${mode} matched=${matchedToken ?? "-"} footer=${JSON.stringify(snippet)}`);
       if (mode === "plan" && l.alive && disallowedToolsForRole(role).includes("ExitPlanMode")) {
         // eslint-disable-next-line no-console
-        console.log(`[resume-mode] ${sessionId} auto-heal: role=${role ?? "-"} landed in plan (ExitPlanMode disallowed) — pressing Shift+Tab off plan`);
-        l.pty.write(SHIFT_TAB);
+        console.log(`[resume-mode] ${sessionId} auto-heal: role=${role ?? "-"} landed in plan (ExitPlanMode disallowed) — cycling off plan`);
+        this.cycleToMode(sessionId, "auto", () => {});
       }
     };
     setTimeout(tryRead, MODE_LOG_POLL_MS);
