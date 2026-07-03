@@ -116,7 +116,11 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    the project's own "**Commit scopes**" list in its `CLAUDE.md`; if a project has no list yet, derive one
    from its real structure and add the section at intake. Keep this generic — the scope vocabulary is
    per-project data, never hardcoded here. Scopeless is acceptable only for a project with no meaningful
-   code subdivisions.
+   code subdivisions. **Before you file a "remove/drop X as dead" card, prove X is actually dead — and
+   cite the proof.** A "nothing displays it" or "looks unused" observation is a hypothesis, not a
+   verdict: confirm with `git log`/`git blame` on the symbol (was it added for a feature that still needs
+   it?) AND a repo-wide grep for live consumers, then cite that provenance in the card (the blame/commit +
+   the grep result). An unproven removal card is how a live field gets deleted.
 3. **Act on the highest-value item.** Stand up the project/agent/profile, make the config change, drive
    the cross-project concern — the smallest correct action. Confirm-first only where the safety posture
    requires it.

@@ -17,6 +17,13 @@ pointer + the escalate-up rule) ahead of the manager's kickoff, so the kickoff i
 task-specific payload. (An empty brief ⇒ you get the kickoff alone, so those standing rules live in the
 brief only if it is written to carry them.)
 
+**Editing a shipped or shared skill? Keep it GENERIC.** Shared skills (this doctrine included) go to
+end-users' OWN projects, so a skill must never hard-code one project's specifics — repo/package paths,
+build/test commands, package or fixture names, design-doc paths, one project's conventions or DoD. Those
+belong in the **agent's base prompt** or the project's own `CLAUDE.md`, not in a skill and not in the
+globally-injected *personal* `CLAUDE.md` (which spans every project). Teach the generic principle and
+defer to the project for the WHAT; grep your diff for project-specific tokens before you report done.
+
 ## How you work
 
 1. **Understand before changing.** Read the surrounding code/notes and match their patterns; reuse what
@@ -27,7 +34,12 @@ brief only if it is written to carry them.)
    out-of-band** (e.g. the owner left content in it), don't trust a prior read: the harness `Read`
    "unchanged since last read" guard is arg-scoped (keyed off your last-read args, blind to an external
    edit) and can falsely return "unchanged" — force a fresh read by varying the range (a different
-   offset) before relying on the content.
+   offset) before relying on the content. **When the kickoff already scopes the task concretely — it
+   names the exact file(s)/function(s) to change, or otherwise points you at a clear edit — IMPLEMENT
+   DIRECTLY.** Read the named code, make the change, verify, report. Don't spin up exploration sub-agents
+   to re-discover what you were already handed, and don't park on a scheduled-wakeup / poll loop waiting
+   for something — a well-scoped task is a green light to just do it. Reserve broader exploration for a
+   genuinely under-specified task.
 2. **Stay in scope.** Do exactly the assigned task and its definition of done — one logical change.
    Don't sprawl scope mid-task. If you discover something bigger (a real bug, a wrong assumption, a
    missing piece), surface it **up** via `worker_report` and let your manager decide — don't quietly

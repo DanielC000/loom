@@ -14,6 +14,15 @@ backlog — lives in the project's **vault + board**, not in any prompt; you loa
 Your agent prompt only points you at those sources and names the stable specifics (the gate command,
 where your living resume doc lives).
 
+**Project-specifics live in the project's agent prompts + `CLAUDE.md`, never in a shipped or shared
+skill.** A skill (this one, `/worker`, `/web-design`, …) ships to end-users' OWN projects, so it must
+stay generic — it teaches the cross-project HOW and defers to the project for the WHAT. A project's
+conventions, its gate command, its definition of done, its repo/package paths and build commands: put
+those in the **agent's base prompt** (or the project's own `CLAUDE.md`), which is where you inject them
+into a worker. Don't bake them into a skill, and don't lean on the globally-injected *personal*
+`CLAUDE.md` to carry them either — that file spans every project, so a project-specific rule placed
+there leaks across all of them. Skill = generic HOW; prompt / project `CLAUDE.md` = the WHAT.
+
 ## Transport
 
 The `loom-orchestration` MCP surface — no human relay:
@@ -116,6 +125,14 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   Never poll the human for more work. Either verdict is only valid against a board you *just* re-read:
   before you park or report `done`, do a fresh `tasks_list` + inbox drain (see *Idle reporting*).
 
+**The litmus — menu vs. escalation.** Before you surface anything to the owner, ask one question:
+*"Can I resolve this myself and reverse it if I got it wrong?"* If **YES → just do it** (and fix it if
+it turns out wrong) — handing it back as a "shall I do A, B, or C?" menu is the forbidden move. Surface
+a decision to the owner **ONLY** when it genuinely needs their machine, credentials, or outward-facing
+identity, **or** is irreversible / destructive / spends money — the same boundary the system's own
+`blocked`-classifier draws. Everything reversible and inside your authority you decide and execute;
+a menu is only ever for the choice the owner alone can make.
+
 ## Idle reporting — say when you park, don't absorb nudges
 
 The daemon runs an idle watchdog over you. If you fall silent while idle with **no live workers**, it
@@ -158,6 +175,12 @@ fixing.)
 
 1. **Plan & triage.** Turn the backlog, features, and bugs into a sharp, scoped plan — derived from
    your living resume doc, the vault, and the repo. Push back on scope creep; protect the finish line.
+   - **Before filing a "remove/drop X as dead" card, prove X is actually dead — and cite the proof.** A
+     "nothing displays it" or "looks unused" observation is a hypothesis, not a verdict. Confirm with
+     `git log`/`git blame` on the symbol (was it added for a feature that still needs it?) AND a repo-wide
+     grep for live consumers before you board a removal. Then **cite that provenance in the card** (the
+     blame/commit + the grep result) so the worker — and you at the merge gate — can trust the card isn't
+     about to delete something load-bearing. An unproven removal card is how a live field gets deleted.
 2. **Decompose into delegable tasks**, each with an explicit **definition of done**. A task without a
    DoD/acceptance check can't be delegated — state what *proves* it works (your agent prompt names the
    project's gate command). One task = one focused, independently-mergeable change.
@@ -181,6 +204,13 @@ fixing.)
    task-specific payload: context + the task + its DoD. You don't restate `/worker`, where `CLAUDE.md`
    lives, or the escalate-up rule (provided the agent's brief actually carries them — a too-thin worker
    brief is worth fixing).
+   - **Inline the full spec; cite a foreign card id as provenance only, never as a fetch instruction.**
+     Put everything the worker needs IN the kickoff. If the task originated from a card on a *different*
+     board (a cross-project/tracker card the worker's own board doesn't hold), do NOT tell the worker to
+     look that id up with its task tool — a worker's task tool is scoped to its OWN project board and
+     can't reach another board's card, so the lookup just dead-ends and strands the worker. Cite such an
+     id as **provenance** ("originally filed as X — for your reference only") for the human's trace, and
+     inline the actual content the worker must act on.
 4. **Resolve forks decisively.** When a worker reports a decision up, make the call *with* reasoning —
    recommend, don't hand back a menu; name what you rejected and why. If genuinely uncertain, propose
    how to de-risk (a spike, a check) instead of guessing.
@@ -237,9 +267,19 @@ fixing.)
    startup line, never assume a default. Hold both when you review a browser-capable worker's
    "verified live."
 
-   To eyeball a **static on-disk HTML artifact** (no dev server), don't navigate `file://` — Playwright
-   blocks it — and don't hand-roll a web server per render cycle. Serve its directory over loopback with
-   the bundled helper and open the printed URL: `node .claude/skills/orchestrate/scripts/serve-static.mjs <dir>`.
+   To eyeball a **static on-disk HTML artifact** (no dev server) — or when the deliverable *itself* is a
+   static artifact a worker is building (a CV, a report, a static site) — don't navigate `file://`
+   (Playwright blocks it) and don't hand-roll a `python -m http.server` per render cycle. Serve its
+   directory over loopback with the **bundled** helper and open the printed URL:
+   `node .claude/skills/orchestrate/scripts/serve-static.mjs <dir>`. It's dependency-free and already
+   ships in this skill's `scripts/` dir — point a worker producing such an artifact at it rather than
+   letting them reinvent an ephemeral server.
+
+   To turn that same HTML into a **PDF** deliverable, print it headlessly — no external converter. Drive
+   Playwright's Chromium to the served loopback URL and call `page.pdf`:
+   `await page.pdf({ path: 'out.pdf', format: 'A4', printBackground: true })` (`page.pdf` is
+   Chromium-headless-only; `printBackground` keeps CSS backgrounds/colors). Serve → navigate → `page.pdf`
+   gives a clean PDF from the exact HTML you eyeball.
 
    To keep a screenshot **as a file** (to attach or diff), don't rely on claude-in-chrome `save_to_disk` —
    it renders the inline base64 but writes no reachable file (Claude Code issue #40141). Use Playwright
