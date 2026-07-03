@@ -16,10 +16,12 @@ import { archivedOnlyProjects, ARCHIVED_ONLY_CAP } from "../src/lib/fleet.ts";
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
 
-// Minimal archived-session factory — only the fields archivedOnlyProjects reads (projectName + lastActivity).
+// Minimal archived-session factory — only the fields archivedOnlyProjects reads (projectName + projectId +
+// lastActivity). projectId defaults to the name (the reserved-exclusion join key; the existing name-only
+// cases pass an empty reserved set, so this default keeps them byte-for-byte unchanged).
 let seq = 0;
-const sess = (projectName, lastActivity = "2026-01-01T00:00:00.000Z") =>
-  ({ id: `sess-${++seq}`, projectName, lastActivity, role: "worker", processState: "exited" });
+const sess = (projectName, lastActivity = "2026-01-01T00:00:00.000Z", projectId = projectName) =>
+  ({ id: `sess-${++seq}`, projectId, projectName, lastActivity, role: "worker", processState: "exited" });
 
 // ── Derivation: only-archived → surfaced; has-any-live → excluded ─────────────────────────────────────
 
@@ -44,6 +46,40 @@ check("a project with ANY live session is EXCLUDED — it stays in the live grid
 check("an empty archive yields no archived-only projects", () => {
   assert.deepEqual(archivedOnlyProjects(["Loom"], []), []);
   assert.deepEqual(archivedOnlyProjects([], []), []);
+});
+
+// ── Reserved/system homes are excluded from the inactive set ──────────────────────────────────────────
+// The reserved "Loom Platform" / "Platform" homes appear in the archive with zero live sessions, so they'd
+// leak into MC's inactive strip. They're hidden from every other project surface (picker, header selector),
+// so they must never read as an "inactive" project either. archivedOnlyProjects excludes them by projectId
+// (the archived-session wire shape carries NO structural `reserved` flag — that lives on Project, not
+// Session — so the caller passes the reserved-home ids it discovers via platformHome/setupHome).
+
+check("reserved/system homes (by project id) are excluded from the inactive set", () => {
+  const archived = [
+    sess("FireStudio", "2026-06-01T00:00:00.000Z", "proj-fire"),      // ordinary → inactive card
+    sess("Loom Platform", "2026-06-02T00:00:00.000Z", "proj-platform"), // reserved dev home → excluded
+    sess("Platform", "2026-06-03T00:00:00.000Z", "proj-setup"),         // reserved shipping home → excluded
+  ];
+  const reserved = new Set(["proj-platform", "proj-setup"]);
+  const names = archivedOnlyProjects([], archived, reserved).map((p) => p.name);
+  assert.deepEqual(names, ["FireStudio"], "only the ordinary archived-only project survives; both reserved homes are filtered");
+});
+
+check("a reserved home with MULTIPLE archived sessions is still fully excluded", () => {
+  const archived = [
+    sess("Loom Platform", "2026-06-01T00:00:00.000Z", "proj-platform"),
+    sess("Loom Platform", "2026-06-02T00:00:00.000Z", "proj-platform"),
+    sess("RealProject", "2026-05-01T00:00:00.000Z", "proj-real"),
+  ];
+  const result = archivedOnlyProjects([], archived, new Set(["proj-platform"]));
+  assert.deepEqual(result.map((p) => p.name), ["RealProject"], "no reserved-home card even with several exited sessions");
+});
+
+check("no reserved ids ⇒ nothing is filtered (backward compatible, default arg)", () => {
+  const archived = [sess("A", "2026-01-01T00:00:00.000Z", "a"), sess("B", "2026-01-02T00:00:00.000Z", "b")];
+  assert.equal(archivedOnlyProjects([], archived).length, 2, "omitted reservedProjectIds behaves as before");
+  assert.equal(archivedOnlyProjects([], archived, new Set()).length, 2, "an empty reserved set filters nothing");
 });
 
 // ── Ordering: freshest finished wave first ────────────────────────────────────────────────────────────

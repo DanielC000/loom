@@ -45,6 +45,13 @@ export default function MissionControl() {
   // restore history access to Run Replay (a god-eye view of LIVE orchestration otherwise loses every
   // finished wave). Polled lazily (15s) — archived rows don't change second-to-second.
   const archived = useQuery({ queryKey: ["allArchivedSessions"], queryFn: api.allArchivedSessions, refetchInterval: 15000 });
+  // The reserved/system homes (the dev "Loom Platform" home + the shipping "Platform" home) — discovered
+  // read-only, exactly as the Platform pages do (retry:false, since platformHome 404s in the shipping
+  // edition and setupHome may 404 before the home seeds). Their project ids exclude the reserved homes from
+  // the INACTIVE strip below: they sit in the archive with zero live sessions, but they're hidden from every
+  // ordinary project surface and must not leak in here either. Shared query keys ⇒ cache reuse, no extra poll.
+  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
+  const setupHome = useQuery({ queryKey: ["setupHome"], queryFn: api.setupHome, retry: false });
   const { items: attention } = useAttention();
 
   const all = sessions.data ?? [];
@@ -81,12 +88,14 @@ export default function MissionControl() {
   const projectNames = [...sessionsByProject.keys()]
     .sort((a, b) => mostRecentActivity(sessionsByProject.get(b)!) - mostRecentActivity(sessionsByProject.get(a)!));
 
-  // Fully-archived projects — those present ONLY in the archived set (all their sessions have exited, so
-  // they're absent from the live `projectNames` above). MC builds its fleet from the RUNNING set, so these
-  // finished waves would otherwise drop off the god-eye entirely. Derived O(n) (a live-name Set + one pass
-  // over the archive; see lib/fleet.ts) and rendered as MUTED cards BELOW the live fleet, so live projects
-  // always rank first and archived history can never crowd the active fleet.
-  const archivedOnly = archivedOnlyProjects(projectNames, archived.data ?? []);
+  // Inactive projects — those present ONLY in the archived set (all their sessions have exited, so they're
+  // absent from the live `projectNames` above). MC builds its fleet from the RUNNING set, so these finished
+  // waves would otherwise drop off the god-eye entirely. Derived O(n) (a live-name Set + one pass over the
+  // archive; see lib/fleet.ts) and rendered as MUTED cards BELOW the live fleet, so live projects always
+  // rank first and inactive history can never crowd the active fleet. The reserved-home ids are passed to
+  // exclude the "Loom Platform" / "Platform" system homes (hidden everywhere else — never an "inactive" card).
+  const reservedProjectIds = [platformHome.data?.project?.id, setupHome.data?.project?.id].filter(Boolean) as string[];
+  const archivedOnly = archivedOnlyProjects(projectNames, archived.data ?? [], reservedProjectIds);
 
   // Per-project Fleet card mode: small fixed-size summary by default; a card expands to the full
   // managers→workers view. State holds the EXPANDED project names (empty = all small). Persisted to
@@ -224,10 +233,10 @@ export default function MissionControl() {
             })}
           </div>
 
-          {/* Fully-archived projects — finished waves with zero live sessions, kept glanceable as MUTED
-              cards. Rendered AFTER the live grid (live always ranks first) and collapsed behind a small
-              affordance + capped, so they never crowd the active fleet. */}
-          <ArchivedOnlyFleet projects={archivedOnly} />
+          {/* Inactive projects — finished waves with zero live sessions, kept glanceable as MUTED cards.
+              Rendered AFTER the live grid (live always ranks first) and collapsed behind a small affordance
+              + capped, so they never crowd the active fleet. */}
+          <InactiveFleet projects={archivedOnly} />
         </div>
 
         <div>
@@ -247,13 +256,15 @@ export default function MissionControl() {
   );
 }
 
-// Fully-archived projects strip — the finished-wave tier of the fleet. Every project here has zero live
-// sessions (present only in the archive), so MC's running-derived fleet would drop it entirely; we surface
-// each as a MUTED FleetCard so past waves stay glanceable. Kept OUT of the way per the owner's constraint:
-// collapsed behind a "N archived project(s)" affordance (closed by default) AND, once open, capped at
-// ARCHIVED_ONLY_CAP cards (the affordance still reports the true total) so archived history can never crowd
+// Inactive-projects strip — the finished-wave tier of the fleet. Every project here has zero live sessions
+// (present only in the archive), so MC's running-derived fleet would drop it entirely; we surface each as a
+// MUTED FleetCard so past waves stay glanceable. The user calls these "inactive" (owner's wording) — NOT
+// "archived": that word is reserved for the separate, reversible soft-archive "Archived" section on the
+// Workspace page, a genuinely different project state. Kept OUT of the way per the owner's constraint:
+// collapsed behind a "N inactive project(s)" affordance (closed by default) AND, once open, capped at
+// ARCHIVED_ONLY_CAP cards (the affordance still reports the true total) so inactive history can never crowd
 // the active fleet above it.
-function ArchivedOnlyFleet({ projects }: { projects: ArchivedOnlyProject[] }) {
+function InactiveFleet({ projects }: { projects: ArchivedOnlyProject[] }) {
   const [open, setOpen] = useState(false);
   if (projects.length === 0) return null;
   const shown = projects.slice(0, ARCHIVED_ONLY_CAP);
@@ -262,9 +273,9 @@ function ArchivedOnlyFleet({ projects }: { projects: ArchivedOnlyProject[] }) {
     <div style={{ marginTop: 12 }}>
       <Button variant="ghost" onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        title={open ? "Hide fully-archived projects" : "Show fully-archived projects"}
+        title={open ? "Hide inactive projects" : "Show inactive projects"}
         style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, padding: "2px 6px" }}>
-        {open ? "▾" : "▸"} {projects.length} archived project{projects.length === 1 ? "" : "s"}
+        {open ? "▾" : "▸"} {projects.length} inactive project{projects.length === 1 ? "" : "s"}
       </Button>
       {open && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, alignItems: "start", marginTop: 8 }}>
@@ -274,7 +285,7 @@ function ArchivedOnlyFleet({ projects }: { projects: ArchivedOnlyProject[] }) {
           ))}
           {overflow > 0 && (
             <span style={{ alignSelf: "center", fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
-              +{overflow} more archived
+              +{overflow} more inactive
             </span>
           )}
         </div>
