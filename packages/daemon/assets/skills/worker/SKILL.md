@@ -53,7 +53,10 @@ brief only if it is written to carry them.)
    point Playwright at the dev server's **actual bound URL** — read the port from the framework's startup
    line (e.g. vite's `Local: http://…:PORT`); never assume a default port. If that port is already held
    by another process, the dev server binds a different one or fails — verifying the default would
-   silently drive the wrong, *stale* server and report a false pass.
+   silently drive the wrong, *stale* server and report a false pass. And a **new or changed user-facing
+   web feature** ships with (or updates) a Playwright e2e spec on the `loomDaemon` harness fixture
+   (`packages/web/e2e/`) — run `pnpm --filter @loom/web test:e2e` green as part of the DoD (see
+   `Projects/Loom/Design/E2E Test Suite Design.md`).
 5. **Hold the line on honesty.** "Done" means done and verified — report what passed, what you skipped,
    and any known limitation rather than papering over it. Keep any docs you touch accurate: rewrite
    stale claims in place, no "UPDATE:" appends.
