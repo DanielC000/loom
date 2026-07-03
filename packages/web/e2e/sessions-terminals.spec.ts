@@ -38,7 +38,10 @@ test.beforeEach(async ({ page }) => {
 
 // The e2e worker daemon is SHARED across spec files, so archive every seeded live session after each test —
 // a lingering `live` row would pollute a later spec's global "no live sessions" empty-state (usage.spec).
+// Also hard-kill any real shell a test spawned (the live-ShellTile case) so it can't leak a host pty into a
+// sibling spec's Shells lane.
 test.afterEach(async ({ loomDaemon }) => {
+  await loomDaemon.killSpawnedShells();
   await loomDaemon.archiveSeededSessions();
 });
 
@@ -238,20 +241,74 @@ test.describe("SessionCockpit (Overview fleet expand)", () => {
   });
 });
 
-// ── ShellTile — NOT hermetically seedable, documented. A raw shell is an ephemeral PtyHost process (not a
-// DB Session row), so the ONLY way to make one render is POST /api/terminals, which spawns a real host
-// shell and logs `[pty] spawnShell …` — a substring the fixture's `/[pty] spawn/` no-spawn guard flags,
-// failing the whole worker at teardown. So a live ShellTile can't be exercised in this hermetic fixture;
-// its unified chrome (resizable pane + hard Kill + Maximize + NO composer) rides the SAME <TerminalCard>
-// base the other variants DO exercise here. We still assert the Shells LANE + its "+ Shell" control render
-// (the empty-state chrome), so the page section itself is covered. ────────────────────────────────────
+// ── ShellTile — the raw-shell <TerminalCard> variant. A raw shell is an ephemeral PtyHost process (NOT a
+// DB Session row), so unlike every other variant here it can't ride /internal/test/seed — the ONLY way to
+// make one render is a REAL `POST /api/terminals`, which spawns a local host shell and logs
+// `[pty] spawnShell …`. That USED to trip the fixture's no-spawn guard (an over-broad `/[pty] spawn/`
+// substring-matched `spawnShell`), which is why this was previously empty-state-only. The guard is now
+// narrowed to `/[pty] spawn\b/` (fixtures/daemon.ts): a benign LOCAL, UNMETERED shell is let through while a
+// real claude `[pty] spawn …` is STILL caught (regression-proofed in no-spawn-guard.spec.ts). So we now
+// exercise the LIVE ShellTile chrome directly: resizable pane, two-step Kill confirm, Maximize, and NO
+// composer — plus the empty-state lane chrome. ────────────────────────────────────────────────────────
 test.describe("ShellTile (shells lane)", () => {
-  test("the Shells lane and its spawn control render (live shell not hermetically seedable — see note)", async ({ page, loomDaemon }) => {
+  test("the Shells lane and its spawn control render (empty-state chrome)", async ({ page, loomDaemon }) => {
     await page.goto(`${loomDaemon.baseURL}/terminals`);
     // The Shells lane's spawn control renders (the "Shells" label is a mixed text+count+button node, so the
     // "+ Shell" button is the clean lane witness).
     await expect(page.getByRole("button", { name: "+ Shell" })).toBeVisible();
-    // No real shell is spawned (that would trip the no-spawn guard), so the empty-state copy stands.
+    // The Shells lane is GLOBAL (unlike the sessions grid below, it has no project filter), so its empty
+    // state holds whenever no shell is alive. Tests run serially (workers:1) and the afterEach hard-kills
+    // any spawned shell, and no OTHER spec spawns shells — so no shell is alive here and the copy stands.
+    await expect(page.getByText(/No shells\. Open one in a project's repo/)).toBeVisible();
+  });
+
+  test("a LIVE shell renders the ShellTile chrome and its controls actually work", async ({ page, loomDaemon }) => {
+    // Spawn ONE real host shell (default shell ⇒ cross-platform). afterEach hard-kills any survivor.
+    const shell = await loomDaemon.spawnShell();
+    await page.goto(`${loomDaemon.baseURL}/terminals`);
+
+    // The Shells lane is GLOBAL (no project filter — the page's project dropdown scopes only the Claude
+    // sessions grid, and this shell's project has no live SESSION so it wouldn't even be an option there).
+    // Serial tests + afterEach kill mean this is the ONLY live shell, so the tile is unambiguous.
+    const shortShell = shell.id.slice(0, 8);
+    // The tile's title: a "shell" pill + the shell's own `<label> · <short-id>` (label = "<project> · shell").
+    await expect(page.getByText(new RegExp(`${shell.projectName} · shell · ${shortShell}`))).toBeVisible();
+    // The empty-state copy is gone now that a shell is live.
+    await expect(page.getByText(/No shells\. Open one in a project's repo/)).toHaveCount(0);
+
+    // A ShellTile withholds the turn Composer (it's not a turn-based DB Session) — assert NO "Send turn".
+    await expect(page.getByRole("button", { name: "Send turn" })).toHaveCount(0);
+    // …and it has no graceful "Stop" (a shell has a hard Kill instead) nor Fork (no conversation to branch).
+    await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Fork" })).toHaveCount(0);
+
+    // EXERCISE #1 — two-step Kill confirm: clicking Kill swaps the button for a "kill shell?" confirm cluster
+    // (Confirm + Cancel), and Cancel reverts it — an observable before/after WITHOUT killing the shell.
+    await expect(page.getByRole("button", { name: "Kill" })).toBeVisible();
+    await page.getByRole("button", { name: "Kill" }).click();
+    await expect(page.getByText("kill shell?")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Confirm" })).toBeVisible();
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect(page.getByText("kill shell?")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Kill" })).toBeVisible(); // reverted to the armed button
+
+    // EXERCISE #2 — Maximize: the base's ⤢ swaps the tile for the full-viewport overlay (Restore appears),
+    // Esc restores it (a clean, reversible before/after — the shell keeps running through it).
+    await page.getByTitle("Maximize terminal").click();
+    await expect(page.getByTitle("Restore terminal (Esc)")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTitle("Restore terminal (Esc)")).toHaveCount(0);
+    await expect(page.getByTitle("Maximize terminal")).toBeVisible();
+
+    // EXERCISE #3 — the live resizable pane mounts an xterm (the resizable shell body, not an empty-state).
+    // The .xterm root is the observable witness that a LIVE pane rendered (vs. the seed-less empty lane).
+    await expect(page.locator(".xterm").first()).toBeVisible();
+
+    // EXERCISE #4 — actually Kill it: Kill → Confirm removes the tile (the lane returns to empty-state for
+    // this project), proving the confirm path drives the real DELETE /api/terminals lifecycle.
+    await page.getByRole("button", { name: "Kill" }).click();
+    await page.getByRole("button", { name: "Confirm" }).click();
+    await expect(page.getByText(new RegExp(`shell · ${shortShell}`))).toHaveCount(0);
     await expect(page.getByText(/No shells\. Open one in a project's repo/)).toBeVisible();
   });
 });

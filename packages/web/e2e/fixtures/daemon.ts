@@ -43,12 +43,21 @@ const SHUTDOWN_TIMEOUT_MS = 8_000;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-const FORBIDDEN_LOG_PATTERNS: RegExp[] = [
-  /\[pty\] spawn/,
+// The no-spawn guard: patterns that, if seen in the daemon's boot/session log, mean a REAL (metered)
+// claude may have spawned — the wipe-prod class of accident this hermetic fixture exists to prevent.
+// NOTE the WORD BOUNDARY on the first pattern (`spawn\b`, not a bare `spawn`): a real claude spawn logs
+// `[pty] spawn <sessionId> …` (pty/host.ts) — "spawn" followed by a space. A benign LOCAL host shell
+// (`POST /api/terminals`) logs `[pty] spawnShell <id> …` — "spawn" followed by "Shell", NO boundary — and
+// is UNMETERED + local, so it must NOT trip the guard (it's exercised as a live ShellTile in
+// sessions-terminals.spec.ts). `spawn\b` matches `spawn ` (→ boundary) but never `spawnShell` (n→S, no
+// boundary), so a real claude spawn is STILL caught by construction while `spawnShell` is let through.
+// This narrowing is regression-proofed by no-spawn-guard.spec.ts — do not widen it back to a bare `spawn`.
+export const FORBIDDEN_LOG_PATTERNS: RegExp[] = [
+  /\[pty\] spawn\b/,
   /first-run: auto-launched/,
 ];
 
-function assertNoRealClaudeSpawn(log: string, when: string): void {
+export function assertNoRealClaudeSpawn(log: string, when: string): void {
   for (const pattern of FORBIDDEN_LOG_PATTERNS) {
     if (pattern.test(log)) {
       throw new Error(
@@ -200,6 +209,28 @@ export interface LoomDaemon {
     task?: { title?: string; body?: string; columnKey?: string; priority?: "p0" | "p1" | "p2" | "p3" };
     wake?: { note?: string };
   }) => Promise<SeededLiveSession>;
+  /**
+   * Spawn ONE real, LIVE host shell via `POST /api/terminals` (card ShellTile-e2e) — the ONLY way to make a
+   * live ShellTile render, since a raw shell is an ephemeral PtyHost process, not a DB Session row (so it can
+   * NOT be seeded through /internal/test/seed like a live session). This logs `[pty] spawnShell …`, which the
+   * narrowed no-spawn guard (`/\[pty\] spawn\b/`) DELIBERATELY lets through — a local host shell is unmetered
+   * and benign, unlike a real claude `[pty] spawn …`. With no `command`, the daemon uses its detected default
+   * shell (pwsh/cmd on win32, `$SHELL`/bash on POSIX), so this stays cross-platform. Tracks the id for
+   * {@link LoomDaemon.killSpawnedShells}. Returns the spawned shell's id + the owning project (for filtering
+   * the /terminals grid to this test's shell on the shared worker daemon).
+   */
+  spawnShell: (opts?: { project?: SeededProject; command?: string; label?: string }) => Promise<{
+    id: string;
+    project: SeededProject;
+    projectName: string;
+    label: string;
+  }>;
+  /**
+   * Hard-kill (`DELETE /api/terminals/:id`) every shell spawned by {@link LoomDaemon.spawnShell} so far. Call
+   * in an afterEach: a leaked live shell would keep a real host pty alive and pollute a sibling spec's Shells
+   * lane. Idempotent (an already-gone id is a no-op on the daemon side).
+   */
+  killSpawnedShells: () => Promise<void>;
   /**
    * Archive every session seeded by {@link LoomDaemon.seedLiveSession} OR {@link LoomDaemon.seedCompanion} so
    * far (sets archived_at via the test-only seed endpoint), removing them from the session rail. Call in an
@@ -365,7 +396,29 @@ export const test = base.extend<{ loomPage: Page }, { loomDaemon: LoomDaemon }>(
       await apiPost(baseURL, "/internal/test/seed", { archiveSessions: ids });
     };
 
-    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedLiveSession, archiveSeededSessions });
+    // Track every real shell spawned via POST /api/terminals so killSpawnedShells can tear them down.
+    const spawnedShellIds: string[] = [];
+
+    const spawnShell: LoomDaemon["spawnShell"] = async (opts = {}) => {
+      const project = opts.project ?? await createProject(`shell-${randomUUID().slice(0, 8)}`);
+      const term = await apiPost<{ id: string; label: string }>(baseURL, "/api/terminals", {
+        projectId: project.id,
+        command: opts.command, // undefined ⇒ the daemon's detected default shell (cross-platform)
+        label: opts.label,
+      });
+      spawnedShellIds.push(term.id);
+      return { id: term.id, project, projectName: project.name, label: term.label };
+    };
+
+    const killSpawnedShells: LoomDaemon["killSpawnedShells"] = async () => {
+      if (spawnedShellIds.length === 0) return;
+      const ids = spawnedShellIds.splice(0); // clear as we kill — DELETE is idempotent for an already-gone id
+      for (const id of ids) {
+        try { await fetch(`${baseURL}/api/terminals/${id}`, { method: "DELETE" }); } catch { /* best-effort */ }
+      }
+    };
+
+    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedLiveSession, spawnShell, killSpawnedShells, archiveSeededSessions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.
