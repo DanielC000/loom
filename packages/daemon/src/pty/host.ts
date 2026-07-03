@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
+import { spawn as spawnProcess } from "node:child_process";
 import { spawn, type IPty } from "node-pty";
 import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
@@ -1043,6 +1044,72 @@ export function detectDefaultShell(): string {
 }
 
 /**
+ * Best-effort reap of any descendant process a torn-down pty's root process leaves behind — the backstop
+ * for a child that ESCAPES node-pty's own orphan-free containment (Job Object on Windows / process-group
+ * kill on POSIX) by detaching into its own process group/session — e.g. a `pnpm dev` vite dev-server the
+ * agent backgrounds via its own Bash tool while verifying UI work (Web-Designer/QA workers), which then
+ * outlives the session and walks the port range (board card 621ef252 — six stale vite servers observed).
+ *
+ * Called from the pty's `onExit` — the ONE chokepoint every exit path shares (a graceful/hard stop, a
+ * recycle's predecessor stop, or an unexpected crash) — so it's DURABLE: it runs even when the root
+ * process died without going through PtyHost.stop() at all.
+ *
+ * By the time this runs the root process is ALREADY DEAD (onExit only fires after exit), which rules out
+ * `taskkill /T` on Windows — verified empirically that it refuses to walk the descendant tree once the
+ * given PID is no longer a running process (it just errors "process not found" and stops). What DOES
+ * still work: a process's `ParentProcessId` is stamped at CREATION and stays queryable via WMI/CIM long
+ * after the parent has exited (verified). So we enumerate the FULL process list ourselves — Windows via
+ * `Get-CimInstance Win32_Process` (CIM, not the deprecated `wmic`), POSIX via `ps -eo pid,ppid` — walk the
+ * descendant tree from `rootPid` in-process, and force-kill each survivor directly (each already confirmed
+ * a live pid by appearing in the snapshot, so a plain `process.kill` suffices — no further tree tool needed).
+ *
+ * Fire-and-forget: spawns a helper process asynchronously and never throws or blocks the caller. A missing
+ * OS tool, an empty process list, or a pid already gone is a silent no-op. Narrow accepted race: OS PID
+ * reuse could in principle attribute an unrelated process's children to a long-dead `rootPid` — the same
+ * class of risk already accepted elsewhere in Loom for pid-keyed process tracking. That SAME reuse race
+ * can also fabricate a parent-map CYCLE (e.g. `A.ppid=B` and `B.ppid=A`) — impossible in a real process
+ * tree but reachable via a reused pid — so the walk below tracks `seen` pids and never revisits one; without
+ * it a cycle would spin the `while (stack.length)` loop forever and freeze the daemon's event loop (`sweep`
+ * runs synchronously in-process on `cmd`'s `close` event, not in the spawned helper).
+ */
+export function reapOrphanedDescendants(rootPid: number): void {
+  const sweep = (out: string): void => {
+    const byParent = new Map<number, number[]>();
+    for (const line of out.split("\n")) {
+      const m = line.trim().match(/^(\d+)[,\s]+(\d+)$/);
+      if (!m) continue;
+      const pid = Number(m[1]);
+      const ppid = Number(m[2]);
+      if (pid === ppid) continue; // guard a malformed/self-referential row
+      let list = byParent.get(ppid);
+      if (!list) { list = []; byParent.set(ppid, list); }
+      list.push(pid);
+    }
+    const seen = new Set<number>();
+    const stack = [rootPid];
+    while (stack.length) {
+      const p = stack.pop()!;
+      if (seen.has(p)) continue; // bounds the walk to each pid at most once — breaks any parent-map cycle
+      seen.add(p);
+      for (const child of byParent.get(p) ?? []) {
+        try { process.kill(child, "SIGKILL"); } catch { /* already gone */ }
+        stack.push(child);
+      }
+    }
+  };
+  const cmd = process.platform === "win32"
+    ? spawnProcess("powershell.exe", [
+        "-NoProfile", "-NonInteractive", "-Command",
+        "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId)\" }",
+      ], { stdio: ["ignore", "pipe", "ignore"] })
+    : spawnProcess("ps", ["-eo", "pid,ppid"], { stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  cmd.stdout?.on("data", (d) => { out += d; });
+  cmd.on("error", () => { /* helper unavailable — best-effort, never throws */ });
+  cmd.on("close", () => sweep(out));
+}
+
+/**
  * Owns all interactive `claude` ptys. Independent of any browser — sessions live here.
  * Implements the spike-validated gate-free spawn recipe (acceptEdits + allowlist,
  * --strict-mcp-config WITH an explicit --mcp-config so the .mcp.json prompt never blocks,
@@ -1154,6 +1221,10 @@ export class PtyHost {
       // live entry survives in the map with alive=false, and getPending reads live.pending). Covers
       // EVERY exit path — a Stop-initiated stop, a crash, a clean session end — not just stopWorker.
       live.pending.length = 0;
+      // Reap any descendant (e.g. a backgrounded `pnpm dev`) that escaped node-pty's own orphan-free
+      // containment — the durable backstop for board card 621ef252. Fires on EVERY exit path, including
+      // an unexpected crash that never went through stop().
+      reapOrphanedDescendants(live.pid);
       // eslint-disable-next-line no-console
       console.log(`[pty] exit ${opts.sessionId} code=${exitCode} intended=${live.stopping}`);
       try { live.logStream.end(); } catch { /* ignore */ }
