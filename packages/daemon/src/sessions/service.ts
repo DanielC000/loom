@@ -13,7 +13,6 @@ import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
-import { WorktreeGc } from "../git/worktree-gc.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { readRunUsage, readRunUsageFromFile } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
@@ -311,14 +310,6 @@ export class SessionService {
    * + process-local; the durable delivered marker remains the cross-restart idempotency guard.
    */
   private readonly redriveInFlightMsgIds = new Set<string>();
-  /**
-   * Board card bd9fc808 — the in-session background retry queue for a worktree removal that
-   * removeWorktree's filesystem backstop swallowed (left on disk for a stuck Windows directory handle).
-   * `finalizeMerge` and boot-reconcile Pass B both enqueue into this on a swallow, instead of leaving
-   * the dir to accumulate until the next boot's reconcile. One instance for the service's lifetime;
-   * self-arms its sweep timer on first enqueue and disarms once the queue drains. See worktree-gc.ts.
-   */
-  private readonly worktreeGc: WorktreeGc;
   constructor(
     private db: Db, private pty: PtyHost, private control: OrchestrationControl,
     opts?: { gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number; runTimeoutMs?: number },
@@ -328,7 +319,6 @@ export class SessionService {
     this.runWebhookPost = opts?.runWebhookPost ?? defaultRunWebhookPost;
     this.runWebhookTimeoutMs = opts?.runWebhookTimeoutMs ?? RUN_WEBHOOK_TIMEOUT_MS;
     this.runTimeoutMs = opts?.runTimeoutMs ?? RUN_TIMEOUT_MS;
-    this.worktreeGc = new WorktreeGc({ timeoutMs: this.gitOpMs });
   }
 
   /**
@@ -4020,21 +4010,11 @@ export class SessionService {
     // Sessions has already marked prior-run ptys exited, so the task has no live siblings).
     await this.retireSiblingSessionsForTask(args.taskId, args.workerSessionId);
     try {
-      const removed = await removeWorktree(args.repoPath, args.worktreePath, { timeoutMs: this.gitOpMs });
-      if (!removed) {
-        // Handle-lag swallow (see removeWorktree's docstring) — queue it for an in-session background
-        // retry (bd9fc808) instead of leaving it to accumulate until the next boot's Pass B.
-        // eslint-disable-next-line no-console
-        console.warn(`[finalizeMerge] worktree ${args.worktreePath} left on disk (dir busy?); merge already landed — finishing bookkeeping, queuing an in-session background retry.`);
-        this.worktreeGc.enqueue(args.repoPath, args.worktreePath);
-      }
+      await removeWorktree(args.repoPath, args.worktreePath, { timeoutMs: this.gitOpMs });
     } catch (e) {
-      // removeWorktree itself never throws (fully best-effort internally) — this guards belt-and-suspenders
-      // against an unexpected throw so it can never abort the rest of finalizeMerge's bookkeeping.
       // eslint-disable-next-line no-console
       console.warn(`[finalizeMerge] could not remove worktree ${args.worktreePath} (dir busy?); ` +
-        `merge already landed — finishing bookkeeping, queuing an in-session background retry: ${(e as Error).message}`);
-      this.worktreeGc.enqueue(args.repoPath, args.worktreePath);
+        `merge already landed — finishing bookkeeping, boot-reconcile Pass B will GC the dir: ${(e as Error).message}`);
     }
     // Terminal bookkeeping BEFORE the destructive deleteBranch (see the ORDER IS CRASH-CRITICAL note).
     // Land the task in the `terminal` lane (role-resolved off its project, last-column fallback) — not the
@@ -4050,21 +4030,6 @@ export class SessionService {
       taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch },
     });
     await deleteBranch(args.repoPath, args.branch, { timeoutMs: this.gitOpMs });
-  }
-
-  /**
-   * Shared by boot-reconcile Pass B's two removal sites (bd9fc808): best-effort remove `worktreePath`,
-   * and if `removeWorktree` swallowed a stuck handle and left it on disk, hand it to {@link worktreeGc}
-   * for an in-session background retry instead of leaving it to accumulate until the NEXT boot. Never
-   * throws past the caller (removeWorktree is itself best-effort; this guards belt-and-suspenders).
-   */
-  private async removeWorktreeAndQueueIfStuck(repoPath: string, worktreePath: string): Promise<void> {
-    try {
-      const removed = await removeWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs });
-      if (!removed) this.worktreeGc.enqueue(repoPath, worktreePath);
-    } catch {
-      this.worktreeGc.enqueue(repoPath, worktreePath);
-    }
   }
 
   /**
@@ -4205,7 +4170,7 @@ export class SessionService {
       // worktrees stays byte-intact). Scope: only the no-`.git` case — NOT the rarer "`.git` exists but
       // gitdir pruned" variant.
       if (!fs.existsSync(path.join(worktreePath, ".git"))) {
-        await this.removeWorktreeAndQueueIfStuck(project.repoPath, worktreePath);
+        try { await removeWorktree(project.repoPath, worktreePath, { timeoutMs: this.gitOpMs }); } catch { /* best-effort */ }
         worktreesPruned++;
         continue;
       }
@@ -4215,7 +4180,7 @@ export class SessionService {
         worktreesKept++;
         continue;
       }
-      await this.removeWorktreeAndQueueIfStuck(project.repoPath, worktreePath);
+      try { await removeWorktree(project.repoPath, worktreePath, { timeoutMs: this.gitOpMs }); } catch { /* best-effort */ }
       worktreesPruned++;
     }
 
