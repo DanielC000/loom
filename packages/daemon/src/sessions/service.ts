@@ -1897,10 +1897,24 @@ export class SessionService {
     // id, then require the id to resolve to a REAL, NON-terminal task IN THIS PROJECT — a truncated/malformed/
     // unknown id won't resolve and is rejected with the same "does not resolve" shape the agentId guard uses.
     // A bad id must create NOTHING.
-    const taskId = (opts.taskId ?? "").trim();
-    if (!taskId || /\s/.test(taskId)) throw new Error(`worker_spawn taskId '${opts.taskId}' is not a valid task id`);
-    const task = this.db.getTask(taskId);
-    if (!task || task.projectId !== manager.projectId) throw new Error(`worker_spawn taskId '${taskId}' does not resolve to an existing task in this project`);
+    // card 3e9e1d9f: taskId accepts EITHER a full id or an unambiguous 8-char id-PREFIX (resolveIdPrefix) —
+    // the same UX the agentId path above already has. An exact match still wins first (the common case
+    // avoids materializing the project's task list); a miss falls back to prefix-scanning THIS manager's
+    // OWN project's tasks (db.listTasks(manager.projectId)), so a cross-project id can never match. An
+    // ambiguous prefix names the candidate ids and spawns nothing, mirroring the agentId ambiguity error.
+    const taskRef = (opts.taskId ?? "").trim();
+    if (!taskRef || /\s/.test(taskRef)) throw new Error(`worker_spawn taskId '${opts.taskId}' is not a valid task id`);
+    const exactTask = this.db.getTask(taskRef);
+    let task = exactTask && exactTask.projectId === manager.projectId ? exactTask : undefined;
+    if (!task) {
+      const resolvedTask = resolveIdPrefix(this.db.listTasks(manager.projectId), taskRef);
+      if (resolvedTask.kind === "ambiguous") {
+        throw new Error(`worker_spawn taskId '${taskRef}' is an ambiguous id-prefix — it matches ${resolvedTask.ids.join(", ")}; pass more characters or the full id`);
+      }
+      if (resolvedTask.kind === "found") task = resolvedTask.record;
+    }
+    if (!task) throw new Error(`worker_spawn taskId '${taskRef}' does not resolve to an existing task in this project`);
+    const taskId = task.id;
     const terminalKey = columnKeyForRole(config.kanbanColumns, "terminal");
     if (task.columnKey === terminalKey) throw new Error(`worker_spawn taskId '${taskId}' is in the terminal column ('${task.columnKey}') — pick a non-terminal task`);
     // OWNER-BRAKE (structural): refuse to dispatch onto a HELD card — the owner's SOLE brake, a per-card

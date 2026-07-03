@@ -549,7 +549,7 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_spawn",
       {
-        description: "Spawn a worker on a task: creates an isolated git worktree + branch, starts a worker session in it, and moves the task to in_progress. agentId is REQUIRED and must be an explicit WORKER agent (e.g. Dev/Bugfix/QA/Docs) — NEVER your own manager agent. Spawning under a manager/platform-role agent is rejected. agentId accepts EITHER the agent's id OR its NAME/slug (resolved within your project; a bad value returns a 'did you mean' hint).",
+        description: "Spawn a worker on a task: creates an isolated git worktree + branch, starts a worker session in it, and moves the task to in_progress. agentId is REQUIRED and must be an explicit WORKER agent (e.g. Dev/Bugfix/QA/Docs) — NEVER your own manager agent. Spawning under a manager/platform-role agent is rejected. agentId accepts EITHER the agent's id OR its NAME/slug (resolved within your project; a bad value returns a 'did you mean' hint). taskId accepts EITHER the full id OR an unambiguous 8-char id-prefix (resolved within your project; an ambiguous prefix errors naming the candidate ids).",
         inputSchema: {
           taskId: z.string(),
           agentId: z.string(),

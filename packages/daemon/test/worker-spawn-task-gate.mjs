@@ -95,9 +95,12 @@ const noSideEffects = () => !fs.existsSync(ptWorktreeDir) && db.listWorkers("mgr
 const worktrees = [];
 try {
   // ===================== rejections — a bad id must create NOTHING =====================
-  // (1) the EXACT repro: a truncated UUID with a trailing space. Trim leaves it truncated ⇒ won't resolve.
+  // (1) the EXACT repro: a truncated UUID with a trailing space. Trim leaves it truncated. card 3e9e1d9f
+  // added id-PREFIX resolution (MIN_ID_PREFIX_LEN=8) — a truncation of 8+ chars is now a LEGITIMATE
+  // unambiguous prefix and correctly SPAWNS (see worker-spawn-task-prefix.mjs), so this repro must
+  // truncate BELOW that floor to still exercise "truncated ⇒ rejected, no zombie spawn".
   await rejects("(1) truncated taskId with a trailing space is rejected",
-    () => svc.spawnWorker("mgr1", { taskId: `${taskGood.slice(0, 20)} `, agentId: "agentDev", kickoffPrompt: "GO" }), "does not resolve");
+    () => svc.spawnWorker("mgr1", { taskId: `${taskGood.slice(0, 5)} `, agentId: "agentDev", kickoffPrompt: "GO" }), "does not resolve");
   // (2) a malformed / unknown id (well-formed-looking but no such task).
   await rejects("(2) malformed/unknown taskId is rejected",
     () => svc.spawnWorker("mgr1", { taskId: randomUUID(), agentId: "agentDev", kickoffPrompt: "GO" }), "does not resolve");
