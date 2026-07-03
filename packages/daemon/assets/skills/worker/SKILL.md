@@ -65,7 +65,11 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    and bounces the task back. For UI/visual work: if your session is browser-capable
    (Playwright/`browserTesting` provisioned + allowlisted — the QA / Web Designer rigs), **self-verify**
    by driving Playwright to the running app and confirming the change renders and behaves before
-   reporting done. For a NEW interactive control (toggle, button, input, menu), a render-only check is
+   reporting done. **When you capture a verification screenshot, take it with no filename** so it
+   auto-names into your session's out-of-tree scratch dir and the working tree stays clean; pass a path
+   only to deliberately persist one, and make it **absolute under your session's scratch/temp dir** — a
+   bare or relative name lands in the repo working tree (`git status` flags it) and risks an accidental
+   commit. For a NEW interactive control (toggle, button, input, menu), a render-only check is
    not enough: **EXERCISE it** and confirm an **observable state change** — DOM/network/text differs
    before vs. after — not just that the page renders without console errors. Otherwise report the UI
    work **up** for your manager to verify. When you self-verify,
