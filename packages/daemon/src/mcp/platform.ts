@@ -316,6 +316,7 @@ const platformConfigOverrideSchema = z.object({
   rateLimit: rateLimitOverride.optional(),
   watchers: watchersOverride.optional(),
   timeouts: timeoutsOverride.optional(),
+  coalesceAgentMessages: z.boolean().optional(),
 }).strict();
 
 /**

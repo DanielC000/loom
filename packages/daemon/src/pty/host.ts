@@ -693,7 +693,22 @@ export type QueueSource = "human" | "system";
  * cross-route messages never merge into one turn (see drainPending).
  */
 export type TurnRoute = CompanionRoute;
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute };
+/**
+ * Coalescing classification (owner-directed, 2026-07-03): `"warning"` = a Loom operational nudge
+ * (idle/context/busy-stuck watchdogs, restart/boot continuation notes, rate-limit/usage nudges,
+ * memory-recall injection) — always safe to concatenate with its neighbors into one turn. `"agent"` =
+ * a message AUTHORED by an agent or a human TO the recipient (a Lead's `session_message`, a human
+ * composer turn, a worker→manager report, a manager→worker direction/redirect, a companion inbound or
+ * proactive reminder/heartbeat) — drained ALONE, one-per-turn, UNLESS `coalesceAgentMessages` is on
+ * (see drainPending). Defaults to `"warning"` at the `enqueueStdin` call boundary so every pre-existing
+ * caller that predates this classification (tests, and any call site this change didn't touch) keeps
+ * the old full-coalesce behavior byte-identical; every real production call site is classified
+ * explicitly (see host.ts's callers). Bias for anything genuinely ambiguous: `"agent"` — the harm this
+ * classification exists to prevent is coalescing agent messages, so a warning wrongly delivered
+ * one-per-turn is merely a few extra benign turns.
+ */
+export type QueuedMessageKind = "warning" | "agent";
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind };
 
 interface Live {
   pty: IPty;
@@ -1126,8 +1141,13 @@ export class PtyHost {
   /** Stuck-busy self-heal threshold (ms). Defaults to BUSY_STALE_MS; index.ts overrides with the
    *  resolved `platform.timeouts.busyStaleMs` at boot (BOOT-BOUND). */
   private readonly busyStaleMs: number;
-  constructor(private events: PtyHostEvents, opts?: { busyStaleMs?: number }) {
+  /** See PlatformConfig.coalesceAgentMessages (shared). Defaults false (one-per-turn agent delivery);
+   *  index.ts overrides with the resolved `platform.coalesceAgentMessages` at boot (BOOT-BOUND). Read
+   *  ONCE here (not per-message) by drainPending. */
+  private readonly coalesceAgentMessages: boolean;
+  constructor(private events: PtyHostEvents, opts?: { busyStaleMs?: number; coalesceAgentMessages?: boolean }) {
     this.busyStaleMs = opts?.busyStaleMs ?? BUSY_STALE_MS;
+    this.coalesceAgentMessages = opts?.coalesceAgentMessages ?? false;
   }
 
   spawn(opts: SpawnOpts): void {
@@ -1636,8 +1656,12 @@ export class PtyHost {
    * `source` defaults to 'system' so EVERY existing programmatic caller (worker reports, idle/context/
    * busy nudges, resume notes, escalations) stays 'system' unchanged; only the REST composer passes
    * 'human'. A held entry's source is what the human-facing mutators gate on (see QueuedMessage).
+   *
+   * `kind` defaults to `"warning"` (see QueuedMessageKind) so every caller this change didn't touch
+   * keeps today's full-coalesce behavior byte-identical; every production call site that enqueues an
+   * agent/human-authored message passes `"agent"` explicitly.
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute): { delivered: boolean; position?: number } {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning"): { delivered: boolean; position?: number } {
     const live = this.live.get(sessionId);
     if (!live?.alive) return { delivered: false };
     this.healIfStuck(live, sessionId);
@@ -1668,7 +1692,7 @@ export class PtyHost {
     // Held (busy / not-ready / composer-dirty / rate-limit parked). Carry the optional delivery callback so that when this
     // entry is finally handed to the recipient (drainPending or consumePending), the durable queued
     // message can be marked delivered. Undefined for every existing (non-messaging) caller → a no-op.
-    live.pending.push({ id: randomUUID(), text, source, onDeliver, route });
+    live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind });
     return { delivered: false, position: live.pending.length };
   }
 
@@ -1711,7 +1735,7 @@ export class PtyHost {
    * needs the stable id to delete/edit/reorder a SPECIFIC entry (see QueuedMessage). Returns [] for an
    * unknown session. Entries are shallow-copied so a caller can't mutate the live FIFO through them.
    */
-  getPendingEntries(sessionId: string): QueuedMessage[] {
+  getPendingEntries(sessionId: string): Array<Pick<QueuedMessage, "id" | "text" | "source">> {
     // Strip the internal `onDeliver` callback — the UI only needs {id,text,source}, and a function must
     // never escape the host (it isn't serializable and is meaningless outside this process).
     return (this.live.get(sessionId)?.pending ?? []).map(({ id, text, source }) => ({ id, text, source }));
@@ -1859,21 +1883,31 @@ export class PtyHost {
   }
 
   /**
-   * Deliver ALL queued messages when it's safe (idle + composer free), COALESCED into ONE turn. Shared
-   * by Stop + reconcile + the markReady / box-free transitions.
+   * Deliver queued messages when it's safe (idle + composer free). Shared by Stop + reconcile + the
+   * markReady / box-free transitions.
    *
-   * COALESCE (mirror consumePending's splice-all): we drain the ENTIRE pending FIFO as one concatenated,
-   * framed turn — splice the whole queue, join the texts in FIFO order with a visible separator, do
-   * exactly ONE submit() (one busy re-arm, one `\r`), and fire EVERY spliced entry's onDeliver so every
-   * durable session_message_queued record resolves. Previously this shift()'d ONE entry then submit()'d,
-   * and submit() re-arms busy SYNCHRONOUSLY (M1), so the rest couldn't drain until the NEXT Stop hook —
-   * that one-per-turn asymmetry (a worker had no consumePending equivalent) let 3 superseding manager
-   * redirects replay one-at-a-time. Now all pending direction reaches the recipient in a single turn.
+   * ONE-PER-TURN for AGENT messages, COALESCE for WARNING messages (owner-directed, 2026-07-03): a
+   * queued entry's `kind` (see QueuedMessageKind) decides whether it may share a turn with its
+   * neighbors. When `coalesceAgentMessages` is OFF (the default), an `"agent"`-kind head entry drains
+   * ALONE — submit() re-arms busy SYNCHRONOUSLY (M1), so the NEXT agent message drains on the next Stop
+   * hook (self-chaining); the reconcile timer is the backstop, so nothing is stranded. A `"warning"`-kind
+   * head entry still coalesces the leading run of same-route WARNING entries exactly as before — Loom's
+   * own operational nudges are safe to concatenate. A run NEVER mixes kinds: it stops at the first
+   * differently-kinded entry (in addition to the existing route-key break), so a turn is either all-agent
+   * (in practice always exactly one, since agent-kind never coalesces when the toggle is off) or
+   * all-warning, never both.
    *
-   * STILL one submit per drain: the splice + concat + submit are SYNCHRONOUS in one tick, so the
-   * load-bearing M1/M2 busy-gate invariants are untouched (the Stop branch still lowers busy and drains
-   * in the same tick; this just hands over the whole FIFO instead of its head). Daemon-wide, no role
-   * special-casing — managers benefit too.
+   * When `coalesceAgentMessages` is ON (legacy, opt-in via Settings), `kind` is ignored entirely and the
+   * ENTIRE leading same-route run coalesces into ONE concatenated turn — byte-identical to the
+   * pre-2026-07 behavior (splice the whole run, join with a visible separator, one submit, one busy
+   * re-arm, one `\r`). This was the original motivation for full coalescing: shift()'ing ONE entry per
+   * Stop meant 3 superseding manager redirects replayed one-at-a-time. That specific case is now handled
+   * upstream by `flushPending` (worker_redirect retires stale queued direction before enqueueing the one
+   * authoritative redirect), so at drain time there is normally at most one pending redirect and
+   * one-per-turn agent delivery does not regress it.
+   *
+   * STILL one submit per drain in EITHER mode: the splice + concat + submit are SYNCHRONOUS in one tick,
+   * so the load-bearing M1/M2 busy-gate invariants are untouched. Daemon-wide, no role special-casing.
    */
   private drainPending(sessionId: string): void {
     const live = this.live.get(sessionId);
@@ -1889,16 +1923,29 @@ export class PtyHost {
     // the interrupted turn. The held queue is kept intact and drains normally on the post-resume Stop.
     if (live.rateLimited) return;
     if (this.deferForHumanDraft(live)) return; // HOLD while the human's raw composer is dirty — never land on half-typed text
-    // ROUTE-KEYED coalescing (Loom Companion multi-channel): coalesce ONLY the LEADING run of pending
-    // messages that share the FIRST entry's route key. Messages with NO route (the manager→worker direction
-    // path, and every non-companion inject) all share the empty key, so they still coalesce ALL-TOGETHER —
-    // byte-identical to the old splice(0). A DIFFERENT route breaks the run: it stays queued and drains as a
-    // DISTINCT next turn on the next Stop. So EVERY turn has EXACTLY ONE originating route ⇒ chat_reply
-    // resolves it unambiguously and cross-delivery is impossible by construction (no runtime check needed).
-    const key = routeKeyOf(live.pending[0]!.route);
-    let n = 1;
-    while (n < live.pending.length && routeKeyOf(live.pending[n]!.route) === key) n++;
-    const drained = live.pending.splice(0, n); // the leading same-route run (all-together when no route)
+    const head = live.pending[0]!;
+    let drained: QueuedMessage[];
+    if (!this.coalesceAgentMessages && head.kind === "agent") {
+      // One-per-turn (default): an agent-authored message never shares a turn with anything else.
+      drained = live.pending.splice(0, 1);
+    } else {
+      // ROUTE-KEYED coalescing (Loom Companion multi-channel): coalesce ONLY the LEADING run of pending
+      // messages that share the FIRST entry's route key. Messages with NO route (the manager→worker direction
+      // path, and every non-companion inject) all share the empty key, so they still coalesce ALL-TOGETHER —
+      // byte-identical to the old splice(0). A DIFFERENT route breaks the run: it stays queued and drains as a
+      // DISTINCT next turn on the next Stop. So EVERY turn has EXACTLY ONE originating route ⇒ chat_reply
+      // resolves it unambiguously and cross-delivery is impossible by construction (no runtime check needed).
+      // ALSO bounded to same-KIND entries (never mix a warning and an agent message into one turn) UNLESS
+      // coalesceAgentMessages is on, in which case kind is ignored (today's legacy full-coalesce).
+      const key = routeKeyOf(head.route);
+      let n = 1;
+      while (
+        n < live.pending.length
+        && routeKeyOf(live.pending[n]!.route) === key
+        && (this.coalesceAgentMessages || live.pending[n]!.kind === head.kind)
+      ) n++;
+      drained = live.pending.splice(0, n); // the leading same-route (+ same-kind, unless toggled) run
+    }
     this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR), drained[0]!.route); // one submit, one busy re-arm, FIFO order preserved, ONE route
     // ADDITIVE delivery hook (card 2ca18433): every drained entry was just handed to the recipient as
     // part of this turn — fire each callback (durable-message resolution) AFTER submit, outside the

@@ -5,7 +5,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // cap/note/exactly-one), live-fire, non-due, not-live auto-resume, usage-limited defer, unresumable
 // drop, cancel scoping, start() past-due fire-once reconcile, and the route-aware fire path
 // (companion-origin wake fires its [loom:reminder] back through the captured route; a non-companion
-// wake stays byte-identical — plain enqueueStdin, [loom:wake], no extra args).
+// wake fires [loom:wake], no route). Card 706cc6fb: every fire carries kind:"agent" (a scheduled
+// wake-up is the agent's own arbitrary note-to-self / companion reminder — one-per-turn, never
+// coalesced with anything else queued behind it).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -31,12 +33,12 @@ function makeEnv(opts = {}) {
   });
 
   const alive = new Set(opts.deadSession ? [] : [sessId]); // isAlive source of truth
-  const enqueued = [];          // { sessionId, text, source, route }
+  const enqueued = [];          // { sessionId, text, source, route, kind }
   const resumed = [];           // sessionIds passed to resume
   let origin = opts.origin ?? null; // mutable: getActiveTurnOrigin() reads THIS at schedule time
   const pty = {
     isAlive: (id) => alive.has(id),
-    enqueueStdin: (id, text, source, onDeliver, route) => { enqueued.push({ sessionId: id, text, source, route }); return { delivered: true }; },
+    enqueueStdin: (id, text, source, onDeliver, route, kind) => { enqueued.push({ sessionId: id, text, source, route, kind }); return { delivered: true }; },
     getActiveTurnOrigin: (id) => (id === sessId ? origin : null),
   };
   const resume = async (id) => {
@@ -172,15 +174,16 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
 }
 
 // Route-aware fire, non-companion case: with NO active turn origin at schedule time, the wake carries
-// no route and fires EXACTLY as before — plain 2-arg enqueueStdin, [loom:wake] tag, no source/route.
+// no route and fires [loom:wake], kind:"agent" (card 706cc6fb — one-per-turn, never coalesced).
 {
   const e = makeEnv(); // origin defaults to null
   const t0 = new Date();
   e.wakes.schedule(e.sessId, { delaySeconds: 60, note: "ordinary" }, t0);
   await e.wakes.tick(new Date(t0.getTime() + 61_000));
   check("non-companion: fires with no route", e.enqueued.length === 1 && e.enqueued[0].route === undefined);
-  check("non-companion: fires with no source arg (byte-identical call)", e.enqueued[0].source === undefined);
+  check("non-companion: fires as a 'system' source turn", e.enqueued[0].source === "system");
   check("non-companion: tagged [loom:wake], not [loom:reminder]", e.enqueued[0].text.startsWith("[loom:wake]"));
+  check("non-companion: kind is 'agent' (one-per-turn, never coalesced)", e.enqueued[0].kind === "agent");
   cleanupEnv(e);
 }
 
@@ -198,11 +201,12 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
   check("companion-origin: fires carrying the CAPTURED route", e.enqueued.length === 1 && JSON.stringify(e.enqueued[0].route) === JSON.stringify(route));
   check("companion-origin: fires as a 'system' turn", e.enqueued[0].source === "system");
   check("companion-origin: tagged [loom:reminder], not [loom:wake]", e.enqueued[0].text.startsWith("[loom:reminder]") && e.enqueued[0].text.includes("check back with them"));
+  check("companion-origin: kind is 'agent' (one-per-turn, never coalesced)", e.enqueued[0].kind === "agent");
   check("companion-origin: emits a wake_fired event same as any wake", events(e, "wake_fired").length === 1);
   cleanupEnv(e);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — WakeService validates+schedules, fires due wakes (live + auto-resume), defers under usage-limit, drops the unresumable, scopes cancel, reconciles past-due on start, and routes a companion-origin wake's [loom:reminder] back through its captured route while a non-companion wake stays byte-identical."
+  ? "\n✅ ALL PASS — WakeService validates+schedules, fires due wakes (live + auto-resume), defers under usage-limit, drops the unresumable, scopes cancel, reconciles past-due on start, routes a companion-origin wake's [loom:reminder] back through its captured route, and every fire carries kind:\"agent\" (card 706cc6fb)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

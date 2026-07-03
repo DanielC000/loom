@@ -279,7 +279,7 @@ async function main(): Promise<void> {
       try { if (exited) void usageSampler.onSessionExit(exited).catch(() => { /* async best-effort */ }); } catch { /* never disturb the exit path */ }
       mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); userAuditMcp.dispose(sessionId); setupMcp.dispose(sessionId); runMcp.dispose(sessionId);
     },
-  }, { busyStaleMs: timeouts.busyStaleMs }); // BOOT-BOUND: stuck-busy self-heal threshold from resolved platform config
+  }, { busyStaleMs: timeouts.busyStaleMs, coalesceAgentMessages: resolved.platform.coalesceAgentMessages }); // BOOT-BOUND: from resolved platform config
 
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design
   // BOOT-BOUND: thread the resolved git-op / provision timeouts into the bounded-git + provision seams
@@ -351,8 +351,9 @@ async function main(): Promise<void> {
   const companionController = new CompanionController({
     db,
     // INBOUND submit carries the originating {channel, chatId} route as the pty turn's route (5th arg), so
-    // the agent's chat_reply resolves back to that exact chat (multi-channel reply routing).
-    submitTurn: (sid, text, route) => pty.enqueueStdin(sid, text, "system", undefined, route),
+    // the agent's chat_reply resolves back to that exact chat (multi-channel reply routing). kind:"agent" —
+    // a companion inbound is a human's own chat message; it must land as its own turn.
+    submitTurn: (sid, text, route) => pty.enqueueStdin(sid, text, "system", undefined, route, "agent"),
     pty,
     hooks: companionHooks,
     env: process.env,

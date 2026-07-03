@@ -158,7 +158,8 @@ export class CompanionReminderWatcher {
    *  with no route then has nowhere to chat_reply, same as an unconfigured heartbeat home). Records
    *  lastFiredAt + emits the durable event; a real fire ends that reminder's current defer streak. */
   private fire(reminder: CompanionReminder, now: Date): void {
-    this.deps.pty.enqueueStdin(this.deps.sessionId, framedReminder(reminder), "system", undefined, reminder.route ?? undefined);
+    // kind:"agent" — a user-authored recurring reminder prompt; must land as its own turn.
+    this.deps.pty.enqueueStdin(this.deps.sessionId, framedReminder(reminder), "system", undefined, reminder.route ?? undefined, "agent");
     this.lastFiredAt.set(reminder.id, now.getTime());
     this.deferredSinceLastFire.delete(reminder.id);
     this.emit(reminder.id, now, "companion_reminder_fired", { cron: reminder.cron, label: reminder.label });

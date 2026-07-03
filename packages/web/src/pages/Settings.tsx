@@ -403,6 +403,9 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     seed[f.key] = msStr(ovVal, f.unit);
   }
   const [vals, setVals] = useState(seed);
+  // Message-delivery behavior toggle (owner-directed 2026-07-03): a top-level boolean, not part of the
+  // ms-keyed GLOBAL_FIELDS grid, so it gets its own tri-state seeded straight from the loaded override.
+  const [coalesceAgentMsgs, setCoalesceAgentMsgs] = useState(triStr(override.coalesceAgentMessages));
 
   // Build the override from the form — every non-blank field converted to canonical ms (× the unit).
   // A blank field is omitted (inherits). A non-numeric entry sends NaN (→ null) so the strict-zod PATCH
@@ -415,6 +418,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
       const grp = ((o as Record<string, Record<string, number>>)[f.grp] ??= {});
       grp[f.key] = Number(s) * UNIT_MS[f.unit];
     }
+    if (coalesceAgentMsgs !== "inherit") o.coalesceAgentMessages = coalesceAgentMsgs === "true";
     return o;
   }
 
@@ -475,6 +479,21 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
           {group("timeouts").map(renderField)}
         </div>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Message Delivery</SectionLabel>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 360 }}>
+          <span style={fieldLabel}>Group agent & worker messages into a single turn (legacy)</span>
+          <TriSelect value={coalesceAgentMsgs} set={setCoalesceAgentMsgs} def={defaults.coalesceAgentMessages} />
+          <Hint>{effHint(resolved.coalesceAgentMessages)}</Hint>
+          <Hint>
+            Off (default): each agent/worker message — a manager&apos;s direction, a worker&apos;s report, a
+            human composer turn — is delivered as its own turn. On: multiple queued messages are concatenated
+            into one turn (the pre-2026-07 behavior). Loom&apos;s own operational nudges always group together
+            regardless of this setting.
+          </Hint>
+        </label>
       </Panel>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>

@@ -1118,8 +1118,14 @@ export class SessionService {
     // resumed pty, IN ORDER and BEFORE its continuation nudge. These predate the restart, so FIFO order
     // puts them ahead of the boot note. enqueueStdin is ready-gated (host.ts), so they queue until the
     // resumed TUI boots, then drain cleanly.
+    //
+    // kind: "agent" — the snapshot (getPersistablePending) carries only TEXT, not each entry's original
+    // warning/agent classification (it predates that discriminator), and this replayed set can be a mix
+    // of worker reports / manager direction (agent) and idle/resume nudges (warning) that were pending at
+    // restart. Ambiguous ⇒ bias to "agent" per the classification's own rule — a warning wrongly replayed
+    // one-per-turn is a few extra benign turns, never a coalesced-away agent message.
     const replayPending = (id: string): void => {
-      for (const m of intent.pending?.[id] ?? []) this.pty.enqueueStdin(id, m);
+      for (const m of intent.pending?.[id] ?? []) this.pty.enqueueStdin(id, m, "system", undefined, undefined, "agent");
     };
     const isParked = (id: string): boolean => {
       const s = this.db.getSession(id);
@@ -1373,10 +1379,12 @@ export class SessionService {
       // it in-flight FIRST so the overlapping path skips it; the onDeliver wrapper clears the mark AND
       // resolves the durable record the instant the held message is finally handed to the recipient.
       this.redriveInFlightMsgIds.add(msgId);
+      // Re-driving a `session_message_queued` record — every such record originated from
+      // enqueueDurableMessage's kind:"agent" enqueue, so the redrive preserves that classification.
       const r = this.pty.enqueueStdin(recipientId, text, "system", (reason?: string) => {
         this.redriveInFlightMsgIds.delete(msgId);
         this.resolveQueuedMessage(msgId, { recipientId, reason });
-      });
+      }, undefined, "agent");
       if (r.delivered || r.position !== undefined) return "reEnqueued";
       // delivered:false with no position ⇒ the host has no live pty for it (DB/host skew) → not actually
       // enqueued; undo the in-flight mark and treat as stuck so a later live-flip can retry it.
@@ -2187,6 +2195,10 @@ export class SessionService {
    * onDeliver callback resolves the durable event the instant the held message is finally handed to the
    * recipient — drained at its next Stop or pulled via inbox_pull. The boot scan
    * (recoverUndeliveredMessagesOnBoot) re-drives any that a process death interrupted before delivery.
+   *
+   * Every caller of this helper enqueues an agent/human-authored, cross-session message (messageWorker,
+   * redirectWorker, messageSessionAsPlatform, the recycle carry-forward of a durable record) — always
+   * `kind: "agent"` (one-per-turn unless `coalesceAgentMessages` is on).
    */
   private enqueueDurableMessage(
     recipientId: string, framedText: string, ctx: { sender: string; taskId?: string | null },
@@ -2195,7 +2207,7 @@ export class SessionService {
     // onDeliver carries an OPTIONAL reason: the normal drain/pull paths fire it with no arg (a plain
     // delivery); a flush/SUPERSEDE caller (redirectWorker) passes "superseded" so the resolution event
     // records WHY the durable record closed without being delivered as a turn.
-    const r = this.pty.enqueueStdin(recipientId, framedText, "system", (reason?: string) => this.resolveQueuedMessage(msgId, { recipientId, reason }));
+    const r = this.pty.enqueueStdin(recipientId, framedText, "system", (reason?: string) => this.resolveQueuedMessage(msgId, { recipientId, reason }), undefined, "agent");
     if (!r.delivered) {
       // Held (busy / not-ready) — persist the durable inbox record. delivered:false with no position also
       // means "recipient not live": we still record it, so the boot scan re-drives it once the recipient
@@ -2245,7 +2257,8 @@ export class SessionService {
    * "superseded" — resolves the old record so the boot scan + done-guard never re-drive it), then re-MINT
    * it onto the successor via `enqueueDurableMessage` (a NEW record naming the successor as recipient,
    * carrying the ORIGINAL sender/taskId so an undelivered re-mint still surfaces to its sender on boot).
-   * Non-durable entries (idle/resume nudges, raw human turns) carry across with their source preserved.
+   * Non-durable entries (idle/resume nudges, raw human turns) carry across with their source AND their
+   * warning/agent classification preserved.
    */
   private carryPendingToSuccessor(
     oldId: string, successorId: string, flushed: QueuedMessage[], durableRecords: OrchestrationEvent[],
@@ -2255,8 +2268,10 @@ export class SessionService {
         // Durable entry — its record is re-minted from `durableRecords` below; resolve the OLD record now.
         try { m.onDeliver("superseded"); } catch { /* a resolution fault must never block the recycle */ }
       } else {
-        // Non-durable (nudge / raw human turn): carry the text AND its source so a 'human' entry stays human.
-        this.pty.enqueueStdin(successorId, m.text, m.source);
+        // Non-durable (nudge / raw human turn): carry the text, source, AND kind so a 'human'/'agent' entry
+        // stays classified exactly as it was (a warning nudge doesn't become one-per-turn, an agent message
+        // doesn't start coalescing).
+        this.pty.enqueueStdin(successorId, m.text, m.source, undefined, undefined, m.kind);
       }
     }
     // Re-mint each unresolved durable record onto the successor (recipient ← successor), so crash-survival
@@ -2428,7 +2443,7 @@ export class SessionService {
         console.log(`[escalation] suppressed live completion nudge to Lead ${liveLead.id} — SHA already delivered by a deploy restart (task ${task.id} still filed)`);
       } else {
         const note = `[loom:escalation] ${originName} manager escalated a Loom issue → Platform board task ${task.id}: ${input.title} (severity: ${severity})`;
-        try { deliveryStatus = this.deliveryStatusFor(this.pty.enqueueStdin(liveLead.id, note)); } catch { /* Lead not live/ready — `boarded` stands */ }
+        try { deliveryStatus = this.deliveryStatusFor(this.pty.enqueueStdin(liveLead.id, note, "system", undefined, undefined, "agent")); } catch { /* Lead not live/ready — `boarded` stands */ }
       }
     }
     return { taskId: task.id, projectId: home.id, deliveryStatus };
@@ -2611,7 +2626,9 @@ export class SessionService {
       .listAllSessions()
       .find((s) => s.role === "setup" && s.projectId === home.id && s.processState === "live");
     if (!operator) return "boarded"; // no live operator — the cards sit on the now-visible home board
-    try { return this.deliveryStatusFor(this.pty.enqueueStdin(operator.id, note)); }
+    // kind:"agent" — a specific, actionable auditor heads-up naming a concrete suggestion, not a Loom
+    // operational nudge; it must reach the operator as its own turn, never mashed with anything else.
+    try { return this.deliveryStatusFor(this.pty.enqueueStdin(operator.id, note, "system", undefined, undefined, "agent")); }
     catch { return "boarded"; } // operator not ready/live — `boarded` stands
   }
 
@@ -2878,7 +2895,9 @@ export class SessionService {
       if (report.needs) framed += ` | needs: ${report.needs}`;
       if (warning) framed += ` | warning: ${warning}`;
       if (autoRetireNoCommit) framed += ` | auto-retired (declared no-commit role, 0 commits ahead — its concurrency slot is freed, no worker_stop needed)`;
-      const r = this.pty.enqueueStdin(managerSessionId, framed);
+      // kind:"agent" — a worker→manager report is a distinct directive the manager must individually
+      // process, never mashed with a sibling worker's report into one wall of text.
+      const r = this.pty.enqueueStdin(managerSessionId, framed, "system", undefined, undefined, "agent");
       deliveryStatus = this.deliveryStatusFor(r);
       // STRAND BACKSTOP (incident 22a44352, broadened by card fc9a27d5): if the report reached no LIVE
       // FIFO at all — `delivered:false` with NO queue position (the manager's pty isn't alive: it idle-
@@ -3774,7 +3793,9 @@ export class SessionService {
     const evt = (kind: OrchestrationEvent["kind"], detail?: Record<string, unknown>) => this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId, taskId, kind, detail,
     });
-    const rejectNotify = (msg: string) => { try { this.pty.enqueueStdin(managerSessionId, msg); } catch { /* manager not live */ } };
+    // kind:"agent" — a merge-rejection result names a specific worker/task and requires distinct manager
+    // action (recover a commit, re-task, rebase); it must never be mashed with an unrelated turn.
+    const rejectNotify = (msg: string) => { try { this.pty.enqueueStdin(managerSessionId, msg, "system", undefined, undefined, "agent"); } catch { /* manager not live */ } };
 
     // BACKSTOP (BEFORE the gate/merge): refuse if the worker's commits are STRANDED on a self-created
     // branch instead of its assigned `loom/<key>`. The assigned branch is then 0-ahead, so the squash

@@ -362,6 +362,21 @@ export interface PlatformConfig {
   rateLimit: RateLimitConfig;
   watchers: WatcherConfig;
   timeouts: TimeoutConfig;
+  /**
+   * Message-delivery behavior toggle (owner-directed, 2026-07-03): when a recipient is busy and
+   * inbound messages queue, should an AGENT/human-authored message (a manager→worker direction, a
+   * worker→manager report, a Lead session_message, a human composer turn, a companion inbound) be
+   * delivered as its OWN turn (one-per-turn, so distinct directives are never mashed into one wall of
+   * text), or coalesced into a single concatenated turn together with any other queued agent messages
+   * (today's legacy full-coalesce behavior)? Loom's own operational nudges (idle/context/busy-stuck
+   * watchdogs, restart/boot continuation notes, rate-limit/usage nudges, memory-recall injection) always
+   * coalesce regardless of this flag — only AGENT-kind entries are gated by it. Default false (= the new
+   * one-per-turn behavior); set true to restore the pre-2026-07 full-coalesce behavior. Read ONCE by
+   * PtyHost's drain path (a pty-host constructor opt, boot-bound like `timeouts.busyStaleMs`), never
+   * re-resolved per message. DAEMON-GLOBAL (no per-project layer) + HUMAN-only, mirroring the rest of
+   * `PlatformConfig`.
+   */
+  coalesceAgentMessages: boolean;
 }
 
 /** The fully-resolved, effective config for a project. */
@@ -430,6 +445,8 @@ export interface PlatformConfigOverride {
   rateLimit?: Partial<RateLimitConfig>;
   watchers?: Partial<WatcherConfig>;
   timeouts?: Partial<TimeoutConfig>;
+  /** See PlatformConfig.coalesceAgentMessages. */
+  coalesceAgentMessages?: boolean;
 }
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
@@ -477,6 +494,8 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     rateLimit: { defaultBackoffMs: 18000000, resetBufferMs: 10000, deadlineAfterResetMs: 1800000, deadlineNoResetMs: 21600000, recencyWindowMs: 21600000 },
     watchers: { contextWatchMs: 60000, idleWatchMs: 60000, rateLimitWatchMs: 60000, usagePollMs: 60000, wakeMs: 60000, schedulerMs: 60000, reconcileMs: 10000, snapshotMs: 420000, crashRecoveryWatchMs: 60000 },
     timeouts: { gitOpMs: 15000, gitLocalMs: 15000, gitPushMs: 45000, provisionMs: 180000, busyStaleMs: 300000, runMs: 600000 },
+    // Default false = deliver agent/human messages one-per-turn (the 2026-07-03 owner-directed fix).
+    coalesceAgentMessages: false,
   },
   docLint: true, // Pillar D vault-lint hook on by default
   // Obsidian auto-start OFF by default: opt-in per project (a daemon-launched GUI process is deliberate).
@@ -674,6 +693,7 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
       busyStaleMs: po?.timeouts?.busyStaleMs ?? d.timeouts.busyStaleMs,
       runMs: po?.timeouts?.runMs ?? d.timeouts.runMs,
     },
+    coalesceAgentMessages: po?.coalesceAgentMessages ?? d.coalesceAgentMessages,
   };
 }
 

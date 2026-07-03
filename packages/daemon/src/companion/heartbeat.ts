@@ -44,6 +44,7 @@ export interface HeartbeatPty {
     source?: "human" | "system",
     onDeliver?: () => void,
     route?: CompanionRoute,
+    kind?: "warning" | "agent",
   ): { delivered: boolean; position?: number };
   /** The session's queued message texts (FIFO) — the no-stacking guard checks for an unconsumed heartbeat. */
   getPending(sessionId: string): string[];
@@ -114,7 +115,9 @@ export class CompanionHeartbeatWatcher {
     // session is busy, enqueueStdin queues it FIFO (the no-stacking guard above ensures at most one pending).
     // Record lastFiredAt + emit the durable event. A real fire ends the current defer streak.
     const home = this.deps.db.getCompanionHome();
-    this.deps.pty.enqueueStdin(this.deps.sessionId, framedHeartbeat(this.deps.prompt), "system", undefined, home ?? undefined);
+    // kind:"agent" — a user-configured proactive prompt, the companion's own analogue of an inbound
+    // chat message; it must land as its own turn, never mashed with a sibling reminder/heartbeat.
+    this.deps.pty.enqueueStdin(this.deps.sessionId, framedHeartbeat(this.deps.prompt), "system", undefined, home ?? undefined, "agent");
     this.lastFiredAt = now.getTime();
     this.deferredSinceLastFire = false;
     this.emit(now, "companion_heartbeat_fired", { intervalMinutes: this.deps.intervalMinutes });

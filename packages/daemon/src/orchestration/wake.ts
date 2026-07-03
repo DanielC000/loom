@@ -9,8 +9,8 @@ export interface WakePty {
   isAlive(sessionId: string): boolean;
   /**
    * Submit text as a turn if the session is idle, else queue it FIFO (drains on the next Stop). The
-   * trailing `source`/`onDeliver`/`route` mirror PtyHost.enqueueStdin (and HeartbeatPty) so the real
-   * pty is assignable directly; a plain 2-arg call (every existing non-companion caller) is
+   * trailing `source`/`onDeliver`/`route`/`kind` mirror PtyHost.enqueueStdin (and HeartbeatPty) so the
+   * real pty is assignable directly; a plain 2-arg call (every existing non-companion caller) is
    * byte-identical to before this route-aware fire path existed.
    */
   enqueueStdin(
@@ -19,6 +19,7 @@ export interface WakePty {
     source?: "human" | "system",
     onDeliver?: () => void,
     route?: CompanionRoute,
+    kind?: "warning" | "agent",
   ): { delivered: boolean; position?: number };
   /**
    * The session's IN-FLIGHT turn's originating companion route, or null when the current turn wasn't
@@ -169,10 +170,13 @@ export class WakeService {
         // route into enqueueStdin so a later chat_reply resolves back to this exact chat. Every OTHER
         // wake (route undefined — the overwhelming majority) takes the EXACT plain enqueueStdin call
         // that ran before this feature existed: byte-identical.
+        // kind:"agent" — a scheduled wake-up carries the agent's own arbitrary, specific note-to-self
+        // (or, when routed, a companion reminder); it must land as its own turn, never mashed with
+        // anything else queued behind it.
         if (w.route) {
-          this.deps.pty.enqueueStdin(w.sessionId, framedReminder(w), "system", undefined, w.route);
+          this.deps.pty.enqueueStdin(w.sessionId, framedReminder(w), "system", undefined, w.route, "agent");
         } else {
-          this.deps.pty.enqueueStdin(w.sessionId, framedNote(w));
+          this.deps.pty.enqueueStdin(w.sessionId, framedNote(w), "system", undefined, undefined, "agent");
         }
         this.deps.db.appendEvent({
           id: randomUUID(), ts: now.toISOString(),

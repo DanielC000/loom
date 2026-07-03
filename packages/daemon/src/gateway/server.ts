@@ -2487,7 +2487,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (typeof text !== "string" || !text.trim()) return reply.code(400).send({ error: "text required" });
     // 'human' source: ONLY this composer path tags its entries human; every programmatic enqueue
     // (worker reports, nudges, resume notes) defaults to 'system'. That tag is what gates the mutators.
-    return reply.send(deps.pty.enqueueStdin(id, text, "human"));
+    // kind:"agent" — a human composer message is the human's own directive; it must land as its own turn.
+    return reply.send(deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent"));
   });
   // Human-initiated merge of a worker's branch (the Review panel / #18c). Runs the daemon's
   // fail-closed build gate then squash-merges (one clean commit); manager is derived from the worker's
