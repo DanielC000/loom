@@ -16,6 +16,7 @@ import type { CompanionReminder, CompanionRoute } from "../companion/types.js";
 import { resolveIdPrefix } from "../id-prefix.js";
 import { resolveWebDistDir } from "../paths.js";
 import { loomVersion } from "../version.js";
+import { lineageRootId } from "../sessions/platform-lead-prompt.js";
 import {
   authorCompanionSkill,
   listCompanionSkills,
@@ -477,6 +478,24 @@ export class OrchestrationMcpRouter {
         : { reportedState: null, awaitingReview: false };
     };
 
+    // Card 93609ef3: a recycled SUCCESSOR manager (fresh sessionId via recycleManager) must still be able
+    // to READ a worker its PREDECESSOR spawned — `recycleManager` only re-parents LIVE workers
+    // (reparentLiveWorkers), so a worker that had already reported done/blocked/exited before the recycle
+    // keeps `parentSessionId` pointing at the now-retired predecessor, and an exact-match guard locks the
+    // successor out of exactly the findings it needs to act on. Scope READS by LINEAGE instead of exact
+    // parent: walk both sessions' `recycledFrom` chains to their roots (the same `lineageRootId` helper the
+    // Platform Lead resume-doc scoping already uses) and compare roots — same lineage ⇒ readable. WRITE ops
+    // (worker_stop/worker_message/worker_redirect, via sessions.*) stay exact-parent-scoped; do not reuse
+    // this for those.
+    const workerReadableByManager = (w: { parentSessionId?: string | null }): boolean => {
+      if (!w.parentSessionId) return false;
+      if (w.parentSessionId === managerSessionId) return true;
+      const managerSession = db.getSession(managerSessionId);
+      const parentSession = db.getSession(w.parentSessionId);
+      if (!managerSession || !parentSession) return false;
+      return lineageRootId(db, managerSession) === lineageRootId(db, parentSession);
+    };
+
     // The fleet view — the manager's direct children as a compact list. Shared by worker_list and the
     // no-arg worker_status call (a manager's reflexive `worker_status({})` aliases to this rather than
     // throwing a schema-validation error).
@@ -508,7 +527,7 @@ export class OrchestrationMcpRouter {
         // No id → fleet view (alias worker_list), so worker_status({}) never throws a schema error.
         if (!workerSessionId) return ok(fleetView());
         const w = db.getSession(workerSessionId);
-        if (!w || w.parentSessionId !== managerSessionId) return ok({ error: "not your worker" });
+        if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
         return ok({ ...w, ...reportedProjection(w.id) });
       },
     );
@@ -521,7 +540,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, lastN }) => {
         const w = db.getSession(workerSessionId);
-        if (!w || w.parentSessionId !== managerSessionId) return ok({ error: "not your worker" });
+        if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
         const turns = w.engineSessionId ? readTranscript(w.cwd, w.engineSessionId) : [];
         return ok(typeof lastN === "number" && lastN > 0 ? turns.slice(-lastN) : turns);
       },
