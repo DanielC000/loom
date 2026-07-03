@@ -199,9 +199,12 @@ try {
   await inProjServer.connect(ipS);
   const ipClient = new Client({ name: "xtask-inproj", version: "0" });
   await ipClient.connect(ipT);
-  const ipList = parse(await ipClient.callTool({ name: "tasks_list", arguments: { includeBody: true } }));
+  // tasks_list returns NEWLINE-DELIMITED JSON (one task per line, card dc647ae2 part A) — not a JSON
+  // array — so it stays Read/grep-pageable even if a wide window spills to a file; parse it line-by-line.
+  const ndjson = (res) => res.content[0].text.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const ipList = ndjson(await ipClient.callTool({ name: "tasks_list", arguments: { includeBody: true } }));
   check(`(5) in-project tasks_list default is capped at ${DEFAULT_TASK_SUMMARY_CAP} (got ${ipList.length})`, ipList.length === DEFAULT_TASK_SUMMARY_CAP);
-  const ipPaged = parse(await ipClient.callTool({ name: "tasks_list", arguments: { includeBody: true, limit: DEFAULT_TASK_SUMMARY_CAP + 50 } }));
+  const ipPaged = ndjson(await ipClient.callTool({ name: "tasks_list", arguments: { includeBody: true, limit: DEFAULT_TASK_SUMMARY_CAP + 50 } }));
   check("(5) in-project tasks_list pages past the cap with an explicit limit", ipPaged.length === BULK);
   await ipClient.close();
 

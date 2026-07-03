@@ -34,7 +34,8 @@ async function connect(sessionId) {
   await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/${sessionId}`)));
   return client;
 }
-const titles = (res) => JSON.parse(res.content[0].text).map((t) => t.title);
+// tasks_list returns NEWLINE-DELIMITED JSON (one task per line, card dc647ae2) — not a JSON array.
+const titles = (res) => res.content[0].text.split("\n").filter(Boolean).map((l) => JSON.parse(l).title);
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };

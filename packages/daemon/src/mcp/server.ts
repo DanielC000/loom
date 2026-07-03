@@ -8,6 +8,16 @@ import { listProjectTasks, getProjectTask, createProjectTask, updateProjectTask,
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
+/**
+ * List-shaped response, NEWLINE-DELIMITED (one JSON object per line) instead of a single
+ * `JSON.stringify(array)` blob (card dc647ae2 part A). A wide `tasks_list` window (e.g.
+ * excludeDone:false + a large limit/offset) can overflow the MCP tool-result cap; when the engine
+ * spills an oversized result to a temp file, a SINGLE giant JSON-array line is unpaginatable —
+ * `Read` can't offset/limit-slice one line, forcing a fragile manual char-slice. NDJSON keeps that
+ * spill file (or a live grep) Read/grep-pageable one row at a time regardless of size.
+ */
+const okLines = (rows: unknown[]) => ({ content: [{ type: "text" as const, text: rows.map((r) => JSON.stringify(r)).join("\n") }] });
+
 /** Task priority enum, shared by the create/update/list tool schemas (rejects any other string). */
 export const prioritySchema = z.enum(["p0", "p1", "p2", "p3"]);
 
@@ -37,19 +47,21 @@ export class TaskMcpRouter {
       "tasks_list",
       {
         description:
-          "List this project's board tasks. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt}) — bodies OMITTED, terminal/done cards EXCLUDED. Pass includeBody:true for full bodies, or tasks_get(id) for one card. Filters: columns:[...] (only those column keys), excludeDone:false (include done), minPriority:p0|p1|p2|p3 (only tasks at or above it; lower number = higher priority). Capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default — page with limit/offset.",
+          "List this project's board tasks. Returns NEWLINE-DELIMITED JSON — one task object per line, NOT a JSON array — so a wide read stays Read/grep-pageable even if it spills to a file. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt}) — bodies OMITTED, terminal/done cards EXCLUDED. Pass includeBody:true for full bodies, or tasks_get(id) for one card. Filters: columns:[...] (only those column keys), excludeDone:false (include done), minPriority:p0|p1|p2|p3 (only tasks at or above it; lower number = higher priority), idPrefix (only ids starting with this), titleContains (case-insensitive title substring) — prefer a scoped filter over paging a huge window. Capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default — page with limit/offset.",
         inputSchema: {
           columns: z.array(z.string()).optional(),
           excludeDone: z.boolean().optional(),
           includeBody: z.boolean().optional(),
           minPriority: prioritySchema.optional(),
+          idPrefix: z.string().optional(),
+          titleContains: z.string().optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
         },
       },
       // Backstop the read with a default cap (caller-applied, the agentView/sessionView pattern) so an
       // includeBody read on a board with hundreds of cards can't overflow the tool-result cap.
-      async (args) => ok(listProjectTasks(db, projectId, { ...args, limit: args.limit ?? DEFAULT_TASK_SUMMARY_CAP })),
+      async (args) => okLines(listProjectTasks(db, projectId, { ...args, limit: args.limit ?? DEFAULT_TASK_SUMMARY_CAP })),
     );
     server.registerTool(
       "tasks_get",

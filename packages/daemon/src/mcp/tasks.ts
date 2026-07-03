@@ -32,6 +32,14 @@ export interface ListTasksOptions {
    * minPriority:'p1' keeps p0 + p1 and drops p2 + p3. Omit = all priorities.
    */
   minPriority?: TaskPriority;
+  /**
+   * Return only tasks whose id STARTS WITH this prefix — a scoped read the caller reaches for INSTEAD
+   * of paging a huge offset/limit window when they already know (part of) the id (card dc647ae2). A
+   * plain filter, not a resolve: no match is just an empty list, never an "ambiguous"/"not found" error.
+   */
+  idPrefix?: string;
+  /** Return only tasks whose title contains this (case-insensitive) substring — the name-based sibling of `idPrefix`. */
+  titleContains?: string;
   /** Skip the first N rows (after filtering, before limit) — bounded-read pagination. Omit = 0. */
   offset?: number;
   /** Return at most N rows (after offset) — bounded-read pagination. Omit = no slice (caller caps). */
@@ -58,7 +66,7 @@ export const toTaskSummary = (t: Task): TaskSummary => ({
 export function listProjectTasks(
   db: Db, projectId: string, opts: ListTasksOptions = {},
 ): Task[] | TaskSummary[] {
-  const { columns, excludeDone = true, includeBody = false, minPriority, offset, limit } = opts;
+  const { columns, excludeDone = true, includeBody = false, minPriority, idPrefix, titleContains, offset, limit } = opts;
   let tasks = db.listTasks(projectId);
   if (excludeDone) {
     const cols = resolveConfig(db.getProject(projectId)?.config).kanbanColumns;
@@ -73,6 +81,11 @@ export function listProjectTasks(
     // Lower priority string sorts lower (p0 < p1 < …), and lower = higher priority, so "at or above
     // minPriority" is a simple string <= comparison.
     tasks = tasks.filter((t) => t.priority <= minPriority);
+  }
+  if (idPrefix) tasks = tasks.filter((t) => t.id.startsWith(idPrefix));
+  if (titleContains) {
+    const needle = titleContains.toLowerCase();
+    tasks = tasks.filter((t) => t.title.toLowerCase().includes(needle));
   }
   if (offset !== undefined) tasks = tasks.slice(offset);
   if (limit !== undefined) tasks = tasks.slice(0, limit);
@@ -92,6 +105,16 @@ function resolveProjectTaskId(db: Db, projectId: string, taskId: string): Task |
   if (r.kind === "found") return r.record;
   if (r.kind === "ambiguous") {
     return { error: `ambiguous task id-prefix '${taskId}' — it matches ${r.ids.join(", ")}; pass more characters or the full id` };
+  }
+  // Not on THIS project's board. Distinguish "no such id anywhere" from "exists on another project's
+  // board" (card dc647ae2 part B) — the latter is a SCOPE error (a worker handed an out-of-scope id),
+  // not a missing card, and the two should never read the same to a caller trying to tell them apart.
+  const elsewhere = resolveIdPrefix(
+    db.listAllProjects().filter((p) => p.id !== projectId).flatMap((p) => db.listTasks(p.id)),
+    taskId,
+  );
+  if (elsewhere.kind !== "none") {
+    return { error: `task '${taskId}' not found in this project — it exists on another project's board (out of scope for this session)` };
   }
   return { error: "task not found in this project" };
 }

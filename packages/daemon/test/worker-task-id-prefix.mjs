@@ -17,7 +17,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       and an ambiguous tasks_update does NOT mutate either candidate;
 //   (3) an unknown id/prefix still 404s "task not found in this project" (regression);
 //   (4) the exact full id still resolves (regression);
-//   (5) tasks_update resolves the prefix to the FULL id before writing (the patch lands on the right row).
+//   (5) tasks_update resolves the prefix to the FULL id before writing (the patch lands on the right row);
+//   (6) a FULL id that exists on ANOTHER project's board gets a DISTINCT scope-error message (card
+//       dc647ae2 part B) instead of the same bare "not found" a truly-missing id gets — a worker handed
+//       an out-of-scope id can tell "wrong board" from "typo'd/gone".
 //
 // Run: 1) build (turbo builds shared first), 2) node test/worker-task-id-prefix.mjs
 import fs from "node:fs";
@@ -94,7 +97,8 @@ try {
   check("(3) tasks_get: too-short/non-matching id -> 'task not found in this project' (regression)", shortGet.error === "task not found in this project");
 
   const crossGet = await call("tasks_get", { id: T_OTHER });
-  check("cross-project guard: another project's FULL id is not readable via this session (not-found, no leak)", crossGet.error === "task not found in this project");
+  check("(6) cross-project guard: another project's FULL id is NOT readable via this session, and the error is a DISTINCT scope error (not the bare 'not found' an unknown id gets)",
+    crossGet.error === `task '${T_OTHER}' not found in this project — it exists on another project's board (out of scope for this session)`);
 
   // ===================== tasks_update =====================
   const upd = await call("tasks_update", { id: "12ab34cd", priority: "p0" });
@@ -114,7 +118,8 @@ try {
   check("(4) exact-id update persisted only to the targeted card", db.getTask(T_DUP_A).priority === "p1" && db.getTask(T_DUP_B).priority === "p2");
 
   const crossUpdate = await call("tasks_update", { id: T_OTHER, priority: "p0" });
-  check("cross-project guard: another project's FULL id is not editable via this session (not-found, no leak)", crossUpdate.error === "task not found in this project");
+  check("(6) cross-project guard: another project's FULL id is NOT editable via this session, and the error is the same distinct scope error",
+    crossUpdate.error === `task '${T_OTHER}' not found in this project — it exists on another project's board (out of scope for this session)`);
   check("cross-project guard: the other project's card was NOT mutated", db.getTask(T_OTHER).priority === "p2");
 
   await client.close();
@@ -124,6 +129,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the worker-facing loom-tasks tasks_get/tasks_update accept an unambiguous 8-char task-id prefix (mirrors project_get), reject an ambiguous prefix by naming both candidate ids without mutating anything, resolve the prefix to the FULL id before writing, and still 404 'task not found in this project' on an unknown id/prefix or a cross-project id — while an exact full id keeps resolving (regressions preserved)."
+  ? "\n✅ ALL PASS — the worker-facing loom-tasks tasks_get/tasks_update accept an unambiguous 8-char task-id prefix (mirrors project_get), reject an ambiguous prefix by naming both candidate ids without mutating anything, resolve the prefix to the FULL id before writing, still 404 'task not found in this project' on an unknown id/prefix (regressions preserved), and now give a cross-project FULL id a DISTINCT scope-error message instead of the same bare not-found."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
