@@ -150,6 +150,60 @@ export interface Profile {
    * rather than a sandboxed capability. Never exposed as an agent MCP setter, full stop.
    */
   connections?: string[];
+  /**
+   * Agent-tooling P4: registry-capability grants for this rig — each names a catalog capability slug
+   * plus an OPTIONAL bound P1 connection id when that capability needs a credential (the credential is
+   * decrypted server-side at spawn and injected only into the capability's own MCP subprocess env — never
+   * the `claude` process, never a tool argument). Default OFF (absent/empty, like `connections`, NOT
+   * `skills`) and fully additive. HUMAN-set only: unlike `browserTesting`/`documentConversion`, this field
+   * is REJECTED even on the Setup Assistant's/Platform Lead's own profile-writing MCP tools (see
+   * `profiles/validate.ts`'s `AGENT_FORBIDDEN_PROFILE_KEYS`) — a capability grant can launch a host
+   * process and bind egress, so it gets the SAME stricter posture as `connections`, not the milder one.
+   * The legacy `browserTesting`/`documentConversion` booleans above are BRIDGED, not replaced: they stay
+   * two permanently-reserved builtin capability slugs ("browser-testing"/"document-conversion") resolved
+   * alongside this array (see `resolveProfileCapabilities` in `config.ts`) — every existing profile row
+   * keeps working with zero data migration.
+   */
+  capabilities?: CapabilityGrant[];
+}
+
+/**
+ * One profile's grant of a registry capability (agent-tooling P4) — the catalog slug to enable, plus an
+ * OPTIONAL bound P1 connection id when the capability needs a credential. See `Profile.capabilities`.
+ */
+export interface CapabilityGrant {
+  slug: string;
+  connectionId?: string;
+}
+
+/**
+ * How a registry capability's MCP server is provisioned (agent-tooling P4). v1 ships three kinds — the
+ * fourth, an owner-typed arbitrary `command`, is DEFERRED (a follow-on card) to isolate that one sharp,
+ * owner-extensible security edge for its own focused review:
+ *  - `node-package`  — resolved via `require.resolve` of an already-installed daemon dependency, mirroring
+ *                      the Playwright MCP (a bin script sitting beside `package.json`, not in its exports map).
+ *  - `python-venv`   — resolved via the shared Loom-managed Python venv (`ensurePythonPackageAsync`),
+ *                      mirroring the markitdown MCP — the one kind an owner can realistically point at a
+ *                      genuinely NEW capability (any PyPI-published MCP server) without a daemon code change.
+ *  - `bundled`       — ships inside Loom's own assets, no install/resolve step.
+ */
+export type CapabilityProvisionKind = "node-package" | "python-venv" | "bundled";
+
+/**
+ * REST-facing summary of one catalog capability (builtin or owner-added) — never carries the raw
+ * provisioning recipe (package names / commands), which stays daemon-internal. What the Settings UI's
+ * capability catalog panel and the Profile editor's capability picker read.
+ */
+export interface CapabilitySummary {
+  slug: string;
+  name: string;
+  description: string;
+  transport: "stdio" | "http";
+  kind: CapabilityProvisionKind;
+  /** Whether this capability needs a bound P1 connection to function (surfaced as a UI badge). */
+  requiresConnection: boolean;
+  /** Loom-shipped (catalog seed) vs owner-added via the Settings UI/REST. */
+  builtin: boolean;
 }
 
 // --- Bundled-profile customization (the profiles analog of skill customization) -------------------
@@ -468,6 +522,16 @@ export interface Session {
    * getSecretForUse return undefined for a deleted connection).
    */
   connections?: string[];
+  /**
+   * Agent-tooling P4: registry-capability grants resolved from the session's Profile at spawn and PINNED
+   * here (mirrors `browserTesting`, spawn-time not tool-call-time — UNLIKE `connections`, which is only
+   * ever read by the MCP layer at call time and never threaded into the spawn recipe): each enabled
+   * capability's MCP server is mounted at spawn per this list. Persisted so EVERY respawn path (resume /
+   * fork / recycle) carries the same grants forward unchanged. Absent/empty on every existing session ⇒
+   * no registry-capability MCP beyond whatever `browserTesting`/`documentConversion` already mount —
+   * byte-identical spawn.
+   */
+  capabilities?: CapabilityGrant[];
   /**
    * Per-project session Archive: the ISO instant a session was archived (moving a stopped session out
    * of the Workspace rail). null = not archived (every live/normal session). Archived sessions are

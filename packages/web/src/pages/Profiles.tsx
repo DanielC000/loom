@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, SessionRole } from "@loom/shared";
+import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, SessionRole, CapabilityGrant } from "@loom/shared";
 import { api, type ProfileFieldResolution, type PythonProvisioning, type PythonProvisioningReason } from "../lib/api";
 import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components/ui";
 import { color, font, radius, tone, sessionRoleTone as roleTone, type Tone } from "../theme";
@@ -256,6 +256,9 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
   // Authenticated-egress connection-id allowlist (empty = NO access, the secure default — UNLIKE skills,
   // empty here never means "all"). Human-set only, here or via REST — never an agent MCP tool.
   const [connections, setConnections] = useState<string[]>(profile.connections ?? []);
+  // Registry-capability grants BEYOND browserTesting/documentConversion above (agent-tooling P4) — raw,
+  // never pre-bridged with the two legacy booleans (mirrors the daemon's resolveProfileCapabilities split).
+  const [capabilities, setCapabilities] = useState<CapabilityGrant[]>(profile.capabilities ?? []);
   const [confirmDel, setConfirmDel] = useState(false);
   const [confirmRevert, setConfirmRevert] = useState(false);
   const [resolver, setResolver] = useState<ProfileMergeResult | null>(null); // open ⇔ a conflicting adopt
@@ -278,6 +281,27 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
   const availableConnections = connectionList.data ?? [];
   const toggleConnection = (id: string) => setConnections((cur) => (cur.includes(id) ? cur.filter((c) => c !== id) : [...cur, id]));
 
+  // The capability registry catalog (agent-tooling P4): builtins + owner-added, ONE unified list — the
+  // Profile editor's picker renders every entry as a checkbox, transparently backed by browserTesting/
+  // documentConversion for the two reserved slugs and by the `capabilities` array for everything else.
+  const capabilityList = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
+  const availableCapabilities = capabilityList.data ?? [];
+  const isCapabilityChecked = (slug: string) =>
+    slug === "browser-testing" ? browserTesting
+    : slug === "document-conversion" ? documentConversion
+    : capabilities.some((g) => g.slug === slug);
+  const toggleCapability = (slug: string) => {
+    if (slug === "browser-testing") return setBrowserTesting((v) => !v);
+    if (slug === "document-conversion") return setDocumentConversion((v) => !v);
+    setCapabilities((cur) => (cur.some((g) => g.slug === slug) ? cur.filter((g) => g.slug !== slug) : [...cur, { slug }]));
+  };
+  const capabilityConnectionId = (slug: string) => capabilities.find((g) => g.slug === slug)?.connectionId ?? "";
+  const setCapabilityConnectionId = (slug: string, connectionId: string) =>
+    setCapabilities((cur) => cur.map((g) => (g.slug === slug ? { ...g, connectionId: connectionId || undefined } : g)));
+  // Canonical per-grant JSON (key-sorted) so {slug,connectionId} order never spuriously trips dirty/save —
+  // mirrors the daemon's customization.ts fieldEqual for the same field.
+  const capsJson = (xs: CapabilityGrant[]) => JSON.stringify(xs.map((g) => JSON.stringify(g, Object.keys(g).sort())).sort());
+
   const allowDelta = allowText.split("\n").map((s) => s.trim()).filter(Boolean);
   const dirty =
     name !== profile.name ||
@@ -291,7 +315,8 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
     restrictedTools !== (profile.restrictedTools ?? false) ||
     noCommit !== (profile.noCommit ?? false) ||
     sortedJson(skills) !== sortedJson(profile.skills ?? []) ||
-    sortedJson(connections) !== sortedJson(profile.connections ?? []);
+    sortedJson(connections) !== sortedJson(profile.connections ?? []) ||
+    capsJson(capabilities) !== capsJson(profile.capabilities ?? []);
 
   const fieldLabel = { fontFamily: font.head as string, fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: color.textDim };
   const ta = {
@@ -299,7 +324,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
     background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
   };
 
-  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setRestrictedTools(profile.restrictedTools ?? false); setNoCommit(profile.noCommit ?? false); setSkills(profile.skills ?? []); setConnections(profile.connections ?? []); };
+  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setRestrictedTools(profile.restrictedTools ?? false); setNoCommit(profile.noCommit ?? false); setSkills(profile.skills ?? []); setConnections(profile.connections ?? []); setCapabilities(profile.capabilities ?? []); };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
@@ -356,34 +381,45 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
           style={{ ...ta, minHeight: 80 }} placeholder={"Bash(pnpm *)\nRead(*)"} />
       </label>
 
-      {/* Opt-in browser-automation: a session under this rig spawns with its own per-session headless
-          Playwright MCP. A navigate-anywhere capability — human-set here only, never via an agent tool. */}
-      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
-        <input type="checkbox" checked={browserTesting} onChange={(e) => setBrowserTesting(e.target.checked)} style={{ marginTop: 2 }} />
-        <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          <span style={fieldLabel}>Browser testing</span>
-          <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
-            Inject a per-session Playwright MCP so this rig can drive its own isolated headless browser
-            (navigate / click / fill / assert). Gated — adds ~20-30 tools per turn and a navigate-anywhere
-            capability, so leave off unless this rig does end-to-end UI testing.
-          </span>
-        </span>
-      </label>
-
-      {/* Opt-in document-conversion: a session under this rig spawns with its own per-session markitdown
-          MCP. Launches a host process — human-set here only, never via an agent tool. */}
-      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
-        <input type="checkbox" checked={documentConversion} onChange={(e) => setDocumentConversion(e.target.checked)} style={{ marginTop: 2 }} />
-        <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          <span style={fieldLabel}>Document conversion</span>
-          <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
-            Inject a per-session markitdown MCP so this rig can convert files (PDF / Office / images / HTML)
-            to Markdown to save tokens. Gated — needs a base Python (≥3.10) on the host; Loom provisions its
-            own venv on first use. Audio conversion needs ffmpeg on PATH; document formats (PDF / Office /
-            images / HTML) don't. Leave off unless this rig works with documents.
-          </span>
-        </span>
-      </label>
+      {/* Agent-tooling P4 capability registry: ONE unified picker over the catalog (the two builtins +
+          any owner-added rows), replacing the old separate browser-testing/document-conversion checkboxes.
+          Each entry launches a host process / MCP server — human-set here only, never via an agent tool.
+          A `requiresConnection` entry reveals an inline P1-connection binding when checked. */}
+      <label style={fieldLabel}>Capabilities</label>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {availableCapabilities.map((c) => {
+          const checked = isCapabilityChecked(c.slug);
+          const isLegacy = c.slug === "browser-testing" || c.slug === "document-conversion";
+          return (
+            <label key={c.slug} style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+              <input type="checkbox" checked={checked} onChange={() => toggleCapability(c.slug)} style={{ marginTop: 2 }} />
+              <span style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ ...fieldLabel, textTransform: "none", letterSpacing: 0, fontSize: 13 }}>{c.name}</span>
+                  {c.builtin && <Badge tone="muted">builtin</Badge>}
+                  {c.requiresConnection && <Badge tone="cyan">needs connection</Badge>}
+                </span>
+                <span style={{ fontWeight: 400, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+                  {c.description}
+                </span>
+                {checked && c.requiresConnection && !isLegacy && (
+                  <Select
+                    value={capabilityConnectionId(c.slug)}
+                    onChange={(e) => setCapabilityConnectionId(c.slug, e.target.value)}
+                    style={{ marginTop: 4, maxWidth: 260 }}
+                  >
+                    <option value="">— pick a connection —</option>
+                    {availableConnections.map((conn) => <option key={conn.id} value={conn.id}>{conn.name}</option>)}
+                  </Select>
+                )}
+              </span>
+            </label>
+          );
+        })}
+        {availableCapabilities.length === 0 && (
+          <span style={{ color: color.textMuted, fontSize: 12, fontFamily: font.mono }}>Loading capability catalog…</span>
+        )}
+      </div>
 
       {/* Shared-venv provisioning status — surfaced only when this rig opts into documentConversion. ONE
           Loom-managed venv backs the capability, so this is a GLOBAL status (not per-profile): a session
@@ -486,7 +522,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
       <span style={{ flex: 1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || !name.trim() || saving}
-          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, restrictedTools, noCommit, skills: skills.length ? skills : null, connections })}>
+          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, restrictedTools, noCommit, skills: skills.length ? skills : null, connections, capabilities })}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {dirty
@@ -656,6 +692,7 @@ const FIELD_DISPLAY: Record<string, string> = {
   role: "Role", description: "Description", allowDelta: "Allow delta", skills: "Skills",
   model: "Model", icon: "Icon", browserTesting: "Browser testing", documentConversion: "Document conversion",
   restrictedTools: "Restricted tools", noCommit: "No-commit role", connections: "Connections",
+  capabilities: "Capabilities",
 };
 function fieldDisplayName(field: string): string {
   return FIELD_DISPLAY[field] ?? field;

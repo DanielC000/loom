@@ -1,6 +1,6 @@
 // Config model: platform default -> per-project override, resolved through ONE merge fn.
 // This is also the machine-writable schema phase-2 AI-driven project creation will target.
-import type { Profile, SessionRole, OrchestrationEventKind } from "./types.js";
+import type { Profile, SessionRole, OrchestrationEventKind, CapabilityGrant } from "./types.js";
 
 /**
  * Semantic role a board column plays in the worker lifecycle. Columns are identified by stable ROLE,
@@ -600,6 +600,35 @@ export interface ResolvedProfile {
   /** Authenticated-egress connection-id allowlist for the `authenticated_request` tool. Backstops to
    *  `[]` (NOT "all" — the secure default direction, unlike `skills`). */
   connections: string[];
+  /**
+   * Agent-tooling P4: the profile's OWN `capabilities` grants, a RAW passthrough — mirrors
+   * `connections`/`skills` (no derived merging here). Backstops to `[]`. Deliberately does NOT fold in
+   * the legacy `browserTesting`/`documentConversion` booleans (those stay separate fields on this same
+   * shape, exactly as before) — the two are bridged into ONE iteration list in exactly one place,
+   * `buildMcpServers` (host.ts), via {@link resolveProfileCapabilities}. Bridging here too would double
+   * the legacy grants wherever both this field and the booleans are read together.
+   */
+  capabilities: CapabilityGrant[];
+}
+
+/** The two permanently-reserved builtin capability slugs the legacy boolean flags bridge to (P4). */
+export const LEGACY_CAPABILITY_SLUGS = { browserTesting: "browser-testing", documentConversion: "document-conversion" } as const;
+
+/**
+ * Bridge a profile/session's legacy `browserTesting`/`documentConversion` booleans + its `capabilities`
+ * array into ONE resolved grant list (agent-tooling P4) — the back-compat seam that lets `buildMcpServers`
+ * iterate a single list while every existing profile/session row (booleans set, `capabilities` unset)
+ * keeps resolving to EXACTLY its pre-P4 grants, with zero data migration. Order: legacy slots first
+ * (stable, matches today's browser-then-document mount order), then the array verbatim. Called EXACTLY
+ * ONCE per resolution (buildMcpServers) — `capabilities` itself is never pre-bridged (see the field doc
+ * above), so this is the only place legacy + new merge.
+ */
+export function resolveProfileCapabilities(p: { browserTesting?: boolean; documentConversion?: boolean; capabilities?: CapabilityGrant[] }): CapabilityGrant[] {
+  const legacy: CapabilityGrant[] = [
+    ...(p.browserTesting ? [{ slug: LEGACY_CAPABILITY_SLUGS.browserTesting }] : []),
+    ...(p.documentConversion ? [{ slug: LEGACY_CAPABILITY_SLUGS.documentConversion }] : []),
+  ];
+  return [...legacy, ...(p.capabilities ?? [])];
 }
 
 /**
@@ -620,7 +649,7 @@ export function resolveProfile(
   const startupPrompt = agent.startupPrompt ?? "";
   if (!profile) {
     // The backstop: a null/absent profile confers NO browser/document capability (false) — today's behavior.
-    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, connections: [] };
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, connections: [], capabilities: [] };
   }
   return {
     role: profile.role ?? null,
@@ -638,6 +667,8 @@ export function resolveProfile(
     noCommit: profile.noCommit ?? false,
     // Authenticated-egress connection-id allowlist. Backstop [] (NOT "all" — the secure default).
     connections: profile.connections ?? [],
+    // Registry-capability grants — RAW passthrough (see the field doc on ResolvedProfile). Backstop [].
+    capabilities: profile.capabilities ?? [],
   };
 }
 

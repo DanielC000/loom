@@ -37,8 +37,9 @@ import type {
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
-  ConnectionAuthScheme,
+  ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
 } from "@loom/shared";
+import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { isOwnerHeldTaskTitle } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken } from "./keys/hash.js";
 // Type-only — companion/types.ts has zero runtime imports, so this can never form a runtime cycle with
@@ -135,6 +136,9 @@ CREATE TABLE IF NOT EXISTS profiles (
   restricted_tools INTEGER NOT NULL DEFAULT 0, -- opt-in: append the curated dangerous native tools to --disallowedTools at spawn (blast-radius control)
   no_commit INTEGER NOT NULL DEFAULT 0, -- declared no-commit role: 0-commit done auto-retires + skips the forgot-to-commit warning (lifecycle-only)
   connections TEXT NOT NULL DEFAULT '[]', -- JSON string[] of P1 connection ids the authenticated_request tool may use; [] = no access (unlike skills, absent/empty is NOT "all")
+  -- agent-tooling P4: registry-capability grants (JSON {slug, connectionId?}[]) — RAW passthrough, never
+  -- pre-bridged with browser_testing/document_conversion (see resolveProfileCapabilities). [] = none.
+  capabilities TEXT NOT NULL DEFAULT '[]',
   -- bundled-profile customization base snapshot: JSON of the shipped def (sans id) at the user's last
   -- sync. NULL = unset (falls back to shipped at read time, like a missing skill base). Backfilled at boot
   -- by seedProfileBaseSnapshots for bundled-by-name rows; advanced on adopt/reset. Computed state only.
@@ -273,6 +277,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- browser_testing, NOT skills): '[]' = no access (the secure default — unlike skills, empty here is
   -- never "all"). Carried across every respawn (resume/fork/recycle).
   connections TEXT NOT NULL DEFAULT '[]',
+  -- agent-tooling P4: registry-capability grants pinned at spawn (JSON {slug, connectionId?}[]), carried
+  -- across every respawn (resume/fork/recycle) like browser_testing. [] on every legacy row (byte-identical).
+  capabilities TEXT NOT NULL DEFAULT '[]',
   parent_session_id TEXT,
   task_id TEXT,
   worktree_path TEXT,
@@ -572,6 +579,25 @@ CREATE TABLE IF NOT EXISTS connections (
   secret_blob TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+-- Owner-added capability catalog rows (agent-tooling epic P4). The two BUILTIN capabilities
+-- (browser-testing/document-conversion) are NOT rows here — they stay special-cased in buildMcpServers,
+-- reusing their existing bespoke resolution code. Brand-new table ⇒ CREATE TABLE IF NOT EXISTS is itself
+-- the additive migration (no ALTER needed), exactly like the connections table above. HUMAN-managed only
+-- (loopback REST, no MCP path) — a capability grant can launch a host process and bind egress.
+CREATE TABLE IF NOT EXISTS capability_defs (
+  id TEXT PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  transport TEXT NOT NULL DEFAULT 'stdio',
+  kind TEXT NOT NULL,                        -- 'node-package' | 'python-venv' | 'bundled'
+  provision_json TEXT NOT NULL,              -- kind-specific recipe (JSON)
+  tool_allowlist_json TEXT NOT NULL DEFAULT '[]', -- JSON string[] of MCP tool names for --allowedTools
+  wants_scratch_dir INTEGER NOT NULL DEFAULT 0,
+  requires_connection INTEGER NOT NULL DEFAULT 0,
+  secret_env_var TEXT,                       -- env var name the P1 secret is injected under; NULL if N/A
+  created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, created_at);
@@ -656,6 +682,9 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   // profile-resolved authenticated-egress connection-id allowlist (JSON array); legacy rows backfill to
   // '[]' = no access (mirrors browser_testing's off-by-default direction, NOT skills' "null = all").
   connections: "TEXT NOT NULL DEFAULT '[]'",
+  // agent-tooling P4: registry-capability grants pinned at spawn (JSON array); legacy rows backfill to
+  // '[]' = none (mirrors connections' off-by-default direction).
+  capabilities: "TEXT NOT NULL DEFAULT '[]'",
   parent_session_id: "TEXT",
   task_id: "TEXT",
   worktree_path: "TEXT",
@@ -711,6 +740,8 @@ const PROFILE_ADDED_COLUMNS: Record<string, string> = {
   no_commit: "INTEGER NOT NULL DEFAULT 0",
   // authenticated-egress connection-id allowlist (JSON array); legacy rows backfill to '[]' = no access.
   connections: "TEXT NOT NULL DEFAULT '[]'",
+  // agent-tooling P4: registry-capability grants (JSON array); legacy rows backfill to '[]' = none.
+  capabilities: "TEXT NOT NULL DEFAULT '[]'",
   // bundled-profile customization `base` snapshot (JSON of the shipped def, sans id). Nullable; legacy
   // rows backfill to NULL and seedProfileBaseSnapshots fills bundled-by-name rows at boot (safe direction).
   base_snapshot: "TEXT",
@@ -1746,6 +1777,37 @@ export class Db {
     this.db.prepare("DELETE FROM connections WHERE id = ?").run(id);
   }
 
+  // --- capability_defs (owner-added registry-capability catalog rows, agent-tooling epic P4) ---
+  // GLOBAL / daemon-wide, HUMAN-managed only over the loopback REST surface — NO MCP path (same trust
+  // posture as connections above). The two BUILTIN capabilities are NOT rows here (see capabilities/registry.ts). ---
+  /** Every owner-added capability, ordered by created_at for a stable admin list. */
+  listCapabilityDefs(): CapabilityDefRow[] {
+    return (this.db.prepare("SELECT * FROM capability_defs ORDER BY created_at, rowid").all() as Row[]).map(toCapabilityDefRow);
+  }
+  /** Read one owner-added capability by slug, or undefined when absent. */
+  getCapabilityDefBySlug(slug: string): CapabilityDefRow | undefined {
+    const r = this.db.prepare("SELECT * FROM capability_defs WHERE slug = ?").get(slug) as Row | undefined;
+    return r ? toCapabilityDefRow(r) : undefined;
+  }
+  /** Create a new owner-added capability def. Caller (capabilities/registry.ts) validates + dedupes first. */
+  createCapabilityDef(input: Omit<CapabilityDefRow, "id" | "createdAt">): CapabilityDefRow {
+    const row: CapabilityDefRow = { id: randomUUID(), createdAt: new Date().toISOString(), ...input };
+    this.db.prepare(
+      `INSERT INTO capability_defs (id,slug,name,description,transport,kind,provision_json,tool_allowlist_json,wants_scratch_dir,requires_connection,secret_env_var,created_at)
+       VALUES (@id,@slug,@name,@description,@transport,@kind,@provisionJson,@toolAllowlistJson,@wantsScratchDir,@requiresConnection,@secretEnvVar,@createdAt)`,
+    ).run({
+      ...row,
+      wantsScratchDir: row.wantsScratchDir ? 1 : 0,
+      requiresConnection: row.requiresConnection ? 1 : 0,
+      secretEnvVar: row.secretEnvVar ?? null,
+    });
+    return row;
+  }
+  /** Delete an owner-added capability def by id (idempotent — a missing id matches nothing). */
+  deleteCapabilityDef(id: string): void {
+    this.db.prepare("DELETE FROM capability_defs WHERE id = ?").run(id);
+  }
+
   // --- agents ---
   listAgents(projectId: string): Agent[] {
     return this.db.prepare("SELECT * FROM agents WHERE project_id = ? ORDER BY position")
@@ -2311,8 +2373,8 @@ export class Db {
   }
   insertProfile(p: Profile): void {
     this.db.prepare(
-      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,restricted_tools,no_commit,connections)
-       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@restrictedTools,@noCommit,@connections)`,
+      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,restricted_tools,no_commit,connections,capabilities)
+       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@restrictedTools,@noCommit,@connections,@capabilities)`,
     ).run({
       id: p.id, name: p.name, role: p.role ?? null, description: p.description,
       // string[] columns persist as JSON text; skills NULL means "deliver all".
@@ -2324,6 +2386,7 @@ export class Db {
       restrictedTools: p.restrictedTools ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       noCommit: p.noCommit ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       connections: JSON.stringify(p.connections ?? []), // [] = no access (absent ⇒ [], NOT skills' "all")
+      capabilities: JSON.stringify(p.capabilities ?? []), // agent-tooling P4: registry-capability grants, raw
     });
   }
   /** Partial edit of a profile. Provided fields are written (null clears); omitted are left as-is. */
@@ -2341,6 +2404,7 @@ export class Db {
       restricted_tools: patch.restrictedTools === undefined ? undefined : patch.restrictedTools ? 1 : 0,
       no_commit: patch.noCommit === undefined ? undefined : patch.noCommit ? 1 : 0,
       connections: patch.connections === undefined ? undefined : JSON.stringify(patch.connections),
+      capabilities: patch.capabilities === undefined ? undefined : JSON.stringify(patch.capabilities),
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
@@ -2534,12 +2598,12 @@ export class Db {
       `INSERT INTO sessions (
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
-         role,browser_testing,document_conversion,restricted_tools,no_commit,skills,connections,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
+         role,browser_testing,document_conversion,restricted_tools,no_commit,skills,connections,capabilities,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
          ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
-         @role,@browserTesting,@documentConversion,@restrictedTools,@noCommit,@skills,@connections,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
+         @role,@browserTesting,@documentConversion,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
          @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline)`,
     ).run({
       ...s,
@@ -2556,6 +2620,8 @@ export class Db {
       skills: s.skills && s.skills.length ? JSON.stringify(s.skills) : null,
       // connection-id allowlist → JSON text; absent ⇒ '[]' = no access (unlike skills, empty is NEVER "all").
       connections: JSON.stringify(s.connections ?? []),
+      // agent-tooling P4: registry-capability grants pinned at spawn → JSON text; absent ⇒ '[]' = none.
+      capabilities: JSON.stringify(s.capabilities ?? []),
 
       parentSessionId: s.parentSessionId ?? null,
       taskId: s.taskId ?? null,
@@ -3284,6 +3350,8 @@ function toProfile(r0: unknown): Profile {
     noCommit: (r.no_commit as number) === 1,
     // authenticated-egress connection-id allowlist; malformed/absent degrades to [] = no access.
     connections: (() => { try { return JSON.parse((r.connections as string) || "[]") as string[]; } catch { return []; } })(),
+    // agent-tooling P4: registry-capability grants (raw passthrough); malformed/absent degrades to [] = none.
+    capabilities: (() => { try { return JSON.parse((r.capabilities as string) || "[]") as CapabilityGrant[]; } catch { return []; } })(),
   };
 }
 function toSession(r0: unknown): Session {
@@ -3307,6 +3375,8 @@ function toSession(r0: unknown): Session {
     skills: r.skills == null ? null : (() => { try { return JSON.parse(r.skills as string) as string[]; } catch { return null; } })(),
     // pinned connection-id allowlist; malformed/absent degrades to [] = no access (never "all").
     connections: (() => { try { return JSON.parse((r.connections as string) || "[]") as string[]; } catch { return []; } })(),
+    // pinned registry-capability grants (agent-tooling P4); malformed/absent degrades to [] = none.
+    capabilities: (() => { try { return JSON.parse((r.capabilities as string) || "[]") as CapabilityGrant[]; } catch { return []; } })(),
     parentSessionId: (r.parent_session_id as string) ?? null,
     taskId: (r.task_id as string) ?? null,
     worktreePath: (r.worktree_path as string) ?? null,
@@ -3388,6 +3458,16 @@ function toConnectionRow(r0: unknown): ConnectionRow {
     id: r.id as string, name: r.name as string, host: r.host as string,
     authScheme: r.auth_scheme as ConnectionAuthScheme, secretBlob: r.secret_blob as string,
     createdAt: (r.created_at as string) ?? "",
+  };
+}
+function toCapabilityDefRow(r0: unknown): CapabilityDefRow {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, slug: r.slug as string, name: r.name as string, description: (r.description as string) ?? "",
+    transport: r.transport as "stdio" | "http", kind: r.kind as CapabilityProvisionKind,
+    provisionJson: r.provision_json as string, toolAllowlistJson: (r.tool_allowlist_json as string) ?? "[]",
+    wantsScratchDir: (r.wants_scratch_dir as number) === 1, requiresConnection: (r.requires_connection as number) === 1,
+    secretEnvVar: (r.secret_env_var as string) ?? null, createdAt: (r.created_at as string) ?? "",
   };
 }
 function toPresetPromptSuggestion(r0: unknown): PresetPromptSuggestion {

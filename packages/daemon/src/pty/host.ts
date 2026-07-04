@@ -4,10 +4,11 @@ import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { spawn as spawnProcess } from "node:child_process";
 import { spawn, type IPty } from "node-pty";
-import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute } from "@loom/shared";
+import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
+import { resolveProfileCapabilities } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
-import { writeSessionSettings } from "./claude-settings.js";
+import { writeSessionSettings, writeSessionMcpConfig } from "./claude-settings.js";
 import { ensureTrusted } from "./claude-config.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
@@ -15,6 +16,7 @@ import { detectUsageLimit, rateLimitedUntil } from "../orchestration/usage-limit
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
+import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
 
 const RING_CAP_BYTES = 256 * 1024;
 /**
@@ -569,9 +571,20 @@ export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "st
  * testable seam for the MCP surface). ALWAYS the project-scoped `loom-tasks` HTTP server; PLUS the
  * role-gated surface (manager/worker → loom-orchestration, platform → loom-platform, auditor → loom-audit,
  * workspace-auditor → loom-user-audit, setup → loom-setup);
- * PLUS — only when `browserTesting` is set — the per-session stdio Playwright MCP. The browser server is
- * fully ADDITIVE: with the flag off the map is byte-identical to today's. Pure + deterministic (no pty, no
- * network), so the spawn-config test can assert the iff-browserTesting inclusion directly.
+ * PLUS — one generalized capability-registry loop (agent-tooling P4) that mounts EVERY resolved
+ * registry-capability grant (`resolveProfileCapabilities(o)`, bridging the legacy `browserTesting`/
+ * `documentConversion` booleans + the new `capabilities` array into ONE list). The two legacy slugs
+ * ("browser-testing"/"document-conversion") are special-cased to their EXISTING, already-hardened
+ * resolvers (`playwrightMcpServer`/`markitdownMcpServer`, untouched) so this generalization is
+ * byte-identical for every caller that still passes the booleans directly (every existing test + call
+ * site) — the mounted map keys stay "playwright"/"markitdown" exactly as before. Any OTHER slug is an
+ * owner-added catalog capability, resolved via the injected `o.capabilityCatalog` + the generic
+ * node-package/python-venv/bundled dispatcher (`resolveCapabilityServer`), with its bound connection's
+ * secret (if any) resolved via `o.resolveConnectionSecret` and injected ONLY into that server's own `env`
+ * — never a CLI argument, never reaching the `claude` process. Fully ADDITIVE: with nothing enabled the
+ * map is byte-identical to today's. Pure + deterministic (no pty, no network — `capabilityCatalog`/
+ * `resolveConnectionSecret` are plain injected values, never a live db handle), so the spawn-config test
+ * can assert inclusion directly, incl. via a FAKE catalog + fake secret resolver (no real DB/venv/network).
  *
  * SECURITY (P5): an "auditor" session gets ONLY loom-tasks + loom-audit — NEVER loom-platform and NEVER
  * loom-orchestration. The restricted loom-audit surface (read transcripts + file findings) is its whole
@@ -581,6 +594,15 @@ export function buildMcpServers(o: {
   sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean; documentConversion?: boolean;
   /** HUMAN-only `python.interpreterPath` (carried via session env) — forwarded to the markitdown venv resolver. */
   pythonInterpreterPath?: string;
+  /** Agent-tooling P4: registry-capability grants BEYOND the two legacy booleans above (raw, un-bridged —
+   *  see resolveProfileCapabilities). Default []. */
+  capabilities?: CapabilityGrant[];
+  /** Owner-added capability catalog rows (injected, never a live db handle) — looked up by slug for any
+   *  grant that isn't one of the two reserved legacy slugs. Default []. */
+  capabilityCatalog?: CapabilityDefRow[];
+  /** Resolve a P1 connection id to its DECRYPTED secret (injected callback, never a live db handle) —
+   *  consulted only for a grant whose def has `requiresConnection` AND that carries a `connectionId`. */
+  resolveConnectionSecret?: (connectionId: string) => string | undefined;
 }): Record<string, unknown> {
   // Agent Runs R2: a `run` session gets ONLY the restricted run surface — NOT even loom-tasks. This is
   // the one path that does not mount loom-tasks (every other role layers ON TOP of it). The early return
@@ -619,38 +641,81 @@ export function buildMcpServers(o: {
   if (wantsSetup) {
     mcpServers["loom-setup"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-setup/${o.sessionId}` };
   }
-  // Opt-in: a per-session stdio Playwright MCP for a browser-testing worker (each gets its OWN
-  // isolated headless browser — parallelizable, no shared extension/auth/state). Omitted for every
-  // non-browser spawn, so the map is byte-identical to today when the flag is off. A null (unresolvable
-  // package) is logged + skipped rather than crashing the spawn.
-  if (o.browserTesting) {
-    // Default capture output to a repo-EXTERNAL per-session scratch dir, so a screenshot taken with no
-    // explicit path can never land inside the project working tree (an absolute caller path still wins).
-    const pw = playwrightMcpServer(sessionScratchDir(o.sessionId));
-    if (pw) {
-      mcpServers["playwright"] = pw;
-    } else {
-      // eslint-disable-next-line no-console
-      console.warn(`[pty] ${o.sessionId} browserTesting set but @playwright/mcp could not be resolved — spawning WITHOUT a browser MCP. Is the daemon dependency installed?`);
+  // Agent-tooling P4: ONE generalized loop over every resolved registry-capability grant (the bridged
+  // legacy booleans + the new capabilities array). byte-identical-when-none: an empty resolved list is a
+  // no-op, so this whole block vanishes for a spawn with nothing enabled — exactly today's map.
+  const catalog = o.capabilityCatalog ?? [];
+  for (const grant of resolveProfileCapabilities(o)) {
+    if (grant.slug === "browser-testing") {
+      // The legacy Playwright capability, UNCHANGED resolution: default capture output to a
+      // repo-EXTERNAL per-session scratch dir, so a screenshot taken with no explicit path can never
+      // land inside the project working tree (an absolute caller path still wins). A null (unresolvable
+      // package) is logged + skipped rather than crashing the spawn.
+      const pw = playwrightMcpServer(sessionScratchDir(o.sessionId));
+      if (pw) {
+        mcpServers["playwright"] = pw;
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(`[pty] ${o.sessionId} browserTesting set but @playwright/mcp could not be resolved — spawning WITHOUT a browser MCP. Is the daemon dependency installed?`);
+      }
+      continue;
     }
-  }
-  // Opt-in: a per-session stdio markitdown MCP for a document-conversion session, so the agent can
-  // convert files (PDF/Office/images/HTML/…) to Markdown to save tokens. Same additive discipline as
-  // the Playwright server above: omitted for every non-documentConversion spawn (byte-identical map when
-  // off). `markitdownMcpServer` is fast + sync-safe (fs.existsSync on the hot path); a null means the
-  // shared venv isn't warm yet — it has kicked BACKGROUND provisioning, so THIS spawn just skips the MCP
-  // (logged, never crashes), and a later spawn picks it up once the venv lands. The one-time host setup is
-  // just a base Python ≥3.10 (PATH or python.interpreterPath); Loom provisions the venv.
-  if (o.documentConversion) {
-    const md = markitdownMcpServer(o.pythonInterpreterPath);
-    if (md) {
-      mcpServers["markitdown"] = md;
+    if (grant.slug === "document-conversion") {
+      // The legacy markitdown capability, UNCHANGED resolution: fast + sync-safe (fs.existsSync on the
+      // hot path); a null means the shared venv isn't warm yet — it has kicked BACKGROUND provisioning,
+      // so THIS spawn just skips the MCP (logged, never crashes), and a later spawn picks it up once the
+      // venv lands. The one-time host setup is just a base Python ≥3.10 (PATH or python.interpreterPath).
+      const md = markitdownMcpServer(o.pythonInterpreterPath);
+      if (md) {
+        mcpServers["markitdown"] = md;
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(`[pty] ${o.sessionId} documentConversion set but the markitdown venv isn't warm yet — spawning WITHOUT the document MCP (provisioning in the background; a later spawn will pick it up). Needs a base Python >=3.10 on PATH (or python.interpreterPath).`);
+      }
+      continue;
+    }
+    // An owner-added catalog capability: look it up in the injected catalog, resolve its bound
+    // connection's secret (if it requiresConnection and a connectionId was granted), and dispatch
+    // through the generic node-package/python-venv/bundled resolver. Unknown slug / unresolvable
+    // provisioning ⇒ log-and-skip, exactly like the two legacy capabilities above — never crashes the spawn.
+    const def = catalog.find((c) => c.slug === grant.slug);
+    if (!def) {
+      // eslint-disable-next-line no-console
+      console.warn(`[pty] ${o.sessionId} capability '${grant.slug}' is enabled but not found in the catalog — spawning without it.`);
+      continue;
+    }
+    const connectionSecret = def.requiresConnection && grant.connectionId ? o.resolveConnectionSecret?.(grant.connectionId) : undefined;
+    const server = resolveCapabilityServer(def, {
+      scratchDir: def.wantsScratchDir ? sessionScratchDir(o.sessionId) : undefined,
+      connectionSecret,
+      pythonInterpreterPath: o.pythonInterpreterPath,
+    });
+    if (server) {
+      mcpServers[def.slug] = server;
     } else {
       // eslint-disable-next-line no-console
-      console.warn(`[pty] ${o.sessionId} documentConversion set but the markitdown venv isn't warm yet — spawning WITHOUT the document MCP (provisioning in the background; a later spawn will pick it up). Needs a base Python >=3.10 on PATH (or python.interpreterPath).`);
+      console.warn(`[pty] ${o.sessionId} capability '${grant.slug}' could not be resolved — spawning without it (provisioning may be in progress in the background).`);
     }
   }
   return mcpServers;
+}
+
+/**
+ * The `--allowedTools` contribution from every resolved capability grant (agent-tooling P4) — the
+ * `createPty` allow-list analog of `buildMcpServers`' mount loop. The two legacy slugs keep their exact
+ * hardcoded allow entries; an owner-added capability contributes its own `toolAllowlist` from the catalog.
+ * NEVER throws: an unknown slug or malformed `toolAllowlistJson` degrades to "no extra allow for THIS one
+ * capability" (buildMcpServers separately log-and-skips its MCP mount) — never crashes the whole spawn.
+ * Pure + exported so the hermetic test can assert the malformed-JSON degradation with no real spawn.
+ */
+export function capabilityToolAllowlist(grants: CapabilityGrant[], catalog: CapabilityDefRow[]): string[] {
+  return grants.flatMap((grant) => {
+    if (grant.slug === "browser-testing") return ["mcp__playwright"];
+    if (grant.slug === "document-conversion") return ["mcp__markitdown__convert_to_markdown"];
+    const def = catalog.find((c) => c.slug === grant.slug);
+    if (!def) return [];
+    try { return JSON.parse(def.toolAllowlistJson) as string[]; } catch { return []; }
+  });
 }
 
 interface Subscriber {
@@ -813,6 +878,13 @@ export interface SpawnOpts {
    */
   documentConversion?: boolean;
   /**
+   * Agent-tooling P4: registry-capability grants BEYOND the two legacy booleans above (resolved from the
+   * session's Profile/row, RAW — see resolveProfileCapabilities). Default [] — every existing spawn is
+   * byte-identical when unset/empty. Threaded on EVERY spawn path (fresh/resume/fork/recycle), pinned on
+   * the session row like browserTesting so a respawn mounts the same capabilities.
+   */
+  capabilities?: CapabilityGrant[];
+  /**
    * Opt-in RESTRICTED-tools (resolved from the session's Profile, gated; blast-radius control). When true,
    * the curated dangerous native tools ({@link RESTRICTED_NATIVE_TOOLS}) are UNIONed into this spawn's
    * `--disallowedTools` (on top of the role's human-prompt disallow), removing them from the model's tool
@@ -956,6 +1028,34 @@ export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedToo
 }
 
 /**
+ * Collect every capability secret value riding an assembled mcpServers map's `env` blocks (agent-tooling
+ * P4 credential tie — see resolveCapabilityServer). `env` is ONLY ever set by that one path today, so
+ * "any server carries an env value" IS "a capability secret is present" — but this reads structurally
+ * (any string value under any server's `env`), not by name, so it stays correct even if a future capability
+ * kind injects a non-secret env var. Pure, exported for the hermetic test.
+ */
+export function collectMcpEnvSecrets(mcpServers: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const server of Object.values(mcpServers)) {
+    const env = (server as { env?: Record<string, string> } | undefined)?.env;
+    if (env) for (const v of Object.values(env)) if (v) out.push(v);
+  }
+  return out;
+}
+
+/** True iff the assembled mcpServers map carries at least one capability secret (see collectMcpEnvSecrets). */
+export function mcpConfigHasSecret(mcpServers: Record<string, unknown>): boolean {
+  return collectMcpEnvSecrets(mcpServers).length > 0;
+}
+
+/** Redact every literal occurrence of each secret in `secrets` from `text`. A no-op for an empty list. */
+export function redactSecrets(text: string, secrets: string[]): string {
+  let out = text;
+  for (const s of secrets) if (s) out = out.split(s).join("[REDACTED]");
+  return out;
+}
+
+/**
  * Assemble the `claude` argv (extracted so the ordering is unit-testable). The startup/kickoff
  * prompt is positional and goes LAST, behind a `--` end-of-options separator (H2): a manager
  * controls kickoffPrompt, and a prompt beginning with `-`/`--` would otherwise be parsed as a flag.
@@ -969,6 +1069,18 @@ export function buildSpawnArgs(o: {
   settingsPath: string;
   mode: string;
   mcpServers: Record<string, unknown>;
+  /**
+   * Agent-tooling P4 credential-tie hardening: when set, `--mcp-config` uses this FILE PATH instead of
+   * inlining `o.mcpServers` as JSON — the caller (createPty) sets this ONLY when `mcpConfigHasSecret`
+   * is true, so a capability secret never rides the `claude` process's own argv (world-readable via
+   * `/proc/PID/cmdline`, `ps`, Windows WMI CommandLine). DELIBERATELY a conditional branch, not a
+   * blanket switch to files: every secret-free spawn (every session today, incl. the whole self-hosting
+   * orchestration fleet) MUST stay on the byte-identical inline form — this is the load-bearing spawn
+   * recipe, and always-file-ing it would risk the resume-after-daemon_restart path for zero benefit on
+   * the overwhelmingly common secret-free case. Undefined/omitted ⇒ byte-identical to before this option
+   * existed (inline `o.mcpServers` JSON).
+   */
+  mcpConfigPath?: string;
   startupPrompt?: string;
   /** Profile-pinned model id → `--model <id>`. Undefined/empty ⇒ NO `--model` (byte-identical to today). */
   model?: string;
@@ -1002,7 +1114,9 @@ export function buildSpawnArgs(o: {
   // its value sitting right before the `--` separator (the H2 ordering invariant). Emitted ONLY when
   // non-empty, so every out-of-scope role's argv is byte-identical (additive-when-applicable discipline).
   if (o.disallowedTools && o.disallowedTools.length) args.push("--disallowedTools", ...o.disallowedTools);
-  args.push("--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: o.mcpServers }));
+  // Agent-tooling P4: a secret-bearing spawn passes the FILE PATH (never the JSON, never the secret);
+  // every other spawn stays the byte-identical inline JSON form (o.mcpConfigPath undefined).
+  args.push("--strict-mcp-config", "--mcp-config", o.mcpConfigPath ?? JSON.stringify({ mcpServers: o.mcpServers }));
   if (o.startupPrompt) args.push("--", o.startupPrompt);
   return args;
 }
@@ -1355,9 +1469,26 @@ export class PtyHost {
    *  index.ts overrides with the resolved `platform.coalesceAgentMessages` at boot (BOOT-BOUND). Read
    *  ONCE here (not per-message) by drainPending. */
   private readonly coalesceAgentMessages: boolean;
-  constructor(private events: PtyHostEvents, opts?: { busyStaleMs?: number; coalesceAgentMessages?: boolean }) {
+  /**
+   * Agent-tooling P4: read access to the OWNER-ADDED capability catalog + the P1 secret store, wired in
+   * by index.ts at boot (it holds `db`; PtyHost deliberately does not). Both default to a harmless no-op
+   * (empty catalog / no secret) so a PtyHost built without these opts — every existing hermetic test —
+   * behaves byte-identically: the two BUILTIN capabilities never consult either callback.
+   */
+  private readonly getCapabilityCatalog: () => CapabilityDefRow[];
+  private readonly resolveConnectionSecret: (connectionId: string) => string | undefined;
+  constructor(
+    private events: PtyHostEvents,
+    opts?: {
+      busyStaleMs?: number; coalesceAgentMessages?: boolean;
+      getCapabilityCatalog?: () => CapabilityDefRow[];
+      resolveConnectionSecret?: (connectionId: string) => string | undefined;
+    },
+  ) {
     this.busyStaleMs = opts?.busyStaleMs ?? BUSY_STALE_MS;
     this.coalesceAgentMessages = opts?.coalesceAgentMessages ?? false;
+    this.getCapabilityCatalog = opts?.getCapabilityCatalog ?? (() => []);
+    this.resolveConnectionSecret = opts?.resolveConnectionSecret ?? (() => undefined);
   }
 
   spawn(opts: SpawnOpts): void {
@@ -1700,10 +1831,17 @@ export class PtyHost {
       : [];
     // A document-conversion session ALSO needs its markitdown MCP tool allowlisted (acceptEdits doesn't
     // auto-approve MCP tools — the §9 lesson), so it layers ON TOP of the role surface like browserTesting.
+    // Agent-tooling P4: generalize the two legacy hardcoded tool-allows into ONE loop over every resolved
+    // capability grant (mirrors buildMcpServers' loop) — the two legacy slugs keep their exact hardcoded
+    // allow entries; an owner-added capability contributes its own `toolAllowlist` from the catalog.
+    // ACCEPTED for v1 (code review): this queries the owner-added catalog on EVERY spawn, even one with
+    // zero capabilities enabled — a cheap indexed SELECT (capability_defs is expected to stay small), not
+    // worth a cache for the read frequency here. Revisit if the catalog ever grows large or spawns get hot.
+    const capabilityCatalog = this.getCapabilityCatalog();
+    const capabilityAllow = capabilityToolAllowlist(resolveProfileCapabilities(opts), capabilityCatalog);
     const extraAllow = [
       ...roleAllow,
-      ...(opts.browserTesting ? ["mcp__playwright"] : []),
-      ...(opts.documentConversion ? ["mcp__markitdown__convert_to_markdown"] : []),
+      ...capabilityAllow,
     ];
     const permission = extraAllow.length
       ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
@@ -1714,7 +1852,11 @@ export class PtyHost {
     // mcpServers map (loom-tasks + role surface + opt-in Playwright) is assembled by the testable seam.
     // The HUMAN-only python.interpreterPath rides the session env (config → pythonSessionEnv); read it here
     // and hand it to the shared-venv markitdown resolver (only consulted when documentConversion is on).
-    const mcpServers = buildMcpServers({ sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion, pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER });
+    const mcpServers = buildMcpServers({
+      sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,
+      pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER,
+      capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,
+    });
     // Role-scoped disallow of the interactive human-prompt tools (AskUserQuestion / Exit|EnterPlanMode):
     // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human — UNIONed with
     // the curated dangerous native tools when this session's Profile set restrictedTools (Companion
@@ -1722,7 +1864,14 @@ export class PtyHost {
     // EVERY path (fresh/resume/fork/recycle/boot) inherits it; when restrictedTools is off this is exactly
     // disallowedToolsForRole(role) ⇒ byte-identical argv. See disallowedToolsForSpawn.
     const disallowedTools = disallowedToolsForSpawn(opts.role, opts.restrictedTools);
-    const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, startupPrompt: opts.startupPrompt, model: opts.model, disallowedTools });
+    // Agent-tooling P4 credential-tie hardening: a capability secret must NEVER ride the claude process's
+    // own argv. Diverting to a 0600 per-session FILE is CONDITIONAL on the map actually carrying one —
+    // every secret-free spawn (every session today) keeps the byte-identical inline --mcp-config <json>
+    // form (see buildSpawnArgs' mcpConfigPath doc). The file is rewritten every spawn (fresh/resume/fork/
+    // recycle all call createPty, which rebuilds mcpServers fresh each time), mirroring writeSessionSettings.
+    const capabilitySecrets = collectMcpEnvSecrets(mcpServers);
+    const mcpConfigPath = capabilitySecrets.length ? writeSessionMcpConfig(opts.sessionId, mcpServers) : undefined;
+    const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, mcpConfigPath, startupPrompt: opts.startupPrompt, model: opts.model, disallowedTools });
 
     // Inherited env (CLAUDE_*/CLAUDECODE scrubbed) + sessionEnv merge + the three git-safety vars that
     // keep an unattended worker pty from wedging on a pager / credential prompt. See buildSpawnEnv.
@@ -1736,8 +1885,12 @@ export class PtyHost {
       env.LOOM_OBSIDIAN_PREFLIGHT = ENSURE_OBSIDIAN_SCRIPT;
     }
 
+    // Belt-and-suspenders (agent-tooling P4): redact any capability secret out of the LOGGED argv even
+    // though mcpConfigPath should already keep it off `args` itself when present — never log raw secret
+    // values under any circumstance. A no-op (capabilitySecrets empty) for every existing spawn.
+    const argsLog = capabilitySecrets.length ? redactSecrets(JSON.stringify(args), capabilitySecrets) : JSON.stringify(args);
     // eslint-disable-next-line no-console
-    console.log(`[pty] spawn ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${opts.resumeId ?? "none"} args=${JSON.stringify(args)}`);
+    console.log(`[pty] spawn ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${opts.resumeId ?? "none"} args=${argsLog}`);
     const pty = spawn(bin, args, {
       name: "xterm-256color",
       cols: opts.geometry.cols,

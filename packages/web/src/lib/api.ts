@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, ConnectionMetadata, ConnectionAuthScheme } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, ConnectionMetadata, ConnectionAuthScheme, CapabilitySummary, CapabilityProvisionKind } from "@loom/shared";
 
 // A one-time DM-pairing enrollment code, returned ONCE by the mint endpoint (the store keeps only a
 // salted hash). The human relays `code` to the person being enrolled; it is never recoverable after.
@@ -673,6 +673,16 @@ export const api = {
   createConnection: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string }) =>
     postErr<ConnectionMetadata>("/api/connections", b),
   deleteConnection: (id: string) => delErr<{ ok: boolean }>(`/api/connections/${encodeURIComponent(id)}`),
+
+  // --- Capability registry catalog (agent-tooling epic P4): the two BUILTIN capabilities PLUS any
+  // owner-added rows, as ONE unified list — the Profile editor's capability picker + a future Settings
+  // catalog panel both read this. HUMAN-only loopback REST — NO agent MCP path. ---
+  capabilities: () => get<CapabilitySummary[]>("/api/capabilities"),
+  createCapability: (b: {
+    slug: string; name: string; description: string; transport: "stdio" | "http"; kind: CapabilityProvisionKind;
+    provision: unknown; toolAllowlist: string[]; wantsScratchDir?: boolean; requiresConnection?: boolean; secretEnvVar?: string;
+  }) => postErr<CapabilitySummary>("/api/capabilities", b),
+  deleteCapability: (id: string) => delErr<{ ok: boolean }>(`/api/capabilities/${encodeURIComponent(id)}`),
 };
 
 // Stop + (once fully exited) resume a companion's own session — the only way a spawn-time property like

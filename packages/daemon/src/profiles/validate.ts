@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Profile } from "@loom/shared";
+import { RESERVED_CAPABILITY_SLUGS } from "../capabilities/registry.js";
 
 /**
  * Strict zod validator for a Profile's WRITABLE shape (everything but the server-assigned id),
@@ -43,6 +44,19 @@ const profileSchema = z
     // so it is rejected even on the Setup Assistant's / Platform Lead's own profile-writing MCP tools (see
     // `agentProfileKeyError` below) — the human REST path (POST/PUT /api/profiles) is the ONLY grant path.
     connections: z.array(z.string()).optional(),
+    // Registry-capability grants (agent-tooling epic P4, default []=none). Each names a catalog slug plus
+    // an OPTIONAL bound P1 connection id. STRICTER than browserTesting/documentConversion, like
+    // `connections` above (see AGENT_FORBIDDEN_PROFILE_KEYS): a grant can launch a host process and bind
+    // egress, so it is rejected even on the elevated Setup Assistant's/Platform Lead's own profile writers.
+    // A grant naming a RESERVED legacy slug (browser-testing/document-conversion) is rejected here too —
+    // those are exclusively conferred via the browserTesting/documentConversion booleans (the bridge in
+    // resolveProfileCapabilities); a profile-array entry naming one would double-mount it and silently
+    // drop any connectionId (the two legacy capabilities never consult a connection).
+    capabilities: z.array(z.object({ slug: z.string(), connectionId: z.string().optional() }))
+      .refine((grants) => grants.every((g) => !(RESERVED_CAPABILITY_SLUGS as readonly string[]).includes(g.slug)), {
+        message: `capabilities may not name a reserved builtin slug (${RESERVED_CAPABILITY_SLUGS.join(", ")}) — use the browserTesting/documentConversion booleans instead`,
+      })
+      .optional(),
   })
   .strict();
 
@@ -52,8 +66,11 @@ const profileSchema = z
  * other field. Mirrors `agentOrchestrationOverride`'s omission of `gateCommand`/`alertWebhook` (mcp/
  * platform.ts) — `connections` grants access to REAL external secrets (P1 credential store), which is
  * categorically more sensitive than a sandboxed capability like `browserTesting`/`documentConversion`.
+ * `capabilities` (agent-tooling P4) gets the SAME stricter posture, not the milder `browserTesting`/
+ * `documentConversion` one: a capability grant launches a host process and can bind egress via a P1
+ * connection, so it is owner-only end-to-end, never delegable to an elevated profile-writing agent.
  */
-const AGENT_FORBIDDEN_PROFILE_KEYS = ["connections"] as const;
+const AGENT_FORBIDDEN_PROFILE_KEYS = ["connections", "capabilities"] as const;
 
 /**
  * Reject a RAW create/patch payload (BEFORE any merge with an existing profile) that tries to set a
@@ -98,6 +115,7 @@ export function validateProfile(
       restrictedTools: d.restrictedTools ?? false, // normalize to the stored default (off)
       noCommit: d.noCommit ?? false, // normalize to the stored default (off)
       connections: d.connections ?? [], // normalize to the stored default (no access)
+      capabilities: d.capabilities ?? [], // normalize to the stored default (none)
     },
   };
 }

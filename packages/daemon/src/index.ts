@@ -32,6 +32,7 @@ import { UsageStatusPoller } from "./orchestration/usage-status.js";
 import { WakeService } from "./orchestration/wake.js";
 import { PollService } from "./orchestration/poll.js";
 import { performAuthenticatedRequest } from "./connections/request.js";
+import { getSecretForUse } from "./connections/store.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
 import { IdleWatcher } from "./orchestration/idle-watcher.js";
 import { BusyWorkerWatcher } from "./orchestration/busy-worker-watcher.js";
@@ -281,7 +282,15 @@ async function main(): Promise<void> {
       try { if (exited) void usageSampler.onSessionExit(exited).catch(() => { /* async best-effort */ }); } catch { /* never disturb the exit path */ }
       mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); userAuditMcp.dispose(sessionId); setupMcp.dispose(sessionId); runMcp.dispose(sessionId);
     },
-  }, { busyStaleMs: timeouts.busyStaleMs, coalesceAgentMessages: resolved.platform.coalesceAgentMessages }); // BOOT-BOUND: from resolved platform config
+  }, {
+    busyStaleMs: timeouts.busyStaleMs, coalesceAgentMessages: resolved.platform.coalesceAgentMessages, // BOOT-BOUND: from resolved platform config
+    // Agent-tooling P4: give PtyHost READ access to the owner-added capability catalog + the P1 secret
+    // store WITHOUT handing it a live db reference (layering boundary — PtyHost stays db-unaware, like
+    // the rate-limit callback above). A failed decrypt (corrupt/wrong key) degrades to "no secret" rather
+    // than throwing into the spawn hot path — the capability just spawns without its credential.
+    getCapabilityCatalog: () => db.listCapabilityDefs(),
+    resolveConnectionSecret: (connectionId: string) => { try { return getSecretForUse(db, connectionId); } catch { return undefined; } },
+  });
 
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design
   // BOOT-BOUND: thread the resolved git-op / provision timeouts into the bounded-git + provision seams

@@ -33,6 +33,7 @@ import { IN_APP_CHANNEL } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig } from "../companion/store.js";
 import { listConnections, createConnection, deleteConnection } from "../connections/store.js";
+import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef } from "../capabilities/registry.js";
 import { encryptSecret } from "../keys/envelope.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validateColumnLayout } from "../mcp/platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
@@ -1163,6 +1164,25 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.delete("/api/connections/:id", async (req) => {
     deleteConnection(deps.db, (req.params as { id: string }).id);
+    return { ok: true };
+  });
+
+  // --- Capability registry catalog (agent-tooling epic P4): the two BUILTIN capabilities (browser-testing/
+  // document-conversion) PLUS owner-added rows, listed as ONE unified REST-facing catalog. HUMAN-managed
+  // ONLY (loopback REST), INTENTIONALLY NO MCP path — a capability grant can launch a host process and
+  // bind egress, the same trust posture as connections above. v1 accepts only the node-package/python-venv/
+  // bundled provision kinds (the arbitrary `command` kind is a deferred follow-on). ---
+  app.get("/api/capabilities", async () => listCapabilitySummaries(deps.db));
+  app.post("/api/capabilities", async (req, reply) => {
+    try {
+      const created = createCapabilityDef(deps.db, (req.body ?? {}) as Parameters<typeof createCapabilityDef>[1]);
+      return reply.code(201).send(created);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+  app.delete("/api/capabilities/:id", async (req) => {
+    deleteCapabilityDef(deps.db, (req.params as { id: string }).id);
     return { ok: true };
   });
 

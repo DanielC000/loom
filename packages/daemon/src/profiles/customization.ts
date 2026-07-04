@@ -26,19 +26,30 @@ export const MERGEABLE_PROFILE_FIELDS = [
   "restrictedTools",
   "noCommit",
   "connections",
+  "capabilities",
 ] as const;
 type MergeableField = (typeof MERGEABLE_PROFILE_FIELDS)[number];
 
-// `allowDelta` / `skills` / `connections` are array-valued; everything else is a scalar/boolean.
+// `allowDelta` / `skills` / `connections` are string[]-valued; everything else (but `capabilities`) is a
+// scalar/boolean. `capabilities` is object[]-valued and needs its own canonicalization (see fieldEqual).
 const ARRAY_FIELDS = new Set<string>(["allowDelta", "skills", "connections"]);
+const OBJECT_ARRAY_FIELDS = new Set<string>(["capabilities"]);
 
 /**
  * Per-field equality (per the design):
  *  - scalars/booleans: strict `===`.
- *  - arrays: ATOMIC — compared as normalized (sorted-copy) JSON; the whole array is one field value, with
- *    NO element-level merge. `null` (skills = "all") is a DISTINCT value from `[]` (an explicit empty set).
+ *  - string[] arrays: ATOMIC — compared as normalized (sorted-copy) JSON; the whole array is one field
+ *    value, with NO element-level merge. `null` (skills = "all") is a DISTINCT value from `[]`.
+ *  - object[] arrays (capabilities): each grant is canonicalized to a key-sorted JSON string first (so
+ *    `{slug,connectionId}` and `{connectionId,slug}` compare equal regardless of key order), THEN the
+ *    canonical strings are sorted and compared as one array — same ATOMIC, no-element-merge contract.
  */
 function fieldEqual(field: string, a: unknown, b: unknown): boolean {
+  if (OBJECT_ARRAY_FIELDS.has(field)) {
+    if (a == null || b == null) return a === b;
+    const canon = (arr: unknown[]) => arr.map((o) => JSON.stringify(o, Object.keys(o as object).sort())).sort();
+    return JSON.stringify(canon(a as unknown[])) === JSON.stringify(canon(b as unknown[]));
+  }
   if (ARRAY_FIELDS.has(field)) {
     if (a == null || b == null) return a === b; // null (all) is distinct from [] and from a populated array
     const na = [...(a as string[])].sort();
@@ -71,6 +82,9 @@ function normalizeFields(p: Partial<Profile>): Record<MergeableField, unknown> {
     // carries connection ids (those are the user's own credential grants), so shipped always normalizes
     // to [] here, which is what lets the merge rule protect a user's grant across an "adopt".
     connections: p.connections ?? [],
+    // Same off-by-default direction as connections; no bundled profile seeds capabilities, so shipped
+    // always normalizes to [] — the merge rule protects a user's own grants across an "adopt".
+    capabilities: p.capabilities ?? [],
   };
 }
 
