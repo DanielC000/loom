@@ -706,6 +706,7 @@ async function main(): Promise<void> {
   try {
     const firstRun = maybeAutoLaunchSetup(db, sessions);
     if (firstRun.launched) console.log(`[boot] first-run: auto-launched Setup Assistant (session ${firstRun.sessionId.slice(0, 8)})`);
+    else if (firstRun.reason === "suppressed") console.log("[boot] first-run: auto-launch suppressed (LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1)");
   } catch (err) {
     console.warn(`[boot] first-run setup auto-launch failed (continuing boot): ${(err as Error).message}`);
   }

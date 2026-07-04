@@ -84,6 +84,11 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    silently drive the wrong, *stale* server and report a false pass. And if the project has an
    end-to-end / browser test suite, a **new or changed user-facing feature** ships with (or updates)
    a test in it, run green as part of the DoD — see the project's own testing docs (its `CLAUDE.md`).
+   **Verifying by booting a fresh/isolated instance of the service under test** (its own throwaway data
+   dir or config)? Check first whether it has a first-run/onboarding auto-action — auto-provisioning,
+   spawning a process, sending a notification — that could fire before you're ready for it; the project's
+   own docs may name a suppress flag or config for exactly this, and using it beats improvising a
+   workaround or letting a verification-only run trigger a production-shaped side effect.
 5. **Hold the line on honesty.** "Done" means done and verified — report what passed, what you skipped,
    and any known limitation rather than papering over it. Keep any docs you touch accurate: rewrite
    stale claims in place, no "UPDATE:" appends.

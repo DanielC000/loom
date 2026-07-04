@@ -72,6 +72,11 @@ and/or a real `claude` login (e.g. `integration-e2e`, `orchestration-e2e`, `mana
 excluded via the small `NOT_HERMETIC` denylist in `scripts/test-daemon.mjs`. Run those manually per
 the header comment in each file.
 
+Booting your own throwaway daemon against a fresh `LOOM_HOME` (e.g. to eyeball the web UI)? Set
+`LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1` — otherwise the daemon's first-run auto-launch spawns a real `claude`
+process (the Setup/Platform operator) before you get a chance to stamp the marker yourself. The daemon
+still boots normally and the marker is still written; only that one auto-spawn is skipped.
+
 ## Conventions
 
 - **TypeScript + ESM.** Node 22, `NodeNext` module resolution in daemon/shared; `bundler` resolution

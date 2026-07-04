@@ -173,6 +173,20 @@ export function isLoomDev(): boolean {
   return process.env.LOOM_DEV === "1";
 }
 
+/**
+ * Test/ops escape hatch (`LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1`, default OFF). A throwaway/isolated daemon
+ * booted against a fresh LOOM_HOME (e.g. a verification worker spinning one up to eyeball the web UI)
+ * otherwise auto-spawns a REAL `claude` process (the Setup/Platform operator) via the first-run
+ * auto-launch — before an operator has a chance to pre-stamp the marker. This flag pre-suppresses ONLY
+ * that auto-SPAWN; the daemon still boots normally and the `app_meta` one-time marker (see
+ * setup/first-run.ts › SETUP_FIRST_RUN_KEY) is still read/written exactly as today, so the "fires at most
+ * once, ever" guarantee is unaffected — a later boot with the flag unset will not re-launch once the
+ * marker is set. Read at CALL time (like `isLoomDev`) so a single test process can exercise both states.
+ */
+export function isFirstRunLaunchSuppressed(): boolean {
+  return process.env.LOOM_SUPPRESS_FIRST_RUN_LAUNCH === "1";
+}
+
 export function ensureDirs(): void {
   for (const d of [LOOM_HOME, SETTINGS_DIR, LOGS_DIR, WORKTREES_DIR, RUNS_DIR, SKILLS_DIR, SKILL_BASE_DIR, WORKSPACE_ROOT]) fs.mkdirSync(d, { recursive: true });
   ensureLoomHomeGitignore();

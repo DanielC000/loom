@@ -18,6 +18,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (5) has-projects guard         → marker UNSET but an ordinary project exists → not launched, no marker
 //                                     stamped (proves the empty-detection gates the launch, not just the marker).
 //   (6) agent-missing guard        → empty + marker unset but NO setup home seeded → not launched, no marker.
+//   (8) LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1 → fresh install → marker STILL stamped (consumes the one lifetime
+//                                     attempt) but NO pty spawned; a 2nd call reads 'marker-set', not
+//                                     're-suppressed'.
+//   (9) flag unset (default)       → byte-identical to pre-flag behavior: fresh install still auto-launches.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/setup-first-run.mjs
 import fs from "node:fs";
@@ -155,6 +159,35 @@ try {
   check("(7) the auto-launched session is a 'setup' session (operator role, not the auditor)",
     hostTwo.spawned.length === 1 && hostTwo.spawned.at(-1).role === "setup");
   dbTwo.close();
+
+  // ===== (8) LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1 — fresh/empty install, marker unset → the marker is STILL
+  //        stamped (this attempt still counts as the one lifetime auto-launch) but NO pty is spawned. Read
+  //        at CALL time (paths.ts › isFirstRunLaunchSuppressed), so toggling the env var mid-process is
+  //        honored by the very next call — no re-import needed. =====
+  const dbSuppressed = new Db(path.join(tmpHome, "suppressed.db"));
+  seedDefaultProfiles(dbSuppressed);
+  seedSetupHome(dbSuppressed);
+  const hostSuppressed = new SeamHost(events);
+  const svcSuppressed = new SessionService(dbSuppressed, hostSuppressed, new OrchestrationControl());
+  process.env.LOOM_SUPPRESS_FIRST_RUN_LAUNCH = "1";
+  const r8 = maybeAutoLaunchSetup(dbSuppressed, svcSuppressed);
+  check("(8) flag ON, fresh install → NOT launched (reason 'suppressed')", r8.launched === false && r8.reason === "suppressed");
+  check("(8) flag ON → marker IS stamped despite the spawn being skipped (consumes the one attempt)", typeof dbSuppressed.getMeta(SETUP_FIRST_RUN_KEY) === "string");
+  check("(8) flag ON → NO pty spawned", hostSuppressed.spawned.length === 0);
+  const r8b = maybeAutoLaunchSetup(dbSuppressed, svcSuppressed);
+  check("(8) a 2nd call after suppression → still not launched (reason 'marker-set', not 're-suppressed')", r8b.launched === false && r8b.reason === "marker-set");
+  delete process.env.LOOM_SUPPRESS_FIRST_RUN_LAUNCH;
+  dbSuppressed.close();
+
+  // ===== (9) flag OFF (default/unset) → byte-identical to pre-flag behavior: fresh install still launches =====
+  const dbUnsuppressed = new Db(path.join(tmpHome, "unsuppressed.db"));
+  seedDefaultProfiles(dbUnsuppressed);
+  seedSetupHome(dbUnsuppressed);
+  const hostUnsuppressed = new SeamHost(events);
+  const r9 = maybeAutoLaunchSetup(dbUnsuppressed, new SessionService(dbUnsuppressed, hostUnsuppressed, new OrchestrationControl()));
+  check("(9) flag unset → fresh install still auto-launches (default OFF, additive)", r9.launched === true && typeof r9.sessionId === "string");
+  check("(9) flag unset → ONE pty spawned", hostUnsuppressed.spawned.length === 1);
+  dbUnsuppressed.close();
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }

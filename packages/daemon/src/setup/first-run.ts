@@ -1,6 +1,7 @@
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { SETUP_PROJECT_NAME, SETUP_AGENT_NAME } from "./seed.js";
+import { isFirstRunLaunchSuppressed } from "../paths.js";
 
 /**
  * Setup Assistant E1-6 — FIRST-RUN auto-launch of the Setup Assistant.
@@ -12,7 +13,7 @@ export const SETUP_FIRST_RUN_KEY = "setup.firstRunLaunched";
 
 export type FirstRunResult =
   | { launched: true; sessionId: string }
-  | { launched: false; reason: "marker-set" | "has-projects" | "agent-missing" };
+  | { launched: false; reason: "marker-set" | "has-projects" | "agent-missing" | "suppressed" };
 
 /**
  * On a brand-new/empty install, greet the user by auto-launching the Setup Assistant session ONCE, then
@@ -30,6 +31,11 @@ export type FirstRunResult =
  * Resolves the reserved "Getting Started" home + its Setup Assistant agent (seeded by seedSetupHome, E1-4)
  * by name; returns {launched:false, reason:"agent-missing"} (no marker stamped) if either is absent, so a
  * misconfigured install can still auto-launch on a later boot once the seed lands.
+ *
+ * `LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1` (see paths.ts › isFirstRunLaunchSuppressed) pre-suppresses ONLY the
+ * spawn below — the marker is still stamped exactly as today (so this attempt still counts as the one
+ * lifetime auto-launch, byte-identical to a spawn that throws), the daemon otherwise boots normally, and
+ * with the flag unset this function is byte-identical to before the flag existed.
  */
 export function maybeAutoLaunchSetup(db: Db, sessions: SessionService): FirstRunResult {
   if (db.getMeta(SETUP_FIRST_RUN_KEY)) return { launched: false, reason: "marker-set" };
@@ -39,6 +45,7 @@ export function maybeAutoLaunchSetup(db: Db, sessions: SessionService): FirstRun
   if (!agent) return { launched: false, reason: "agent-missing" };
   // Stamp FIRST — the exactly-once guarantee must hold even if the spawn below throws.
   db.setMeta(SETUP_FIRST_RUN_KEY, new Date().toISOString());
+  if (isFirstRunLaunchSuppressed()) return { launched: false, reason: "suppressed" };
   const session = sessions.startSetup(agent.id);
   return { launched: true, sessionId: session.id };
 }
