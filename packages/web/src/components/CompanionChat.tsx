@@ -155,8 +155,10 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
       <div
         ref={scrollRef}
         style={{
-          flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 2,
-          padding: "4px 2px",
+          // Inter-message spacing is single-sourced on each Bubble's marginTop (4px within a group,
+          // 12px between authors) — the list itself adds no gap, so the two never compound.
+          flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 0,
+          padding: "4px 4px",
         }}
       >
         {messages.length === 0 ? (
@@ -168,7 +170,7 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
         )}
         {awaitingReply && !replyTimedOut && <TypingIndicator title={title ?? "Companion"} />}
         {replyTimedOut && (
-          <div style={{ ...notice("muted"), alignSelf: "center", marginTop: 6 }} role="status">
+          <div style={{ ...notice("muted"), alignSelf: "center", marginTop: 12 }} role="status">
             No reply yet — {title ?? "this companion"} may be offline or not connected.
           </div>
         )}
@@ -187,10 +189,10 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
           style={{
             flex: 1, resize: "none", fontFamily: font.mono, fontSize: 13, lineHeight: 1.5,
             background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`,
-            borderRadius: radius.base, padding: "8px 10px",
+            borderRadius: radius.base, padding: "8px 12px",
           }}
         />
-        <Button variant="primary" disabled={!canSend} onClick={send} style={{ padding: "8px 14px", alignSelf: "stretch" }}>
+        <Button variant="primary" disabled={!canSend} onClick={send} style={{ padding: "8px 16px", alignSelf: "stretch" }}>
           Send
         </Button>
       </div>
@@ -219,16 +221,16 @@ function ChatHeader({ title, conn }: { title: string; conn: ChatConnState }) {
 function Bubble({ msg, title, grouped }: { msg: ChatMessage; title: string; grouped: boolean }) {
   const you = msg.author === "you";
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: you ? "flex-end" : "flex-start", marginTop: grouped ? 0 : 8 }}>
+    <div style={{ display: "flex", flexDirection: "column", alignItems: you ? "flex-end" : "flex-start", marginTop: grouped ? 4 : 12 }}>
       {!grouped && (
-        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", margin: "0 4px 3px" }}>
+        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", margin: "0 4px 4px" }}>
           {you ? "You" : title}
         </span>
       )}
       <div
         className="loom-chat-in"
         style={{
-          maxWidth: "82%", padding: "7px 11px", borderRadius: 10, fontFamily: font.mono, fontSize: 13,
+          maxWidth: "82%", padding: "8px 12px", borderRadius: 10, fontFamily: font.mono, fontSize: 13,
           lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: color.text,
           background: you ? color.phosphorDim : color.panel2,
           border: `1px solid ${you ? "transparent" : color.border}`,
@@ -245,8 +247,8 @@ function Bubble({ msg, title, grouped }: { msg: ChatMessage; title: string; grou
 // ── Companion "typing" affordance while a reply is awaited ────────────────────────
 function TypingIndicator({ title }: { title: string }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", marginTop: 8 }} aria-label={`${title} is replying`} role="status">
-      <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "9px 12px", borderRadius: 10, borderBottomLeftRadius: 3, background: color.panel2, border: `1px solid ${color.border}` }}>
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", marginTop: 12 }} aria-label={`${title} is replying`} role="status">
+      <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "8px 12px", borderRadius: 10, borderBottomLeftRadius: 3, background: color.panel2, border: `1px solid ${color.border}` }}>
         {[0, 1, 2].map((i) => (
           <span
             key={i}
@@ -280,7 +282,7 @@ function EmptyState({ connected, title }: { connected: boolean; title: string })
 function notice(t: "amber" | "muted"): CSSProperties {
   const c = t === "amber" ? color.amber : color.textMuted;
   return {
-    display: "flex", gap: 8, alignItems: "center", padding: "7px 10px",
+    display: "flex", gap: 8, alignItems: "center", padding: "8px 12px",
     border: `1px solid ${t === "amber" ? color.amber : color.border}`, borderRadius: radius.base,
     background: t === "amber" ? "rgba(255,178,62,0.06)" : color.panel2,
     fontFamily: font.mono, fontSize: 12, lineHeight: 1.5, color: c === color.amber ? color.textDim : color.textMuted,
