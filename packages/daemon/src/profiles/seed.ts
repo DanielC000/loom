@@ -7,7 +7,8 @@ import type { Db } from "../db.js";
  * Loom's bundled Profiles — the reusable, platform-level "rig" (role + model + allow-delta +
  * skill-subset + icon) an agent runs under. Orchestrator=manager, Dev/Bugfix=worker, Planning &
  * Triage / Content Strategy = plain (role null), Setup Assistant=setup (the ungated onboarding rig),
- * plus the two platform rigs: Platform-lead
+ * Code Reviewer / Docs & Vault = the two no-commit worker rigs (noCommit=true — a 0-commit done is
+ * their correct contract, not a mistake), plus the two platform rigs: Platform-lead
  * (role=platform — the full human-equivalent operator) and Platform-audit (role=auditor — the
  * lower-privilege, read-and-file-only scheduled transcript reviewer; P5). Cross-project, so NO project
  * FK. Keyed by NAME for the seed-if-absent idempotent seed (UUID id assigned on first seed); "reset to
@@ -94,6 +95,23 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
     skills: null,
     model: null,
     icon: "🧐",
+    noCommit: true,
+  },
+  {
+    // CORE product, UNGATED — the second no-commit rig (alongside Code Reviewer above). A vault-only /
+    // report worker whose deliverable is a note in the project's separate auto-committed vault store, or a
+    // pure analysis writeup: its CORRECT contract is also 0 files changed in the code repo, so without
+    // noCommit it trips the same misleading "forgot to commit" warning Code Reviewer used to. Declared
+    // no-commit so that warning is suppressed and a 0-commit done auto-retires the session (no manual
+    // worker_stop) — the fix for the matrix asymmetry where only Code Reviewer had this flag.
+    name: "Docs & Vault",
+    role: "worker",
+    description:
+      "No-commit worker rig for vault-only and pure-analysis work: writes its deliverable as a vault note or report rather than a code change, so reporting done with 0 files changed is its correct contract. Declared no-commit (noCommit), like Code Reviewer, so the session auto-retires cleanly and the forgot-to-commit warning is suppressed.",
+    allowDelta: [],
+    skills: null,
+    model: null,
+    icon: "📚",
     noCommit: true,
   },
   {

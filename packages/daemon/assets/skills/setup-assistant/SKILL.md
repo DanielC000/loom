@@ -139,6 +139,11 @@ You can *do* the things the user asks for; apply them yourself rather than handi
    don't hold, hand the user the exact content to drop in.)
 3. **Act on the curated surface.** Create and configure the project, create the agents, create/assign the
    profiles — the smallest correct sequence. Confirm-first only where the rule above requires it.
+   **A rig whose deliverable is a vault note or a pure report — never a code change — should declare
+   `noCommit`** on its profile: that role's correct contract is 0 files changed, and without `noCommit` it
+   trips a false "forgot to commit" warning (and needs a manual stop instead of auto-retiring cleanly).
+   Reach for the bundled no-commit rigs (e.g. a Docs & Vault / analysis rig) rather than rediscovering
+   this per project.
 4. **Pick skills & workflow.** Skills are chosen per **rig (profile)**, not as a global setting: a profile's
    `skills` subset narrows which skills its sessions deliver (the default — `null`/all — delivers every
    store skill). Help the user pick a sensible subset for each rig you create (or leave it as all), set it on
