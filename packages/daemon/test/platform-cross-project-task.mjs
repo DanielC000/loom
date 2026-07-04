@@ -175,7 +175,35 @@ try {
   const targetFull = await call("list_all_tasks", { projectId: "pTarget", includeBody: true });
   check("(4) list_all_tasks projectId filter + includeBody returns full rows scoped to that project",
     targetFull.length > 0 && targetFull.every((t) => t.projectId === "pTarget" && typeof t.body === "string"));
-  check("(4) list_all_tasks narrows an unknown project to []", (await call("list_all_tasks", { projectId: "ghost" })).length === 0);
+  // An unknown/unresolvable projectId is an EXPLICIT error — never a silent [] (card 0c34189c bug #1).
+  const ghostRes = await call("list_all_tasks", { projectId: "ghost" });
+  check("(4) list_all_tasks errors clearly on an unknown project (no silent [])", ghostRes.error === "project not found");
+
+  // 8-char id-PREFIX resolution — mirrors project_get/project_task_get (card 0c34189c bug #1): a Lead
+  // pasting the displayed short id must resolve to the SAME board a full-id lookup would.
+  db.insertProject({ id: "cafe1234-full-uuid-form", name: "Prefixed", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  const prefixCard = await call("project_task_create", { projectId: "cafe1234-full-uuid-form", title: "prefix-resolved card" });
+  check("(4) project_task_create accepted the full id", !!prefixCard.id && !prefixCard.error);
+  const byPrefix = await call("list_all_tasks", { projectId: "cafe1234", includeBody: true });
+  check("(4) list_all_tasks resolves an 8-char project-id PREFIX to the same board (no silent [])",
+    Array.isArray(byPrefix) && byPrefix.some((t) => t.id === prefixCard.id));
+
+  // includeDone — mirrors tasks_list's excludeDone/columns filter shape (card 0c34189c bug #2): a Lead can
+  // confirm a dispatched batch landed (incl. terminal/done cards) without per-card polling.
+  const noDone = await call("list_all_tasks", { projectId: "pTarget", includeBody: true });
+  check("(4) default (includeDone omitted) still excludes the done card", !noDone.some((t) => t.id === doneCard.id));
+  const withDone = await call("list_all_tasks", { projectId: "pTarget", includeDone: true, includeBody: true });
+  check("(4) includeDone:true includes the terminal/done card", withDone.some((t) => t.id === doneCard.id));
+  const onlyDoneCol = await call("list_all_tasks", { projectId: "pTarget", includeDone: true, columns: ["done"], includeBody: true });
+  check("(4) columns filter narrows to just the named column",
+    onlyDoneCol.length > 0 && onlyDoneCol.every((t) => t.columnKey === "done"));
+
+  // A genuine no-match (a real project with zero qualifying cards) returns an EXPLICIT { tasks: [], message }
+  // payload — never a bare [] that the harness renders as "(completed with no output)" (card 0c34189c bug #3).
+  db.insertProject({ id: "pEmpty", name: "Empty", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  const emptyRes = await call("list_all_tasks", { projectId: "pEmpty" });
+  check("(4) a genuine no-match returns an explicit { tasks: [], message } payload",
+    Array.isArray(emptyRes.tasks) && emptyRes.tasks.length === 0 && typeof emptyRes.message === "string");
 
   // ===================== (5) bounded-read pagination + a measured cap =====================
   db.insertProject({ id: "pBulk", name: "Bulk", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });

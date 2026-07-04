@@ -971,28 +971,46 @@ export class PlatformMcpRouter {
       {
         description:
           "List board tasks across the platform — the cross-project aggregate mirroring list_all_agents. " +
-          "Optional projectId narrows to one project (unknown id => []). With no filter, aggregates the non-" +
-          "terminal cards of every live project (incl. the reserved home). DEFAULT returns a lightweight " +
-          "SUMMARY per card (id, title, columnKey, position, priority, updatedAt) so the aggregate stays " +
-          "bounded; the unbounded body is DROPPED. Pass includeBody:true for full Task rows (use sparingly — " +
-          "page it). Terminal/done cards are excluded. Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP +
-          " rows by default — page with limit/offset for more.",
+          "Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix " +
+          "(mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no " +
+          "filter, aggregates the non-terminal cards of every live project (incl. the reserved home) — pass " +
+          "includeDone:true to include terminal/done cards too, and/or columns to narrow to specific column " +
+          "keys (mirrors tasks_list's excludeDone/columns filters). DEFAULT returns a lightweight SUMMARY per " +
+          "card (id, title, columnKey, position, priority, updatedAt) so the aggregate stays bounded; the " +
+          "unbounded body is DROPPED. Pass includeBody:true for full Task rows (use sparingly — page it). " +
+          "Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default — page with limit/offset for " +
+          "more. A genuine no-match returns an explicit { tasks: [], message } payload, never a bare empty.",
         inputSchema: {
           projectId: z.string().optional(),
           includeBody: z.boolean().optional(),
+          includeDone: z.boolean().optional(),
+          columns: z.array(z.string()).optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
         },
       },
-      async ({ projectId, includeBody, limit, offset }) => {
-        // Per-project FULL filtered rows (excludeDone applied by listProjectTasks), concatenated, then
-        // projected + paginated at the AGGREGATE level — so the cap bounds the whole feed, not each project.
-        const projectIds = projectId !== undefined
-          ? (db.getProject(projectId) ? [projectId] : [])
-          : db.listAllProjects().map((p) => p.id);
-        let page = projectIds.flatMap((pid) => listProjectTasks(db, pid, { includeBody: true }) as Task[]);
+      async ({ projectId, includeBody, includeDone, columns, limit, offset }) => {
+        // projectId resolves EXACTLY like the sibling cross-project reads (project_get/project_task_get) —
+        // full id OR unambiguous 8-char prefix, error on unknown/ambiguous — so it can never silently
+        // read as an empty board (the Lead misread real boards as EMPTY this way — card 0c34189c).
+        let projectIds: string[];
+        if (projectId !== undefined) {
+          const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+          if ("error" in project) return ok(project);
+          projectIds = [project.id];
+        } else {
+          projectIds = db.listAllProjects().map((p) => p.id);
+        }
+        // Per-project FULL filtered rows (excludeDone/columns applied by listProjectTasks), concatenated,
+        // then projected + paginated at the AGGREGATE level — so the cap bounds the whole feed, not each project.
+        let page = projectIds.flatMap(
+          (pid) => listProjectTasks(db, pid, { includeBody: true, excludeDone: !includeDone, columns }) as Task[],
+        );
         if (offset !== undefined) page = page.slice(offset);
         page = page.slice(0, limit ?? DEFAULT_TASK_SUMMARY_CAP);
+        // A genuine no-match returns an EXPLICIT payload — a bare [] renders in the harness as the generic
+        // "(completed with no output)" artifact, which reads as a tool malfunction rather than "0 results".
+        if (page.length === 0) return ok({ tasks: [], message: "no matching tasks" });
         return ok(includeBody ? page : page.map(toTaskSummary));
       },
     );
