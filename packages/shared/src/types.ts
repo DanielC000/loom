@@ -508,11 +508,12 @@ export type OrchestrationEventKind =
   // Emitted EXACTLY ONCE per session — the manager's nudge policy flips 'watching'→'escalated', which the
   // policy gate skips on the next tick; a recycled successor is a fresh row, so it re-arms naturally.
   | "context_escalated"
-  // Busy-worker stuck watchdog (BusyWorkerWatcher): a LIVE worker has been `busy` in a single
-  // uninterrupted turn past the `stuckWorkerMinutes` window with no progress. Filed under the OWNING
-  // MANAGER (managerSessionId) with workerSessionId/taskId set; `detail` carries minutesBusy + reason.
-  // The human-/manager-facing signal that the worker may be hung — surfaced, never a hard kill. Emitted
-  // ONCE per stuck episode (re-arms when the worker makes progress, i.e. lastActivity advances).
+  // Busy-worker long-turn advisory (BusyWorkerWatcher): a LIVE worker has been `busy` in a single
+  // uninterrupted turn past the `stuckWorkerMinutes` window. Filed under the OWNING MANAGER
+  // (managerSessionId) with workerSessionId/taskId set; `detail` carries minutesBusy + reason. A SOFT,
+  // informational signal (likely a long build/test gate) — not a hang detector, never a hard kill; the
+  // manager decides whether to check on it. Emitted ONCE per episode (re-arms when the worker makes
+  // progress, i.e. lastActivity advances).
   | "worker_stuck"
   // A manager self-service management action (assign profile / update agent / update or archive a
   // project / create or update a schedule). `detail.action` discriminates; audit trail for the

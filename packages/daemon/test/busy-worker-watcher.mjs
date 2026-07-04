@@ -1,11 +1,14 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// BusyWorkerWatcher test (busy-worker stuck watchdog — the inverse of IdleWatcher). NO claude — the
+// BusyWorkerWatcher test (busy-worker LONG-TURN advisory — the inverse of IdleWatcher). NO claude — the
 // watcher takes an injected pty-slice, so the tick tests use a RECORDING STUB and drive tick() directly.
 // Hermetic like idle-watcher.mjs: each env gets its OWN temp .db, imports dist/* + @loom/shared, no daemon.
-// Covers the DoD trio (busy+stale+no-progress → fires ONCE; busy+progressing → no fire; idle → not our
-// job) plus every silent skip (disabled / orphaned-manager / human-paused worker or manager), the
-// once-per-episode guard (a second tick does NOT re-fire; a STALE prior-episode event does NOT suppress
-// a new episode = re-arm), and the zod orchestrationOverride accepting `stuckWorkerMinutes`.
+// Covers the DoD trio (busy+stale → fires ONCE with the softened advisory message; busy+progressing →
+// no fire; idle → not our job) plus every silent skip (disabled / orphaned-manager / human-paused worker
+// or manager), the once-per-episode guard (a second tick does NOT re-fire; a STALE prior-episode event
+// does NOT suppress a new episode = re-arm), the raised default window (60m, not the old 30m), and the
+// zod orchestrationOverride accepting `stuckWorkerMinutes`. Deliberately single-signal (lastActivity
+// only) — see the class doc in busy-worker-watcher.ts for why a pty-output gate is unreachable dead code
+// (PtyHost's healIfStuck already clears `busy` once output is stale ≥5min).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -50,8 +53,8 @@ function seedManager(e, id, { live = true } = {}) {
   });
   if (live) e.alive.add(id);
 }
-// A WORKER. Defaults make it eligible to flag: live, busy, last turn started 30m ago (> 20m default window).
-function seedWorker(e, id, parentId, { busy = true, busyMin = 30, live = true } = {}) {
+// A WORKER. Defaults make it eligible to flag: live, busy, last turn started 65m ago (> 60m default window).
+function seedWorker(e, id, parentId, { busy = true, busyMin = 65, live = true } = {}) {
   e.db.insertSession({
     id, projectId: e.projId, agentId: e.agentId, engineSessionId: "eng-" + id, title: null, cwd: e.projId,
     processState: live ? "live" : "exited", resumability: "resumable", busy,
@@ -66,18 +69,20 @@ function cleanup(e) {
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(e.dbFile + ext, { force: true }); } catch { /* ignore */ } }
 }
 
-// ============================ (1) FIRES ONCE — busy + stale + no progress ============================
+// ============================ (1) FIRES ONCE — busy + stale, softened advisory message ============================
 {
   const e = makeEnv();
   seedManager(e, "mgr-1");
-  seedWorker(e, "wkr-stuck", "mgr-1"); // busy, 30m in one turn (> 20m window)
+  seedWorker(e, "wkr-stuck", "mgr-1"); // busy, 65m in one turn (> 60m default window)
   e.watcher.tick(NOW);
   check("(1) busy+stale worker → ONE worker_stuck event filed under the owning manager", stuckEvents(e, "wkr-stuck").length === 1);
   const ev = stuckEvents(e, "wkr-stuck")[0];
-  check("(1) event carries manager/worker/task + reason + minutesBusy", ev?.managerSessionId === "mgr-1" && ev?.workerSessionId === "wkr-stuck" && ev?.taskId === "tk-wkr-stuck" && ev?.detail?.reason === "busy_no_progress" && ev?.detail?.minutesBusy === 30);
-  check("(1) nudge enqueued to the MANAGER (not the worker) + names the worker + steers to worker_status", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-1" && e.enqueued[0].text.includes("worker_status") && e.enqueued[0].text.includes("wkr-stuck".slice(0, 8)));
-  check("(1) nudge is surface-only (NOT a hard kill)", /does NOT auto-kill/i.test(e.enqueued[0]?.text));
-  // A SECOND tick in the SAME hung turn must NOT re-fire (once per episode).
+  check("(1) event carries manager/worker/task + reason + minutesBusy", ev?.managerSessionId === "mgr-1" && ev?.workerSessionId === "wkr-stuck" && ev?.taskId === "tk-wkr-stuck" && ev?.detail?.reason === "busy_no_progress" && ev?.detail?.minutesBusy === 65);
+  const text = e.enqueued[0]?.text ?? "";
+  check("(1) nudge enqueued to the MANAGER (not the worker) + names the worker + steers to worker_status", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-1" && text.includes("worker_status") && text.includes("wkr-stuck".slice(0, 8)));
+  check("(1) nudge is the softened [loom:worker-busy-long] advisory, not a hang alarm", text.startsWith("[loom:worker-busy-long]") && /long build\/test gate/i.test(text) && !/may be hung/i.test(text));
+  check("(1) nudge is informational-only (NOT a hard kill)", /not auto-kill/i.test(text));
+  // A SECOND tick in the SAME long turn must NOT re-fire (once per episode).
   e.watcher.tick(NOW);
   check("(1) a second tick (same episode) does NOT re-emit worker_stuck", stuckEvents(e, "wkr-stuck").length === 1);
   check("(1) a second tick enqueues no further nudge", e.enqueued.length === 1);
@@ -88,9 +93,21 @@ function cleanup(e) {
 {
   const e = makeEnv();
   seedManager(e, "mgr-2");
-  seedWorker(e, "wkr-fresh", "mgr-2", { busy: true, busyMin: 5 }); // 5m < 20m window → still working
+  seedWorker(e, "wkr-fresh", "mgr-2", { busy: true, busyMin: 5 }); // 5m < 60m window → still working
   e.watcher.tick(NOW);
   check("(2) busy worker that started its turn only 5m ago is NOT flagged", stuckEvents(e, "wkr-fresh").length === 0 && e.enqueued.length === 0);
+  cleanup(e);
+}
+
+// ============================ (2b) NO FIRE — busy 55m, below the RAISED 60m default window ============================
+{
+  // Regression guard for the raised default (30m → 60m): a worker mid-gate for less than an hour
+  // must not be flagged, confirming the default actually moved and isn't still 30.
+  const e = makeEnv();
+  seedManager(e, "mgr-2b");
+  seedWorker(e, "wkr-55", "mgr-2b", { busyMin: 55 }); // 55m < 60m default window
+  e.watcher.tick(NOW);
+  check("(2b) busy 55m (< raised 60m default) is NOT flagged", stuckEvents(e, "wkr-55").length === 0 && e.enqueued.length === 0);
   cleanup(e);
 }
 
@@ -156,12 +173,12 @@ function cleanup(e) {
 {
   const e = makeEnv();
   seedManager(e, "mgr-7");
-  seedWorker(e, "wkr-rearm", "mgr-7"); // busy, turn started 30m ago (lastActivity = NOW-30m)
-  // A prior worker_stuck stamped 60m ago — BEFORE the current turn began (the worker has since
-  // progressed and re-hung). The guard (event.ts > lastActivity) must NOT suppress this new episode.
+  seedWorker(e, "wkr-rearm", "mgr-7"); // busy, turn started 65m ago (lastActivity = NOW-65m)
+  // A prior worker_stuck stamped 90m ago — BEFORE the current turn began (the worker has since
+  // progressed and gone long again). The guard (event.ts > lastActivity) must NOT suppress this episode.
   e.db.appendEvent({
-    id: randomUUID(), ts: minutesAgo(60), managerSessionId: "mgr-7", workerSessionId: "wkr-rearm",
-    taskId: "tk-wkr-rearm", kind: "worker_stuck", detail: { reason: "busy_no_progress", minutesBusy: 25 },
+    id: randomUUID(), ts: minutesAgo(90), managerSessionId: "mgr-7", workerSessionId: "wkr-rearm",
+    taskId: "tk-wkr-rearm", kind: "worker_stuck", detail: { reason: "busy_no_progress", minutesBusy: 61 },
   });
   e.watcher.tick(NOW);
   check("(7) a worker_stuck OLDER than the current turn's start does NOT suppress → fires this episode", stuckEvents(e, "wkr-rearm").length === 2 && e.enqueued.length === 1);
@@ -171,10 +188,10 @@ function cleanup(e) {
 {
   const e = makeEnv();
   seedManager(e, "mgr-7b");
-  seedWorker(e, "wkr-same-ep", "mgr-7b"); // lastActivity = NOW-30m
+  seedWorker(e, "wkr-same-ep", "mgr-7b"); // lastActivity = NOW-65m
   e.db.appendEvent({
-    id: randomUUID(), ts: minutesAgo(10), managerSessionId: "mgr-7b", workerSessionId: "wkr-same-ep",
-    taskId: "tk-wkr-same-ep", kind: "worker_stuck", detail: { reason: "busy_no_progress", minutesBusy: 20 },
+    id: randomUUID(), ts: minutesAgo(40), managerSessionId: "mgr-7b", workerSessionId: "wkr-same-ep",
+    taskId: "tk-wkr-same-ep", kind: "worker_stuck", detail: { reason: "busy_no_progress", minutesBusy: 25 },
   });
   e.watcher.tick(NOW);
   check("(7b) a worker_stuck stamped AFTER the turn start (same episode) suppresses → no re-fire", stuckEvents(e, "wkr-same-ep").length === 1 && e.enqueued.length === 0);
@@ -220,6 +237,6 @@ function cleanup(e) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — BusyWorkerWatcher flags a LIVE worker stuck busy past the per-project window (lastActivity not advancing) EXACTLY ONCE per hung turn (one worker_stuck event under the owning manager + one busy-gated nudge to that manager, surface-only — never a kill); is SILENT when the worker is progressing / idle / disabled(0) / orphaned(no live manager) / human-paused (worker, manager, or global); re-arms when the worker makes progress (a stale prior-episode event doesn't suppress a new one, a same-episode one does); honors a per-project stuckWorkerMinutes override; ignores managers; and the zod orchestrationOverride accepts stuckWorkerMinutes (negatives rejected)."
+  ? "\n✅ ALL PASS — BusyWorkerWatcher surfaces a LIVE worker busy past the per-project window (lastActivity not advancing, the ONLY signal — a pty-output gate is unreachable dead code given healIfStuck) EXACTLY ONCE per long turn (one worker_stuck event under the owning manager + one softened [loom:worker-busy-long] advisory nudge — informational, never a kill or hang alarm); is SILENT when the worker is progressing / idle / disabled(0) / orphaned(no live manager) / human-paused (worker, manager, or global); confirms the raised 60m default (55m busy is NOT flagged); re-arms when the worker makes progress (a stale prior-episode event doesn't suppress a new one, a same-episode one does); honors a per-project stuckWorkerMinutes override; ignores managers; and the zod orchestrationOverride accepts stuckWorkerMinutes (negatives rejected)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -236,14 +236,18 @@ export interface OrchestrationConfig {
    */
   idleDefaultSnoozeMinutes: number;
   /**
-   * Busy-worker stuck watchdog: minutes a LIVE worker may sit `busy` in a SINGLE uninterrupted turn
+   * Busy-worker LONG-TURN advisory: minutes a LIVE worker may sit `busy` in a SINGLE uninterrupted turn
    * (no turn boundary → `lastActivity` not advancing, since `setBusy` re-stamps it on every turn edge)
-   * before the BusyWorkerWatcher surfaces it to the OWNING MANAGER as an attention signal (a
-   * `worker_stuck` event + a busy-gated nudge the manager can act on — re-nudge or recycle; never a
-   * hard kill). Sibling of `idleNudgeMinutes`, but for stuck workers rather than idle managers.
-   * Default 30; 0 disables the watcher entirely. Conservative by design so a legitimately long single
-   * tool call (a big build / test run, which is one turn) clears before the window — raise it per
-   * project if your builds routinely run longer.
+   * before the BusyWorkerWatcher surfaces it to the OWNING MANAGER as an informational heads-up (a
+   * `worker_stuck` event + a busy-gated nudge — re-nudge or recycle if genuinely warranted; never a
+   * hard kill). Sibling of `idleNudgeMinutes`, but for long-running workers rather than idle managers.
+   * Default 60; 0 disables the watcher entirely. Deliberately a SOFT advisory, not a hang detector: a
+   * worker mid-gate (build/test streaming output) and a genuinely hung worker look identical on this
+   * signal alone — `lastActivity` only advances at turn edges, and a live-repainting TUI can't be told
+   * apart from a hang by pty output either (PtyHost's own `healIfStuck` already clears `busy` once pty
+   * output goes stale ≥5min, so `busy` staying true for the full window already implies recent output —
+   * a dual pty-output gate would be unreachable dead code). Raise this per project if your builds
+   * routinely run longer than 60 minutes.
    */
   stuckWorkerMinutes: number;
   /**
@@ -484,7 +488,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, stuckWorkerMinutes: 30, crashRecoveryMaxAttempts: 3 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3 },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
