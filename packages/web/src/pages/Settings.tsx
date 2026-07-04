@@ -8,10 +8,11 @@ import {
   type PlatformConfig,
   type PlatformConfigOverride,
   type ConnectionAuthScheme,
+  type PollJob,
 } from "@loom/shared";
 import { api, type ProjectPatchError } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { Panel, Button, Input, Select, SectionLabel } from "../components/ui";
+import { Panel, Button, Input, Select, SectionLabel, Badge, Chip } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
 import { color, font } from "../theme";
 
@@ -56,6 +57,13 @@ export default function Settings() {
       <div>
         <SectionLabel>Connections</SectionLabel>
         <ConnectionsPanel />
+      </div>
+
+      {/* Poll-job triggers (agent-tooling epic P3) — daemon-global scheduled polls that wake or spawn a
+          session on a new item. HUMAN-only, like Connections above (which each job binds). */}
+      <div>
+        <SectionLabel>Poll Jobs</SectionLabel>
+        <PollJobsPanel />
       </div>
     </div>
   );
@@ -647,6 +655,342 @@ function ConnectionForm({ pending, error, onSubmit, onCancel }: {
 
       <div style={{ display: "flex", gap: 8 }}>
         <Button variant="primary" onClick={submit} disabled={pending}>{pending ? "Saving…" : "Create connection"}</Button>
+        <Button variant="ghost" onClick={onCancel} disabled={pending}>Cancel</Button>
+      </div>
+    </div>
+  );
+}
+
+// --- Poll jobs (agent-tooling epic P3) ----------------------------------------------------------
+// The 60s cadence floor — MIRRORS the daemon's exported MIN_POLL_INTERVAL_MS (orchestration/poll.ts).
+// Web can't import from @loom/daemon, so this is a cheap client-side gate (same idiom as Schedules'
+// `looksLikeCron`); the daemon does the REAL enforcement and 400s anything below it.
+const MIN_POLL_INTERVAL_MS = 60_000;
+const POLL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
+
+function fmtWhen(iso: string | null): string {
+  return iso ? new Date(iso).toLocaleString() : "never";
+}
+
+// Flat cross-project agent list ("Project / Agent" labels) for a spawn-mode target picker — mirrors
+// Schedules' useAllAgents. Poll jobs are daemon-global, so the target can be any project's agent.
+function usePollAgents() {
+  return useQuery({
+    queryKey: ["allAgentsFlat"],
+    queryFn: async () => {
+      const projects = await api.projects();
+      const lists = await Promise.all(
+        projects.map((p) => api.agents(p.id).then((ags) => ags.map((a) => ({ id: a.id, label: `${p.name} / ${a.name}` })))),
+      );
+      return lists.flat();
+    },
+  });
+}
+
+function PollJobsPanel() {
+  const qc = useQueryClient();
+  const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  const jobs = useQuery({ queryKey: ["pollJobs"], queryFn: () => api.pollJobs() });
+  const connections = useQuery({ queryKey: ["connections"], queryFn: () => api.connections() });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: () => api.allSessions() });
+  const agents = usePollAgents();
+
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["pollJobs"] });
+  const create = useMutation({
+    mutationFn: (b: Parameters<typeof api.createPollJob>[0]) => api.createPollJob(b),
+    onSuccess: () => { setAdding(false); invalidate(); },
+  });
+  const update = useMutation({
+    mutationFn: (v: { id: string; patch: Parameters<typeof api.updatePollJob>[1] }) => api.updatePollJob(v.id, v.patch),
+    onSuccess: () => { setEditingId(null); invalidate(); },
+  });
+  // Inline enable/disable + delete are quick actions (no inline error slot) — surface a rare 400 (a
+  // now-missing target) as an alert so it isn't swallowed.
+  const toggle = useMutation({
+    mutationFn: (v: { id: string; enabled: boolean }) => api.updatePollJob(v.id, { enabled: v.enabled }),
+    onSuccess: () => invalidate(),
+    onError: (e) => window.alert((e as Error).message),
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api.deletePollJob(id),
+    onSuccess: () => invalidate(),
+    onError: (e) => window.alert((e as Error).message),
+  });
+
+  const rows = jobs.data ?? [];
+  const conns = (connections.data ?? []).map((c) => ({ id: c.id, name: c.name, host: c.host }));
+  const sessionOpts = (sessions.data ?? []).map((s) => ({
+    id: s.id, label: `${s.projectName} / ${s.agentName}${s.title ? ` · ${s.title}` : ""}`,
+  }));
+  const agentOpts = agents.data ?? [];
+  const connName = (id: string) => conns.find((c) => c.id === id)?.name ?? id;
+  const targetLabel = (job: PollJob): string =>
+    job.mode === "wake"
+      ? sessionOpts.find((s) => s.id === job.sessionId)?.label ?? job.sessionId ?? "—"
+      : agentOpts.find((a) => a.id === job.agentId)?.label ?? job.agentId ?? "—";
+  const noConns = !connections.isLoading && conns.length === 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <Panel>
+        <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+          Scheduled local polls. On each due tick Loom fetches a connection's endpoint and, on an item it
+          hasn't seen since the previous poll, wakes an existing session or spawns a fresh one with the new
+          item(s) as its kickoff. Owner-managed only — there is no agent-facing tool that can read or edit
+          these. Changes apply on the next tick.
+        </p>
+      </Panel>
+
+      <Panel>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <SectionLabel style={{ margin: 0 }}>Poll jobs ({rows.length})</SectionLabel>
+          <span style={{ flex: 1 }} />
+          {!adding && (
+            <Button variant="primary" disabled={noConns}
+              title={noConns ? "Add a connection above first — a poll job fetches through one." : undefined}
+              onClick={() => { setAdding(true); setEditingId(null); create.reset(); }}>
+              New poll job
+            </Button>
+          )}
+        </div>
+
+        {jobs.isLoading && <Hint>loading poll jobs…</Hint>}
+        {jobs.isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(jobs.error as Error)?.message ?? "failed to load /api/poll-jobs"}</span>}
+        {noConns && <Hint>no connections yet — add one in the Connections section above before creating a poll job.</Hint>}
+
+        {adding && (
+          <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
+            <PollJobForm connections={conns} sessions={sessionOpts} agents={agentOpts}
+              agentsLoading={agents.isLoading} sessionsLoading={sessions.isLoading}
+              pending={create.isPending} error={create.error ? (create.error as Error).message : null}
+              onSubmit={(v) => create.mutate(v)} onCancel={() => { setAdding(false); create.reset(); }} />
+          </div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {rows.length === 0 && !adding && !jobs.isLoading && (
+            <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>No poll jobs yet.</span>
+          )}
+          {rows.map((job) => (
+            editingId === job.id ? (
+              <div key={job.id} style={{ padding: 12, background: color.panel2, border: `1px solid ${color.phosphor}`, borderRadius: 6 }}>
+                <PollJobForm initial={job} connections={conns} sessions={sessionOpts} agents={agentOpts}
+                  agentsLoading={agents.isLoading} sessionsLoading={sessions.isLoading}
+                  connName={connName(job.connectionId)}
+                  pending={update.isPending} error={update.error ? (update.error as Error).message : null}
+                  onSubmit={(v) => update.mutate({ id: job.id, patch: v })} onCancel={() => { setEditingId(null); update.reset(); }} />
+              </div>
+            ) : (
+              <PollJobRow key={job.id} job={job} connName={connName(job.connectionId)} target={targetLabel(job)}
+                toggling={toggle.isPending} deleting={remove.isPending}
+                onEdit={() => { setEditingId(job.id); setAdding(false); update.reset(); }}
+                onToggle={() => toggle.mutate({ id: job.id, enabled: !job.enabled })}
+                onDelete={() => remove.mutate(job.id)} />
+            )
+          ))}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+function PollJobRow({ job, connName, target, toggling, deleting, onEdit, onToggle, onDelete }: {
+  job: PollJob; connName: string; target: string; toggling: boolean; deleting: boolean;
+  onEdit: () => void; onToggle: () => void; onDelete: () => void;
+}) {
+  const [confirmDel, setConfirmDel] = useState(false);
+  const failing = job.consecutiveFailures > 0;
+  return (
+    <div style={{ padding: "10px 12px", background: color.panel2, border: `1px solid ${failing ? color.amber : color.border}`, borderRadius: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{connName}</span>
+        <Chip label={job.method} value={job.path} />
+        <span style={{ flex: 1 }} />
+        <Badge tone={job.enabled ? "phosphor" : "muted"}>{job.enabled ? "enabled" : "disabled"}</Badge>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+        <span>every {job.intervalMs / 1000}s</span>
+        <span>{job.mode} → <span style={{ color: color.textDim }}>{target}</span></span>
+        <span>items: {job.itemsPath || "(root)"} · id: {job.idPath || "(none)"}</span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", fontFamily: font.mono, fontSize: 11 }}>
+        <span style={{ color: color.textDim }}>last polled · <span style={{ color: color.text }}>{fmtWhen(job.lastPolledAt)}</span></span>
+        {failing && (
+          <span style={{ color: color.amber }}>{job.consecutiveFailures} consecutive failure{job.consecutiveFailures === 1 ? "" : "s"}</span>
+        )}
+        {job.lastError && (
+          <span style={{ color: color.red, maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={job.lastError}>
+            error: {job.lastError}
+          </span>
+        )}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <Button onClick={onEdit}>Edit</Button>
+        <Button onClick={onToggle} disabled={toggling} title={job.enabled ? "Pause this poll job (stops polling)" : "Resume this poll job"}>
+          {job.enabled ? "Disable" : "Enable"}
+        </Button>
+        <span style={{ flex: 1 }} />
+        {confirmDel ? (
+          <>
+            <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>delete this poll job?</span>
+            <Button variant="danger" disabled={deleting} onClick={onDelete}>Confirm</Button>
+            <Button onClick={() => setConfirmDel(false)}>Cancel</Button>
+          </>
+        ) : <Button variant="danger" onClick={() => setConfirmDel(true)}>Delete</Button>}
+      </div>
+    </div>
+  );
+}
+
+// Shared create/edit form. `initial` prefills for edit; `connectionId` is IMMUTABLE after create (the
+// PATCH handler doesn't accept it — mirrors a schedule's fixed agentId), so edit shows the connection
+// read-only via `connName`. The interval is edited in SECONDS (stored ms); the 60s floor is gated here
+// and re-enforced by the daemon.
+function PollJobForm({ initial, connections, sessions, agents, agentsLoading, sessionsLoading, connName, pending, error, onSubmit, onCancel }: {
+  initial?: PollJob;
+  connections: { id: string; name: string; host: string }[];
+  sessions: { id: string; label: string }[];
+  agents: { id: string; label: string }[];
+  agentsLoading: boolean; sessionsLoading: boolean;
+  connName?: string;
+  pending: boolean; error: string | null;
+  onSubmit: (v: {
+    connectionId: string; path: string; method: string; intervalMs: number; itemsPath: string; idPath: string;
+    mode: PollJob["mode"]; sessionId?: string; agentId?: string; enabled: boolean;
+  }) => void;
+  onCancel: () => void;
+}) {
+  const editing = !!initial;
+  const [connectionId, setConnectionId] = useState(initial?.connectionId ?? "");
+  const [path, setPath] = useState(initial?.path ?? "");
+  const [method, setMethod] = useState<string>(initial?.method ?? "GET");
+  const [intervalSec, setIntervalSec] = useState(String((initial?.intervalMs ?? MIN_POLL_INTERVAL_MS) / 1000));
+  const [itemsPath, setItemsPath] = useState(initial?.itemsPath ?? "");
+  const [idPath, setIdPath] = useState(initial?.idPath ?? "id");
+  const [mode, setMode] = useState<PollJob["mode"]>(initial?.mode ?? "spawn");
+  const [sessionId, setSessionId] = useState(initial?.sessionId ?? "");
+  const [agentId, setAgentId] = useState(initial?.agentId ?? "");
+  const [enabled, setEnabled] = useState(initial?.enabled ?? true);
+  const [localErr, setLocalErr] = useState<string | null>(null);
+
+  const minSec = MIN_POLL_INTERVAL_MS / 1000;
+  const sec = Number(intervalSec);
+  const intervalValid = Number.isFinite(sec) && sec >= minSec;
+  const pathValid = path.trim().startsWith("/");
+  const targetValid = mode === "wake" ? !!sessionId : !!agentId;
+  const connValid = editing || !!connectionId;
+  const valid = connValid && pathValid && intervalValid && targetValid;
+
+  const submit = () => {
+    setLocalErr(null);
+    if (!valid) {
+      setLocalErr(`Need a connection, a path starting with "/", an interval ≥ ${minSec}s, and a ${mode === "wake" ? "session" : "agent"} target.`);
+      return;
+    }
+    onSubmit({
+      connectionId, path: path.trim(), method, intervalMs: Math.round(sec * 1000),
+      itemsPath: itemsPath.trim(), idPath: idPath.trim(), mode,
+      sessionId: mode === "wake" ? sessionId : undefined,
+      agentId: mode === "spawn" ? agentId : undefined,
+      enabled,
+    });
+  };
+
+  const noAgents = !agentsLoading && agents.length === 0;
+  const noSessions = !sessionsLoading && sessions.length === 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text, fontSize: 13 }}>
+        {editing ? "Edit poll job" : "New poll job"}
+      </strong>
+
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Connection {editing && <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>· fixed after create</span>}</span>
+        {editing
+          ? <Input value={connName ?? connectionId} disabled />
+          : (
+            <Select value={connectionId} onChange={(e) => setConnectionId(e.target.value)}>
+              <option value="">— select a connection —</option>
+              {connections.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.host})</option>)}
+            </Select>
+          )}
+      </label>
+
+      <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 10 }}>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={fieldLabel}>Method</span>
+          <Select value={method} onChange={(e) => setMethod(e.target.value)}>
+            {POLL_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+          </Select>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={fieldLabel}>Path</span>
+          <Input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/notifications" spellCheck={false} />
+          {path.trim().length > 0 && !pathValid && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>Path must start with "/".</span>}
+        </label>
+      </div>
+
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Poll interval (seconds)</span>
+        <Input value={intervalSec} onChange={(e) => setIntervalSec(e.target.value)} inputMode="numeric" min={minSec} type="number" placeholder={String(minSec)} />
+        {intervalSec.trim().length > 0 && !intervalValid && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>Minimum {minSec}s (the poll cadence floor).</span>}
+      </label>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={fieldLabel}>Items path</span>
+          <Input value={itemsPath} onChange={(e) => setItemsPath(e.target.value)} placeholder="(root array)" spellCheck={false} />
+          <Hint>dot-path to the items array in the response · blank = the root</Hint>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={fieldLabel}>Id path</span>
+          <Input value={idPath} onChange={(e) => setIdPath(e.target.value)} placeholder="id" spellCheck={false} />
+          <Hint>dot-path to each item's stable id (the diff key)</Hint>
+        </label>
+      </div>
+
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>On a new item</span>
+        <Select value={mode} onChange={(e) => setMode(e.target.value as PollJob["mode"])}>
+          <option value="spawn">Spawn a fresh session (pick an agent)</option>
+          <option value="wake">Wake an existing session</option>
+        </Select>
+      </label>
+
+      {mode === "spawn" ? (
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={fieldLabel}>Target agent</span>
+          <Select value={agentId} onChange={(e) => setAgentId(e.target.value)} disabled={agentsLoading || noAgents}>
+            <option value="">{agentsLoading ? "Loading agents…" : noAgents ? "— no agents —" : "— select an agent —"}</option>
+            {agents.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+          </Select>
+          {noAgents && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>No agents exist yet — create one on the Projects page first.</span>}
+        </label>
+      ) : (
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={fieldLabel}>Target session</span>
+          <Select value={sessionId} onChange={(e) => setSessionId(e.target.value)} disabled={sessionsLoading || noSessions}>
+            <option value="">{sessionsLoading ? "Loading sessions…" : noSessions ? "— no sessions —" : "— select a session —"}</option>
+            {sessions.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+          </Select>
+          {noSessions && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>No sessions exist yet — start one before targeting a wake.</span>}
+        </label>
+      )}
+
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 13, color: color.text }}>
+        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+        Enabled
+      </label>
+
+      {(localErr || error) && <div style={{ fontSize: 12, color: color.red, fontFamily: font.mono }}>{localErr ?? error}</div>}
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <Button variant="primary" onClick={submit} disabled={pending || !valid}>
+          {pending ? "Saving…" : editing ? "Save changes" : "Create poll job"}
+        </Button>
         <Button variant="ghost" onClick={onCancel} disabled={pending}>Cancel</Button>
       </div>
     </div>

@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, ConnectionMetadata, ConnectionAuthScheme, CapabilitySummary, CapabilityProvisionKind } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, ConnectionMetadata, ConnectionAuthScheme, CapabilitySummary, CapabilityProvisionKind, PollJob } from "@loom/shared";
 
 // A one-time DM-pairing enrollment code, returned ONCE by the mint endpoint (the store keeps only a
 // salted hash). The human relays `code` to the person being enrolled; it is never recoverable after.
@@ -673,6 +673,25 @@ export const api = {
   createConnection: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string }) =>
     postErr<ConnectionMetadata>("/api/connections", b),
   deleteConnection: (id: string) => delErr<{ ok: boolean }>(`/api/connections/${encodeURIComponent(id)}`),
+
+  // --- Poll jobs (agent-tooling epic P3): scheduled local poll triggers. On each due tick the daemon
+  // fetches through a connection (server-side authenticated_request path — the secret is injected/redacted
+  // there, never carried by the row) and, on a NEW item vs the previous poll's id snapshot, wakes an
+  // existing session (mode "wake") or spawns a fresh one (mode "spawn"). HUMAN-only loopback REST —
+  // INTENTIONALLY NO agent MCP path (same trust posture as connections/schedules). create/update surface
+  // the server's `{ error }` body verbatim (path/interval-floor/target-exists validation) via postErr;
+  // `connectionId` is immutable after create (the update handler doesn't accept it — mirrors a schedule's
+  // fixed agentId). ---
+  pollJobs: () => get<PollJob[]>("/api/poll-jobs"),
+  createPollJob: (b: {
+    connectionId: string; path: string; method?: string; intervalMs: number;
+    itemsPath?: string; idPath?: string; mode: PollJob["mode"]; sessionId?: string; agentId?: string; enabled?: boolean;
+  }) => postErr<PollJob>("/api/poll-jobs", b),
+  updatePollJob: (id: string, patch: {
+    path?: string; method?: string; intervalMs?: number; itemsPath?: string; idPath?: string;
+    mode?: PollJob["mode"]; sessionId?: string; agentId?: string; enabled?: boolean;
+  }) => postErr<PollJob>(`/api/poll-jobs/${encodeURIComponent(id)}`, patch),
+  deletePollJob: (id: string) => del<{ ok: boolean }>(`/api/poll-jobs/${encodeURIComponent(id)}`),
 
   // --- Capability registry catalog (agent-tooling epic P4): the two BUILTIN capabilities PLUS any
   // owner-added rows, as ONE unified list — the Profile editor's capability picker + a future Settings
