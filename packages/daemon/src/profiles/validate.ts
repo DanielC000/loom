@@ -38,8 +38,41 @@ const profileSchema = z
     // Declared no-commit role (default off). Lifecycle-only flag (no spawn-time host capability) — a
     // 0-commit done auto-retires + skips the forgot-to-commit warning. Human-gated like browserTesting.
     noCommit: z.boolean().optional(),
+    // Opt-in authenticated-egress connection-id allowlist (agent-tooling epic P2, default []=no access).
+    // STRICTER than browserTesting/documentConversion: this field grants access to REAL external secrets,
+    // so it is rejected even on the Setup Assistant's / Platform Lead's own profile-writing MCP tools (see
+    // `agentProfileKeyError` below) — the human REST path (POST/PUT /api/profiles) is the ONLY grant path.
+    connections: z.array(z.string()).optional(),
   })
   .strict();
+
+/**
+ * Profile keys that must NEVER be settable through an agent MCP tool, even the elevated Setup
+ * Assistant / Platform Lead profile writers that otherwise share this same strict validator for every
+ * other field. Mirrors `agentOrchestrationOverride`'s omission of `gateCommand`/`alertWebhook` (mcp/
+ * platform.ts) — `connections` grants access to REAL external secrets (P1 credential store), which is
+ * categorically more sensitive than a sandboxed capability like `browserTesting`/`documentConversion`.
+ */
+const AGENT_FORBIDDEN_PROFILE_KEYS = ["connections"] as const;
+
+/**
+ * Reject a RAW create/patch payload (BEFORE any merge with an existing profile) that tries to set a
+ * human-only key. Callers (setup.ts / platform.ts profile_create/profile_update) run this on the
+ * caller-supplied input alone — never on a merged whole — so an unrelated patch to a profile that
+ * ALREADY has `connections` set (via human REST) passes through untouched: the forbidden key is only
+ * rejected when the AGENT's own payload tries to introduce/change it. Returns an error string, or null
+ * when the payload is clean.
+ */
+export function agentProfileKeyError(raw: unknown): string | null {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    for (const key of AGENT_FORBIDDEN_PROFILE_KEYS) {
+      if (key in (raw as Record<string, unknown>)) {
+        return `${key} may not be set via an agent MCP tool — it grants access to real external secrets (human-only, via the Profiles UI / REST)`;
+      }
+    }
+  }
+  return null;
+}
 
 export function validateProfile(
   raw: unknown,
@@ -64,6 +97,7 @@ export function validateProfile(
       documentConversion: d.documentConversion ?? false, // normalize to the stored default (off)
       restrictedTools: d.restrictedTools ?? false, // normalize to the stored default (off)
       noCommit: d.noCommit ?? false, // normalize to the stored default (off)
+      connections: d.connections ?? [], // normalize to the stored default (no access)
     },
   };
 }

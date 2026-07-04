@@ -2,9 +2,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { WakeService } from "../orchestration/wake.js";
 import { listProjectTasks, getProjectTask, createProjectTask, updateProjectTask, DEFAULT_TASK_SUMMARY_CAP } from "./tasks.js";
+import { performAuthenticatedRequest } from "../connections/request.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -32,7 +34,9 @@ export const prioritySchema = z.enum(["p0", "p1", "p2", "p3"]);
  * wedge the surface — every request rebuilds the identical tools from the stable mapping.
  */
 export class TaskMcpRouter {
-  constructor(private db: Db, private wakes: WakeService) {}
+  // `fetchOverride` is a TEST-ONLY seam for `authenticated_request` (mirrors the envelope's `keyPath`
+  // swappable-backend seam) — production never passes a 3rd arg, so every real spawn is unaffected.
+  constructor(private db: Db, private wakes: WakeService, private fetchOverride?: typeof fetch) {}
 
   resolveProject(sessionId: string): string | null {
     return this.db.getSession(sessionId)?.projectId ?? null;
@@ -41,6 +45,7 @@ export class TaskMcpRouter {
   private buildServer(projectId: string, sessionId: string): McpServer {
     const db = this.db;
     const wakes = this.wakes;
+    const fetchOverride = this.fetchOverride;
     const server = new McpServer({ name: "loom-tasks", version: "0.1.0" });
 
     server.registerTool(
@@ -127,6 +132,43 @@ export class TaskMcpRouter {
       { description: "List your pending wake-ups.", inputSchema: {} },
       async () => ok(wakes.list(sessionId)),
     );
+
+    // Agent-tooling epic P2: the profile-gated authenticated-egress tool. OMITTED from tools/list
+    // entirely (not merely denied) when this session has no pinned connections — a session's `connections`
+    // allowlist is resolved from the session ROW (pinned at spawn from the Profile, mirrors browserTesting)
+    // fresh on every request, since this router is stateless. The default daemon-global permission already
+    // whole-server-allows "mcp__loom-tasks" (config.ts), so — UNLIKE browserTesting/documentConversion's
+    // separate stdio MCP servers — no `--allowedTools` entry is needed here: conditional registration IS
+    // the gate. The handler double-checks the requested connection id against this same pinned list
+    // (defense in depth), so a future bug in this gate still can't reach a connection outside the grant.
+    const session = db.getSession(sessionId);
+    const sessionConnections = session?.connections ?? [];
+    if (sessionConnections.length > 0) {
+      const guard = resolveConfig(undefined, db.getPlatformConfig()).platform.connections;
+      server.registerTool(
+        "authenticated_request",
+        {
+          description:
+            "Perform a credential-injected HTTP request to one of THIS session's allowlisted connections " +
+            "(set on your profile by the owner). Loom builds the URL from the connection's fixed host + your " +
+            "`path` and injects the auth header server-side — you never see the secret and cannot set an " +
+            "Authorization header yourself (rejected if you try). Redirects are NOT followed: a 3xx comes " +
+            "back as {status, location} instead of being chased. `method` defaults to GET. `headers` may " +
+            "carry NON-auth headers only. `body` may be a string or a JSON-serializable object (a JSON " +
+            "object defaults Content-Type: application/json). Bounded by a request timeout and a response-" +
+            "size cap; each connection also has a request-rate limit.",
+          inputSchema: {
+            connection: z.string(),
+            path: z.string(),
+            method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
+            headers: z.record(z.string(), z.string()).optional(),
+            body: z.union([z.string(), z.record(z.string(), z.any())]).optional(),
+          },
+        },
+        async (args) => ok(await performAuthenticatedRequest({ db, fetchImpl: fetchOverride }, sessionConnections, guard, args)),
+      );
+    }
+
     return server;
   }
 

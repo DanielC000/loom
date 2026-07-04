@@ -8,7 +8,7 @@ import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
-import { validateProfile } from "../profiles/validate.js";
+import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
@@ -360,10 +360,12 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_create",
       {
-        description: "Create a Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). role may be manager|worker|setup or omitted ONLY — an elevated \"platform\"/\"auditor\" role is rejected here (human-only). Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
+        description: "Create a Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). role may be manager|worker|setup or omitted ONLY — an elevated \"platform\"/\"auditor\" role is rejected here (human-only). `connections` (authenticated-egress connection-id grants) is ALSO rejected here — human-only via the Profiles UI/REST, it grants access to real external secrets. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
         inputSchema: { profile: z.object({}).passthrough() },
       },
       async ({ profile }) => {
+        const forbiddenErr = agentProfileKeyError(profile);
+        if (forbiddenErr) return ok({ error: forbiddenErr });
         const v = validateProfile(profile);
         if (!v.ok) return ok({ error: `invalid profile: ${v.error}` });
         const roleErr = setupRoleError(v.value.role);
@@ -377,7 +379,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker|setup or null ONLY — a patch that yields an elevated \"platform\"/\"auditor\" role is rejected (human-only). 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker|setup or null ONLY — a patch that yields an elevated \"platform\"/\"auditor\" role is rejected (human-only). The patch may not touch `connections` (authenticated-egress grants — human-only, via the Profiles UI/REST); a profile that already has connections set keeps them across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
         inputSchema: { profileId: z.string(), patch: z.object({}).passthrough() },
       },
       async ({ profileId, patch }) => {
@@ -385,6 +387,11 @@ export class SetupMcpRouter {
         if (!existing) return ok({ error: "profile not found" });
         // Mirror the REST PUT: drop `id` from both sides so a verbatim round-trip doesn't trip .strict().
         const { id: _pid, ...patchNoId } = patch as Record<string, unknown>;
+        // Reject on the RAW incoming patch (before merge) — a profile that already has `connections` set
+        // via human REST must survive an unrelated agent patch untouched; only the agent's OWN attempt to
+        // introduce/change the key is rejected.
+        const forbiddenErr = agentProfileKeyError(patchNoId);
+        if (forbiddenErr) return ok({ error: forbiddenErr });
         const { id: _eid, ...base } = existing;
         const v = validateProfile({ ...base, ...patchNoId });
         if (!v.ok) return ok({ error: `invalid profile: ${v.error}` });

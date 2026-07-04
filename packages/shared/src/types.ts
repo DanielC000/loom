@@ -139,6 +139,17 @@ export interface Profile {
    * still gets the warning and is NEVER auto-retired (the forgot-to-commit safety net stays intact).
    */
   noCommit?: boolean;
+  /**
+   * Opt-in authenticated-egress capability (agent-tooling epic P2): the list of P1 credential-store
+   * Connection ids a session under this rig may use with the `authenticated_request` tool. Default OFF
+   * (absent/empty — UNLIKE `skills`, absent here means NO access, never "all connections") and fully
+   * additive — a rig without it spawns byte-identically to today. HUMAN-set only, via the Profiles UI /
+   * REST `POST`/`PUT /api/profiles` — stricter than `browserTesting`/`documentConversion`: this field is
+   * REJECTED even on the Setup Assistant's and Platform Lead's own profile-writing MCP tools (see
+   * `profiles/validate.ts`'s agent-restriction helper), because it grants access to REAL external secrets
+   * rather than a sandboxed capability. Never exposed as an agent MCP setter, full stop.
+   */
+  connections?: string[];
 }
 
 // --- Bundled-profile customization (the profiles analog of skill customization) -------------------
@@ -446,6 +457,17 @@ export interface Session {
    * normalized to null at the pin sites (no profile subset ⇒ all).
    */
   skills?: string[] | null;
+  /**
+   * Profile-resolved authenticated-egress connection-id list, PINNED here at fresh spawn (mirrors
+   * `browserTesting`, NOT `skills`): the `authenticated_request` tool (loom-tasks MCP) may only be used
+   * with a connection id in this list, and is OMITTED from tools/list entirely when this is empty/absent.
+   * Absent/empty on every existing session ⇒ no access, byte-identical to today (the secure-default
+   * direction — unlike `skills`, empty here does NOT mean "all connections"). Persisted so every respawn
+   * path (resume/fork/recycle) carries the same grant forward unchanged; a connection later revoked at
+   * the P1 store still fails closed at call time regardless of this pin (getConnectionMetadata/
+   * getSecretForUse return undefined for a deleted connection).
+   */
+  connections?: string[];
   /**
    * Per-project session Archive: the ISO instant a session was archived (moving a stopped session out
    * of the Workspace rail). null = not archived (every live/normal session). Archived sessions are

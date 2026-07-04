@@ -253,6 +253,9 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
   const [noCommit, setNoCommit] = useState(profile.noCommit ?? false);
   // Skill subset (empty = deliver ALL, the default — null and [] are equivalent, matching the daemon).
   const [skills, setSkills] = useState<string[]>(profile.skills ?? []);
+  // Authenticated-egress connection-id allowlist (empty = NO access, the secure default — UNLIKE skills,
+  // empty here never means "all"). Human-set only, here or via REST — never an agent MCP tool.
+  const [connections, setConnections] = useState<string[]>(profile.connections ?? []);
   const [confirmDel, setConfirmDel] = useState(false);
   const [confirmRevert, setConfirmRevert] = useState(false);
   const [resolver, setResolver] = useState<ProfileMergeResult | null>(null); // open ⇔ a conflicting adopt
@@ -270,6 +273,11 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
   const toggleSkill = (n: string) => setSkills((cur) => (cur.includes(n) ? cur.filter((s) => s !== n) : [...cur, n]));
   const sortedJson = (xs: string[]) => JSON.stringify([...xs].sort());
 
+  // The P1 credential store's connections — the menu of what this rig's egress allowlist can grant.
+  const connectionList = useQuery({ queryKey: ["connections"], queryFn: api.connections });
+  const availableConnections = connectionList.data ?? [];
+  const toggleConnection = (id: string) => setConnections((cur) => (cur.includes(id) ? cur.filter((c) => c !== id) : [...cur, id]));
+
   const allowDelta = allowText.split("\n").map((s) => s.trim()).filter(Boolean);
   const dirty =
     name !== profile.name ||
@@ -282,7 +290,8 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
     documentConversion !== (profile.documentConversion ?? false) ||
     restrictedTools !== (profile.restrictedTools ?? false) ||
     noCommit !== (profile.noCommit ?? false) ||
-    sortedJson(skills) !== sortedJson(profile.skills ?? []);
+    sortedJson(skills) !== sortedJson(profile.skills ?? []) ||
+    sortedJson(connections) !== sortedJson(profile.connections ?? []);
 
   const fieldLabel = { fontFamily: font.head as string, fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: color.textDim };
   const ta = {
@@ -290,7 +299,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
     background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
   };
 
-  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setRestrictedTools(profile.restrictedTools ?? false); setNoCommit(profile.noCommit ?? false); setSkills(profile.skills ?? []); };
+  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setRestrictedTools(profile.restrictedTools ?? false); setNoCommit(profile.noCommit ?? false); setSkills(profile.skills ?? []); setConnections(profile.connections ?? []); };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
@@ -447,10 +456,37 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
       </div>
       <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, marginTop: -6 }}>Model + skills apply on the next spawn. Skills delivery is per-session — sessions sharing a repo see the union of their subsets, never each other stripped.</span>
 
+      {/* Authenticated-egress connection grant (agent-tooling epic P2): which P1 credential-store
+          connections a session under this rig may call the authenticated_request tool with. Human-set
+          HERE ONLY — stricter than every other flag on this page: not even the Setup Assistant / Platform
+          Lead's own profile-writing tools may touch this field (it grants access to real external secrets). */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <span style={fieldLabel}>Connections <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>· {connections.length === 0 ? "none selected → NO authenticated_request access (default)" : `${connections.length} selected → authenticated_request may use only these`}</span></span>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {availableConnections.map((c) => {
+            const on = connections.includes(c.id);
+            return (
+              <button key={c.id} type="button" onClick={() => toggleConnection(c.id)}
+                style={{ cursor: "pointer", fontFamily: font.mono, fontSize: 12, padding: "3px 9px", borderRadius: 12,
+                  border: `1px solid ${on ? color.phosphor : color.border}`, background: on ? color.panel2 : "transparent",
+                  color: on ? color.phosphor : color.textMuted }}>
+                {on ? "✓ " : ""}{c.name} <span style={{ opacity: 0.7 }}>({c.host})</span>
+              </button>
+            );
+          })}
+          {availableConnections.length === 0 && <span style={{ color: color.textMuted, fontSize: 12, fontFamily: font.mono }}>No connections in the credential store yet — add one in Settings.</span>}
+        </div>
+        {connections.filter((id) => !availableConnections.some((c) => c.id === id)).length > 0 && (
+          <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>
+            not in the credential store (will be ignored at spawn): {connections.filter((id) => !availableConnections.some((c) => c.id === id)).join(", ")}
+          </span>
+        )}
+      </div>
+
       <span style={{ flex: 1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || !name.trim() || saving}
-          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, restrictedTools, noCommit, skills: skills.length ? skills : null })}>
+          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, restrictedTools, noCommit, skills: skills.length ? skills : null, connections })}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {dirty
@@ -619,7 +655,7 @@ function FieldSide({ label, tone: t, active, value, onPick }: { label: string; t
 const FIELD_DISPLAY: Record<string, string> = {
   role: "Role", description: "Description", allowDelta: "Allow delta", skills: "Skills",
   model: "Model", icon: "Icon", browserTesting: "Browser testing", documentConversion: "Document conversion",
-  restrictedTools: "Restricted tools", noCommit: "No-commit role",
+  restrictedTools: "Restricted tools", noCommit: "No-commit role", connections: "Connections",
 };
 function fieldDisplayName(field: string): string {
   return FIELD_DISPLAY[field] ?? field;

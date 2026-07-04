@@ -357,6 +357,22 @@ export interface TimeoutConfig {
 }
 
 /**
+ * Bounds for the P2 `authenticated_request` MCP tool (agent-tooling epic) — the request timeout +
+ * response-size cap that keep a hung/huge upstream response from wedging the daemon, plus the
+ * per-connection rate/spend guard the design flagged as a LEAD DEFAULT (owner-veto item before merge).
+ */
+export interface ConnectionsGuardConfig {
+  /** Request timeout (ms) via AbortSignal. Default 20000 (20s). */
+  requestTimeoutMs: number;
+  /** Response body cap (bytes); exceeding it aborts the read and errors the call. Default 1000000 (1MB). */
+  maxResponseBytes: number;
+  /** Max requests a single connection may make within `rateLimitWindowMs`. Default 30. */
+  rateLimitMax: number;
+  /** Sliding rate-limit window (ms). Default 300000 (5m). */
+  rateLimitWindowMs: number;
+}
+
+/**
  * Daemon-global "platform" tuning grouping: rate-limit numbers, watcher cadences, operation timeouts.
  * NOT per-project — like `backup`/`schedulerEnabled`, the daemon shares ONE of these. The daemon
  * supplies an optional global override (its SQLite-persisted singleton blob) as the 2nd arg to
@@ -366,6 +382,8 @@ export interface PlatformConfig {
   rateLimit: RateLimitConfig;
   watchers: WatcherConfig;
   timeouts: TimeoutConfig;
+  /** P2 authenticated-request bounds + per-connection rate guard. See ConnectionsGuardConfig. */
+  connections: ConnectionsGuardConfig;
   /**
    * Message-delivery behavior toggle (owner-directed, 2026-07-03): when a recipient is busy and
    * inbound messages queue, should an AGENT/human-authored message (a manager→worker direction, a
@@ -449,6 +467,8 @@ export interface PlatformConfigOverride {
   rateLimit?: Partial<RateLimitConfig>;
   watchers?: Partial<WatcherConfig>;
   timeouts?: Partial<TimeoutConfig>;
+  /** See PlatformConfig.connections. */
+  connections?: Partial<ConnectionsGuardConfig>;
   /** See PlatformConfig.coalesceAgentMessages. */
   coalesceAgentMessages?: boolean;
 }
@@ -498,6 +518,8 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     rateLimit: { defaultBackoffMs: 18000000, resetBufferMs: 10000, deadlineAfterResetMs: 1800000, deadlineNoResetMs: 21600000, recencyWindowMs: 21600000 },
     watchers: { contextWatchMs: 60000, idleWatchMs: 60000, rateLimitWatchMs: 60000, usagePollMs: 60000, wakeMs: 60000, schedulerMs: 60000, reconcileMs: 10000, snapshotMs: 420000, crashRecoveryWatchMs: 60000 },
     timeouts: { gitOpMs: 15000, gitLocalMs: 15000, gitPushMs: 45000, provisionMs: 180000, busyStaleMs: 300000, runMs: 600000 },
+    // P2 authenticated-request bounds: 20s timeout, 1MB response cap, 30 req/5min per connection.
+    connections: { requestTimeoutMs: 20000, maxResponseBytes: 1000000, rateLimitMax: 30, rateLimitWindowMs: 300000 },
     // Default false = deliver agent/human messages one-per-turn (the 2026-07-03 owner-directed fix).
     coalesceAgentMessages: false,
   },
@@ -570,6 +592,9 @@ export interface ResolvedProfile {
   /** Declared no-commit role: a read-only worker whose 0-commit done auto-retires + skips the
    *  forgot-to-commit warning. NO spawn-time effect (lifecycle-only). Backstops to false. */
   noCommit: boolean;
+  /** Authenticated-egress connection-id allowlist for the `authenticated_request` tool. Backstops to
+   *  `[]` (NOT "all" — the secure default direction, unlike `skills`). */
+  connections: string[];
 }
 
 /**
@@ -590,7 +615,7 @@ export function resolveProfile(
   const startupPrompt = agent.startupPrompt ?? "";
   if (!profile) {
     // The backstop: a null/absent profile confers NO browser/document capability (false) — today's behavior.
-    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false };
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, connections: [] };
   }
   return {
     role: profile.role ?? null,
@@ -606,6 +631,8 @@ export function resolveProfile(
     restrictedTools: profile.restrictedTools ?? false,
     // Declared no-commit role (lifecycle-only; no spawn-time effect). Backstop false.
     noCommit: profile.noCommit ?? false,
+    // Authenticated-egress connection-id allowlist. Backstop [] (NOT "all" — the secure default).
+    connections: profile.connections ?? [],
   };
 }
 
@@ -696,6 +723,12 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
       provisionMs: po?.timeouts?.provisionMs ?? d.timeouts.provisionMs,
       busyStaleMs: po?.timeouts?.busyStaleMs ?? d.timeouts.busyStaleMs,
       runMs: po?.timeouts?.runMs ?? d.timeouts.runMs,
+    },
+    connections: {
+      requestTimeoutMs: po?.connections?.requestTimeoutMs ?? d.connections.requestTimeoutMs,
+      maxResponseBytes: po?.connections?.maxResponseBytes ?? d.connections.maxResponseBytes,
+      rateLimitMax: po?.connections?.rateLimitMax ?? d.connections.rateLimitMax,
+      rateLimitWindowMs: po?.connections?.rateLimitWindowMs ?? d.connections.rateLimitWindowMs,
     },
     coalesceAgentMessages: po?.coalesceAgentMessages ?? d.coalesceAgentMessages,
   };

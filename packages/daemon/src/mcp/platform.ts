@@ -12,7 +12,7 @@ import { checkRepoRebind } from "../projects/rebind.js";
 import { GitWriter } from "../git/writer.js";
 import { writeVaultFile } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { validateProfile } from "../profiles/validate.js";
+import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
@@ -313,10 +313,19 @@ const timeoutsOverride = z.object({
   busyStaleMs: z.number().int().min(30000).max(1800000).optional(),
   runMs: z.number().int().min(30000).max(3600000).optional(), // Agent Runs hard run-timeout: 30s..1h
 }).strict();
+// P2 authenticated-request bounds + per-connection rate guard. HUMAN-only, exactly like the other
+// `platform` sub-groups (no agent variant — see the platformConfigOverrideSchema note above).
+const connectionsOverride = z.object({
+  requestTimeoutMs: z.number().int().min(1000).max(120000).optional(),
+  maxResponseBytes: z.number().int().min(1024).max(20000000).optional(), // 1KB..20MB
+  rateLimitMax: z.number().int().min(1).max(10000).optional(),
+  rateLimitWindowMs: z.number().int().min(1000).max(3600000).optional(),
+}).strict();
 const platformConfigOverrideSchema = z.object({
   rateLimit: rateLimitOverride.optional(),
   watchers: watchersOverride.optional(),
   timeouts: timeoutsOverride.optional(),
+  connections: connectionsOverride.optional(),
   coalesceAgentMessages: z.boolean().optional(),
 }).strict();
 
@@ -696,10 +705,12 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_create",
       {
-        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). Validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
+        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). `connections` (authenticated-egress connection-id grants) is REJECTED here — human-only via the Profiles UI/REST, it grants access to real external secrets; not even the Platform Lead may set it. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
         inputSchema: { profile: z.object({}).passthrough() },
       },
       async ({ profile }) => {
+        const forbiddenErr = agentProfileKeyError(profile);
+        if (forbiddenErr) return ok({ error: forbiddenErr });
         const v = validateProfile(profile);
         if (!v.ok) return ok({ error: `invalid profile: ${v.error}` });
         const created: Profile = { id: randomUUID(), ...v.value };
@@ -711,7 +722,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not touch `connections` (authenticated-egress grants — human-only, via the Profiles UI/REST); a profile that already has connections set keeps them across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
         inputSchema: { profileId: z.string(), patch: z.object({}).passthrough() },
       },
       async ({ profileId, patch }) => {
@@ -719,6 +730,10 @@ export class PlatformMcpRouter {
         if (!existing) return ok({ error: "profile not found" });
         // Mirror the REST PUT: drop `id` from both sides so a verbatim round-trip doesn't trip .strict().
         const { id: _pid, ...patchNoId } = patch as Record<string, unknown>;
+        // Reject on the RAW incoming patch (before merge) — see profile_create's note; an existing
+        // `connections` grant on the profile survives an unrelated patch untouched.
+        const forbiddenErr = agentProfileKeyError(patchNoId);
+        if (forbiddenErr) return ok({ error: forbiddenErr });
         const { id: _eid, ...base } = existing;
         const v = validateProfile({ ...base, ...patchNoId });
         if (!v.ok) return ok({ error: `invalid profile: ${v.error}` });

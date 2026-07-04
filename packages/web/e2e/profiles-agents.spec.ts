@@ -35,7 +35,8 @@ async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 interface SeededAgent { id: string; projectId: string; name: string; profileId: string | null }
-interface SeededProfile { id: string; name: string; role: string | null; icon: string | null; browserTesting: boolean; documentConversion: boolean }
+interface SeededProfile { id: string; name: string; role: string | null; icon: string | null; browserTesting: boolean; documentConversion: boolean; connections?: string[] }
+interface SeededConnection { id: string; name: string; host: string }
 
 const seedAgent = (baseURL: string, projectId: string, name: string, startupPrompt = "") =>
   apiJson<SeededAgent>(`${baseURL}/api/projects/${projectId}/agents`, { method: "POST", body: JSON.stringify({ name, startupPrompt }) });
@@ -44,6 +45,11 @@ const seedAgent = (baseURL: string, projectId: string, name: string, startupProm
 // icon when the test needs a visible on-agent signal after assignment.
 const seedProfile = (baseURL: string, body: { name: string; role?: string | null; icon?: string | null }) =>
   apiJson<SeededProfile>(`${baseURL}/api/profiles`, { method: "POST", body: JSON.stringify(body) });
+
+// Agent-tooling epic P2 — the P1 credential store's human-only REST create (a real connection row, not a
+// mock), so the Profiles page's Connections multiselect has something real to render.
+const seedConnection = (baseURL: string, body: { name: string; host: string; authScheme: "api-key" | "bearer"; secret: string }) =>
+  apiJson<SeededConnection>(`${baseURL}/api/connections`, { method: "POST", body: JSON.stringify(body) });
 
 const listAgents = (baseURL: string, projectId: string) =>
   apiJson<SeededAgent[]>(`${baseURL}/api/projects/${projectId}/agents`);
@@ -190,5 +196,37 @@ test.describe("profiles & agents", () => {
     await expect
       .poll(async () => (await getProfile(loomDaemon.baseURL, profile.id)).documentConversion)
       .toBe(true);
+  });
+
+  test("profile Connections multiselect renders a seeded connection and persists a grant", async ({ page, loomDaemon }) => {
+    // Agent-tooling epic P2: the authenticated-request tool's profile-gating surface. A freshly seeded
+    // profile grants NO connections (the secure default); toggling one on + Save persists it — the ONLY
+    // grant path (no agent MCP tool can set this field, unlike browserTesting/documentConversion).
+    const connection = await seedConnection(loomDaemon.baseURL, { name: `E2E Conn ${Date.now()}`, host: "api.example.com", authScheme: "bearer", secret: "e2e-test-secret-not-real" });
+    const profile = await seedProfile(loomDaemon.baseURL, { name: `Rig Connections ${Date.now()}` });
+    await page.goto(`${loomDaemon.baseURL}/profiles`);
+    await page.getByRole("button").filter({ hasText: profile.name }).first().click();
+
+    // The Connections section renders the seeded connection as a toggle button (mirrors the Skills subset
+    // picker's pattern), labelled with its name.
+    const connToggle = page.getByRole("button").filter({ hasText: connection.name });
+    await expect(connToggle).toBeVisible();
+
+    // BEFORE: a freshly seeded profile grants nothing — the "none selected" summary is shown.
+    await expect(page.getByText(/none selected.*NO authenticated_request access/)).toBeVisible();
+
+    // ACT + AFTER (observable #1 — interactive toggle): clicking the connection selects it, updating the
+    // summary line immediately (local state, no Save needed to observe the toggle itself).
+    await connToggle.click();
+    await expect(page.getByText(/1 selected.*authenticated_request may use only these/)).toBeVisible();
+
+    // ACT + AFTER (observable #2 — persistence): Save, then read the grant back over REST.
+    const save = page.getByRole("button", { name: "Save", exact: true });
+    await expect(save).toBeEnabled();
+    await save.click();
+
+    await expect
+      .poll(async () => (await getProfile(loomDaemon.baseURL, profile.id)).connections)
+      .toEqual([connection.id]);
   });
 });

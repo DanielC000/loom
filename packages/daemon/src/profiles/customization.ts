@@ -25,11 +25,12 @@ export const MERGEABLE_PROFILE_FIELDS = [
   "documentConversion",
   "restrictedTools",
   "noCommit",
+  "connections",
 ] as const;
 type MergeableField = (typeof MERGEABLE_PROFILE_FIELDS)[number];
 
-// `allowDelta` / `skills` are array-valued; everything else is a scalar/boolean.
-const ARRAY_FIELDS = new Set<string>(["allowDelta", "skills"]);
+// `allowDelta` / `skills` / `connections` are array-valued; everything else is a scalar/boolean.
+const ARRAY_FIELDS = new Set<string>(["allowDelta", "skills", "connections"]);
 
 /**
  * Per-field equality (per the design):
@@ -66,6 +67,10 @@ function normalizeFields(p: Partial<Profile>): Record<MergeableField, unknown> {
     documentConversion: p.documentConversion ?? false,
     restrictedTools: p.restrictedTools ?? false,
     noCommit: p.noCommit ?? false,
+    // Unlike skills, absent always means [] (no access) — never "all". A shipped bundled profile never
+    // carries connection ids (those are the user's own credential grants), so shipped always normalizes
+    // to [] here, which is what lets the merge rule protect a user's grant across an "adopt".
+    connections: p.connections ?? [],
   };
 }
 

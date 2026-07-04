@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   document_conversion INTEGER NOT NULL DEFAULT 0, -- opt-in: inject a per-session markitdown MCP at spawn
   restricted_tools INTEGER NOT NULL DEFAULT 0, -- opt-in: append the curated dangerous native tools to --disallowedTools at spawn (blast-radius control)
   no_commit INTEGER NOT NULL DEFAULT 0, -- declared no-commit role: 0-commit done auto-retires + skips the forgot-to-commit warning (lifecycle-only)
+  connections TEXT NOT NULL DEFAULT '[]', -- JSON string[] of P1 connection ids the authenticated_request tool may use; [] = no access (unlike skills, absent/empty is NOT "all")
   -- bundled-profile customization base snapshot: JSON of the shipped def (sans id) at the user's last
   -- sync. NULL = unset (falls back to shipped at read time, like a missing skill base). Backfilled at boot
   -- by seedProfileBaseSnapshots for bundled-by-name rows; advanced on adopt/reset. Computed state only.
@@ -268,6 +269,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- profile-resolved skill subset pinned at fresh spawn (JSON array of skill names); NULL = deliver all
   -- skills (today's behavior). Carried verbatim across every respawn (resume/fork/recycle) like role.
   skills TEXT,
+  -- profile-resolved authenticated-egress connection-id allowlist, pinned at fresh spawn (mirrors
+  -- browser_testing, NOT skills): '[]' = no access (the secure default — unlike skills, empty here is
+  -- never "all"). Carried across every respawn (resume/fork/recycle).
+  connections TEXT NOT NULL DEFAULT '[]',
   parent_session_id TEXT,
   task_id TEXT,
   worktree_path TEXT,
@@ -615,6 +620,9 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   // profile-resolved skill subset pinned at spawn (JSON array). Nullable; legacy rows backfill to NULL
   // = deliver all skills (today's behavior — the regression-guarded default).
   skills: "TEXT",
+  // profile-resolved authenticated-egress connection-id allowlist (JSON array); legacy rows backfill to
+  // '[]' = no access (mirrors browser_testing's off-by-default direction, NOT skills' "null = all").
+  connections: "TEXT NOT NULL DEFAULT '[]'",
   parent_session_id: "TEXT",
   task_id: "TEXT",
   worktree_path: "TEXT",
@@ -668,6 +676,8 @@ const PROFILE_ADDED_COLUMNS: Record<string, string> = {
   restricted_tools: "INTEGER NOT NULL DEFAULT 0",
   // declared no-commit role flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
   no_commit: "INTEGER NOT NULL DEFAULT 0",
+  // authenticated-egress connection-id allowlist (JSON array); legacy rows backfill to '[]' = no access.
+  connections: "TEXT NOT NULL DEFAULT '[]'",
   // bundled-profile customization `base` snapshot (JSON of the shipped def, sans id). Nullable; legacy
   // rows backfill to NULL and seedProfileBaseSnapshots fills bundled-by-name rows at boot (safe direction).
   base_snapshot: "TEXT",
@@ -2268,8 +2278,8 @@ export class Db {
   }
   insertProfile(p: Profile): void {
     this.db.prepare(
-      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,restricted_tools,no_commit)
-       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@restrictedTools,@noCommit)`,
+      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,restricted_tools,no_commit,connections)
+       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@restrictedTools,@noCommit,@connections)`,
     ).run({
       id: p.id, name: p.name, role: p.role ?? null, description: p.description,
       // string[] columns persist as JSON text; skills NULL means "deliver all".
@@ -2280,6 +2290,7 @@ export class Db {
       documentConversion: p.documentConversion ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       restrictedTools: p.restrictedTools ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       noCommit: p.noCommit ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
+      connections: JSON.stringify(p.connections ?? []), // [] = no access (absent ⇒ [], NOT skills' "all")
     });
   }
   /** Partial edit of a profile. Provided fields are written (null clears); omitted are left as-is. */
@@ -2296,6 +2307,7 @@ export class Db {
       document_conversion: patch.documentConversion === undefined ? undefined : patch.documentConversion ? 1 : 0,
       restricted_tools: patch.restrictedTools === undefined ? undefined : patch.restrictedTools ? 1 : 0,
       no_commit: patch.noCommit === undefined ? undefined : patch.noCommit ? 1 : 0,
+      connections: patch.connections === undefined ? undefined : JSON.stringify(patch.connections),
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
@@ -2489,12 +2501,12 @@ export class Db {
       `INSERT INTO sessions (
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
-         role,browser_testing,document_conversion,restricted_tools,no_commit,skills,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
+         role,browser_testing,document_conversion,restricted_tools,no_commit,skills,connections,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
          ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
-         @role,@browserTesting,@documentConversion,@restrictedTools,@noCommit,@skills,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
+         @role,@browserTesting,@documentConversion,@restrictedTools,@noCommit,@skills,@connections,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
          @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline)`,
     ).run({
       ...s,
@@ -2509,6 +2521,8 @@ export class Db {
       // skill subset → JSON text; null/absent ⇒ NULL = deliver all (today's behavior). An empty array is
       // also stored as NULL ("no subset ⇒ all") so the read side never has to special-case [].
       skills: s.skills && s.skills.length ? JSON.stringify(s.skills) : null,
+      // connection-id allowlist → JSON text; absent ⇒ '[]' = no access (unlike skills, empty is NEVER "all").
+      connections: JSON.stringify(s.connections ?? []),
 
       parentSessionId: s.parentSessionId ?? null,
       taskId: s.taskId ?? null,
@@ -3168,6 +3182,8 @@ function toProfile(r0: unknown): Profile {
     documentConversion: (r.document_conversion as number) === 1,
     restrictedTools: (r.restricted_tools as number) === 1,
     noCommit: (r.no_commit as number) === 1,
+    // authenticated-egress connection-id allowlist; malformed/absent degrades to [] = no access.
+    connections: (() => { try { return JSON.parse((r.connections as string) || "[]") as string[]; } catch { return []; } })(),
   };
 }
 function toSession(r0: unknown): Session {
@@ -3189,6 +3205,8 @@ function toSession(r0: unknown): Session {
     // pinned skill subset; NULL ⇒ null = deliver all. Defensive parse: a malformed value degrades to
     // null (deliver all), never throws toSession.
     skills: r.skills == null ? null : (() => { try { return JSON.parse(r.skills as string) as string[]; } catch { return null; } })(),
+    // pinned connection-id allowlist; malformed/absent degrades to [] = no access (never "all").
+    connections: (() => { try { return JSON.parse((r.connections as string) || "[]") as string[]; } catch { return []; } })(),
     parentSessionId: (r.parent_session_id as string) ?? null,
     taskId: (r.task_id as string) ?? null,
     worktreePath: (r.worktree_path as string) ?? null,

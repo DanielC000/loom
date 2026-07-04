@@ -208,29 +208,44 @@ try {
       return tools;
     };
 
-    const mentionsConnection = (tools) => tools.some((t) => /connection/i.test(t.name) || /connection/i.test(t.description ?? ""));
+    // NO tool NAME ever mentions "connection" (no purpose-built connection tool exists on any router).
+    const mentionsConnectionByName = (tools) => tools.some((t) => /connection/i.test(t.name));
+    // A tool DESCRIPTION may mention "connection" ONLY to document that the field is REJECTED (P2 added
+    // this to setup/platform's profile_create/profile_update — see profiles/validate.ts's
+    // agentProfileKeyError) — never to describe a capability that grants/reads one. A description
+    // mentioning "connection" without also signalling rejection would mean a NEW connection-touching
+    // capability slipped onto an agent-facing tool, which this still catches.
+    const grantsConnectionCapability = (tools) => tools.some((t) => {
+      const d = t.description ?? "";
+      return /connection/i.test(d) && !/reject|human-only/i.test(d);
+    });
 
     const managerTools = await listOf(orch.buildServer("mgr-1", "manager"));
-    check("orchestration (manager): NO tool name/description mentions 'connection'", !mentionsConnection(managerTools));
+    check("orchestration (manager): NO tool name mentions 'connection'", !mentionsConnectionByName(managerTools));
+    check("orchestration (manager): NO tool description grants a connection capability", !grantsConnectionCapability(managerTools));
     const workerTools = await listOf(orch.buildServer("wkr-1", "worker"));
-    check("orchestration (worker): NO tool name/description mentions 'connection'", !mentionsConnection(workerTools));
+    check("orchestration (worker): NO tool name mentions 'connection'", !mentionsConnectionByName(workerTools));
+    check("orchestration (worker): NO tool description grants a connection capability", !grantsConnectionCapability(workerTools));
     const assistantTools = await listOf(orch.buildServer("assist-1", "assistant"));
-    check("orchestration (assistant): NO tool name/description mentions 'connection'", !mentionsConnection(assistantTools));
+    check("orchestration (assistant): NO tool name mentions 'connection'", !mentionsConnectionByName(assistantTools));
+    check("orchestration (assistant): NO tool description grants a connection capability", !grantsConnectionCapability(assistantTools));
     const setupTools = await listOf(setup.buildServer());
-    check("setup: NO tool name/description mentions 'connection'", !mentionsConnection(setupTools));
+    check("setup: NO tool name mentions 'connection'", !mentionsConnectionByName(setupTools));
+    check("setup: NO tool description grants a connection capability (profile_create/update only REJECT it)", !grantsConnectionCapability(setupTools));
 
     // PlatformMcpRouter's `buildServer` is TS-`private` (an HTTP-handle()-only entry at the type level),
     // but that's a compile-time annotation only — the compiled method is an ordinary callable at runtime,
     // exactly like OrchestrationMcpRouter's above. Calling it directly gives the SAME live tool-name/
     // description scan as every other router here (no broader, looser raw-source-text scan needed).
     const platformTools = await listOf(platform.buildServer("plat-1"));
-    check("platform: NO tool name/description mentions 'connection'", !mentionsConnection(platformTools));
+    check("platform: NO tool name mentions 'connection'", !mentionsConnectionByName(platformTools));
+    check("platform: NO tool description grants a connection capability (profile_create/update only REJECT it)", !grantsConnectionCapability(platformTools));
 
     db.close();
   }
 
   console.log(failures === 0
-    ? "\n✅ ALL PASS — connections: encrypted at rest (envelope, swappable keyPath seam), metadata-only list/get (secret absent from every shape), human-only REST CRUD (secret never in a response body), the agent+human config validators reject an unknown `connections` field, and no MCP router (setup/orchestration manager+worker+assistant/platform) exposes a connection tool."
+    ? "\n✅ ALL PASS — connections: encrypted at rest (envelope, swappable keyPath seam), metadata-only list/get (secret absent from every shape), human-only REST CRUD (secret never in a response body), the agent+human config validators reject an unknown `connections` field, and no MCP router (setup/orchestration manager+worker+assistant/platform) exposes a connection-granting tool (setup/platform's profile_create/update now document REJECTING the P2 `connections` profile field — see authenticated-request.mjs for that surface's own coverage)."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }
