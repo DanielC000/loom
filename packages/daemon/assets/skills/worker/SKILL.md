@@ -64,7 +64,9 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    later, check if it finished) — that risks a "No response requested" stall and only adds latency; a
    foreground run just returns when it's done. If a gate is *genuinely* long-running, the ONLY acceptable
    background pattern is a background **task that re-invokes you on completion** (never a `ScheduleWakeup`
-   poll) — and even then you MUST still read its result, commit, and only THEN report. Re-read your diff
+   poll): end your turn with a short status line naming what you kicked off and what you're waiting on —
+   the harness re-invokes you the moment it completes, so there's nothing to poll for. And even then you
+   MUST still read its result, commit, and only THEN report. Re-read your diff
    against the task's acceptance check. Say what you actually ran. **COMMIT your verified work to your
    branch BEFORE you report `done`** (see the report protocol below) — uncommitted work is invisible: the
    gate sees `filesChanged:0` and bounces the task back. For UI/visual work: if your session is browser-capable
@@ -137,12 +139,15 @@ tool you call); board reads are `mcp__loom-tasks__tasks_get` / `tasks_list`. Loa
 - **`blocked`** — with `needs`: the specific decision, access, or information you're waiting on.
 - **`progress`** — an optional checkpoint on a long task.
 
-You **receive** direction via `worker_message`. Act on it, then report again. **Before you commit and
-report `done`, re-check whether newer manager direction has arrived** — if a `[loom:from-manager]`
-message has landed that supersedes your current approach, **reconcile to it before reporting**; don't
-finish a now-stale plan. This is the soft complement to the daemon's hard guard, which **refuses** a
-`done` report while you still have unconsumed manager direction queued — a well-behaved worker reconciles
-proactively and so rarely trips it.
+You **receive** direction via `worker_message`. Act on it, then report again. There is **no mid-turn way
+to check for newer direction** — `my_context` returns only your context `pct`, and a message queued while
+you're mid-turn is genuinely invisible to you until your turn ends (it drains into your *next* turn). So
+don't try to poll for it. Instead: if you `worker_report done` while manager direction is still queued and
+unconsumed, the daemon **refuses** the report — and names the queued instruction's actual text in the
+refusal, not just a count — so you can tell in that one refusal whether it's a fresh redirect that
+supersedes your work (reconcile to it before re-reporting) or a nudge you've already accounted for
+(say so and re-report). Either way, don't finish and commit a now-stale plan on the strength of "nothing
+arrived recently" — you can't know that mid-turn; the refusal is where you find out.
 
 You may also call **`my_context`** (no args) at a clean seam to self-assess your own context occupancy
 (returns your `pct` of your model's window). If you're getting heavy on a long task, `worker_report`

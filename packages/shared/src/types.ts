@@ -515,11 +515,13 @@ export type OrchestrationEventKind =
   // (claim-before-spawn), so this never re-fires; the schedule stays enabled (a transient spawn failure
   // must not permanently disable a cadence — only the deleted-agent case disables).
   | "schedule_fire_failed"
-  // worker_report(done) PRE-CHECK refusal (board cards 907b9f50, dcb25bd9): a worker reported done but was
-  // refused at the source — `detail.reason` discriminates: "uncommitted" (UNCOMMITTED work in its worktree,
-  // + the named files) or "pending-direction" (UNRESOLVED manager direction still queued, + the queued
-  // count). Either way the task is kept in_progress (not moved to review). Composes with the divergent-
-  // branch merge_rejected.
+  // worker_report(done) PRE-CHECK refusal (board cards 907b9f50, dcb25bd9, 50162e6b): a worker reported
+  // done but was refused at the source — `detail.reason` discriminates: "uncommitted" (UNCOMMITTED work
+  // in its worktree, + the named files) or "pending-direction" (UNRESOLVED manager direction still
+  // queued, + `queued` count, `msgIds` of the still-unresolved queued messages, and `repeat` — whether
+  // this is the SAME unconsumed set already named in the worker's last rejection for this task, vs a
+  // fresh one). Either way the task is kept in_progress (not moved to review). Composes with the
+  // divergent-branch merge_rejected.
   | "worker_report_rejected"
   | "wake_scheduled" | "wake_fired" | "wake_dropped" | "idle_report" | "idle_escalated"
   // Context-recycle ESCALATION (ContextWatcher): a context-heavy manager (over `recycleAtContextRatio`)

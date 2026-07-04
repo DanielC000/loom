@@ -2990,14 +2990,44 @@ export class SessionService {
           .listUnresolvedQueuedMessagesForWorker(workerSessionId)
           .filter((e) => e.detail?.sender === managerSessionId);
         if (pending.length > 0) {
-          const error =
-            `worker_report(done) REFUSED — you have ${pending.length} UNRESOLVED instruction(s) queued from your manager that you have NOT consumed yet. ` +
-            `These may SUPERSEDE the work you're about to report (the incident this guards: a worker committed a superseded design before reading the manager's redirect). ` +
-            `End this turn so the queued manager direction drains into your next turn, act on it, THEN re-report done. Your task stays in_progress.`;
+          // Board card 50162e6b: name the queued instruction TEXT (not just a count) so the worker can
+          // judge for itself whether this is a genuine superseding redirect or a redundant nudge it
+          // already saw — without burning a full turn just to drain and read it. Truncate defensively;
+          // a queued message is agent/human-authored text, never a length we control.
+          const pendingList = pending
+            .map((e, i) => {
+              const text = typeof e.detail?.text === "string" ? e.detail.text : "(no text captured)";
+              const truncated = text.length > 500 ? `${text.slice(0, 500)}…` : text;
+              return `  ${i + 1}. ${truncated}`;
+            })
+            .join("\n");
+          const currentMsgIds = pending.map((e) => e.detail?.msgId).filter((id): id is string => typeof id === "string").sort();
+          // REPEAT check: was this EXACT still-unconsumed set already named in the worker's last rejection
+          // for this task? If so, nothing new has arrived since — this is the `e554d4f4` shape (a worker
+          // re-reporting `done` against a redundant nudge it was already refused on), not a fresh supersede.
+          // Soften the tone (still refused — the hard guard for genuinely-unconsumed direction is unchanged)
+          // to point the worker at RECONCILING (act on it or confirm it's already satisfied) rather than
+          // re-alarming it with "may supersede" language it has already read once.
+          const priorRejection = this.db
+            .listEventsForWorker(workerSessionId)
+            .filter((e) => e.kind === "worker_report_rejected" && e.taskId === taskId && e.detail?.reason === "pending-direction")
+            .at(-1);
+          const priorMsgIds = Array.isArray(priorRejection?.detail?.msgIds)
+            ? [...(priorRejection.detail.msgIds as unknown[])].filter((id): id is string => typeof id === "string").sort()
+            : null;
+          const isRepeat = priorMsgIds !== null
+            && priorMsgIds.length === currentMsgIds.length
+            && priorMsgIds.every((id, i) => id === currentMsgIds[i]);
+          const error = isRepeat
+            ? `worker_report(done) REFUSED (again) — the SAME ${pending.length} instruction(s) from your manager are still unconsumed (unchanged since your last refusal):\n${pendingList}\n` +
+              `Nothing NEW has arrived, so this doesn't look like a fresh supersede — RECONCILE against it (act on it, or if your work already satisfies it, say so) THEN re-report done. Your task stays in_progress.`
+            : `worker_report(done) REFUSED — you have ${pending.length} UNRESOLVED instruction(s) queued from your manager that you have NOT consumed yet:\n${pendingList}\n` +
+              `These may SUPERSEDE the work you're about to report (the incident this guards: a worker committed a superseded design before reading the manager's redirect). ` +
+              `End this turn so the queued manager direction drains into your next turn, act on it, THEN re-report done. Your task stays in_progress.`;
           this.db.appendEvent({
             id: randomUUID(), ts: new Date().toISOString(),
             managerSessionId, workerSessionId, taskId, kind: "worker_report_rejected",
-            detail: { reason: "pending-direction", queued: pending.length },
+            detail: { reason: "pending-direction", queued: pending.length, msgIds: currentMsgIds, repeat: isRepeat },
           });
           // `dropped`: nothing routed, the task was NOT moved (stays in_progress to drain + re-report).
           return { reported: false, refused: true, error, deliveryStatus: "dropped" };

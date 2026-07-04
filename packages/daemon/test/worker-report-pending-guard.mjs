@@ -91,7 +91,9 @@ const P = mk("p"); // PENDING from-manager → REFUSED
 const A = mk("a"); // NONE pending → ALLOWED
 const R = mk("r"); // RESOLVED from-manager → ALLOWED
 const X = mk("x"); // from-PLATFORM (origin accuracy) → ALLOWED
-const all = [P, A, R, X];
+const RPT = mk("rpt"); // SAME unresolved set refused twice → 2nd refusal is a softer "reconcile" repeat
+const FRESH = mk("fresh"); // a NEW instruction lands between two refusals → NOT treated as a repeat
+const all = [P, A, R, X, RPT, FRESH];
 
 try {
   // ── (P) PENDING from-manager → REFUSED ────────────────────────────────────────────────────────────
@@ -101,6 +103,8 @@ try {
   check("(pending) workerReport → reported:false, refused:true", rP.reported === false && rP.refused === true);
   check("(pending) error mentions the unconsumed manager direction",
     typeof rP.error === "string" && /unresolved|queued|manager/i.test(rP.error) && rP.error.includes("REFUSED"));
+  check("(pending) error names the queued instruction TEXT, not just a count (board card 50162e6b)",
+    rP.error.includes("STOP — the design changed, redo it"));
   check("(pending) deliveryStatus is 'dropped' (nothing routed)", rP.deliveryStatus === "dropped");
   check("(pending) task STAYS in_progress (NOT moved to review)", db.getTask(P.taskId).columnKey === "in_progress");
   check("(pending) a worker_report_rejected(reason:pending-direction) event recorded",
@@ -127,6 +131,31 @@ try {
   const rX = await sessions.workerReport(X.workerId, { status: "done", summary: "only a platform note is queued" });
   check("(platform) workerReport → reported:true, NOT refused (only MANAGER-origin direction gates)", rX.reported === true && !rX.refused);
   check("(platform) task moved to review", db.getTask(X.taskId).columnKey === "review");
+
+  // ── (RPT) SAME unresolved set refused twice → 2nd refusal softens to "reconcile", still refused ───
+  seed(RPT);
+  queueFromManager(RPT, { sender: RPT.mgrId, text: "[loom:from-manager]\nSTOP — reconsider the approach" });
+  const rRPT1 = await sessions.workerReport(RPT.workerId, { status: "done", summary: "attempt 1" });
+  check("(repeat) 1st refusal names the instruction text", rRPT1.error.includes("STOP — reconsider the approach"));
+  check("(repeat) 1st refusal is the standard (non-repeat) wording", !/REFUSED \(again\)/.test(rRPT1.error));
+  const rRPT2 = await sessions.workerReport(RPT.workerId, { status: "done", summary: "attempt 2, nothing new arrived" });
+  check("(repeat) 2nd refusal on the UNCHANGED set softens to a 'reconcile' repeat",
+    /REFUSED \(again\)/.test(rRPT2.error) && /RECONCILE/.test(rRPT2.error));
+  check("(repeat) task still stays in_progress (hard guard unchanged)", db.getTask(RPT.taskId).columnKey === "in_progress");
+  check("(repeat) the 2nd rejection event records repeat:true",
+    db.listEvents(RPT.mgrId).filter((e) => e.kind === "worker_report_rejected" && e.taskId === RPT.taskId).at(-1)?.detail?.repeat === true);
+
+  // ── (FRESH) a NEW instruction lands between two refusals → NOT treated as a repeat ─────────────────
+  seed(FRESH);
+  queueFromManager(FRESH, { sender: FRESH.mgrId, text: "[loom:from-manager]\nfirst nudge" });
+  const rFRESH1 = await sessions.workerReport(FRESH.workerId, { status: "done", summary: "attempt 1" });
+  check("(fresh) 1st refusal is standard wording", !/REFUSED \(again\)/.test(rFRESH1.error));
+  queueFromManager(FRESH, { sender: FRESH.mgrId, text: "[loom:from-manager]\nSTOP, redo it entirely" }); // a genuinely new redirect lands
+  const rFRESH2 = await sessions.workerReport(FRESH.workerId, { status: "done", summary: "attempt 2" });
+  check("(fresh) 2nd refusal, with a NEW instruction added, is NOT a repeat",
+    !/REFUSED \(again\)/.test(rFRESH2.error) && rFRESH2.error.includes("STOP, redo it entirely"));
+  check("(fresh) the 2nd rejection event records repeat:false",
+    db.listEvents(FRESH.mgrId).filter((e) => e.kind === "worker_report_rejected" && e.taskId === FRESH.taskId).at(-1)?.detail?.repeat === false);
 } finally {
   db.close();
   for (const p of all) {
@@ -137,6 +166,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker_report(done) pending-direction guard: an unresolved from-manager queued message REFUSES done (task stays in_progress); none / already-resolved / platform-origin all allow the done through."
+  ? "\n✅ ALL PASS — worker_report(done) pending-direction guard: an unresolved from-manager queued message REFUSES done (task stays in_progress) and names the instruction TEXT; a repeat refusal on the SAME unresolved set softens to a 'reconcile' tone (still refused) while a genuinely NEW instruction keeps the standard wording; none / already-resolved / platform-origin all allow the done through."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

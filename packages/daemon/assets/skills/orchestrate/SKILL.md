@@ -26,7 +26,7 @@ there leaks across all of them. Skill = generic HOW; prompt / project `CLAUDE.md
 ## Transport
 
 The `loom-orchestration` MCP surface — no human relay:
-`worker_spawn`, `worker_list`, `worker_status`, `worker_transcript`, `worker_message`,
+`worker_spawn`, `worker_list`, `worker_status`, `worker_transcript`, `worker_message`, `worker_redirect`,
 `worker_stop`, `worker_recycle`, and the two-step `worker_merge` → `worker_merge_confirm`.
 Workers report up via `worker_report` — you **receive** those; you never call it. A report that arrives
 while you're mid-turn is held in your inbox and otherwise drains ONE-per-turn as a separate (often
@@ -40,7 +40,7 @@ so a first BARE call (`worker_spawn`, `inbox_pull`, `my_context`, `recycle_me`, 
 round-trip. **Preload the lifecycle set in ONE ToolSearch at orchestrator start** — include the
 orientation reads (`worker_list` is your standard first call) and the direction tools, so even your
 first bare call lands:
-`select:mcp__loom-orchestration__idle_report,mcp__loom-orchestration__inbox_pull,mcp__loom-orchestration__my_context,mcp__loom-orchestration__worker_spawn,mcp__loom-orchestration__worker_list,mcp__loom-orchestration__worker_status,mcp__loom-orchestration__worker_transcript,mcp__loom-orchestration__worker_message,mcp__loom-orchestration__worker_merge,mcp__loom-orchestration__worker_merge_confirm,mcp__loom-orchestration__worker_recycle,mcp__loom-orchestration__worker_stop,mcp__loom-orchestration__recycle_me`
+`select:mcp__loom-orchestration__idle_report,mcp__loom-orchestration__inbox_pull,mcp__loom-orchestration__my_context,mcp__loom-orchestration__worker_spawn,mcp__loom-orchestration__worker_list,mcp__loom-orchestration__worker_status,mcp__loom-orchestration__worker_transcript,mcp__loom-orchestration__worker_message,mcp__loom-orchestration__worker_redirect,mcp__loom-orchestration__worker_merge,mcp__loom-orchestration__worker_merge_confirm,mcp__loom-orchestration__worker_recycle,mcp__loom-orchestration__worker_stop,mcp__loom-orchestration__recycle_me`
 (add `mcp__loom-tasks__tasks_list,mcp__loom-tasks__tasks_create,mcp__loom-tasks__tasks_update` for the board).
 
 ## Standing goal — never idle
@@ -176,6 +176,17 @@ server prepends the worker's base brief (its `startupPrompt`) — which should c
 worker's `/worker` doctrine — ahead of your kickoff. (That holds only if the agent's brief is written to
 carry them; a blank or too-thin worker brief leaves the worker on the kickoff alone, and is itself worth
 fixing.)
+
+**Two distinct steering tools — pick deliberately.** `worker_message` is ADDITIVE and NON-interrupting:
+it queues behind the worker's current turn and lands at the next natural turn boundary — use it for
+ordinary direction, clarifying answers, and anything that isn't urgent. `worker_redirect` is the
+escalation: it ENDS the worker's current turn immediately and replaces its entire pending queue with
+your one instruction, delivered next. Reach for `worker_redirect` — not `worker_message` — the moment
+you've spotted the worker building the wrong thing and need it to change course NOW; waiting for a long
+turn to end on `worker_message` alone risks the worker committing a whole implement→build→test cycle on
+a design you've already superseded. Because the interrupt can land mid-edit, phrase the redirect so the
+worker FIRST reconciles its working tree (`git status`; finish or revert the half-done edit) before
+acting on the new direction.
 
 ## The loop
 
