@@ -397,6 +397,36 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ================ (10b) recycle precedence uses the PROJECT's OWN recycleAtContextRatio ================
+{
+  // No env force override (recycleRatio: 0) — a project overriding recycleAtContextRatio to 0.5 should
+  // defer idle-nudging a manager at 60% ctx, while a SIBLING project at the 0.8 default does NOT defer
+  // (60% is under 0.8) — proving IdleWatcher resolves the recycle threshold per-project, not from a
+  // single constructor-injected ratio.
+  const e = makeEnv({ recycleRatio: 0, projectConfig: { orchestration: { recycleAtContextRatio: 0.5 } } });
+  seedManager(e, "mgr-low-ratio-project", { ctx: 600_000, model: "claude-opus-4-8" }); // 60% of 1M
+
+  const projId2 = `ip-${Math.random().toString(36).slice(2, 8)}`;
+  const agentId2 = `it-${Math.random().toString(36).slice(2, 8)}`;
+  const now = NOW.toISOString();
+  e.db.insertProject({ id: projId2, name: "Idle2", repoPath: projId2, vaultPath: projId2, config: {}, createdAt: now, archivedAt: null });
+  e.db.insertAgent({ id: agentId2, projectId: projId2, name: "t2", startupPrompt: "orchestrate", position: 0 });
+  e.db.insertSession({
+    id: "mgr-default-ratio-project", projectId: projId2, agentId: agentId2, engineSessionId: "eng-mgr-default-ratio-project",
+    title: null, cwd: projId2, processState: "live", resumability: "resumable", busy: false,
+    createdAt: minutesAgo(60), lastActivity: minutesAgo(60), lastError: null, role: "manager",
+    ctxInputTokens: 600_000, ctxTurns: 1, model: "claude-opus-4-8",
+  });
+  e.alive.add("mgr-default-ratio-project");
+
+  e.watcher.tick(NOW);
+  check("(10b) manager in a 0.5-ratio project (60% ctx, over its own threshold) is NOT idle-nudged (recycle pending)",
+    !e.enqueued.some((x) => x.id === "mgr-low-ratio-project"));
+  check("(10b) sibling manager in a default-0.8-ratio project (same 60% ctx, under its threshold) IS idle-nudged",
+    e.enqueued.some((x) => x.id === "mgr-default-ratio-project"));
+  cleanup(e);
+}
+
 // ============================ (11) per-project override honored (idleNudgeMinutes:90) ============================
 {
   const e = makeEnv({ projectConfig: { orchestration: { idleNudgeMinutes: 90 } } });

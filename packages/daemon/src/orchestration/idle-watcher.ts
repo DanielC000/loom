@@ -16,7 +16,11 @@ export interface IdleWatcherDeps {
   pty: IdlePty;
   /** §17a pause registry — a human-paused manager is never nudged (parity with worker_spawn). */
   control: OrchestrationControl;
-  /** ContextWatcher's recycle ratio: a manager at/over it has a recycle nudge pending → idle defers. 0 = no recycle nudges. */
+  /**
+   * ContextWatcher's GLOBAL force override (mirrors ContextWatcherDeps.ratio): a manager at/over the
+   * EFFECTIVE recycle ratio has a recycle nudge pending → idle defers. > 0 forces this ratio for every
+   * project; 0 = no override, so tick() falls back to THIS project's own resolved recycleAtContextRatio.
+   */
   recycleRatio: number;
   /** Tick cadence; defaults to 60s. Injectable so a test drives tick() directly. */
   intervalMs?: number;
@@ -107,9 +111,11 @@ export class IdleWatcher {
       if (liveWorkers > 0) continue;
 
       // Competing recycle nudge: a near-full manager should recycle, not spawn. Mirror ContextWatcher's
-      // own predicate (ratio of measured context to the model window) so we never double-fire.
-      if (recycleRatio > 0 && m.ctxInputTokens != null) {
-        if (m.ctxInputTokens / contextWindowForModel(m.model) >= recycleRatio) continue;
+      // own per-project threshold (env force override, else THIS project's resolved recycleAtContextRatio,
+      // already computed above as cfg) so idle precedence never disagrees with the recycle trigger.
+      const effectiveRecycleRatio = recycleRatio > 0 ? recycleRatio : cfg.recycleAtContextRatio;
+      if (effectiveRecycleRatio > 0 && m.ctxInputTokens != null) {
+        if (m.ctxInputTokens / contextWindowForModel(m.model) >= effectiveRecycleRatio) continue;
       }
 
       // Idle long enough? The re-nudge cadence is gated on the LATER of lastActivity and the last

@@ -12,13 +12,15 @@ import { ContextWatcher } from "../dist/orchestration/context-watcher.js";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-function makeEnv(ratio = 0.8) {
+function makeEnv(ratio = 0.8, { projectConfig } = {}) {
   const dbFile = path.join(os.tmpdir(), `loom-ctx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const projId = `cp-${Math.random().toString(36).slice(2, 8)}`;
   const agentId = `ct-${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
-  db.insertProject({ id: projId, name: "Ctx", repoPath: projId, vaultPath: projId, config: {}, createdAt: now, archivedAt: null });
+  // ratio here is the ENV-style global force override (0 = none, per-project cfg governs instead — see
+  // ContextWatcherDeps.ratio). projectConfig lets a test set this project's OWN recycleAtContextRatio.
+  db.insertProject({ id: projId, name: "Ctx", repoPath: projId, vaultPath: projId, config: projectConfig ?? {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "orchestrate", position: 0 });
   const alive = new Set();
   const enqueued = [];
@@ -85,12 +87,24 @@ function cleanup(e) {
   cleanup(e);
 }
 
-// Disabled (ratio 0): no nudge even when full.
+// Disabled per-project (recycleAtContextRatio: 0): no nudge even when full, with no env override.
 {
-  const e = makeEnv(0);
+  const e = makeEnv(0, { projectConfig: { orchestration: { recycleAtContextRatio: 0 } } });
   seedManager(e, "mgr-disabled", { ctx: 999_000, model: "claude-opus-4-8" });
   e.watcher.tick();
-  check("ratio 0 disables the watcher entirely", e.enqueued.length === 0);
+  check("a project's recycleAtContextRatio: 0 disables the watcher for that project", e.enqueued.length === 0);
+  cleanup(e);
+}
+
+// Platform-default fallback (BYTE-IDENTICAL invariant): no env force override AND an empty project
+// config → the ratio must fold to the platform default (0.80), not silently become disabled or
+// unbounded. A manager at ~85% ctx on a 1M Opus IS nudged — proves the empty-config path still fires,
+// distinct from the explicit-0.5/0.9-override test below and from the env-force tests above.
+{
+  const e = makeEnv(0); // no env force override
+  seedManager(e, "mgr-platform-default", { ctx: 850_000, model: "claude-opus-4-8" }); // 85% of 1M
+  e.watcher.tick();
+  check("empty project config falls back to the platform default (0.80) — 85% IS nudged", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-platform-default");
   cleanup(e);
 }
 
@@ -109,7 +123,42 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// Per-project resolution: two projects with DIFFERENT recycleAtContextRatio (0.5 vs 0.9), no env
+// override. A manager at 60% ctx is over the 0.5 project's threshold but under the 0.9 project's —
+// proving the ratio is resolved from EACH manager's own project, not a single global value (93335f4e).
+{
+  const e = makeEnv(0, { projectConfig: { orchestration: { recycleAtContextRatio: 0.5 } } });
+  seedManager(e, "mgr-low-ratio-project", { ctx: 600_000, model: "claude-opus-4-8" }); // 60% of 1M
+
+  const projId2 = `cp-${Math.random().toString(36).slice(2, 8)}`;
+  const agentId2 = `ct-${Math.random().toString(36).slice(2, 8)}`;
+  const now = new Date().toISOString();
+  e.db.insertProject({ id: projId2, name: "Ctx2", repoPath: projId2, vaultPath: projId2, config: { orchestration: { recycleAtContextRatio: 0.9 } }, createdAt: now, archivedAt: null });
+  e.db.insertAgent({ id: agentId2, projectId: projId2, name: "t2", startupPrompt: "orchestrate", position: 0 });
+  e.db.insertSession({
+    id: "mgr-high-ratio-project", projectId: projId2, agentId: agentId2, engineSessionId: "eng-mgr-high-ratio-project",
+    title: null, cwd: projId2, processState: "live", resumability: "resumable", busy: false,
+    createdAt: now, lastActivity: now, lastError: null, role: "manager",
+    ctxInputTokens: 600_000, ctxTurns: 1, model: "claude-opus-4-8",
+  });
+  e.alive.add("mgr-high-ratio-project");
+
+  e.watcher.tick();
+  check("per-project: manager over its OWN project's 0.5 ratio (60%) IS nudged", e.enqueued.some((x) => x.id === "mgr-low-ratio-project"));
+  check("per-project: sibling manager under its OWN project's 0.9 ratio (same 60% ctx) is NOT nudged", !e.enqueued.some((x) => x.id === "mgr-high-ratio-project"));
+  cleanup(e);
+}
+
+// Env force override wins over EVERY project's own ratio, including a lower one.
+{
+  const e = makeEnv(0.9, { projectConfig: { orchestration: { recycleAtContextRatio: 0.2 } } }); // project wants 0.2, env forces 0.9
+  seedManager(e, "mgr-env-forced", { ctx: 600_000, model: "claude-opus-4-8" }); // 60%: over the project's 0.2, under the env-forced 0.9
+  e.watcher.tick();
+  check("env override (0.9) wins over a lower per-project ratio (0.2) — 60% is NOT nudged", e.enqueued.length === 0);
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — ContextWatcher nudges over-ratio MANAGERS once, scales the threshold per model window, skips below-threshold/plain sessions, and disables at ratio 0."
+  ? "\n✅ ALL PASS — ContextWatcher nudges over-ratio MANAGERS once, scales the threshold per model window, skips below-threshold/plain sessions, resolves the ratio PER-PROJECT (env override else project's own recycleAtContextRatio), and disables at a project's own ratio 0."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -12,8 +12,13 @@ export interface ContextPty {
 export interface ContextWatcherDeps {
   db: Db;
   pty: ContextPty;
-  /** Fraction of the model's context window at which to nudge a manager to recycle. 0 disables. */
-  ratio: number;
+  /**
+   * GLOBAL force override for the recycle ratio (the daemon resolves `LOOM_RECYCLE_CONTEXT_RATIO`
+   * before constructing the watcher). > 0 forces this ratio for EVERY project, bypassing each
+   * project's own `recycleAtContextRatio`. 0/undefined = no override — each manager's threshold is
+   * resolved per-project instead (see tick()), so a project override (or its own disable-at-0) is honored.
+   */
+  ratio?: number;
   /** Tick cadence; defaults to 60s (context grows slowly). Injectable so a test drives tick() directly. */
   intervalMs?: number;
 }
@@ -44,20 +49,26 @@ export class ContextWatcher {
   constructor(private deps: ContextWatcherDeps) {}
 
   tick(now: Date = new Date()): void {
-    const { db, pty, ratio } = this.deps;
-    if (ratio <= 0) return; // disabled
+    const { db, pty, ratio: envOverride } = this.deps;
     const nowMs = now.getTime();
     const nowIso = now.toISOString();
 
     for (const m of db.listLiveManagers()) {
       if (m.ctxInputTokens == null) continue;
-      const window = contextWindowForModel(m.model);
-      const r = m.ctxInputTokens / window;
-      if (r < ratio) continue; // under the recycle threshold
 
       const project = db.getProject(m.projectId);
       if (!project) continue;
       const cfg = resolveConfig(project.config).orchestration;
+
+      // Per-project threshold: an env force override wins for every project; otherwise this project's
+      // OWN resolved recycleAtContextRatio (resolveConfig already folds the platform default under any
+      // project override) — and a project setting 0 disables ITS OWN watcher, not the whole ticker.
+      const ratio = envOverride && envOverride > 0 ? envOverride : cfg.recycleAtContextRatio;
+      if (ratio <= 0) continue; // disabled for this project
+
+      const window = contextWindowForModel(m.model);
+      const r = m.ctxInputTokens / window;
+      if (r < ratio) continue; // under this project's recycle threshold
 
       const state = db.getContextNudgeState(m.id);
       if (!state) continue;

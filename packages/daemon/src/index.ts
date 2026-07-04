@@ -563,11 +563,15 @@ async function main(): Promise<void> {
 
   // Manager context-recycle watcher — nudges a manager nearing its model's context window to hand off
   // to a fresh successor (run /session-end → recycle_me). Ratio scales with the model. 0 disables.
-  const recycleRatio = Number(process.env.LOOM_RECYCLE_CONTEXT_RATIO) || resolved.orchestration.recycleAtContextRatio;
+  // LOOM_RECYCLE_CONTEXT_RATIO, if set, is a GLOBAL FORCE that overrides every project's own ratio —
+  // it is NOT baked together with the platform default here; ContextWatcher/IdleWatcher instead resolve
+  // each manager's threshold from ITS OWN project's config (resolveConfig folds the platform default
+  // under any project override) so a per-project recycleAtContextRatio (e.g. 0.5) is actually honored.
+  const recycleRatio = Number(process.env.LOOM_RECYCLE_CONTEXT_RATIO) || 0;
   const ctxWatchMs = watchers.contextWatchMs;
   const contextWatcher = new ContextWatcher({ db, pty, ratio: recycleRatio, intervalMs: ctxWatchMs });
   contextWatcher.start();
-  console.log(`[boot] context-recycle watcher on (ratio ${recycleRatio}, tick ${ctxWatchMs}ms)`);
+  console.log(`[boot] context-recycle watcher on (${recycleRatio > 0 ? `env-forced ratio ${recycleRatio}` : `per-project ratio, platform default ${resolved.orchestration.recycleAtContextRatio}`}, tick ${ctxWatchMs}ms)`);
 
   // Asleep-at-the-Wheel watcher — nudges a LIVE manager that has silently dropped its orchestration
   // loop (idle, no live workers, backlog open) to report why and resume. Per-project leash via
