@@ -54,15 +54,20 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    blocked` *immediately*, before doing the full implementation, so the human fix can happen in
    parallel instead of after a wasted build.
 4. **Verify before reporting.** Meet the DoD — run the project's gate (build / typecheck / repro / the
-   check your task names) and confirm the behavior. **Run the gate in the FOREGROUND and read its result
-   in the SAME turn** — a blocking command completes within your turn, so you never need to launch it in
-   the background and park on a scheduled wakeup waiting for it (and never `ScheduleWakeup`-poll a
-   long-running command at all — a foreground run just returns when it's done). If the output would be too
-   long/noisy to read inline, redirect it to a file and read the tail (e.g. `<gate-cmd> > gate.log 2>&1;
-   echo EXIT=$?`, then read `gate.log`). Re-read your diff against the task's acceptance
-   check. Say what you actually ran. **Then COMMIT your verified work to your branch BEFORE you report
-   `done`** (see the report protocol below) — uncommitted work is invisible: the gate sees `filesChanged:0`
-   and bounces the task back. For UI/visual work: if your session is browser-capable
+   check your task names) and confirm the behavior. **Run the gate in the FOREGROUND, then commit, then
+   report — in ONE flow.** A blocking command completes within your turn, so you never need to launch it
+   in the background and park on a poll waiting for it. **The rule: never end your turn while a gate is
+   running — unless it's a re-invoking background task — and never report before committing.** If the
+   output would be too long/noisy to read inline, redirect it to a file and read the tail in the same turn
+   (e.g. `<gate-cmd> > gate.log 2>&1; echo EXIT=$?`, then read `gate.log`) — the command still runs in the
+   foreground and returns to you when done. **Never `ScheduleWakeup`-poll a gate** (park the turn, wake
+   later, check if it finished) — that risks a "No response requested" stall and only adds latency; a
+   foreground run just returns when it's done. If a gate is *genuinely* long-running, the ONLY acceptable
+   background pattern is a background **task that re-invokes you on completion** (never a `ScheduleWakeup`
+   poll) — and even then you MUST still read its result, commit, and only THEN report. Re-read your diff
+   against the task's acceptance check. Say what you actually ran. **COMMIT your verified work to your
+   branch BEFORE you report `done`** (see the report protocol below) — uncommitted work is invisible: the
+   gate sees `filesChanged:0` and bounces the task back. For UI/visual work: if your session is browser-capable
    (Playwright/`browserTesting` provisioned + allowlisted — the QA / Web Designer rigs), **self-verify**
    by driving Playwright to the running app and confirming the change renders and behaves before
    reporting done. **When you capture a verification screenshot, take it with no filename** so it
