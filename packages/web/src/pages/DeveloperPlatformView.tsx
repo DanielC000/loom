@@ -211,7 +211,7 @@ function AgentControl({ agent, role, session, liveCount, missingLabel }:
 function PlatformSessions({ sessions }: { sessions: SessionListItem[] }) {
   const live = sessions.filter((s) => s.processState === "live");
   if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>No platform sessions running. Spawn the Lead or Auditor above.</p>;
-  const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12 };
+  const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12, alignItems: "start" };
   return (
     <div style={grid}>
       {live.map((s) => <PlatformSessionTile key={s.id} session={s} height={440} />)}
