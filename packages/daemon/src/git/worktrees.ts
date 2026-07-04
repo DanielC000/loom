@@ -823,9 +823,36 @@ export interface DiffstatFile {
   binary: boolean;
 }
 
+/**
+ * Translate a glob (supporting `**`, `*`, `?`) to an anchored RegExp matched against a POSIX,
+ * repo-relative path. `**` (optionally `/`-bounded) crosses directories and may match zero segments;
+ * `*`/`?` stay within a single segment. No `{a,b}` brace expansion — keep the surface small and
+ * predictable. (Deliberately a small local copy rather than importing `mcp/repo-read.ts`'s equivalent —
+ * this git-layer module shouldn't reach up into the mcp layer for a 15-line helper.)
+ */
+function pathGlobToRegExp(glob: string): RegExp {
+  const SPECIAL = /[.+^${}()|[\]\\]/g;
+  let re = "^";
+  let i = 0;
+  while (i < glob.length) {
+    const c = glob[i]!; // i < glob.length ⇒ defined (noUncheckedIndexedAccess)
+    if (c === "*" && glob[i + 1] === "*") {
+      const slashBefore = i === 0 || glob[i - 1] === "/";
+      const j = i + 2;
+      const slashAfter = glob[j] === "/";
+      if (slashBefore && slashAfter) { re += "(?:.*/)?"; i = j + 1; continue; } // `**/` -> zero-or-more dirs
+      re += ".*"; i = j; continue; // bare `**` -> anything incl. `/`
+    }
+    if (c === "*") { re += "[^/]*"; i++; continue; }
+    if (c === "?") { re += "[^/]"; i++; continue; }
+    re += c.replace(SPECIAL, "\\$&"); i++;
+  }
+  return new RegExp(re + "$");
+}
+
 export async function diffBranch(
   repoPath: string, branch: string, base = "HEAD",
-  opts: { includePatch?: boolean } = {},
+  opts: { includePatch?: boolean; files?: string[]; pathGlob?: string } = {},
 ): Promise<{ filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[]; patch: string }> {
   // The full unified `patch` is UNBOUNDED — on a large change it overflows an MCP display limit, blinding a
   // manager exactly when the diff is biggest/riskiest. So the patch is OPT-IN: callers that only need a
@@ -836,14 +863,34 @@ export async function diffBranch(
   const git = simpleGit(repoPath);
   const range = `${base}...${branch}`; // 3-dot: changes on `branch` since the merge-base with `base`
   const summary = await git.diffSummary([range]);
-  const files: DiffstatFile[] = summary.files.map((f) => ({
+  const allFiles: DiffstatFile[] = summary.files.map((f) => ({
     file: f.file,
     insertions: "insertions" in f ? f.insertions : 0, // binary files carry before/after, not ins/del
     deletions: "deletions" in f ? f.deletions : 0,
     binary: f.binary,
   }));
-  const patch = includePatch ? await git.diff([range]) : "";
-  return { filesChanged: summary.files.length, insertions: summary.insertions, deletions: summary.deletions, files, patch };
+
+  // OPTIONAL scope-down filter (files/pathGlob): narrows the diffstat + patch to matching file(s) so a
+  // manager can pull one file's hunk at a time instead of the whole patch. ADDITIVE — with neither param
+  // set, `filtering` is false and every field below is computed exactly as before (byte-identical).
+  const needles = (opts.files ?? []).map((f) => f.replace(/\\/g, "/")).filter((f) => f.length > 0);
+  const globRe = opts.pathGlob ? pathGlobToRegExp(opts.pathGlob) : undefined;
+  const filtering = needles.length > 0 || globRe !== undefined;
+  const files = filtering
+    ? allFiles.filter((f) => needles.some((n) => f.file.includes(n)) || (globRe?.test(f.file) ?? false))
+    : allFiles;
+
+  const filesChanged = filtering ? files.length : summary.files.length;
+  const insertions = filtering ? files.reduce((s, f) => s + f.insertions, 0) : summary.insertions;
+  const deletions = filtering ? files.reduce((s, f) => s + f.deletions, 0) : summary.deletions;
+
+  const patch = includePatch
+    ? filtering
+      ? (files.length > 0 ? await git.diff([range, "--", ...files.map((f) => f.file)]) : "")
+      : await git.diff([range])
+    : "";
+
+  return { filesChanged, insertions, deletions, files, patch };
 }
 
 export interface WorkerDiff {

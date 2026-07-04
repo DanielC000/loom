@@ -12,6 +12,7 @@ import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
+import { sessionScratchDir } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
 import { readRunUsage, readRunUsageFromFile } from "./context.js";
@@ -235,6 +236,15 @@ const RUN_TIMEOUT_MS = 600_000; // 10 min
 const RUN_WEBHOOK_TIMEOUT_MS = 5_000;
 /** At most this many delivery attempts (best-effort; the design calls for ≤1–2 retries). */
 const RUN_WEBHOOK_ATTEMPTS = 2;
+
+/**
+ * Char cap for INLINING a worker_merge full patch in the JSON tool response. Above this, the patch is
+ * instead spilled to a scratch file (see {@link SessionService.spillMergePatch}) — comfortably under the
+ * transcript pager's own ~48KB page budget (`TRANSCRIPT_PAGE_CHAR_BUDGET`), and well below the real-world
+ * overflow (a 74,658-char patch, auditor finding 8a942a95) that this cap is meant to catch BEFORE the MCP
+ * tool-result cap does, so Loom controls the spill format instead of the client's own broken one-line spill.
+ */
+const MERGE_PATCH_INLINE_CAP = 40_000;
 
 /** Default run-webhook poster: one bounded `fetch` POST; the AbortController caps a hung endpoint. */
 const defaultRunWebhookPost: RunWebhookPoster = async (url, body, timeoutMs) => {
@@ -3893,17 +3903,23 @@ export class SessionService {
    * happens — this is the review the manager cannot skip (there is no worker-side merge tool).
    */
   async reviewWorkerMerge(
-    managerSessionId: string, workerSessionId: string, opts: { includePatch?: boolean } = {},
-  ): Promise<{ filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[]; patch?: string; note?: string; warning?: string }> {
+    managerSessionId: string, workerSessionId: string,
+    opts: { includePatch?: boolean; files?: string[]; pathGlob?: string } = {},
+  ): Promise<{
+    filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[];
+    patch?: string; patchFile?: string; patchChars?: number; note?: string; warning?: string;
+  }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     if (!worker.branch) throw new Error("worker has no branch");
     const project = this.db.getProject(worker.projectId);
     if (!project) throw new Error("project not found");
     // DEFAULT: a bounded diffstat (per-file ± + totals) so step-1 can't overflow the display on a big diff.
-    // The full unified patch is opt-in (includePatch) — see the worker_merge tool's `fullDiff` flag.
+    // The full unified patch is opt-in (includePatch) — see the worker_merge tool's `fullDiff` flag. An
+    // OPTIONAL files/pathGlob filter (additive — see diffBranch) further scopes BOTH the diffstat and the
+    // patch to matching file(s), so a manager can pull one file's hunk at a time instead of the whole patch.
     const includePatch = opts.includePatch === true;
-    const diff = await diffBranch(project.repoPath, worker.branch, "HEAD", { includePatch });
+    const diff = await diffBranch(project.repoPath, worker.branch, "HEAD", { includePatch, files: opts.files, pathGlob: opts.pathGlob });
     // BACKSTOP: a worker that committed to a SELF-CREATED branch instead of its assigned `loom/<key>`
     // leaves the assigned branch 0-ahead, so `diff` reads empty and the stranded commits would be
     // silently lost. Surface a WARNING at review time so the manager sees the divergence (only an
@@ -3919,17 +3935,49 @@ export class SessionService {
       detail: { branch: worker.branch, filesChanged: diff.filesChanged, ...(warning ? { stranded: stranded.branch } : {}) },
     });
     // Bounded by default: diffstat (files + totals) only. The full patch is included ONLY when requested;
-    // otherwise a `note` tells the manager how to pull it.
+    // otherwise a `note` tells the manager how to pull it. A requested patch that's still too large to
+    // safely inline (it would round-trip through JSON.stringify, whose `\n` -> `\n`-escape collapse left a
+    // spilled patch as ONE giant unpaginatable, non-UTF8-safe line — auditor finding 8a942a95) is instead
+    // written straight to a scratch file (real line breaks, explicit UTF-8) and the response carries
+    // patchFile/patchChars + a note instead of the inline patch.
     return {
       filesChanged: diff.filesChanged,
       insertions: diff.insertions,
       deletions: diff.deletions,
       files: diff.files,
       ...(includePatch
-        ? { patch: diff.patch }
+        ? (diff.patch.length > MERGE_PATCH_INLINE_CAP
+          ? (() => {
+            const patchFile = this.spillMergePatch(managerSessionId, workerSessionId, diff.patch);
+            return {
+              patchFile,
+              patchChars: diff.patch.length,
+              note: `Full patch is ${diff.patch.length} chars — too large to inline safely, so it was written to ` +
+                `${patchFile} (UTF-8, real line breaks). Page it with Read (offset/limit are LINE-based), or ` +
+                `re-call worker_merge with a files/pathGlob filter to scope the diff to fewer files.`,
+            };
+          })()
+          : { patch: diff.patch })
         : { note: "Diffstat only — re-call worker_merge with fullDiff:true for the full unified patch." }),
       ...(warning ? { warning } : {}),
     };
+  }
+
+  /**
+   * Persist an oversized worker_merge patch to the manager's scratch dir, NEWLINE-DELIMITED (the raw git
+   * diff text already carries real `\n`s — writing it directly, rather than embedding it in a JSON tool
+   * response, is what keeps them real instead of collapsing into the JSON string escape `\n`) and
+   * EXPLICITLY UTF-8 encoded, so `Read` can page it with offset/limit and a non-UTF8-aware fallback (e.g. a
+   * Windows cp1252 python read()) doesn't choke on box-drawing/Unicode diff content. Deterministic path
+   * (keyed by workerSessionId, not a fresh name per call) so repeated fullDiff pulls don't accumulate
+   * garbage in the scratch dir — each overwrites the prior spill.
+   */
+  private spillMergePatch(managerSessionId: string, workerSessionId: string, patch: string): string {
+    const dir = path.join(sessionScratchDir(managerSessionId), "merge-diffs");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${workerSessionId}.patch`);
+    fs.writeFileSync(file, patch, "utf8");
+    return file;
   }
 
   /**

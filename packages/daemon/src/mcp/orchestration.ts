@@ -732,12 +732,19 @@ export class OrchestrationMcpRouter {
           "overflow the display on a large change (where the full patch is biggest/riskiest). Pass " +
           "fullDiff:true to ALSO get the full unified patch for line-level review (the full patch is " +
           "unbounded and may itself overflow on a very large change — review the diffstat first, then pull " +
-          "the patch). No merge happens; you must review before confirming (there is no worker-side merge).",
-        inputSchema: { workerSessionId: z.string(), fullDiff: z.boolean().optional() },
+          "the patch). Pass `files` (an array of exact/substring path matches) and/or `pathGlob` (a glob " +
+          "like 'packages/daemon/src/mcp/*.ts') to scope BOTH the diffstat and the patch to matching file(s) " +
+          "— pull one file's hunk at a time on a large multi-file change instead of the whole patch. Omit " +
+          "both for the full unfiltered diff (unchanged). If the (possibly filtered) patch is still too " +
+          "large to inline safely, it's written to a scratch file instead — UTF-8, real line breaks, " +
+          "Read-pageable with offset/limit — and the response carries patchFile/patchChars + a note in " +
+          "place of the inline patch. No merge happens; you must review before confirming (there is no " +
+          "worker-side merge).",
+        inputSchema: { workerSessionId: z.string(), fullDiff: z.boolean().optional(), files: z.array(z.string()).optional(), pathGlob: z.string().optional() },
       },
-      async ({ workerSessionId, fullDiff }) => {
+      async ({ workerSessionId, fullDiff, files, pathGlob }) => {
         try {
-          return ok(await sessions.reviewWorkerMerge(managerSessionId, workerSessionId, { includePatch: fullDiff === true }));
+          return ok(await sessions.reviewWorkerMerge(managerSessionId, workerSessionId, { includePatch: fullDiff === true, files, pathGlob }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
