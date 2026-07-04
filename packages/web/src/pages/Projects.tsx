@@ -166,6 +166,12 @@ export default function Projects() {
             <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{projects.data?.length ?? 0}</span>
           </div>
           <Input placeholder="Filter projects…" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter projects" />
+          {/* Create sits at the TOP of the rail — the primary action is reachable without scrolling past the
+              list (owner ask, card ee742d5b). The reveal-collapsed form still opens in the roomy Editor pane. */}
+          <Button variant={creating === "project" ? "primary" : "default"} style={{ textAlign: "center" }}
+            onClick={() => setCreating((c) => (c === "project" ? null : "project"))}>
+            ＋ New project
+          </Button>
           <div style={{ display: "flex", flexDirection: "column", gap: 1, maxHeight: "56vh", overflowY: "auto", marginRight: -4, paddingRight: 4 }}>
             {filteredProjects.map((p) => (
               <ProjectRow key={p.id} name={p.name} selected={p.id === projectId} live={liveByProject.get(p.id) ?? 0}
@@ -177,10 +183,6 @@ export default function Projects() {
               </span>
             )}
           </div>
-          <Button variant={creating === "project" ? "primary" : "default"} style={{ textAlign: "center" }}
-            onClick={() => setCreating((c) => (c === "project" ? null : "project"))}>
-            ＋ New project
-          </Button>
           {(archivedProjects.data?.length ?? 0) > 0 && (
             <ArchivedProjects projects={archivedProjects.data!}
               onRestore={(id) => restoreProject.mutate(id)}
@@ -244,7 +246,7 @@ export default function Projects() {
               <ProjectForm onCreate={(b) => createProject.mutate(b)} pending={createProject.isPending} onCancel={() => setCreating(null)} />
             </EditorFrame>
           ) : creating === "agent" && selectedProject ? (
-            <EditorFrame title="New agent" subtitle={`for ${selectedProject.name} — its startup prompt is injected as the first turn of each session`}>
+            <EditorFrame fill title="New agent" subtitle={`for ${selectedProject.name} — its startup prompt is injected as the first turn of each session`}>
               <AgentForm onCreate={(b) => createAgent.mutate(b)} pending={createAgent.isPending} onCancel={() => setCreating(null)} />
             </EditorFrame>
           ) : selectedAgent ? (
@@ -325,14 +327,21 @@ function AgentRow(
 
 // A titled frame for the editor pane's create surfaces — a small header (title + one-line subtitle) over
 // the form body, so the roomy right pane reads as a deliberate "New …" workspace rather than a bare form.
-function EditorFrame({ title, subtitle, children }: { title: string; subtitle: string; children: ReactNode }) {
+// `fill` lets the body stretch to the pane's full height (a flex column) so a form with a grow-to-fit
+// textarea — the create-agent form — actually uses the roomy pane; the default (project form) stays a
+// compact, top-aligned column at a comfortable measure. Root is `flex:1` (not `height:100%`): the Editor
+// Panel gets its height from `minHeight:72vh` while sitting in an `alignItems:start` grid, so its `height`
+// is `auto` and a percentage height would collapse to content — `flex:1` honors the flex min-height.
+function EditorFrame({ title, subtitle, children, fill = false }: { title: string; subtitle: string; children: ReactNode; fill?: boolean }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", padding: 8, gap: 12 }}>
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, padding: 8, gap: 12 }}>
       <div>
         <div style={{ fontFamily: font.head, fontSize: 13, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{title}</div>
         <div style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12, marginTop: 3 }}>{subtitle}</div>
       </div>
-      <div style={{ maxWidth: 520 }}>{children}</div>
+      <div style={fill
+        ? { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", maxWidth: 760 }
+        : { maxWidth: 520 }}>{children}</div>
     </div>
   );
 }
@@ -479,11 +488,13 @@ function ProjectForm({ onCreate, pending, onCancel }: { onCreate: (b: { name: st
 
 function AgentForm({ onCreate, pending, onCancel }: { onCreate: (b: { name: string; startupPrompt: string }) => void; pending: boolean; onCancel: () => void }) {
   const [name, setName] = useState(""), [startupPrompt, setPrompt] = useState("");
+  // Fills its EditorFrame `fill` body: name at natural height, the prompt textarea grows (`flex:1`) to take
+  // the rest of the pane so the roomy Editor pane is actually used, buttons pinned below.
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 }}>
       <Input placeholder="agent name" value={name} onChange={(e) => setName(e.target.value)} />
       <textarea
-        style={{ width: "100%", height: 160, boxSizing: "border-box", resize: "vertical", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: 8, fontFamily: font.mono, fontSize: 13, lineHeight: 1.5 }}
+        style={{ flex: 1, minHeight: 200, width: "100%", boxSizing: "border-box", resize: "none", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: 8, fontFamily: font.mono, fontSize: 13, lineHeight: 1.5 }}
         placeholder="startup prompt (injected as the first turn of each new session)"
         value={startupPrompt} onChange={(e) => setPrompt(e.target.value)} />
       <div style={{ display: "flex", gap: 8 }}>
@@ -506,8 +517,11 @@ function AgentEditor(
   const [prompt, setPrompt] = useState(agent.startupPrompt);
   const dirty = prompt !== agent.startupPrompt;
   const live = liveCount > 0;
+  // `flex:1` (not `height:100%`) so the editor fills the Editor Panel's `minHeight:72vh`: that Panel sits in
+  // an `alignItems:start` grid so its `height` is `auto`, against which a percentage height collapses to
+  // content — the flex min-height is what the prompt textarea's own `flex:1` then grows into.
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", padding: 8, gap: 10 }}>
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, padding: 8, gap: 10 }}>
       {/* Editor header: identity + profile assignment + delete */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <span style={{ fontFamily: font.head, fontSize: 14, color: color.text }}>{agent.name}</span>
