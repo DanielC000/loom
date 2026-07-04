@@ -495,9 +495,12 @@ export class SessionService {
    * web "Spawn → force plain") overrides any profile-conferred role to spawn a role-null session.
    * `opts.companionName` (companion provision only) bakes the companion's given name into its startup
    * prompt at creation — see resolveAgentSpawn / composeAssistantStartupPrompt. Harmless on any non-
-   * assistant spawn (resolveAgentSpawn only reads it when role === "assistant").
+   * assistant spawn (resolveAgentSpawn only reads it when role === "assistant"). `opts.kickoffPrompt`
+   * (poll-triggered spawns, agent-tooling epic P3) appends a dynamic part AFTER the agent's own resolved
+   * prompt via `composeWorkerStartupPrompt`'s brief+"---"+dynamicPart shape (reused verbatim, no new
+   * compose path) — omitted ⇒ byte-identical to today.
    */
-  startNew(agentId: string, opts: { forcePlain?: boolean; companionName?: string } = {}): Session {
+  startNew(agentId: string, opts: { forcePlain?: boolean; companionName?: string; kickoffPrompt?: string } = {}): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -543,6 +546,12 @@ export class SessionService {
     const finalStartupPrompt = role === "assistant"
       ? appendMemoryRecallToStartupPrompt(startupPrompt!, buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name)))
       : startupPrompt;
+    // Poll-triggered spawn (P3): append the untrusted-framed kickoff AFTER the agent's own resolved
+    // prompt — reuses composeWorkerStartupPrompt's brief+"---"+dynamicPart shape verbatim (no new
+    // compose path). Omitted (every other caller) ⇒ finalStartupPrompt unchanged, byte-identical.
+    const composedStartupPrompt = opts.kickoffPrompt
+      ? composeWorkerStartupPrompt(finalStartupPrompt, opts.kickoffPrompt)
+      : finalStartupPrompt;
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd,
@@ -550,7 +559,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      startupPrompt: finalStartupPrompt,
+      startupPrompt: composedStartupPrompt,
       role,
       browserTesting,
       documentConversion,

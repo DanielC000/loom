@@ -330,6 +330,11 @@ export interface WatcherConfig {
    * them; per-project enable + cap lives in `orchestration.crashRecoveryMaxAttempts` (0 = off).
    */
   crashRecoveryWatchMs: number;
+  /** PollService tick (LOOM_POLL_INTERVAL_MS) — the local poll-job trigger layer, agent-tooling epic P3.
+   *  Default 60000. Independently tunable from wakeMs: poll jobs hit an external host (through the P2
+   *  connection guard's own rate limiter), so an owner may want a coarser cadence than the internal
+   *  wake/schedule tickers. */
+  pollMs: number;
 }
 
 /**
@@ -516,7 +521,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   // + LOOM_* watcher env layer beneath. See RateLimitConfig/WatcherConfig/TimeoutConfig for unit docs.
   platform: {
     rateLimit: { defaultBackoffMs: 18000000, resetBufferMs: 10000, deadlineAfterResetMs: 1800000, deadlineNoResetMs: 21600000, recencyWindowMs: 21600000 },
-    watchers: { contextWatchMs: 60000, idleWatchMs: 60000, rateLimitWatchMs: 60000, usagePollMs: 60000, wakeMs: 60000, schedulerMs: 60000, reconcileMs: 10000, snapshotMs: 420000, crashRecoveryWatchMs: 60000 },
+    watchers: { contextWatchMs: 60000, idleWatchMs: 60000, rateLimitWatchMs: 60000, usagePollMs: 60000, wakeMs: 60000, schedulerMs: 60000, reconcileMs: 10000, snapshotMs: 420000, crashRecoveryWatchMs: 60000, pollMs: 60000 },
     timeouts: { gitOpMs: 15000, gitLocalMs: 15000, gitPushMs: 45000, provisionMs: 180000, busyStaleMs: 300000, runMs: 600000 },
     // P2 authenticated-request bounds: 20s timeout, 1MB response cap, 30 req/5min per connection.
     connections: { requestTimeoutMs: 20000, maxResponseBytes: 1000000, rateLimitMax: 30, rateLimitWindowMs: 300000 },
@@ -715,6 +720,7 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
       reconcileMs: po?.watchers?.reconcileMs ?? envWatcherIntervalMs("LOOM_RECONCILE_INTERVAL_MS") ?? d.watchers.reconcileMs,
       snapshotMs: po?.watchers?.snapshotMs ?? envWatcherIntervalMs("LOOM_SNAPSHOT_INTERVAL_MS") ?? d.watchers.snapshotMs,
       crashRecoveryWatchMs: po?.watchers?.crashRecoveryWatchMs ?? envWatcherIntervalMs("LOOM_CRASH_RECOVERY_WATCH_INTERVAL_MS") ?? d.watchers.crashRecoveryWatchMs,
+      pollMs: po?.watchers?.pollMs ?? envWatcherIntervalMs("LOOM_POLL_INTERVAL_MS") ?? d.watchers.pollMs,
     },
     timeouts: {
       gitOpMs: po?.timeouts?.gitOpMs ?? d.timeouts.gitOpMs,

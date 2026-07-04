@@ -30,6 +30,8 @@ import { Scheduler } from "./orchestration/scheduler.js";
 import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
 import { UsageStatusPoller } from "./orchestration/usage-status.js";
 import { WakeService } from "./orchestration/wake.js";
+import { PollService } from "./orchestration/poll.js";
+import { performAuthenticatedRequest } from "./connections/request.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
 import { IdleWatcher } from "./orchestration/idle-watcher.js";
 import { BusyWorkerWatcher } from "./orchestration/busy-worker-watcher.js";
@@ -311,6 +313,25 @@ async function main(): Promise<void> {
   const wakes = new WakeService({ db, pty, resume: (id) => sessions.resume(id), intervalMs: wakeIntervalMs });
   // The task MCP hosts the universal wake tools, so it takes the WakeService.
   const mcp = new TaskMcpRouter(db, wakes);
+  // PollService (local poll-job triggers, agent-tooling epic P3) — ALWAYS ON like WakeService: with zero
+  // poll_jobs rows every tick is a no-op, so this is byte-identical to today until a human creates one
+  // over the (human-only) REST surface. `request` calls the EXISTING P2 authenticated_request path
+  // directly (server-side, never through the MCP layer — there is no agent turn here); the guard is the
+  // SAME resolved connections config the MCP tool itself reads. `spawn` reuses `startNew`'s existing
+  // profile-resolution — the poll job's target agent's OWN profile decides its role, nothing hardcoded.
+  const pollIntervalMs = watchers.pollMs;
+  const polls = new PollService({
+    db, pty,
+    request: (job) => performAuthenticatedRequest(
+      { db },
+      [job.connectionId],
+      resolveConfig(undefined, db.getPlatformConfig()).platform.connections,
+      { connection: job.connectionId, path: job.path, method: job.method },
+    ),
+    resume: (id) => sessions.resume(id),
+    spawn: (agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt }),
+    intervalMs: pollIntervalMs,
+  });
   // Loom Companion (Phase 1): a chat-native companion whose brain is a live `claude` PTY session, served
   // by the ChatGateway subsystem (registry of channel adapters + inbound routing + outbound deliverReply).
   // OFF by default — the gateway is only constructed when LOOM_COMPANION_BOT_TOKEN (+ the allowlisted chat
@@ -542,6 +563,10 @@ async function main(): Promise<void> {
   wakes.start();
   console.log(`[boot] wake-up ticker on (tick ${wakeIntervalMs}ms)`);
 
+  // The local poll-job trigger ticker (always on; zero rows ⇒ a no-op tick).
+  polls.start();
+  console.log(`[boot] poll ticker on (tick ${pollIntervalMs}ms)`);
+
   // Input-queue reconcile: self-heal stuck-busy sessions and drain any message held while the session
   // was busy / the human was typing — so a worker report never strands behind a phantom 'busy' or an
   // unfinished compose. The Stop hook is the fast path; this is the safety net (10s).
@@ -731,7 +756,7 @@ async function main(): Promise<void> {
     // Best-effort courtesy stop of the companion (long-poll + heartbeat, no-op when off); it dies with the
     // process anyway. The controller owns BOTH now, so stop() disarms the heartbeat too (no separate stop).
     void companionController.stop().catch(() => { /* never block the exit */ });
-    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop();
+    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop();
     console.log(`[shutdown] graceful stop (${reason})`);
     process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
   };

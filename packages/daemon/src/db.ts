@@ -32,7 +32,7 @@ function assertNotProdDbInTest(file: string): void {
 import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PresetPrompt, PresetPromptSuggestion,
+  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, PresetPrompt, PresetPromptSuggestion,
   CompanionBinding, CompanionAllowedSender, CompanionRoute,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
@@ -357,6 +357,39 @@ CREATE TABLE IF NOT EXISTS wakes (
   -- pty.getActiveTurnOrigin, or NULL for an ordinary wake. Nullable -- NULL is the byte-identical
   -- default (fires via plain enqueueStdin, exactly as before this column existed).
   route TEXT
+);
+-- Local poll-job triggers (agent-tooling epic P3): the daemon PollService periodically fetches 'path' on
+-- 'connection_id' (through the SAME server-side P2 authenticated_request path — never a second outbound-
+-- HTTP path) and, on a new item vs the previous poll, wakes session_id or spawns a fresh session in
+-- agent_id with the item(s) as kickoff. Brand-new table => CREATE TABLE IF NOT EXISTS is itself the
+-- additive migration (no ALTER), exactly like connections/api_keys/runs. Human-configured only (REST) —
+-- no MCP path (mirrors connections/schedules).
+CREATE TABLE IF NOT EXISTS poll_jobs (
+  id TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL REFERENCES connections(id),
+  path TEXT NOT NULL,
+  method TEXT NOT NULL DEFAULT 'GET',
+  interval_ms INTEGER NOT NULL,
+  next_poll_at TEXT NOT NULL,
+  last_polled_at TEXT,
+  -- Dot-path into the fetched JSON body to the array of items (default '' = the body itself is the array).
+  items_path TEXT NOT NULL DEFAULT '',
+  -- Dot-path within ONE item to its stable unique id (default 'id').
+  id_path TEXT NOT NULL DEFAULT 'id',
+  -- The PREVIOUS successful poll's item-id snapshot (JSON string[]), NOT accumulated across polls — bounds
+  -- storage to O(items-per-poll). NULL = never successfully polled (the next poll seeds the baseline and
+  -- fires nothing — a fresh job must never replay the existing backlog as "new").
+  cursor_json TEXT,
+  -- 'wake' (nudge an existing session_id) or 'spawn' (fresh session in agent_id).
+  mode TEXT NOT NULL,
+  session_id TEXT REFERENCES sessions(id),
+  agent_id TEXT REFERENCES agents(id),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  -- Backoff counter (resets to 0 on any successful poll); the tick pushes next_poll_at out by
+  -- interval_ms * 2^min(consecutive_failures, 5) instead of disabling on a transient failure.
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TEXT NOT NULL
 );
 -- Daemon-GLOBAL platform tuning override (rate-limit numbers / watcher cadences / op timeouts), held
 -- as a single JSON blob in a SINGLETON row (id pinned to 1 by the CHECK). NOT per-project — the daemon
@@ -3056,6 +3089,73 @@ export class Db {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM wakes WHERE session_id = ?").get(sessionId) as { c: number }).c;
   }
 
+  // --- poll jobs (local poll-job triggers, agent-tooling epic P3) ---
+  insertPollJob(p: PollJob): void {
+    this.db.prepare(
+      `INSERT INTO poll_jobs
+        (id,connection_id,path,method,interval_ms,next_poll_at,last_polled_at,items_path,id_path,
+         cursor_json,mode,session_id,agent_id,enabled,consecutive_failures,last_error,created_at)
+       VALUES
+        (@id,@connectionId,@path,@method,@intervalMs,@nextPollAt,@lastPolledAt,@itemsPath,@idPath,
+         @cursorJson,@mode,@sessionId,@agentId,@enabled,@consecutiveFailures,@lastError,@createdAt)`,
+    ).run({
+      ...p, enabled: p.enabled ? 1 : 0, lastPolledAt: p.lastPolledAt ?? null,
+      sessionId: p.sessionId ?? null, agentId: p.agentId ?? null, cursorJson: p.cursorJson ?? null,
+      lastError: p.lastError ?? null,
+    });
+  }
+  listPollJobs(): PollJob[] {
+    return (this.db.prepare("SELECT * FROM poll_jobs ORDER BY created_at, rowid").all() as Row[]).map(toPollJob);
+  }
+  getPollJob(id: string): PollJob | undefined {
+    const r = this.db.prepare("SELECT * FROM poll_jobs WHERE id = ?").get(id) as Row | undefined;
+    return r ? toPollJob(r) : undefined;
+  }
+  /** Partial edit (REST): any provided field is written; omitted fields are left as-is. */
+  updatePollJob(id: string, patch: {
+    path?: string; method?: string; intervalMs?: number; itemsPath?: string; idPath?: string;
+    mode?: "wake" | "spawn"; sessionId?: string | null; agentId?: string | null; enabled?: boolean;
+  }): void {
+    const cols: Record<string, unknown> = {
+      path: patch.path, method: patch.method, interval_ms: patch.intervalMs,
+      items_path: patch.itemsPath, id_path: patch.idPath, mode: patch.mode,
+      session_id: patch.sessionId, agent_id: patch.agentId,
+      enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
+    };
+    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
+    if (names.length === 0) return;
+    const set = names.map((c) => `${c} = ?`).join(", ");
+    this.db.prepare(`UPDATE poll_jobs SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
+  deletePollJob(id: string): void {
+    this.db.prepare("DELETE FROM poll_jobs WHERE id = ?").run(id);
+  }
+  /** Enabled poll jobs whose next_poll_at is at/earlier than nowIso — the PollService's due set. */
+  listDuePollJobs(nowIso: string): PollJob[] {
+    return (this.db.prepare("SELECT * FROM poll_jobs WHERE enabled = 1 AND next_poll_at <= ? ORDER BY next_poll_at")
+      .all(nowIso) as Row[]).map(toPollJob);
+  }
+  /** CLAIM-FIRST (Scheduler finding-2): advance next_poll_at BEFORE the fetch side-effect, so a
+   *  throwing/hanging fetch can't leave the slot un-advanced and double-fetch next tick. Overwritten
+   *  again by markPolled/markPollFailed once the real outcome is known. */
+  claimPollJob(id: string, nextPollAt: string): void {
+    this.db.prepare("UPDATE poll_jobs SET next_poll_at = ? WHERE id = ?").run(nextPollAt, id);
+  }
+  /** Record a SUCCESSFUL poll: advance next_poll_at, persist the new cursor snapshot, reset the backoff
+   *  counter and any prior error. */
+  markPolled(id: string, patch: { lastPolledAt: string; nextPollAt: string; cursorJson: string | null }): void {
+    this.db.prepare(
+      "UPDATE poll_jobs SET last_polled_at = ?, next_poll_at = ?, cursor_json = ?, consecutive_failures = 0, last_error = NULL WHERE id = ?",
+    ).run(patch.lastPolledAt, patch.nextPollAt, patch.cursorJson, id);
+  }
+  /** Record a FAILED poll: advance next_poll_at (backoff, computed by the caller), bump the failure
+   *  counter, and persist the surfaced error — never touches the cursor. */
+  markPollFailed(id: string, patch: { nextPollAt: string; error: string }): void {
+    this.db.prepare(
+      "UPDATE poll_jobs SET next_poll_at = ?, consecutive_failures = consecutive_failures + 1, last_error = ? WHERE id = ?",
+    ).run(patch.nextPollAt, patch.error, id);
+  }
+
   // --- companion reminders (Companion Memory & Reminders Design, Surface 2 s3 — the recurring engine) ---
   insertCompanionReminder(r: CompanionReminder): void {
     this.db.prepare(
@@ -3317,6 +3417,20 @@ function toWake(r0: unknown): Wake {
     id: r.id as string, sessionId: r.session_id as string,
     wakeAt: r.wake_at as string, note: r.note as string, createdAt: r.created_at as string,
     ...(routeJson ? { route: JSON.parse(routeJson) as Wake["route"] } : {}),
+  };
+}
+function toPollJob(r0: unknown): PollJob {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, connectionId: r.connection_id as string, path: r.path as string,
+    method: r.method as string, intervalMs: r.interval_ms as number,
+    nextPollAt: r.next_poll_at as string, lastPolledAt: (r.last_polled_at as string) ?? null,
+    itemsPath: r.items_path as string, idPath: r.id_path as string,
+    cursorJson: (r.cursor_json as string) ?? null,
+    mode: r.mode as PollJob["mode"], sessionId: (r.session_id as string) ?? null,
+    agentId: (r.agent_id as string) ?? null, enabled: (r.enabled as number) === 1,
+    consecutiveFailures: r.consecutive_failures as number, lastError: (r.last_error as string) ?? null,
+    createdAt: r.created_at as string,
   };
 }
 function toCompanionReminder(r0: unknown): CompanionReminder {

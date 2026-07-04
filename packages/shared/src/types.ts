@@ -645,7 +645,28 @@ export type OrchestrationEventKind =
   // manager drives it directly. Parent-scoped exactly like message_worker/stop_worker. `detail` carries
   // { target, landed } — the requested mode and the feedback-VERIFIED mode the cycle actually settled on
   // (may differ from target if the cycle gave up early). Filed under the owning MANAGER.
-  | "set_worker_mode";
+  | "set_worker_mode"
+  // ── Poll-job triggers (agent-tooling epic P3, PollService) ─────────────────────────────────────────
+  // A poll job's fetch surfaced item(s) not present in the previous poll's snapshot, and they were
+  // delivered as a (wake or spawn) kickoff. Filed under the TRIGGERED session (managerSessionId — the
+  // woken session, or the freshly-spawned one); `detail` carries { pollJobId, itemCount, mode }.
+  | "poll_fired"
+  // A poll's fetch (through the P2 authenticated_request path) THREW — network/auth/rate-limit/timeout.
+  // The durable mirror of `schedule_fire_failed`: session-LESS (no session exists to key it to, or the
+  // existing one wasn't touched), filed with managerSessionId = "" ; `detail` carries { pollJobId, error,
+  // consecutiveFailures }. Never disables the job (a transient failure must not kill a cadence) — backoff
+  // instead (next_poll_at pushed out); only a deleted connection disables it.
+  | "poll_fire_failed"
+  // The FIRST successful poll of a job (cursorJson was null) — seeds the baseline item-id snapshot and
+  // deliberately fires NOTHING (a fresh poll job must never replay the whole existing backlog as "new").
+  // Session-less like poll_fire_failed; `detail` carries { pollJobId, itemCount }.
+  | "poll_baseline_seeded"
+  // MISCONFIG GUARD: `idPath` yielded no extractable id for a large fraction of this poll's items (a bad
+  // path, or a feed whose items don't carry that field). Firing anyway would re-fire the SAME items every
+  // tick forever (no id ⇒ no stable diff). This event marks the poll as SKIPPED (not advanced past
+  // baseline) so the misconfiguration is visible instead of silently spamming; `detail` carries
+  // { pollJobId, itemCount, withIdCount }. Session-less.
+  | "poll_id_guard_tripped";
 
 export interface OrchestrationEvent {
   id: string;
@@ -958,6 +979,37 @@ export interface Wake {
    * heartbeat uses, instead of a plain nudge.
    */
   route?: CompanionRoute;
+}
+
+/**
+ * A local poll job (agent-tooling epic P3): the daemon periodically fetches `path` on `connectionId`
+ * (via the SAME server-side P2 `authenticated_request` path an agent uses — the connection's secret is
+ * injected/redacted there, never carried by this row or seen by the triggered session) and, on detecting
+ * an item not seen on the PREVIOUS poll, either wakes `sessionId` (mode "wake") or spawns a fresh session
+ * in `agentId` (mode "spawn") with the new item(s) as its kickoff. `cursorJson` holds the last poll's
+ * item-id SNAPSHOT (a JSON string[] — not accumulated across polls, so storage stays O(items-per-poll));
+ * `null` means "never successfully polled yet" — the first poll seeds the baseline and fires nothing.
+ * `itemsPath`/`idPath` are dot-paths into the fetched JSON (default: root array / "id" per item).
+ * Human-configured only (REST, mirrors `schedules`/`connections`) — never an agent MCP tool.
+ */
+export interface PollJob {
+  id: string;
+  connectionId: string;
+  path: string;
+  method: string;
+  intervalMs: number;
+  nextPollAt: string;
+  lastPolledAt: string | null;
+  itemsPath: string;
+  idPath: string;
+  cursorJson: string | null;
+  mode: "wake" | "spawn";
+  sessionId: string | null;
+  agentId: string | null;
+  enabled: boolean;
+  consecutiveFailures: number;
+  lastError: string | null;
+  createdAt: string;
 }
 
 /**

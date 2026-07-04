@@ -5,12 +5,13 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, OrchestrationEventKind } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, OrchestrationEventKind } from "@loom/shared";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt } from "../orchestration/cron.js";
+import { MIN_POLL_INTERVAL_MS } from "../orchestration/poll.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, engineTranscriptExists, deleteProjectArchives } from "../sessions/transcript.js";
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
 import type { Db } from "../db.js";
@@ -1162,6 +1163,91 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.delete("/api/connections/:id", async (req) => {
     deleteConnection(deps.db, (req.params as { id: string }).id);
+    return { ok: true };
+  });
+
+  // --- Poll-job triggers (agent-tooling epic P3): local, human-configured cadence jobs the daemon
+  // PollService fetches via a connection and wakes/spawns a session on new items. HUMAN-ONLY loopback
+  // REST, INTENTIONALLY NO MCP path (mirrors connections/schedules) — a poll job references a connection,
+  // so it inherits that surface's trust posture. ---
+  const isPollMode = (v: unknown): v is PollJob["mode"] => v === "wake" || v === "spawn";
+  /**
+   * Validate a poll job's mode↔target pairing + target existence — the ONE check both create and update
+   * must enforce (the two-path anti-pattern: an update that skipped this could patch a job into an
+   * inconsistent mode/target pair that the tick's OWN structural guard then silently disables, turning a
+   * fixable 400 into a vanished job). Called with the EFFECTIVE post-patch mode/sessionId/agentId — for
+   * create that's just the body; for update it's the body merged over the existing row. Returns the
+   * normalized {sessionId, agentId} to persist (the field for the OTHER mode is always cleared).
+   */
+  const validatePollTarget = (
+    mode: PollJob["mode"], sessionId: string | null | undefined, agentId: string | null | undefined,
+  ): { ok: true; sessionId: string | null; agentId: string | null } | { ok: false; status: number; error: string } => {
+    if (mode === "wake") {
+      if (!sessionId || !deps.db.getSession(sessionId)) return { ok: false, status: 404, error: "mode 'wake' requires an existing sessionId" };
+      return { ok: true, sessionId, agentId: null };
+    }
+    if (!agentId || !deps.db.getAgent(agentId)) return { ok: false, status: 404, error: "mode 'spawn' requires an existing agentId" };
+    return { ok: true, sessionId: null, agentId };
+  };
+  app.get("/api/poll-jobs", async () => deps.db.listPollJobs());
+  app.post("/api/poll-jobs", async (req, reply) => {
+    const b = (req.body ?? {}) as {
+      connectionId?: string; path?: string; method?: string; intervalMs?: number;
+      itemsPath?: string; idPath?: string; mode?: string; sessionId?: string; agentId?: string; enabled?: boolean;
+    };
+    if (!b.connectionId || !b.path) return reply.code(400).send({ error: "connectionId and path required" });
+    if (!deps.db.getConnection(b.connectionId)) return reply.code(404).send({ error: "connection not found" });
+    if (!b.path.startsWith("/")) return reply.code(400).send({ error: "path must start with '/'" });
+    if (typeof b.intervalMs !== "number" || b.intervalMs < MIN_POLL_INTERVAL_MS) {
+      return reply.code(400).send({ error: `intervalMs must be a number >= ${MIN_POLL_INTERVAL_MS}` });
+    }
+    if (!isPollMode(b.mode)) return reply.code(400).send({ error: "mode must be 'wake' or 'spawn'" });
+    const target = validatePollTarget(b.mode, b.sessionId, b.agentId);
+    if (!target.ok) return reply.code(target.status).send({ error: target.error });
+    const job: PollJob = {
+      id: randomUUID(), connectionId: b.connectionId, path: b.path, method: (b.method ?? "GET").toUpperCase(),
+      intervalMs: b.intervalMs, nextPollAt: new Date().toISOString(), lastPolledAt: null,
+      itemsPath: b.itemsPath ?? "", idPath: b.idPath ?? "id", cursorJson: null,
+      mode: b.mode, sessionId: target.sessionId, agentId: target.agentId,
+      enabled: b.enabled ?? true, consecutiveFailures: 0, lastError: null, createdAt: new Date().toISOString(),
+    };
+    deps.db.insertPollJob(job);
+    return reply.code(201).send(job);
+  });
+  app.post("/api/poll-jobs/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const existing = deps.db.getPollJob(id);
+    if (!existing) return reply.code(404).send({ error: "poll job not found" });
+    const b = (req.body ?? {}) as {
+      path?: string; method?: string; intervalMs?: number; itemsPath?: string; idPath?: string;
+      mode?: string; sessionId?: string; agentId?: string; enabled?: boolean;
+    };
+    if (b.mode !== undefined && !isPollMode(b.mode)) return reply.code(400).send({ error: "mode must be 'wake' or 'spawn'" });
+    // Mirror create's TYPE guard, not just the floor: a non-numeric intervalMs (e.g. a string) would
+    // otherwise slip through `"abc" < MIN_POLL_INTERVAL_MS` (a NaN comparison → false) and get stored —
+    // the tick's `new Date(now.getTime() + job.intervalMs).toISOString()` then throws on the CLAIM line,
+    // which sits BEFORE the per-job try/catch, aborting the whole tick and starving every job ordered
+    // after this one, every tick (the bad job never advances past this claim, so it re-throws forever).
+    if (b.intervalMs !== undefined && (typeof b.intervalMs !== "number" || b.intervalMs < MIN_POLL_INTERVAL_MS)) {
+      return reply.code(400).send({ error: `intervalMs must be a number >= ${MIN_POLL_INTERVAL_MS}` });
+    }
+    if (b.path !== undefined && !b.path.startsWith("/")) return reply.code(400).send({ error: "path must start with '/'" });
+    // Re-validate the EFFECTIVE (post-patch) mode↔target pairing — a PATCH that changes mode, or that
+    // changes sessionId/agentId, or that changes neither, must ALL land on a consistent, existing target;
+    // never just the create path (see validatePollTarget's doc for why that asymmetry is a real bug).
+    const effectiveMode: PollJob["mode"] = isPollMode(b.mode) ? b.mode : existing.mode;
+    const effectiveSessionId = b.sessionId !== undefined ? b.sessionId : existing.sessionId;
+    const effectiveAgentId = b.agentId !== undefined ? b.agentId : existing.agentId;
+    const target = validatePollTarget(effectiveMode, effectiveSessionId, effectiveAgentId);
+    if (!target.ok) return reply.code(target.status).send({ error: target.error });
+    deps.db.updatePollJob(id, {
+      path: b.path, method: b.method, intervalMs: b.intervalMs, itemsPath: b.itemsPath, idPath: b.idPath,
+      mode: effectiveMode, sessionId: target.sessionId, agentId: target.agentId, enabled: b.enabled,
+    });
+    return deps.db.getPollJob(id);
+  });
+  app.delete("/api/poll-jobs/:id", async (req) => {
+    deps.db.deletePollJob((req.params as { id: string }).id);
     return { ok: true };
   });
 
