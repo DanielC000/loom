@@ -879,6 +879,9 @@ export class OrchestrationMcpRouter {
     // SERVER-SIDE from this manager's session (the agent passes no projectId), so it can never list
     // another project's agents. `role` is the agent's resolved PROFILE role (resolveProfile — the
     // canonical mechanism, exactly as the platform page derives it); null for a plain/profile-less agent.
+    // browserTesting/documentConversion/restrictedTools are the SAME resolveProfile output profile_get/
+    // profile_list already surface (mcp/platform.ts) — reused here so a manager can match a worker prompt
+    // to real provisioning without a spawn-and-inspect round-trip (Auditor finding 64430a50).
     server.registerTool(
       "agent_list",
       {
@@ -887,20 +890,28 @@ export class OrchestrationMcpRouter {
           "agent-id PREFIX (e.g. 'b5d7304f…') to a full id, and to choose the right worker agent for " +
           "worker_spawn. Your project is derived SERVER-SIDE from your session (you pass NO projectId, so " +
           "you can never list another project's agents — same scoping as worker_list). Returns each agent's " +
-          "{id, name, role (resolved from its bound profile — null for a plain agent), profileId, position}, " +
-          "ordered by position.",
+          "{id, name, role (resolved from its bound profile — null for a plain agent), profileId, position, " +
+          "browserTesting, documentConversion, restrictedTools (resolved from the assigned/default profile — " +
+          "same resolution profile_get/profile_list use; false when profile-less or the profile leaves a flag " +
+          "unset)}, ordered by position.",
         inputSchema: {},
       },
       async () => {
         const projectId = db.getSession(managerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
-        return ok(db.listAgents(projectId).map((a) => ({
-          id: a.id,
-          name: a.name,
-          role: resolveProfile(a, a.profileId ? db.getProfile(a.profileId) : undefined).role,
-          profileId: a.profileId,
-          position: a.position,
-        })));
+        return ok(db.listAgents(projectId).map((a) => {
+          const resolved = resolveProfile(a, a.profileId ? db.getProfile(a.profileId) : undefined);
+          return {
+            id: a.id,
+            name: a.name,
+            role: resolved.role,
+            profileId: a.profileId,
+            position: a.position,
+            browserTesting: resolved.browserTesting,
+            documentConversion: resolved.documentConversion,
+            restrictedTools: resolved.restrictedTools,
+          };
+        }));
       },
     );
 
@@ -917,23 +928,35 @@ export class OrchestrationMcpRouter {
       {
         description:
           "Read ONE agent in YOUR project — the FULL record INCLUDING its startupPrompt (agent_list's " +
-          "summary deliberately drops it — some prompts are large, e.g. ~6.6KB for a Code Reviewer rig). " +
-          "Use this before a safe read-modify-write via agent_update (its appendToStartupPrompt mode lets " +
-          "you add to what you read here without retyping the whole prompt). agentId accepts the full id OR " +
-          "an unambiguous 8-char id-prefix (same resolution as worker_spawn/agent_list). Your project is " +
-          "derived SERVER-SIDE (you pass no projectId) — an agent outside YOUR project resolves as " +
-          "not-found, same scoping as worker_list/agent_list. Error if unknown or an ambiguous prefix (the " +
-          "error names the candidate ids).",
+          "summary deliberately drops it — some prompts are large, e.g. ~6.6KB for a Code Reviewer rig), " +
+          "PLUS its resolved browserTesting/documentConversion/restrictedTools capability flags (from its " +
+          "assigned/default profile — same resolution profile_get/profile_list use; false when profile-less " +
+          "or the profile leaves a flag unset). Use this before a safe read-modify-write via agent_update " +
+          "(its appendToStartupPrompt mode lets you add to what you read here without retyping the whole " +
+          "prompt), and to check an agent's real provisioning before assuming it from its prompt. agentId " +
+          "accepts the full id OR an unambiguous 8-char id-prefix (same resolution as worker_spawn/" +
+          "agent_list). Your project is derived SERVER-SIDE (you pass no projectId) — an agent outside YOUR " +
+          "project resolves as not-found, same scoping as worker_list/agent_list. Error if unknown or an " +
+          "ambiguous prefix (the error names the candidate ids).",
         inputSchema: { agentId: z.string() },
       },
       async ({ agentId }) => {
         const projectId = db.getSession(managerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
         const agents = db.listAgents(projectId);
+        const withResolvedFlags = (a: (typeof agents)[number]) => {
+          const resolved = resolveProfile(a, a.profileId ? db.getProfile(a.profileId) : undefined);
+          return {
+            ...a,
+            browserTesting: resolved.browserTesting,
+            documentConversion: resolved.documentConversion,
+            restrictedTools: resolved.restrictedTools,
+          };
+        };
         const exact = agents.find((a) => a.id === agentId);
-        if (exact) return ok(exact);
+        if (exact) return ok(withResolvedFlags(exact));
         const r = resolveIdPrefix(agents, agentId);
-        if (r.kind === "found") return ok(r.record);
+        if (r.kind === "found") return ok(withResolvedFlags(r.record));
         if (r.kind === "ambiguous") {
           return ok({ error: `ambiguous agent id-prefix '${agentId}' — it matches ${r.ids.join(", ")}; pass more characters or the full id` });
         }

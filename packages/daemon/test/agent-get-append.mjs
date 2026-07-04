@@ -13,7 +13,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (3) agent_update's `appendToStartupPrompt` CONCATENATES onto the existing prompt (blank-line joined),
 //       and appends bare (no leading blank line) when the existing prompt is empty;
 //   (4) agent_update's plain `startupPrompt` full-replace still works UNCHANGED (regression);
-//   (5) passing BOTH `startupPrompt` and `appendToStartupPrompt` in one call is REJECTED with NO write.
+//   (5) passing BOTH `startupPrompt` and `appendToStartupPrompt` in one call is REJECTED with NO write;
+//   (6) agent_get AND agent_list surface the RESOLVED browserTesting/documentConversion/restrictedTools
+//       flags (Auditor finding 64430a50): an agent bound to a browser profile shows true/true/false;
+//       a profile-less agent backstops to false/false/false — matching resolveProfile exactly.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/agent-get-append.mjs
 import fs from "node:fs";
@@ -57,6 +60,14 @@ db.insertAgent({ id: ID_DUP_A, projectId: "pMine", name: "Alpha", startupPrompt:
 db.insertAgent({ id: ID_DUP_B, projectId: "pMine", name: "Bravo", startupPrompt: "B", position: 2, profileId: null });
 db.insertAgent({ id: "aEmpty", projectId: "pMine", name: "Empty", startupPrompt: "", position: 3, profileId: null });
 db.insertAgent({ id: ID_OTHER, projectId: "pOther", name: "Foreign", startupPrompt: "OTHER PROJECT PROMPT", position: 0, profileId: null });
+
+// A browser-capable profile + an agent bound to it, vs. the profile-less agents above (ID_SOLO etc.).
+db.insertProfile({
+  id: "profBrowser", name: "Web Designer", role: null, description: "browser rig", allowDelta: [],
+  skills: null, model: null, icon: null, browserTesting: true, documentConversion: false, restrictedTools: false,
+});
+const ID_BROWSER = "b0000001-0000-4000-8000-000000000007";
+db.insertAgent({ id: ID_BROWSER, projectId: "pMine", name: "Browsy", startupPrompt: "BROWSER PROMPT", position: 4, profileId: "profBrowser" });
 
 db.insertSession({
   id: "M", projectId: "pMine", agentId: ID_SOLO, engineSessionId: null, title: null, cwd: tmpHome,
@@ -114,12 +125,28 @@ try {
   check("(5) passing BOTH startupPrompt and appendToStartupPrompt is REJECTED",
     typeof both.error === "string" && both.error.includes("not both"));
   check("(5) the rejected call made NO write", db.getAgent(ID_SOLO).startupPrompt === before);
+
+  // ===================== (6) resolved capability flags on agent_get + agent_list =====================
+  const gBrowser = await call("agent_get", { agentId: ID_BROWSER });
+  check("(6) agent_get on a browser-profile agent resolves browserTesting:true",
+    gBrowser.browserTesting === true && gBrowser.documentConversion === false && gBrowser.restrictedTools === false);
+  const gPlain = await call("agent_get", { agentId: ID_DUP_A });
+  check("(6) agent_get on a profile-less agent backstops all flags to false",
+    gPlain.browserTesting === false && gPlain.documentConversion === false && gPlain.restrictedTools === false);
+
+  const list = await call("agent_list", {});
+  const lBrowser = list.find((a) => a.id === ID_BROWSER);
+  const lPlain = list.find((a) => a.id === ID_DUP_A);
+  check("(6) agent_list on a browser-profile agent resolves browserTesting:true",
+    lBrowser?.browserTesting === true && lBrowser?.documentConversion === false && lBrowser?.restrictedTools === false);
+  check("(6) agent_list on a profile-less agent backstops all flags to false",
+    lPlain?.browserTesting === false && lPlain?.documentConversion === false && lPlain?.restrictedTools === false);
 } finally {
   db.close();
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle) */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — agent_get returns the full record for an exact id / unambiguous prefix, errors on ambiguous/unknown/cross-project; agent_update's appendToStartupPrompt concatenates (bare when empty), plain startupPrompt still fully replaces, and passing both is rejected with no write."
+  ? "\n✅ ALL PASS — agent_get returns the full record for an exact id / unambiguous prefix, errors on ambiguous/unknown/cross-project; agent_update's appendToStartupPrompt concatenates (bare when empty), plain startupPrompt still fully replaces, passing both is rejected with no write, and agent_get/agent_list surface the resolved browserTesting/documentConversion/restrictedTools flags."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
