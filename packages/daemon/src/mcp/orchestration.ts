@@ -772,7 +772,11 @@ export class OrchestrationMcpRouter {
           "Loom REBUILDS FIRST: if the build fails it does NOT restart and returns the error (stays up — fix it " +
           "and retry). On a green build the daemon restarts: your pty and your live workers' ptys are dropped, " +
           "then you are AUTOMATICALLY resumed (your live workers too) with a note once it's back. Returns " +
-          "{restarting:true} on success, or {restarting:false, error} if unsupervised / build failed.",
+          "{restarting:true} on success, or {restarting:false, error} if unsupervised / build failed. If the " +
+          "deploy going live also touches scripts/daemon-supervisor.mjs (the OUTER process that spawned this " +
+          "daemon and is NOT re-execed by this restart), the success result additionally carries " +
+          "{supervisorChanged:true, supervisorWarning} — those lines are silently inert until a human does a " +
+          "manual `pnpm daemon:stable`; never report that part of the change as fully live.",
         inputSchema: { reason: z.string() },
       },
       async ({ reason }) => {

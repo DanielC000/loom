@@ -27,7 +27,7 @@ import { buildFramedMemoryRecall } from "../companion/memory-recall.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
-import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
+import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, supervisorScriptChangedSince, SUPERVISOR_CHANGED_WARNING, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
 import { RESUME_NUDGE_TAIL } from "../orchestration/resume-nudge.js";
@@ -1028,7 +1028,7 @@ export class SessionService {
    * the manager running to fix it, instead of exiting into a daemon that won't boot. On a green build
    * it records intent and exits with RESTART_EXIT_CODE; the supervisor relaunches.
    */
-  async requestDaemonRestart(managerSessionId: string, reason: string): Promise<{ restarting: boolean; error?: string }> {
+  async requestDaemonRestart(managerSessionId: string, reason: string): Promise<{ restarting: boolean; error?: string; supervisorChanged?: boolean; supervisorWarning?: string }> {
     const mgr = this.db.getSession(managerSessionId);
     if (!mgr || mgr.role !== "manager") throw new Error("only a manager can restart the daemon");
     if (!isSupervised()) {
@@ -1038,6 +1038,13 @@ export class SessionService {
     if (build.code !== 0) {
       return { restarting: false, error: `daemon build failed — NOT restarting (your code stays un-deployed but the daemon stays up). Fix and retry:\n${build.tail}` };
     }
+    // Best-effort advisory: does the diff going live touch the outer supervisor script? daemon_restart
+    // re-execs only the daemon process, never the supervisor that spawned it, so a change there is
+    // silently inert until a manual `pnpm daemon:stable` — flag it now so an agent never reports the
+    // deploy fully live when part of it isn't. A detection failure (git unavailable/timeout) degrades
+    // to `false`, never blocking the restart itself.
+    const bootTime = new Date(Date.now() - process.uptime() * 1000);
+    const supervisorChanged = await supervisorScriptChangedSince(bootTime);
     // A restart is the riskiest moment (a bad merge that just built clean can still wedge boot) — snapshot
     // the DB before we exit, after the green build. Best-effort: takeBackup never throws, so a backup
     // failure can NEVER block the restart.
@@ -1088,7 +1095,9 @@ export class SessionService {
     // Exit AFTER this MCP response flushes; the pty (incl. this manager) dies with the process, the
     // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent.
     setTimeout(() => process.exit(RESTART_EXIT_CODE), 300);
-    return { restarting: true };
+    return supervisorChanged
+      ? { restarting: true, supervisorChanged: true, supervisorWarning: SUPERVISOR_CHANGED_WARNING }
+      : { restarting: true };
   }
 
   /**

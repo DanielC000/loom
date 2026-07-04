@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { simpleGit } from "simple-git";
 import type { SessionRole } from "@loom/shared";
 import { LOOM_HOME } from "../paths.js";
 import { writeJsonAtomic } from "../pty/claude-config.js";
@@ -310,3 +311,46 @@ export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail:
     return { code: 0, tail: lastOut.trim().slice(-1500) };
   })();
 }
+
+/** The one file daemon_restart cannot make live itself — see {@link supervisorScriptChangedSince}. */
+export const SUPERVISOR_SCRIPT_REL_PATH = "scripts/daemon-supervisor.mjs";
+
+/** Bound the deploy-time supervisor-diff check so a hung/slow git call can't wedge the restart. */
+const SUPERVISOR_CHECK_TIMEOUT_MS = 10_000;
+
+/** Injectable git seam for {@link supervisorScriptChangedSince} — a hermetic test swaps in a fake
+ * `git log` so it can assert the detection logic without a real repo/spawn. */
+export interface SupervisorChangeDeps {
+  gitLogSince?: (root: string, sinceIso: string, file: string) => Promise<string>;
+}
+
+async function defaultGitLogSince(root: string, sinceIso: string, file: string): Promise<string> {
+  const git = simpleGit(root, { timeout: { block: SUPERVISOR_CHECK_TIMEOUT_MS } }).env({ ...process.env, GIT_TERMINAL_PROMPT: "0" });
+  return git.raw(["log", `--since=${sinceIso}`, "--format=%H", "--", file]);
+}
+
+/**
+ * Whether the deploy about to go live touches `scripts/daemon-supervisor.mjs` — the daemon_restart
+ * path (install → buildDaemon → relaunch) re-execs the DAEMON but NOT the outer supervisor process
+ * that spawned it, so a committed change to that script (or its launch env — the env is set INSIDE
+ * this script, e.g. a `UV_THREADPOOL_SIZE` bump, so watching the file covers the env case too, no
+ * separate env-diff mechanism needed) is silently inert until a human does a manual `pnpm
+ * daemon:stable`. Scope: everything committed since `bootTime` — a daemon only ever loses its
+ * in-memory code on a restart, so "since this process booted" IS "since the last deploy"; no separate
+ * last-deployed-SHA bookkeeping is needed. BEST-EFFORT + BOUNDED + NEVER throws: a git failure (no
+ * repo, git unavailable, timeout) degrades to `false` — this is an ADVISORY warning only, so an
+ * inability to check must never block the restart itself.
+ */
+export async function supervisorScriptChangedSince(bootTime: Date, deps: SupervisorChangeDeps = {}): Promise<boolean> {
+  try {
+    const log = deps.gitLogSince ?? defaultGitLogSince;
+    const out = await log(repoRoot(), bootTime.toISOString(), SUPERVISOR_SCRIPT_REL_PATH);
+    return out.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Advisory message surfaced on `daemon_restart`'s result when {@link supervisorScriptChangedSince} is true. */
+export const SUPERVISOR_CHANGED_WARNING =
+  `this deploy modifies the supervisor (${SUPERVISOR_SCRIPT_REL_PATH}); a manual \`pnpm daemon:stable\` restart is required for those lines to take effect.`;
