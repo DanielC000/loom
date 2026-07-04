@@ -109,17 +109,33 @@ const main = async () => {
     process.env.LOOM_TRUST_LOCK_MS = "500";
     const projB = path.join(root, "bounded-proj");
 
+    // Calibrate ambient scheduler pressure RIGHT NOW using the SAME primitive the lock's retry
+    // loop parks on (Atomics.wait on a nominal 50ms sleep). Under CPU contention (e.g. this
+    // hermetic suite running alongside the web e2e suite) the OS may not wake this thread anywhere
+    // near on time; measuring that live gives us how much slack THIS run actually needs, instead of
+    // guessing a fixed number that the next, more-loaded run can still blow through.
+    const calibT0 = performance.now();
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    const calibDt = performance.now() - calibT0;
+    const overshoot = Math.max(1, calibDt / 50); // 1 = no contention observed; >1 scales with it
+
     const t0 = performance.now(); // MONOTONIC (not Date.now): a wall-clock forward step under load can't inflate dt
     ensureTrusted(projB); // must NOT hang on the held lock
     const dt = performance.now() - t0;
 
-    // The bound only proves "bounded, no hang" (it must sit above the 500ms timeout, since by
-    // design this waits the held lock out then degrades). Kept generous — the ORDER-OF-MAGNITUDE
-    // bound (6× the 500ms timeout) so a loaded machine's sleep overshoot can't flip it, yet a real
-    // hang (which would wait a full lock-wait ≫3s or never return) still trips it. The exact
-    // wall-clock value is not what's under test. (Was a flaky Date.now()-measured dt < 500 against
-    // a 500ms timeout — bound == timeout, so load flipped it: observed 505ms.)
-    check(`(b) held lock → ensureTrusted returns bounded (${dt.toFixed(1)}ms, timeout 500ms)`, dt < 3000);
+    // LOAD-INSENSITIVE bound — NOT another fixed-ms guess. The prior fix bumped 500ms→3000ms and
+    // it still flaked under combined suite+e2e contention, because any FIXED ceiling is just a
+    // guess about how loaded the machine could get, and a heavier run always beats a bigger guess.
+    // ensureTrusted's retry loop parks in ~10 chunks of the SAME 50ms Atomics.wait we just
+    // calibrated above, so its worst-case wall time scales with the SAME ambient overshoot factor
+    // as `calibDt` — multiplying the 500ms timeout by that just-measured factor (plus a 3x margin
+    // for variance between the two measurements) tracks however loaded THIS run's machine actually
+    // is, rather than a static guess of how loaded it could get. A genuine hang (e.g. a regression
+    // that waits forever instead of degrading) does not merely overshoot proportionally to ambient
+    // scheduler pressure — it never returns — so it still trips this bound (or the test file's own
+    // 120s runner timeout) regardless of how generous the load-scaled ceiling becomes.
+    const bound = 500 * overshoot * 3;
+    check(`(b) held lock → ensureTrusted returns bounded (${dt.toFixed(1)}ms, bound ${bound.toFixed(0)}ms @ ${overshoot.toFixed(2)}x ambient load)`, dt < bound);
     check("(b) held lock → ensureTrusted still wrote best-effort (degrades to today's behavior)", trusted(isoJson, keyFor(projB)));
     try { fs.rmSync(lockPath); } catch { /* the held lock may have been treated stale & broken */ }
     delete process.env.CLAUDE_CONFIG_DIR;
