@@ -81,7 +81,7 @@ try {
   check("(3) pure: block carries the absolute repoPath", composed.includes("/abs/repo"));
   check("(3) pure: block carries the absolute vaultPath", composed.includes("/abs/vault"));
   check("(3) pure: block header present", composed.includes("## Where things live"));
-  check("(3) pure: block carries the fully-resolved Resume doc line", composed.includes("**Resume doc:**") && composed.includes(path.join("/abs/vault", "Projects", "Demo", "Orchestrator Log.md")));
+  check("(3) pure: block carries the fully-resolved Resume doc line (vaultPath is ALREADY the project's vault dir — NOT doubled with Projects/<name>)", composed.includes("**Resume doc:**") && composed.includes(path.join("/abs/vault", "Orchestrator Log.md")) && !composed.includes(path.join("/abs/vault", "Projects", "Demo")));
   check("(3) pure: the agent's OWN prompt is preserved AFTER the block", composed.includes("DOCTRINE_BODY") && composed.indexOf("Where things live") < composed.indexOf("DOCTRINE_BODY"));
   check("(3) pure: instructs never to Glob", /never Glob/i.test(composed));
   const blockOnly = composeManagerStartupPrompt(undefined, { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" });
@@ -93,12 +93,14 @@ try {
   // The bug: managers reconstruct the path from memory and mis-spell the vault root ("Obsidian\Vault" vs the
   // real "Obsidian Vault" with a space), then fall back to the forbidden Glob. The fix builds it server-side
   // via path.join, so a space round-trips. Prove it by creating the file on disk and matching the emitted path.
-  const spaceVaultRoot = path.join(os.tmpdir(), `loom-mctxblk-spacevault-${Date.now()}`, "Obsidian Vault");
+  // vaultPath is ALREADY the project's vault dir (e.g. ".../Obsidian Vault/Projects/Fire Studio") — it is
+  // NOT the vault root, so the resume doc must NOT re-append "Projects/<name>" on top of it.
   const spaceProjectName = "Fire Studio"; // a project name that ALSO contains a space
-  const realResumeDoc = path.join(spaceVaultRoot, "Projects", spaceProjectName, "Orchestrator Log.md");
-  fs.mkdirSync(path.dirname(realResumeDoc), { recursive: true });
+  const spaceVaultDir = path.join(os.tmpdir(), `loom-mctxblk-spacevault-${Date.now()}`, "Obsidian Vault", "Projects", spaceProjectName);
+  const realResumeDoc = path.join(spaceVaultDir, "Orchestrator Log.md");
+  fs.mkdirSync(spaceVaultDir, { recursive: true });
   fs.writeFileSync(realResumeDoc, "# Orchestrator Log\n");
-  const spaceComposed = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: spaceVaultRoot, name: spaceProjectName });
+  const spaceComposed = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: spaceVaultDir, name: spaceProjectName });
   check("(3b) space-in-vault: emitted resume-doc path is the EXACT real on-disk path", spaceComposed.includes(realResumeDoc));
   check("(3b) space-in-vault: that emitted path actually exists on disk (it's the real file)", fs.existsSync(realResumeDoc) && spaceComposed.includes(realResumeDoc));
   check("(3b) space-in-vault: the space in the vault folder is PRESERVED (not collapsed/escaped)", spaceComposed.includes("Obsidian Vault"));
@@ -110,7 +112,7 @@ try {
   check("(1) manager spawn opts.startupPrompt contains the absolute repoPath", oM?.startupPrompt?.includes(repo));
   check("(1) manager spawn opts.startupPrompt contains the absolute vaultPath", oM?.startupPrompt?.includes(vault));
   check("(1) manager spawn opts.startupPrompt carries the 'Where things live' block", oM?.startupPrompt?.includes("## Where things live"));
-  check("(1) manager spawn opts.startupPrompt carries the resolved resume-doc path (vaultPath + project name)", oM?.startupPrompt?.includes(path.join(vault, "Projects", "MProj", "Orchestrator Log.md")));
+  check("(1) manager spawn opts.startupPrompt carries the resolved resume-doc path (vaultPath is already the project's vault dir — not doubled)", oM?.startupPrompt?.includes(path.join(vault, "Orchestrator Log.md")));
   check("(1) manager spawn preserves the agent's OWN doctrine after the block", oM?.startupPrompt?.includes("AGENT_MGR_DOCTRINE"));
   check("(1) manager session is live + role manager", db.getSession(sM.id).processState === "live" && oM?.role === "manager");
 

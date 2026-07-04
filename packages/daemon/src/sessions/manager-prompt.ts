@@ -13,21 +13,23 @@ import path from "node:path";
  * every worker/run/plain/platform/auditor spawn byte-stream is unchanged.
  *
  * The block emits the resume doc as a FULLY-RESOLVED absolute path, built SERVER-SIDE from the resolved
- * `vaultPath` + project `name` via the SAME `path.join` the daemon uses for the vault (so a vault folder
- * with a SPACE — `Obsidian Vault`, not `Obsidian\Vault` — resolves correctly). The agent Reads it
- * verbatim with zero derivation, instead of reconstructing `<vaultRoot>/Projects/<Project>/Orchestrator
- * Log.md` from memory and mis-spelling the vault root (the bug that drove the forbidden Glob fallback).
+ * `vaultPath` via the SAME `path.join` the daemon uses for the vault (so a vault folder with a SPACE —
+ * `Obsidian Vault`, not `Obsidian\Vault` — resolves correctly). `vaultPath` IS the project's vault
+ * directory (e.g. `.../Obsidian Vault/Projects/Loom`) — NOT the vault root — so the resume doc is just
+ * `vaultPath/Orchestrator Log.md`. The agent Reads it verbatim with zero derivation, instead of
+ * reconstructing the path from memory and mis-spelling the vault root (the bug that drove the forbidden
+ * Glob fallback).
  */
 export function composeManagerStartupPrompt(
   startupPrompt: string | undefined,
   loc: { repoPath: string; vaultPath: string; name: string },
 ): string {
   // Same path-join the daemon uses for the vault (handles spaces correctly — no string concatenation).
-  const resumeDoc = path.join(loc.vaultPath, "Projects", loc.name, "Orchestrator Log.md");
+  const resumeDoc = path.join(loc.vaultPath, "Orchestrator Log.md");
   const block =
     "## Where things live (this project's absolute paths)\n" +
     `- **Repo root (your cwd):** \`${loc.repoPath}\`\n` +
-    `- **Vault root:** \`${loc.vaultPath}\`\n` +
+    `- **Project vault dir:** \`${loc.vaultPath}\`\n` +
     `- **Resume doc:** \`${resumeDoc}\`\n\n` +
     "Read project files by ABSOLUTE path from these roots — never Glob from your home directory " +
     "for them (a broad Glob hits the search timeout). Read your resume doc from the exact absolute " +
