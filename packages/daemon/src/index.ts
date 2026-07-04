@@ -455,8 +455,13 @@ async function main(): Promise<void> {
   // fire-and-forget instead of gating the port bind. A merge briefly showing un-finalized on the board
   // for the run's duration is a self-healing cosmetic cost, not a correctness one.
   void sessions.reconcileOrchestrationOnBoot(protectedSessionIds).then((reconciled) => {
-    if (reconciled.mergesFinished || reconciled.mergesFailed || reconciled.staleMergesResolved || reconciled.worktreesPruned || reconciled.worktreesKept || reconciled.worktreesNeedsHuman) {
-      console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${reconciled.mergesFailed} failed (retry next boot), resolved ${reconciled.staleMergesResolved} branch-gone dangling merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s) (a wedged one is retried, not skipped, until it clears), kept ${reconciled.worktreesKept} holding unmerged/uncommitted work, gave up on ${reconciled.worktreesNeedsHuman} worktree(s) wedged too long (needs a human)`);
+    // worktreesPruned counts only an ACTUAL removal (task 8e5a7a5e) — a boot pass whose only activity is
+    // retrying an already-wedged worktree (still held, not yet actually removed) would otherwise leave
+    // every one of these counters at 0 and silently skip this summary line, so worktreesStillWedged is
+    // included in the gate (it's reported separately below, not folded into the "pruned" wording, which
+    // means something narrower now: an ACTUAL removal, not merely a retried attempt).
+    if (reconciled.mergesFinished || reconciled.mergesFailed || reconciled.staleMergesResolved || reconciled.worktreesPruned || reconciled.worktreesKept || reconciled.worktreesNeedsHuman || reconciled.worktreesStillWedged) {
+      console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${reconciled.mergesFailed} failed (retry next boot), resolved ${reconciled.staleMergesResolved} branch-gone dangling merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s), ${reconciled.worktreesStillWedged} still wedged (retried, not skipped, until it clears), kept ${reconciled.worktreesKept} holding unmerged/uncommitted work, gave up on ${reconciled.worktreesNeedsHuman} worktree(s) wedged too long (needs a human)`);
     }
   }).catch((err) => {
     console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);

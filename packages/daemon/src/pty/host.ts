@@ -1125,6 +1125,216 @@ export function reapOrphanedDescendants(rootPid: number): void {
 }
 
 /**
+ * One live OS process, as far as {@link reapProcessesRootedInWorktree} needs to know about it. Any field
+ * the platform can't supply is `null` (e.g. POSIX gives no separate executable-path-vs-cwd distinction for
+ * a gone/permission-denied pid; win32's CIM query gives no cwd at all) — the caller ORs across whichever
+ * fields ARE populated, so a partial read still matches.
+ */
+export interface WorktreeProcess {
+  pid: number;
+  exePath: string | null;
+  cwd: string | null;
+  commandLine: string | null;
+}
+
+/** Injectable process lister for {@link reapProcessesRootedInWorktree} (defaults to the real OS
+ *  enumerator). Takes the same `timeoutMs` the caller is bounding by, so an enumerator that itself spawns
+ *  a helper process (win32) can bound + kill that helper on timeout rather than merely being raced and
+ *  abandoned by an outer wrapper — see {@link enumerateProcessesWin32}. */
+export type ProcessEnumerator = (timeoutMs: number) => Promise<WorktreeProcess[]>;
+/** Injectable process killer for {@link reapProcessesRootedInWorktree} (defaults to a real OS kill). */
+export type ProcessKiller = (pid: number) => void;
+
+/** Normalize a path for substring matching: backslashes → forward slashes, lowercased, no trailing slash. */
+function normalizePathForMatch(p: string): string {
+  return p.replace(/\\/g, "/").toLowerCase().replace(/\/+$/, "");
+}
+
+/**
+ * Is `proc` rooted under `worktreePath` — by executable path, cwd, OR command line? This is the
+ * SAFETY-CRITICAL predicate: {@link reapProcessesRootedInWorktree} kills only what this returns true for,
+ * so a false positive here would kill an unrelated (possibly live) process. Guards against a PREFIX
+ * collision (worktree `…/worktrees/abc` must NOT match a process rooted in a SIBLING `…/worktrees/abcdef`
+ * — worktree dirs are keyed by a 12-hex task-hash, so this is a defense-in-depth belt, not a load-bearing
+ * assumption) by requiring the match to land on a path-segment boundary: the candidate string must EQUAL
+ * the normalized worktree path or contain it immediately followed by `/`. Pure (no I/O) — unit-testable
+ * without spawning anything.
+ */
+export function processRootedInWorktree(proc: WorktreeProcess, worktreePath: string): boolean {
+  const target = normalizePathForMatch(worktreePath);
+  const targetWithSep = `${target}/`;
+  const matches = (s: string | null): boolean => {
+    if (!s) return false;
+    const n = normalizePathForMatch(s);
+    return n === target || n.includes(targetWithSep);
+  };
+  return matches(proc.exePath) || matches(proc.cwd) || matches(proc.commandLine);
+}
+
+/** Real POSIX process enumerator: walk `/proc/<pid>` reading `exe`/`cwd` (symlinks) and `cmdline` (NUL-
+ *  joined argv). Any per-pid read failure (permission denied, or the pid exited mid-scan) is swallowed —
+ *  that pid is simply reported with whatever fields DID resolve, or omitted if none did. */
+async function enumerateProcessesPosix(_timeoutMs: number): Promise<WorktreeProcess[]> {
+  let entries: string[];
+  try {
+    entries = await fs.promises.readdir("/proc");
+  } catch {
+    return [];
+  }
+  const procs: WorktreeProcess[] = [];
+  await Promise.all(entries.filter((e) => /^\d+$/.test(e)).map(async (pidStr) => {
+    let exePath: string | null = null;
+    let cwd: string | null = null;
+    let commandLine: string | null = null;
+    try { exePath = await fs.promises.readlink(`/proc/${pidStr}/exe`); } catch { /* gone/denied */ }
+    try { cwd = await fs.promises.readlink(`/proc/${pidStr}/cwd`); } catch { /* gone/denied */ }
+    try {
+      const raw = await fs.promises.readFile(`/proc/${pidStr}/cmdline`, "utf8");
+      const joined = raw.split("\0").filter(Boolean).join(" ");
+      if (joined) commandLine = joined;
+    } catch { /* gone/denied */ }
+    if (exePath || cwd || commandLine) procs.push({ pid: Number(pidStr), exePath, cwd, commandLine });
+  }));
+  return procs;
+}
+
+/** Matches any raw ASCII control character (0x00–0x1F) — built from char codes so the source never embeds
+ *  a literal control character itself. See its use in {@link enumerateProcessesWin32}. */
+const CONTROL_CHAR_RE = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}]`, "g");
+
+/** Real win32 process enumerator: `Get-CimInstance Win32_Process` for every live process's ExecutablePath
+ *  + CommandLine (win32 exposes no per-process cwd via CIM, so `cwd` is always null here — Path +
+ *  CommandLine is what the live-evidence investigation found sufficient: the esbuild service's OWN
+ *  executable runs FROM inside the worktree, and vite's global node.exe carries the worktree path in its
+ *  CommandLine). `@(...)` forces array context so ConvertTo-Json returns a JSON ARRAY even for 0 or 1
+ *  processes (bare `ConvertTo-Json` on a single object would otherwise emit a bare object, not `[obj]`).
+ *
+ *  SELF-BOUNDED: unlike the outer {@link withReapTimeout} race (which only stops the CALLER waiting, the
+ *  same limitation `withTimeout` in git/worktrees.ts documents for its own callers), this function arms
+ *  its OWN timer and force-kills the `powershell.exe` child it spawned if the query hasn't closed by
+ *  `timeoutMs` — so a wedged/slow CIM query (WMI contention, a loaded host) can never leave an orphaned
+ *  helper process behind, the same leak class this whole feature exists to prevent. */
+function enumerateProcessesWin32(timeoutMs: number): Promise<WorktreeProcess[]> {
+  return new Promise((resolve) => {
+    const cmd = spawnProcess("powershell.exe", [
+      "-NoProfile", "-NonInteractive", "-Command",
+      "@(Get-CimInstance Win32_Process | Select-Object ProcessId,ExecutablePath,CommandLine) | ConvertTo-Json -Compress",
+    ], { stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    let settled = false;
+    const finish = (result: WorktreeProcess[]) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      // Force-kill the query helper itself so a wedged CIM call never leaks an orphaned powershell.exe —
+      // mirrors killRemoveChild's win32 posture (taskkill /T /F, then a plain kill as belt-and-suspenders).
+      if (cmd.pid) { try { spawnProcess("taskkill", ["/pid", String(cmd.pid), "/T", "/F"], { stdio: "ignore" }); } catch { /* best effort */ } }
+      try { cmd.kill(); } catch { /* already gone */ }
+      finish([]);
+    }, timeoutMs);
+    cmd.stdout?.on("data", (d) => { out += d; });
+    cmd.on("error", () => finish([]));
+    cmd.on("close", () => {
+      try {
+        // `ConvertTo-Json` can leave a raw, UN-ESCAPED control character inside a `CommandLine` string
+        // (observed live against real running processes on this host), which makes strict `JSON.parse`
+        // throw on an otherwise well-formed array — silently zeroing out the WHOLE enumeration (the old
+        // catch-all below would swallow it and return no processes at all, not just skip the one bad
+        // entry). A JSON structural character is never below 0x20, so any raw control character can only
+        // ever be sitting inside a string VALUE — safe to blank out without corrupting the JSON shape.
+        const sanitized = out.replace(CONTROL_CHAR_RE, " ");
+        const parsed = JSON.parse(sanitized || "[]") as unknown;
+        const arr = Array.isArray(parsed) ? parsed : [parsed];
+        finish(arr.map((r: Record<string, unknown>) => ({
+          pid: Number(r["ProcessId"]),
+          exePath: (r["ExecutablePath"] as string | null) ?? null,
+          cwd: null,
+          commandLine: (r["CommandLine"] as string | null) ?? null,
+        })));
+      } catch {
+        finish([]);
+      }
+    });
+  });
+}
+
+/** Real process killer: `taskkill /pid <pid> /T /F` on win32 (kills any subtree the survivor itself
+ *  spawned too), `SIGKILL` on posix — mirrors {@link killRemoveChild}'s posture (unconditional, immediate,
+ *  best-effort — an already-gone pid is a silent no-op). */
+function killProcessById(pid: number): void {
+  if (process.platform === "win32") {
+    try { spawnProcess("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" }); } catch { /* best effort */ }
+  }
+  try { process.kill(pid, "SIGKILL"); } catch { /* already gone / no permission */ }
+}
+
+/** Reject after `ms` — bounds {@link reapProcessesRootedInWorktree}'s enumerate step so a wedged/slow
+ *  helper (a hung `powershell.exe`, an unreadable `/proc`) can never block worktree teardown indefinitely. */
+function withReapTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`process enumeration exceeded ${ms}ms`)), ms);
+    p.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
+  });
+}
+
+/**
+ * THE PREVENTION for dangling worktrees (task 8e5a7a5e — live evidence 2026-07-03/04): before a worktree
+ * dir is removed, kill any OS process still ROOTED in it — by executable path, cwd, or command line (see
+ * {@link processRootedInWorktree}) — that {@link reapOrphanedDescendants}'s pty-tree walk MISSES because
+ * it detached/re-parented away from the pty's process tree entirely (an esbuild long-lived service
+ * process, a backgrounded vite dev-server, a lingering tsserver/watcher). Without this, such a survivor
+ * keeps a file handle open inside the worktree and the subsequent `removeWorktree` hits
+ * `ERROR_SHARING_VIOLATION` on Windows (the confirmed root cause of the owner's 8 wedged dead-leftover
+ * worktrees) — this closes the window BEFORE that removal is even attempted, rather than reacting to it.
+ *
+ * SAFETY (this function is the one new code path this task's mandatory Code-Reviewer pass exists for): the
+ * match is scoped to EXACTLY the one `worktreePath` the caller is about to tear down, at a path-segment
+ * boundary ({@link processRootedInWorktree} — no prefix-collision false-positive across sibling worktree
+ * dirs). It is the CALLER's responsibility to only ever invoke this with a worktree that is genuinely being
+ * removed (never a live/protected one) — every call site in SessionService (gcWorktreeDir, the single
+ * removal chokepoint shared by finalizeMerge, boot-reconcile Pass B, and the wedge-retry sweep) already
+ * upholds that invariant for `removeWorktree` itself, so wiring this in right before that same call inherits
+ * the same guarantee for free, without this function needing to know anything about sessions/liveness itself.
+ *
+ * BOUNDED + BEST-EFFORT: the enumerate step is time-boxed both by the outer {@link withReapTimeout} race
+ * AND, for the real win32 enumerator, by its OWN internal timer that force-kills its spawned helper (see
+ * {@link enumerateProcessesWin32}) — so a wedged query can never leak a helper process on top of failing
+ * to find its target. ANY failure (a missing OS tool, an enumeration timeout, a kill that errors) is
+ * swallowed — this must never throw or block teardown, mirroring every other best-effort helper in the
+ * worktree-removal path. Injectable via `deps` (enumerate/kill/timeoutMs) so a test can drive it with a
+ * fake process list instead of the real OS.
+ *
+ * SELF-EXCLUSION: the daemon's OWN pid (`process.pid`) is never a kill candidate, regardless of what
+ * `processRootedInWorktree` says — a defense-in-depth backstop against the (currently theoretical, but
+ * cheap-to-rule-out) case where the daemon's own cwd/exePath/commandLine happens to satisfy the match
+ * (e.g. a misconfigured LOOM_HOME nested under the very worktree being torn down). The task's own DoD
+ * requires this can never happen; this makes it structurally impossible rather than merely unlikely.
+ */
+export async function reapProcessesRootedInWorktree(
+  worktreePath: string,
+  deps: { enumerate?: ProcessEnumerator; kill?: ProcessKiller; timeoutMs?: number } = {},
+): Promise<{ killedPids: number[] }> {
+  const enumerate = deps.enumerate ?? (process.platform === "win32" ? enumerateProcessesWin32 : enumerateProcessesPosix);
+  const kill = deps.kill ?? killProcessById;
+  const timeoutMs = deps.timeoutMs ?? 10_000;
+  try {
+    const procs = await withReapTimeout(enumerate(timeoutMs), timeoutMs);
+    const killedPids: number[] = [];
+    for (const proc of procs) {
+      if (proc.pid === process.pid) continue; // NEVER the daemon's own process — see SELF-EXCLUSION above
+      if (!processRootedInWorktree(proc, worktreePath)) continue;
+      try { kill(proc.pid); killedPids.push(proc.pid); } catch { /* best effort */ }
+    }
+    return { killedPids };
+  } catch {
+    return { killedPids: [] }; // enumeration failed/timed out — best-effort, never throw past the caller
+  }
+}
+
+/**
  * Owns all interactive `claude` ptys. Independent of any browser — sessions live here.
  * Implements the spike-validated gate-free spawn recipe (acceptEdits + allowlist,
  * --strict-mcp-config WITH an explicit --mcp-config so the .mcp.json prompt never blocks,

@@ -11,7 +11,7 @@ import {
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode } from "../pty/host.js";
-import { modeAfterCyclesFromAcceptEdits } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
@@ -266,6 +266,14 @@ export class SessionService {
    */
   private readonly removeDirOverride: ((target: string, timeoutMs: number) => Promise<{ removed: boolean; killed: boolean }>) | undefined;
   /**
+   * Injectable seam for {@link reapProcessesRootedInWorktree} (task 8e5a7a5e — the dangling-worktree
+   * PREVENTION: kill an escaped build/dev-server process rooted in the worktree BEFORE the removal below
+   * even attempts to run). `undefined` in production ⇒ {@link gcWorktreeDir} falls back to the real OS
+   * process-enumerate-and-kill. Lets a test drive a deterministic fake process list through gcWorktreeDir
+   * without touching real OS processes.
+   */
+  private readonly reapWorktreeProcesses: ((worktreePath: string) => Promise<{ killedPids: number[] }>) | undefined;
+  /**
    * SLOW-retry policy for a wedged worktree (task dea6728e — the owner-directed refinement: "quarantine"
    * must not mean "dangles forever"). A wedge is usually eventually-resolvable (a held OS-indexer/
    * Defender-scan handle releases, or a pnpm-junction structure `rmdir` succeeds where `fs.rm` choked), so
@@ -273,8 +281,10 @@ export class SessionService {
    * rather than skipping it forever. Safe at ANY cadence because every retry is the SAME killable removal
    * (never a threadpool op, never able to hang a thread) — this is NOT bd9fc808's reverted 30s loop, both
    * because the removal itself can't leak AND because the cadence here is ~1000x slower. Only past
-   * {@link wedgeGiveUpAttempts}/{@link wedgeGiveUpMs} does a dir flip to `needsHuman` and stop retrying.
-   * All three are test-overridable (opts) so a test can prove the give-up bound without real days/attempts.
+   * {@link wedgeGiveUpAttempts} attempts OR {@link wedgeGiveUpMs} elapsed — WHICHEVER trips first; the
+   * default attempt count can be reached in well under the default 7-day window on a heavy restart
+   * cadence — does a dir flip to `needsHuman` and stop retrying. All three are test-overridable (opts) so
+   * a test can prove the give-up bound without real days/attempts.
    */
   private readonly wedgeSweepIntervalMs: number;
   private readonly wedgeGiveUpAttempts: number;
@@ -343,12 +353,14 @@ export class SessionService {
     opts?: {
       gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number; runTimeoutMs?: number;
       removeDir?: (target: string, timeoutMs: number) => Promise<{ removed: boolean; killed: boolean }>;
+      reapWorktreeProcesses?: (worktreePath: string) => Promise<{ killedPids: number[] }>;
       wedgeSweepIntervalMs?: number; wedgeGiveUpAttempts?: number; wedgeGiveUpMs?: number;
     },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
     this.provisionMs = opts?.provisionMs;
     this.removeDirOverride = opts?.removeDir;
+    this.reapWorktreeProcesses = opts?.reapWorktreeProcesses;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
     this.wedgeGiveUpMs = opts?.wedgeGiveUpMs ?? SessionService.DEFAULT_WEDGE_GIVE_UP_MS;
@@ -4063,12 +4075,28 @@ export class SessionService {
    * `rmdir` succeeds where the old `fs.rm` choked), so a dir that was wedged before is NOT skipped here —
    * it's retried, safely, because every attempt is the same killable removal (never a threadpool op).
    * On success, any wedge tracking for the path is cleared. On a fresh/repeat wedge, the attempt is
-   * recorded and — past {@link wedgeGiveUpAttempts}/{@link wedgeGiveUpMs} — flipped to `needsHuman` and
-   * loudly surfaced; short of that bound it's surfaced as "still wedged, retrying slowly" and the
-   * low-frequency background sweep is armed so it keeps getting retried even between boots.
+   * recorded and — past {@link wedgeGiveUpAttempts}/{@link wedgeGiveUpMs} (whichever of the two trips
+   * FIRST — a heavy restart cadence can rack up the attempt bound long before the elapsed-time one) —
+   * flipped to `needsHuman` and loudly surfaced; short of that bound it's surfaced as "still wedged,
+   * retrying slowly" and the low-frequency background sweep is armed so it keeps getting retried even
+   * between boots.
+   *
+   * BEFORE every removal attempt, sweeps and kills any OS process still ROOTED in `worktreePath` (task
+   * 8e5a7a5e — the dangling-worktree PREVENTION: an escaped esbuild service / vite dev-server holds a file
+   * handle open inside the dir and would make the removal below fail with `ERROR_SHARING_VIOLATION`, the
+   * confirmed root cause). See {@link reapProcessesRootedInWorktree} for the safety scoping — it only ever
+   * matches THIS `worktreePath`, so a caller that only ever reaches this method with a worktree it has
+   * already decided to discard (every call site here does) can never sweep a live/protected one.
    */
   private async gcWorktreeDir(repoPath: string, worktreePath: string): Promise<"removed" | "wedged" | "left-on-disk" | "needs-human-skip"> {
     if (this.db.getWedgedWorktree(worktreePath)?.needsHuman) return "needs-human-skip";
+    const reap = this.reapWorktreeProcesses ?? ((p: string) => reapProcessesRootedInWorktree(p));
+    try {
+      await reap(worktreePath);
+    } catch {
+      // Best-effort by construction (reapProcessesRootedInWorktree never throws), but stay defensive:
+      // an injected/broken seam must never abort the removal it's only meant to help along.
+    }
     const { removed, wedged } = await removeWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs, removeDir: this.removeDirOverride });
     if (removed) {
       this.db.clearWedgedWorktree(worktreePath);
@@ -4082,12 +4110,15 @@ export class SessionService {
         // eslint-disable-next-line no-console
         console.warn(`[worktree] ${worktreePath} has been wedged for ${Math.round(ageMs / 86_400_000)} day(s) across ${entry.attempts} attempt(s) — ` +
           `giving up automatic retry. Needs a human to investigate (reboot to force-release a stuck handle) and delete it manually.`);
-      } else {
-        // eslint-disable-next-line no-console
-        console.warn(`[worktree] ${worktreePath} still wedged (attempt ${entry.attempts}) — retrying slowly ` +
-          `(next: a later boot, or the background sweep in ≤${Math.round(this.wedgeSweepIntervalMs / 60_000)}min). Not abandoned.`);
-        this.armWedgeSweep();
+        // This IS the pass that crossed the give-up bound — report it as the give-up outcome directly
+        // (not "wedged") so the caller's aggregate counts it as a give-up on the SAME pass it happened,
+        // rather than under-counting it as one more ordinary retry.
+        return "needs-human-skip";
       }
+      // eslint-disable-next-line no-console
+      console.warn(`[worktree] ${worktreePath} still wedged (attempt ${entry.attempts}) — retrying slowly ` +
+        `(next: a later boot, or the background sweep in ≤${Math.round(this.wedgeSweepIntervalMs / 60_000)}min). Not abandoned.`);
+      this.armWedgeSweep();
       return "wedged";
     }
     return "left-on-disk";
@@ -4225,7 +4256,7 @@ export class SessionService {
    *     the branch here — any committed work stays on it and createWorktree re-attaches a fresh
    *     worktree to it on a re-task.
    */
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     const handledWorktrees = new Set<string>();
@@ -4331,7 +4362,10 @@ export class SessionService {
       // gitdir pruned" variant.
       if (!fs.existsSync(path.join(worktreePath, ".git"))) {
         const outcome = await this.gcWorktreeDir(project.repoPath, worktreePath).catch(() => "left-on-disk" as const);
-        if (outcome === "needs-human-skip") worktreesNeedsHuman++; else worktreesPruned++;
+        // Only an ACTUAL removal counts as pruned — "wedged"/"left-on-disk" is a retry-pending attempt,
+        // not a completed prune, and double-counting it here overstated the aggregate.
+        if (outcome === "needs-human-skip") worktreesNeedsHuman++;
+        else if (outcome === "removed") worktreesPruned++;
         continue;
       }
       if (await worktreeHasWork(project.repoPath, worktreePath, s.branch ?? null, "HEAD", { timeoutMs: this.gitOpMs })) {
@@ -4341,7 +4375,9 @@ export class SessionService {
         continue;
       }
       const outcome = await this.gcWorktreeDir(project.repoPath, worktreePath).catch(() => "left-on-disk" as const);
-      if (outcome === "needs-human-skip") worktreesNeedsHuman++; else worktreesPruned++;
+      // Only an ACTUAL removal counts as pruned — see the identical comment on the dead-leftover branch above.
+      if (outcome === "needs-human-skip") worktreesNeedsHuman++;
+      else if (outcome === "removed") worktreesPruned++;
     }
 
     // Surface what's still wedged-but-retryable (armWedgeSweep already fired per-entry above; this is the
@@ -4360,6 +4396,10 @@ export class SessionService {
         `needs a human to investigate + delete manually. Paths: ${paths.join(", ")}`);
     }
 
-    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman };
+    // Surfaced separately from worktreesPruned (task 8e5a7a5e nit fix: pruned now counts only an ACTUAL
+    // removal) so a boot pass whose only activity is retrying an already-wedged worktree — pruned=0,
+    // kept=0, needsHuman=0, no merges — doesn't read as "nothing happened" to a caller's summary log; see
+    // index.ts's boot-reconcile summary line, which gates on this alongside the other counters.
+    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length };
   }
 }

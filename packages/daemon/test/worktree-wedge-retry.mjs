@@ -4,10 +4,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // killable-removal mechanism proof: a worktree whose removal comes back KILLED (genuinely wedged, not a
 // clean reject) is tracked + RETRIED on a slow cadence (every boot-reconcile pass + the background
 // sweep) — NOT skipped forever — because removal is now killable, so retrying it can never leak a
-// thread or stick the daemon no matter how often it's attempted. Only past a LONG give-up bound does a
-// dir stop being retried (flipped to `needsHuman`, loudly surfaced). Also proves the CLEAN-reject case
-// is never tracked as wedged and gets removed once its handle "releases", and the plain db wedged-set
-// store (list/get/record/markNeedsHuman/clear) at the unit level.
+// thread or stick the daemon no matter how often it's attempted. Only past a LONG give-up bound (whichever
+// of the attempt-count or elapsed-time thresholds trips FIRST) does a dir stop being retried (flipped to
+// `needsHuman`, loudly surfaced, on the SAME pass that crosses the bound — task 8e5a7a5e nit fix). Also
+// proves the CLEAN-reject case is never tracked as wedged and gets removed once its handle "releases", the
+// plain db wedged-set store (list/get/record/markNeedsHuman/clear) at the unit level, and that
+// `worktreesPruned` counts only an ACTUAL removal — a still-wedged/left-on-disk outcome is neither pruned
+// nor given-up-on and increments neither aggregate counter (the other task 8e5a7a5e nit fix).
 //
 // REAL git on temp repos, NO claude + NO live daemon — drives reconcileOrchestrationOnBoot() and
 // sweepWedgedWorktreesOnce() directly against an isolated LOOM_HOME, injecting SessionService's
@@ -118,13 +121,15 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   check("(wedge) first pass ATTEMPTS the removal", removeDirCalls === 1);
   check("(wedge) worktree dir is LEFT ON DISK (killed, not removed)", fs.existsSync(W.worktreePath));
   check("(wedge) is now TRACKED as wedged, attempts:1, NOT needsHuman", db.getWedgedWorktree(W.worktreePath)?.attempts === 1 && db.getWedgedWorktree(W.worktreePath)?.needsHuman === false);
-  check("(wedge) first pass counts it as an attempt (worktreesPruned), NOT gave-up", r1.worktreesPruned === 1 && r1.worktreesNeedsHuman === 0);
+  // worktreesPruned counts only an ACTUAL removal (not merely an attempt) — a still-wedged dir increments
+  // neither counter (it's neither pruned nor given-up-on yet), just tracked in the wedged-set above.
+  check("(wedge) first pass attempted but did NOT actually prune (nothing removed yet), NOT gave-up", r1.worktreesPruned === 0 && r1.worktreesNeedsHuman === 0);
 
   // THE CORE REFINEMENT: a SECOND boot-reconcile pass RETRIES it (does NOT skip) — still wedged.
   const r2 = await sessions.reconcileOrchestrationOnBoot();
   check("(wedge) a SECOND pass RETRIES the removal (NOT skipped forever) — removeDir called again", removeDirCalls === 2);
   check("(wedge) attempts incremented to 2 on the retry", db.getWedgedWorktree(W.worktreePath)?.attempts === 2);
-  check("(wedge) second pass STILL counts it as an attempt, not a skip", r2.worktreesPruned === 1 && r2.worktreesNeedsHuman === 0);
+  check("(wedge) second pass STILL attempted but still not actually pruned, not a skip", r2.worktreesPruned === 0 && r2.worktreesNeedsHuman === 0);
 
   // Now simulate the handle releasing (the whole point: wedges are eventually resolvable). The NEXT
   // retry — via the background sweep, driven directly here rather than waiting on the real interval —
@@ -157,10 +162,16 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     wedgeGiveUpAttempts: GIVE_UP_ATTEMPTS,
   });
 
-  for (let i = 1; i <= GIVE_UP_ATTEMPTS; i++) {
+  // Every attempt is genuinely killed (never removed), so worktreesPruned stays 0 throughout — only the
+  // FINAL attempt (the one that crosses the give-up bound) should flip worktreesNeedsHuman, on that SAME
+  // pass (the nit-2 fix: the crossing pass reports needs-human-skip directly, not one more "wedged").
+  for (let i = 1; i < GIVE_UP_ATTEMPTS; i++) {
     const r = await sessions.reconcileOrchestrationOnBoot();
-    check(`(give-up) attempt ${i}/${GIVE_UP_ATTEMPTS}: still retried (not yet given up)`, r.worktreesNeedsHuman === 0 && r.worktreesPruned === 1);
+    check(`(give-up) attempt ${i}/${GIVE_UP_ATTEMPTS}: still retried (not yet given up), no prune, no give-up yet`, r.worktreesNeedsHuman === 0 && r.worktreesPruned === 0);
   }
+  const rCrossing = await sessions.reconcileOrchestrationOnBoot();
+  check(`(give-up) the pass that CROSSES the bound (attempt ${GIVE_UP_ATTEMPTS}) reports needsHuman on the SAME pass, not pruned`,
+    rCrossing.worktreesNeedsHuman === 1 && rCrossing.worktreesPruned === 0);
   check(`(give-up) exactly ${GIVE_UP_ATTEMPTS} removal attempts were made before giving up`, removeDirCalls === GIVE_UP_ATTEMPTS);
   check("(give-up) now flipped to needsHuman", db.getWedgedWorktree(G.worktreePath)?.needsHuman === true);
 

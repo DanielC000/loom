@@ -432,8 +432,11 @@ function killRemoveChild(child: ChildProcess): void {
  * This instead runs the removal in a SEPARATE OS PROCESS. A wedged handle blocks only that child, never
  * a daemon thread, and on timeout we FORCE-KILL it (`killRemoveChild`) — an OS-level TerminateProcess/
  * SIGKILL that works regardless of what the child is blocked on, unlike a threadpool task with no kill
- * primitive at all. A killed child releases everything it held; NEVER settles false, NEVER rejects, so
- * every path (found already-gone / removed / clean failure / killed) resolves within `timeoutMs`.
+ * primitive at all. A killed child releases everything it held, and every NORMAL path (found already-gone
+ * / removed / clean failure / killed) RESOLVES (never settles false-negative) within `timeoutMs` — the
+ * function is not designed to reject. (A synchronous throw from an injected `spawnChild` seam would still
+ * propagate as a rejection via the Promise executor; the real default spawn never throws synchronously,
+ * and callers already wrap this in a `.catch` for exactly that belt-and-suspenders reason.)
  */
 export function killableRemoveDir(
   target: string, timeoutMs: number, spawnChild: SpawnRemoveChild = defaultSpawnRemoveChild,
