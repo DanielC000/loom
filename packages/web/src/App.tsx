@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReviewPanel from "./pages/ReviewPanel";
 import SessionView from "./pages/SessionView";
 import { NAV_PAGES, useVisibleNavPages, type NavGroup } from "./nav";
-import { NavTab, Badge, Select, Button } from "./components/ui";
+import { NavTab, Badge, Button } from "./components/ui";
 import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
 import { api } from "./lib/api";
@@ -54,19 +54,94 @@ function Bell() {
 // Settings). Mission Control, Terminals and the other god-eye pages ignore it
 // — hence the quiet tooltip rather than hiding the control per route. Lives on the LEFT, right
 // after the logo, so the active scope reads before the destinations it scopes.
+//
+// A custom dropdown (not a native <select>) so it can MARK projects that currently have a live
+// session with the design system's live Dot — projects with ≥1 live session sort to the TOP and
+// carry a small phosphor dot + count; the rest follow below a hairline. Mirrors the MoreMenu
+// dropdown pattern in this file (useDismissable, Panel/borderStrong/token styling, zIndex).
 function ActiveProjectControl() {
   const { projectId, setProjectId, projects } = useActiveProject();
-  // Only work projects are selectable here — the reserved "Platform" home is excluded (it's reached via
-  // the Platform page, which renders its board directly), so the picker is a flat list of work projects.
+  const [open, setOpen] = useState(false);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const ref = useDismissable<HTMLDivElement>(open, () => setOpen(false));
+
+  // Reuse the fleet's shared session cache (Overview polls the same key) to know which projects have
+  // a live session right now — no new API surface. Exclude companions (assistant): a lone companion
+  // must never mark a project "active" (mirrors the Terminals dropdown/count exclusion, lib/sessions.ts).
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
+  const liveByProject = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const s of sessionsQ.data ?? []) {
+      if (s.role === "assistant") continue;
+      if (s.processState !== "live" && s.processState !== "starting") continue;
+      m.set(s.projectId, (m.get(s.projectId) ?? 0) + 1);
+    }
+    return m;
+  }, [sessionsQ.data]);
+
+  // Stable partition: projects with ≥1 live session first, the rest below. Each group keeps the
+  // provider's incoming order (no activity-keyed re-sort), so the list never reshuffles on a poll.
+  const { live: liveProjects, idle: idleProjects } = useMemo(() => {
+    const live = projects.filter((p) => (liveByProject.get(p.id) ?? 0) > 0);
+    const idle = projects.filter((p) => (liveByProject.get(p.id) ?? 0) === 0);
+    return { live, idle };
+  }, [projects, liveByProject]);
+
   const hasOptions = projects.length > 0;
+  const current = projects.find((p) => p.id === projectId);
+  const currentLive = current ? (liveByProject.get(current.id) ?? 0) : 0;
+
+  const renderItem = (p: (typeof projects)[number]) => {
+    const count = liveByProject.get(p.id) ?? 0;
+    const selected = p.id === projectId;
+    return (
+      <button key={p.id} role="option" aria-selected={selected}
+        onClick={() => { setProjectId(p.id); setOpen(false); }}
+        onMouseEnter={() => setHoveredId(p.id)} onMouseLeave={() => setHoveredId((h) => (h === p.id ? null : h))}
+        style={{ display: "inline-flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left",
+          background: hoveredId === p.id ? color.panel2 : "transparent", border: "none", cursor: "pointer",
+          color: selected ? color.phosphor : color.text, fontFamily: font.mono, fontSize: 13, padding: "6px 12px" }}>
+        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+        {count > 0 && (
+          <span title={`${count} live session${count === 1 ? "" : "s"}`}
+            style={{ display: "inline-flex", alignItems: "center", gap: 5, flex: "none", color: color.textDim, fontSize: 11 }}>
+            {count}
+            <Dot tone="phosphor" glow />
+          </span>
+        )}
+      </button>
+    );
+  };
+
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
       <span style={{ fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>Project</span>
-      <Select value={hasOptions ? projectId : ""} onChange={(e) => setProjectId(e.target.value)}
-        title="Scopes the project-scoped pages (marked with a dot). God-eye pages ignore this.">
-        {!hasOptions && <option value="">— none —</option>}
-        {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-      </Select>
+      <div ref={ref} style={{ position: "relative", display: "inline-flex" }}>
+        <button onClick={() => hasOptions && setOpen((o) => !o)} disabled={!hasOptions}
+          aria-haspopup="listbox" aria-expanded={open}
+          title="Scopes the project-scoped pages (marked with a dot). God-eye pages ignore this. A live-session dot marks projects with running work."
+          style={{ display: "inline-flex", alignItems: "center", gap: 7, maxWidth: 240,
+            background: color.panel2, color: hasOptions ? color.text : color.textMuted,
+            border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, padding: "4px 8px",
+            fontFamily: font.mono, fontSize: 13, cursor: hasOptions ? "pointer" : "default" }}>
+          {currentLive > 0 && <Dot tone="phosphor" glow />}
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {hasOptions ? (current?.name ?? "Select project") : "— none —"}
+          </span>
+          <span aria-hidden style={{ color: color.textMuted, fontSize: 11 }}>▾</span>
+        </button>
+        {open && hasOptions && (
+          <div role="listbox" style={{ position: "absolute", top: "100%", left: 0, marginTop: 6, zIndex: 30, minWidth: 220, maxWidth: 320,
+            background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, overflow: "hidden",
+            display: "flex", flexDirection: "column", padding: "4px 0", boxShadow: "0 6px 20px rgba(0,0,0,0.45)" }}>
+            {liveProjects.map(renderItem)}
+            {liveProjects.length > 0 && idleProjects.length > 0 && (
+              <div aria-hidden style={{ height: 1, background: color.border, margin: "4px 0" }} />
+            )}
+            {idleProjects.map(renderItem)}
+          </div>
+        )}
+      </div>
     </span>
   );
 }
