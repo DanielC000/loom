@@ -499,21 +499,47 @@ export class OrchestrationMcpRouter {
     // The fleet view — the manager's direct children as a compact list. Shared by worker_list and the
     // no-arg worker_status call (a manager's reflexive `worker_status({})` aliases to this rather than
     // throwing a schema-validation error).
-    const fleetView = () => db.listWorkers(managerSessionId).map((w) => ({
-      workerSessionId: w.id,
-      taskId: w.taskId ?? null,
-      processState: w.processState,
-      busy: w.busy,
-      branch: w.branch ?? null,
-      ctxInputTokens: w.ctxInputTokens ?? null,
-      model: w.model ?? null,
-      lastActivity: w.lastActivity,
-      ...reportedProjection(w.id),
-    }));
+    //
+    // CLIENT-TIMEOUT RESILIENCE (card fb8df559 Part 1): each real worker row gains a `pendingMerge`
+    // field (non-null while a worker_merge_confirm for it is still running its gate) — read-only, never
+    // consumed by this view. worker_list's TOP-LEVEL shape stays a BARE ARRAY (no breaking change): a
+    // pending worker_spawn has no worker row yet (inserted only once createWorktree resolves), so it's
+    // appended as an ADDITIVE PLACEHOLDER row instead — `workerSessionId:null`, `pendingSpawn` set,
+    // `processState:"starting"`, `reportedState:null`, `awaitingReview:false`, so an existing "count live
+    // workers" / "find one awaiting review" consumer skips it rather than miscounting a phantom worker.
+    const fleetView = () => {
+      const workers = db.listWorkers(managerSessionId).map((w) => ({
+        workerSessionId: w.id,
+        taskId: w.taskId ?? null,
+        processState: w.processState,
+        busy: w.busy,
+        branch: w.branch ?? null,
+        ctxInputTokens: w.ctxInputTokens ?? null,
+        model: w.model ?? null,
+        lastActivity: w.lastActivity,
+        pendingMerge: sessions.peekPendingMerge(w.id) ?? null,
+        ...reportedProjection(w.id),
+      }));
+      const pendingSpawns = sessions.listPendingSpawns(managerSessionId).map((op) => ({
+        workerSessionId: null,
+        taskId: op.taskId,
+        processState: "starting" as const,
+        busy: false,
+        branch: null,
+        ctxInputTokens: null,
+        model: null,
+        lastActivity: op.startedAt,
+        pendingMerge: null,
+        pendingSpawn: { opId: op.opId, startedAt: op.startedAt },
+        reportedState: null,
+        awaitingReview: false,
+      }));
+      return [...workers, ...pendingSpawns];
+    };
 
     server.registerTool(
       "worker_list",
-      { description: "List the workers you (this manager) have spawned — your direct children. `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged).", inputSchema: {} },
+      { description: "List the workers you (this manager) have spawned — your direct children. `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is still running its gate in the background — poll here or re-call worker_merge_confirm to fetch the result once ready. A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result.", inputSchema: {} },
       async () => ok(fleetView()),
     );
 
@@ -528,7 +554,7 @@ export class OrchestrationMcpRouter {
         if (!workerSessionId) return ok(fleetView());
         const w = db.getSession(workerSessionId);
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
-        return ok({ ...w, ...reportedProjection(w.id) });
+        return ok({ ...w, pendingMerge: sessions.peekPendingMerge(w.id) ?? null, ...reportedProjection(w.id) });
       },
     );
 
@@ -549,7 +575,7 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_spawn",
       {
-        description: "Spawn a worker on a task: creates an isolated git worktree + branch, starts a worker session in it, and moves the task to in_progress. agentId is REQUIRED and must be an explicit WORKER agent (e.g. Dev/Bugfix/QA/Docs) — NEVER your own manager agent. Spawning under a manager/platform-role agent is rejected. agentId accepts EITHER the agent's id OR its NAME/slug (resolved within your project; a bad value returns a 'did you mean' hint). taskId accepts EITHER the full id OR an unambiguous 8-char id-prefix (resolved within your project; an ambiguous prefix errors naming the candidate ids).",
+        description: "Spawn a worker on a task: creates an isolated git worktree + branch, starts a worker session in it, and moves the task to in_progress. agentId is REQUIRED and must be an explicit WORKER agent (e.g. Dev/Bugfix/QA/Docs) — NEVER your own manager agent. Spawning under a manager/platform-role agent is rejected. agentId accepts EITHER the agent's id OR its NAME/slug (resolved within your project; a bad value returns a 'did you mean' hint). taskId accepts EITHER the full id OR an unambiguous 8-char id-prefix (resolved within your project; an ambiguous prefix errors naming the candidate ids). CLIENT-TIMEOUT RESILIENT: a fast spawn returns {workerSessionId,branch,worktreePath} exactly as before; a slow one (worktree provisioning taking a while) instead returns {opId,status:\"pending\",taskId} — poll via worker_list (a placeholder row) or RE-CALL worker_spawn with the SAME taskId/agentId/kickoffPrompt (idempotent-retryable: it attaches to the SAME in-flight spawn rather than starting a second one, and never throws 'already in flight').",
         inputSchema: {
           taskId: z.string(),
           agentId: z.string(),
@@ -557,17 +583,23 @@ export class OrchestrationMcpRouter {
         },
       },
       async ({ taskId, agentId, kickoffPrompt }) => {
+        // A usage-limit refusal carries a STRUCTURED retry-after deadline (PL Auditor finding #7) so the
+        // manager can schedule a wake to it instead of guessing (and the daemon also auto-wakes it on
+        // hold-clear). Surface `retryAfter` alongside the message — NOT a bare string. spawnWorkerTracked
+        // never throws it synchronously (a slow/attached call resolves through the registry instead), so
+        // this is checked on BOTH the settled-failed result AND a defensive catch below.
+        const asUsageLimitOrMessage = (e: unknown) =>
+          e instanceof UsageLimitError ? { error: e.message, retryAfter: e.retryAfter } : { error: e instanceof Error ? e.message : String(e) };
         try {
-          const worker = await sessions.spawnWorker(managerSessionId, { taskId, agentId, kickoffPrompt });
+          const r = await sessions.spawnWorkerTracked(managerSessionId, { taskId, agentId, kickoffPrompt });
+          if (!r.settled) return ok({ opId: r.op.opId, status: "pending", taskId, note: "still spawning — poll worker_list (a pendingSpawn placeholder row) or re-call worker_spawn with the SAME taskId/agentId/kickoffPrompt to fetch the result once ready." });
+          if (!r.ok) return ok(asUsageLimitOrMessage(r.error));
+          const worker = r.value;
           return ok({ workerSessionId: worker.id, branch: worker.branch, worktreePath: worker.worktreePath });
         } catch (e) {
-          // A usage-limit refusal carries a STRUCTURED retry-after deadline (PL Auditor finding #7) so the
-          // manager can schedule a wake to it instead of guessing (and the daemon also auto-wakes it on
-          // hold-clear). Surface `retryAfter` alongside the message — NOT a bare string.
-          if (e instanceof UsageLimitError) return ok({ error: e.message, retryAfter: e.retryAfter });
           // Other refusals (paused / over-cap / bad task) stay a bare { error } string — same envelope as
           // the sibling lifecycle tools.
-          return ok({ error: (e as Error).message });
+          return ok(asUsageLimitOrMessage(e));
         }
       },
     );
@@ -715,12 +747,15 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_merge_confirm",
       {
-        description: "STEP 2: after reviewing, confirm the merge. Runs the build/DoD gate, and ONLY if green merges the branch as ONE squash commit, removes the worktree, and moves the task to done. The staged set is re-derived at confirm time (never a stale snapshot), so a valid +N-commit branch merges on the FIRST call. Fail-closed: a failed gate or a conflict leaves the repo untouched and the worktree retained. A genuine no-op is distinguishable via emptyKind: ALREADY_MERGED (branch already in main → finished idempotently, merged:true) vs STAGE_EMPTY_RETRY (no diff to merge → merged:false, worktree retained).",
+        description: "STEP 2: after reviewing, confirm the merge. Runs the build/DoD gate, and ONLY if green merges the branch as ONE squash commit, removes the worktree, and moves the task to done. The staged set is re-derived at confirm time (never a stale snapshot), so a valid +N-commit branch merges on the FIRST call. Fail-closed: a failed gate or a conflict leaves the repo untouched and the worktree retained. A genuine no-op is distinguishable via emptyKind: ALREADY_MERGED (branch already in main → finished idempotently, merged:true) vs STAGE_EMPTY_RETRY (no diff to merge → merged:false, worktree retained). CLIENT-TIMEOUT RESILIENT: a fast confirm returns {merged,...} exactly as before; a slow one (the gate genuinely takes a while) instead returns {opId,status:\"pending\",workerSessionId} — poll via worker_list (this worker's `pendingMerge` field) or RE-CALL worker_merge_confirm with the SAME workerSessionId (idempotent-retryable: it attaches to the SAME in-flight gate/merge rather than re-running it, and never throws 'already in flight').",
         inputSchema: { workerSessionId: z.string() },
       },
       async ({ workerSessionId }) => {
         try {
-          return ok(await sessions.confirmWorkerMerge(managerSessionId, workerSessionId));
+          const r = await sessions.confirmWorkerMergeTracked(managerSessionId, workerSessionId);
+          if (!r.settled) return ok({ opId: r.op.opId, status: "pending", workerSessionId, note: "gate/merge still running — poll worker_list (this worker's pendingMerge field) or re-call worker_merge_confirm with the SAME workerSessionId to fetch the result once ready." });
+          if (!r.ok) return ok({ error: r.error instanceof Error ? r.error.message : String(r.error) });
+          return ok(r.value);
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

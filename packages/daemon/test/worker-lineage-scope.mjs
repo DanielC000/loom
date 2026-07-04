@@ -81,6 +81,10 @@ const sessionsStub = {
     if (!w || w.parentSessionId !== managerSessionId) throw new Error("not your worker");
     return { delivered: true };
   },
+  // card fb8df559 Part 1: fleetView/worker_status now read these off `sessions` — no pending ops in this
+  // test, so read-only no-ops mirroring PendingOpRegistry's "nothing tracked" shape.
+  peekPendingMerge() { return undefined; },
+  listPendingSpawns() { return []; },
 };
 const router = new OrchestrationMcpRouter(db, /** @type {any} */ (sessionsStub));
 const server = router.buildServer("NEW", "manager");

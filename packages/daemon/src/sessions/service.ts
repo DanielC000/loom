@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { Ajv } from "ajv";
 import {
   resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY,
@@ -33,6 +32,8 @@ import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
 import { RESUME_NUDGE_TAIL } from "../orchestration/resume-nudge.js";
 import { nextFireAt } from "../orchestration/cron.js";
+import { runGateSequential } from "../orchestration/gate-runner.js";
+import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
@@ -42,6 +43,10 @@ import { resolveIdPrefix, looksLikeId, MIN_ID_PREFIX_LEN } from "../id-prefix.js
 /** Floor (1s) for any threaded git-op timeout — a sub-second misconfig must never make every git op
  *  fail-fast (mirrors GitWriter's GIT_TIMEOUT_FLOOR_MS). Applied where the resolved value is threaded. */
 const GIT_TIMEOUT_FLOOR_MS = 1_000;
+
+/** {@link SessionService.confirmWorkerMerge}'s settled result shape — named so it can be threaded
+ *  through {@link PendingOpRegistry} (card fb8df559 Part 1) without repeating the inline object type. */
+type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked" };
 
 /**
  * worker_set_mode's mode ALLOWLIST (card 610abe29) — the security boundary for `setWorkerMode`.
@@ -333,6 +338,19 @@ export class SessionService {
    * finally once the row is live (the liveHolder guard then owns exclusion) or on any failure.
    */
   private readonly inFlightSpawnTaskIds = new Set<string>();
+  /**
+   * CLIENT-TIMEOUT RESILIENCE registry (card fb8df559 Part 1) — a THIN OUTER layer around
+   * spawnWorker/confirmWorkerMerge (via {@link spawnWorkerTracked}/{@link confirmWorkerMergeTracked}),
+   * NOT a replacement for {@link inFlightSpawnTaskIds}/the merge gate's own internals, which stay
+   * completely untouched (so the existing hermetic tests that call spawnWorker/confirmWorkerMerge
+   * in-process keep working byte-identically). This registry only changes how the MCP tools
+   * worker_spawn/worker_merge_confirm DELIVER a result: a fast op still resolves synchronously; a slow
+   * one (a real multi-minute gate — Auditor b9515beb) degrades to a pending handle instead of the caller
+   * timing out with no way to tell whether it landed, and a RETRY attaches to the same in-flight op
+   * instead of racing a second real invocation. Keyed `spawn:${taskId}` (raw, as given by the caller —
+   * NOT prefix-resolved; a genuine retry replays the identical taskId string) / `merge:${workerSessionId}`.
+   */
+  private readonly pendingOps = new PendingOpRegistry();
   /**
    * msgIds of durable queued messages whose RE-DRIVE enqueue is currently HELD in a recipient's pty FIFO
    * — enqueued onto a now-live recipient but not yet drained, so the durable `session_message_queued`
@@ -2149,6 +2167,41 @@ export class SessionService {
     }
   }
 
+  /**
+   * CLIENT-TIMEOUT-RESILIENT entry point for the `worker_spawn` MCP tool (card fb8df559 Part 1) — the
+   * ONLY caller-visible change is at this outer layer; {@link spawnWorker} itself (worktree provisioning,
+   * the per-taskId mutex, the concurrency cap) is completely untouched. Keyed on the RAW (trimmed)
+   * `opts.taskId` string the caller passed — not the resolved/prefix-matched task id — so a genuine retry
+   * (which replays the identical args) attaches to the SAME in-flight op; two calls using two DIFFERENT
+   * prefix strings for the same underlying task simply don't dedupe against each other at THIS layer, but
+   * `spawnWorker`'s own mutex still prevents a double-spawn (the second gets that mutex's existing
+   * "already has a spawn in flight" error, unchanged) — no correctness regression, only a narrower
+   * dedup-by-string-identity than a full task-id resolution would give.
+   */
+  async spawnWorkerTracked(
+    managerSessionId: string,
+    opts: { taskId: string; agentId?: string; kickoffPrompt: string },
+  ): Promise<AttachResult<Session>> {
+    const key = `spawn:${(opts.taskId ?? "").trim()}`;
+    return this.pendingOps.attach<Session>(
+      key, "spawn", managerSessionId, SYNC_ATTACH_BUDGET_MS,
+      () => this.spawnWorker(managerSessionId, opts),
+    );
+  }
+
+  /** Read-only pending-merge lookup for worker_list's `pendingMerge` field (card fb8df559 Part 1) — never
+   *  consumes; only confirmWorkerMergeTracked's own attach() call consumes a settled op. */
+  peekPendingMerge(workerSessionId: string): PendingOpView | undefined {
+    return this.pendingOps.peek(`merge:${workerSessionId}`);
+  }
+
+  /** Read-only pending-spawn listing for worker_list's placeholder rows (card fb8df559 Part 1) — a
+   *  pending spawn has no worker row yet (it's inserted only once createWorktree resolves), so it's
+   *  surfaced by manager rather than hung off a per-worker `peek()`. */
+  listPendingSpawns(managerSessionId: string): Array<PendingOpView & { taskId: string }> {
+    return this.pendingOps.listByManager(managerSessionId, "spawn").map((op) => ({ ...op, taskId: op.key.slice("spawn:".length) }));
+  }
+
   /** Stop one of a manager's workers (parent-scoped). Worktree is RETAINED (merge/recycle own it). */
   stopWorker(managerSessionId: string, workerSessionId: string, mode: StopMode): void {
     const worker = this.db.getSession(workerSessionId);
@@ -3912,7 +3965,7 @@ export class SessionService {
    */
   async confirmWorkerMerge(
     managerSessionId: string, workerSessionId: string,
-  ): Promise<{ merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked" }> {
+  ): Promise<ConfirmMergeResult> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     if (!worker.branch) throw new Error("worker has no branch");
@@ -3956,11 +4009,15 @@ export class SessionService {
     // `validateAgentProjectConfigOverride`, which REJECTS `orchestration.gateCommand` (see
     // mcp/platform.ts). Only the human/trusted REST path (PATCH /api/projects/:id/config) may set it.
     // If you add another config-write surface reachable by an agent, it MUST use the agent validator.
+    //
+    // Run as SEPARATE sequential processes (runGateSequential), NOT one `&&`-chained spawnSync — a
+    // shared memory footprint across lint+test+build was OOM-killing a worker's gate (exit 137,
+    // Auditor finding b9515beb). Same fail-closed short-circuit semantics as the old `&&` chain: the
+    // first non-zero step stops the run.
     if (gate) {
-      const res = spawnSync(gate, { cwd: worktreePath, shell: true, timeout: gateTimeoutMs, stdio: "ignore" });
-      const passed = res.status === 0 && !res.error;
-      evt("build_gate", { passed });
-      if (!passed) {
+      const gateResult = await runGateSequential(gate, worktreePath, gateTimeoutMs);
+      evt("build_gate", { passed: gateResult.passed });
+      if (!gateResult.passed) {
         evt("merge_rejected", { reason: "gate" });
         rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — build gate failed; canonical repo untouched, worktree retained.`);
         return { merged: false, reason: "build gate failed" };
@@ -4031,6 +4088,28 @@ export class SessionService {
     // paths above return early WITHOUT deleting, so a re-task keeps its retained worktree + branch.
     await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath });
     return { merged: true };
+  }
+
+  /**
+   * CLIENT-TIMEOUT-RESILIENT entry point for the `worker_merge_confirm` MCP tool (card fb8df559 Part 1) —
+   * the ONLY caller-visible change is at this outer layer; {@link confirmWorkerMerge} itself (the
+   * stranded-work backstop, the gate, the squash-merge, the ALREADY_MERGED/STAGE_EMPTY_RETRY idempotency)
+   * is completely untouched. Keyed `merge:${workerSessionId}` — unambiguous, no prefix-resolution
+   * involved, so unlike spawn there is no "different string, same target" edge case here at all.
+   *
+   * A stale retry that lands AFTER the op has settled+been consumed just re-invokes confirmWorkerMerge for
+   * real — safe because that method's OWN ALREADY_MERGED re-derive-from-clean-index already handles a
+   * duplicate confirm idempotently (card 2eddf573); this registry adds no new merge-side idempotency of
+   * its own, it only changes how/when the result is DELIVERED to the caller.
+   */
+  async confirmWorkerMergeTracked(
+    managerSessionId: string, workerSessionId: string,
+  ): Promise<AttachResult<ConfirmMergeResult>> {
+    const key = `merge:${workerSessionId}`;
+    return this.pendingOps.attach<ConfirmMergeResult>(
+      key, "merge", managerSessionId, SYNC_ATTACH_BUDGET_MS,
+      () => this.confirmWorkerMerge(managerSessionId, workerSessionId),
+    );
   }
 
   /**

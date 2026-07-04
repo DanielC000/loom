@@ -26,6 +26,7 @@ const NOT_HERMETIC = new Set([
   "orch-spawn", "mcp-scope", "platform-scope", "recycle", "scheduler", "scheduler-drain",
   "scheduler-disabled", "usage-limit-detect", "usage-limit-resume", "worker-report", "autonomy-rails",
   "busy-flag", "merge-gate", "board-consistency", "skills-e2e", "profiles-rest",
+  "merge-confirm-slow-gate-pending", // ~20s wall-clock (a real 15s gate) + needs a manually-started daemon
 ]);
 
 const HERMETIC = fs.readdirSync(TEST_DIR)
