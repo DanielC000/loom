@@ -7,6 +7,66 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-07-04
+
+**Orchestration control, message clarity, and worktree robustness** — managers gain direct control over a
+worker's permission mode and the full agent/profile delete lifecycle; queued agent and human messages are
+delivered one-per-turn instead of concatenated into a wall of text; a unified terminal chrome across the
+cockpit; faster startup; and a hardened, Windows-safe worktree/session cleanup path.
+
+### Added
+- **`worker_set_mode`** — a manager can drive one of its workers' permission mode
+  (`acceptEdits`/`auto`/`plan`) from the daemon side, for recovery or a mid-run override (a worker can't
+  change its own mode). Rejects `bypassPermissions`; scoped to the manager's own workers.
+- **`agent_delete` + `profile_delete`** — agents and profiles can now be permanently deleted from the
+  management surfaces, so workspace cleanups complete end-to-end: cross-project for the Platform operator,
+  own-project for a project manager (with a guard that refuses to delete a rig another project still depends
+  on). Mirrors the human REST delete exactly.
+- **Manager-settable `deferred` task state** — mark a card as intentionally sequenced behind other work; it
+  is excluded from the idle-nag count but never blocks dispatch, distinct from the owner's `held` brake.
+- **`/graphify`** — an opt-in code-graph orientation skill (a local tree-sitter code graph) for getting your
+  bearings in an unfamiliar codebase.
+- **Message Delivery setting (`coalesceAgentMessages`)** — restores the legacy full-coalesce of queued agent
+  messages; off by default (see the delivery change below).
+
+### Changed
+- **Agent & human messages are delivered one-per-turn.** When a session is busy, queued messages authored by
+  an agent or human (manager→worker direction, worker→manager reports, companion messages, your composer
+  turns) now each land as their own turn instead of being concatenated into one; only Loom's own operational
+  nudges (idle/context watchdogs, restart notes) still coalesce. Reversible via the new Message Delivery
+  setting.
+- **Unified terminal chrome** — the session, shell, companion, and platform terminal tiles now share one
+  terminal-card frame with maximize, quick-command presets, and inline task panels; card height follows its
+  content, removing the dead space below the composer.
+- **Overview page reworked** — Fleet moves below the Board, Attention is promoted into its place, and
+  pending-merge cards render as the same rich review cards Mission Control uses.
+- **Faster startup** — the daemon no longer blocks boot on worktree cleanup; it binds its port promptly and
+  reconciles + cleans up in the background.
+- Inactive projects are labeled "inactive" (not "archived") on Mission Control; reserved system homes are
+  hidden from the picker.
+
+### Fixed
+- **Reliable worker permission mode under load** — a dropped mode keystroke during a busy spawn could strand
+  a worker in plan mode (unrecoverable); the spawn and the auto-heal now feedback-verify the landed mode.
+- **Robust, Windows-safe worktree cleanup** — escaped build/dev-server processes (an `esbuild` service, a
+  `vite` dev server) that held a worktree open (the root cause of worktrees that could not be removed) are
+  now reaped before removal, and the removal runs in a killable child process so a wedged directory handle
+  can never stall the daemon. A dir that still can't be removed is retried slowly and surfaced, never
+  silently accumulated.
+- **Crash-recovery coordination** — a false "won't come back" nudge no longer collides with auto-resume, and
+  the companion/assistant recovers correctly after a restart.
+- **Leaked dev servers** (`pnpm dev`) are torn down on session end/recycle — they had been exhausting the
+  local port range.
+- The **companion's given name** is now an editable field in Manage.
+- **Terminal-card sizing** — no more resize oscillation on the Platform page, and the gap between the
+  terminal and the composer is closed.
+- **Cross-session message routing** — a message to a recycled session reaches its live successor, and a
+  recycled successor can read its predecessor's worker transcripts.
+
+### Internal
+- A broad end-to-end (Playwright) test harness with page-level specs across the app, glob-based daemon test
+  discovery, and a sweep of orchestration/worker doctrine + skill refinements.
+
 ## [0.14.0] — 2026-07-03
 
 **The Companion** — a chat-native personal agent on the same durable, real-`claude` PTY runtime as your

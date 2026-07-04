@@ -1,7 +1,7 @@
 {
   "name": "loom",
   "private": true,
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Orchestrate a fleet of real Claude Code agents on your Claude subscription (Pro/Max), not per-token API bills — durable sessions, multi-agent orchestration, all local-first on your own machine.",
   "license": "MIT",
   "packageManager": "pnpm@10.6.4",
