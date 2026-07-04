@@ -113,15 +113,32 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   fs.writeFileSync(probeB, "setInterval(() => {}, 1000);\n");
   const childA = spawnProcess(process.execPath, [probeA], { stdio: "ignore" });
   const childB = spawnProcess(process.execPath, [probeB], { stdio: "ignore" });
+  // A THIRD probe whose script lives OUTSIDE any worktree, but whose CWD is set to worktree A — so
+  // neither its exePath (the shared node executable) nor its commandLine (a script path with no worktree
+  // reference) can match; only the cwd arm can. Proves the cwd arm against the REAL enumerator, not just
+  // the synthetic unit objects in the (unit) block above. POSIX only: win32's CIM query exposes no
+  // per-process cwd at all (enumerateProcessesWin32 always reports `cwd: null` — see its doc-comment), so
+  // this arm is structurally unreachable there; the assertion below is skipped on win32, same as the
+  // suite's other platform-specific arms.
+  const probeCScript = path.join(os.tmpdir(), `loom-wpr-probeC-${sfx}.js`);
+  fs.writeFileSync(probeCScript, "setInterval(() => {}, 1000);\n");
+  const childC = spawnProcess(process.execPath, [probeCScript], { stdio: "ignore", cwd: wtA });
   try {
-    await sleep(400); // let both settle as steady-state live processes before enumerating
+    await sleep(400); // let all settle as steady-state live processes before enumerating
     check("(real) child A (rooted in worktree A) is alive before reap", isAlive(childA.pid));
     check("(real) child B (rooted in a DIFFERENT worktree B) is alive before reap", isAlive(childB.pid));
+    check("(real) child C (cwd rooted in worktree A, script path outside any worktree) is alive before reap", isAlive(childC.pid));
 
     const { killedPids } = await reapProcessesRootedInWorktree(wtA);
     const aGone = await waitUntil(() => !isAlive(childA.pid), 8000);
     check("(real) reapProcessesRootedInWorktree(wtA) kills child A via the REAL enumerator + killer", aGone);
     check("(real) child A's pid is reported in killedPids", killedPids.includes(childA.pid));
+
+    if (process.platform !== "win32") {
+      const cGone = await waitUntil(() => !isAlive(childC.pid), 8000);
+      check("(real) reapProcessesRootedInWorktree(wtA) kills child C via the cwd arm against the REAL /proc enumerator", cGone);
+      check("(real) child C's pid is reported in killedPids (cwd-arm match)", killedPids.includes(childC.pid));
+    }
 
     // THE SAFETY INVARIANT: worktree B — standing in for a DIFFERENT, live/protected worktree — was never
     // named in the call above, so its process must be completely untouched.
@@ -130,8 +147,15 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   } finally {
     if (isAlive(childA.pid)) { try { process.kill(childA.pid, "SIGKILL"); } catch { /* ignore */ } }
     if (isAlive(childB.pid)) { try { process.kill(childB.pid, "SIGKILL"); } catch { /* ignore */ } }
-    fs.rmSync(wtA, { recursive: true, force: true });
-    fs.rmSync(wtB, { recursive: true, force: true });
+    if (isAlive(childC.pid)) { try { process.kill(childC.pid, "SIGKILL"); } catch { /* ignore */ } }
+    // childC was spawned with cwd: wtA, and win32 locks a directory while any live process has it as CWD
+    // (the very ERROR_SHARING_VIOLATION class this whole feature exists to prevent) — wait for its exit to
+    // actually land before removing wtA, or rmSync races a handle still closing. Best-effort either way
+    // (swallow, don't fail the run): this is test cleanup, not the assertion under test.
+    await waitUntil(() => !isAlive(childC.pid), 5000);
+    try { fs.rmSync(wtA, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+    try { fs.rmSync(wtB, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+    try { fs.rmSync(probeCScript, { force: true }); } catch { /* best-effort cleanup */ }
   }
 }
 

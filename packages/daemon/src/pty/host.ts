@@ -1349,6 +1349,10 @@ function enumerateProcessesWin32(timeoutMs: number): Promise<WorktreeProcess[]> 
       try { cmd.kill(); } catch { /* already gone */ }
       finish([]);
     }, timeoutMs);
+    // Explicit utf8 decoding — without it a multibyte sequence split across chunk boundaries could
+    // corrupt a CommandLine path and MISS a match (fail-safe: under-kill, not over-kill, since the
+    // wedge-retry sweep catches a missed process next pass).
+    cmd.stdout?.setEncoding("utf8");
     cmd.stdout?.on("data", (d) => { out += d; });
     cmd.on("error", () => finish([]));
     cmd.on("close", () => {
@@ -1420,6 +1424,16 @@ function withReapTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
  * swallowed — this must never throw or block teardown, mirroring every other best-effort helper in the
  * worktree-removal path. Injectable via `deps` (enumerate/kill/timeoutMs) so a test can drive it with a
  * fake process list instead of the real OS.
+ *
+ * ACCEPTED RISK (both fail-safe / under-kill, not over-kill — reviewed and deliberately kept): (1) the
+ * command-line arm of {@link processRootedInWorktree} intentionally over-matches a process that merely
+ * NAMES the doomed worktree path in its argv without being rooted there — this is load-bearing, not a
+ * bug, because on win32 vite's global node.exe carries the worktree path ONLY in its CommandLine (CIM
+ * exposes no per-process cwd), so narrowing the match would miss the exact survivor this function exists
+ * to catch. (2) {@link killProcessById}'s win32 path (`taskkill /pid <pid> /T /F`) kills the matched pid's
+ * whole subtree, which widens the blast radius past the one matched process — theoretically reaching an
+ * ancestor-of-the-daemon if one were ever wrongly rooted in a worktree, though not realistic for a
+ * checkout-launched daemon (the daemon's own pid is separately excluded below regardless).
  *
  * SELF-EXCLUSION: the daemon's OWN pid (`process.pid`) is never a kill candidate, regardless of what
  * `processRootedInWorktree` says — a defense-in-depth backstop against the (currently theoretical, but
