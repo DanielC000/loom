@@ -156,6 +156,15 @@ export class ChatGateway {
     return undefined;
   }
 
+  /** Read-only: a session's current bindings (a COPY — never the live array), one per bound channel.
+   *  Empty for a session with no bindings. Used by cross-channel MIRRORING (e.g. echoing a web-chat turn
+   *  out to the session's other bound channels) to enumerate "the channels this session is ALREADY bound
+   *  to" from the SAME routing map handleInbound/bind/unbind maintain — never a separate lookup that could
+   *  reach an unbound chat id. */
+  bindingsForSession(sessionId: string): SessionBinding[] {
+    return (this.bindingsBySession.get(sessionId) ?? []).slice();
+  }
+
   /**
    * INBOUND. Allowlist by (channel, chatId) → the bound session, then submit the body as a TURN via the
    * EXISTING pty primitive. A foreign chat id (no binding) is REJECTED and never submitted (load-bearing
@@ -267,14 +276,38 @@ export class ChatGateway {
     // what makes cross-delivery impossible by construction: the reply can only go where the turn came from.
     const target = this.replyTarget(sessionId);
     if (!target) return { delivered: false, reason: "no-target" };
-    const adapter = this.adapters.get(target.channel);
+    const result = await this.sendVia(target.channel, target.chatId, text);
+    if (!result.delivered) return result.reason === "no-adapter" ? { delivered: false, reason: "no-adapter" } : { delivered: false, reason: "send-failed" };
+    return { delivered: true, chunks: result.chunks };
+  }
+
+  /**
+   * OUTBOUND MIRROR primitive: send a plain, non-reply message to an EXPLICIT (channel, chatId) — never
+   * resolved from a turn's origin (unlike deliverReply/replyTarget). Callers pass a route already known to
+   * be one of a session's bound channels (see bindingsForSession) — this method does no binding lookup of
+   * its own and does not care WHICH session the route belongs to. It NEVER calls submitTurn and never
+   * touches inbound routing (bindingForInbound/handleInbound), so it structurally cannot form a turn or
+   * loop a mirrored message back in. Used to echo a web-chat turn out to the session's other bound
+   * channels (e.g. Telegram) with a disclaimer — the caller composes that text; this just sends it.
+   */
+  async sendToChannel(channel: string, chatId: string, text: string): Promise<DeliverResult> {
+    const result = await this.sendVia(channel, chatId, text);
+    if (!result.delivered) return result.reason === "no-adapter" ? { delivered: false, reason: "no-adapter" } : { delivered: false, reason: "send-failed" };
+    return { delivered: true, chunks: result.chunks };
+  }
+
+  /** Shared outbound send: chunk to the adapter's max length and send every part, in order. Contains a
+   *  throw (never propagates) — the only failure modes are "no adapter registered for this channel" and
+   *  "the adapter's send threw". Pure outbound: never calls submitTurn, never consults inbound routing. */
+  private async sendVia(channel: string, chatId: string, text: string): Promise<{ delivered: true; chunks: number } | { delivered: false; reason: "no-adapter" | "send-failed" }> {
+    const adapter = this.adapters.get(channel);
     if (!adapter) return { delivered: false, reason: "no-adapter" };
     const parts = adapter.maxMessageLength ? chunkText(text, adapter.maxMessageLength) : [text];
     try {
-      for (const part of parts) await adapter.send(target.chatId, part);
+      for (const part of parts) await adapter.send(chatId, part);
       return { delivered: true, chunks: parts.length };
     } catch (err) {
-      this.debug(`deliverReply send failed for ${sessionId}: ${describeError(err)}`);
+      this.debug(`sendVia send failed for ${channel}/${chatId}: ${describeError(err)}`);
       return { delivered: false, reason: "send-failed" };
     }
   }

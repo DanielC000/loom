@@ -34,7 +34,7 @@ import { createCompanionGateway } from "./factory.js";
 import { CompanionHeartbeatWatcher, type HeartbeatPty } from "./heartbeat.js";
 import { CompanionReminderWatcher } from "./reminders.js";
 import { resolveEffectiveConfig } from "./store.js";
-import { normalizeInAppMessage, type InAppChannel } from "./in-app.js";
+import { IN_APP_CHANNEL, normalizeInAppMessage, type InAppChannel } from "./in-app.js";
 import type { CompanionConfig } from "./config.js";
 import type { CompanionRoute, DeliverResult, InboundResult, SessionBinding, SubmitTurn } from "./types.js";
 
@@ -66,7 +66,8 @@ export interface CompanionControl {
    * INBOUND for the in-app channel: a message typed in the cockpit companion chat panel, routed through the
    * SAME bindings-authoritative gateway (chatId == the companion session id). Stable indirection over the
    * CURRENT gateway (symmetric with deliverReply) so it never targets a torn-down one; returns "companion-off"
-   * when no gateway is live. The /ws/companion route calls this.
+   * when no gateway is live. The /ws/companion route calls this. An ACCEPTED turn is also (fire-and-forget)
+   * MIRRORED out to the session's other bound channels — see mirrorWebInputToOtherChannels.
    */
   handleInAppInbound(sessionId: string, body: string): Promise<InboundResult | { accepted: false; reason: "companion-off" }>;
   /** Best-effort teardown on daemon shutdown (stops the adapter long-poll + the heartbeat). */
@@ -207,7 +208,42 @@ export class CompanionController implements CompanionControl {
     if (!this.gateway) return { accepted: false, reason: "companion-off" };
     const msg = normalizeInAppMessage(sessionId, body);
     if (!msg) return { accepted: false, reason: "no-text" };
-    return this.gateway.handleInbound(msg);
+    const result = await this.gateway.handleInbound(msg);
+    // OUTBOUND MIRROR (card 92b6445c): an accepted web-chat turn echoes out to the session's other bound
+    // channels — NOT awaited (fire-and-forget: the cockpit's own turn/reply never waits on a Telegram send).
+    if (result.accepted) this.mirrorWebInputToOtherChannels(sessionId, body);
+    return result;
+  }
+
+  /**
+   * OUTBOUND MIRROR (card 92b6445c): echo an ACCEPTED web-chat user turn out to the session's OTHER bound
+   * channels (e.g. Telegram) with a "— via web chat" disclaimer, so the Telegram side stays in sync with
+   * what the owner typed in the cockpit. Uses ONLY the gateway's existing bindings-authoritative routing map
+   * (bindingsForSession) and its outbound-only sendToChannel primitive — NEITHER calls submitTurn nor
+   * touches inbound routing (bindingForInbound/handleInbound), so this can NEVER form an inbound turn on the
+   * mirrored channel (no loop-back) and can NEVER reach a channel the session isn't ALREADY bound to (no
+   * broadcast). Fire-and-forget from the caller's perspective; every failure is caught + logged here, never
+   * thrown (mirrors the existing inbound-error-boundary posture in factory.ts / gateway/server.ts).
+   */
+  private mirrorWebInputToOtherChannels(sessionId: string, body: string): void {
+    if (!this.gateway) return;
+    const others = this.gateway.bindingsForSession(sessionId).filter((b) => b.channel !== IN_APP_CHANNEL);
+    if (others.length === 0) return;
+    const text = `${body}\n\n— via web chat`;
+    for (const b of others) {
+      void this.gateway
+        .sendToChannel(b.channel, b.chatId, text)
+        .then((result) => {
+          if (!result.delivered) {
+            // eslint-disable-next-line no-console
+            console.error(`[companion] web-chat mirror to ${b.channel} did not deliver: ${result.reason}`);
+          }
+        })
+        .catch((err) => {
+          // eslint-disable-next-line no-console
+          console.error(`[companion] web-chat mirror to ${b.channel} failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+    }
   }
 
   /** Read-only introspection (tests + potential status surface): is a gateway live, which session, heartbeat armed. */
