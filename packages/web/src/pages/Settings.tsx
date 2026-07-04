@@ -7,6 +7,7 @@ import {
   type OrchestrationConfig,
   type PlatformConfig,
   type PlatformConfigOverride,
+  type ConnectionAuthScheme,
 } from "@loom/shared";
 import { api, type ProjectPatchError } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -48,6 +49,13 @@ export default function Settings() {
       <div>
         <SectionLabel>Global / Daemon</SectionLabel>
         <GlobalConfigEditor />
+      </div>
+
+      {/* Owner-controlled encrypted credential store (agent-tooling epic, P1) — daemon-global, like the
+          tuning above. HUMAN-only; there is no agent-facing surface in this phase. */}
+      <div>
+        <SectionLabel>Connections</SectionLabel>
+        <ConnectionsPanel />
       </div>
     </div>
   );
@@ -509,6 +517,137 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             {(save.error as Error).message}
           </span>
         )}
+      </div>
+    </div>
+  );
+}
+
+// --- Connections (owner-controlled encrypted credential store, agent-tooling epic P1) -----------------
+// HUMAN-only loopback REST — there is intentionally NO agent-facing surface this phase. List/add/revoke
+// only: the secret is write-only (accepted on create, never returned by any read, never re-editable in
+// place — revoke + recreate). Daemon-global, like the tuning panel above (one shared credential store).
+
+const AUTH_SCHEMES: ConnectionAuthScheme[] = ["api-key", "bearer"];
+
+function ConnectionsPanel() {
+  const qc = useQueryClient();
+  const [adding, setAdding] = useState(false);
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ["connections"],
+    queryFn: () => api.connections(),
+  });
+
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["connections"] });
+  const create = useMutation({
+    mutationFn: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string }) => api.createConnection(b),
+    onSuccess: () => { setAdding(false); invalidate(); },
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api.deleteConnection(id),
+    onSuccess: () => invalidate(),
+    onError: (e) => window.alert((e as Error).message),
+  });
+
+  const rows = data ?? [];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <Panel>
+        <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+          Owner-only credentials for connecting Loom to external services. Secrets are encrypted at rest
+          and never shown again after creation — there is no agent-facing tool that can read, list, or use
+          them yet (this is the foundation phase only).
+        </p>
+      </Panel>
+
+      <Panel>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <SectionLabel style={{ margin: 0 }}>Connections ({rows.length})</SectionLabel>
+          <span style={{ flex: 1 }} />
+          {!adding && <Button variant="primary" onClick={() => { setAdding(true); create.reset(); }}>New connection</Button>}
+        </div>
+
+        {isLoading && <Hint>loading connections…</Hint>}
+        {isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/connections"}</span>}
+
+        {adding && (
+          <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
+            <ConnectionForm pending={create.isPending} error={create.error ? (create.error as Error).message : null}
+              onSubmit={(v) => create.mutate(v)} onCancel={() => { setAdding(false); create.reset(); }} />
+          </div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {rows.length === 0 && !adding && !isLoading && (
+            <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>No connections yet.</span>
+          )}
+          {rows.map((c) => (
+            <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
+              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{c.name}</span>
+              <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>{c.host}</span>
+              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>{c.authScheme}</span>
+              <span style={{ flex: 1 }} />
+              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{new Date(c.createdAt).toLocaleString()}</span>
+              <Button variant="danger" disabled={remove.isPending}
+                onClick={() => { if (window.confirm(`Revoke "${c.name}"? This cannot be undone — you'll need to re-create it with the secret to restore it.`)) remove.mutate(c.id); }}>
+                Revoke
+              </Button>
+            </div>
+          ))}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+function ConnectionForm({ pending, error, onSubmit, onCancel }: {
+  pending: boolean; error: string | null;
+  onSubmit: (v: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string }) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [host, setHost] = useState("");
+  const [authScheme, setAuthScheme] = useState<ConnectionAuthScheme>("api-key");
+  const [secret, setSecret] = useState("");
+  const [localErr, setLocalErr] = useState<string | null>(null);
+
+  const submit = () => {
+    setLocalErr(null);
+    if (!name.trim() || !host.trim() || !secret.trim()) {
+      setLocalErr("Name, host, and secret are all required.");
+      return;
+    }
+    onSubmit({ name: name.trim(), host: host.trim(), authScheme, secret: secret.trim() });
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Name</span>
+        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. GitHub personal token" />
+      </label>
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Host</span>
+        <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="e.g. api.github.com" spellCheck={false} />
+        <Hint>the target host this connection's secret is scoped to (metadata only — not yet enforced)</Hint>
+      </label>
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Auth scheme</span>
+        <Select value={authScheme} onChange={(e) => setAuthScheme(e.target.value as ConnectionAuthScheme)}>
+          {AUTH_SCHEMES.map((s) => <option key={s} value={s}>{s}</option>)}
+        </Select>
+      </label>
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Secret</span>
+        <Input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} spellCheck={false} autoComplete="off" />
+        <Hint>encrypted at rest immediately · never shown again after this form is submitted</Hint>
+      </label>
+
+      {(localErr || error) && <div style={{ fontSize: 12, color: color.red, fontFamily: font.mono }}>{localErr ?? error}</div>}
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <Button variant="primary" onClick={submit} disabled={pending}>{pending ? "Saving…" : "Create connection"}</Button>
+        <Button variant="ghost" onClick={onCancel} disabled={pending}>Cancel</Button>
       </div>
     </div>
   );

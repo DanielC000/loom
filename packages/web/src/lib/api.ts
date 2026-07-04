@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, ConnectionMetadata, ConnectionAuthScheme } from "@loom/shared";
 
 // A one-time DM-pairing enrollment code, returned ONCE by the mint endpoint (the store keeps only a
 // salted hash). The human relays `code` to the person being enrolled; it is never recoverable after.
@@ -664,6 +664,15 @@ export const api = {
     getErr<CompanionRestrictedTools>(`/api/companion/restricted-tools/${encodeURIComponent(sessionId)}`),
   updateCompanionRestrictedTools: (sessionId: string, restrictedTools: boolean) =>
     putErr<CompanionRestrictedTools>(`/api/companion/restricted-tools/${encodeURIComponent(sessionId)}`, { restrictedTools }),
+
+  // --- Owner-controlled encrypted credential store (agent-tooling epic, P1 foundation). HUMAN-only
+  // loopback REST — INTENTIONALLY NO agent MCP path (same trust posture as the companion/vault/git
+  // human-only writers). Reads are ALWAYS metadata only (name/host/authScheme/createdAt); the secret is
+  // write-only (accepted on create, never returned by any read). ---
+  connections: () => get<ConnectionMetadata[]>("/api/connections"),
+  createConnection: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string }) =>
+    postErr<ConnectionMetadata>("/api/connections", b),
+  deleteConnection: (id: string) => delErr<{ ok: boolean }>(`/api/connections/${encodeURIComponent(id)}`),
 };
 
 // Stop + (once fully exited) resume a companion's own session — the only way a spawn-time property like

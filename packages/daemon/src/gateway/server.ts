@@ -31,6 +31,7 @@ import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig } from "../companion/store.js";
+import { listConnections, createConnection, deleteConnection } from "../connections/store.js";
 import { encryptSecret } from "../keys/envelope.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validateColumnLayout } from "../mcp/platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
@@ -1132,6 +1133,36 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     deps.db.setRestrictedTools(sessionId, b.restrictedTools);
     return { sessionId, restrictedTools: b.restrictedTools };
+  });
+
+  // --- Owner-controlled encrypted credential store (agent-tooling epic, P1 foundation). HUMAN-ONLY
+  // loopback REST, INTENTIONALLY NO MCP path (of ANY router): an agent in an ordinary project session must
+  // never create, list, or read a connection's secret (same trust posture as the companion/vault/git
+  // human-only writers). Reads are ALWAYS metadata only (name/host/authScheme/createdAt) — the secret is
+  // encrypted at rest (envelope helper) and this layer never returns it. Validation (length bounds +
+  // authScheme enum) is OWNED by `connections/store.ts` (createConnection throws a descriptive Error on
+  // invalid input) — this handler only narrows the body's TYPE (so a non-string can't reach the store),
+  // then maps the store's thrown validation error to a 400. See that module's doc for why the invariant
+  // must not live only here. ---
+  app.get("/api/connections", async () => listConnections(deps.db));
+  app.post("/api/connections", async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    if (typeof b.name !== "string" || typeof b.host !== "string" || typeof b.secret !== "string") {
+      return reply.code(400).send({ error: "name, host, and secret must be strings" });
+    }
+    if (b.authScheme !== "api-key" && b.authScheme !== "bearer") {
+      return reply.code(400).send({ error: "authScheme must be 'api-key' or 'bearer'" });
+    }
+    try {
+      const created = createConnection(deps.db, { name: b.name, host: b.host, authScheme: b.authScheme, secret: b.secret });
+      return reply.code(201).send(created);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+  app.delete("/api/connections/:id", async (req) => {
+    deleteConnection(deps.db, (req.params as { id: string }).id);
+    return { ok: true };
   });
 
   // --- Hook relay target (loopback only) ---

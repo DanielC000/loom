@@ -37,6 +37,7 @@ import type {
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
+  ConnectionAuthScheme,
 } from "@loom/shared";
 import { isOwnerHeldTaskTitle } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken } from "./keys/hash.js";
@@ -84,6 +85,23 @@ export interface CompanionConfigRow {
   provisioned: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * A stored Connection row (owner-controlled encrypted credential store, agent-tooling epic P1) as read at
+ * the DB layer — carries the ENCRYPTED `secretBlob` (envelope ciphertext) that `connections/store.ts`
+ * decrypts only on the (future, P2-only) authenticated-request seam. This shape is DAEMON-INTERNAL and must
+ * NEVER be returned over REST or to any MCP tool — the REST layer masks to `ConnectionMetadata` (name/host/
+ * authScheme/createdAt only, never the secret).
+ */
+export interface ConnectionRow {
+  id: string;
+  name: string;
+  host: string;
+  authScheme: ConnectionAuthScheme;
+  /** Envelope ciphertext (v1:iv:tag:ct) — NEVER plaintext. */
+  secretBlob: string;
+  createdAt: string;
 }
 
 const SCHEMA = `
@@ -502,6 +520,18 @@ CREATE TABLE IF NOT EXISTS companion_reminders (
   label TEXT,
   route TEXT,
   enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+-- Owner-controlled encrypted credential store (agent-tooling epic, P1 foundation). GLOBAL / daemon-wide,
+-- HUMAN-managed only over the loopback REST surface — NO MCP tool creates/reads/lists a connection or its
+-- secret. secret_blob is envelope ciphertext (v1:iv:tag:ct); the REST layer never returns it (masked read).
+-- Brand-new table => CREATE TABLE IF NOT EXISTS is itself the additive migration.
+CREATE TABLE IF NOT EXISTS connections (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  host TEXT NOT NULL,
+  auth_scheme TEXT NOT NULL,
+  secret_blob TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
@@ -1637,6 +1667,40 @@ export class Db {
       this.db.prepare("DELETE FROM companion_allowed_senders WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM companion_pairing_codes WHERE session_id = ?").run(sessionId);
     })();
+  }
+
+  // --- connections (owner-controlled encrypted credential store, agent-tooling epic P1) ---
+  // GLOBAL / daemon-wide, HUMAN-managed only over the loopback REST surface — NO MCP path (same trust
+  // posture as the companion/vault/git writers). These accessors carry the raw `secretBlob` ciphertext
+  // (this layer is daemon-internal); `connections/store.ts` is the only caller and it never lets the
+  // ciphertext or a decrypted secret reach a REST response or an MCP tool. ---
+  /** Every stored connection (GLOBAL / daemon-wide), ordered by created_at for a stable admin list. */
+  listConnections(): ConnectionRow[] {
+    return (this.db.prepare("SELECT * FROM connections ORDER BY created_at, rowid").all() as Row[]).map(toConnectionRow);
+  }
+  /** Read one connection by id (with the ciphertext blob), or undefined when absent. */
+  getConnection(id: string): ConnectionRow | undefined {
+    const r = this.db.prepare("SELECT * FROM connections WHERE id = ?").get(id) as Row | undefined;
+    return r ? toConnectionRow(r) : undefined;
+  }
+  /**
+   * Create a new connection. The caller passes an ALREADY-ENCRYPTED `secretBlob` (this layer never sees
+   * the plaintext secret — encryption happens in `connections/store.ts` via the envelope helper).
+   */
+  createConnection(input: { name: string; host: string; authScheme: ConnectionAuthScheme; secretBlob: string }): ConnectionRow {
+    const row: ConnectionRow = {
+      id: randomUUID(), name: input.name, host: input.host, authScheme: input.authScheme,
+      secretBlob: input.secretBlob, createdAt: new Date().toISOString(),
+    };
+    this.db.prepare(
+      `INSERT INTO connections (id, name, host, auth_scheme, secret_blob, created_at)
+       VALUES (@id, @name, @host, @authScheme, @secretBlob, @createdAt)`,
+    ).run(row);
+    return row;
+  }
+  /** Delete a connection by id (idempotent — a missing id matches nothing). */
+  deleteConnection(id: string): void {
+    this.db.prepare("DELETE FROM connections WHERE id = ?").run(id);
   }
 
   // --- agents ---
@@ -3198,6 +3262,14 @@ function toCompanionConfigRow(r0: unknown): CompanionConfigRow {
     provisioned: (r.provisioned as number) === 1,
     name: (r.name as string | null) ?? "",
     createdAt: (r.created_at as string) ?? "", updatedAt: (r.updated_at as string) ?? "",
+  };
+}
+function toConnectionRow(r0: unknown): ConnectionRow {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, name: r.name as string, host: r.host as string,
+    authScheme: r.auth_scheme as ConnectionAuthScheme, secretBlob: r.secret_blob as string,
+    createdAt: (r.created_at as string) ?? "",
   };
 }
 function toPresetPromptSuggestion(r0: unknown): PresetPromptSuggestion {

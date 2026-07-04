@@ -853,6 +853,27 @@ export interface CompanionConfigMasked {
   updatedAt: string;
 }
 
+/** Auth scheme a stored Connection uses. API-key/Bearer only in P1 — OAuth is a later agent-tooling phase. */
+export type ConnectionAuthScheme = "api-key" | "bearer";
+
+/**
+ * The MASKED, human-facing view of a stored Connection (owner-controlled encrypted credential store,
+ * agent-tooling epic P1) — metadata ONLY. The secret material is ENCRYPTED at rest (envelope) and NEVER
+ * leaves the daemon: no REST read and no MCP tool ever returns it. There is intentionally NO MCP path (same
+ * human-only trust posture as the vault/git/companion writers): an agent in an ordinary project session must
+ * never create, list, or read a connection's secret. `host` is stored metadata only in P1 — request-side
+ * host-allowlist ENFORCEMENT belongs to a later phase's authenticated-request tool, not this store.
+ */
+export interface ConnectionMetadata {
+  id: string;
+  /** Human-chosen label for the connection (e.g. "GitHub personal token"). */
+  name: string;
+  /** The target host this connection's secret is scoped to (metadata only in P1 — no enforcement here). */
+  host: string;
+  authScheme: ConnectionAuthScheme;
+  createdAt: string;
+}
+
 /**
  * A cron-triggered schedule (phase-2 Pillar B). On its minute boundary the daemon Scheduler
  * boots a manager session in `agentId` (the agent's startupPrompt is the kickoff), which then
