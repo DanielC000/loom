@@ -3953,6 +3953,43 @@ export class SessionService {
   }
 
   /**
+   * RECONCILE-BEFORE-NOTIFY (Auditor finding 8fb05b2d): a `[loom:merge-rejected]` pty notification can
+   * otherwise fire long after the situation it describes has resolved out-of-band — e.g. a client-timeout
+   * on `worker_merge_confirm` leaves the manager to manually squash-merge the task itself, then the
+   * ORIGINAL confirmWorkerMerge run (or a retry that re-invoked it from scratch once the pendingOps entry
+   * had already settled+evicted) finishes and delivers a stale "build gate failed" — burning the manager's
+   * turns confirming an echo of something already resolved. Suppress the NOTIFY only (never the caller's
+   * `merged:false`/`reason` return, nor the `merge_rejected` event — those stay accurate bookkeeping) when:
+   *  - the task's card is already in its project's terminal lane (Done) — the situation resolved another
+   *    way, or
+   *  - the branch's work is already reachable from main — reuses the SAME ancestry check the ALREADY_MERGED
+   *    path derives from ({@link findLandedSquashCommit}'s deterministic `Loom-Worker-Branch` trailer scan),
+   *    not a second one, or
+   *  - an IDENTICAL rejection (same worker + reason) was already recorded for this task — de-dupe, so a
+   *    stale re-run reproducing the same failure doesn't notify twice.
+   * FAILS SAFE throughout: any read/git error is treated as "not resolved yet" (never suppress a genuine
+   * first notification on a flaky check).
+   */
+  private async shouldSuppressMergeReject(
+    workerSessionId: string, taskId: string | null, branch: string, repoPath: string, reason: string,
+  ): Promise<boolean> {
+    if (taskId) {
+      const task = this.db.getTask(taskId);
+      if (task) {
+        const terminalKey = this.columnKeyForProjectRole(task.projectId, "terminal");
+        if (terminalKey && task.columnKey === terminalKey) return true;
+      }
+    }
+    if (await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs })) return true;
+    try {
+      const already = this.db.listEventsForWorker(workerSessionId)
+        .some((e) => e.kind === "merge_rejected" && e.detail?.reason === reason);
+      if (already) return true;
+    } catch { /* fail safe: a dedupe-read error must not suppress a genuine first notification */ }
+    return false;
+  }
+
+  /**
    * Step 2: run the build/DoD gate, and ONLY if green merge the branch as ONE squash commit, remove the
    * worktree, and move the task to done. FAIL-CLOSED — a failed gate or a merge conflict leaves
    * the canonical repo UNTOUCHED and the worktree RETAINED (so the manager can re-task a fix).
@@ -3993,7 +4030,15 @@ export class SessionService {
     });
     // kind:"agent" — a merge-rejection result names a specific worker/task and requires distinct manager
     // action (recover a commit, re-task, rebase); it must never be mashed with an unrelated turn.
-    const rejectNotify = (msg: string) => { try { this.pty.enqueueStdin(managerSessionId, msg, "system", undefined, undefined, "agent"); } catch { /* manager not live */ } };
+    // RECONCILE-BEFORE-NOTIFY (shouldSuppressMergeReject): called with the SAME `reason` the sibling evt()
+    // call records, and BEFORE that evt() call runs, so the dedupe check only ever sees PRIOR invocations'
+    // events — never its own about-to-be-appended one (which would otherwise self-suppress the very first
+    // notification).
+    const rejectNotify = async (reason: string, msg: string) => {
+      const suppressed = await this.shouldSuppressMergeReject(workerSessionId, taskId, branch, project.repoPath, reason);
+      if (!suppressed) { try { this.pty.enqueueStdin(managerSessionId, msg, "system", undefined, undefined, "agent"); } catch { /* manager not live */ } }
+      return suppressed;
+    };
 
     // BACKSTOP (BEFORE the gate/merge): refuse if the worker's commits are STRANDED on a self-created
     // branch instead of its assigned `loom/<key>`. The assigned branch is then 0-ahead, so the squash
@@ -4003,8 +4048,8 @@ export class SessionService {
     // untouched so the manager can recover the commit.
     const stranded = await detectStrandedWork(project.repoPath, worktreePath, branch, { timeoutMs: this.gitOpMs });
     if (stranded.stranded) {
-      evt("merge_rejected", { reason: "stranded", strandedBranch: stranded.branch, strandedCommit: stranded.commit });
-      rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — STRANDED WORK: commits are on '${stranded.branch}' (tip ${stranded.commit}, ${stranded.ahead} ahead), not the assigned branch '${branch}' (empty). Refusing the empty merge so the work isn't lost; canonical repo untouched, worktree retained. Re-point '${branch}' to ${stranded.commit} (or cherry-pick it), then re-confirm.`);
+      const suppressed = await rejectNotify("stranded", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — STRANDED WORK: commits are on '${stranded.branch}' (tip ${stranded.commit}, ${stranded.ahead} ahead), not the assigned branch '${branch}' (empty). Refusing the empty merge so the work isn't lost; canonical repo untouched, worktree retained. Re-point '${branch}' to ${stranded.commit} (or cherry-pick it), then re-confirm.`);
+      evt("merge_rejected", { reason: "stranded", strandedBranch: stranded.branch, strandedCommit: stranded.commit, ...(suppressed ? { suppressed: true } : {}) });
       return { merged: false, reason: `stranded work on '${stranded.branch}' (tip ${stranded.commit}); assigned branch '${branch}' is empty — re-point or cherry-pick before merging` };
     }
 
@@ -4027,8 +4072,8 @@ export class SessionService {
       const gateResult = await runGateSequential(gate, worktreePath, gateTimeoutMs);
       evt("build_gate", { passed: gateResult.passed });
       if (!gateResult.passed) {
-        evt("merge_rejected", { reason: "gate" });
-        rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — build gate failed; canonical repo untouched, worktree retained.`);
+        const suppressed = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — build gate failed; canonical repo untouched, worktree retained.`);
+        evt("merge_rejected", { reason: "gate", ...(suppressed ? { suppressed: true } : {}) });
         return { merged: false, reason: "build gate failed" };
       }
     }
@@ -4039,8 +4084,9 @@ export class SessionService {
     const merge = await mergeBranch(project.repoPath, branch, taskTitle);
     if (!merge.ok) {
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
-      evt("merge_rejected", { reason: merge.conflict ? "conflict" : "merge_failed" });
-      rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — ${why}; canonical repo untouched, worktree retained. Re-task a rebase.`);
+      const failReason = merge.conflict ? "conflict" : "merge_failed";
+      const suppressed = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — ${why}; canonical repo untouched, worktree retained. Re-task a rebase.`);
+      evt("merge_rejected", { reason: failReason, ...(suppressed ? { suppressed: true } : {}) });
       return { merged: false, reason: why };
     }
     // GENUINE no-op (nothing staged): the staged set was re-derived from a clean index, so this is NOT a
@@ -4056,8 +4102,8 @@ export class SessionService {
         // orphaned done sail through before.
         const reported = this.workerReportedComplete(workerSessionId);
         if (reported) {
-          evt("merge_rejected", { reason: "orphaned_zero_ahead", reportedState: reported });
-          rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — ORPHANED WORK (HARD): your worker REPORTED ${reported} but its assigned branch '${branch}' is 0 commits ahead of main — there is NOTHING on the branch to merge. The reported work was almost certainly committed to MAIN directly (or another branch); a later main sync can ORPHAN it and lose it silently. Refusing the empty merge. RECOVER it: 'git --no-pager log main' to find the commit, cherry-pick it onto '${branch}', then re-confirm — or if the report was mistaken, re-task. (Workers must NEVER commit to main — commit only to the assigned branch.)`);
+          const suppressed = await rejectNotify("orphaned_zero_ahead", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — ORPHANED WORK (HARD): your worker REPORTED ${reported} but its assigned branch '${branch}' is 0 commits ahead of main — there is NOTHING on the branch to merge. The reported work was almost certainly committed to MAIN directly (or another branch); a later main sync can ORPHAN it and lose it silently. Refusing the empty merge. RECOVER it: 'git --no-pager log main' to find the commit, cherry-pick it onto '${branch}', then re-confirm — or if the report was mistaken, re-task. (Workers must NEVER commit to main — commit only to the assigned branch.)`);
+          evt("merge_rejected", { reason: "orphaned_zero_ahead", reportedState: reported, ...(suppressed ? { suppressed: true } : {}) });
           return {
             merged: false,
             reason: `orphaned work: assigned branch '${branch}' is 0 commits ahead of main but the worker reported ${reported} — the committed work is not on the branch (likely committed straight to main); recover the commit onto '${branch}' before merging`,
@@ -4068,13 +4114,16 @@ export class SessionService {
         }
         // No report of work → a genuine empty no-op. Fail-closed (worktree retained so the manager can see
         // why the worker produced no change, task stays in review) but soft — no alarm.
-        evt("merge_rejected", { reason: "stage_empty" });
-        rejectNotify(`[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — STAGE_EMPTY_RETRY: the branch has no diff to merge; canonical repo + worktree untouched. The worker committed nothing that differs from main — re-task or close the task by hand.`);
+        const suppressed = await rejectNotify("stage_empty", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — STAGE_EMPTY_RETRY: the branch has no diff to merge; canonical repo + worktree untouched. The worker committed nothing that differs from main — re-task or close the task by hand.`);
+        evt("merge_rejected", { reason: "stage_empty", ...(suppressed ? { suppressed: true } : {}) });
         return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", emptyKind: "STAGE_EMPTY_RETRY" };
       }
       // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the
       // bookkeeping idempotently — retire the worktree + mark the task done — and report it distinguishably.
-      rejectNotify(`[loom:already-merged] worker ${workerSessionId} (task ${taskId ?? "none"}) — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.`);
+      // NOT routed through rejectNotify/shouldSuppressMergeReject: this is a SUCCESS announcement (not a
+      // rejection) and this branch is BY DEFINITION the already-landed case, so the ancestry check would
+      // suppress it unconditionally — it always sends.
+      try { this.pty.enqueueStdin(managerSessionId, `[loom:already-merged] worker ${workerSessionId} (task ${taskId ?? "none"}) — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.`, "system", undefined, undefined, "agent"); } catch { /* manager not live */ }
       this.pty.stop(workerSessionId, "hard");
       for (let i = 0; i < 50 && this.pty.isAlive(workerSessionId); i++) {
         await new Promise((r) => setTimeout(r, 100));
