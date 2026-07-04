@@ -24,19 +24,27 @@ npx serve site
 
 ## Deploying
 
-Not deployed. GitHub-Pages-ready: relative asset paths only, so pointing Pages at `/site` (or copying
-its contents to the Pages root) would publish it as-is. Publishing remains the owner's call.
+`.github/workflows/pages.yml` publishes this folder to GitHub Pages **verbatim** (no build step) on a
+merge to `main` that touches `site/**`. Merging such a change therefore **publishes the site live**, so
+the merge is owner-gated.
 
 ## Files
 
-- `index.html` — the page (semantic landmarks, single page).
-- `styles.css` — tokens mirrored from `packages/web/src/styles/global.css` so it reads as the same product.
+- `index.html` — the page (semantic landmarks, single page) with a small block of inline,
+  self-contained JS for reveal-on-scroll and the quickstart copy buttons (both progressive enhancement;
+  the page is fully usable with JS disabled).
+- `styles.css` — tokens mirrored from `packages/web/src/styles/global.css` so it reads as the same
+  product. The brand type (Space Grotesk + JetBrains Mono, both OFL-1.1) is embedded as base64 `woff2`
+  `@font-face` rules at the top of the file.
 - `favicon.svg` — the woven Loom mark (from `packages/web/src/components/Logo.tsx`).
 
 ## Placeholders / notes
 
-- The hero shows a **CSS-rendered mock** of Loom's orchestration view with **synthetic data only**
+- The hero shows a **CSS/SVG-rendered mock** of Loom's orchestration weave with **synthetic data only**
   (fake branch names, fake diff counts). There are **no live screenshots of real project data**, per
   the task. The owner can later swap it for a real, scrubbed screenshot if desired.
-- Fonts load from Google Fonts (same CDN the app uses); system fallbacks keep the layout intact
-  offline.
+- **Zero network requests:** fonts are embedded offline as base64 `woff2`, images are inline SVG, and
+  the JS is inline. Nothing is fetched from a CDN, so the page renders fully offline from this folder
+  with relative paths. Do not reintroduce a remote font/script/image link.
+- Motion (the animated weave shuttle, reveal-on-scroll) is disabled under
+  `prefers-reduced-motion: reduce`, which leaves a clean static composition.

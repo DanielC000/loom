@@ -246,7 +246,8 @@ prefer the finest-grained scope that fits.
   `profiles`, `pty`, `runs`, `sessions`, `setup`, `skills`, `tasks` (the task board / cards domain),
   `update`, `vault`.
 - **Cross-cutting / process:** `deps` (dependency bumps), `ci`, `release`, `docs`, `assets` (bundled
-  skills / hook-relay / vault-lint under `assets/**`).
+  skills / hook-relay / vault-lint under `assets/**`), `site` (the hand-authored GitHub Pages landing
+  page under `site/**`).
 
 This list is **Loom-specific**. Every project keeps its OWN "Commit scopes" list in its OWN `CLAUDE.md`;
 a project with no documented list gets one derived from its structure at intake, and only a project with

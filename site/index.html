@@ -6,28 +6,22 @@
     <title>Loom · orchestrate real Claude Code agents on your subscription</title>
     <meta
       name="description"
-      content="Loom orchestrates a fleet of real interactive Claude Code agents on your Claude subscription (Pro/Max) — not per-token API bills. Durable sessions, multi-agent orchestration, and your data on your own machine. (Agents still consume your subscription's usage and obey its rate limits.)"
+      content="Loom weaves a fleet of real interactive Claude Code agents into one fabric. Every agent runs on your Claude subscription (Pro/Max), with no per-token API bill for the orchestration. Durable local sessions, multi-agent orchestration, and your data on your own machine. (Agents still consume your subscription's usage and obey its rate limits.)"
     />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0a0b0c" />
 
     <!-- Open Graph / social -->
     <meta property="og:title" content="Loom · orchestrate real Claude Code agents on your subscription" />
     <meta
       property="og:description"
-      content="Drive a fleet of real interactive Claude Code sessions on the Claude subscription you already pay for — no per-token API bill for the orchestration — with a lead agent delegating to workers, all on your own machine."
+      content="Weave a fleet of real interactive Claude Code sessions into one fabric on the Claude subscription you already pay for, with a lead agent delegating to workers on isolated branches, all on your own machine."
     />
     <meta property="og:type" content="website" />
 
-    <!-- Fonts: matches the cockpit's Space Grotesk (head) + JetBrains Mono (data) stacks.
-         Fallbacks keep the layout intact if the CDN is unreachable. -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
-
+    <!-- Brand type (Space Grotesk + JetBrains Mono) is embedded offline as base64 woff2 in styles.css.
+         No CDN, no remote fonts, no network requests — the page renders fully offline from this folder. -->
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -53,11 +47,13 @@
           <a href="#what">What it is</a>
           <a href="#features">Features</a>
           <a href="#how">How it works</a>
-          <a
-            class="btn btn-primary btn-sm"
-            href="https://github.com/DanielC000/loom"
-            >View on GitHub</a
-          >
+          <a href="#quickstart">Quickstart</a>
+          <a class="btn btn-primary btn-sm" href="https://github.com/DanielC000/loom">
+            <span class="btn-gh-mark" aria-hidden="true">
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            </span>
+            GitHub
+          </a>
         </nav>
       </div>
     </header>
@@ -65,27 +61,26 @@
     <main id="main">
       <!-- ── Hero ─────────────────────────────────────────────────────────── -->
       <section class="hero loom-grid" id="top">
+        <div class="hero-warp" aria-hidden="true"></div>
         <div class="wrap hero-inner">
-          <div class="hero-copy">
-            <p class="kicker">On your Claude subscription · not metered API</p>
+          <div class="hero-copy reveal">
+            <p class="kicker">
+              <span class="dot dot-phosphor"></span>
+              On your Claude subscription · not metered API
+            </p>
             <h1 class="hero-title">
-              Orchestrate a fleet of
-              <span class="accent">real</span> Claude&nbsp;Code agents on your
-              subscription.
+              Weave a fleet of <span class="accent">real</span> Claude&nbsp;Code
+              agents into <span class="grad">one&nbsp;fabric</span>.
             </h1>
             <p class="hero-lede">
               Every agent is the genuine interactive <code>claude</code> driven
               over a PTY, so a whole fleet runs on the Claude subscription
-              (Pro/Max) you already pay for — no per-token API bill for the
-              orchestration. A lead agent decomposes a goal and delegates to
-              workers on isolated branches, all on your own machine. (Agents
-              still consume your subscription's usage and obey its rate limits.)
+              (Pro/Max) you already pay for, with no per-token API bill for the
+              orchestration. A lead decomposes a goal and delegates to workers on
+              isolated branches, all on your own machine.
             </p>
             <div class="hero-cta">
-              <a
-                class="btn btn-primary"
-                href="https://github.com/DanielC000/loom"
-              >
+              <a class="btn btn-primary" href="https://github.com/DanielC000/loom">
                 View on GitHub
                 <span class="btn-arrow" aria-hidden="true">→</span>
               </a>
@@ -96,92 +91,177 @@
               <li><span class="dot dot-cyan"></span> No per-token API bill</li>
               <li><span class="dot dot-amber"></span> Your data, on your hardware</li>
             </ul>
+            <p class="hero-foot">
+              Agents still consume your subscription's usage and obey its rate limits.
+            </p>
           </div>
 
-          <!-- Mock cockpit panel — CSS-rendered, synthetic data only.
-               PLACEHOLDER: no live screenshots; this is an illustrative mock. -->
-          <div class="terminal" role="img"
-               aria-label="Illustrative mock of Loom's orchestration view: a lead agent managing three worker sessions on isolated branches.">
-            <div class="terminal-bar">
-              <span class="terminal-dot"></span>
-              <span class="terminal-title">loom · orchestration</span>
-              <span class="terminal-live"><span class="dot dot-phosphor"></span> live</span>
+          <!-- The weave instrument: an animated SVG of a lead weaving workers into
+               main, over a compact live-log strip. CSS-rendered, synthetic data only —
+               an illustrative mock, not a live screenshot. Degrades to a clean static
+               composition under prefers-reduced-motion. -->
+          <div class="instrument reveal" role="img"
+               aria-label="Illustrative mock of Loom's orchestration: a lead agent weaving three worker sessions on isolated branches into the main fabric.">
+            <div class="instrument-bar">
+              <span class="instrument-dot"></span>
+              <span class="instrument-title">loom · orchestration</span>
+              <span class="instrument-live"><span class="dot dot-phosphor"></span> live</span>
             </div>
-            <div class="terminal-body" aria-hidden="true">
-              <div class="trow">
-                <span class="t-glyph">▌</span><span class="t-role">MANAGER</span>
-                <span class="pill pill-phosphor">live</span>
-                <span class="t-note">weaving 3 workers</span>
-              </div>
-              <div class="trow t-child">
-                <span class="t-branch">├ worker/landing-site</span>
+
+            <div class="weave" aria-hidden="true">
+              <svg viewBox="0 0 440 220" preserveAspectRatio="xMidYMid meet" role="presentation">
+                <!-- warp: faint vertical threads -->
+                <g class="warp">
+                  <line x1="70"  y1="24" x2="70"  y2="196" />
+                  <line x1="130" y1="24" x2="130" y2="196" />
+                  <line x1="190" y1="24" x2="190" y2="196" />
+                  <line x1="250" y1="24" x2="250" y2="196" />
+                  <line x1="310" y1="24" x2="310" y2="196" />
+                  <line x1="370" y1="24" x2="370" y2="196" />
+                </g>
+
+                <!-- weft: the orchestration threads (base, static) -->
+                <g class="weft-base">
+                  <path d="M56,110 C110,110 130,52 196,52" />
+                  <path d="M56,110 C110,110 130,110 196,110" />
+                  <path d="M56,110 C110,110 130,168 196,168" />
+                  <path d="M196,52  C300,52 320,110 392,110" />
+                  <path d="M196,110 C300,110 320,110 392,110" />
+                  <path d="M196,168 C300,168 320,110 392,110" />
+                </g>
+
+                <!-- weft: animated flow overlay (the shuttle weaving through) -->
+                <g class="weft-flow">
+                  <path class="flow flow-a" d="M56,110 C110,110 130,52 196,52 C300,52 320,110 392,110" />
+                  <path class="flow flow-b" d="M56,110 C110,110 130,168 196,168 C300,168 320,110 392,110" />
+                </g>
+
+                <!-- nodes -->
+                <g class="nodes">
+                  <circle class="node node-lead" cx="56"  cy="110" r="7" />
+                  <circle class="node node-review" cx="196" cy="52"  r="5.5" />
+                  <circle class="node node-busy"   cx="196" cy="110" r="5.5" />
+                  <circle class="node node-queued" cx="196" cy="168" r="5.5" />
+                  <circle class="node node-main"   cx="392" cy="110" r="7.5" />
+                </g>
+
+                <g class="weave-labels">
+                  <text x="56"  y="92"  text-anchor="middle">lead</text>
+                  <text x="392" y="92"  text-anchor="middle">main</text>
+                </g>
+              </svg>
+            </div>
+
+            <div class="ilog" aria-hidden="true">
+              <div class="ilog-row">
+                <span class="ilog-branch">├ worker/landing-site</span>
                 <span class="pill pill-phosphor">review</span>
-                <span class="t-diff">+318 −0</span>
+                <span class="ilog-diff">+318 −0</span>
               </div>
-              <div class="trow t-child">
-                <span class="t-branch">├ worker/api-gateway</span>
+              <div class="ilog-row">
+                <span class="ilog-branch">├ worker/api-gateway</span>
                 <span class="pill pill-amber">busy</span>
-                <span class="t-diff">+142 −18</span>
+                <span class="ilog-diff">+142 −18</span>
               </div>
-              <div class="trow t-child">
-                <span class="t-branch">└ worker/vault-sync</span>
+              <div class="ilog-row">
+                <span class="ilog-branch">└ worker/vault-sync</span>
                 <span class="pill pill-muted">queued</span>
-                <span class="t-diff">idle</span>
+                <span class="ilog-diff">idle</span>
               </div>
-              <div class="trow t-log">
-                <span class="t-time">17:02</span>
-                <span class="t-cyan">merge</span> worker/landing-site → main
-                <span class="t-cursor">▏</span>
+              <div class="ilog-row ilog-event">
+                <span class="ilog-time">17:02</span>
+                <span class="ilog-merge">merge</span> worker/landing-site → main
+                <span class="ilog-cursor">▏</span>
               </div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Spec band ────────────────────────────────────────────────────── -->
+      <section class="specband" aria-label="At a glance">
+        <div class="wrap specband-grid">
+          <div class="spec reveal">
+            <p class="spec-k">Subscription</p>
+            <p class="spec-v">Claude <strong>Pro / Max</strong>, not metered API</p>
+          </div>
+          <div class="spec reveal">
+            <p class="spec-k">Engine</p>
+            <p class="spec-v">Real interactive <code>claude</code>, over PTY</p>
+          </div>
+          <div class="spec reveal">
+            <p class="spec-k">State</p>
+            <p class="spec-v">Local daemon · SQLite · your git + vault</p>
+          </div>
+          <div class="spec reveal">
+            <p class="spec-k">Orchestration</p>
+            <p class="spec-v">1 lead → N workers, isolated branches</p>
           </div>
         </div>
       </section>
 
       <!-- ── What it is ───────────────────────────────────────────────────── -->
-      <section class="section" id="what" aria-labelledby="what-h">
-        <div class="wrap">
-          <p class="section-label">What it is</p>
-          <h2 class="section-title" id="what-h">
-            One fabric for the work, the agents, and the knowledge.
-          </h2>
-          <p class="prose">
+      <section class="section section-what" id="what" aria-labelledby="what-h">
+        <div class="wrap what-inner">
+          <div class="reveal">
+            <p class="section-label">What it is</p>
+            <h2 class="section-title" id="what-h">
+              One fabric for the work, the agents, and the knowledge.
+            </h2>
+          </div>
+          <p class="prose reveal">
             Loom drives the <strong>real interactive <code>claude</code></strong>,
             the same terminal session you'd run by hand rather than a headless
             one-shot or an API-key agent loop. Because every agent is a genuine
             <code>claude</code> session, a whole fleet of them runs on your
-            <strong>existing Claude subscription (Pro/Max)</strong> — there's no
+            <strong>existing Claude subscription (Pro/Max)</strong>, with no
             separate per-token API bill for the orchestration. Those sessions are
-            durable: they're owned by a daemon on your own machine, so closing the
-            window never kills the work, and your code, transcripts, and vault stay
-            on your hardware. Around them, one lead agent decomposes a goal,
-            delegates to workers on isolated branches, reviews their diffs, and
-            merges.
+            durable: a daemon on your own machine owns them, so closing the window
+            never kills the work, and your code, transcripts, and vault stay on
+            your hardware. Around them, one lead agent decomposes a goal, delegates
+            to workers on isolated branches, reviews their diffs, and merges.
           </p>
         </div>
       </section>
 
-      <!-- ── Features ─────────────────────────────────────────────────────── -->
+      <!-- ── Features (bento) ─────────────────────────────────────────────── -->
       <section class="section section-features" id="features" aria-labelledby="features-h">
         <div class="wrap">
-          <p class="section-label">Features</p>
-          <h2 class="section-title" id="features-h">Built like an instrument.</h2>
-          <ul class="features-grid">
-            <li class="card">
-              <span class="card-icon" aria-hidden="true">↻</span>
-              <h3 class="card-title">Runs on your subscription</h3>
-              <p class="card-body">
-                Every agent is the genuine interactive <code>claude</code> driven
-                over a PTY — never <code>claude -p</code> / headless, never an
-                API-key agent loop — so a whole fleet runs on the Claude
-                subscription (Pro/Max) you already pay for, with no per-token API
-                bill for the orchestration. Sessions are resumable and outlive any
-                viewer, so a closed tab or a reboot doesn't lose the thread (agents
-                still consume your subscription's usage and obey its rate limits).
-              </p>
+          <div class="reveal">
+            <p class="section-label">Features</p>
+            <h2 class="section-title" id="features-h">Built like an instrument.</h2>
+          </div>
+          <ul class="bento">
+            <li class="card card-wide reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="4" y="8" width="15" height="11" rx="2" />
+                  <path d="M7.5 13.5h8 M7.5 11h5" />
+                  <circle cx="30" cy="11" r="2.5" /><circle cx="36" cy="20" r="2.5" /><circle cx="30" cy="29" r="2.5" />
+                  <path d="M19 13.5 27.8 11.6 M19 13.5 33.6 19.3 M19 13.5 27.8 28.4" />
+                </svg>
+              </span>
+              <div class="card-text">
+                <h3 class="card-title">Runs on your subscription</h3>
+                <p class="card-body">
+                  Every agent is the genuine interactive <code>claude</code> driven
+                  over a PTY, never <code>claude -p</code> / headless, never an
+                  API-key agent loop, so a whole fleet runs on the Claude
+                  subscription (Pro/Max) you already pay for, with no per-token API
+                  bill for the orchestration. Sessions are resumable and outlive any
+                  viewer, so a closed tab or a reboot doesn't lose the thread.
+                </p>
+              </div>
             </li>
-            <li class="card">
-              <span class="card-icon" aria-hidden="true">⛓</span>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="9" cy="20" r="2.5" />
+                  <circle cx="31" cy="9" r="2.5" /><circle cx="31" cy="20" r="2.5" /><circle cx="31" cy="31" r="2.5" />
+                  <path d="M11.5 19 28.5 10 M11.5 20h17 M11.5 21 28.5 30" />
+                </svg>
+              </span>
               <h3 class="card-title">Multi-agent orchestration</h3>
               <p class="card-body">
                 A lead session plans, delegates to worker sessions on isolated
@@ -189,42 +269,84 @@
                 Workers report up; the lead holds the whole picture.
               </p>
             </li>
-            <li class="card">
-              <span class="card-icon" aria-hidden="true">▦</span>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="5" y="8" width="30" height="24" rx="2.5" />
+                  <path d="M5 14h30 M17 14v18" />
+                  <path d="M9 11h.01 M12 11h.01" />
+                  <path d="M21 20l3 2.5-3 2.5" />
+                </svg>
+              </span>
               <h3 class="card-title">The terminal cockpit</h3>
               <p class="card-body">
-                A stateless web viewport attaches over WebSockets: Mission
-                Control, a task board, live terminals, runs and git, all in one
+                A stateless web viewport attaches over WebSockets: Mission Control,
+                a task board, live terminals, runs and git, all in one
                 phosphor-on-dark instrument panel.
               </p>
             </li>
-            <li class="card">
-              <span class="card-icon" aria-hidden="true">⌂</span>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M20 5l12 4v8c0 7.5-5 13-12 15C13 30 8 24.5 8 17V9z" />
+                  <rect x="15.5" y="17.5" width="9" height="7" rx="1.4" />
+                  <path d="M17.5 17.5v-2a2.5 2.5 0 015 0v2" />
+                </svg>
+              </span>
               <h3 class="card-title">Your data, on your hardware</h3>
               <p class="card-body">
-                Everything Loom keeps is local: a loopback-bound daemon, an
-                SQLite store, your git checkouts, transcripts, and vault. Loom
-                adds no cloud service of its own, so your code and history stay
-                on your machine.
+                Everything Loom keeps is local: a loopback-bound daemon, an SQLite
+                store, your git checkouts, transcripts, and vault. Loom adds no
+                cloud service of its own, so your code and history stay on your
+                machine.
               </p>
             </li>
-            <li class="card">
-              <span class="card-icon" aria-hidden="true">✦</span>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M20 5 33 12.5v15L20 35 7 27.5v-15z" />
+                  <path d="M20 5v30 M7 12.5 20 20l13-7.5 M20 20v15" />
+                </svg>
+              </span>
               <h3 class="card-title">Vault-backed knowledge</h3>
               <p class="card-body">
-                Design notes, decisions, and session logs live in an Obsidian
-                vault woven alongside the code, and Loom auto-commits vault
-                writes so the knowledge layer stays versioned with the work.
+                Design notes, decisions, and session logs live in an Obsidian vault
+                woven alongside the code, and Loom auto-commits vault writes so the
+                knowledge layer stays versioned with the work.
               </p>
             </li>
-            <li class="card">
-              <span class="card-icon" aria-hidden="true">◧</span>
-              <h3 class="card-title">A task board agents can use</h3>
-              <p class="card-body">
-                Tasks are a first-class, project-scoped surface backed by an MCP
-                server, so agents read the board, create cards, and move work
-                through columns as part of the same loop you watch.
-              </p>
+
+            <li class="card card-full reveal">
+              <div class="card-text">
+                <h3 class="card-title">A task board agents can use</h3>
+                <p class="card-body">
+                  Tasks are a first-class, project-scoped surface backed by an MCP
+                  server, so agents read the board, create cards, and move work
+                  through columns as part of the same loop you watch, the same
+                  board the lead uses to decompose a goal into worker tasks.
+                </p>
+              </div>
+              <span class="card-board" aria-hidden="true">
+                <span class="board-col">
+                  <span class="board-h">todo</span>
+                  <span class="board-card"></span><span class="board-card"></span>
+                </span>
+                <span class="board-col">
+                  <span class="board-h">doing</span>
+                  <span class="board-card is-busy"></span>
+                </span>
+                <span class="board-col">
+                  <span class="board-h">review</span>
+                  <span class="board-card is-review"></span>
+                </span>
+                <span class="board-col">
+                  <span class="board-h">done</span>
+                  <span class="board-card is-done"></span><span class="board-card is-done"></span>
+                </span>
+              </span>
             </li>
           </ul>
         </div>
@@ -233,11 +355,14 @@
       <!-- ── How it works ─────────────────────────────────────────────────── -->
       <section class="section section-how" id="how" aria-labelledby="how-h">
         <div class="wrap">
-          <p class="section-label">How it works</p>
-          <h2 class="section-title" id="how-h">Plan, delegate, review, merge.</h2>
-          <ol class="steps">
-            <li class="step">
-              <span class="step-k" aria-hidden="true">01</span>
+          <div class="reveal">
+            <p class="section-label">How it works</p>
+            <h2 class="section-title" id="how-h">Plan, delegate, review, merge.</h2>
+          </div>
+          <ol class="flow">
+            <li class="step reveal">
+              <span class="step-node" aria-hidden="true"></span>
+              <span class="step-k">01</span>
               <h3 class="step-title">Run the daemon</h3>
               <p class="step-body">
                 A single local daemon owns the durable state on
@@ -245,40 +370,88 @@
                 and the vault.
               </p>
             </li>
-            <li class="step">
-              <span class="step-k" aria-hidden="true">02</span>
+            <li class="step reveal">
+              <span class="step-node" aria-hidden="true"></span>
+              <span class="step-k">02</span>
               <h3 class="step-title">Open the cockpit</h3>
               <p class="step-body">
-                The web viewport attaches over WebSockets and detaches freely.
-                The session keeps running on the daemon whether or not you're
-                watching.
+                The web viewport attaches over WebSockets and detaches freely. The
+                session keeps running on the daemon whether or not you're watching.
               </p>
             </li>
-            <li class="step">
-              <span class="step-k" aria-hidden="true">03</span>
+            <li class="step reveal">
+              <span class="step-node" aria-hidden="true"></span>
+              <span class="step-k">03</span>
               <h3 class="step-title">Give a lead a goal</h3>
               <p class="step-body">
-                The lead decomposes the goal into tasks and spawns workers, each
-                on its own worktree branch, each driving a real Claude Code
-                session.
+                The lead decomposes the goal into tasks and spawns workers, each on
+                its own worktree branch, each driving a real Claude Code session.
               </p>
             </li>
-            <li class="step">
-              <span class="step-k" aria-hidden="true">04</span>
+            <li class="step reveal">
+              <span class="step-node" aria-hidden="true"></span>
+              <span class="step-k">04</span>
               <h3 class="step-title">Review and weave it in</h3>
               <p class="step-body">
-                Workers report up; the lead reviews each diff, merges what
-                passes, and the vault + board keep the decisions and progress
-                versioned alongside the code.
+                Workers report up; the lead reviews each diff, merges what passes,
+                and the vault + board keep the decisions and progress versioned
+                alongside the code.
               </p>
             </li>
           </ol>
         </div>
       </section>
 
+      <!-- ── Quickstart ───────────────────────────────────────────────────── -->
+      <section class="section section-quickstart" id="quickstart" aria-labelledby="qs-h">
+        <div class="wrap quickstart-inner">
+          <div class="quickstart-copy reveal">
+            <p class="section-label">Quickstart</p>
+            <h2 class="section-title" id="qs-h">Two commands to a live fleet.</h2>
+            <p class="prose prose-tight">
+              Install the management CLI from npm and start the local daemon. The
+              cockpit runs on your own machine, bound to loopback. Prefer the
+              source? Clone the repo and run it with pnpm.
+            </p>
+            <ul class="quickstart-meta" aria-label="Distribution facts">
+              <li><span class="dot dot-phosphor"></span> MIT licensed</li>
+              <li><span class="dot dot-cyan"></span> Loopback only</li>
+              <li><span class="dot dot-amber"></span> macOS · Linux · Windows</li>
+            </ul>
+          </div>
+
+          <div class="term reveal">
+            <div class="term-bar">
+              <span class="instrument-dot"></span>
+              <span class="term-title">loom · quickstart</span>
+            </div>
+            <div class="term-body">
+              <p class="term-comment"># install the manager CLI (bin: loom)</p>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="npm i -g loomctl"><span class="term-prompt">$</span> npm i -g loomctl</code>
+                <button class="copy" type="button" aria-label="Copy: npm i -g loomctl">Copy</button>
+              </div>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="loom start"><span class="term-prompt">$</span> loom start</code>
+                <button class="copy" type="button" aria-label="Copy: loom start">Copy</button>
+              </div>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="loom open"><span class="term-prompt">$</span> loom open</code>
+                <button class="copy" type="button" aria-label="Copy: loom open">Copy</button>
+              </div>
+              <p class="term-comment term-comment-sp"># or run from source</p>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="pnpm install &amp;&amp; pnpm daemon"><span class="term-prompt">$</span> pnpm install &amp;&amp; pnpm daemon</code>
+                <button class="copy" type="button" aria-label="Copy: pnpm install and pnpm daemon">Copy</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- ── CTA strip ────────────────────────────────────────────────────── -->
       <section class="section section-cta" aria-labelledby="cta-h">
-        <div class="wrap cta-inner">
+        <div class="wrap cta-inner reveal">
           <div>
             <h2 class="section-title" id="cta-h">Read the source.</h2>
             <p class="prose prose-tight">
@@ -287,7 +460,7 @@
               repository.
             </p>
           </div>
-          <a class="btn btn-primary" href="https://github.com/DanielC000/loom">
+          <a class="btn btn-primary btn-lg" href="https://github.com/DanielC000/loom">
             View on GitHub
             <span class="btn-arrow" aria-hidden="true">→</span>
           </a>
@@ -312,13 +485,73 @@
           <span class="brand-word">loom</span>
         </a>
         <p class="footer-note">
-          Orchestrate real Claude Code agents on your Claude subscription, not
-          per-token API bills. Runs on your own machine.
+          Weave real Claude Code agents into one fabric on your Claude
+          subscription, not per-token API bills. Runs on your own machine. MIT
+          licensed. Agents still consume your subscription's usage and obey its
+          rate limits.
         </p>
         <a class="footer-link" href="https://github.com/DanielC000/loom"
           >github.com/DanielC000/loom</a
         >
       </div>
     </footer>
+
+    <!-- Progressive enhancement only: reveal-on-scroll + copy buttons.
+         Self-contained inline JS, no network. The page is fully usable with JS
+         disabled (everything is visible; commands are plain selectable text). -->
+    <script>
+      (function () {
+        var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+        // Reveal-on-scroll — enabled only when motion is allowed AND IntersectionObserver exists.
+        // We opt in by adding a class to <html>, so the hidden state never applies without JS.
+        if (!reduce && "IntersectionObserver" in window) {
+          document.documentElement.classList.add("js-reveal");
+          var io = new IntersectionObserver(
+            function (entries) {
+              entries.forEach(function (e) {
+                if (e.isIntersecting) {
+                  e.target.classList.add("in");
+                  io.unobserve(e.target);
+                }
+              });
+            },
+            { rootMargin: "0px 0px -8% 0px", threshold: 0.08 }
+          );
+          document.querySelectorAll(".reveal").forEach(function (el) { io.observe(el); });
+        }
+
+        // Copy buttons for the quickstart commands.
+        document.querySelectorAll(".term-line").forEach(function (line) {
+          var btn = line.querySelector(".copy");
+          var cmd = line.querySelector(".term-cmd");
+          if (!btn || !cmd) return;
+          btn.addEventListener("click", function () {
+            var text = cmd.getAttribute("data-copy") || cmd.textContent.replace(/^\$\s*/, "");
+            var done = function () {
+              btn.classList.add("is-copied");
+              btn.textContent = "Copied";
+              setTimeout(function () {
+                btn.classList.remove("is-copied");
+                btn.textContent = "Copy";
+              }, 1400);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(text).then(done, function () {});
+            } else {
+              var ta = document.createElement("textarea");
+              ta.value = text;
+              ta.setAttribute("readonly", "");
+              ta.style.position = "absolute";
+              ta.style.left = "-9999px";
+              document.body.appendChild(ta);
+              ta.select();
+              try { document.execCommand("copy"); done(); } catch (err) {}
+              document.body.removeChild(ta);
+            }
+          });
+        });
+      })();
+    </script>
   </body>
 </html>
