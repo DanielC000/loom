@@ -139,7 +139,7 @@ function ScheduleCreate({ agents, loading, onCreate, creating, error, onCancel }
           <option value="">{loading ? "Loading agents…" : noAgents ? "— no agents in this project —" : "— select an agent —"}</option>
           {agents.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
         </Select>
-        {noAgents && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>This project has no agents yet — create one in Workspace first.</span>}
+        {noAgents && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>This project has no agents yet — create one on the Projects page first.</span>}
       </label>
 
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>

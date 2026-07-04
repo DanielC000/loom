@@ -155,7 +155,7 @@ export default function Overview() {
         {projectAgents.length === 0 ? (
           <Panel style={{ padding: 12 }}>
             <span style={{ color: color.amber, fontFamily: font.mono, fontSize: 12 }}>
-              No agents in this project — create one in Workspace.
+              No agents in this project — create one on the Projects page.
             </span>
           </Panel>
         ) : (

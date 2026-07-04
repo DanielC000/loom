@@ -1,9 +1,9 @@
 // Profiles & agents spec (card 5c41c20d) — proves the two HUMAN-only rig-management surfaces render and
 // mutate through the real REST paths, with an observable before/after for every interactive control:
-//   1. Workspace (/workspace) — the per-project Agents panel LISTS REST-seeded agents, CREATING an agent
-//      through the AgentForm reflects in the list + over REST, and ASSIGNING a Profile to an agent produces
-//      an observable change (the agent row gains the profile's role/icon; the agent row's profileId flips
-//      over REST).
+//   1. Projects (/projects) — the per-project Agents column LISTS REST-seeded agents, CREATING an agent
+//      through the AgentForm (revealed by "＋ New agent") reflects in the list + over REST, and ASSIGNING a
+//      Profile to an agent produces an observable change (the agent row gains the profile's role/icon; the
+//      agent row's profileId flips over REST).
 //   2. Profiles (/profiles) — a profile's capability toggles RENDER (browserTesting / documentConversion),
 //      toggling documentConversion reveals the shared-venv provisioning panel (interactive observable), and
 //      toggling browserTesting + Save persists to the store (REST read-back).
@@ -11,7 +11,7 @@
 // profiles inline via `fetch(loomDaemon.baseURL + "/api/...")` — the fixture is NOT edited (shared file).
 //
 // Determinism: the `loomDaemon` fixture is worker-scoped (one daemon for the whole run), so more than one
-// project/profile can exist on it. Every Workspace test seeds its OWN project and PINS it active via
+// project/profile can exist on it. Every Projects test seeds its OWN project and PINS it active via
 // addInitScript localStorage `loom.projectId` (see lib/activeProject) BEFORE navigating, so it never races
 // another test's project; profiles are addressed by a unique name/id, never by list position. The first-run
 // "Welcome to Loom" overlay (App.tsx › FirstRunWelcome, a fixed pointer-intercepting layer) is suppressed
@@ -55,9 +55,9 @@ async function pinActiveProject(page: Page, projectId: string) {
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
 }
 
-// An agent row in the Workspace Agents list is a <button> whose text starts with the agent name (and, once a
-// profile is assigned, also its icon + role). Nav items are <a> links and the profile options live in a
-// <select>, so a role-button filter on the unique name pins exactly the agent row.
+// An agent row in the Projects-page Agents list is a <button> whose text starts with the agent name (and,
+// once a profile is assigned, also its icon + role). Nav items are <a> links and the profile options live in
+// a <select>, so a role-button filter on the unique name pins exactly the agent row.
 const agentRow = (page: Page, name: string) => page.getByRole("button").filter({ hasText: name }).first();
 
 // The profile-assignment control is the ONLY <select> on the page carrying the "— none —" placeholder option
@@ -74,7 +74,7 @@ test.describe("profiles & agents", () => {
     for (const n of names) await seedAgent(loomDaemon.baseURL, project.id, n);
     await pinActiveProject(page, project.id);
 
-    await page.goto(`${loomDaemon.baseURL}/workspace`);
+    await page.goto(`${loomDaemon.baseURL}/projects`);
 
     // The per-project Agents panel renders (it only mounts once an active project resolves).
     await expect(page.getByText("Agents", { exact: true })).toBeVisible();
@@ -92,7 +92,7 @@ test.describe("profiles & agents", () => {
   test("creating an agent through the UI reflects in the list and over REST", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`agents-create-${Date.now()}`);
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/workspace`);
+    await page.goto(`${loomDaemon.baseURL}/projects`);
 
     await expect(page.getByText("Agents", { exact: true })).toBeVisible();
 
@@ -100,8 +100,10 @@ test.describe("profiles & agents", () => {
     // BEFORE: no such agent exists in the list.
     await expect(agentRow(page, newName)).toHaveCount(0);
 
-    // ACT: fill the AgentForm (its "agent name" input is distinct from the project form's "name") and Create.
-    // The Create button (exact) is the AgentForm's — the project form's button reads "Create project".
+    // ACT: reveal the AgentForm in the editor pane ("＋ New agent"), fill it (its "agent name" input is
+    // distinct from the project form's "name"), and Create. The Create button (exact) is the AgentForm's —
+    // the project form's button reads "Create project".
+    await page.getByRole("button", { name: /new agent/i }).click();
     await page.getByPlaceholder("agent name").fill(newName);
     await page.getByPlaceholder("startup prompt (injected as the first turn of each new session)")
       .fill("Verify the assigned task end-to-end and report with evidence.");
@@ -123,7 +125,7 @@ test.describe("profiles & agents", () => {
     const agent = await seedAgent(loomDaemon.baseURL, project.id, "Lead");
     const profile = await seedProfile(loomDaemon.baseURL, { name: `Manager Rig ${Date.now()}`, role: "manager", icon: "🧭" });
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/workspace`);
+    await page.goto(`${loomDaemon.baseURL}/projects`);
 
     // Select the agent so its Profile assignment control mounts.
     await agentRow(page, "Lead").click();

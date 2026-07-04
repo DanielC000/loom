@@ -428,6 +428,8 @@ export default function App() {
             {/* /setup was the old end-user Platform route — now consolidated into /platform. Redirect any
                 lingering links/bookmarks (and the first-run welcome's historical target). */}
             <Route path="/setup" element={<Navigate to="/platform" replace />} />
+            {/* /workspace was renamed + repositioned to /projects (card 274f9ba9) — redirect lingering links. */}
+            <Route path="/workspace" element={<Navigate to="/projects" replace />} />
             <Route path="/review/:workerId" element={<ReviewPanel />} />
             <Route path="/session/:id" element={<SessionView />} />
           </Routes>

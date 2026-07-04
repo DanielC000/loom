@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "./lib/api";
 import { isCompanionActive, withCompanionNavGating } from "./lib/companion";
 import MissionControl from "./pages/MissionControl";
-import Workspace from "./pages/Workspace";
+import Projects from "./pages/Projects";
 import Overview from "./pages/Overview";
 import Archive from "./pages/Archive";
 import Terminals from "./pages/Terminals";
@@ -54,7 +54,7 @@ export type NavPage = {
 // VERIFIED per page (does switching the active project actually rescope it?): Overview, Board,
 // Runs, Vault, Git, Schedules (per-project agents), Settings (edits the active project's config
 // override). Archive imports nothing scoped (its `projectId` fields are its own grouping type),
-// and Workspace has its OWN project picker — both intentionally NOT scoped.
+// and Projects has its OWN project rail (which writes the active project) — both intentionally NOT scoped.
 export const NAV_PAGES: NavPage[] = [
   // ── Primary tabs (header), in display order ──────────────────────────────────
   { label: "Mission Control", nav: "Mission", to: "/", end: true, element: <MissionControl />, group: "system", primary: true },
@@ -74,12 +74,17 @@ export const NAV_PAGES: NavPage[] = [
   { label: "Board", to: "/board", element: <Board />, group: "project", primary: true, scoped: true },
   // ── More ▾ · Operate ─────────────────────────────────────────────────────────
   { label: "Runs", to: "/runs", element: <Runs />, group: "operate", scoped: true },
-  { label: "Workspace", to: "/workspace", element: <Workspace />, group: "operate" },
   { label: "Archive", to: "/archive", element: <Archive />, group: "operate" },
   // ── More ▾ · Project ─────────────────────────────────────────────────────────
   { label: "Vault", to: "/vault", element: <Vault />, group: "project", scoped: true },
   { label: "Git", to: "/git", element: <Git />, group: "project", scoped: true },
   // ── More ▾ · Config ──────────────────────────────────────────────────────────
+  // Projects — the definition/config layer: create/manage projects + define their agents (assign a
+  // Profile, edit the startup prompt). Renamed + repositioned from the old "Workspace" page (card
+  // 274f9ba9): it's config, not operate — it touches NO live sessions — so it sits with the other
+  // "define your actors" surfaces (Profiles, Skills). Its own project rail writes the active project,
+  // so it is deliberately NOT `scoped`. /workspace redirects here (App.tsx) for lingering links.
+  { label: "Projects", to: "/projects", element: <Projects />, group: "config" },
   { label: "Skills", to: "/skills", element: <Skills />, group: "config" },
   { label: "Profiles", to: "/profiles", element: <Profiles />, group: "config" },
   // Companion management is daemon-GLOBAL (one companion config store, not project-scoped) — deliberately
