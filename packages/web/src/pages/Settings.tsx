@@ -9,6 +9,7 @@ import {
   type PlatformConfigOverride,
   type ConnectionAuthScheme,
   type PollJob,
+  type CapabilityProvisionKind,
 } from "@loom/shared";
 import { api, type ProjectPatchError } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -64,6 +65,14 @@ export default function Settings() {
       <div>
         <SectionLabel>Poll Jobs</SectionLabel>
         <PollJobsPanel />
+      </div>
+
+      {/* Capability registry catalog (agent-tooling epic P4 + follow-on): the two BUILTIN capabilities
+          PLUS owner-added rows, in ONE unified list. HUMAN-only, like Connections/Poll Jobs above — a
+          capability grant can launch a host process, the same trust posture as gateCommand. */}
+      <div>
+        <SectionLabel>Capabilities</SectionLabel>
+        <CapabilitiesPanel />
       </div>
     </div>
   );
@@ -991,6 +1000,247 @@ function PollJobForm({ initial, connections, sessions, agents, agentsLoading, se
         <Button variant="primary" onClick={submit} disabled={pending || !valid}>
           {pending ? "Saving…" : editing ? "Save changes" : "Create poll job"}
         </Button>
+        <Button variant="ghost" onClick={onCancel} disabled={pending}>Cancel</Button>
+      </div>
+    </div>
+  );
+}
+
+// --- Capabilities catalog (agent-tooling epic P4 + follow-on) -----------------------------------
+// Mirrors ConnectionsPanel/PollJobsPanel above: list + create-form + delete. Unlike those, ONE catalog
+// spans FOUR provision kinds with mutually-exclusive fields, so the create-form renders a field set
+// CONDITIONAL on the chosen kind rather than one fixed shape. The two builtins (browser-testing /
+// document-conversion) are read-only rows — no delete button — since they aren't `capability_defs` rows
+// at all (see capabilities/registry.ts's BUILTIN_CAPABILITY_SUMMARIES).
+const CAPABILITY_KINDS: CapabilityProvisionKind[] = ["node-package", "python-venv", "bundled", "command"];
+
+function CapabilitiesPanel() {
+  const qc = useQueryClient();
+  const [adding, setAdding] = useState(false);
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ["capabilities"],
+    queryFn: () => api.capabilities(),
+  });
+
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["capabilities"] });
+  const create = useMutation({
+    mutationFn: (b: Parameters<typeof api.createCapability>[0]) => api.createCapability(b),
+    onSuccess: () => { setAdding(false); invalidate(); },
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api.deleteCapability(id),
+    onSuccess: () => invalidate(),
+    onError: (e) => window.alert((e as Error).message),
+  });
+
+  const rows = data ?? [];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <Panel>
+        <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+          The catalog of MCP capabilities a Profile can grant a session — the two Loom-shipped builtins plus
+          any you add here. Owner-only: there is no agent-facing tool that can create, edit, or delete a
+          capability.
+        </p>
+      </Panel>
+
+      <Panel>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <SectionLabel style={{ margin: 0 }}>Catalog ({rows.length})</SectionLabel>
+          <span style={{ flex: 1 }} />
+          {!adding && <Button variant="primary" onClick={() => { setAdding(true); create.reset(); }}>New capability</Button>}
+        </div>
+
+        {isLoading && <Hint>loading capabilities…</Hint>}
+        {isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/capabilities"}</span>}
+
+        {adding && (
+          <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
+            <CapabilityForm pending={create.isPending} error={create.error ? (create.error as Error).message : null}
+              onSubmit={(v) => create.mutate(v)} onCancel={() => { setAdding(false); create.reset(); }} />
+          </div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {rows.length === 0 && !adding && !isLoading && (
+            <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>No capabilities yet.</span>
+          )}
+          {rows.map((c) => (
+            <div key={c.slug} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
+              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{c.name}</span>
+              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>{c.kind}</span>
+              {c.builtin && <Badge tone="muted">builtin</Badge>}
+              {c.requiresConnection && <Badge tone="cyan">needs connection</Badge>}
+              <span style={{ flex: 1, color: color.textMuted, fontSize: 12, fontFamily: font.mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.description}</span>
+              {!c.builtin && c.id && (
+                <Button variant="danger" disabled={remove.isPending}
+                  onClick={() => { if (window.confirm(`Delete capability "${c.name}"? Any Profile granting it will simply skip mounting it.`)) remove.mutate(c.id!); }}>
+                  Delete
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+function CapabilityForm({ pending, error, onSubmit, onCancel }: {
+  pending: boolean; error: string | null;
+  onSubmit: (v: Parameters<typeof api.createCapability>[0]) => void;
+  onCancel: () => void;
+}) {
+  const [slug, setSlug] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [kind, setKind] = useState<CapabilityProvisionKind>("bundled");
+  const [toolAllowlistText, setToolAllowlistText] = useState("");
+  const [wantsScratchDir, setWantsScratchDir] = useState(false);
+  const [requiresConnection, setRequiresConnection] = useState(false);
+  const [secretEnvVar, setSecretEnvVar] = useState("");
+  const [localErr, setLocalErr] = useState<string | null>(null);
+
+  // node-package fields
+  const [pkg, setPkg] = useState("");
+  const [binRelativeToPackageJson, setBinRelativeToPackageJson] = useState("");
+  // python-venv fields
+  const [packagesText, setPackagesText] = useState("");
+  const [venvBinary, setVenvBinary] = useState("");
+  const [probeImport, setProbeImport] = useState("");
+  // bundled / command fields (same shape)
+  const [command, setCommand] = useState("");
+  const [argsText, setArgsText] = useState("");
+
+  const splitLines = (s: string) => s.split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
+
+  const submit = () => {
+    setLocalErr(null);
+    if (!slug.trim() || !name.trim()) { setLocalErr("Slug and name are required."); return; }
+    let provision: unknown;
+    if (kind === "node-package") {
+      if (!pkg.trim() || !binRelativeToPackageJson.trim()) { setLocalErr("Package and bin path are required for node-package."); return; }
+      provision = { package: pkg.trim(), binRelativeToPackageJson: binRelativeToPackageJson.trim() };
+    } else if (kind === "python-venv") {
+      const packages = splitLines(packagesText);
+      if (packages.length === 0 || !venvBinary.trim()) { setLocalErr("At least one package and a binary name are required for python-venv."); return; }
+      provision = { packages, binary: venvBinary.trim(), probeImport: probeImport.trim() || undefined };
+    } else {
+      if (!command.trim()) { setLocalErr("Command is required."); return; }
+      provision = { command: command.trim(), args: argsText.trim() ? splitLines(argsText) : undefined };
+    }
+    if (requiresConnection && !secretEnvVar.trim()) { setLocalErr("Secret env var is required when 'requires connection' is checked."); return; }
+    onSubmit({
+      slug: slug.trim(), name: name.trim(), description: description.trim(), transport: "stdio", kind,
+      provision, toolAllowlist: splitLines(toolAllowlistText), wantsScratchDir, requiresConnection,
+      secretEnvVar: requiresConnection ? secretEnvVar.trim() : undefined,
+    });
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Slug</span>
+        <Input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="e.g. gh-mcp" spellCheck={false} />
+        <Hint>lowercase kebab-case — the id a Profile's capability grant references</Hint>
+      </label>
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Name</span>
+        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. GitHub MCP" />
+      </label>
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Description</span>
+        <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="shown in the Profile editor's capability picker" />
+      </label>
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Provision kind</span>
+        <Select value={kind} onChange={(e) => setKind(e.target.value as CapabilityProvisionKind)}>
+          {CAPABILITY_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+        </Select>
+      </label>
+
+      {kind === "node-package" && (
+        <>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Package</span>
+            <Input value={pkg} onChange={(e) => setPkg(e.target.value)} placeholder="e.g. @playwright/mcp" spellCheck={false} />
+            <Hint>an already-installed daemon dependency, resolved via require.resolve</Hint>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Bin path (relative to package.json)</span>
+            <Input value={binRelativeToPackageJson} onChange={(e) => setBinRelativeToPackageJson(e.target.value)} placeholder="e.g. cli.js" spellCheck={false} />
+          </label>
+        </>
+      )}
+
+      {kind === "python-venv" && (
+        <>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>PyPI packages</span>
+            <Input value={packagesText} onChange={(e) => setPackagesText(e.target.value)} placeholder="comma-separated, e.g. markitdown[all]" spellCheck={false} />
+            <Hint>installed into Loom's shared managed venv on first use</Hint>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Binary</span>
+            <Input value={venvBinary} onChange={(e) => setVenvBinary(e.target.value)} placeholder="the venv console-script name" spellCheck={false} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Probe import <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>(optional)</span></span>
+            <Input value={probeImport} onChange={(e) => setProbeImport(e.target.value)} spellCheck={false} />
+          </label>
+        </>
+      )}
+
+      {(kind === "bundled" || kind === "command") && (
+        <>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Command</span>
+            <Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder={kind === "command" ? "e.g. my-mcp-server, or an absolute path" : "an absolute path Loom ships"} spellCheck={false} />
+            {kind === "command" && <Hint>resolved to an absolute path on save (searches PATH for a bare name) — the save fails if it can't be resolved</Hint>}
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Args <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>(optional, comma-separated)</span></span>
+            <Input value={argsText} onChange={(e) => setArgsText(e.target.value)} spellCheck={false} />
+          </label>
+          {kind === "command" && (
+            <div style={{ padding: 10, background: color.panel, border: `1px solid ${color.amber}`, borderRadius: 6, display: "flex", flexDirection: "column", gap: 2 }}>
+              <span style={{ ...fieldLabel, color: color.amber }}>This launches a host process you control</span>
+              <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+                A session granted this capability spawns the command above directly (no shell — args are
+                passed as an argv array, never a shell string). Loom trusts it because you typed it: the same
+                model as the project Gate Command. Only add a command you'd run yourself.
+              </span>
+            </div>
+          )}
+        </>
+      )}
+
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Tool allowlist <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>(comma-separated MCP tool names)</span></span>
+        <Input value={toolAllowlistText} onChange={(e) => setToolAllowlistText(e.target.value)} placeholder="e.g. mcp__gh-mcp__list_issues" spellCheck={false} />
+      </label>
+
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 13, color: color.text }}>
+        <input type="checkbox" checked={wantsScratchDir} onChange={(e) => setWantsScratchDir(e.target.checked)} />
+        Wants a scratch dir (passed --output-dir at spawn time)
+      </label>
+
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 13, color: color.text }}>
+        <input type="checkbox" checked={requiresConnection} onChange={(e) => setRequiresConnection(e.target.checked)} />
+        Requires a bound connection (credential injected into the server's env)
+      </label>
+      {requiresConnection && (
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={fieldLabel}>Secret env var</span>
+          <Input value={secretEnvVar} onChange={(e) => setSecretEnvVar(e.target.value)} placeholder="e.g. GITHUB_TOKEN" spellCheck={false} />
+        </label>
+      )}
+
+      {(localErr || error) && <div style={{ fontSize: 12, color: color.red, fontFamily: font.mono }}>{localErr ?? error}</div>}
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <Button variant="primary" onClick={submit} disabled={pending}>{pending ? "Saving…" : "Create capability"}</Button>
         <Button variant="ghost" onClick={onCancel} disabled={pending}>Cancel</Button>
       </div>
     </div>

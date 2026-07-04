@@ -2,10 +2,11 @@
  * Agent-tooling P4: the capability registry — generalizes the two hard-coded per-session MCPs
  * (Playwright/markitdown) into a small, extensible, owner-curated catalog. This module owns the
  * OWNER-ADDED half only: CRUD against the `capability_defs` table, input validation, the GENERIC
- * provisioning dispatch (node-package | python-venv | bundled — the fourth kind, an owner-typed
- * arbitrary `command`, is DEFERRED to a focused follow-on so that one owner-extensible security edge
- * gets its own review), and a PER-SLUG python-venv provisioning tracker (so N owner-added python-venv
- * capabilities provision independently, never sharing one in-flight flag).
+ * provisioning dispatch (node-package | python-venv | bundled | command — the fourth kind, an
+ * owner-typed arbitrary `command`, is OWNER-APPROVED as owner-typed-therefore-trusted, the same trust
+ * model as `gateCommand`: trust is about who-can-set, not sandboxing what's set), and a PER-SLUG
+ * python-venv provisioning tracker (so N owner-added python-venv capabilities provision independently,
+ * never sharing one in-flight flag).
  *
  * The two BUILTIN capabilities (browser-testing/document-conversion) are NOT rows in this table — they
  * stay special-cased in `buildMcpServers` (pty/host.ts), reusing their existing, already-hardened
@@ -24,6 +25,7 @@ import { createRequire } from "node:module";
 import type { CapabilityProvisionKind, CapabilitySummary } from "@loom/shared";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
+import { resolveExecutable } from "../pty/resolve-bin.js";
 
 /** One owner-added catalog row as stored/read at the DB layer (mirrors ConnectionRow's shape). */
 export interface CapabilityDefRow {
@@ -55,7 +57,8 @@ export interface CapabilitiesDbStore {
 export type CapabilityProvision =
   | { kind: "node-package"; package: string; binRelativeToPackageJson: string }
   | { kind: "python-venv"; packages: string[]; binary: string; probeImport?: string }
-  | { kind: "bundled"; command: string; args?: string[] };
+  | { kind: "bundled"; command: string; args?: string[] }
+  | { kind: "command"; command: string; args?: string[] };
 
 const NAME_MAX = 200;
 const DESCRIPTION_MAX = 2000;
@@ -94,8 +97,8 @@ export function validateCapabilityDefInput(input: {
   // hardcodes `type: "stdio"` on the mounted entry regardless — an "http" row would silently be inert
   // (validated/stored but never actually usable), so reject it at creation time instead of the confusion.
   if (input.transport !== "stdio") return { ok: false, error: "transport must be 'stdio' (the 'http' transport is not yet supported — all v1 provision kinds are subprocess recipes)" };
-  if (input.kind !== "node-package" && input.kind !== "python-venv" && input.kind !== "bundled") {
-    return { ok: false, error: "kind must be 'node-package', 'python-venv', or 'bundled' (the 'command' kind is not yet available)" };
+  if (input.kind !== "node-package" && input.kind !== "python-venv" && input.kind !== "bundled" && input.kind !== "command") {
+    return { ok: false, error: "kind must be 'node-package', 'python-venv', 'bundled', or 'command'" };
   }
   const p = (input.provision ?? {}) as Record<string, unknown>;
   let provision: CapabilityProvision;
@@ -111,13 +114,33 @@ export function validateCapabilityDefInput(input: {
     }
     if (!isNonBlankStr(p.binary, NAME_MAX)) return { ok: false, error: "python-venv provision requires a 'binary' string" };
     provision = { kind: "python-venv", packages, binary: p.binary, probeImport: typeof p.probeImport === "string" ? p.probeImport : undefined };
-  } else {
+  } else if (input.kind === "bundled") {
     if (!isNonBlankStr(p.command, 500)) return { ok: false, error: "bundled provision requires a 'command' string" };
     const args = p.args;
     if (args !== undefined && (!Array.isArray(args) || !args.every((x) => typeof x === "string"))) {
       return { ok: false, error: "bundled provision's 'args' must be a string array when present" };
     }
     provision = { kind: "bundled", command: p.command, args: args as string[] | undefined };
+  } else {
+    // command: an owner-typed arbitrary executable — OWNER-APPROVED as owner-typed-therefore-trusted
+    // (same trust model as gateCommand). Resolved to an ABSOLUTE path here, at catalog-SAVE time, so an
+    // unresolvable command fails the save explicitly instead of silently no-op-ing at every spawn.
+    if (!isNonBlankStr(p.command, 500)) return { ok: false, error: "command provision requires a 'command' string" };
+    const args = p.args;
+    if (args !== undefined && (!Array.isArray(args) || !args.every((x) => typeof x === "string"))) {
+      return { ok: false, error: "command provision's 'args' must be a string array when present" };
+    }
+    // resolveExecutable only fs-verifies a BARE name via a PATH search; an already-absolute or
+    // slash-containing path is returned as-is with NO existence check. Without the fs.existsSync below, a
+    // nonexistent absolute/relative path (e.g. "/usr/bin/fooo", "C:\bad\x.exe") would pass this guard and
+    // then silently no-op at every future spawn — exactly the outcome this save-time check exists to
+    // prevent. Both branches of "unresolvable" (bare name not on PATH, or a path that doesn't exist) must
+    // fail the save.
+    const resolved = resolveExecutable(p.command);
+    if (!path.isAbsolute(resolved) || !fs.existsSync(resolved)) {
+      return { ok: false, error: `command '${p.command}' could not be resolved to an executable (not absolute/not found on PATH, or does not exist)` };
+    }
+    provision = { kind: "command", command: resolved, args: args as string[] | undefined };
   }
   const toolAllowlist = input.toolAllowlist;
   if (!Array.isArray(toolAllowlist) || !toolAllowlist.every((x) => typeof x === "string")) {
@@ -139,7 +162,7 @@ export function validateCapabilityDefInput(input: {
 }
 
 function toSummary(row: CapabilityDefRow): CapabilitySummary {
-  return { slug: row.slug, name: row.name, description: row.description, transport: row.transport, kind: row.kind, requiresConnection: row.requiresConnection, builtin: false };
+  return { id: row.id, slug: row.slug, name: row.name, description: row.description, transport: row.transport, kind: row.kind, requiresConnection: row.requiresConnection, builtin: false };
 }
 
 /**
@@ -307,8 +330,14 @@ export function resolveCapabilityServer(row: CapabilityDefRow, ctx: ResolveCapab
   } else if (provision.kind === "python-venv") {
     const bin = resolvePythonVenv(row.slug, provision, ctx.pythonInterpreterPath);
     if (bin) server = { command: bin, args: [] };
-  } else {
-    // bundled: a fixed absolute command Loom ships — no install/resolve step, just an existence check.
+  } else if (provision.kind === "bundled" || provision.kind === "command") {
+    // bundled: a fixed absolute command Loom ships. command: an owner-typed executable, already resolved
+    // to an absolute path at catalog-save time (validateCapabilityDefInput). Either way, no install/resolve
+    // step here — just an existence check. NO SHELL: this {command, args} entry is mounted as a "stdio" MCP
+    // server, launched by the CLAUDE ENGINE's own MCP stdio client as an argv-array subprocess — never
+    // through node-pty and never through `/bin/sh -c` — so there is no metachar-injection surface even
+    // though `command`'s two strings are owner-controlled end to end (the containment posture here is
+    // who-can-set, not sandboxing what's set).
     if (fs.existsSync(provision.command)) server = { command: provision.command, args: provision.args ?? [] };
   }
   if (!server) return null;

@@ -203,8 +203,53 @@ check("(regression) an old-shape call (no capabilities/capabilityCatalog fields 
 // ===================== (e) validateCapabilityDefInput =====================
 check("(validate) a reserved slug is rejected",
   validateCapabilityDefInput({ slug: "browser-testing", name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: "/bin/x" }, toolAllowlist: [] }).ok === false);
-check("(validate) the deferred 'command' provision-kind is rejected in v1",
-  validateCapabilityDefInput({ slug: "arb", name: "x", description: "", transport: "stdio", kind: "command", provision: {}, toolAllowlist: [] }).ok === false);
+// ===================== command provision-kind (P4 follow-on): owner-typed-therefore-trusted =====================
+const commandOk = validateCapabilityDefInput({
+  slug: "arb", name: "x", description: "", transport: "stdio", kind: "command",
+  provision: { command: process.execPath, args: ["--version"] }, toolAllowlist: [],
+});
+check("(validate) a resolvable 'command' provision is accepted", commandOk.ok === true);
+check("(validate) 'command' is resolved to an ABSOLUTE path at save time",
+  commandOk.ok === true && path.isAbsolute(commandOk.value.provision.command) && commandOk.value.provision.command === process.execPath);
+const commandBadArgs = validateCapabilityDefInput({
+  slug: "arb2", name: "x", description: "", transport: "stdio", kind: "command",
+  provision: { command: process.execPath, args: "not-an-array" }, toolAllowlist: [],
+});
+check("(validate) 'command' provision rejects non-array args", commandBadArgs.ok === false);
+const commandUnresolvable = validateCapabilityDefInput({
+  slug: "arb3", name: "x", description: "", transport: "stdio", kind: "command",
+  provision: { command: "totally-not-a-real-binary-xyz123" }, toolAllowlist: [],
+});
+check("(validate) an unresolvable bare 'command' name is REJECTED at save time (not deferred to a silent per-spawn skip)", commandUnresolvable.ok === false);
+
+// CODE-REVIEW FIX: resolveExecutable trusts an already-absolute (or slash-containing) path with NO
+// existence check — only a bare PATH-searched name gets fs-verified. Without an explicit fs.existsSync
+// in validateCapabilityDefInput, a NONEXISTENT absolute path would pass this guard and silently no-op at
+// every spawn. This case must be rejected too.
+const nonexistentAbsPath = path.join(os.tmpdir(), "loom-cr-does-not-exist-xyz123", "nope.exe");
+const commandNonexistentAbs = validateCapabilityDefInput({
+  slug: "arb4", name: "x", description: "", transport: "stdio", kind: "command",
+  provision: { command: nonexistentAbsPath }, toolAllowlist: [],
+});
+check("(validate) a NONEXISTENT absolute 'command' path is REJECTED at save time (not just a bare unresolvable name)",
+  commandNonexistentAbs.ok === false);
+
+const commandDef = {
+  ...fakeBundled, slug: "arb-cmd", kind: "command",
+  provisionJson: JSON.stringify({ kind: "command", command: process.execPath, args: ["--version"] }),
+};
+const resolvedCommand = resolveCapabilityServer(commandDef, {});
+check("(command) resolveCapabilityServer mounts a command capability from its resolved abs command + args",
+  resolvedCommand?.command === process.execPath && JSON.stringify(resolvedCommand?.args) === JSON.stringify(["--version"]));
+
+// credential tie (OQ1) covered for the command kind too, not just bundled.
+const commandCredDef = {
+  ...commandDef, slug: "arb-cmd-cred", requiresConnection: true, secretEnvVar: "ARB_TOKEN",
+};
+const resolvedCommandCred = resolveCapabilityServer(commandCredDef, { connectionSecret: "arb-secret-value" });
+check("(command) resolveCapabilityServer injects the bound secret into the mounted server's OWN env, under secretEnvVar",
+  resolvedCommandCred?.env?.ARB_TOKEN === "arb-secret-value");
+check("(command) the secret NEVER lands in the mounted server's args", !(resolvedCommandCred?.args ?? []).includes("arb-secret-value"));
 check("(validate) requiresConnection WITHOUT secretEnvVar is rejected",
   validateCapabilityDefInput({ slug: "gh", name: "GitHub", description: "", transport: "stdio", kind: "bundled", provision: { command: "/bin/x" }, toolAllowlist: [], requiresConnection: true }).ok === false);
 const goodInput = validateCapabilityDefInput({
@@ -222,9 +267,12 @@ const created = createCapabilityDef(db, {
 });
 check("(db) createCapabilityDef persists + returns a REST summary (never the raw provisioning recipe)",
   created.slug === "gh-mcp" && created.builtin === false && !("provision" in created) && !("provisionJson" in created));
+check("(db) createCapabilityDef's summary carries the row id (the Settings UI's DELETE target)", typeof created.id === "string" && created.id.length > 0);
 const summaries = listCapabilitySummaries(db);
 check("(db) listCapabilitySummaries returns the 2 BUILTINS first, then the owner-added row",
   summaries.length === 3 && summaries[0].slug === "browser-testing" && summaries[1].slug === "document-conversion" && summaries[2].slug === "gh-mcp");
+check("(db) the 2 BUILTIN summaries carry NO id (they aren't capability_defs rows and can't be deleted)",
+  summaries[0].id === undefined && summaries[1].id === undefined);
 let dupThrew = false;
 try {
   createCapabilityDef(db, { slug: "gh-mcp", name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: process.execPath }, toolAllowlist: [] });

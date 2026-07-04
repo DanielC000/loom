@@ -1170,8 +1170,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- Capability registry catalog (agent-tooling epic P4): the two BUILTIN capabilities (browser-testing/
   // document-conversion) PLUS owner-added rows, listed as ONE unified REST-facing catalog. HUMAN-managed
   // ONLY (loopback REST), INTENTIONALLY NO MCP path — a capability grant can launch a host process and
-  // bind egress, the same trust posture as connections above. v1 accepts only the node-package/python-venv/
-  // bundled provision kinds (the arbitrary `command` kind is a deferred follow-on). ---
+  // bind egress, the same trust posture as connections above. Accepts all four provision kinds
+  // (node-package/python-venv/bundled/command) — `command` is owner-typed-therefore-trusted, resolved to
+  // an absolute path at save time (see capabilities/registry.ts). ---
   app.get("/api/capabilities", async () => listCapabilitySummaries(deps.db));
   app.post("/api/capabilities", async (req, reply) => {
     try {

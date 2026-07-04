@@ -177,17 +177,19 @@ export interface CapabilityGrant {
 }
 
 /**
- * How a registry capability's MCP server is provisioned (agent-tooling P4). v1 ships three kinds — the
- * fourth, an owner-typed arbitrary `command`, is DEFERRED (a follow-on card) to isolate that one sharp,
- * owner-extensible security edge for its own focused review:
+ * How a registry capability's MCP server is provisioned (agent-tooling P4). v1 shipped three kinds;
+ * `command` followed as a focused follow-on (owner-approved: owner-typed-therefore-trusted, the same
+ * trust model as `gateCommand` — trust is about who-can-set, not sandboxing what's set):
  *  - `node-package`  — resolved via `require.resolve` of an already-installed daemon dependency, mirroring
  *                      the Playwright MCP (a bin script sitting beside `package.json`, not in its exports map).
  *  - `python-venv`   — resolved via the shared Loom-managed Python venv (`ensurePythonPackageAsync`),
  *                      mirroring the markitdown MCP — the one kind an owner can realistically point at a
  *                      genuinely NEW capability (any PyPI-published MCP server) without a daemon code change.
  *  - `bundled`       — ships inside Loom's own assets, no install/resolve step.
+ *  - `command`       — an owner-typed arbitrary executable + args, resolved to an ABSOLUTE path at
+ *                      catalog-save time (`resolveExecutable`); a host process the owner explicitly typed in.
  */
-export type CapabilityProvisionKind = "node-package" | "python-venv" | "bundled";
+export type CapabilityProvisionKind = "node-package" | "python-venv" | "bundled" | "command";
 
 /**
  * REST-facing summary of one catalog capability (builtin or owner-added) — never carries the raw
@@ -195,6 +197,9 @@ export type CapabilityProvisionKind = "node-package" | "python-venv" | "bundled"
  * capability catalog panel and the Profile editor's capability picker read.
  */
 export interface CapabilitySummary {
+  /** The `capability_defs` row id — present for an owner-added row (DELETE /api/capabilities/:id
+   *  target), absent for a builtin (builtins aren't rows and can't be deleted). */
+  id?: string;
   slug: string;
   name: string;
   description: string;
