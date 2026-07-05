@@ -126,7 +126,7 @@ function runPythonHelper(pythonBin: string, args: string[], timeoutMs: number): 
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(pythonBin, [TRANSCRIBE_SCRIPT, ...args], {
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", "ignore"],
         env: { ...process.env, HF_HOME: hfHomeDir(), LOOM_STT_MODEL_SIZE: STT_MODEL_SIZE },
       });
     } catch {
