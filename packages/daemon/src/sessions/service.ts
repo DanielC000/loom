@@ -3223,6 +3223,17 @@ export class SessionService {
    * method synchronously, BEFORE the drain hands the redirect over, so at this instant the worker looks
    * stranded even though it has authoritative direction about to land as its very next turn. If the
    * worker still has queued direction sitting in its pending FIFO, it is not stranded — skip the nudge.
+   *
+   * PROGRESS-PARK GUARD (card 492a0a17): a `worker_report(status=progress)` does NOT move the task out
+   * of the `active` lane, so an approach-first worker that reported progress and parked awaiting the
+   * manager's reply satisfies both checks above — yet it DID call worker_report, so "did NOT call
+   * worker_report" would be false. Distinguish that healthy park from a genuine stall by looking at this
+   * worker's most recent recorded events: if the LATEST `worker_report` is a `progress` report AND no
+   * `message_worker`/`redirect_worker` event has landed since (i.e. the manager hasn't replied yet),
+   * this is the await-ack park — reword instead of alarming. Once the manager DOES reply (a
+   * message_worker/redirect_worker event appears after that progress report) and the worker goes idle
+   * again without a fresh report, the condition no longer holds — that's a real stall and gets the
+   * normal nudge, so an acked-then-stalled worker is never silently missed.
    */
   notifyManagerOfIdleWorker(workerSessionId: string): void {
     const w = this.db.getSession(workerSessionId);
@@ -3232,7 +3243,17 @@ export class SessionService {
     // Still sitting in the `active` lane ⇒ hasn't reported (worker_report would have moved it out).
     const activeKey = this.columnKeyForProjectRole(w.projectId, "active");
     if (!task || task.columnKey !== activeKey) return; // reported done/blocked, already merged, or no active lane
-    const msg = `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review, or worker_message it.`;
+
+    const events = this.db.listEventsForWorker(workerSessionId);
+    const lastReportIdx = events.findLastIndex((e) => e.kind === "worker_report");
+    const lastReport = lastReportIdx !== -1 ? events[lastReportIdx] : undefined;
+    const parkedAwaitingAck = !!lastReport
+      && lastReport.detail?.status === "progress"
+      && !events.slice(lastReportIdx + 1).some((e) => e.kind === "message_worker" || e.kind === "redirect_worker");
+
+    const msg = parkedAwaitingAck
+      ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) is idle after calling worker_report(progress) — it IS parked awaiting your reply, not stalled. If you haven't replied yet, worker_message it with direction; if it looks stuck anyway, pull it first: worker_transcript ${workerSessionId}.`
+      : `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review, or worker_message it.`;
     try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
   }
 

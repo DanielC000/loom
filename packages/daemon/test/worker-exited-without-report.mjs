@@ -28,6 +28,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       [loom:worker-idle] nudge when the worker still has direction queued in its pending FIFO (the
 //       redirectWorker-on-a-busy-worker race: enqueue then busy-clear, in one tick, before the drain);
 //       a worker with NO pending direction still gets the genuine-strand nudge.
+//   (g) PROGRESS-PARK GUARD (card 492a0a17) — a worker whose LATEST recorded event is a
+//       worker_report(status=progress), with no message_worker/redirect_worker event since, is a healthy
+//       await-ack park: the nudge is REWORDED (no false "did NOT call worker_report" claim, and says
+//       "parked awaiting your reply").
+//   (h) ACKED-THEN-STALLED — a worker that reported progress, THEN got a manager reply (message_worker/
+//       redirect_worker recorded after the progress report), and THEN goes idle again without a fresh
+//       report is a GENUINE stall: it still gets the normal "did NOT call worker_report" nudge (no blind
+//       spot introduced by the progress-park guard).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -209,7 +217,56 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ============================ (g) PROGRESS-PARK GUARD (card 492a0a17) ============================
+// A worker that calls worker_report(progress) does NOT move its task out of the active lane, so it
+// still satisfies notifyManagerOfIdleWorker's "still in_progress" check — but it DID call worker_report,
+// so the old copy's "did NOT call worker_report" claim would be false. With no manager reply since,
+// this is a healthy await-ack park: the nudge must be reworded, not the alarming original.
+{
+  const e = makeEnv();
+  seedSession(e, "mgr-g", { role: "manager", processState: "live" });
+  seedTask(e, "tk-g");
+  seedSession(e, "wkr-g", { role: "worker", processState: "live", parentSessionId: "mgr-g", taskId: "tk-g", branch: "loom/tk-g" });
+
+  const rep = await e.sessions.workerReport("wkr-g", { status: "progress", summary: "approach: X, will proceed unless redirected" });
+  check("(g) precondition: the progress report itself reaches the live manager", rep.reported === true);
+  e.enqueued.length = 0; // isolate the idle-nudge assertions from the progress-report enqueue above
+
+  e.sessions.notifyManagerOfIdleWorker("wkr-g");
+  const parkNudge = e.enqueued.find((x) => x.id === "mgr-g" && /worker-idle/.test(x.text));
+  check("(g) a progress-parked worker STILL gets a nudge (visibility preserved)", !!parkNudge);
+  check("(g) the nudge does NOT claim the worker \"did NOT call worker_report\" (that would be false)",
+    !!parkNudge && !/did NOT call worker_report/.test(parkNudge.text));
+  check("(g) the nudge is reworded to say it's parked awaiting a reply, not stalled",
+    !!parkNudge && /parked awaiting your reply/.test(parkNudge.text) && /not stalled/.test(parkNudge.text));
+  cleanup(e);
+}
+
+// ============================ (h) ACKED-THEN-STALLED → still a genuine strand, still nudges normally ======
+// The progress-park guard must NOT create a blind spot: once the manager actually replies (a message_worker
+// or redirect_worker event lands AFTER the progress report) and the worker goes idle again with no fresh
+// report, that is a REAL stall — the normal "did NOT call worker_report" nudge must still fire.
+{
+  const e = makeEnv();
+  seedSession(e, "mgr-h", { role: "manager", processState: "live" });
+  seedTask(e, "tk-h");
+  seedSession(e, "wkr-h", { role: "worker", processState: "live", parentSessionId: "mgr-h", taskId: "tk-h", branch: "loom/tk-h" });
+
+  await e.sessions.workerReport("wkr-h", { status: "progress", summary: "approach: Y, will proceed unless redirected" });
+  // The manager acks/replies — records a message_worker event AFTER the progress report.
+  e.sessions.messageWorker("mgr-h", "wkr-h", "sounds good, proceed");
+  e.enqueued.length = 0; // isolate the idle-nudge assertions from the report/message enqueues above
+
+  // The worker (having been acked) works more and THEN genuinely goes idle without reporting again.
+  e.sessions.notifyManagerOfIdleWorker("wkr-h");
+  const staleNudge = e.enqueued.find((x) => x.id === "mgr-h" && /worker-idle/.test(x.text));
+  check("(h) an acked-then-stalled worker STILL nudges its manager (no blind spot)", !!staleNudge);
+  check("(h) the nudge is the NORMAL \"did NOT call worker_report\" copy (this is a genuine stall)",
+    !!staleNudge && /did NOT call worker_report/.test(staleNudge.text));
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a worker that exits without ever calling worker_report (task still in_progress) yields a DISTINCT, durable worker_exited_without_report event + a [loom:worker-exited] manager nudge; a worker that DID report (task moved) yields no duplicate; an intended stop, a recycled/superseded worker, and a non-worker/parentless exit all record nothing; notifyManagerOfIdleWorker skips the nudge when direction is genuinely queued (the redirectWorker race) but still nudges a genuine strand."
+  ? "\n✅ ALL PASS — a worker that exits without ever calling worker_report (task still in_progress) yields a DISTINCT, durable worker_exited_without_report event + a [loom:worker-exited] manager nudge; a worker that DID report (task moved) yields no duplicate; an intended stop, a recycled/superseded worker, and a non-worker/parentless exit all record nothing; notifyManagerOfIdleWorker skips the nudge when direction is genuinely queued (the redirectWorker race) but still nudges a genuine strand; a progress-parked worker gets a reworded (not falsely-alarming) nudge, and an acked-then-stalled worker still gets the normal one (no blind spot)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
