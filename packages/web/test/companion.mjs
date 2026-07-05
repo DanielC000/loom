@@ -9,10 +9,10 @@
 //   node --experimental-strip-types packages/web/test/companion.mjs
 import assert from "node:assert/strict";
 import {
-  COMPANION_ID_MAX, COMPANION_TOKEN_MAX, TELEGRAM_CHANNEL, bindingFromCreateForm, bindingsForDisplay,
-  buildConfigBody, buildTelegramConnect, channelDisplayName, emptyConfigForm, emptyTelegramForm,
-  formFromMasked, hasChannelBinding, maskedToken, provisionBody, provisionErrorMessage, validateBinding,
-  validateSender, validatePairing, validateTelegramConnect,
+  COMPANION_DEFAULT_NAME, COMPANION_ID_MAX, COMPANION_TOKEN_MAX, TELEGRAM_CHANNEL, bindingFromCreateForm,
+  bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, companionDisplayName,
+  emptyConfigForm, emptyTelegramForm, formFromMasked, hasChannelBinding, maskedToken, provisionBody,
+  provisionErrorMessage, validateBinding, validateSender, validatePairing, validateTelegramConnect,
 } from "../src/lib/companion.ts";
 // api.ts has only a type-only `@loom/shared` import (erased under --experimental-strip-types), so it loads
 // here with no daemon/build — letting us drive api.provisionCompanion against a mocked global fetch.
@@ -122,6 +122,24 @@ check("buildConfigBody: name is trimmed and always sent (edit sends '' to clear,
 check("buildConfigBody: an over-long name errors, at-the-max passes", () => {
   assert.ok("error" in buildConfigBody({ ...baseForm(), name: "x".repeat(COMPANION_ID_MAX + 1) }, "create"));
   assert.ok(!("error" in buildConfigBody({ ...baseForm(), name: "x".repeat(COMPANION_ID_MAX) }, "create")));
+});
+
+// ── The companion DISPLAY NAME derivation (config.name authoritative, friendly fallback, NEVER the id) ──
+// The exact bug this card fixes: the Companion page must render the companion's OWN name — not the raw
+// session-id prefix — in the header and the chat input placeholder. companionDisplayName is the single
+// source that both consume, so it's the load-bearing unit to pin.
+check("companionDisplayName: uses config.name when set (trimmed)", () => {
+  assert.equal(companionDisplayName({ name: "Ada" }), "Ada");
+  assert.equal(companionDisplayName({ name: "  Ada  " }), "Ada", "the name is trimmed");
+});
+
+check("companionDisplayName: falls back to a friendly default when the name is empty/whitespace/absent — NEVER the session id", () => {
+  assert.equal(companionDisplayName({ name: "" }), COMPANION_DEFAULT_NAME);
+  assert.equal(companionDisplayName({ name: "   " }), COMPANION_DEFAULT_NAME, "a whitespace-only name is treated as unset");
+  assert.equal(companionDisplayName({}), COMPANION_DEFAULT_NAME, "an absent name field falls back");
+  assert.equal(companionDisplayName(undefined), COMPANION_DEFAULT_NAME, "a missing config (binding-only companion) falls back");
+  assert.equal(companionDisplayName(null), COMPANION_DEFAULT_NAME, "a null config falls back");
+  assert.equal(companionDisplayName(maskedRow()), COMPANION_DEFAULT_NAME, "a masked row with no name never leaks the session id");
 });
 
 // ── Access binding + sender + pairing validators ────────────────────────────────────────────────────

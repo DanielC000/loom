@@ -1,9 +1,9 @@
 import { useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { CompanionConfigMasked, CompanionBinding, SessionListItem } from "@loom/shared";
+import type { CompanionConfigMasked, CompanionBinding } from "@loom/shared";
 import { api, restartCompanionSession, type CompanionProvisionError, type CompanionSkillEntry, type CompanionMemoryEntry, type CompanionReminderEntry } from "../lib/api";
 import {
-  bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, emptyConfigForm,
+  bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, companionDisplayName, emptyConfigForm,
   emptyTelegramForm, formFromMasked, hasChannelBinding, maskedToken, provisionBody, provisionErrorMessage,
   validateBinding, validatePairing, validateSender, validatePersonaPrompt, COMPANION_PROMPT_MAX, TELEGRAM_CHANNEL,
   reminderTitle, humanCron, reminderNextFireAt,
@@ -53,7 +53,6 @@ export default function Companion() {
 
   const configs = useQuery({ queryKey: ["companionConfigs"], queryFn: api.companionConfigs });
   const bindings = useQuery({ queryKey: ["companionBindings"], queryFn: api.companionBindings });
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
 
   // Merge configs + bindings into the companion, keyed by session id. A session may hold MANY bindings
   // (one per channel), so collect them into a list. Only ONE companion can ever exist (single-companion),
@@ -67,17 +66,6 @@ export default function Companion() {
     }
     return [...byId.values()].sort((a, b) => a.sessionId.localeCompare(b.sessionId));
   }, [configs.data, bindings.data]);
-
-  const sessionLabel = useMemo(() => {
-    const m = new Map<string, SessionListItem>();
-    for (const s of sessions.data ?? []) m.set(s.id, s);
-    return (id: string) => {
-      const s = m.get(id);
-      if (!s) return id.slice(0, 8);
-      const bits = [s.agentName, s.title].filter(Boolean).join(" · ");
-      return bits || id.slice(0, 8);
-    };
-  }, [sessions.data]);
 
   const invalidateAll = () => {
     qc.invalidateQueries({ queryKey: ["companionConfigs"] });
@@ -103,12 +91,12 @@ export default function Companion() {
 
   return (
     <div style={{ maxWidth: 1180 }}>
-      <Panel style={{ minHeight: "72vh", padding: 14 }}>
+      <Panel style={{ display: "flex", flexDirection: "column", minHeight: "72vh", padding: 14 }}>
         {current ? (
           <CompanionDetail
             key={current.sessionId}
             companion={current}
-            label={sessionLabel(current.sessionId)}
+            label={companionDisplayName(current.config)}
             onChanged={invalidateAll}
             onDeleted={invalidateAll}
           />
@@ -340,7 +328,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
   const armed = isArmedInApp(companion.bindings, companion.sessionId);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: 1, minHeight: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{label}</strong>
         {companion.config
@@ -354,7 +342,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
 
       {mode === "chat" ? (
         <div role="tabpanel" id="companion-panel-chat" aria-labelledby="companion-tab-chat"
-          style={{ flex: 1, minHeight: "62vh", display: "flex", flexDirection: "column" }}>
+          style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
           <CompanionChat sessionId={companion.sessionId} title={label} armed={armed} />
         </div>
       ) : mode === "terminal" ? (

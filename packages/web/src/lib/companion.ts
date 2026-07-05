@@ -102,6 +102,16 @@ export function maskedToken(cfg: Pick<CompanionConfigMasked, "tokenLast4">): str
   return last4 ? `••••••••••${last4}` : "•••••••••• (unreadable)";
 }
 
+// The companion's DISPLAY NAME — authoritative from its own `config.name` (the field the user sets at
+// create or in the Manage tab). When that's empty (never named), fall back to a friendly "Companion" —
+// NEVER the raw session id, which is meaningless to a human. A companion is deliberately hidden from the
+// session list (lib/sessions.ts), so the session-lookup that other rows use is the WRONG source here;
+// config.name is the right one. Feeds the detail header AND the chat placeholder / bubbles / empty state.
+export const COMPANION_DEFAULT_NAME = "Companion";
+export function companionDisplayName(config?: Pick<CompanionConfigMasked, "name"> | null): string {
+  return (config?.name ?? "").trim() || COMPANION_DEFAULT_NAME;
+}
+
 export type ConfigBodyResult = { error: string } | { body: Record<string, unknown> };
 
 // Validate + assemble the POST/PUT body from the form. `mode` gates the required-on-create fields

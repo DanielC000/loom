@@ -139,8 +139,8 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
   const canSend = connected && draft.trim().length > 0;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 420, gap: 12 }}>
-      <ChatHeader title={title ?? "Companion"} conn={conn} />
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, gap: 12 }}>
+      <ChatHeader conn={conn} />
 
       {armed === false && (
         <div style={notice("amber")} role="status">
@@ -200,17 +200,16 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
   );
 }
 
-// ── Header: title + live connection pill ─────────────────────────────────────────
-function ChatHeader({ title, conn }: { title: string; conn: ChatConnState }) {
+// ── Header: live connection pill ─────────────────────────────────────────────────
+// The companion's NAME is not repeated here — the surrounding CompanionDetail header already names it.
+// This thin strip carries only the live connection state, right-aligned, so the name shows exactly once.
+function ChatHeader({ conn }: { conn: ChatConnState }) {
   const pill =
     conn === "connected" ? { tone: "phosphor" as const, label: "connected", glow: true } :
     conn === "connecting" ? { tone: "amber" as const, label: "connecting", glow: false } :
     { tone: "red" as const, label: "reconnecting", glow: false };
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-      <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>
-        {title}
-      </strong>
       <span style={{ flex: 1 }} />
       <StatusPill tone={pill.tone} label={pill.label} glow={pill.glow} />
     </div>
