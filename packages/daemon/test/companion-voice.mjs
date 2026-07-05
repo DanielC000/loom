@@ -167,6 +167,42 @@ try {
     check("still never submitted a turn across either group message", submitted.length === 0);
   }
 
+  // ============ Part 3b — honest group-scope /voice ack (VOICE-P3 follow-up, card 0078b6a9): a group
+  //              can never actually deliver voice (outbound always resolves senderId:null), so /voice on
+  //              must not claim success it can't deliver. DM behavior is unchanged. ============
+  {
+    const submitted = [];
+    const submit = (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; };
+    const prefs = inMemoryVoicePrefs();
+    const auth = { isSenderAuthorized(binding, sender) { return binding.scope !== "group" || sender?.id === "member-1"; } };
+    const bindings = [{ sessionId: "sess-G2", channel: "telegram", chatId: "888", scope: "group" }];
+    const gw = new ChatGateway(submit, bindings, auth, undefined, undefined, prefs);
+    const sent = [];
+    gw.registerAdapter(fakeAdapter("telegram", sent));
+    const groupRoute = { sessionId: "sess-G2", channel: "telegram", chatId: "888", senderId: "member-1" };
+
+    const rOn = await gw.handleInbound({ channel: "telegram", chatId: "888", body: "/voice on", sender: { id: "member-1" } });
+    check("group /voice on: still intercepted as a command (not a turn)", rOn.accepted === false && rOn.reason === "command" && rOn.command === "voice");
+    check("group /voice on: does NOT claim success — acks the DM-only limitation instead", sent.length === 1 && !/turned on/.test(sent[0].text) && /group chats/i.test(sent[0].text));
+
+    // Belt-and-suspenders: even though /voice on wrote a per-sender pref row, the outbound reply-to-the-
+    // whole-chat path resolves with senderId:null, so it NEVER finds that row — a group reply stays
+    // text-only regardless of what /voice acked (proven end-to-end in companion-voice-tts.mjs case 10).
+    check("group /voice on wrote a per-sender pref row (for whenever group voice is real)", prefs.resolve(groupRoute).voiceReplies === true);
+
+    sent.length = 0;
+    await gw.handleInbound({ channel: "telegram", chatId: "888", body: "/voice off", sender: { id: "member-1" } });
+    check("group /voice off: acked (off is harmless, no false promise to correct)", sent.length === 1);
+
+    // DM behavior is byte-identical to before this fix.
+    sent.length = 0;
+    const dmBindings = [{ sessionId: "sess-D2", channel: "telegram", chatId: "777", scope: "dm" }];
+    const gwDm = new ChatGateway(submit, dmBindings, undefined, undefined, undefined, prefs);
+    gwDm.registerAdapter(fakeAdapter("telegram", sent));
+    const rDmOn = await gwDm.handleInbound({ channel: "telegram", chatId: "777", body: "/voice on" });
+    check("DM /voice on: UNCHANGED — still claims success (the supported path)", rDmOn.accepted === false && rDmOn.reason === "command" && sent.length === 1 && /turned on/.test(sent[0].text));
+  }
+
   // ============ Part 4 — default ctor (no explicit voicePrefs arg) still works — the default is NOT a no-op ============
   {
     const submitted = [];

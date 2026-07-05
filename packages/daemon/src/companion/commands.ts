@@ -84,6 +84,12 @@ const COMMANDS: Record<string, CommandDef> = {
         return { ack: "Usage: /voice on|off" };
       }
       prefs.setVoiceReplies(route, norm === "on");
+      // Group-scoped voice replies aren't deliverable yet (VOICE-P3, DM-first): the outbound reply
+      // always resolves senderId:null, so a per-sender group row is never found and the reply always
+      // degrades to text. Don't let "/voice on" claim a success it can't deliver in a group.
+      if (norm === "on" && route.senderId !== null) {
+        return { ack: "Voice replies aren't available in group chats yet — DM the bot and turn it on there." };
+      }
       return { ack: `✅ Voice replies turned ${norm}.` };
     },
   },
