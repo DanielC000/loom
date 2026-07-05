@@ -33,7 +33,7 @@ import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, PresetPrompt, PresetPromptSuggestion,
-  CompanionBinding, CompanionAllowedSender, CompanionRoute,
+  CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionRoute,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
@@ -567,6 +567,30 @@ CREATE TABLE IF NOT EXISTS companion_reminders (
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL
 );
+-- Companion VOICE preferences (Companion Voice epic, VOICE-P1 foundation — the routing/preference
+-- plumbing P2/P3 slot into; NO STT/TTS model work here). Per-ROUTE, keyed like companion_bindings but
+-- ADDITIONALLY by sender_id for a GROUP-scoped binding (a DM's chat_id already IS the user, so a DM row's
+-- sender_id stays '' — same NOT-NULL-with-empty-string convention as companion_bindings' route columns,
+-- for the same airtight-unique-index reason: SQLite treats NULL as DISTINCT in a UNIQUE index, so a NULL
+-- sender_id would let a group route's per-user rows collide into duplicates). Brand-new table => CREATE
+-- TABLE IF NOT EXISTS is itself the additive migration (an existing DB gains an empty table on boot; zero
+-- rows => every existing companion path is byte-identical — DEFAULT-OFF). The ONLY writer is the
+-- "/lang"/"/voice" slash-command router (companion/commands.ts via companion/voice-prefs.ts), which
+-- resolves the route SERVER-SIDE from an already-authorized inbound; HUMAN-managed READ-ONLY over the
+-- loopback REST surface (no MCP path — same trust posture as companion_bindings/companion_allowed_senders).
+CREATE TABLE IF NOT EXISTS companion_voice_prefs (
+  session_id TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  sender_id TEXT NOT NULL DEFAULT '',
+  stt_lang TEXT,
+  tts_lang TEXT,
+  tts_voice TEXT,
+  voice_replies INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_voice_prefs_route ON companion_voice_prefs(session_id, channel, chat_id, sender_id);
 -- Owner-controlled encrypted credential store (agent-tooling epic, P1 foundation). GLOBAL / daemon-wide,
 -- HUMAN-managed only over the loopback REST surface — NO MCP tool creates/reads/lists a connection or its
 -- secret. secret_blob is envelope ciphertext (v1:iv:tag:ct); the REST layer never returns it (masked read).
@@ -3257,6 +3281,51 @@ export class Db {
   setCompanionReminderEnabled(id: string, enabled: boolean): void {
     this.db.prepare("UPDATE companion_reminders SET enabled = ? WHERE id = ?").run(enabled ? 1 : 0, id);
   }
+
+  // --- companion voice preferences (Companion Voice epic, VOICE-P1 — the per-route pref store) ---
+  /** One route's stored pref, or undefined when none has ever been set (the resolver's default applies). */
+  getCompanionVoicePref(sessionId: string, channel: string, chatId: string, senderId: string | null): CompanionVoicePref | undefined {
+    const r = this.db.prepare(
+      "SELECT * FROM companion_voice_prefs WHERE session_id = ? AND channel = ? AND chat_id = ? AND sender_id = ?",
+    ).get(sessionId, channel, chatId, senderId ?? "") as Row | undefined;
+    return r ? toCompanionVoicePref(r) : undefined;
+  }
+  /** A session's stored voice-pref rows (any route) — the human-only REST read. */
+  listCompanionVoicePrefsForSession(sessionId: string): CompanionVoicePref[] {
+    return (this.db.prepare("SELECT * FROM companion_voice_prefs WHERE session_id = ? ORDER BY created_at, rowid")
+      .all(sessionId) as Row[]).map(toCompanionVoicePref);
+  }
+  /**
+   * PARTIAL upsert keyed on (session_id, channel, chat_id, sender_id): a field omitted from `input` keeps
+   * its existing stored value (or the column default on first insert) — so `/lang` (which only touches
+   * stt_lang/tts_lang) never clobbers a `/voice` toggle already set for the same route, and vice versa.
+   */
+  upsertCompanionVoicePref(input: {
+    sessionId: string; channel: string; chatId: string; senderId: string | null;
+    sttLang?: string | null; ttsLang?: string | null; ttsVoice?: string | null; voiceReplies?: boolean;
+  }): CompanionVoicePref {
+    const sid = input.senderId ?? "";
+    const existing = this.db.prepare(
+      "SELECT * FROM companion_voice_prefs WHERE session_id = ? AND channel = ? AND chat_id = ? AND sender_id = ?",
+    ).get(input.sessionId, input.channel, input.chatId, sid) as Row | undefined;
+    const now = new Date().toISOString();
+    const row: CompanionVoicePref = {
+      sessionId: input.sessionId, channel: input.channel, chatId: input.chatId, senderId: input.senderId ?? null,
+      sttLang: input.sttLang !== undefined ? input.sttLang : ((existing?.stt_lang as string | null) ?? null),
+      ttsLang: input.ttsLang !== undefined ? input.ttsLang : ((existing?.tts_lang as string | null) ?? null),
+      ttsVoice: input.ttsVoice !== undefined ? input.ttsVoice : ((existing?.tts_voice as string | null) ?? null),
+      voiceReplies: input.voiceReplies !== undefined ? input.voiceReplies : (existing?.voice_replies as number ?? 0) === 1,
+      createdAt: (existing?.created_at as string) ?? now,
+      updatedAt: now,
+    };
+    this.db.prepare(
+      `INSERT INTO companion_voice_prefs (session_id, channel, chat_id, sender_id, stt_lang, tts_lang, tts_voice, voice_replies, created_at, updated_at)
+       VALUES (@sessionId, @channel, @chatId, @senderId, @sttLang, @ttsLang, @ttsVoice, @voiceReplies, @createdAt, @updatedAt)
+       ON CONFLICT(session_id, channel, chat_id, sender_id) DO UPDATE SET
+         stt_lang = @sttLang, tts_lang = @ttsLang, tts_voice = @ttsVoice, voice_replies = @voiceReplies, updated_at = @updatedAt`,
+    ).run({ ...row, senderId: sid, voiceReplies: row.voiceReplies ? 1 : 0 });
+    return row;
+  }
 }
 
 function toProject(r0: unknown): Project {
@@ -3436,6 +3505,19 @@ function toCompanionAllowedSender(r0: unknown): CompanionAllowedSender {
     id: r.id as string, sessionId: r.session_id as string, channel: r.channel as string,
     senderId: r.sender_id as string, label: (r.label as string | null) ?? null,
     createdAt: (r.created_at as string) ?? "",
+  };
+}
+function toCompanionVoicePref(r0: unknown): CompanionVoicePref {
+  const r = r0 as Row;
+  const senderId = r.sender_id as string;
+  return {
+    sessionId: r.session_id as string, channel: r.channel as string, chatId: r.chat_id as string,
+    senderId: senderId.length > 0 ? senderId : null,
+    sttLang: (r.stt_lang as string | null) ?? null,
+    ttsLang: (r.tts_lang as string | null) ?? null,
+    ttsVoice: (r.tts_voice as string | null) ?? null,
+    voiceReplies: (r.voice_replies as number) === 1,
+    createdAt: (r.created_at as string) ?? "", updatedAt: (r.updated_at as string) ?? "",
   };
 }
 function toCompanionConfigRow(r0: unknown): CompanionConfigRow {

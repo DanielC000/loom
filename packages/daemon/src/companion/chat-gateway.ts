@@ -32,6 +32,8 @@ import type {
 } from "./types.js";
 import { allowIfDmMatch, type CompanionAuth } from "./auth.js";
 import { noPairing, type CompanionPairing } from "./pairing.js";
+import { inMemoryVoicePrefs, voicePrefRoute, type CompanionVoicePrefs } from "./voice-prefs.js";
+import { parseCommand, commandHandler } from "./commands.js";
 
 /**
  * Split `text` into chunks no longer than `max` chars, preferring a newline then a whitespace boundary so
@@ -91,6 +93,12 @@ export class ChatGateway {
    *                    never a shared/guessed channel and never cross-delivered under interleaved inbounds.
    *                    Defaults to undefined (⇒ no target ⇒ deliverReply returns `no-target`); the daemon
    *                    injects `(sid) => pty.getActiveTurnOrigin(sid)`.
+   * @param voicePrefs  the injected per-route VOICE preference store (Companion Voice epic, VOICE-P1 —
+   *                    voice-prefs.ts). The "/lang"/"/voice" slash-command router (commands.ts) writes
+   *                    through this; P2/P3 will read it at inbound/outbound time. Defaults to a real
+   *                    in-memory store (not a no-op — see voice-prefs.ts) so existing bare
+   *                    `new ChatGateway(submit, [...])` constructions stay green; the daemon injects the
+   *                    db-backed store.
    */
   constructor(
     private readonly submitTurn: SubmitTurn,
@@ -98,6 +106,7 @@ export class ChatGateway {
     private readonly auth: CompanionAuth = allowIfDmMatch(),
     private readonly pairing: CompanionPairing = noPairing(),
     private readonly originResolver: ((sessionId: string) => CompanionRoute | null) | undefined = undefined,
+    private readonly voicePrefs: CompanionVoicePrefs = inMemoryVoicePrefs(),
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -213,6 +222,21 @@ export class ChatGateway {
           `scope=${binding.scope} sender=${msg.sender?.id ?? "none"})`,
       );
       return { accepted: false, reason: "sender-not-authorized" };
+    }
+    // "/" SLASH-COMMAND intercept (Companion Voice epic, VOICE-P1 foundation — commands.ts). Runs AFTER
+    // the route match + sender authz above, so an unallowlisted/foreign/unauthorized sender NEVER reaches
+    // here (both reject paths above return first) — a command can only ever write a pref for an
+    // ALREADY-AUTHORIZED route, gated exactly like text. A RECOGNIZED command (an entry in commands.ts'
+    // handler map) NEVER becomes a turn — mirrors the redeemed-pairing-code path above. An unrecognized
+    // "/word" (parsed but no handler) falls through unchanged to the normal submit path below.
+    const parsed = parseCommand(msg.body);
+    const handler = parsed ? commandHandler(parsed.name) : undefined;
+    if (parsed && handler) {
+      const route = voicePrefRoute(binding, msg.sender);
+      const { ack } = handler(parsed.args, route, this.voicePrefs);
+      const acked = await this.tryAck(binding, ack);
+      this.debug(`inbound COMMAND /${parsed.name} (channel=${msg.channel} chat=${msg.chatId} session=${binding.sessionId})`);
+      return { accepted: false, reason: "command", sessionId: binding.sessionId, command: parsed.name, acked };
     }
     let submit: { delivered: boolean; position?: number };
     try {

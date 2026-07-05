@@ -132,7 +132,12 @@ export type InboundResult =
   // reports whether the "paired" confirmation reached the chat. A FAILED redemption never returns these —
   // it falls through to the SAME silent reject as any unallowlisted inbound (no pairing oracle).
   | { accepted: false; reason: "paired-dm"; sessionId: string; acked: boolean }
-  | { accepted: false; reason: "paired-sender"; sessionId: string; acked: boolean };
+  | { accepted: false; reason: "paired-sender"; sessionId: string; acked: boolean }
+  // A RECOGNIZED "/" slash-command (Companion Voice epic, VOICE-P1 — companion/commands.ts) was
+  // intercepted BEFORE submitTurn: an already-authorized route's command text never reaches the agent
+  // as a turn (mirrors 'paired-dm'/'paired-sender' above). `command` is the parsed command name (e.g.
+  // "lang"); `acked` reports whether the ack reached the chat.
+  | { accepted: false; reason: "command"; sessionId: string; command: string; acked: boolean };
 
 /**
  * A session↔chat binding (spike scope: seeded from env as a SINGLE binding). Models WHICH chat on WHICH

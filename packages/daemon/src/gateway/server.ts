@@ -1107,6 +1107,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true, reminders: companionReminderList(sessionId) };
   });
 
+  // --- Companion VOICE PREFERENCES (Companion Voice epic, VOICE-P1 foundation): a READ-ONLY view over the
+  // per-route `companion_voice_prefs` rows the "/lang"/"/voice" slash-command router writes (commands.ts →
+  // voice-prefs.ts). Same posture as MEMORY/SKILLS/REMINDERS above: VIEW only, no human REST write here —
+  // the ONLY writer is the already-authorized inbound slash-command path, never a human-supplied body (a
+  // human REST write would let anyone bypass the per-route authz the command router enforces).
+  app.get("/api/companion/voice-prefs/:sessionId", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    return { prefs: deps.db.listCompanionVoicePrefsForSession(sessionId) };
+  });
+
   // --- Companion RESTRICTED TOOLS (blast-radius control, live-apply fix): restrictedTools is a SPAWN-TIME
   // property re-read from the SESSION ROW on every resume/fork/recycle (sessions/service.ts resolveAgentSpawn's
   // comment; `restrictedTools` on the row, NOT re-resolved from the Profile) — the Manage toggle used to edit

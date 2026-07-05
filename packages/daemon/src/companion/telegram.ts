@@ -16,6 +16,7 @@
 import { Bot } from "grammy";
 import type { ChannelAdapter, InboundHandler, InboundMessage } from "./types.js";
 import { cappedBackoff, runWithReconnect } from "./resilience.js";
+import { COMMAND_MENU } from "./commands.js";
 
 export const TELEGRAM_CHANNEL = "telegram";
 /** Telegram's hard per-message character limit — the gateway chunks outbound replies to this. */
@@ -23,7 +24,12 @@ export const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
 
 /** The minimal grammY Bot surface the adapter uses — lets a test inject a fake (no live network). */
 export interface TelegramBotLike {
-  api: { sendMessage(chatId: string | number, text: string): Promise<unknown> };
+  api: {
+    sendMessage(chatId: string | number, text: string): Promise<unknown>;
+    /** Register the native "/" command menu (Companion Voice epic, VOICE-P1). Optional on the seam so an
+     *  existing test fake bot (no `setMyCommands`) stays valid — the call site guards with `?.`. */
+    setMyCommands?(commands: { command: string; description: string }[]): Promise<unknown>;
+  };
   on(filter: "message", handler: (ctx: { update: unknown }) => void | Promise<void>): void;
   catch(handler: (err: unknown) => void): void;
   start(opts?: { onStart?: (info: { username: string }) => void }): Promise<void>;
@@ -117,6 +123,13 @@ export function createTelegramAdapter(
     name: TELEGRAM_CHANNEL,
     maxMessageLength: TELEGRAM_MAX_MESSAGE_LENGTH,
     start() {
+      // Register the native "/" command menu (Companion Voice epic, VOICE-P1) — best-effort, fire-and-forget:
+      // a failure (network / bad token) is logged, never thrown, and never blocks/delays the poll loop below.
+      // `?.` guards a test fake bot that doesn't implement setMyCommands (companion-telegram.mjs).
+      void bot.api.setMyCommands?.(COMMAND_MENU).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error(`[companion] telegram setMyCommands failed: ${describeError(err)}`);
+      });
       // Fire-and-forget the RESILIENT poll loop: runWithReconnect re-runs bot.start() after a backoff on
       // any drop, until stop() flips `stopped`. A startup failure (bad token / network) is logged, never
       // thrown, so it can't crash the daemon boot.

@@ -913,6 +913,37 @@ export interface CompanionAllowedSender {
 }
 
 /**
+ * A per-ROUTE Companion VOICE preference (Companion Voice epic, VOICE-P1 foundation) — the language/voice
+ * settings a "/lang"/"/voice" slash-command sets for ONE (session, channel, chatId[, senderId]) route.
+ * Keyed like {@link CompanionBinding} but ADDITIONALLY by `senderId` for a GROUP-scoped binding (a DM's
+ * chatId already IS the user, so senderId stays null there) — a shared chat's users each get their own
+ * language/voice-reply setting. Resolved SERVER-SIDE from the authenticated inbound route, NEVER a
+ * body-supplied field (same posture as CompanionBinding). Read at inbound (P2, forces the STT decode
+ * language) and outbound (P3, picks the TTS voice) — this card (P1) only stores + resolves it, no
+ * STT/TTS model work here. GLOBAL / daemon-wide. HUMAN-managed READ-ONLY over the loopback REST surface
+ * (no MCP path — same trust posture as the binding/allowlist writers); the ONLY writer is the "/lang"/
+ * "/voice" slash-command router (companion/commands.ts), which resolves the route server-side from the
+ * already-authorized inbound. See `[[Companion Voice — STT-TTS Design]]`.
+ */
+export interface CompanionVoicePref {
+  sessionId: SessionId;
+  channel: string;
+  chatId: string;
+  /** Present only for a GROUP-scoped binding (the per-user key within a shared chat); null for DM. */
+  senderId: string | null;
+  /** Forced STT decode language (P2 consumes this), or null = auto-detect. */
+  sttLang: string | null;
+  /** TTS output language (P3 consumes this), or null = unset. */
+  ttsLang: string | null;
+  /** TTS voice selection (P3 consumes this), or null = provider default. */
+  ttsVoice: string | null;
+  /** Whether an outbound reply on this route should synthesize to voice, once TTS (P3) lands. */
+  voiceReplies: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
  * The MASKED, human-facing view of a durable Companion RUN config (Companion epic Phase 3 — the
  * `companion_config` DB row that says HOW to run a companion: which bot token, cadence, home, enabled).
  * This is the ONLY shape the REST surface ever returns and the web cockpit ever sees — the bot token
