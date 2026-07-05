@@ -28,6 +28,7 @@
  * never cross-wired; chat_reply stays gated to the single bound companion session; authz stays fail-closed
  * at inbound time (the gateway's per-binding CompanionAuth). This controller only (re)wires the SAME parts.
  */
+import { randomUUID } from "node:crypto";
 import type { Db } from "../db.js";
 import type { ChatGateway } from "./chat-gateway.js";
 import { createCompanionGateway } from "./factory.js";
@@ -217,10 +218,35 @@ export class CompanionController implements CompanionControl {
     const msg = normalizeInAppMessage(sessionId, body);
     if (!msg) return { accepted: false, reason: "no-text" };
     const result = await this.gateway.handleInbound(msg);
+    // CHAT HISTORY record (bug 0f01f234): only an ACCEPTED turn (delivered now OR queued in the session's
+    // FIFO) is a real user message — a command/pairing-redemption/rejection/no-text never becomes a turn,
+    // so recording only on `accepted` keeps history exactly the conversation the agent actually sees. `body`
+    // is the FINAL submitted text (today always the typed text; VOICE-P4's web-mic transcript would slot in
+    // here unchanged, since this is already the point where the final text is known — see chat-gateway.ts's
+    // `body` var for the analogous Telegram-side seam). Best-effort: a history-record failure must never
+    // break the inbound path it's mirroring.
+    if (result.accepted) this.recordInboundMessageSafely(sessionId, body);
     // OUTBOUND MIRROR (card 92b6445c): an accepted web-chat turn echoes out to the session's other bound
     // channels — NOT awaited (fire-and-forget: the cockpit's own turn/reply never waits on a Telegram send).
     if (result.accepted) this.mirrorWebInputToOtherChannels(sessionId, body);
     return result;
+  }
+
+  /** Best-effort chat-history record for an ACCEPTED in-app inbound (bug 0f01f234), scoped to the IN-APP
+   *  channel only — a Telegram-originated turn for the SAME companion is not recorded here (Telegram keeps
+   *  its own history in the Telegram app; deliverReply only ever targets a turn's own originating route, so
+   *  a unified cross-channel history is out of scope for this fix). Never throws — a history-record failure
+   *  must never break the inbound path it's mirroring. */
+  private recordInboundMessageSafely(sessionId: string, text: string): void {
+    try {
+      this.deps.db.insertCompanionMessage({
+        id: randomUUID(), sessionId, channel: IN_APP_CHANNEL, chatId: sessionId, author: "user", text,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[companion] in-app history record failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**

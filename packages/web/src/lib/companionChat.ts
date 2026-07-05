@@ -74,3 +74,20 @@ export function companionMessage(text: string, id: string): ChatMessage {
 // is the transient gap between a drop and the next open (auto-reconnect), distinct from a never-yet-open
 // `connecting` so the pill copy can differ ("connecting" vs "reconnecting").
 export type ChatConnState = "connecting" | "connected" | "reconnecting";
+
+// ── Chat HISTORY seed (bug 0f01f234 — the "reload loses the whole conversation" fix) ───────────────────
+// One row as served by GET /api/companion/messages/:sessionId (daemon: db.ts CompanionMessage, minus the
+// session/channel/chatId/createdAt columns the panel doesn't render).
+export interface CompanionHistoryRow {
+  id: string;
+  author: "user" | "companion";
+  text: string;
+}
+
+// Map ONE stored row to a rendered bubble — the daemon's "user"/"companion" author maps to this panel's
+// "you"/"companion" ChatAuthor (mirrors youMessage/companionMessage's author values). The component fetches
+// history BEFORE opening the WebSocket (load-then-connect), so there is no live frame that could arrive
+// before this seed — no separate dedup step is needed here, just the correct author mapping.
+export function historyMessage(row: CompanionHistoryRow): ChatMessage {
+  return { id: row.id, author: row.author === "user" ? "you" : "companion", text: row.text };
+}

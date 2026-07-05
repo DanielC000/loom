@@ -33,7 +33,7 @@ import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, PresetPrompt, PresetPromptSuggestion,
-  CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionRoute,
+  CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionRoute,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
@@ -591,6 +591,27 @@ CREATE TABLE IF NOT EXISTS companion_voice_prefs (
   updated_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_voice_prefs_route ON companion_voice_prefs(session_id, channel, chat_id, sender_id);
+-- Companion CHAT HISTORY (bug 0f01f234): a durable record of every in-app chat turn, fixing the "reload
+-- loses the whole conversation" bug — the in-app channel was live-only with no store-and-forward.
+-- Channel-keyed like companion_voice_prefs (Telegram could reuse this table later; today only in-app
+-- writes here — Telegram keeps its own history). Brand-new table => CREATE TABLE IF NOT EXISTS is itself
+-- the additive migration (an existing DB gains an empty table on boot; zero rows => byte-identical to
+-- today until a companion chat actually happens). Bounded growth: pruned to the most recent ~200 rows per
+-- (session_id, channel) on every insert (Db.insertCompanionMessage), so this can never grow unbounded
+-- across a long-lived companion. HUMAN-facing READ-ONLY over loopback REST (GET /api/companion/messages/
+-- :sessionId) — no MCP path, same trust posture as companion_reminders/companion_voice_prefs; the only
+-- writers are the in-app inbound/outbound record hooks (companion/controller.ts, companion/in-app.ts),
+-- never a body-supplied author/text.
+CREATE TABLE IF NOT EXISTS companion_messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  channel TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  author TEXT NOT NULL,       -- 'user' | 'companion'
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_companion_messages_session ON companion_messages(session_id, channel, created_at);
 -- Owner-controlled encrypted credential store (agent-tooling epic, P1 foundation). GLOBAL / daemon-wide,
 -- HUMAN-managed only over the loopback REST surface — NO MCP tool creates/reads/lists a connection or its
 -- secret. secret_blob is envelope ciphertext (v1:iv:tag:ct); the REST layer never returns it (masked read).
@@ -666,6 +687,13 @@ const COMPANION_HOME_KEY = "companion_home";
  * clearWedgedWorktree.
  */
 const WORKTREE_WEDGED_KEY = "worktree_wedged";
+
+/**
+ * The bounded-growth cap for `companion_messages` (bug 0f01f234 — the in-app chat history store): the most
+ * recent rows per (session_id, channel) kept; `insertCompanionMessage` prunes anything older on every
+ * insert, so the table is a ring buffer and can never grow unbounded across a long-lived companion.
+ */
+const MAX_COMPANION_MESSAGES = 200;
 
 /**
  * One worktree dir whose killable removal was force-KILLED on timeout (genuinely wedged, not a clean
@@ -3326,6 +3354,31 @@ export class Db {
     ).run({ ...row, senderId: sid, voiceReplies: row.voiceReplies ? 1 : 0 });
     return row;
   }
+
+  // --- companion chat history (bug 0f01f234 — the durable store behind the "reload loses the whole
+  // conversation" fix). Channel-keyed like companion_voice_prefs; today only the in-app channel writes here. ---
+  /** Record ONE chat turn, then prune to the most recent {@link MAX_COMPANION_MESSAGES} rows for its
+   *  (session, channel) — a ring buffer enforced on every insert. Callers (companion/controller.ts's
+   *  inbound hook, companion/in-app.ts's outbound hook) wrap this in a try/catch: a history-record failure
+   *  must never break the reply/inbound path it's mirroring — a dropped history row is acceptable, a
+   *  dropped reply or a crashed inbound is not. */
+  insertCompanionMessage(m: { id: string; sessionId: string; channel: string; chatId: string; author: "user" | "companion"; text: string; createdAt: string }): void {
+    this.db.prepare(
+      `INSERT INTO companion_messages (id, session_id, channel, chat_id, author, text, created_at)
+       VALUES (@id, @sessionId, @channel, @chatId, @author, @text, @createdAt)`,
+    ).run(m);
+    this.db.prepare(
+      `DELETE FROM companion_messages WHERE session_id = ? AND channel = ? AND id NOT IN (
+         SELECT id FROM companion_messages WHERE session_id = ? AND channel = ? ORDER BY created_at DESC, rowid DESC LIMIT ?
+       )`,
+    ).run(m.sessionId, m.channel, m.sessionId, m.channel, MAX_COMPANION_MESSAGES);
+  }
+  /** A session's stored chat history for ONE channel, chronological — the human-only REST read
+   *  (GET /api/companion/messages/:sessionId) and the web cockpit's reload-persists seed. */
+  listCompanionMessages(sessionId: string, channel: string): CompanionMessage[] {
+    return (this.db.prepare("SELECT * FROM companion_messages WHERE session_id = ? AND channel = ? ORDER BY created_at, rowid")
+      .all(sessionId, channel) as Row[]).map(toCompanionMessage);
+  }
 }
 
 function toProject(r0: unknown): Project {
@@ -3518,6 +3571,13 @@ function toCompanionVoicePref(r0: unknown): CompanionVoicePref {
     ttsVoice: (r.tts_voice as string | null) ?? null,
     voiceReplies: (r.voice_replies as number) === 1,
     createdAt: (r.created_at as string) ?? "", updatedAt: (r.updated_at as string) ?? "",
+  };
+}
+function toCompanionMessage(r0: unknown): CompanionMessage {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, sessionId: r.session_id as string, channel: r.channel as string, chatId: r.chat_id as string,
+    author: r.author as CompanionMessage["author"], text: r.text as string, createdAt: (r.created_at as string) ?? "",
   };
 }
 function toCompanionConfigRow(r0: unknown): CompanionConfigRow {

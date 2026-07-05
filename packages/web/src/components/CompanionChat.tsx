@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import {
-  companionMessage, parseInbound, prepareSend, youMessage,
-  type ChatConnState, type ChatMessage,
+  companionMessage, historyMessage, parseInbound, prepareSend, youMessage,
+  type ChatConnState, type ChatMessage, type CompanionHistoryRow,
 } from "../lib/companionChat";
 import { Button, StatusPill } from "./ui";
 import { color, font, radius } from "../theme";
@@ -16,6 +16,12 @@ import { color, font, radius } from "../theme";
  * Connection lifecycle mirrors Terminal.tsx's discipline (open/close/reconnect, and the CONNECTING-state
  * close guard so a pane abandoned mid-handshake never logs a spurious close) — but with JSON chat framing,
  * never raw pty bytes.
+ *
+ * HISTORY (bug 0f01f234 — reload used to lose the whole conversation): on every sessionId mount, this LOADS
+ * the durable history first (GET /api/companion/messages/:sessionId) and seeds `messages` from it, THEN
+ * opens the WebSocket — load-then-connect, so no live frame can arrive before the history snapshot is
+ * taken (no history/live overlap to dedup). A fetch failure degrades to an empty seed and still connects
+ * live (never blocks the chat on a history read).
  *
  * `armed` (optional) is whether this companion actually has an in-app route. When false, we surface a
  * gentle "not wired" notice: a message to an unbound companion gets no reply frame, so we must not imply it
@@ -88,7 +94,24 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
       // onerror is followed by onclose; let onclose own the reconnect so we don't double-schedule.
     };
 
-    connect();
+    // Load-then-connect (bug 0f01f234): seed the durable history BEFORE opening the WS, so there is no
+    // window where a live frame and a historical row could both land — nothing can arrive live until the
+    // socket below opens, and that only happens after this resolves. `disposed` guards against a
+    // fast sessionId swap (or unmount) landing a stale fetch's result on the NEW session's transcript.
+    (async () => {
+      try {
+        const res = await fetch(`/api/companion/messages/${sessionId}`);
+        if (res.ok) {
+          const body = (await res.json()) as { messages?: CompanionHistoryRow[] };
+          if (!disposed && Array.isArray(body.messages)) {
+            setMessages(body.messages.map(historyMessage));
+          }
+        }
+      } catch {
+        // best-effort — an unreachable history endpoint just means an empty seed, never blocks live chat
+      }
+      if (!disposed) connect();
+    })();
 
     return () => {
       disposed = true;

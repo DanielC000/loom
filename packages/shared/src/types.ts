@@ -944,6 +944,26 @@ export interface CompanionVoicePref {
 }
 
 /**
+ * A persisted CHAT TURN for a companion channel (bug 0f01f234 — the web in-app chat used to lose all
+ * history on reload; this is the fix's durable store). Channel-keyed so Telegram could reuse the same
+ * table later, but today only the in-app channel writes here (Telegram already keeps its own history in
+ * the Telegram app itself). `chatId` mirrors {@link CompanionBinding}'s shape; for in-app it always equals
+ * `sessionId` (the loopback self-address — see companion/in-app.ts). GLOBAL / daemon-wide, bounded growth
+ * (pruned to the most recent ~200 rows per session+channel on every insert — see `Db.insertCompanionMessage`).
+ * See `[[Companion Design]]`.
+ */
+export interface CompanionMessage {
+  id: string;
+  sessionId: SessionId;
+  channel: string;
+  chatId: string;
+  /** Who authored this turn: the human ("user") or the companion's reply ("companion"). */
+  author: "user" | "companion";
+  text: string;
+  createdAt: string;
+}
+
+/**
  * The MASKED, human-facing view of a durable Companion RUN config (Companion epic Phase 3 — the
  * `companion_config` DB row that says HOW to run a companion: which bot token, cadence, home, enabled).
  * This is the ONLY shape the REST surface ever returns and the web cockpit ever sees — the bot token

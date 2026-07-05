@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { resolveConfig } from "@loom/shared";
 import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR } from "./paths.js";
 import { installCrashHandlers } from "./crashlog.js";
@@ -48,7 +49,7 @@ import { startVaultVersioners, type VaultVersioner } from "./vault/versioner.js"
 import { buildServer } from "./gateway/server.js";
 import { resolveCompanionConfig } from "./companion/store.js";
 import { CompanionController, type CompanionReplyHooks } from "./companion/controller.js";
-import { InAppChannel } from "./companion/in-app.js";
+import { InAppChannel, IN_APP_CHANNEL } from "./companion/in-app.js";
 import { reviveCompanionSessionAtBoot, withCompanionSelfHeal } from "./companion/revive.js";
 import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
@@ -375,7 +376,16 @@ async function main(): Promise<void> {
   // the companion is OFF at boot) so the /ws/companion route + every built gateway share ONE client registry
   // that survives a gateway rebuild. Default-OFF byte-identical: with no in-app binding + no attached web
   // client it is inert (its adapter is registered but never hit; the WS route accepts but delivers nothing).
-  const inAppChannel = new InAppChannel();
+  // The injected recorder (bug 0f01f234) persists every OUTBOUND in-app reply to the durable chat-history
+  // store, symmetric with the inbound record in companion/controller.ts's handleInAppInbound.
+  const inAppChannel = new InAppChannel({
+    record: (sessionId, author, text) => {
+      db.insertCompanionMessage({
+        id: randomUUID(), sessionId, channel: IN_APP_CHANNEL, chatId: sessionId, author, text,
+        createdAt: new Date().toISOString(),
+      });
+    },
+  });
   // Local STT transcriber (Companion Voice epic, VOICE-P2) — built ALWAYS (even when the companion is OFF
   // at boot), stable across a gateway rebuild, exactly like inAppChannel/originResolver below. Constructing
   // it does NO provisioning work itself (lazy, memoized — see companion/stt.ts); pre-warm it now IFF the

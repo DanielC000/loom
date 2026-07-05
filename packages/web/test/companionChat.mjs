@@ -14,7 +14,7 @@
 //   node --experimental-strip-types packages/web/test/companionChat.mjs
 import assert from "node:assert/strict";
 import {
-  IN_APP_CHANNEL, companionMessage, isArmedInApp, parseInbound, prepareSend, youMessage,
+  IN_APP_CHANNEL, companionMessage, historyMessage, isArmedInApp, parseInbound, prepareSend, youMessage,
 } from "../src/lib/companionChat.ts";
 
 let pass = 0;
@@ -98,6 +98,17 @@ check("round-trip: send emits a frame; the echoed frame parses into a companion 
 
 check("IN_APP_CHANNEL mirrors the daemon's channel name", () => {
   assert.equal(IN_APP_CHANNEL, "in-app");
+});
+
+// ── historyMessage: the reload-persists seed (bug 0f01f234) maps a stored row to a rendered bubble ────
+check("historyMessage: a stored 'user' row becomes a 'you' bubble", () => {
+  assert.deepEqual(historyMessage({ id: "h1", author: "user", text: "typed earlier" }), { id: "h1", author: "you", text: "typed earlier" });
+});
+check("historyMessage: a stored 'companion' row becomes a 'companion' bubble", () => {
+  assert.deepEqual(historyMessage({ id: "h2", author: "companion", text: "replied earlier" }), { id: "h2", author: "companion", text: "replied earlier" });
+});
+check("historyMessage: the row's own id is preserved as the bubble key (never re-derived)", () => {
+  assert.equal(historyMessage({ id: "row-42", author: "user", text: "x" }).id, "row-42");
 });
 
 // ── isArmedInApp: the in-app route is detected among a companion's now-MULTIPLE bindings ──────────────

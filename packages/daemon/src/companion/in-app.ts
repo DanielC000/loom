@@ -51,6 +51,18 @@ export interface InAppClient {
 }
 
 /**
+ * The injected CHAT HISTORY recorder (bug 0f01f234 — the "reload loses the whole conversation" fix). Kept
+ * as a narrow interface (not a raw `Db`) so the hub stays db-agnostic, mirroring how CompanionVoicePrefs/
+ * CompanionPairing are injected into ChatGateway rather than the gateway holding a `Db` directly. The
+ * daemon injects `(sessionId, author, text) => db.insertCompanionMessage({ sessionId, channel: IN_APP_CHANNEL,
+ * chatId: sessionId, author, text, ... })` (index.ts). Optional: absent ⇒ no recording (every existing/test
+ * `new InAppChannel()` construction stays byte-identical).
+ */
+export interface InAppMessageRecorder {
+  record(sessionId: string, author: "user" | "companion", text: string): void;
+}
+
+/**
  * Normalize an in-app inbound (a message typed in the cockpit companion chat panel) into the
  * platform-agnostic InboundMessage. `chatId` is the bound session id (the loopback self-address). There is
  * NO sender — the loopback cockpit is the single authenticated owner, so the binding's "dm" scope authorizes
@@ -72,11 +84,16 @@ export class InAppChannel {
   /** chatId → the set of web clients currently attached to that in-app chat. */
   private readonly clients = new Map<string, Set<InAppClient>>();
 
+  /** @param recorder  the optional CHAT HISTORY recorder (bug 0f01f234) — see {@link InAppMessageRecorder}. */
+  constructor(private readonly recorder?: InAppMessageRecorder) {}
+
   /**
    * The ChannelAdapter registered on each gateway. OUTBOUND-only here: `send` pushes to the attached web
    * clients; `start`/`stop` are no-ops (there is no long-poll — the /ws/companion route owns connection
    * lifecycle). No `maxMessageLength`: the web client renders arbitrary-length replies, so the gateway does
-   * not chunk (a reply is delivered as a single frame).
+   * not chunk (a reply is delivered as a single frame) — which is exactly why this is the ONE place to
+   * record an outbound in-app reply (never >1 `send` call per logical reply, so recording here can't
+   * double-record a chunked message).
    */
   readonly adapter: ChannelAdapter = {
     name: IN_APP_CHANNEL,
@@ -87,9 +104,26 @@ export class InAppChannel {
       /* no long-poll to stop */
     },
     send: async (chatId: string, text: string) => {
+      // Record UNCONDITIONALLY — even with zero attached clients — so a proactive heartbeat/reminder reply
+      // to a session nobody is viewing right now still shows up in history on the next attach (this is what
+      // "in-app has no store-and-forward" used to mean for chat history; now it's stored, just not LIVE-pushed
+      // to nobody). Contained: a history-record failure must never break the actual reply delivery below.
+      this.recordSafely(chatId, "companion", text);
       this.deliver(chatId, text);
     },
   };
+
+  /** Best-effort record (never throws upward) — mirrors `deliver`'s per-client try/catch containment. A
+   *  dropped history row is acceptable; it must never break the reply/inbound path it's mirroring. */
+  private recordSafely(sessionId: string, author: "user" | "companion", text: string): void {
+    if (!this.recorder) return;
+    try {
+      this.recorder.record(sessionId, author, text);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[companion] in-app history record failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   /**
    * WS route: attach a connected web client to an in-app chat (chatId == the companion session id). Returns
@@ -119,9 +153,10 @@ export class InAppChannel {
   /**
    * OUTBOUND sink: frame `text` and push it to every client attached to `chatId`. A client `deliver` that
    * throws is CONTAINED (one bad socket can't drop the others or bubble out of the reply path). With no
-   * attached client the reply is dropped — in-app has no store-and-forward, so a PROACTIVE reply (heartbeat)
-   * to a session nobody is viewing is not persisted here; the owner sees it in the session transcript on
-   * attach. A reply-to-inbound always has an attached client (they just sent the message).
+   * attached client the LIVE push is simply dropped — nobody is there to receive a frame — but the reply is
+   * still RECORDED to chat history by `adapter.send` before this runs, so a proactive reply (heartbeat) to a
+   * session nobody is viewing right now shows up on the next attach instead of vanishing. A reply-to-inbound
+   * always has an attached client (they just sent the message).
    */
   private deliver(chatId: string, text: string): void {
     const set = this.clients.get(chatId);
