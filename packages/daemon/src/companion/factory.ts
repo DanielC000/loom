@@ -14,7 +14,7 @@ import { createDbCompanionVoicePrefs, type VoicePrefStore } from "./voice-prefs.
 import type { CompanionConfig } from "./config.js";
 import { createTelegramAdapter, TELEGRAM_CHANNEL } from "./telegram.js";
 import type { InAppChannel } from "./in-app.js";
-import type { CompanionRoute, CompanionTranscriber, SessionBinding, SubmitTurn } from "./types.js";
+import type { CompanionRoute, CompanionSynthesizer, CompanionTranscriber, SessionBinding, SubmitTurn } from "./types.js";
 import type { CompanionBinding } from "@loom/shared";
 
 /** The narrow db surface the factory needs: the durable binding store + the allowlist reader (for authz)
@@ -38,9 +38,11 @@ function toSessionBinding(b: CompanionBinding): SessionBinding {
  * route of the turn it answers. Undefined ⇒ deliverReply has no target (`no-target`); test seams that don't
  * exercise chat_reply routing may omit it. `transcribe` (Companion Voice epic, VOICE-P2) is the injected STT
  * transcriber — the daemon injects the local faster-whisper transcriber (companion/stt.ts); undefined ⇒ an
- * audio inbound is a no-op, byte-identical to today.
+ * audio inbound is a no-op, byte-identical to today. `synthesize` (Companion Voice epic, VOICE-P3) is the
+ * injected TTS synthesizer — the daemon injects the local kokoro-onnx synthesizer (companion/tts.ts);
+ * undefined ⇒ deliverReply's text path is unchanged, byte-identical to today.
  */
-export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitTurn, db: CompanionBindingStore, inApp?: InAppChannel, originResolver?: (sessionId: string) => CompanionRoute | null, transcribe?: CompanionTranscriber): ChatGateway {
+export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitTurn, db: CompanionBindingStore, inApp?: InAppChannel, originResolver?: (sessionId: string) => CompanionRoute | null, transcribe?: CompanionTranscriber, synthesize?: CompanionSynthesizer): ChatGateway {
   // Load durable bindings. BOOTSTRAP: an empty store + present env config seeds ONE binding (the
   // single-owner env path). The DM authz rule means the owner works with no allowlist row; a group scope
   // (LOOM_COMPANION_CHAT_SCOPE=group) seeds a group binding to which senders are added over REST. This
@@ -60,7 +62,7 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // Per-turn ORIGIN resolver (multi-channel reply routing): deliverReply targets the in-flight turn's
   // originating route (pty.getActiveTurnOrigin, injected). NOT the old home fallback — a proactive/heartbeat
   // turn now carries the home route ON its submit, so its chat_reply flows through the SAME per-turn path.
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe);
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize);
   // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
   // arms NO Telegram long-poll: the gateway comes up with the in-app adapter alone (registered below), so no
   // external network transport is started and default-OFF stays byte-identical. The adapter normalizes each

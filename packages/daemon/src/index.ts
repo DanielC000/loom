@@ -16,6 +16,7 @@ import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles, migrateHumanHoldToHeld } from "./tasks/columns.js";
 import { prewarmMarkitdownForProfilesAtBoot, resolvePrewarmInterpreterPath } from "./python/prewarm.js";
 import { createFasterWhisperTranscriber, prewarmStt } from "./companion/stt.js";
+import { createKokoroSynthesizer, prewarmTts } from "./companion/tts.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
 import { UsageSampler } from "./sessions/usage-sampler.js";
@@ -381,9 +382,15 @@ async function main(): Promise<void> {
   // companion is configured at boot, so a real deployment's first voice note usually finds the venv warm.
   const sttInterpreterPath = resolvePrewarmInterpreterPath(db.listAllProjects());
   const sttTranscriber = createFasterWhisperTranscriber(sttInterpreterPath);
+  // Local TTS synthesizer (Companion Voice epic, VOICE-P3) — same shape as sttTranscriber above: built
+  // ALWAYS, stable across a gateway rebuild, no provisioning work at construction time (lazy, memoized —
+  // see companion/tts.ts). The shared venv is ONE per machine, so the SAME interpreter path applies.
+  const ttsSynthesizer = createKokoroSynthesizer(sttInterpreterPath);
   if (companionCfg) {
     console.log("[boot] pre-warming the faster-whisper venv (the companion is configured)");
     prewarmStt(sttInterpreterPath);
+    console.log("[boot] pre-warming the kokoro-onnx venv (the companion is configured)");
+    prewarmTts(sttInterpreterPath);
   }
   // The hot-lifecycle controller (Companion Phase 3 backend): owns the live ChatGateway (Telegram long-poll)
   // + the proactive heartbeat, and drives BOTH from the human-only REST config writes with NO daemon
@@ -409,6 +416,7 @@ async function main(): Promise<void> {
     // pty when the turn was formed). The SOLE reply-target source — no binding/home guessing, no cross-wire.
     originResolver: (sid) => pty.getActiveTurnOrigin(sid),
     transcribe: sttTranscriber,
+    synthesize: ttsSynthesizer,
   });
 
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after. The

@@ -24,6 +24,7 @@
 import type {
   ChannelAdapter,
   CompanionRoute,
+  CompanionSynthesizer,
   CompanionTranscriber,
   DeliverResult,
   InboundAttachment,
@@ -105,6 +106,10 @@ export class ChatGateway {
    *                    Deferred from P1: default undefined ⇒ an inbound carrying an audio attachment is a
    *                    no-op (ignored, exactly like an empty text body) — every existing/test construction
    *                    stays byte-identical. The daemon injects the local faster-whisper transcriber.
+   * @param synthesize  the injected TTS synthesizer (Companion Voice epic, VOICE-P3 — companion/tts.ts).
+   *                    Default undefined ⇒ deliverReply's text path is UNCHANGED (no synth attempted, no
+   *                    behavior difference) — every existing/test construction stays byte-identical. The
+   *                    daemon injects the local kokoro-onnx synthesizer.
    */
   constructor(
     private readonly submitTurn: SubmitTurn,
@@ -114,6 +119,7 @@ export class ChatGateway {
     private readonly originResolver: ((sessionId: string) => CompanionRoute | null) | undefined = undefined,
     private readonly voicePrefs: CompanionVoicePrefs = inMemoryVoicePrefs(),
     private readonly transcribe: CompanionTranscriber | undefined = undefined,
+    private readonly synthesize: CompanionSynthesizer | undefined = undefined,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -378,9 +384,56 @@ export class ChatGateway {
     // what makes cross-delivery impossible by construction: the reply can only go where the turn came from.
     const target = this.replyTarget(sessionId);
     if (!target) return { delivered: false, reason: "no-target" };
+    // VOICE REPLY (Companion Voice epic, VOICE-P3) — attempted BEFORE the text send, never INSTEAD of it:
+    // tryDeliverVoice resolves a DeliverResult only on a genuine voice-message success; ANY ineligibility
+    // or failure (no synthesize dep, pref off, adapter lacks sendVoice, synth not ready/fails, sendVoice
+    // throws) resolves null and falls straight through to the EXISTING text send below — the reply is
+    // NEVER lost to a voice-pipeline problem.
+    if (this.synthesize) {
+      const voiceResult = await this.tryDeliverVoice(sessionId, target, text);
+      if (voiceResult) return voiceResult;
+    }
     const result = await this.sendVia(target.channel, target.chatId, text);
     if (!result.delivered) return result.reason === "no-adapter" ? { delivered: false, reason: "no-adapter" } : { delivered: false, reason: "send-failed" };
     return { delivered: true, chunks: result.chunks };
+  }
+
+  /**
+   * Attempt to synthesize `text` and deliver it as a native voice message on `target` (Companion Voice
+   * epic, VOICE-P3). Returns a DeliverResult on SUCCESS ONLY; returns null on ANY ineligibility or failure
+   * so `deliverReply` falls through to the plain text send — this method NEVER throws (an OUTER try/catch
+   * contains everything, including a throwing voicePrefs.resolve or a throwing adapter.sendVoice) and the
+   * temp audio file is ALWAYS cleaned up (`finally`) once synthesize() has handed one back.
+   */
+  private async tryDeliverVoice(sessionId: string, target: CompanionRoute, text: string): Promise<DeliverResult | null> {
+    if (!this.synthesize) return null;
+    try {
+      // Outbound pref resolution FIRST — senderId is ALWAYS null (Companion Voice epic, VOICE-P3 fork #3):
+      // a DM's inbound pref key is ALSO senderId:null (voicePrefRoute), so this matches exactly end-to-end
+      // for the single-owner DM companion — the SUPPORTED path in P3. A GROUP binding's /voice on is stored
+      // PER-SENDER (senderId = the authenticated sender who set it), but a reply addressed to the whole
+      // chat has no single sender to resolve — so this senderId:null lookup NEVER finds a group's row and a
+      // group's voice replies ALWAYS degrade to plain text in P3, even after a member turns them on. This is
+      // an intentional, DOCUMENTED P3 limitation (group per-sender outbound voice is future work), not a bug
+      // and not a "works, just chat-wide" fallback. Checked BEFORE isReady()/adapter capability so a route
+      // that doesn't want voice replies never kicks TTS provisioning or does any other work on its account.
+      const pref = this.voicePrefs.resolve({ sessionId, channel: target.channel, chatId: target.chatId, senderId: null });
+      if (!pref.voiceReplies) return null;
+      const adapter = this.adapters.get(target.channel);
+      if (!adapter?.sendVoice) return null;
+      if (!this.synthesize.isReady()) return null;
+      const audio = await this.synthesize.synthesize({ text, lang: pref.ttsLang, voice: pref.ttsVoice });
+      if (!audio) return null;
+      try {
+        await adapter.sendVoice(target.chatId, audio.filePath);
+        return { delivered: true, chunks: 1 };
+      } finally {
+        await audio.cleanup().catch(() => { /* best-effort — cleanup must never block/throw */ });
+      }
+    } catch (err) {
+      this.debug(`voice reply failed, degrading to text: ${describeError(err)}`);
+      return null;
+    }
   }
 
   /**

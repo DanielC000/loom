@@ -36,7 +36,7 @@ import { CompanionReminderWatcher } from "./reminders.js";
 import { resolveEffectiveConfig } from "./store.js";
 import { IN_APP_CHANNEL, normalizeInAppMessage, type InAppChannel } from "./in-app.js";
 import type { CompanionConfig } from "./config.js";
-import type { CompanionRoute, CompanionTranscriber, DeliverResult, InboundResult, SessionBinding, SubmitTurn } from "./types.js";
+import type { CompanionRoute, CompanionSynthesizer, CompanionTranscriber, DeliverResult, InboundResult, SessionBinding, SubmitTurn } from "./types.js";
 
 /** The minimal lifecycle handle the controller needs from a heartbeat watcher (satisfied by
  *  CompanionHeartbeatWatcher; narrowed so a test can inject a spy). */
@@ -119,6 +119,10 @@ export interface CompanionControllerDeps {
    *  builder exactly like `inApp`/`originResolver` — STABLE across a gateway rebuild (a token change never
    *  drops STT). Optional: absent ⇒ every built gateway's audio inbound is a no-op (default OFF). */
   transcribe?: CompanionTranscriber;
+  /** The injected TTS synthesizer (Companion Voice epic, VOICE-P3), threaded into the default gateway
+   *  builder exactly like `transcribe` — STABLE across a gateway rebuild. Optional: absent ⇒ every built
+   *  gateway's deliverReply is byte-identical to today (no synth attempted, default OFF). */
+  synthesize?: CompanionSynthesizer;
   /** Envelope key-file override (test seam only). */
   keyPath?: string;
   /** Build the gateway for an effective config (test seam — defaults to createCompanionGateway with the
@@ -326,7 +330,7 @@ export class CompanionController implements CompanionControl {
     // injected buildGateway test seam supplies its own). The hub is stable across rebuilds — see in-app.ts.
     const build =
       this.deps.buildGateway ??
-      ((c: CompanionConfig, submit: SubmitTurn, db: typeof this.deps.db) => createCompanionGateway(c, submit, db, this.deps.inApp, this.deps.originResolver, this.deps.transcribe));
+      ((c: CompanionConfig, submit: SubmitTurn, db: typeof this.deps.db) => createCompanionGateway(c, submit, db, this.deps.inApp, this.deps.originResolver, this.deps.transcribe, this.deps.synthesize));
     this.gateway = build(cfg, this.deps.submitTurn, this.deps.db);
     this.gateway.start();
   }

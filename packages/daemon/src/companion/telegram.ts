@@ -18,7 +18,7 @@ import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { randomUUID } from "node:crypto";
-import { Bot } from "grammy";
+import { Bot, InputFile } from "grammy";
 import type { ChannelAdapter, InboundAttachment, InboundHandler, InboundMessage } from "./types.js";
 import { cappedBackoff, runWithReconnect } from "./resilience.js";
 import { COMMAND_MENU } from "./commands.js";
@@ -47,6 +47,9 @@ export interface TelegramBotLike {
     /** Resolve a Telegram `file_id` to its download path (Companion Voice epic, VOICE-P2). Optional on the
      *  seam so an existing test fake bot (no voice-download tests) stays valid. */
     getFile?(fileId: string): Promise<{ file_path?: string }>;
+    /** Send a native voice message (Companion Voice epic, VOICE-P3 — outbound TTS). Optional on the seam
+     *  so an existing test fake bot (no voice-reply tests) stays valid — the call site guards with `?.`. */
+    sendVoice?(chatId: string | number, voice: InputFile): Promise<unknown>;
   };
   on(filter: "message", handler: (ctx: { update: unknown }) => void | Promise<void>): void;
   catch(handler: (err: unknown) => void): void;
@@ -193,6 +196,10 @@ export function createTelegramAdapter(
     },
     async send(chatId, text) {
       await bot.api.sendMessage(chatId, text);
+    },
+    async sendVoice(chatId, audioFilePath) {
+      if (!bot.api.sendVoice) throw new Error("sendVoice not supported by this bot");
+      await bot.api.sendVoice(chatId, new InputFile(audioFilePath));
     },
     async downloadAttachment(attachment) {
       if (!attachment.fileId || !bot.api.getFile) return null;

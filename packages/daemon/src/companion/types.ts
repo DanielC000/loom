@@ -73,6 +73,14 @@ export interface ChannelAdapter {
    * MUST call the returned `cleanup()` (in a `finally`) once done with `filePath` — no unbounded disk growth.
    */
   downloadAttachment?(attachment: InboundAttachment): Promise<{ filePath: string; cleanup: () => Promise<void> } | null>;
+  /**
+   * OPTIONAL: send a local audio file to `chatId` as a native voice message (Companion Voice epic, VOICE-P3
+   * — outbound TTS). Only implemented by adapters whose platform renders a voice bubble for the format the
+   * gateway hands it (Telegram: OGG/Opus via `sendVoice`). Absent ⇒ the gateway never attempts voice replies
+   * on this channel (degrades to the plain text send). May throw — the caller (deliverReply) contains it and
+   * degrades to text, exactly like a `send` failure.
+   */
+  sendVoice?(chatId: string, audioFilePath: string): Promise<void>;
 }
 
 /**
@@ -139,6 +147,29 @@ export interface CompanionTranscriber {
    * unreadable file, empty result) — NEVER throws; the caller degrades to a friendly "not available" ack.
    */
   transcribe(input: { filePath: string; langHint: string | null }): Promise<string | null>;
+}
+
+/**
+ * The injected TTS synthesizer (Companion Voice epic, VOICE-P3 — see companion/tts.ts for the local
+ * Kokoro-onnx implementation). Mirrors {@link CompanionTranscriber}'s shape exactly: a cheap readiness
+ * check the gateway can consult BEFORE doing any work, and a never-throws synthesize call that resolves
+ * null on ANY failure so the caller degrades to the existing text send.
+ */
+export interface CompanionSynthesizer {
+  /**
+   * A CHEAP, synchronous readiness check — true iff a `synthesize()` call right now will actually attempt
+   * TTS (not "will eventually be ready"). A false result may itself kick background provisioning as a side
+   * effect (see companion/tts.ts) — repeated calls are safe (deduped).
+   */
+  isReady(): boolean;
+  /**
+   * Synthesize `text` to a local audio file. `lang`/`voice` come from the route's voice pref (ttsLang/
+   * ttsVoice) — either may be null (no pref set), in which case the implementation picks a sensible
+   * default. Resolves null on ANY failure (cold venv, subprocess crash/timeout, encode failure) — NEVER
+   * throws; the caller degrades to the existing text send. On success the caller MUST call the returned
+   * `cleanup()` (in a `finally`) once done with `filePath` — no unbounded disk growth.
+   */
+  synthesize(input: { text: string; lang: string | null; voice: string | null }): Promise<{ filePath: string; cleanup: () => Promise<void> } | null>;
 }
 
 /** The OUTBOUND delivery result — STRUCTURED across every failure mode (never throws out of chat_reply).

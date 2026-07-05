@@ -140,6 +140,12 @@ export const ENSURE_OBSIDIAN_SCRIPT = path.join(__dirname, "..", "assets", "scri
  * other assets, so an asset edit applies on the next transcribe call with no rebuild of the daemon itself.
  */
 export const TRANSCRIBE_SCRIPT = path.join(__dirname, "..", "assets", "python", "transcribe.py");
+/**
+ * synthesize.py (Companion Voice epic, VOICE-P3 — local Kokoro-onnx TTS) ships as an asset too, invoked via
+ * the shared Python venv's interpreter (see companion/tts.ts). Read live from the package dir like the
+ * other assets, so an asset edit applies on the next synthesize call with no rebuild of the daemon itself.
+ */
+export const SYNTHESIZE_SCRIPT = path.join(__dirname, "..", "assets", "python", "synthesize.py");
 
 /**
  * The Obsidian "vault preflight" skill fragment — appended (live-read from the package dir) to the
