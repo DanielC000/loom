@@ -47,6 +47,7 @@ import { buildServer } from "./gateway/server.js";
 import { resolveCompanionConfig } from "./companion/store.js";
 import { CompanionController, type CompanionReplyHooks } from "./companion/controller.js";
 import { InAppChannel } from "./companion/in-app.js";
+import { reviveCompanionSessionAtBoot, withCompanionSelfHeal } from "./companion/revive.js";
 import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 
@@ -383,7 +384,12 @@ async function main(): Promise<void> {
     // INBOUND submit carries the originating {channel, chatId} route as the pty turn's route (5th arg), so
     // the agent's chat_reply resolves back to that exact chat (multi-channel reply routing). kind:"agent" —
     // a companion inbound is a human's own chat message; it must land as its own turn.
-    submitTurn: (sid, text, route) => pty.enqueueStdin(sid, text, "system", undefined, route, "agent"),
+    // Wrapped with the self-heal in companion/revive.ts (bug 4cc7826d): one auto-resume-then-retry when the
+    // bound session died AFTER boot, strictly after chat-gateway's allowlist + sender-authz gates run.
+    submitTurn: withCompanionSelfHeal(
+      (sid, text, route) => pty.enqueueStdin(sid, text, "system", undefined, route, "agent"),
+      { resume: (sid) => { sessions.resume(sid); } },
+    ),
     pty,
     hooks: companionHooks,
     env: process.env,
@@ -497,6 +503,10 @@ async function main(): Promise<void> {
     console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);
   });
 
+  // Boot-revive (bug 4cc7826d, companion/revive.ts): revive the bound session BEFORE the controller wires
+  // the gateway around it — see revive.ts for the full why (no human viewer to click "Resume" like a
+  // manager/worker has). Best-effort; never gates boot.
+  reviveCompanionSessionAtBoot(companionCfg, { isAlive: (sid) => pty.isAlive(sid), resume: (sid) => { sessions.resume(sid); } });
   // Loom Companion: start the initial companion now that the server is up (chat_reply routes back through
   // this process). The controller builds+starts the Telegram long-poll, arms the proactive heartbeat if a
   // positive cadence is set, and flips the chat_reply gate on — a no-op when the companion is OFF at boot
