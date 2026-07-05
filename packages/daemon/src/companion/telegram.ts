@@ -13,10 +13,25 @@
  * minimal `TelegramBotLike` seam so a test injects a fake (no live network). Default OFF: the daemon only
  * constructs this when the companion is configured (see companion/config.ts + factory.ts).
  */
+import fs from "node:fs";
+import path from "node:path";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { randomUUID } from "node:crypto";
 import { Bot } from "grammy";
-import type { ChannelAdapter, InboundHandler, InboundMessage } from "./types.js";
+import type { ChannelAdapter, InboundAttachment, InboundHandler, InboundMessage } from "./types.js";
 import { cappedBackoff, runWithReconnect } from "./resilience.js";
 import { COMMAND_MENU } from "./commands.js";
+import { LOOM_HOME } from "../paths.js";
+
+/** Telegram's cloud-API file-download size cap (Companion Voice epic, VOICE-P2). */
+const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
+/**
+ * The OVERALL deadline (ms) for a voice-note download — covers connect/TTFB AND the full body stream (one
+ * AbortController threaded through both the `fetch` call and the piped body read below), so a mid-stream
+ * stall is bounded exactly like a slow/hanging connect — neither can wedge the daemon.
+ */
+const DOWNLOAD_TIMEOUT_MS = 60_000;
 
 export const TELEGRAM_CHANNEL = "telegram";
 /** Telegram's hard per-message character limit — the gateway chunks outbound replies to this. */
@@ -29,6 +44,9 @@ export interface TelegramBotLike {
     /** Register the native "/" command menu (Companion Voice epic, VOICE-P1). Optional on the seam so an
      *  existing test fake bot (no `setMyCommands`) stays valid — the call site guards with `?.`. */
     setMyCommands?(commands: { command: string; description: string }[]): Promise<unknown>;
+    /** Resolve a Telegram `file_id` to its download path (Companion Voice epic, VOICE-P2). Optional on the
+     *  seam so an existing test fake bot (no voice-download tests) stays valid. */
+    getFile?(fileId: string): Promise<{ file_path?: string }>;
   };
   on(filter: "message", handler: (ctx: { update: unknown }) => void | Promise<void>): void;
   catch(handler: (err: unknown) => void): void;
@@ -51,12 +69,20 @@ export function normalizeTelegramMessage(update: unknown): InboundMessage | null
         text?: unknown;
         message_id?: unknown;
         from?: { id?: unknown; username?: unknown; first_name?: unknown; last_name?: unknown };
+        voice?: { file_id?: unknown; mime_type?: unknown };
       };
     } | null
   )?.message;
   const chatId = message?.chat?.id;
   const text = message?.text;
-  if ((typeof chatId !== "number" && typeof chatId !== "string") || typeof text !== "string" || text.length === 0) {
+  const voice = message?.voice;
+  // A voice note carries NO text (Telegram doesn't support a caption on `voice`) — the attachment alone
+  // makes this inbound usable, so it must not be dropped by the text-only check below.
+  const voiceFileId = typeof voice?.file_id === "string" && voice.file_id.length > 0 ? voice.file_id : undefined;
+  if (
+    (typeof chatId !== "number" && typeof chatId !== "string") ||
+    (!voiceFileId && (typeof text !== "string" || text.length === 0))
+  ) {
     return null;
   }
   const from = message?.from;
@@ -68,11 +94,15 @@ export function normalizeTelegramMessage(update: unknown): InboundMessage | null
         displayName: displayName.length > 0 ? displayName : undefined,
       }
     : undefined;
+  const attachments: InboundAttachment[] | undefined = voiceFileId
+    ? [{ type: "audio", fileId: voiceFileId, mimeType: typeof voice?.mime_type === "string" ? voice.mime_type : undefined }]
+    : undefined;
   return {
     channel: TELEGRAM_CHANNEL,
     chatId: String(chatId),
-    body: text,
+    body: typeof text === "string" ? text : "",
     sender,
+    attachments,
     metadata: message?.message_id !== undefined ? { messageId: message.message_id } : undefined,
   };
 }
@@ -163,6 +193,51 @@ export function createTelegramAdapter(
     },
     async send(chatId, text) {
       await bot.api.sendMessage(chatId, text);
+    },
+    async downloadAttachment(attachment) {
+      if (!attachment.fileId || !bot.api.getFile) return null;
+      let dest: string | undefined;
+      // ONE AbortController for the WHOLE operation — connect/TTFB (the fetch call) AND the full body
+      // stream (threaded into Readable.fromWeb below) — so a mid-download stall is bounded exactly like a
+      // slow connect, not just the initial response.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+      try {
+        const file = await bot.api.getFile(attachment.fileId);
+        if (!file?.file_path) return null;
+        // Telegram's cloud-API file-download URL (bot-token-scoped — never a body-supplied path).
+        const url = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
+        const res = await fetch(url, { signal: controller.signal });
+        if (!res.ok || !res.body) return null;
+        const dir = path.join(LOOM_HOME, "tmp", "companion-audio");
+        fs.mkdirSync(dir, { recursive: true });
+        dest = path.join(dir, `${randomUUID()}${path.extname(file.file_path) || ".ogg"}`);
+        let bytes = 0;
+        // Enforce the ≤20MB cap as a Transform stage so `pipeline` treats an over-cap stream exactly like
+        // any other stream error — it destroys BOTH the source and the destination write stream for us
+        // (unlike a manual write-stream loop, which left the destination's own 'error' event unhandled: an
+        // async write failure would otherwise escape this try/catch as an uncaught exception).
+        const capStream = new Transform({
+          transform(chunk: Buffer, _enc, callback) {
+            bytes += chunk.length;
+            if (bytes > MAX_AUDIO_BYTES) { callback(new Error("attachment exceeds the size cap")); return; }
+            callback(null, chunk);
+          },
+        });
+        await pipeline(Readable.fromWeb(res.body, { signal: controller.signal }), capStream, fs.createWriteStream(dest));
+        const filePath = dest;
+        return {
+          filePath,
+          cleanup: async () => { try { await fs.promises.unlink(filePath); } catch { /* best-effort */ } },
+        };
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[companion] telegram attachment download failed: ${describeError(err)}`);
+        if (dest) { try { await fs.promises.unlink(dest); } catch { /* best-effort cleanup of a partial file */ } }
+        return null;
+      } finally {
+        clearTimeout(timer);
+      }
     },
   };
 }

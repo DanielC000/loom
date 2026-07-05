@@ -134,6 +134,12 @@ export const VAULT_LINT_SCRIPT = path.join(__dirname, "..", "assets", "vault-lin
  * `node "$LOOM_OBSIDIAN_PREFLIGHT"` before its `obsidian` CLI calls (self-heals or falls back to FS).
  */
 export const ENSURE_OBSIDIAN_SCRIPT = path.join(__dirname, "..", "assets", "scripts", "ensure-obsidian.mjs");
+/**
+ * transcribe.py (Companion Voice epic, VOICE-P2 — local faster-whisper STT) ships as an asset too, invoked
+ * via the shared Python venv's interpreter (see companion/stt.ts). Read live from the package dir like the
+ * other assets, so an asset edit applies on the next transcribe call with no rebuild of the daemon itself.
+ */
+export const TRANSCRIBE_SCRIPT = path.join(__dirname, "..", "assets", "python", "transcribe.py");
 
 /**
  * The Obsidian "vault preflight" skill fragment — appended (live-read from the package dir) to the

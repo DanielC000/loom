@@ -19,6 +19,11 @@ export interface InboundAttachment {
   url?: string;
   fileName?: string;
   mimeType?: string;
+  /**
+   * An OPAQUE platform-specific reference (e.g. Telegram's `file_id`) — never a fetchable URL itself, only
+   * resolvable by the SAME adapter's `downloadAttachment` (Companion Voice epic, VOICE-P2: inbound STT).
+   */
+  fileId?: string;
 }
 
 /** A platform-agnostic inbound message — every adapter normalizes its wire update into THIS. */
@@ -59,6 +64,15 @@ export interface ChannelAdapter {
   stop(): Promise<void>;
   /** OUTBOUND: send `text` to `chatId` on this channel. */
   send(chatId: string, text: string): Promise<void>;
+  /**
+   * OPTIONAL: download a non-text attachment to a local temp file (Companion Voice epic, VOICE-P2). Only
+   * the adapter that emitted the attachment knows how to resolve it (wire-format-specific — e.g. Telegram's
+   * `getFile` + `file_id`), so this is NOT implemented by the gateway. Resolves null when the platform/
+   * adapter doesn't support downloading, or on ANY fetch failure (size cap exceeded, network error,
+   * timeout) — never throws; the caller degrades gracefully (a friendly "not available" ack). The caller
+   * MUST call the returned `cleanup()` (in a `finally`) once done with `filePath` — no unbounded disk growth.
+   */
+  downloadAttachment?(attachment: InboundAttachment): Promise<{ filePath: string; cleanup: () => Promise<void> } | null>;
 }
 
 /**
@@ -107,6 +121,26 @@ export interface CompanionReminder {
  */
 export type SubmitTurn = (sessionId: string, text: string, route?: CompanionRoute) => { delivered: boolean; position?: number };
 
+/**
+ * The injected STT transcriber (Companion Voice epic, VOICE-P2 — see companion/stt.ts for the local
+ * faster-whisper implementation). Kept as a narrow interface (not a bare function) so the gateway can skip
+ * a wasted attachment download when STT definitely isn't ready, without knowing anything about venvs/pip.
+ */
+export interface CompanionTranscriber {
+  /**
+   * A CHEAP, synchronous readiness check — true iff a `transcribe()` call right now will actually attempt
+   * STT (not "will eventually be ready"). A false result may itself kick background provisioning as a
+   * side effect (see companion/stt.ts) — repeated calls are safe (deduped).
+   */
+  isReady(): boolean;
+  /**
+   * Transcribe the audio at `filePath`. `langHint` forces the decode language (from the per-route voice
+   * pref), or null for auto-detect. Resolves null on ANY failure (cold venv, subprocess crash/timeout,
+   * unreadable file, empty result) — NEVER throws; the caller degrades to a friendly "not available" ack.
+   */
+  transcribe(input: { filePath: string; langHint: string | null }): Promise<string | null>;
+}
+
 /** The OUTBOUND delivery result — STRUCTURED across every failure mode (never throws out of chat_reply).
  *  `no-target` = the in-flight turn had NO reply-to route (a turn that wasn't formed from a companion
  *  inbound / proactive-home submit) ⇒ chat_reply delivers NOWHERE (never broadcasts, never guesses). */
@@ -137,7 +171,13 @@ export type InboundResult =
   // intercepted BEFORE submitTurn: an already-authorized route's command text never reaches the agent
   // as a turn (mirrors 'paired-dm'/'paired-sender' above). `command` is the parsed command name (e.g.
   // "lang"); `acked` reports whether the ack reached the chat.
-  | { accepted: false; reason: "command"; sessionId: string; command: string; acked: boolean };
+  | { accepted: false; reason: "command"; sessionId: string; command: string; acked: boolean }
+  // An inbound carried an audio attachment but STT could not produce a transcript — a cold/unwarmed venv
+  // (skipped BEFORE downloading, via CompanionTranscriber.isReady()), an unsupported adapter (no
+  // downloadAttachment), a download failure, or the transcribe subprocess failing/timing out/returning
+  // empty. Distinct from the silent 'no-text' no-transcriber-injected case so a degraded voice note is
+  // debuggable instead of silently vanishing; `acked` reports whether the "try again" ack reached the chat.
+  | { accepted: false; reason: "transcribe-unavailable"; sessionId: string; acked: boolean };
 
 /**
  * A session↔chat binding (spike scope: seeded from env as a SINGLE binding). Models WHICH chat on WHICH

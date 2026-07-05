@@ -14,7 +14,8 @@ import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
 import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles, migrateHumanHoldToHeld } from "./tasks/columns.js";
-import { prewarmMarkitdownForProfilesAtBoot } from "./python/prewarm.js";
+import { prewarmMarkitdownForProfilesAtBoot, resolvePrewarmInterpreterPath } from "./python/prewarm.js";
+import { createFasterWhisperTranscriber, prewarmStt } from "./companion/stt.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
 import { UsageSampler } from "./sessions/usage-sampler.js";
@@ -374,6 +375,16 @@ async function main(): Promise<void> {
   // that survives a gateway rebuild. Default-OFF byte-identical: with no in-app binding + no attached web
   // client it is inert (its adapter is registered but never hit; the WS route accepts but delivers nothing).
   const inAppChannel = new InAppChannel();
+  // Local STT transcriber (Companion Voice epic, VOICE-P2) — built ALWAYS (even when the companion is OFF
+  // at boot), stable across a gateway rebuild, exactly like inAppChannel/originResolver below. Constructing
+  // it does NO provisioning work itself (lazy, memoized — see companion/stt.ts); pre-warm it now IFF the
+  // companion is configured at boot, so a real deployment's first voice note usually finds the venv warm.
+  const sttInterpreterPath = resolvePrewarmInterpreterPath(db.listAllProjects());
+  const sttTranscriber = createFasterWhisperTranscriber(sttInterpreterPath);
+  if (companionCfg) {
+    console.log("[boot] pre-warming the faster-whisper venv (the companion is configured)");
+    prewarmStt(sttInterpreterPath);
+  }
   // The hot-lifecycle controller (Companion Phase 3 backend): owns the live ChatGateway (Telegram long-poll)
   // + the proactive heartbeat, and drives BOTH from the human-only REST config writes with NO daemon
   // restart. Constructed ALWAYS — even when the companion is OFF at boot — so a REST enable can start it
@@ -397,6 +408,7 @@ async function main(): Promise<void> {
     // Per-turn ORIGIN resolver: chat_reply delivers to the in-flight turn's originating route (pinned in the
     // pty when the turn was formed). The SOLE reply-target source — no binding/home guessing, no cross-wire.
     originResolver: (sid) => pty.getActiveTurnOrigin(sid),
+    transcribe: sttTranscriber,
   });
 
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after. The

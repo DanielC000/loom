@@ -36,7 +36,7 @@ import { CompanionReminderWatcher } from "./reminders.js";
 import { resolveEffectiveConfig } from "./store.js";
 import { IN_APP_CHANNEL, normalizeInAppMessage, type InAppChannel } from "./in-app.js";
 import type { CompanionConfig } from "./config.js";
-import type { CompanionRoute, DeliverResult, InboundResult, SessionBinding, SubmitTurn } from "./types.js";
+import type { CompanionRoute, CompanionTranscriber, DeliverResult, InboundResult, SessionBinding, SubmitTurn } from "./types.js";
 
 /** The minimal lifecycle handle the controller needs from a heartbeat watcher (satisfied by
  *  CompanionHeartbeatWatcher; narrowed so a test can inject a spy). */
@@ -115,6 +115,10 @@ export interface CompanionControllerDeps {
    *  turn's originating route. Optional: absent ⇒ deliverReply has no target (test seams that don't exercise
    *  reply routing). */
   originResolver?: (sessionId: string) => CompanionRoute | null;
+  /** The injected STT transcriber (Companion Voice epic, VOICE-P2), threaded into the default gateway
+   *  builder exactly like `inApp`/`originResolver` — STABLE across a gateway rebuild (a token change never
+   *  drops STT). Optional: absent ⇒ every built gateway's audio inbound is a no-op (default OFF). */
+  transcribe?: CompanionTranscriber;
   /** Envelope key-file override (test seam only). */
   keyPath?: string;
   /** Build the gateway for an effective config (test seam — defaults to createCompanionGateway with the
@@ -322,7 +326,7 @@ export class CompanionController implements CompanionControl {
     // injected buildGateway test seam supplies its own). The hub is stable across rebuilds — see in-app.ts.
     const build =
       this.deps.buildGateway ??
-      ((c: CompanionConfig, submit: SubmitTurn, db: typeof this.deps.db) => createCompanionGateway(c, submit, db, this.deps.inApp, this.deps.originResolver));
+      ((c: CompanionConfig, submit: SubmitTurn, db: typeof this.deps.db) => createCompanionGateway(c, submit, db, this.deps.inApp, this.deps.originResolver, this.deps.transcribe));
     this.gateway = build(cfg, this.deps.submitTurn, this.deps.db);
     this.gateway.start();
   }

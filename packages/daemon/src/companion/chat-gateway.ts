@@ -24,7 +24,9 @@
 import type {
   ChannelAdapter,
   CompanionRoute,
+  CompanionTranscriber,
   DeliverResult,
+  InboundAttachment,
   InboundMessage,
   InboundResult,
   SessionBinding,
@@ -99,6 +101,10 @@ export class ChatGateway {
    *                    in-memory store (not a no-op — see voice-prefs.ts) so existing bare
    *                    `new ChatGateway(submit, [...])` constructions stay green; the daemon injects the
    *                    db-backed store.
+   * @param transcribe  the injected STT transcriber (Companion Voice epic, VOICE-P2 — companion/stt.ts).
+   *                    Deferred from P1: default undefined ⇒ an inbound carrying an audio attachment is a
+   *                    no-op (ignored, exactly like an empty text body) — every existing/test construction
+   *                    stays byte-identical. The daemon injects the local faster-whisper transcriber.
    */
   constructor(
     private readonly submitTurn: SubmitTurn,
@@ -107,6 +113,7 @@ export class ChatGateway {
     private readonly pairing: CompanionPairing = noPairing(),
     private readonly originResolver: ((sessionId: string) => CompanionRoute | null) | undefined = undefined,
     private readonly voicePrefs: CompanionVoicePrefs = inMemoryVoicePrefs(),
+    private readonly transcribe: CompanionTranscriber | undefined = undefined,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -181,7 +188,10 @@ export class ChatGateway {
    * vanishing silently. Every rejection / dead-session path is debug-logged.
    */
   async handleInbound(msg: InboundMessage): Promise<InboundResult> {
-    if (!msg.body || msg.body.length === 0) {
+    // An audio-only inbound (Companion Voice epic, VOICE-P2) carries an empty body — it must NOT be
+    // dropped here before it reaches the authz gates below (the load-bearing STT-behind-authz ordering).
+    const audioAttachment = msg.attachments?.find((a) => a.type === "audio");
+    if ((!msg.body || msg.body.length === 0) && !audioAttachment) {
       this.debug(`inbound ignored: no text (channel=${msg.channel} chat=${msg.chatId})`);
       return { accepted: false, reason: "no-text" };
     }
@@ -223,13 +233,63 @@ export class ChatGateway {
       );
       return { accepted: false, reason: "sender-not-authorized" };
     }
+    // AUDIO TRANSCRIPTION (Companion Voice epic, VOICE-P2). Runs STRICTLY after the route match + sender
+    // authz above — an unallowlisted/foreign/unauthorized sender's voice note is rejected by one of the
+    // two returns above and this code is NEVER reached: no download, no STT compute spent on untrusted
+    // senders. `body` (not msg.body) is what the rest of this method acts on from here.
+    let body = msg.body;
+    if (audioAttachment && this.transcribe) {
+      // The WHOLE audio pipeline is wrapped: `isReady()`/`voicePrefs.resolve()`/`transcribe()` are
+      // documented never-throw, but an escaping throw here (like a submitTurn throw above) would escape
+      // handleInbound — fire-and-forget from the adapter — as an UNHANDLED REJECTION → the daemon's global
+      // handler exits (and NOT with the supervisor's restart sentinel, so it stays down). Contain it and
+      // degrade to the SAME friendly ack every other STT failure mode uses.
+      try {
+        // Cheap readiness check FIRST — skips a wasted ≤20MB download when STT definitely isn't ready (cold
+        // venv); a false result here also kicks background provisioning (see companion/stt.ts).
+        if (!this.transcribe.isReady()) {
+          const acked = await this.tryAck(binding, STT_UNAVAILABLE_ACK);
+          this.debug(`inbound audio: STT not ready, skipped download (channel=${msg.channel} chat=${msg.chatId})`);
+          return { accepted: false, reason: "transcribe-unavailable", sessionId: binding.sessionId, acked };
+        }
+        const download = await this.downloadAttachment(binding, audioAttachment);
+        if (!download) {
+          const acked = await this.tryAck(binding, STT_UNAVAILABLE_ACK);
+          this.debug(`inbound audio: download failed/unsupported (channel=${msg.channel} chat=${msg.chatId})`);
+          return { accepted: false, reason: "transcribe-unavailable", sessionId: binding.sessionId, acked };
+        }
+        try {
+          const pref = this.voicePrefs.resolve(voicePrefRoute(binding, msg.sender));
+          const transcript = await this.transcribe.transcribe({ filePath: download.filePath, langHint: pref.sttLang });
+          if (!transcript || transcript.length === 0) {
+            const acked = await this.tryAck(binding, STT_UNAVAILABLE_ACK);
+            this.debug(`inbound audio: transcribe failed/empty (channel=${msg.channel} chat=${msg.chatId})`);
+            return { accepted: false, reason: "transcribe-unavailable", sessionId: binding.sessionId, acked };
+          }
+          body = transcript; // untrusted DATA, handed to the agent as a turn just like typed text — never
+                              // interpreted as an instruction to the gateway.
+        } finally {
+          await download.cleanup().catch(() => { /* best-effort — cleanup must never block/throw */ });
+        }
+      } catch (err) {
+        this.debug(`inbound audio: transcription pipeline THREW: ${describeError(err)} (channel=${msg.channel} chat=${msg.chatId})`);
+        const acked = await this.tryAck(binding, STT_UNAVAILABLE_ACK);
+        return { accepted: false, reason: "transcribe-unavailable", sessionId: binding.sessionId, acked };
+      }
+    }
+    // An audio attachment with no transcribe dep injected (default OFF) leaves `body` at msg.body's ""
+    // — falls through here exactly like the pre-existing no-text path (audio is silently ignored, a no-op).
+    if (!body || body.length === 0) {
+      this.debug(`inbound ignored: no text after transcription (channel=${msg.channel} chat=${msg.chatId})`);
+      return { accepted: false, reason: "no-text" };
+    }
     // "/" SLASH-COMMAND intercept (Companion Voice epic, VOICE-P1 foundation — commands.ts). Runs AFTER
     // the route match + sender authz above, so an unallowlisted/foreign/unauthorized sender NEVER reaches
     // here (both reject paths above return first) — a command can only ever write a pref for an
     // ALREADY-AUTHORIZED route, gated exactly like text. A RECOGNIZED command (an entry in commands.ts'
     // handler map) NEVER becomes a turn — mirrors the redeemed-pairing-code path above. An unrecognized
     // "/word" (parsed but no handler) falls through unchanged to the normal submit path below.
-    const parsed = parseCommand(msg.body);
+    const parsed = parseCommand(body);
     const handler = parsed ? commandHandler(parsed.name) : undefined;
     if (parsed && handler) {
       const route = voicePrefRoute(binding, msg.sender);
@@ -243,7 +303,7 @@ export class ChatGateway {
       // Submit WITH the originating route {channel, chatId}: the pty pins it to the formed turn so the
       // agent's chat_reply resolves back to THIS chat (multi-channel routing). The route is the AUTHENTICATED
       // inbound's own (channel, chatId) — never a body-supplied one.
-      submit = this.submitTurn(binding.sessionId, msg.body, { channel: msg.channel, chatId: msg.chatId });
+      submit = this.submitTurn(binding.sessionId, body, { channel: msg.channel, chatId: msg.chatId });
     } catch (err) {
       // The submit primitive (pty.enqueueStdin) can THROW: its fail-loud M1/M2 guards, or realistically
       // `submit()`'s pty.write() throwing when the bound session's pty dies in the window between the
@@ -283,6 +343,24 @@ export class ChatGateway {
     } catch (err) {
       this.debug(`ack send failed: ${describeError(err)}`);
       return false;
+    }
+  }
+
+  /** Best-effort attachment download via the binding's adapter (Companion Voice epic, VOICE-P2) — contains
+   *  a throw (never propagates) so a download failure degrades to "unavailable", exactly like a send
+   *  failure. Returns null when the adapter doesn't implement downloadAttachment (e.g. in-app) or on ANY
+   *  failure (network, size cap, timeout — see telegram.ts). */
+  private async downloadAttachment(
+    binding: SessionBinding,
+    attachment: InboundAttachment,
+  ): Promise<{ filePath: string; cleanup: () => Promise<void> } | null> {
+    const adapter = this.adapters.get(binding.channel);
+    if (!adapter?.downloadAttachment) return null;
+    try {
+      return (await adapter.downloadAttachment(attachment)) ?? null;
+    } catch (err) {
+      this.debug(`attachment download failed: ${describeError(err)}`);
+      return null;
     }
   }
 
@@ -369,6 +447,10 @@ export class ChatGateway {
 /** The confirmation sent back to a chat on a successful pairing. Deliberately generic — a failed
  *  redemption NEVER acks (it is indistinguishable from any unallowlisted inbound: no pairing oracle). */
 const PAIRED_ACK = "✅ Paired — you can now message me here.";
+
+/** Sent when an audio inbound can't be transcribed right now (cold venv / download or subprocess failure)
+ *  — Companion Voice epic, VOICE-P2. A friendly nudge, not a silent vanish. */
+const STT_UNAVAILABLE_ACK = "🎙️ Voice transcription isn't ready yet — please try again in a moment, or type your message.";
 
 function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
