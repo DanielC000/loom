@@ -244,7 +244,7 @@ check("hasChannelBinding: detects whether a companion already holds a binding on
   assert.equal(hasChannelBinding([], "in-app"), false);
 });
 
-// ── Simple in-app-first create: provisionBody + the graceful single-companion (409) message ───────────
+// ── Simple in-app-first create: provisionBody + the defensive provision-error message ─────────────────
 
 check("provisionBody: a name sends { name } (trimmed); a blank name sends {} (no external config either way)", () => {
   assert.deepEqual(provisionBody("Ada"), { name: "Ada" });
@@ -253,8 +253,10 @@ check("provisionBody: a name sends { name } (trimmed); a blank name sends {} (no
   assert.deepEqual(provisionBody("   "), {}, "a whitespace-only name is treated as unset");
 });
 
-check("provisionErrorMessage: 409 → a calm 'you already have one' precondition; anything else → the server message", () => {
-  assert.match(provisionErrorMessage(409, "a companion is already active — delete it first"), /already have a companion/i);
+check("provisionErrorMessage: 409 → a calm defensive message (multi-companion: no longer expected); anything else → the server message", () => {
+  // Multi-companion (55f1b62): provisioning an additional companion no longer 409s. The 409 branch is kept
+  // as defensive handling only — a calm retry message, never the raw server string.
+  assert.match(provisionErrorMessage(409, "a companion is already active — delete it first"), /try again/i);
   assert.doesNotMatch(provisionErrorMessage(409, "raw server string"), /raw server string/, "the 409 raw string is never shown");
   assert.equal(provisionErrorMessage(500, "companion provision failed and was rolled back"), "companion provision failed and was rolled back");
   assert.equal(provisionErrorMessage(0, "network down"), "network down", "a non-HTTP failure falls back to its own message");
@@ -286,16 +288,19 @@ await acheck("provision: POSTs { name } to /api/companion/provision and returns 
   assert.equal(row.tokenConfigured, false, "the in-app default has no token");
 });
 
-await acheck("provision: a 409 throws an error tagged with status 409, which maps to the graceful message", async () => {
+await acheck("provision: a 409 throws an error tagged with status 409, which maps to the defensive message", async () => {
+  // Not an expected path post-multi-companion, but the api layer must still surface the status so the UI can
+  // branch on it defensively rather than showing a raw server string.
   globalThis.fetch = async () => ({
     ok: false, status: 409,
-    json: async () => ({ error: "a companion is already active — delete it first, or multi-companion support is not yet available" }),
+    json: async () => ({ error: "raw server 409 string that must never reach the user" }),
   });
   let threw = null;
   try { await api.provisionCompanion({}); } catch (e) { threw = e; }
   assert.ok(threw, "a 409 rejects");
-  assert.equal(threw.status, 409, "the status is carried on the error so the UI can branch on the guard");
-  assert.match(provisionErrorMessage(threw.status, threw.message), /already have a companion/i);
+  assert.equal(threw.status, 409, "the status is carried on the error so the UI can branch defensively");
+  assert.match(provisionErrorMessage(threw.status, threw.message), /try again/i);
+  assert.doesNotMatch(provisionErrorMessage(threw.status, threw.message), /raw server 409 string/, "the raw string never reaches the user");
 });
 
 // ── Per-channel remove targets ONLY that channel (the daemon `?channel=` contract) ────────────────────

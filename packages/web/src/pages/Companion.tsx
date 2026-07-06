@@ -3,13 +3,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { resolveConfig, type CompanionConfigMasked, type CompanionBinding } from "@loom/shared";
 import { api, restartCompanionSession, type CompanionProvisionError, type CompanionSkillEntry, type CompanionMemoryEntry, type CompanionReminderEntry } from "../lib/api";
 import {
-  bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, companionDisplayName, emptyConfigForm,
+  bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, companionDisplayName, COMPANION_DEFAULT_NAME, emptyConfigForm,
   emptyTelegramForm, formFromMasked, hasChannelBinding, maskedToken, provisionBody, provisionErrorMessage,
   validateBinding, validatePairing, validateSender, validatePersonaPrompt, COMPANION_PROMPT_MAX, TELEGRAM_CHANNEL,
   reminderTitle, humanCron, reminderNextFireAt,
   type CompanionConfigForm, type CompanionTelegramForm,
 } from "../lib/companion";
-import { Panel, Button, Input, Select, SectionLabel, Badge, StatusPill, Chip } from "../components/ui";
+import { Panel, Button, Input, Select, SectionLabel, Badge, StatusPill, Chip, Dot } from "../components/ui";
 import { CompanionChat } from "../components/CompanionChat";
 import { TerminalCard } from "../components/TerminalCard";
 import { IN_APP_CHANNEL, isArmedInApp } from "../lib/companionChat";
@@ -54,9 +54,9 @@ export default function Companion() {
   const configs = useQuery({ queryKey: ["companionConfigs"], queryFn: api.companionConfigs });
   const bindings = useQuery({ queryKey: ["companionBindings"], queryFn: api.companionBindings });
 
-  // Merge configs + bindings into the companion, keyed by session id. A session may hold MANY bindings
-  // (one per channel), so collect them into a list. Only ONE companion can ever exist (single-companion),
-  // so this list is 0 or 1 in practice — we take the first.
+  // Merge configs + bindings into companions, keyed by session id. A session may hold MANY bindings
+  // (one per channel), so collect them into a list. MULTI-COMPANION (55f1b62): the daemon now arms EVERY
+  // enabled config concurrently, so this list can hold 2+ — the switcher below picks which one is in focus.
   const companions = useMemo<CompanionRow[]>(() => {
     const byId = new Map<string, CompanionRow>();
     for (const c of configs.data ?? []) byId.set(c.sessionId, { sessionId: c.sessionId, config: c, bindings: [] });
@@ -72,44 +72,119 @@ export default function Companion() {
     qc.invalidateQueries({ queryKey: ["companionBindings"] });
   };
 
-  // Single-companion: provisioning mints the ONE in-app companion (spawns the assistant session, writes the
-  // in-app binding, arms it — ZERO external config). On success we just refresh; the page then renders that
-  // companion directly (Chat is its default face), so the user can talk to it at once. The single-companion
-  // guard (409) is surfaced inline in the create box as a calm precondition (provisionErrorMessage), never a
-  // raw alert.
+  // Which companion is in focus, and whether the "New companion" create form is open OVER the current one.
+  // `selectedId` defaults to the first companion (see `selected` below) until the owner picks another;
+  // provisioning focuses the new companion. `creating` lets an owner who ALREADY has a companion open the
+  // create flow without losing their place — Cancel returns to the selected companion.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  // Provisioning mints an IN-APP companion (spawns the assistant session, writes the in-app binding, arms it —
+  // ZERO external config). The old single-companion 409 is GONE (multi-companion runtime, 55f1b62), so this
+  // always creates an ADDITIONAL companion. On success we refresh, focus the new companion (Chat is its
+  // default face, so the owner can talk to it at once), and close the create form.
   const provision = useMutation({
     mutationFn: (name: string) => api.provisionCompanion(provisionBody(name)),
-    onSuccess: () => { invalidateAll(); },
+    onSuccess: (created: CompanionConfigMasked) => { invalidateAll(); setSelectedId(created.sessionId); setCreating(false); },
     meta: { inlineError: true },
   });
 
-  // Exactly one companion can exist — render THAT one directly (no list, no selector). None yet → the
-  // create box IS the page. This structurally enforces single-companion: there is no "new" affordance once a
-  // companion exists (the provision endpoint 409-guards a second server-side too).
-  const current = companions[0] ?? null;
+  // Resolve the focused companion, tolerating a stale/absent selection (e.g. the selected companion was just
+  // deleted) by falling back to the first. None yet → the create box IS the page.
+  const selected = companions.find((c) => c.sessionId === selectedId) ?? companions[0] ?? null;
   const loading = configs.isLoading || bindings.isLoading;
+  // Show the create form when the owner opted in (creating) OR there's simply no companion to show yet.
+  const showCreate = creating || (!selected && !loading);
 
   return (
     <div style={{ maxWidth: 1180 }}>
       <Panel style={{ display: "flex", flexDirection: "column", minHeight: "72vh", padding: 14 }}>
-        {current ? (
-          <CompanionDetail
-            key={current.sessionId}
-            companion={current}
-            label={companionDisplayName(current.config)}
-            onChanged={invalidateAll}
-            onDeleted={invalidateAll}
-          />
-        ) : loading ? (
-          <p style={{ color: color.textMuted, padding: 12 }}>Loading…</p>
-        ) : (
+        {showCreate ? (
           <CompanionCreate
             onCreate={(name) => provision.mutate(name)}
             pending={provision.isPending}
             error={provision.error as CompanionProvisionError | null}
+            // Cancel is offered only when there's a companion to return to (the additional-companion flow); when
+            // the create box IS the page (no companion yet) there's nothing to cancel back to.
+            onCancel={selected ? () => { setCreating(false); provision.reset(); } : undefined}
           />
+        ) : selected ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, flex: 1, minHeight: 0 }}>
+            <CompanionSwitcher
+              companions={companions}
+              selectedId={selected.sessionId}
+              onSelect={setSelectedId}
+              onNew={() => { setCreating(true); provision.reset(); }}
+            />
+            <CompanionDetail
+              key={selected.sessionId}
+              companion={selected}
+              label={companionDisplayName(selected.config)}
+              onChanged={invalidateAll}
+              // A delete drops the focus back to the first remaining companion (or the create box if it was the last).
+              onDeleted={() => { setSelectedId(null); invalidateAll(); }}
+            />
+          </div>
+        ) : (
+          <p style={{ color: color.textMuted, padding: 12 }}>Loading…</p>
         )}
       </Panel>
+    </div>
+  );
+}
+
+// ── Companion switcher: pick among companions + a "New companion" affordance ──────────────────────────────
+// With MULTIPLE companions this renders a segmented selector (one entry per companion) so the owner can switch
+// which one the Chat/Manage/Terminal panes below are scoped to; with exactly ONE it stays out of the way — just
+// the "New companion" button, right-aligned — so the single-companion page reads essentially as it did before
+// multi-companion (no picker where there's nothing to pick). Selection is client-only (the panes key off the
+// selected sessionId); "New companion" routes up to the parent's provision flow. Each entry carries an
+// enabled/disabled dot; an unnamed companion shows a short session-id tail so two default-named ones stay
+// distinguishable.
+function CompanionSwitcher({ companions, selectedId, onSelect, onNew }: {
+  companions: CompanionRow[];
+  selectedId: string;
+  onSelect: (sessionId: string) => void;
+  onNew: () => void;
+}) {
+  const many = companions.length > 1;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      {many && (
+        <div role="group" aria-label="Select companion" style={{ display: "inline-flex", flexWrap: "wrap", gap: 6 }}>
+          {companions.map((c) => {
+            const on = c.sessionId === selectedId;
+            const enabled = c.config ? c.config.enabled : true;
+            const named = (c.config?.name ?? "").trim();
+            return (
+              <button
+                key={c.sessionId}
+                type="button"
+                aria-pressed={on}
+                title={enabled ? "enabled" : "disabled"}
+                onClick={() => onSelect(c.sessionId)}
+                className="loom-toggle"
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 7,
+                  background: on ? color.phosphorDim : "transparent",
+                  color: on ? color.text : color.textDim,
+                  border: `1px solid ${on ? color.phosphor : color.border}`,
+                  borderRadius: radius.base, padding: "5px 12px",
+                  fontFamily: font.mono, fontSize: 12, cursor: "pointer",
+                }}
+              >
+                {/* Decorative — the enabled state is also in the button's title tooltip; keep it out of the
+                    accessible name so that stays just the companion's name. */}
+                <Dot tone={enabled ? "phosphor" : "muted"} />
+                <span>{named || COMPANION_DEFAULT_NAME}</span>
+                {!named && <span style={{ color: color.textMuted, fontSize: 11 }}>{c.sessionId.slice(0, 4)}</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <span style={{ flex: 1 }} />
+      <Button onClick={onNew} title="Provision an additional companion">+ New companion</Button>
     </div>
   );
 }
@@ -245,8 +320,9 @@ function CompanionCreate({ onCreate, pending, error, onCancel }: {
     if (e.key === "Enter") { e.preventDefault(); submit(); }
   };
 
-  // The single-companion guard (409) is a calm precondition, not a failure — render it in an amber notice
-  // with a pointer, distinct from the red style a genuine error uses.
+  // A 409 is no longer expected (multi-companion: the single-companion pre-spawn guard was removed) — but if
+  // the daemon ever returns one, treat it as a calm precondition in an amber notice, distinct from the red
+  // style a genuine error uses. Kept as defensive handling, not a live path.
   const isGuard = error?.status === 409;
   const message = error ? provisionErrorMessage(error.status ?? 0, error.message) : null;
 

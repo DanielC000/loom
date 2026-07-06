@@ -170,12 +170,13 @@ export function provisionBody(name: string): { name?: string } {
   return trimmed ? { name: trimmed } : {};
 }
 
-// Map a failed provision to a friendly, non-alarming message for the create flow. The single-companion
-// guard (HTTP 409) is an expected PRECONDITION, not a failure — surface a calm "you already have one" with
-// a clear pointer, never the raw server string. Any other status falls back to the server's own message.
-// (Multi-companion support is a pending follow-up; until then one enabled companion is the ceiling.)
+// Map a failed provision to a friendly, non-alarming message for the create flow. Multi-companion is now
+// supported (the daemon arms every enabled config concurrently — 55f1b62), so provisioning an additional
+// companion no longer 409s. The 409 branch is kept only as DEFENSIVE handling: if the daemon ever returns
+// one, surface a calm pointer rather than the raw server string. Any other status falls back to the server's
+// own message.
 export function provisionErrorMessage(status: number, serverMessage: string): string {
-  if (status === 409) return "You already have a companion. Delete it under Manage first, then create a new one.";
+  if (status === 409) return "That companion couldn't be created right now — try again in a moment.";
   return serverMessage;
 }
 

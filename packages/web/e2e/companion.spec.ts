@@ -19,6 +19,7 @@
 // name. `seedCompanion` gives the seeded agent the SAME name as the companion's configured name (default
 // "Ada"), so asserting that name is visible holds regardless of which source a future UI change reads it
 // from.
+import { randomUUID } from "node:crypto";
 import { expect, test } from "./fixtures/daemon";
 
 // Isolation is baked into the fixture (fixtures/daemon.ts): the first-run "Welcome to Loom" overlay is
@@ -30,14 +31,20 @@ test("shows the seeded companion (not the empty create-box) with Chat + Manage t
   await loomDaemon.seedCompanion();
   await page.goto(`${loomDaemon.baseURL}/companion`);
 
-  // NOT the empty create-box — a companion is already seeded.
+  // NOT the empty create-box — a companion is already seeded. (The "+ New companion" affordance is present
+  // but its label is "+ New companion", never the exact "New companion" the create-box heading uses.)
   await expect(page.getByText("New companion", { exact: true })).toHaveCount(0);
 
   // The companion's name renders in the page header.
   await expect(page.getByText("Ada", { exact: true }).first()).toBeVisible();
 
-  // Single-companion model: exactly one tablist, Chat + Manage (+ Terminal) tabs — no companion selector
-  // of any kind (there is nothing to pick between).
+  // Multi-companion: the "+ New companion" affordance is always available so an additional companion can be
+  // provisioned. (Whether the picker itself renders depends on how many companions exist — it's gated on
+  // length > 1, covered hermetically in test/companion-multi.mjs; the shared e2e daemon can't guarantee a
+  // single-companion state, so this spec doesn't assert the picker's absence here.)
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+
+  // Exactly one "Companion view" tablist (one focused companion) — Chat + Manage (+ Terminal) tabs.
   const tablist = page.getByRole("tablist", { name: "Companion view" });
   await expect(tablist).toBeVisible();
   await expect(tablist).toHaveCount(1);
@@ -82,4 +89,56 @@ test("Manage tab surfaces config (masked), memory, reminders, persona, and proac
   // configuration above it) — .last() pins the heading, which is what proves the SECTION itself renders.
   await expect(page.getByText("Persona / prompt", { exact: true })).toBeVisible();
   await expect(page.getByText("Proactive home", { exact: true }).last()).toBeVisible();
+});
+
+test("multi-companion: a picker lists every companion and switches the focused one", async ({ page, loomDaemon }) => {
+  // Two seeded companions (each its own project+agent+session) — the multi-companion runtime (55f1b62) means
+  // the page must list both and let the owner switch which one the Chat/Manage/Terminal panes are scoped to.
+  // Names carry a per-run suffix: the e2e worker daemon is SHARED, and the companion-config list does not drop
+  // archived rows, so sibling tests' seeded companions also appear in the picker. Unique names let this test
+  // target ONLY its own two regardless of what else accumulated (mirrors the ".first()" tolerance elsewhere).
+  const suffix = randomUUID().slice(0, 8);
+  const nameA = `Ada-${suffix}`;
+  const nameB = `Bram-${suffix}`;
+  await loomDaemon.seedCompanion({ name: nameA });
+  await loomDaemon.seedCompanion({ name: nameB });
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  // The picker renders (2+ companions), with an entry for each of THIS test's companions.
+  const picker = page.getByRole("group", { name: "Select companion" });
+  await expect(picker).toBeVisible();
+  const btnA = picker.getByRole("button", { name: nameA });
+  const btnB = picker.getByRole("button", { name: nameB });
+  await expect(btnA).toBeVisible();
+  await expect(btnB).toBeVisible();
+
+  // Focus companion B → the chat pane (a companion's default face) re-scopes to B.
+  await btnB.click();
+  await expect(btnB).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#companion-panel-chat").getByText(nameB, { exact: true })).toBeVisible();
+
+  // Switch to A → the panes re-scope to A (observable state change: the chat header name flips, B de-selects).
+  await btnA.click();
+  await expect(btnA).toHaveAttribute("aria-pressed", "true");
+  await expect(btnB).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("#companion-panel-chat").getByText(nameA, { exact: true })).toBeVisible();
+});
+
+test("multi-companion: the create form opens over the current companion and cancels back", async ({ page, loomDaemon }) => {
+  await loomDaemon.seedCompanion({ name: `Ada-${randomUUID().slice(0, 8)}` });
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  // A companion is shown (its Chat pane), not the create box.
+  await expect(page.getByText("New companion", { exact: true })).toHaveCount(0);
+  await expect(page.locator("#companion-panel-chat")).toBeVisible();
+
+  // "+ New companion" opens the create form OVER the current companion (its heading is the exact "New companion").
+  await page.getByRole("button", { name: "+ New companion" }).click();
+  await expect(page.getByText("New companion", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create companion" })).toBeVisible();
+
+  // Cancel returns to the existing companion without provisioning anything (no real spawn in this fixture).
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(page.getByText("New companion", { exact: true })).toHaveCount(0);
+  await expect(page.locator("#companion-panel-chat")).toBeVisible();
 });
