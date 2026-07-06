@@ -261,7 +261,7 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, gap: 12 }}>
-      <ChatHeader conn={conn} />
+      <ChatHeader conn={conn} title={title ?? "Companion"} />
 
       {armed === false && (
         <div style={notice("amber")} role="status">
@@ -333,17 +333,27 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
   );
 }
 
-// ── Header: live connection pill ─────────────────────────────────────────────────
-// The companion's NAME is not repeated here — the surrounding CompanionDetail header already names it.
-// This thin strip carries only the live connection state, right-aligned, so the name shows exactly once.
-function ChatHeader({ conn }: { conn: ChatConnState }) {
+// ── Header: companion name + live connection pill ────────────────────────────────
+// Names the companion INSIDE the chat panel (left), with the live connection state right-aligned. The
+// name reads in the panel's own header strip so it's present even once the empty state (which also names
+// it) scrolls away — styled like the outer CompanionDetail header (font.head, uppercase) but dimmer, so
+// the two agree without competing. Truncates with an ellipsis rather than wrapping the strip.
+function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
   const pill =
     conn === "connected" ? { tone: "phosphor" as const, label: "connected", glow: true } :
     conn === "connecting" ? { tone: "amber" as const, label: "connecting", glow: false } :
     { tone: "red" as const, label: "reconnecting", glow: false };
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-      <span style={{ flex: 1 }} />
+      <span
+        style={{
+          flex: 1, minWidth: 0, fontFamily: font.head, fontSize: 12, textTransform: "uppercase",
+          letterSpacing: "0.08em", color: color.textDim,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}
+      >
+        {title}
+      </span>
       <StatusPill tone={pill.tone} label={pill.label} glow={pill.glow} />
     </div>
   );

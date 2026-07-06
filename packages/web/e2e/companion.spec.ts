@@ -48,6 +48,12 @@ test("shows the seeded companion (not the empty create-box) with Chat + Manage t
   // Chat is the default face — the message composer renders straight away.
   await expect(page.getByRole("tab", { name: "Chat" })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+
+  // The companion's name is surfaced INSIDE the chat panel itself (its header strip), not only in the
+  // outer CompanionDetail header — scope to the chat tabpanel so this can't pass on the outer header alone.
+  await expect(
+    page.locator("#companion-panel-chat").getByText("Ada", { exact: true }),
+  ).toBeVisible();
 });
 
 test("Manage tab surfaces config (masked), memory, reminders, persona, and proactive-home", async ({ page, loomDaemon }) => {
