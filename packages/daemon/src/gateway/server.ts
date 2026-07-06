@@ -31,10 +31,10 @@ import type { CompanionControl } from "../companion/controller.js";
 import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
-import { maskCompanionConfig } from "../companion/store.js";
+import { maskCompanionConfig, findEnabledTokenCollision } from "../companion/store.js";
 import { listConnections, createConnection, deleteConnection } from "../connections/store.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef } from "../capabilities/registry.js";
-import { encryptSecret } from "../keys/envelope.js";
+import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validateColumnLayout } from "../mcp/platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
@@ -776,6 +776,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     return { sessionId, botTokenBlob, channel, allowedChatId, chatScope, heartbeatIntervalMinutes, heartbeatPrompt, enabled, name };
   };
+  // Reject a create/edit that would arm a Telegram token already used by another ENABLED companion (companion
+  // multi-bot-token collision guard) — Telegram allows only ONE getUpdates consumer per token, so a shared
+  // token is never valid; catching it here beats the reconcile-time skip-and-warn safety net (store.ts's
+  // resolveAllEnabledConfigs). Only checked when the row being written is itself enabled and carries a token;
+  // a disabled write or an in-app-only (tokenless) write is unaffected. Returns an error string, or null.
+  const checkTokenCollision = (built: { sessionId: string; botTokenBlob: string; enabled: boolean }): string | null => {
+    if (!built.enabled || !built.botTokenBlob) return null;
+    let token: string;
+    try {
+      token = decryptSecret(built.botTokenBlob);
+    } catch {
+      return null; // we just encrypted this blob ourselves — a decrypt failure here should never block the write
+    }
+    const collidingSessionId = findEnabledTokenCollision(deps.db, token, built.sessionId);
+    if (!collidingSessionId) return null;
+    return `this Telegram bot token is already used by another enabled companion (session ${collidingSessionId.slice(0, 8)}) — Telegram allows only one getUpdates consumer per token; give this companion its own token or disable the other one first`;
+  };
   // Optional home update carried on a config write — writes app_meta (the single source), returns error|null.
   const applyHomeIfPresent = (body: Record<string, unknown>): string | null => {
     if (body.home === undefined || body.home === null) return null;
@@ -801,6 +818,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const existing = deps.db.getCompanionConfig(sessionId);
     const built = buildCompanionUpsert(b, sessionId, existing);
     if ("error" in built) return reply.code(400).send({ error: built.error });
+    const tokenErr = checkTokenCollision(built);
+    if (tokenErr) return reply.code(409).send({ error: tokenErr });
     const homeErr = applyHomeIfPresent(b);
     if (homeErr) return reply.code(400).send({ error: homeErr });
     const row = deps.db.upsertCompanionConfig(built);
@@ -814,6 +833,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const built = buildCompanionUpsert(b, sessionId, existing);
     if ("error" in built) return reply.code(400).send({ error: built.error });
+    const tokenErr = checkTokenCollision(built);
+    if (tokenErr) return reply.code(409).send({ error: tokenErr });
     const homeErr = applyHomeIfPresent(b);
     if (homeErr) return reply.code(400).send({ error: homeErr });
     const row = deps.db.upsertCompanionConfig(built);
@@ -923,6 +944,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     let enabled = true;
     if (typeof b.enabled === "boolean") enabled = b.enabled;
     else if (b.enabled !== undefined && b.enabled !== null) return reply.code(400).send({ error: "enabled must be a boolean" });
+    // GUARD 4 (companion multi-bot-token collision guard): Telegram allows only ONE getUpdates consumer per
+    // bot token — a token already armed on another ENABLED companion is never valid. Checked BEFORE spawning
+    // the session: there's no reason to spawn+rollback for a precondition catchable up front.
+    if (botToken && enabled) {
+      const collidingSessionId = findEnabledTokenCollision(deps.db, botToken);
+      if (collidingSessionId) {
+        return reply.code(409).send({
+          error: `this Telegram bot token is already used by another enabled companion (session ${collidingSessionId.slice(0, 8)}) — Telegram allows only one getUpdates consumer per token; give this companion its own token`,
+        });
+      }
+    }
     // home: optional { channel, chatId } proactive target.
     let home: CompanionRoute | null = null;
     if (b.home !== undefined && b.home !== null) {

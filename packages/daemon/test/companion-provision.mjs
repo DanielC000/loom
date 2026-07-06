@@ -289,6 +289,22 @@ try {
     const ok = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
     check("guard(6c): the assistant default rig still provisions (201)", ok.statusCode === 201 && rig.spawned.length === 1);
   }
+  // (6d) companion multi-bot-token collision guard: provisioning a 2nd Telegram companion on a token already
+  // ARMED by another enabled companion → 409, no session spawned (rejected BEFORE the spawn, so there is
+  // nothing to roll back). A DISTINCT token still provisions fine.
+  {
+    const rig = await makeRig("p6d.db"); rigs.push(rig);
+    const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "chat-first" } });
+    check("guard(6d): first Telegram provision succeeds", first.statusCode === 201 && rig.spawned.length === 1);
+    const collide = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "chat-second" } });
+    check("guard(6d): a 2nd provision on the SAME token → 409", collide.statusCode === 409 && /already used by another enabled companion/.test(JSON.parse(collide.payload).error));
+    check("guard(6d): NO session spawned for the rejected collision (nothing to roll back)", rig.spawned.length === 1);
+    check("guard(6d): the collision error never leaks the plaintext token", !collide.payload.includes(TOKEN));
+    // A DISTINCT token still provisions fine (the guard is token-scoped, not a single-companion 409).
+    const TOKEN_OTHER = "8222222222:distinct-second-companion-token";
+    const distinct = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN_OTHER, allowedChatId: "chat-third" } });
+    check("guard(6d): a DIFFERENT token still provisions (201) — distinct tokens are never a collision", distinct.statusCode === 201 && rig.spawned.length === 2);
+  }
 
   // ============ Part 5 — the REAL factory applies the SAME token guard (no injected builder) ============
   // Prove createCompanionGateway itself registers the Telegram adapter ONLY when a token exists: a tokenless

@@ -18,6 +18,7 @@
  * to call Telegram or to derive the masked last-4. It is NEVER logged and NEVER returned in clear. Home is
  * NOT stored in the config row — it stays the single source of truth in app_meta (get/setCompanionHome).
  */
+import { createHash } from "node:crypto";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { readCompanionConfig, DEFAULT_HEARTBEAT_PROMPT, type CompanionConfig } from "./config.js";
 import { TELEGRAM_CHANNEL } from "./telegram.js";
@@ -92,11 +93,67 @@ export function resolveAllEnabledConfigs(
   const home = db.getCompanionHome();
   const enabled = db.listCompanionConfigs().filter((c) => c.enabled);
   const configs: CompanionConfig[] = [];
+  // SAME-TOKEN COLLISION GUARD (companion multi-bot-token collision guard): Telegram allows only ONE
+  // getUpdates long-poll consumer per bot token — arming two ENABLED configs on the same token would leave
+  // the 2nd thrashing forever on HTTP 409 (silent inbound loss for that companion). `enabled` is read
+  // oldest-first (db.listCompanionConfigs ORDER BY created_at, rowid), so keeping the FIRST config seen per
+  // token and skipping the rest arms the OLDEST companion deterministically — a safety net independent of
+  // the provision/config-set REST guard (findEnabledTokenCollision below), which should catch this earlier.
+  // Distinct tokens (the normal multi-companion case) are completely unaffected.
+  const armedByTokenFingerprint = new Map<string, string>(); // fingerprint -> sessionId already armed on it
   for (const row of enabled) {
     const cfg = buildConfigFromRow(row, home, keyPath);
-    if (cfg) configs.push(cfg);
+    if (!cfg) continue;
+    if (cfg.botToken) {
+      const fingerprint = tokenFingerprint(cfg.botToken);
+      const armedBy = armedByTokenFingerprint.get(fingerprint);
+      if (armedBy) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[companion] session ${cfg.sessionId.slice(0, 8)} shares its Telegram bot token with already-armed session ${armedBy.slice(0, 8)} — Telegram allows only ONE getUpdates consumer per token, so this companion is NOT armed. Give it its own bot token to run both concurrently.`,
+        );
+        continue;
+      }
+      armedByTokenFingerprint.set(fingerprint, cfg.sessionId);
+    }
+    configs.push(cfg);
   }
   return configs;
+}
+
+/** Non-secret grouping key for a decrypted bot token (sha256 hex) — used ONLY to detect two configs sharing
+ *  the same Telegram token without comparing plaintext directly. */
+function tokenFingerprint(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+/**
+ * Provision/config-set precondition companion to the reconcile safety net above: does `candidateToken`
+ * (plaintext) already belong to a DIFFERENT enabled companion? A shared Telegram token is never valid (only
+ * one getUpdates consumer per token), so a REST write can reject before the arm even attempts it — catching
+ * the collision at configuration time instead of leaving it to the reconcile-time skip-and-warn. Returns the
+ * colliding row's sessionId, or undefined when clear. `excludeSessionId` skips the row being written itself
+ * (re-saving your OWN config without changing the token is not a collision). A row whose blob fails to
+ * decrypt is skipped (not a comparable token), never thrown.
+ */
+export function findEnabledTokenCollision(
+  db: CompanionConfigStore,
+  candidateToken: string,
+  excludeSessionId?: string,
+  keyPath?: string,
+): string | undefined {
+  const candidateFingerprint = tokenFingerprint(candidateToken);
+  for (const row of db.listCompanionConfigs()) {
+    if (!row.enabled || !row.botTokenBlob || row.sessionId === excludeSessionId) continue;
+    let token: string;
+    try {
+      token = decryptSecret(row.botTokenBlob, keyPath);
+    } catch {
+      continue; // corrupt/undecryptable — not a comparable token, never throw
+    }
+    if (tokenFingerprint(token) === candidateFingerprint) return row.sessionId;
+  }
+  return undefined;
 }
 
 /**

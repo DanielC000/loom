@@ -177,21 +177,44 @@ try {
     check("corrupt: an undecryptable blob ⇒ dropped (empty array), NOT a crash", threw === false && corrupt.length === 0);
     db4.close();
 
-    // (2f) MULTI-COMPANION (the whole point of the card): MORE THAN ONE enabled row + no env → resolves
-    // ALL of them (every enabled row gets its own CompanionConfig, no "pick one + warn the rest away").
+    // (2f) MULTI-COMPANION (the whole point of the card): MORE THAN ONE enabled row on DISTINCT tokens + no
+    // env → resolves ALL of them (every enabled row gets its own CompanionConfig, no "pick one + warn the
+    // rest away"). Same-TOKEN collision is a SEPARATE guard (2g below) — distinct tokens stay first-class.
     const db5 = new Db(dbFile("p2f.db"));
-    db5.upsertCompanionConfig({ sessionId: "sess-A", botTokenBlob: encryptSecret(PLAINTEXT), channel: "telegram", allowedChatId: "chat-A", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
-    db5.upsertCompanionConfig({ sessionId: "sess-B", botTokenBlob: encryptSecret(PLAINTEXT), channel: "telegram", allowedChatId: "chat-B", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
-    const warnBefore = logSink.filter((l) => /enabled companion configs found/.test(l)).length;
+    const TOKEN_DISTINCT_A = "8100000001:AAA-distinct-token-A-abcdefg";
+    const TOKEN_DISTINCT_B = "8100000002:BBB-distinct-token-B-abcdefg";
+    db5.upsertCompanionConfig({ sessionId: "sess-A", botTokenBlob: encryptSecret(TOKEN_DISTINCT_A), channel: "telegram", allowedChatId: "chat-A", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
+    db5.upsertCompanionConfig({ sessionId: "sess-B", botTokenBlob: encryptSecret(TOKEN_DISTINCT_B), channel: "telegram", allowedChatId: "chat-B", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
+    const warnBefore = logSink.filter((l) => /shares its Telegram bot token/.test(l)).length;
     const multi = resolveAllCompanionConfigs(db5, {});
-    const warnAfter = logSink.filter((l) => /enabled companion configs found/.test(l)).length;
-    check(">1-enabled: resolves BOTH enabled rows (multi-companion runtime)", multi.length === 2 && multi.some((c) => c.sessionId === "sess-A") && multi.some((c) => c.sessionId === "sess-B"));
-    check(">1-enabled: emits NO 'pick one, warn the rest' log (multi-companion is first-class, not a misconfiguration)", warnAfter === warnBefore);
+    const warnAfter = logSink.filter((l) => /shares its Telegram bot token/.test(l)).length;
+    check(">1-enabled (distinct tokens): resolves BOTH enabled rows (multi-companion runtime)", multi.length === 2 && multi.some((c) => c.sessionId === "sess-A") && multi.some((c) => c.sessionId === "sess-B"));
+    check(">1-enabled (distinct tokens): emits NO shared-token warning (distinct tokens are first-class, not a misconfiguration)", warnAfter === warnBefore);
     // A single enabled row still resolves to exactly that one (no regression from the multi-row case).
-    db5.upsertCompanionConfig({ sessionId: "sess-B", botTokenBlob: encryptSecret(PLAINTEXT), channel: "telegram", allowedChatId: "chat-B", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: false });
+    db5.upsertCompanionConfig({ sessionId: "sess-B", botTokenBlob: encryptSecret(TOKEN_DISTINCT_B), channel: "telegram", allowedChatId: "chat-B", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: false });
     const single = resolveAllCompanionConfigs(db5, {});
     check(">1-enabled: disabling one drops it — exactly the remaining enabled row resolves", single.length === 1 && single[0].sessionId === "sess-A");
     db5.close();
+
+    // (2g) SAME-TOKEN COLLISION GUARD (companion multi-bot-token collision guard): Telegram allows only ONE
+    // getUpdates long-poll consumer per token, so two ENABLED rows sharing the SAME token must arm exactly
+    // ONE (deterministically — the OLDEST/created-first row, since listCompanionConfigs orders by
+    // created_at, rowid) and SKIP the rest with a clear diagnostic naming both sessions, instead of letting
+    // the 2nd thrash forever on Telegram's HTTP 409.
+    const db6 = new Db(dbFile("p2g.db"));
+    db6.upsertCompanionConfig({ sessionId: "sess-old", botTokenBlob: encryptSecret(PLAINTEXT), channel: "telegram", allowedChatId: "chat-old", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
+    db6.upsertCompanionConfig({ sessionId: "sess-new", botTokenBlob: encryptSecret(PLAINTEXT), channel: "telegram", allowedChatId: "chat-new", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
+    const collideWarnBefore = logSink.filter((l) => /shares its Telegram bot token/.test(l)).length;
+    const collided = resolveAllCompanionConfigs(db6, {});
+    const collideWarnAfter = logSink.filter((l) => /shares its Telegram bot token/.test(l)).length;
+    check("same-token collision: arms exactly ONE of the two (the oldest, sess-old)", collided.length === 1 && collided[0].sessionId === "sess-old");
+    check("same-token collision: emits exactly one diagnostic naming BOTH sessions", collideWarnAfter === collideWarnBefore + 1 && logSink.some((l) => l.includes("sess-old") && l.includes("sess-new") && /shares its Telegram bot token/.test(l)));
+    check("same-token collision: the diagnostic never leaks the plaintext token", logSink.every((l) => !l.includes(PLAINTEXT)));
+    // Once given a DISTINCT token, the previously-skipped session arms too (the guard is token-scoped only).
+    db6.upsertCompanionConfig({ sessionId: "sess-new", botTokenBlob: encryptSecret(TOKEN_DISTINCT_B), channel: "telegram", allowedChatId: "chat-new", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
+    const distinctNow = resolveAllCompanionConfigs(db6, {});
+    check("same-token collision: given a distinct token, BOTH sessions now arm", distinctNow.length === 2);
+    db6.close();
   }
 
   // ============ Part 3 — the human-only REST CRUD via the REAL buildServer (app.inject) ============
@@ -237,6 +260,39 @@ try {
     check("REST PUT: new blob is ciphertext (decrypts to the new token)", (() => { const row = db.getCompanionConfig("sess-1"); return decryptSecret(row.botTokenBlob) === NEWTOKEN; })());
     check("REST PUT: body carries neither the old nor the new plaintext token", !put.payload.includes(PLAINTEXT) && !put.payload.includes(NEWTOKEN));
     check("REST PUT: unknown session → 404", (await inject({ method: "PUT", url: "/api/companion/config/ghost", payload: { botToken: NEWTOKEN } })).statusCode === 404);
+
+    // --- SAME-TOKEN COLLISION GUARD (companion multi-bot-token collision guard): the REST config-set path
+    // rejects a create/edit that would arm a Telegram token already used by another ENABLED companion —
+    // catching it before the reconcile-time skip-and-warn safety net ever has to act. `sess-1` is currently
+    // enabled on NEWTOKEN (from the PUT above).
+    const collideCreate = await inject({ method: "POST", url: "/api/companion/config", payload: {
+      sessionId: "sess-2", botToken: NEWTOKEN, allowedChatId: "chat-2", chatScope: "dm",
+    } });
+    check("REST POST: creating a 2nd ENABLED companion on sess-1's token → 409", collideCreate.statusCode === 409 && /already used by another enabled companion/.test(JSON.parse(collideCreate.payload).error));
+    check("REST POST: the rejected collision leaves NO 'sess-2' row", db.getCompanionConfig("sess-2") === undefined);
+    check("REST POST: the collision error names the OTHER session, never the plaintext token", !collideCreate.payload.includes(NEWTOKEN) && collideCreate.payload.includes("sess-1".slice(0, 8)));
+
+    // A DISABLED create on the same token is unaffected (never armed, so never a collision).
+    const disabledSameToken = await inject({ method: "POST", url: "/api/companion/config", payload: {
+      sessionId: "sess-2", botToken: NEWTOKEN, allowedChatId: "chat-2", chatScope: "dm", enabled: false,
+    } });
+    check("REST POST: a DISABLED create on the same token is NOT a collision → 201", disabledSameToken.statusCode === 201);
+
+    // A DIFFERENT token for sess-2 (now enabling it) succeeds — distinct tokens are never a collision.
+    const TOKEN_SESS2 = "7000000001:sess-2-own-distinct-token-xyz";
+    const enableDistinct = await inject({ method: "PUT", url: "/api/companion/config/sess-2", payload: { botToken: TOKEN_SESS2, enabled: true } });
+    check("REST PUT: enabling sess-2 on its OWN distinct token succeeds → 200", enableDistinct.statusCode === 200);
+
+    // Now editing sess-2 to sess-1's token (both enabled) → 409, and sess-2's stored token is UNCHANGED.
+    const collidePut = await inject({ method: "PUT", url: "/api/companion/config/sess-2", payload: { botToken: NEWTOKEN } });
+    check("REST PUT: editing sess-2 onto sess-1's token (both enabled) → 409", collidePut.statusCode === 409);
+    check("REST PUT: the rejected collision left sess-2's token UNCHANGED", decryptSecret(db.getCompanionConfig("sess-2").botTokenBlob) === TOKEN_SESS2);
+
+    // Re-saving sess-1 itself (unchanged token) is NOT a self-collision.
+    const selfResave = await inject({ method: "PUT", url: "/api/companion/config/sess-1", payload: { heartbeatIntervalMinutes: 15 } });
+    check("REST PUT: re-saving sess-1 with its OWN unchanged token is not a self-collision → 200", selfResave.statusCode === 200);
+    // Clean up sess-2 so the remaining assertions below (bodies-never-leak-PLAINTEXT sweep) aren't affected.
+    await inject({ method: "DELETE", url: "/api/companion/config/sess-2" });
 
     // Validation 400s — none of these write/keep a bad row.
     check("REST POST: missing sessionId → 400", (await inject({ method: "POST", url: "/api/companion/config", payload: { botToken: PLAINTEXT, allowedChatId: "c" } })).statusCode === 400);
