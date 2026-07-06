@@ -209,6 +209,52 @@ try {
     check("8: transcribe() received the route's sttLang as langHint", tr.calls.length === 1 && tr.calls[0].langHint === "es");
   }
 
+  // ============ 5b — transcriber THROWS SYNCHRONOUSLY → contained (no unhandled rejection, no crash) ============
+  {
+    // isReady() throws
+    {
+      const submitted = [];
+      const submit = (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; };
+      const tg = makeAdapter("telegram", { downloadResult: { filePath: "/tmp/voice.ogg", cleanup: async () => {} } });
+      const tr = {
+        isReady() { throw new Error("venv probe blew up"); },
+        async transcribe() { return "should never get here"; },
+      };
+      const gw = new ChatGateway(submit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, undefined, undefined, tr);
+      gw.registerAdapter(tg.adapter);
+
+      let threw = false;
+      let r;
+      try { r = await gw.handleInbound(audioMsg("telegram", "111", { id: "owner" })); } catch { threw = true; }
+      check("5b (isReady throws): handleInbound did NOT throw/reject", threw === false);
+      check("5b (isReady throws): contained as transcribe-unavailable", r && r.accepted === false && r.reason === "transcribe-unavailable");
+      check("5b (isReady throws): the friendly STT-unavailable ack was sent, not a raw error", r?.acked === true && tg.sent.length === 1 && /isn't ready yet/i.test(tg.sent[0].text));
+      check("5b (isReady throws): no turn submitted", submitted.length === 0);
+    }
+    // transcribe() throws
+    {
+      const submitted = [];
+      const submit = (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; };
+      let cleanupCalls = 0;
+      const tg = makeAdapter("telegram", { downloadResult: { filePath: "/tmp/voice.ogg", cleanup: async () => { cleanupCalls++; } } });
+      const tr = {
+        isReady() { return true; },
+        async transcribe() { throw new Error("whisper subprocess crashed"); },
+      };
+      const gw = new ChatGateway(submit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, undefined, undefined, tr);
+      gw.registerAdapter(tg.adapter);
+
+      let threw = false;
+      let r;
+      try { r = await gw.handleInbound(audioMsg("telegram", "111", { id: "owner" })); } catch { threw = true; }
+      check("5b (transcribe throws): handleInbound did NOT throw/reject", threw === false);
+      check("5b (transcribe throws): contained as transcribe-unavailable", r && r.accepted === false && r.reason === "transcribe-unavailable");
+      check("5b (transcribe throws): the friendly STT-unavailable ack was sent, not a raw error", r?.acked === true && tg.sent.length === 1 && /isn't ready yet/i.test(tg.sent[0].text));
+      check("5b (transcribe throws): the downloaded temp file was still cleaned up", cleanupCalls === 1);
+      check("5b (transcribe throws): no turn submitted", submitted.length === 0);
+    }
+  }
+
   // ============ 9 — normalizeTelegramMessage: a voice-note update normalizes with an audio attachment ============
   {
     const update = { message: { chat: { id: 111 }, message_id: 5, from: { id: 7 }, voice: { file_id: "AAbb", mime_type: "audio/ogg" } } };

@@ -49,6 +49,7 @@ requireHermeticEnv();
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { IN_APP_CHANNEL } = await import("../dist/companion/in-app.js");
+const { TELEGRAM_CHANNEL } = await import("../dist/companion/telegram.js");
 
 const dbFile = path.join(tmpHome, "loom.db");
 let db = new Db(dbFile);
@@ -116,6 +117,27 @@ try {
     check("(3) THAT conversation only now becomes visible in the history list (3 real conversations total)", afterMessage.length === before + 1 && afterMessage[0].seq === 3);
   }
 
+  // ============ 3b — the /new no-op guard COUNTS ACROSS CHANNELS (db.ts:3518), not just in-app ============
+  {
+    // A session whose ONLY activity in its open conversation is a Telegram message (zero in-app rows).
+    // The no-op guard's count query has NO channel filter — if it only counted in-app rows, this would look
+    // empty and wrongly no-op (silently reusing conv1 forever); since it counts cross-channel, it must see
+    // n=1 and perform a REAL close+open.
+    const sess = makeCompanionSession("Cross-Channel Guard");
+    db.insertCompanionMessage({ id: randomUUID(), sessionId: sess, channel: TELEGRAM_CHANNEL, chatId: "tg-1", author: "user", text: "telegram only, no in-app activity", createdAt: now0 });
+    const before = db.listCompanionConversations(sess);
+    check("(3b) before /new: the still-open telegram-only conversation is already listed (1 message, cross-channel)", before.length === 1 && before[0].seq === 1 && before[0].endedAt === null && before[0].messageCount === 1);
+
+    db.startNewCompanionConversation(sess);
+    const after = db.listCompanionConversations(sess);
+    check("(3b) a Telegram-only open conversation is NOT treated as empty — /new performs a REAL close+open", after.length === 1 && after[0].seq === 1 && after[0].endedAt !== null);
+
+    // Now the freshly-opened conv2 IS genuinely empty (no messages on any channel) — THIS one must no-op.
+    db.startNewCompanionConversation(sess);
+    const stillAfter = db.listCompanionConversations(sess);
+    check("(3b) a genuinely empty open conversation (no messages on ANY channel) still no-ops as before", stillAfter.length === 1 && stillAfter[0].seq === 1);
+  }
+
   // ============ 4 — retention cap: oldest conversations evicted WHOLESALE past the cap ============
   {
     // Mirrors MAX_RETAINED_CONVERSATIONS in db.ts (20) — not exported, so asserted against here by count.
@@ -137,6 +159,26 @@ try {
     // The still-open, most-recent conversation was never itself a target of eviction.
     const openSeq = RETAIN_CAP + 6; // 25 closes (seq 1..25) then the final still-open conversation is seq 26
     check("(4) the currently-open conversation is never evicted", db.listCompanionMessagesForConversation(sess, openSeq).length === 1);
+  }
+
+  // ============ 4b — per-(session,channel,conversation) ring buffer: 200 in-app + 200 Telegram COEXIST ============
+  {
+    // Mirrors MAX_COMPANION_MESSAGES in db.ts (200) — not exported, so asserted against here by count.
+    const RING_CAP = 200;
+    const sess = makeCompanionSession("Multi-Channel Ring Buffer");
+    for (let i = 1; i <= RING_CAP + 5; i++) {
+      db.insertCompanionMessage({ id: randomUUID(), sessionId: sess, channel: IN_APP_CHANNEL, chatId: sess, author: "user", text: `in-app-${i}`, createdAt: new Date().toISOString() });
+    }
+    for (let i = 1; i <= RING_CAP + 5; i++) {
+      db.insertCompanionMessage({ id: randomUUID(), sessionId: sess, channel: TELEGRAM_CHANNEL, chatId: "tg-1", author: "user", text: `telegram-${i}`, createdAt: new Date().toISOString() });
+    }
+    const inAppMsgs = db.listCompanionMessages(sess, IN_APP_CHANNEL);
+    const telegramMsgs = db.listCompanionMessages(sess, TELEGRAM_CHANNEL);
+    check(`(4b) in-app retains its own ${RING_CAP}-row ring buffer, unaffected by Telegram traffic`, inAppMsgs.length === RING_CAP);
+    check(`(4b) Telegram retains its own ${RING_CAP}-row ring buffer, unaffected by in-app traffic`, telegramMsgs.length === RING_CAP);
+    check("(4b) in-app kept the NEWEST rows (oldest 5 evicted, in-app-6.. survive)", inAppMsgs[0].text === "in-app-6" && inAppMsgs[inAppMsgs.length - 1].text === `in-app-${RING_CAP + 5}`);
+    check("(4b) Telegram kept the NEWEST rows (oldest 5 evicted, telegram-6.. survive)", telegramMsgs[0].text === "telegram-6" && telegramMsgs[telegramMsgs.length - 1].text === `telegram-${RING_CAP + 5}`);
+    check("(4b) both channels' full 200+200 rows coexist in the SAME (still-open) conversation", db.listCurrentCompanionMessages(sess).length === RING_CAP * 2);
   }
 
   // ============ 5 — MIGRATION: a pre-upgrade session (messages, no companion_conversations row) is backfilled ============
