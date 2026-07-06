@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import type { CompanionConversationSummary } from "@loom/shared";
 import {
   companionMessage, crossChannelMessage, historyMessage, IN_APP_CHANNEL, parseCleared, parseCrossChannel, parseInbound, parseTranscript,
   prepareSend, prepareSendAudio, youMessage,
   type ChatConnState, type ChatMessage, type CompanionHistoryRow,
 } from "../lib/companionChat";
-import { Button, StatusPill } from "./ui";
+import { api } from "../lib/api";
+import { Button, Dot, SectionLabel, StatusPill } from "./ui";
 import { color, font, radius } from "../theme";
 
 // Feature-detect mic support ONCE at module load (Companion Voice epic, VOICE-P4 inbound) — Safari/older
@@ -62,13 +65,23 @@ const RECONNECT_MAX_MS = 10000;
 // "no reply yet" hint — the companion may be offline / not yet provisioned (never a fake "delivered").
 const REPLY_TIMEOUT_MS = 25000;
 
-export function CompanionChat({ sessionId, title, armed }: { sessionId: string; title?: string; armed?: boolean }) {
+export function CompanionChat({ sessionId, title, armed, onConversationArchived }: {
+  sessionId: string; title?: string; armed?: boolean;
+  // Fires when a "/new"/"/reset" archives the current conversation (a live `cleared` frame). The
+  // history-browser parent uses it to refetch the conversation list so the just-archived one appears.
+  onConversationArchived?: () => void;
+}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [conn, setConn] = useState<ChatConnState>("connecting");
   const [draft, setDraft] = useState("");
   const [awaitingReply, setAwaitingReply] = useState(false);
   const [replyTimedOut, setReplyTimedOut] = useState(false);
   const [recording, setRecording] = useState(false); // Companion Voice epic, VOICE-P4 inbound
+
+  // Held in a ref so the sessionId-keyed WS effect below always calls the LATEST callback without
+  // re-subscribing the socket when the parent passes a fresh function each render.
+  const onArchivedRef = useRef(onConversationArchived);
+  onArchivedRef.current = onConversationArchived;
 
   const wsRef = useRef<WebSocket | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -147,6 +160,7 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
           setAwaitingReply(false);
           setReplyTimedOut(false);
           clearReplyTimer();
+          onArchivedRef.current?.(); // the just-ended conversation is now archived — refresh the history list
           return;
         }
         // A NON-in-app channel turn (e.g. Telegram), pushed live the moment the daemon persists it
@@ -483,4 +497,183 @@ function notice(t: "amber" | "muted"): CSSProperties {
     background: t === "amber" ? "rgba(255,178,62,0.06)" : color.panel2,
     fontFamily: font.mono, fontSize: 12, lineHeight: 1.5, color: c === color.amber ? color.textDim : color.textMuted,
   };
+}
+
+// ══ Conversation history browser (card 59e8e0c9) ═══════════════════════════════════════════════════════
+// A companion's Chat surface, extended so past conversations are browsable alongside the live chat. Every
+// "/new"/"/reset" ARCHIVES the just-ended conversation (daemon card 85f62475); this pane surfaces those
+// archived conversations in a left rail (newest-first, each a timestamp + first-message preview + count).
+// The CURRENT (open, endedAt===null) conversation stays the live chat, UNCHANGED — it never appears as a
+// "past" row. Clicking a past conversation opens its full unified transcript READ-ONLY (no composer),
+// reusing the exact bubble rendering (channel badge + 🎤 voice indicator) the live chat uses.
+//
+// Scoped PER-companion by sessionId (each companion is its own session). With NO archived conversations yet
+// the rail is hidden entirely, so a fresh single-conversation companion reads exactly as it did before this
+// feature — the live chat sits in the same tree slot whether the rail shows or not, so gaining history never
+// tears down and re-opens the live WebSocket.
+export function CompanionChatPanel({ sessionId, title, armed }: { sessionId: string; title?: string; armed?: boolean }) {
+  const qc = useQueryClient();
+  const convos = useQuery({
+    queryKey: ["companionConversations", sessionId],
+    queryFn: () => api.companionConversations(sessionId),
+  });
+  // null = the live chat; a number = viewing that archived conversation's read-only transcript.
+  const [viewingSeq, setViewingSeq] = useState<number | null>(null);
+
+  // "Past" = archived (endedAt !== null). The open conversation (endedAt===null) IS the live chat and is
+  // rendered in the live pane, so it's never a browsable "past" row.
+  const past = (convos.data ?? []).filter((c) => c.endedAt !== null);
+  const hasHistory = past.length > 0;
+
+  // A /new archives the current conversation → refetch so it shows in the rail. Passed into the live chat,
+  // fired from its `cleared` frame handler.
+  const onArchived = () => { qc.invalidateQueries({ queryKey: ["companionConversations", sessionId] }); };
+
+  // If the viewed conversation vanished (retention eviction past the cap, or a companion switch), fall back
+  // to the live chat rather than leaving a dangling read-only pane.
+  useEffect(() => {
+    if (viewingSeq !== null && convos.data && !convos.data.some((c) => c.seq === viewingSeq)) setViewingSeq(null);
+  }, [viewingSeq, convos.data]);
+
+  return (
+    <div style={{ display: "flex", gap: hasHistory ? 14 : 0, flex: 1, minHeight: 0 }}>
+      {hasHistory && (
+        <ConversationHistoryRail past={past} viewingSeq={viewingSeq} onSelect={setViewingSeq} />
+      )}
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+        {viewingSeq === null ? (
+          <CompanionChat sessionId={sessionId} title={title} armed={armed} onConversationArchived={onArchived} />
+        ) : (
+          <PastConversationView sessionId={sessionId} seq={viewingSeq} title={title ?? "Companion"} onBack={() => setViewingSeq(null)} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── History rail: the live conversation + every archived one, newest-first ─────────────────────────────
+function ConversationHistoryRail({ past, viewingSeq, onSelect }: {
+  past: CompanionConversationSummary[];
+  viewingSeq: number | null;
+  onSelect: (seq: number | null) => void;
+}) {
+  return (
+    <aside aria-label="Conversation history" style={{ width: 232, flexShrink: 0, display: "flex", flexDirection: "column", minHeight: 0, gap: 8 }}>
+      <SectionLabel style={{ margin: 0 }}>History</SectionLabel>
+      <div style={{ overflowY: "auto", minHeight: 0, display: "flex", flexDirection: "column", gap: 6, paddingRight: 2 }}>
+        <HistoryRow
+          active={viewingSeq === null}
+          live
+          primary="Current"
+          secondary="The live chat"
+          onClick={() => onSelect(null)}
+        />
+        {past.map((c) => (
+          <HistoryRow
+            key={c.seq}
+            active={viewingSeq === c.seq}
+            primary={formatConversationTime(c.startedAt)}
+            secondary={c.preview ?? "(no preview)"}
+            count={c.messageCount}
+            onClick={() => onSelect(c.seq)}
+          />
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+// One selectable conversation row. `live` marks the current (live-chat) entry with a phosphor dot; a past
+// row shows its message count. Selection mirrors the CompanionSwitcher toggle treatment (phosphor fill +
+// border when active) so the two picker patterns on this page read as one system.
+function HistoryRow({ active, primary, secondary, count, live, onClick }: {
+  active: boolean; primary: string; secondary: string; count?: number; live?: boolean; onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active ? "true" : undefined}
+      className="loom-toggle"
+      style={{
+        textAlign: "left", display: "flex", flexDirection: "column", gap: 3, cursor: "pointer",
+        background: active ? color.phosphorDim : "transparent",
+        border: `1px solid ${active ? color.phosphor : color.border}`,
+        borderRadius: radius.base, padding: "7px 9px", fontFamily: font.mono,
+      }}
+    >
+      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        {live && <Dot tone="phosphor" glow />}
+        <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: active ? color.text : color.textDim }}>
+          {primary}
+        </span>
+        {count !== undefined && (
+          <>
+            <span style={{ flex: 1 }} />
+            <span style={{ fontSize: 10, color: color.textMuted }}>{count} msg{count === 1 ? "" : "s"}</span>
+          </>
+        )}
+      </span>
+      <span style={{ fontSize: 11, lineHeight: 1.4, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {secondary}
+      </span>
+    </button>
+  );
+}
+
+// ── Past conversation: a read-only transcript of ONE archived conversation ─────────────────────────────
+// Fetches the one conversation's full unified message list and renders it with the SAME Bubble the live
+// chat uses (channel badge + 🎤 voice indicator preserved). No composer — a past conversation is immutable.
+function PastConversationView({ sessionId, seq, title, onBack }: {
+  sessionId: string; seq: number; title: string; onBack: () => void;
+}) {
+  const q = useQuery({
+    queryKey: ["companionConversation", sessionId, seq],
+    queryFn: () => api.companionConversation(sessionId, seq),
+  });
+  const messages: ChatMessage[] = (q.data?.messages ?? []).map(historyMessage);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <Button variant="ghost" onClick={onBack} style={{ padding: "4px 8px" }} title="Return to the live chat">← Live chat</Button>
+        <span style={{ flex: 1, minWidth: 0, fontFamily: font.head, fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {q.data ? formatConversationTime(q.data.conversation.startedAt) : "Conversation"}
+        </span>
+        <StatusPill tone="cyan" label="read-only" />
+      </div>
+
+      <div
+        style={{
+          flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 0,
+          padding: "4px 4px",
+        }}
+      >
+        {q.isLoading ? (
+          <div style={{ margin: "auto", color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>Loading…</div>
+        ) : q.isError ? (
+          <div style={{ margin: "auto", color: color.red, fontFamily: font.mono, fontSize: 12 }}>{(q.error as Error).message}</div>
+        ) : messages.length === 0 ? (
+          <div style={{ margin: "auto", color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>This conversation has no messages.</div>
+        ) : (
+          messages.map((m, i) => (
+            <Bubble
+              key={m.id}
+              msg={m}
+              title={title}
+              grouped={messages[i - 1]?.author === m.author && messages[i - 1]?.channel === m.channel}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Compact, locale-aware absolute timestamp for a conversation row / header — e.g. "Jul 6, 2:14 PM". Falls
+// back to the raw ISO string if it can't be parsed (never throws on a malformed date).
+function formatConversationTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }

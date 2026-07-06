@@ -10,7 +10,7 @@ import {
   type CompanionConfigForm, type CompanionTelegramForm,
 } from "../lib/companion";
 import { Panel, Button, Input, Select, SectionLabel, Badge, StatusPill, Chip, Dot } from "../components/ui";
-import { CompanionChat } from "../components/CompanionChat";
+import { CompanionChatPanel } from "../components/CompanionChat";
 import { TerminalCard } from "../components/TerminalCard";
 import { IN_APP_CHANNEL, isArmedInApp } from "../lib/companionChat";
 import { color, font, radius } from "../theme";
@@ -459,7 +459,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
       {mode === "chat" ? (
         <div role="tabpanel" id="companion-panel-chat" aria-labelledby="companion-tab-chat"
           style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-          <CompanionChat sessionId={companion.sessionId} title={label} armed={armed} />
+          <CompanionChatPanel sessionId={companion.sessionId} title={label} armed={armed} />
         </div>
       ) : mode === "terminal" ? (
         <div role="tabpanel" id="companion-panel-terminal" aria-labelledby="companion-tab-terminal"

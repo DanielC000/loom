@@ -1432,6 +1432,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         }[];
         companionMemories?: { sessionId: string; name: string; content: string }[];
         companionReminders?: { sessionId: string; cron?: string; prompt?: string; label?: string | null; enabled?: boolean }[];
+        // Companion chat MESSAGES + conversation boundaries (conversation-history browser e2e, card 59e8e0c9).
+        // The ONLY way an e2e spec can seed browsable conversation history: each message is inserted via the
+        // real `insertCompanionMessage` (auto-tagged with the session's current open conversation), and each
+        // `companionNewConversation` session id runs `startNewCompanionConversation` (archive the open
+        // conversation, open the next) — the same archive path a live "/new" takes. Arrays process as whole
+        // blocks in a single call, so to interleave (conversation 1 messages → archive → conversation 2
+        // messages) a caller makes SEQUENTIAL seed calls (see the e2e fixture's seedCompanionConversations).
+        companionMessages?: { sessionId: string; channel?: string; chatId?: string; author: "user" | "companion"; text: string; viaVoice?: boolean; createdAt?: string }[];
+        companionNewConversation?: string[];
         // A direct orchestration_events audit row (card 12204d22: the Overview attention merge-card e2e).
         // The ONLY way an e2e spec can drive a `MERGE REQUEST` attention item — useAttention derives it from
         // a LIVE manager's `merge_request` event whose worker is live (lib/attention.ts), which the Overview
@@ -1544,6 +1553,25 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         });
         companionReminderIds.push(id);
       }
+      // Companion chat messages: a direct `insertCompanionMessage` per row (auto-tagged with the session's
+      // current open conversation). `chatId` defaults to the sessionId (the in-app loopback self-address).
+      const companionMessageIds: string[] = [];
+      for (const m of b.companionMessages ?? []) {
+        if (typeof m.sessionId !== "string" || (m.author !== "user" && m.author !== "companion") || typeof m.text !== "string") {
+          return reply.code(400).send({ error: "companionMessages[].sessionId, author ('user'|'companion'), and text are required" });
+        }
+        const id = randomUUID();
+        deps.db.insertCompanionMessage({
+          id, sessionId: m.sessionId, channel: m.channel ?? IN_APP_CHANNEL, chatId: m.chatId ?? m.sessionId,
+          author: m.author, text: m.text, createdAt: m.createdAt ?? new Date().toISOString(), viaVoice: m.viaVoice ?? false,
+        });
+        companionMessageIds.push(id);
+      }
+      // Companion conversation boundaries: archive the open conversation + open the next (the "/new" path).
+      for (const sid of b.companionNewConversation ?? []) {
+        if (typeof sid !== "string") return reply.code(400).send({ error: "companionNewConversation[] must be session id strings" });
+        deps.db.startNewCompanionConversation(sid);
+      }
       // Live-but-no-PTY session rows (stage 6): inserted directly via deps.db.insertSession — NEVER
       // SessionService.startRun (which spawns a real claude). processState defaults to "live" so it
       // surfaces on the live rail (listAllSessions) + the ProjectTerminals/Terminals live filters;
@@ -1628,6 +1656,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return reply.code(201).send({
         ok: true, usageSampleIds, runIds,
         companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds,
+        companionMessageIds,
         liveSessionIds, wakeIds, archivedSessionIds, orchestrationEventIds,
       });
     });

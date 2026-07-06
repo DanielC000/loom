@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, ConnectionMetadata, ConnectionAuthScheme, CapabilitySummary, CapabilityProvisionKind, PollJob } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, CapabilitySummary, CapabilityProvisionKind, PollJob } from "@loom/shared";
 
 // A one-time DM-pairing enrollment code, returned ONCE by the mint endpoint (the store keeps only a
 // salted hash). The human relays `code` to the person being enrolled; it is never recoverable after.
@@ -648,6 +648,18 @@ export const api = {
     getErr<{ name: string; content: string }>(`/api/companion/memory/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
   deleteCompanionMemory: (sessionId: string, name: string) =>
     delErr<{ ok: boolean; memories: CompanionMemoryEntry[] }>(`/api/companion/memory/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
+
+  // CONVERSATION HISTORY (card 85f62475): browse a companion's PAST conversations + drill into one's full
+  // transcript. Same human-only loopback posture as the reads above (NO agent MCP path). `companionConversations`
+  // returns summaries newest-first (seq DESC); `endedAt === null` marks the CURRENT (open, live) conversation,
+  // a closed one carries an `endedAt`. `companionConversation` fetches one conversation's full unified message
+  // list (every channel, chronological) — 404 (surfaced via getErr) on an unknown/invalid seq.
+  companionConversations: (sessionId: string) =>
+    get<{ conversations: CompanionConversationSummary[] }>(`/api/companion/conversations/${encodeURIComponent(sessionId)}`).then((r) => r.conversations),
+  companionConversation: (sessionId: string, seq: number) =>
+    getErr<{ conversation: { seq: number; startedAt: string; endedAt: string | null }; messages: CompanionMessage[] }>(
+      `/api/companion/conversations/${encodeURIComponent(sessionId)}/${seq}`,
+    ),
 
   // REMINDERS: the sibling read/curate surface over the companion's OWN `companion_reminders` rows — same
   // VIEW + PRUNE posture as MEMORY/SKILLS (authoring is the companion's own MCP job; this only lists +

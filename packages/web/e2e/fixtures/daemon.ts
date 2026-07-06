@@ -187,6 +187,19 @@ export interface LoomDaemon {
     reminderPrompt?: string;
   }) => Promise<SeededCompanion>;
   /**
+   * Seed browsable companion conversation HISTORY (card 59e8e0c9: the conversation-history browser e2e) via
+   * the test-only POST /internal/test/seed. Given a companion `sessionId` and an ORDERED list of
+   * conversations (each an array of {author,text,viaVoice?,channel?} turns), inserts each conversation's
+   * messages then archives it with a "/new" boundary — EXCEPT the last, which stays the OPEN/current one (the
+   * live chat). So `[[…], [...]]` yields exactly one ARCHIVED conversation (browsable in the history rail) and
+   * one current. Uses the real insertCompanionMessage + startNewCompanionConversation paths (NOT the live WS),
+   * so no real companion/pty is needed. Sequential seed calls guarantee the archive lands BETWEEN batches.
+   */
+  seedCompanionConversations: (
+    sessionId: string,
+    conversations: { author: "user" | "companion"; text: string; viaVoice?: boolean; channel?: string }[][],
+  ) => Promise<void>;
+  /**
    * Seed a LIVE-but-NO-PTY session (card d01311b6: the unified terminal / sessions e2e spec) via the
    * test-only POST /internal/test/seed — a `processState:"live"` session row inserted directly through
    * `deps.db.insertSession`, so it renders as live in the session list + the unified <TerminalCard> chrome
@@ -411,6 +424,19 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       return { projectId: project.id, agentId: agent.id, sessionId, memoryName, reminderLabel };
     };
 
+    const seedCompanionConversations: LoomDaemon["seedCompanionConversations"] = async (sessionId, conversations) => {
+      for (let i = 0; i < conversations.length; i++) {
+        await apiPost(baseURL, "/internal/test/seed", {
+          companionMessages: conversations[i].map((m) => ({ sessionId, ...m })),
+        });
+        // Archive every conversation but the last (the last stays open/current = the live chat). Each call is
+        // a separate, sequential round trip, so the "/new" boundary reliably lands BETWEEN message batches.
+        if (i < conversations.length - 1) {
+          await apiPost(baseURL, "/internal/test/seed", { companionNewConversation: [sessionId] });
+        }
+      }
+    };
+
     const seedLiveSession: LoomDaemon["seedLiveSession"] = async (opts = {}) => {
       const project = opts.project ?? await createProject(`live-${randomUUID().slice(0, 8)}`);
       const agentName = opts.agentName ?? "Seeded Agent";
@@ -483,7 +509,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedLiveSession, seedOrchestrationEvent, spawnShell, killSpawnedShells, archiveSeededSessions });
+    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, seedOrchestrationEvent, spawnShell, killSpawnedShells, archiveSeededSessions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.

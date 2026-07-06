@@ -124,6 +124,57 @@ test("multi-companion: a picker lists every companion and switches the focused o
   await expect(page.locator("#companion-panel-chat").getByText(nameA, { exact: true })).toBeVisible();
 });
 
+test("conversation history: the rail lists an archived conversation, opening it shows a read-only transcript, the live chat stays", async ({ page, loomDaemon }) => {
+  // A companion with TWO conversations: an archived one (distinctive first message → its history preview,
+  // plus a Telegram VOICE turn to prove cross-channel badge + 🎤 rendering carry through) and the current one
+  // (still open = the live chat). Unique name so we can target ONLY our companion on the shared worker daemon.
+  const name = `Ada-${randomUUID().slice(0, 8)}`;
+  const companion = await loomDaemon.seedCompanion({ name });
+  await loomDaemon.seedCompanionConversations(companion.sessionId, [
+    [
+      { author: "user", text: "Roadmap planning for Q3" },
+      { author: "companion", text: "Here is the roadmap summary." },
+      { author: "user", text: "voice note please", viaVoice: true, channel: "telegram" },
+    ],
+    [
+      { author: "user", text: "Live and current — hello" },
+      { author: "companion", text: "Hi! This is the live reply." },
+    ],
+  ]);
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  // Focus OUR companion (the shared daemon accumulates others; the picker renders when >1 exist).
+  const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
+  if (await pickerBtn.count()) await pickerBtn.click();
+
+  const chat = page.locator("#companion-panel-chat");
+  const rail = chat.locator('aside[aria-label="Conversation history"]');
+
+  // ── The history rail lists the archived conversation by its first-message preview. ──────────────────────
+  await expect(rail.getByText("History", { exact: true })).toBeVisible();
+  await expect(rail.getByText("Current", { exact: true })).toBeVisible(); // the live-chat entry
+  await expect(rail.getByText("Roadmap planning for Q3")).toBeVisible(); // the archived conversation's preview
+
+  // The live chat is showing (composer present) until we open a past conversation.
+  await expect(chat.getByRole("textbox", { name: "Message" })).toBeVisible();
+
+  // ── Open the archived conversation → its read-only transcript renders (companion reply + cross-channel). ──
+  await rail.getByText("Roadmap planning for Q3").click();
+  await expect(chat.getByText("read-only")).toBeVisible();
+  await expect(chat.getByText("Here is the roadmap summary.")).toBeVisible(); // the companion's reply bubble
+  await expect(chat.getByText("voice note please")).toBeVisible(); // the Telegram voice turn's text
+  await expect(chat.getByText("Telegram")).toBeVisible(); // the cross-channel provenance badge
+  await expect(chat.locator('[aria-label="Voice message"]')).toBeVisible(); // the 🎤 voice indicator
+
+  // A past conversation is READ-ONLY — no composer while viewing it.
+  await expect(chat.getByRole("textbox", { name: "Message" })).toHaveCount(0);
+
+  // ── Back to the live chat → the composer returns (observable state change). ─────────────────────────────
+  await chat.getByRole("button", { name: /Live chat/ }).click();
+  await expect(chat.getByRole("textbox", { name: "Message" })).toBeVisible();
+  await expect(chat.getByText("read-only")).toHaveCount(0);
+});
+
 test("multi-companion: the create form opens over the current companion and cancels back", async ({ page, loomDaemon }) => {
   await loomDaemon.seedCompanion({ name: `Ada-${randomUUID().slice(0, 8)}` });
   await page.goto(`${loomDaemon.baseURL}/companion`);
