@@ -81,6 +81,15 @@ try {
     check("commands: the handler key-set === the menu command-set (no drift either direction)", names.length === menuNames.length && new Set(names).size === new Set(menuNames).size && names.every((n) => menuNames.includes(n)));
   }
 
+  // ============ Part 1c — /help derives its ack from COMMANDS itself (never a second hand-maintained list) ============
+  {
+    const helpAck = commandHandler("help")(undefined, {}, {}).ack;
+    const names = registeredCommandNames();
+    check("/help: appears in its own output", helpAck.includes("/help"));
+    check("/help: every registered command name appears in the ack", names.every((n) => helpAck.includes(`/${n}`)));
+    check("/help: every registered command's description appears in the ack", COMMAND_MENU.every((c) => helpAck.includes(c.description)));
+  }
+
   // ============ Part 2 — DM-scope intercept: /lang + /voice write the pref, never submit a turn ============
   {
     const submitted = [];
@@ -122,9 +131,9 @@ try {
     check("/voice with neither on|off → usage ack, pref unchanged", /Usage: \/voice on\|off/.test(sent[0].text) && prefs.resolve(route).voiceReplies === true);
 
     // Unrecognized command → falls through unchanged to the normal submit path.
-    const rUnknown = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/help me" });
+    const rUnknown = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/bogus me" });
     check("an unrecognized '/word' falls through: accepted as a normal turn", rUnknown.accepted === true);
-    check("an unrecognized '/word' is submitted VERBATIM (never swallowed)", submitted.length === 1 && submitted[0].text === "/help me");
+    check("an unrecognized '/word' is submitted VERBATIM (never swallowed)", submitted.length === 1 && submitted[0].text === "/bogus me");
 
     // Plain text (byte-identical) — the existing pipeline is untouched.
     const rText = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "hello there" });

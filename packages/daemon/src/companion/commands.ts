@@ -93,6 +93,16 @@ const COMMANDS: Record<string, CommandDef> = {
       return { ack: `✅ Voice replies turned ${norm}.` };
     },
   },
+  help: {
+    description: "List every recognized command",
+    // Derives its output from COMMANDS itself (not a second hand-maintained list), so a new command
+    // registered above automatically appears here — the in-app web chat has no native command menu
+    // (Telegram gets one via setMyCommands), so this is the only way to discover commands there.
+    handler() {
+      const lines = Object.entries(COMMANDS).map(([command, def]) => `/${command} – ${def.description}`);
+      return { ack: `Available commands:\n${lines.join("\n")}` };
+    },
+  },
 };
 
 /** Look up the handler for a parsed command name, or undefined when unrecognized — the router's signal
