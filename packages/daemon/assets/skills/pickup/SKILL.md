@@ -19,14 +19,18 @@ project id anywhere; it's derived server-side.
    - *Lead / orchestrator:* read your **living resume doc** — it's the "you are here + what's next"
      source of truth. Your session's **"Where things live"** context block gives your project's
      absolute **vault root**; your resume doc is `<vaultRoot>/Projects/<Project>/Orchestrator Log.md`
-     (substitute your project's name). **Read it by that ABSOLUTE path — never Glob for it** (a broad
-     Glob from your home directory hits the search timeout). Cross-check it against the board.
+     (substitute your project's name). **Read it by that ABSOLUTE path — never Glob, Bash `find`, or
+     Bash `ls` for it** (a broad search from your home directory hits the search timeout). Cross-check
+     it against the board. If that injected root turns out wrong (the read 404s), don't fall back to a
+     broad search — resolve the real vault root from Obsidian's own global config file (`obsidian.json`,
+     under the OS's per-user app-data directory, e.g. `%APPDATA%\obsidian\obsidian.json` on Windows),
+     which lists every known vault path; then retry against the resolved root.
    - *Worker:* your scope is your assigned board task / kickoff — orient narrowly to it, not the whole
      project.
 5. **Design notes** (optional) — read **`_Index.md`** at the project vault root FIRST (the root is in
    your "Where things live" context block): it's the map-of-content that lists every note by group, so
-   use it to locate the design/task notes you need **instead of Globbing** (a broad Glob from home times
-   out). Notes live in a shallow, one-level taxonomy folder per the project's `CLAUDE.md` "Vault
+   use it to locate the design/task notes you need **instead of Globbing or Bash `find`/`ls`** (a broad
+   search from home times out). Notes live in a shallow, one-level taxonomy folder per the project's `CLAUDE.md` "Vault
    structure" section; fixed-path docs stay pinned at the vault root.
    - **If the owner says they edited or left notes in a file out-of-band**, force a fresh read of it: the
      harness `Read` "unchanged since last read" guard is arg-scoped (keyed off the last-read args, blind

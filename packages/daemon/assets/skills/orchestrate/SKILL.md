@@ -188,6 +188,14 @@ a design you've already superseded. Because the interrupt can land mid-edit, phr
 worker FIRST reconciles its working tree (`git status`; finish or revert the half-done edit) before
 acting on the new direction.
 
+**Don't double-dispatch an already-approved worker.** Once you've unblocked or approved a worker to
+proceed, a redundant "start now" / "keep driving" nudge queues on top of work already in flight — and if
+it lands while the worker is mid-report, it trips the `worker_report(done)` pending-guard (the daemon
+refuses the report until the worker reconciles the queued instruction), forcing an unnecessary
+drain-and-re-report round-trip. Prefer ONE durable dispatch per decision. If you do need to nudge, check
+`worker_list`/`worker_transcript` first to confirm the worker is genuinely idle — not already working or
+mid-report — before sending anything.
+
 ## The loop
 
 1. **Plan & triage.** Turn the backlog, features, and bugs into a sharp, scoped plan — derived from
@@ -228,6 +236,10 @@ acting on the new direction.
      can't reach another board's card, so the lookup just dead-ends and strands the worker. Cite such an
      id as **provenance** ("originally filed as X — for your reference only") for the human's trace, and
      inline the actual content the worker must act on.
+   - **Never hand a worktree-bound worker a bare vault-relative path** (e.g. `Projects/…/Design/*.md`)
+     for a design note — that store can live outside the worker's isolated worktree and is unreachable
+     by its Glob/Read tools. Paste the relevant excerpt into the kickoff, or give an absolute,
+     worktree-reachable path.
 4. **Resolve forks decisively.** When a worker reports a decision up, make the call *with* reasoning —
    recommend, don't hand back a menu; name what you rejected and why. If genuinely uncertain, propose
    how to de-risk (a spike, a check) instead of guessing.
@@ -250,9 +262,9 @@ acting on the new direction.
    each meaningful step. This single doc IS your recycle handoff and your re-orientation after a pause.
    **Where it lives:** your session's **"Where things live"** context block gives your project's
    absolute **vault root**; your resume doc is `<vaultRoot>/Projects/<Project>/Orchestrator Log.md`
-   (substitute your project's name). **Read and write it by that ABSOLUTE path — never Glob for it** (a
-   broad Glob from your home directory hits the search timeout). The vault root is the injected value;
-   the doc path is derived from it.
+   (substitute your project's name). **Read and write it by that ABSOLUTE path — never Glob, Bash
+   `find`, or Bash `ls` for it** (a broad search from your home directory hits the search timeout). The
+   vault root is the injected value; the doc path is derived from it.
    A handoff (your resume doc, or a worker recycle handoff) is a **hint, not the source of truth**: when
    its claimed state conflicts with the **live board + code**, the live board and code win — verify
    against them and proceed, don't act on the stale claim.
@@ -261,8 +273,8 @@ acting on the new direction.
    taxonomy folder** named in that project's `CLAUDE.md` **"Vault structure"** section (mirrors the
    "Commit scopes" pattern — the folder vocabulary is per-project data, never baked into this doctrine).
    Maintain an **`_Index.md`** map-of-content at the vault root: **read `_Index.md` to locate a note
-   instead of Globbing**, and add/update the note's line in it when you create or move a note. Wikilinks
-   resolve by note name, so moving a note between folders never breaks a link.
+   instead of Globbing or Bash `find`/`ls`**, and add/update the note's line in it when you create or
+   move a note. Wikilinks resolve by note name, so moving a note between folders never breaks a link.
 9. **Verify the whole, not just the parts.** Before declaring a phase done, require an integrated
    end-to-end pass; eyeball what can't be verified automatically. For visual/UI work the eyeball is
    *yours* — verifying it "done" means *seeing* it. **Prefer the Playwright/`browserTesting` path**: if

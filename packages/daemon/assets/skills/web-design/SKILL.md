@@ -132,10 +132,12 @@ testing available (the Loom "Web Designer" / QA-capable profile spawns with a Pl
    states, dark mode, a narrow (mobile) viewport. For a **throwaway** verification shot, take it with
    **no filename/path** — the screenshot tool auto-names it into your session's out-of-tree
    scratch/output dir, so the working tree stays clean. Only pass a path when you deliberately **persist**
-   a shot (to attach or diff), and then make it an **absolute path under your session's scratch/temp
-   dir** — a bare or relative name resolves against the browser tool's client workspace (the repo root),
-   litters the tree, and risks an accidental commit (`git status` will flag it). To persist a shot **as a
-   file**, don't rely on claude-in-chrome `save_to_disk` — it renders the inline base64 but writes no
+   a shot (to attach or diff), and then make it an **absolute path under the per-session scratch
+   directory the Playwright client itself allows writes to** — this is not necessarily the same as your
+   generic session scratch/temp dir, and a path outside Playwright's own allowed roots is rejected ("…
+   is outside allowed roots"); a bare or relative name also resolves against the browser tool's client
+   workspace (the repo root), litters the tree, and risks an accidental commit (`git status` will flag
+   it). To persist a shot **as a file**, don't rely on claude-in-chrome `save_to_disk` — it renders the inline base64 but writes no
    reachable file (Claude Code issue #40141). Use Playwright `page.screenshot({ path })` against the
    loopback page (launch with `{ channel: 'chrome' }` to reuse system Chrome and skip a download), or
    decode the base64 from the transcript for a shot you already captured.

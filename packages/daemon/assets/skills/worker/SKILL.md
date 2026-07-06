@@ -39,7 +39,11 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    DIRECTLY.** Read the named code, make the change, verify, report. Don't spin up exploration sub-agents
    to re-discover what you were already handed, and don't park on a scheduled-wakeup / poll loop waiting
    for something — a well-scoped task is a green light to just do it. Reserve broader exploration for a
-   genuinely under-specified task.
+   genuinely under-specified task. **A design-note path may live outside your worktree.** A kickoff that
+   points you at a note in the project's knowledge base (a vault-relative path, e.g. `Projects/…/Design/
+   *.md`) may not be reachable by your Glob/Read tools at all — that store can live outside your isolated
+   worktree. Don't burn repeated Globs hunting for it; `worker_report blocked` and ask your manager for
+   the excerpt or an absolute, worktree-reachable path.
 2. **Stay in scope.** Do exactly the assigned task and its definition of done — one logical change.
    Don't sprawl scope mid-task. If you discover something bigger (a real bug, a wrong assumption, a
    missing piece), surface it **up** via `worker_report` and let your manager decide — don't quietly
@@ -74,9 +78,12 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    by driving Playwright to the running app and confirming the change renders and behaves before
    reporting done. **When you capture a verification screenshot, take it with no filename** so it
    auto-names into your session's out-of-tree scratch dir and the working tree stays clean; pass a path
-   only to deliberately persist one, and make it **absolute under your session's scratch/temp dir** — a
-   bare or relative name lands in the repo working tree (`git status` flags it) and risks an accidental
-   commit. For a NEW interactive control (toggle, button, input, menu), a render-only check is
+   only to deliberately persist one, and make it **absolute under the per-session scratch directory the
+   Playwright client itself allows writes to** — this is not necessarily the same as your generic
+   harness scratch/temp dir, and a path outside Playwright's own allowed roots is rejected ("… is
+   outside allowed roots"); a bare or relative name also lands in the repo working tree (`git status`
+   flags it) and risks an accidental commit. When unsure of that root, pass no filename/path at all and
+   let the tool auto-name into it. For a NEW interactive control (toggle, button, input, menu), a render-only check is
    not enough: **EXERCISE it** and confirm an **observable state change** — DOM/network/text differs
    before vs. after — not just that the page renders without console errors. Otherwise report the UI
    work **up** for your manager to verify. When you self-verify,
@@ -108,6 +115,11 @@ sits undelivered). Always inspect git with **`git --no-pager`** (`git --no-pager
 log`) so it can never page into `less` and block on `q`; and never start a foreground process that
 doesn't exit on its own. (Your spawn env also sets `GIT_PAGER=cat`/`PAGER=cat`/`GIT_TERMINAL_PROMPT=0`
 as a backstop, but write `--no-pager` anyway.)
+
+**A Bash `cd` leaks into later relative-path resolution.** If a Bash call changes directory, that cwd
+change also applies to any Grep/Glob you run afterward with a relative path — a later relative lookup
+can then fail against the wrong base. Prefer **absolute paths** in Grep/Glob (or a tool's own
+`path`/`cwd` parameter) instead of relying on a shell cwd carried over from an earlier command.
 
 ## Report protocol
 
