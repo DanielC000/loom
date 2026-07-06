@@ -178,6 +178,20 @@ export interface CompanionSynthesizer {
   synthesize(input: { text: string; lang: string | null; voice: string | null }): Promise<{ filePath: string; cleanup: () => Promise<void> } | null>;
 }
 
+/**
+ * The injected "fresh conversation" side-channel (the `/new`/`/reset` command — companion/commands.ts).
+ * ChatGateway resets the underlying agent's own context ITSELF (it already holds `submitTurn` — the same
+ * primitive every inbound turn uses — so it injects `/clear`, `claude`'s own built-in slash command, with
+ * no new dependency needed for that half). This interface covers ONLY the other half: clearing whatever
+ * durable chat-history record exists for `sessionId` and notifying any LIVE viewer so an open panel empties
+ * immediately instead of waiting for its next reload. Optional: undefined ⇒ that half is a no-op (every
+ * existing/test bare `new ChatGateway(...)` construction stays byte-identical), mirroring `transcribe`/
+ * `synthesize`. The daemon injects a db+in-app-backed impl (factory.ts). Never throws.
+ */
+export interface CompanionHistoryReset {
+  clear(sessionId: string): Promise<void>;
+}
+
 /** The OUTBOUND delivery result — STRUCTURED across every failure mode (never throws out of chat_reply).
  *  `no-target` = the in-flight turn had NO reply-to route (a turn that wasn't formed from a companion
  *  inbound / proactive-home submit) ⇒ chat_reply delivers NOWHERE (never broadcasts, never guesses). */

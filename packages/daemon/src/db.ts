@@ -3379,6 +3379,12 @@ export class Db {
     return (this.db.prepare("SELECT * FROM companion_messages WHERE session_id = ? AND channel = ? ORDER BY created_at, rowid")
       .all(sessionId, channel) as Row[]).map(toCompanionMessage);
   }
+  /** Wipe a session's stored chat history for ONE channel — the "/new"/"/reset" command's history-clear
+   *  half (companion/factory.ts's CompanionHistoryReset impl). A no-op (0 rows deleted) is not an error —
+   *  a fresh companion with no prior in-app history clears to the same empty state. */
+  clearCompanionMessages(sessionId: string, channel: string): void {
+    this.db.prepare("DELETE FROM companion_messages WHERE session_id = ? AND channel = ?").run(sessionId, channel);
+  }
 }
 
 function toProject(r0: unknown): Project {

@@ -59,6 +59,11 @@ export interface InAppServerAudio {
  * web-mic recording once STT completes — a genuine round trip, unlike a typed message (the panel already
  * knows its own typed text and renders it locally without waiting on the server). Kept as a DISTINCT frame
  * type (never `"chat"`) so the panel can never confuse "your own transcribed turn" with a companion reply.
+ *
+ * `type:"cleared"` (the "/new"/"/reset" command — companion/commands.ts + chat-gateway.ts's
+ * `resetConversation`) tells an attached web viewer its conversation was just reset: the daemon has already
+ * cleared the durable history, so this is PURELY the live push — an open panel empties immediately instead
+ * of waiting for its next reload/history-fetch.
  */
 export type InAppServerFrame =
   | {
@@ -74,6 +79,10 @@ export type InAppServerFrame =
       chatId: string;
       /** The STT transcript of the sender's own just-recorded web-mic clip. */
       text: string;
+    }
+  | {
+      type: "cleared";
+      chatId: string;
     };
 
 /** The minimal surface of a connected web client the hub pushes outbound frames to. The WS route wraps the
@@ -289,6 +298,15 @@ export class InAppChannel {
    */
   pushTranscript(chatId: string, text: string): void {
     this.pushFrame(chatId, { type: "transcript", chatId, text });
+  }
+
+  /**
+   * Push a "conversation cleared" notice to every client attached to `chatId` (the "/new"/"/reset" command,
+   * chat-gateway.ts's `resetConversation`). The daemon has ALREADY cleared the durable history by the time
+   * this runs — this call is PURELY the live push, so it never records/deletes anything itself.
+   */
+  pushCleared(chatId: string): void {
+    this.pushFrame(chatId, { type: "cleared", chatId });
   }
 
   /** Shared per-client fan-out: a client `deliver` that throws is CONTAINED (one bad socket can't drop the

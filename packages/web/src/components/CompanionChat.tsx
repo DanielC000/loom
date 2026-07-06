@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import {
-  companionMessage, historyMessage, parseInbound, parseTranscript, prepareSend, prepareSendAudio, youMessage,
+  companionMessage, historyMessage, parseCleared, parseInbound, parseTranscript, prepareSend, prepareSendAudio, youMessage,
   type ChatConnState, type ChatMessage, type CompanionHistoryRow,
 } from "../lib/companionChat";
 import { Button, StatusPill } from "./ui";
@@ -131,6 +131,16 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
           setReplyTimedOut(false);
           clearReplyTimer();
           replyTimer.current = setTimeout(() => setReplyTimedOut(true), REPLY_TIMEOUT_MS);
+          return;
+        }
+        // The "/new"/"/reset" command's live push (daemon has already cleared the durable history) — empty
+        // the panel's own transcript + any pending-reply state right now, instead of waiting for a reload.
+        const cleared = parseCleared(e.data);
+        if (cleared) {
+          setMessages([]);
+          setAwaitingReply(false);
+          setReplyTimedOut(false);
+          clearReplyTimer();
           return;
         }
         // any other frame (control/garbage) is ignored — never rendered

@@ -13,18 +13,20 @@ import { createDbCompanionPairing, type PairingStore } from "./pairing.js";
 import { createDbCompanionVoicePrefs, type VoicePrefStore } from "./voice-prefs.js";
 import type { CompanionConfig } from "./config.js";
 import { createTelegramAdapter, TELEGRAM_CHANNEL } from "./telegram.js";
-import type { InAppChannel } from "./in-app.js";
-import type { CompanionRoute, CompanionSynthesizer, CompanionTranscriber, SessionBinding, SubmitTurn } from "./types.js";
+import { IN_APP_CHANNEL, type InAppChannel } from "./in-app.js";
+import type { CompanionHistoryReset, CompanionRoute, CompanionSynthesizer, CompanionTranscriber, SessionBinding, SubmitTurn } from "./types.js";
 import type { CompanionBinding } from "@loom/shared";
 
 /** The narrow db surface the factory needs: the durable binding store + the allowlist reader (for authz)
- *  + the pairing-code redemption txn (for DM-pairing) + the per-route voice-pref store (VOICE-P1). */
+ *  + the pairing-code redemption txn (for DM-pairing) + the per-route voice-pref store (VOICE-P1) + the
+ *  chat-history store (the "/new"/"/reset" command's history-clear half). */
 export interface CompanionBindingStore extends AllowlistReader, PairingStore, VoicePrefStore {
   listCompanionBindings(): CompanionBinding[];
   upsertCompanionBinding(input: { sessionId: string; scope?: "dm" | "group" } & CompanionRoute): CompanionBinding;
   /** The proactive HOME channel target (card 9488951e) — carried explicitly on the heartbeat's submitted
    *  turn (as its per-turn route), not consulted by deliverReply. */
   getCompanionHome(): CompanionRoute | null;
+  clearCompanionMessages(sessionId: string, channel: string): void;
 }
 
 /** Drop the db-only createdAt — the gateway's routing map wants just the SessionBinding shape. */
@@ -59,10 +61,21 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // DM-pairing coordinator: the db-backed redemption path with the real wall clock (epoch ms). Default
   // rate-limit/lockout policy (5 attempts / 10-min window / 15-min lockout) — tests inject a fake clock.
   const pairing = createDbCompanionPairing(db, { now: () => Date.now() });
+  // The "/new"/"/reset" command's history-clear half (ChatGateway resets the agent's own context itself,
+  // via the SAME submitTurn above — no dependency needed for that half). Scoped to IN_APP_CHANNEL: it's the
+  // only channel that ever writes companion_messages (Telegram keeps its own history in the Telegram app —
+  // see db.ts/gateway/server.ts's comments), so clearing it is correct regardless of which channel's "/new"
+  // triggered the reset (one companion session, one shared conversation).
+  const historyReset: CompanionHistoryReset = {
+    async clear(sessionId) {
+      db.clearCompanionMessages(sessionId, IN_APP_CHANNEL);
+      inApp?.pushCleared(sessionId);
+    },
+  };
   // Per-turn ORIGIN resolver (multi-channel reply routing): deliverReply targets the in-flight turn's
   // originating route (pty.getActiveTurnOrigin, injected). NOT the old home fallback — a proactive/heartbeat
   // turn now carries the home route ON its submit, so its chat_reply flows through the SAME per-turn path.
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize);
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset);
   // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
   // arms NO Telegram long-poll: the gateway comes up with the in-app adapter alone (registered below), so no
   // external network transport is started and default-OFF stays byte-identical. The adapter normalizes each

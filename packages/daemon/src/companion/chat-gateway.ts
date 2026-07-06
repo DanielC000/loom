@@ -23,6 +23,7 @@
  */
 import type {
   ChannelAdapter,
+  CompanionHistoryReset,
   CompanionRoute,
   CompanionSynthesizer,
   CompanionTranscriber,
@@ -110,6 +111,12 @@ export class ChatGateway {
    *                    Default undefined ⇒ deliverReply's text path is UNCHANGED (no synth attempted, no
    *                    behavior difference) — every existing/test construction stays byte-identical. The
    *                    daemon injects the local kokoro-onnx synthesizer.
+   * @param historyReset  the injected "fresh conversation" history-clear half of the "/new"/"/reset"
+   *                    command (commands.ts) — see {@link CompanionHistoryReset}. The OTHER half (resetting
+   *                    the agent's own context) needs no injection: this class already holds `submitTurn`.
+   *                    Default undefined ⇒ resetConversation only does the context-reset half (every
+   *                    existing/test construction stays byte-identical). The daemon injects a db+in-app
+   *                    backed impl (factory.ts).
    */
   constructor(
     private readonly submitTurn: SubmitTurn,
@@ -120,6 +127,7 @@ export class ChatGateway {
     private readonly voicePrefs: CompanionVoicePrefs = inMemoryVoicePrefs(),
     private readonly transcribe: CompanionTranscriber | undefined = undefined,
     private readonly synthesize: CompanionSynthesizer | undefined = undefined,
+    private readonly historyReset: CompanionHistoryReset | undefined = undefined,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -299,7 +307,7 @@ export class ChatGateway {
     const handler = parsed ? commandHandler(parsed.name) : undefined;
     if (parsed && handler) {
       const route = voicePrefRoute(binding, msg.sender);
-      const { ack } = handler(parsed.args, route, this.voicePrefs);
+      const { ack } = await handler(parsed.args, route, this.voicePrefs, { resetConversation: (sid) => this.resetConversation(sid) });
       const acked = await this.tryAck(binding, ack);
       this.debug(`inbound COMMAND /${parsed.name} (channel=${msg.channel} chat=${msg.chatId} session=${binding.sessionId})`);
       return { accepted: false, reason: "command", sessionId: binding.sessionId, command: parsed.name, acked };
@@ -337,6 +345,40 @@ export class ChatGateway {
       "⚠️ This companion session isn't currently running, so your message couldn't be delivered.",
     );
     return { accepted: false, reason: "session-dead", sessionId: binding.sessionId, acked };
+  }
+
+  /**
+   * The "/new"/"/reset" command's session-lifecycle side effect (commands.ts's `resetConversation` dep).
+   * Two independent halves, in order:
+   *   (a) CONTEXT RESET — inject "/clear" via the SAME `submitTurn` primitive every inbound turn uses. This
+   *       needs no new dependency: `/clear` is `claude`'s own built-in slash command, intercepted CLIENT-SIDE
+   *       in the real interactive session (Loom drives the real `claude` via node-pty — CLAUDE.md's
+   *       load-bearing invariant) exactly like a human typing it — it never reaches the model, so it forms
+   *       NO turn and produces NO reply. If the session is busy, this rides the SAME FIFO every other
+   *       message does and fires once free; if the session is dead, submitTurn no-ops exactly like today's
+   *       dead-session inbound path. No route is passed (a `/clear` never produces a chat_reply, so there is
+   *       nothing for a route to target). A throwing submitTurn (e.g. pty.write racing a dying session) is
+   *       contained here — mirrors handleInbound's own submit-failed containment — so a `/new` never crashes
+   *       the inbound path that's running it.
+   *   (b) HISTORY CLEAR — best-effort, via the optional injected `historyReset` (undefined ⇒ no-op: e.g. a
+   *       Telegram-only gateway, or a test that doesn't inject one). Clears whatever durable chat-history
+   *       record exists for `sessionId` and pushes a live "cleared" notice to an attached web viewer.
+   * Runs BEFORE the command's ack is sent (see handleInbound) — the persisted history is already empty and
+   * any live viewer already cleared by the time the ack is recorded+pushed as the first message of the new,
+   * empty conversation. Never throws.
+   */
+  private async resetConversation(sessionId: string): Promise<void> {
+    try {
+      this.submitTurn(sessionId, "/clear");
+    } catch (err) {
+      this.debug(`resetConversation: /clear submit failed for ${sessionId}: ${describeError(err)}`);
+    }
+    if (!this.historyReset) return;
+    try {
+      await this.historyReset.clear(sessionId);
+    } catch (err) {
+      this.debug(`resetConversation: history clear failed for ${sessionId}: ${describeError(err)}`);
+    }
   }
 
   /** Best-effort error ack back to a chat (swallows a send failure — an ack must never throw upward). */

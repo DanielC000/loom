@@ -5,8 +5,9 @@
  * `handleInbound` pre-submit seam where `pairing.redeem` already intercepts a code-shaped body — so a
  * RECOGNIZED command's text NEVER becomes an agent turn (mirrors the redeemed-pairing-code path). An
  * unrecognized "/word" (no handler registered) is NOT treated as a command by this router: it falls
- * through unchanged to the normal text pipeline, so only "/lang" and "/voice" are ever swallowed — every
- * other message (including one that merely starts with "/") is byte-identical to today.
+ * through unchanged to the normal text pipeline, so only a REGISTERED command name (see COMMANDS below —
+ * today "/lang", "/voice", "/new", "/reset", "/help") is ever swallowed — every other message (including
+ * one that merely starts with "/") is byte-identical to today.
  *
  * Platform-agnostic: this sits ONE layer above the normalizer (Telegram, in-app, …), so it works the same
  * for every channel.
@@ -44,7 +45,34 @@ export interface CommandResult {
   ack: string;
 }
 
-export type CommandHandler = (args: string | undefined, route: VoicePrefRoute, prefs: CompanionVoicePrefs) => CommandResult;
+/**
+ * Capabilities beyond the voice-prefs store a command handler may need — injected so commands.ts stays
+ * pure/testable (mirrors how ChatGateway itself is built from small injected interfaces, never a raw db/
+ * pty). Extended as later commands need more (Tier-2 slash commands, card 9db7d09c); kept to exactly what
+ * `/new`/`/reset` need today.
+ */
+export interface CommandDeps {
+  /** Start a fresh conversation for `sessionId`: forgets the underlying agent's prior context AND clears
+   *  any persisted chat history for the route, notifying a live viewer (ChatGateway.resetConversation).
+   *  Never throws. */
+  resetConversation(sessionId: string): Promise<void>;
+}
+
+/**
+ * A command handler may be sync (every handler before `/new`) or async (`/new`/`/reset`, which await a
+ * session-lifecycle side effect) — `CommandResult | Promise<CommandResult>` covers both, and the dispatch
+ * call site always `await`s the result, which resolves a plain (non-Promise) object through unchanged. The
+ * `deps` param is ADDITIVE: a handler declared with fewer params (every existing `/lang`/`/voice`/`/help`
+ * handler) is still a valid `CommandHandler` — TypeScript allows a shorter-arity function to satisfy a
+ * wider function type, since a JS call with extra arguments is always safe — so none of them needed to
+ * change shape for this contract to grow.
+ */
+export type CommandHandler = (
+  args: string | undefined,
+  route: VoicePrefRoute,
+  prefs: CompanionVoicePrefs,
+  deps: CommandDeps,
+) => CommandResult | Promise<CommandResult>;
 
 function normalizeLangCode(code: string): string {
   const dash = code.indexOf("-");
@@ -57,6 +85,15 @@ interface CommandDef {
   /** The Telegram `setMyCommands` menu description for this command. */
   description: string;
 }
+
+/** `/new` — start a fresh conversation (forgets prior context + clears the chat history). `/reset` is a
+ *  literal ALIAS (Hermes collapses the two; Loom has no archive-split to distinguish them either — see
+ *  the design note) — both COMMANDS entries below point at this SAME function object, so COMMAND_MENU
+ *  advertises both with zero risk of the two drifting apart. */
+const startFreshConversation: CommandHandler = async (_args, route, _prefs, deps) => {
+  await deps.resetConversation(route.sessionId);
+  return { ack: "🆕 Started a fresh conversation." };
+};
 
 /**
  * THE single source of truth for every recognized command: `commandHandler` and `COMMAND_MENU` are both
@@ -92,6 +129,14 @@ const COMMANDS: Record<string, CommandDef> = {
       }
       return { ack: `✅ Voice replies turned ${norm}.` };
     },
+  },
+  new: {
+    description: "Start a fresh conversation — forgets everything said so far",
+    handler: startFreshConversation,
+  },
+  reset: {
+    description: "Alias of /new — start a fresh conversation",
+    handler: startFreshConversation,
   },
   help: {
     description: "List every recognized command",

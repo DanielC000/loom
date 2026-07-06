@@ -121,6 +121,23 @@ export function parseTranscript(raw: string): { chatId: string; text: string } |
   return { chatId: typeof m.chatId === "string" ? m.chatId : "", text: m.text };
 }
 
+// Parse an inbound {type:"cleared"} frame — the "/new"/"/reset" slash command (daemon: companion/commands.ts
+// + chat-gateway.ts's resetConversation). The daemon has already cleared the durable history by the time
+// this arrives; the panel's only job is to empty its own live transcript so the reset is visible immediately
+// instead of waiting for the next reload. Returns { chatId } for a well-formed frame, else null.
+export function parseCleared(raw: string): { chatId: string } | null {
+  let msg: unknown;
+  try {
+    msg = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof msg !== "object" || msg === null) return null;
+  const m = msg as { type?: unknown; chatId?: unknown };
+  if (m.type !== "cleared") return null;
+  return { chatId: typeof m.chatId === "string" ? m.chatId : "" };
+}
+
 // Build a "you" (local) bubble from a prepared send. Split out so the send path is one testable step.
 export function youMessage(text: string, id: string): ChatMessage {
   return { id, author: "you", text };
