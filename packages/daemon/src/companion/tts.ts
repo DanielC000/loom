@@ -134,6 +134,13 @@ export function __setTtsPythonBinForTest(bin: string | undefined): void {
   ttsPythonBin = bin;
 }
 
+/** TEST SEAM: swap node:child_process.spawn — lets a hermetic test drive runPythonHelper against a fake
+ *  child (e.g. one whose stdin emits an async EPIPE, as an early-exiting real python child would) without
+ *  spawning a real process. */
+type SpawnFn = typeof spawn;
+let spawnImpl: SpawnFn = spawn;
+export function __setSpawnForTest(fn?: SpawnFn): void { spawnImpl = fn ?? spawn; }
+
 /** Kick BACKGROUND provisioning of kokoro-onnx in the shared venv — deduped ONLY while genuinely in-flight,
  *  so a fresh kick is always possible after a terminal outcome (never a permanent dead-end). Never throws,
  *  never blocks the event loop. Returns the in-flight promise (new or already-running) so a caller
@@ -188,7 +195,7 @@ function runPythonHelper(
     const done = (ok: boolean) => { if (!settled) { settled = true; resolve({ ok }); } };
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(pythonBin, [SYNTHESIZE_SCRIPT, ...args], {
+      child = spawnImpl(pythonBin, [SYNTHESIZE_SCRIPT, ...args], {
         // stderr is IGNORED, not piped-and-left-undrained: nothing here consumes child.stderr, and a
         // chatty onnxruntime/PyAV writing enough to fill the OS pipe buffer would otherwise block the
         // child's write() until this process reads it — which never happens — stalling the call all the
@@ -208,6 +215,12 @@ function runPythonHelper(
     const timer = setTimeout(() => { try { child.kill(); } catch { /* noop */ } done(false); }, timeoutMs);
     child.on("error", () => { clearTimeout(timer); done(false); });
     child.on("exit", (code) => { clearTimeout(timer); done(code === 0); });
+    // A child that exits/closes its read-end before we finish writing (e.g. a cold/failed first synth
+    // dying during model load, before it ever calls sys.stdin.read()) fires an ASYNC 'error' (EPIPE) on
+    // this stream — NOT the synchronous try/catch below. With no listener, Node's default behavior is to
+    // re-throw as an uncaughtException, which crashlog.ts turns into process.exit(1) — killing the whole
+    // daemon over one failed synth. Swallow it here; the exit/error handlers above already resolve {ok:false}.
+    child.stdin?.on("error", () => { /* stray EPIPE from an early-exiting child; already handled via exit/error above */ });
     try {
       child.stdin?.write(stdin);
       child.stdin?.end();
