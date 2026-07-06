@@ -118,7 +118,8 @@ native CSS and be honest that there's no official package for it.
 ## Iterate by eye
 
 **Looking at the rules is not the same as looking at the result.** If this session has browser
-testing available (the Loom "Web Designer" / QA-capable profile spawns with a Playwright MCP), use it:
+testing available (a browser-testing-capable profile — a QA or web-design rig with a Playwright/browser
+MCP — spawns with one), use it:
 
 1. Render the page or component in the browser — at the dev server's **actual bound URL**. Read the
    port from the framework's startup line (e.g. vite's `Local: http://…:PORT`); never assume a default
