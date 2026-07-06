@@ -69,10 +69,12 @@ export interface CompanionHooks {
   getActiveTurnOrigin?: (sessionId: string) => CompanionRoute | null;
   /**
    * (Re)arm/disarm the live reminder watcher for the bound companion session — ARM-ON-CREATE. Called after
-   * reminder_create/reminder_cancel writes so a freshly-created reminder starts firing immediately instead
-   * of waiting for an unrelated config write to reconcile (companion/controller.ts CompanionReplyHooks).
+   * reminder_create/reminder_cancel writes (with the caller's OWN bound sessionId) so a freshly-created
+   * reminder starts firing immediately instead of waiting for an unrelated config write to reconcile
+   * (companion/controller.ts CompanionReplyHooks) — scoped to that session, never touching a sibling
+   * companion's reminder watcher.
    */
-  rearmReminders?: () => Promise<void>;
+  rearmReminders?: (sessionId: string) => Promise<void>;
 }
 
 export class OrchestrationMcpRouter {
@@ -371,7 +373,7 @@ export class OrchestrationMcpRouter {
           route, enabled: true, createdAt: now.toISOString(),
         };
         db.insertCompanionReminder(reminder);
-        await this.companion.rearmReminders?.(); // ARM-ON-CREATE — must fire without a later config write.
+        await this.companion.rearmReminders?.(sessionId); // ARM-ON-CREATE — must fire without a later config write.
         return ok({ reminderId: reminder.id, nextFireAt: reminderNextFireAt(db, reminder) });
       },
     );
@@ -402,7 +404,7 @@ export class OrchestrationMcpRouter {
         const r = db.getCompanionReminder(reminderId);
         if (!r || r.sessionId !== sessionId) return ok({ cancelled: false });
         db.deleteCompanionReminder(reminderId);
-        await this.companion.rearmReminders?.(); // disarm too — a now-empty reminder set tears the watcher down.
+        await this.companion.rearmReminders?.(sessionId); // disarm too — a now-empty reminder set tears the watcher down.
         return ok({ cancelled: true });
       },
     );

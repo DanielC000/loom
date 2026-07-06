@@ -7,7 +7,10 @@
  * It owns — as ONE stable facade the REST + MCP hooks hold across gateway rebuilds — ONE live ChatGateway
  * (Telegram long-poll) + ONE proactive CompanionHeartbeatWatcher + ONE CompanionReminderWatcher PER ENABLED
  * companion config, keyed by session id, all sharing the SAME stable in-app hub (`deps.inApp`, threaded
- * into every gateway build). `reconcile()` diffs the FULL live set against the FULL enabled set every time:
+ * into every gateway build). `reconcile(sessionId?)` diffs the enabled set against the live set: given a
+ * `sessionId` (every REST config write and reminder CRUD call knows the one session it just touched), the
+ * diff — and any resulting rearm — is scoped to THAT session alone; omitted (boot / no known origin), it
+ * diffs the FULL live set against the FULL enabled set, exactly as before:
  *   • a session newly in the enabled set (not yet live) → START: build + start() its gateway, arm its
  *     heartbeat if cadence>0, arm its reminders, and add it to the chat_reply gate — NO restart of anyone
  *     else's gateway.
@@ -81,8 +84,14 @@ export interface CompanionControl {
   /** Live-remove a binding from the running gateway's routing map (no-op when OFF). When `channel` is
    *  given, removes only that ONE channel's entry, leaving the session's other channel(s) routing. */
   unbind(sessionId: string, channel?: string): void;
-  /** Reconcile the live companion to the CURRENT DB config after a REST config write (the hot path). */
-  reconcile(): Promise<void>;
+  /**
+   * Reconcile the live companion to the CURRENT DB config after a REST config write (the hot path).
+   * `sessionId`, when given, is the ONE session known to have actually changed (the REST route's own
+   * :sessionId / the reminder tool's own bound session) — the diff + any rearm is scoped to THAT session
+   * only, leaving every other live companion's watchers untouched. Omitted (boot / no known origin) ⇒
+   * diff the FULL live set, matching the historical behavior.
+   */
+  reconcile(sessionId?: string): Promise<void>;
   /**
    * INBOUND for the in-app channel: a message typed in the cockpit companion chat panel, routed through the
    * SAME bindings-authoritative gateway (chatId == the companion session id). Stable indirection over the
@@ -119,13 +128,14 @@ export interface CompanionReplyHooks {
   getActiveTurnOrigin?: (sessionId: string) => CompanionRoute | null;
   /**
    * (Re)arm/disarm the live reminder watcher after a reminder_create/cancel MCP write — ARM-ON-CREATE
-   * (Companion Memory & Reminders Design, Surface 2 s4). Wired to `() => controller.reconcile()`: a
-   * reminder CRUD write lands in its own table, independent of CompanionConfig, so re-running the SAME
-   * reconcile a config write already triggers is the only way this path picks up the new/removed row
-   * (see rearmReminders' unconditional call in applyDesired). Consumed by the orchestration MCP router,
-   * not by this controller.
+   * (Companion Memory & Reminders Design, Surface 2 s4). Wired to `(sessionId) =>
+   * controller.reconcile(sessionId)`: a reminder CRUD write lands in its own table, independent of
+   * CompanionConfig, so re-running reconcile SCOPED TO the reminder's own bound session is the only way
+   * this path picks up the new/removed row — without perturbing any OTHER live companion's reminder
+   * watcher (see rearmRemindersFor's per-session rearm in applyDesired). Consumed by the orchestration
+   * MCP router, not by this controller.
    */
-  rearmReminders?: () => Promise<void>;
+  rearmReminders?: (sessionId: string) => Promise<void>;
 }
 
 export interface CompanionControllerDeps {
@@ -210,10 +220,10 @@ export class CompanionController implements CompanionControl {
    * and revives it on the NEXT daemon boot. This is surfaced to the human via `envPinned:true` in the masked
    * config read, so a REST edit to an env-pinned companion is visibly "reverts on restart" rather than silent.
    */
-  reconcile(): Promise<void> {
+  reconcile(sessionId?: string): Promise<void> {
     return this.enqueue(() => {
       const resolve = this.deps.resolveEffective ?? resolveAllEnabledConfigs;
-      return this.applyDesired(resolve(this.deps.db, this.deps.env, this.deps.keyPath));
+      return this.applyDesired(resolve(this.deps.db, this.deps.env, this.deps.keyPath), sessionId);
     });
   }
 
@@ -394,15 +404,26 @@ export class CompanionController implements CompanionControl {
    *   - a session in `desired` with no live entry → START (full build).
    *   - a session in `desired` that's ALREADY live → UPDATE (apply only what changed, exactly like the
    *     single-companion ON→ON diff below, now scoped to that one map entry).
+   *
+   * `onlySessionId`, when given, narrows BOTH the STOP scan and the START/UPDATE pass to that one session —
+   * `desired` is still the freshly-resolved FULL set (resolveEffective has no per-session variant), but every
+   * other live session's map entry is left completely untouched: no teardownOne, no startOne/updateOne, no
+   * rearmRemindersFor/rearmHeartbeatFor call. This is the fix for the cross-companion rearm-all bug — a
+   * single config/reminder write for session A used to re-run updateOne (and its unconditional
+   * rearmRemindersFor) for EVERY OTHER live session B, C, … too, resetting their reminder watchers' tick
+   * phase for no reason. Omitted (boot / no known origin) ⇒ every live+desired session is visited, exactly
+   * as before.
    */
-  private async applyDesired(desired: CompanionConfig[]): Promise<void> {
+  private async applyDesired(desired: CompanionConfig[], onlySessionId?: string): Promise<void> {
     const desiredBySid = new Map(desired.map((c) => [c.sessionId, c]));
-    // STOP first: any live session no longer in the enabled set.
-    for (const sessionId of [...this.cfgs.keys()]) {
+    const liveIds = onlySessionId ? (this.cfgs.has(onlySessionId) ? [onlySessionId] : []) : [...this.cfgs.keys()];
+    // STOP first: any live session (in scope) no longer in the enabled set.
+    for (const sessionId of liveIds) {
       if (!desiredBySid.has(sessionId)) await this.teardownOne(sessionId);
     }
-    // START / UPDATE: every desired session, independently.
-    for (const cfg of desired) {
+    // START / UPDATE: every desired session (in scope), independently.
+    const desiredInScope = onlySessionId ? desired.filter((c) => c.sessionId === onlySessionId) : desired;
+    for (const cfg of desiredInScope) {
       const current = this.cfgs.get(cfg.sessionId);
       if (!current) {
         await this.startOne(cfg);
@@ -449,11 +470,14 @@ export class CompanionController implements CompanionControl {
     const hbChanged =
       desired.heartbeatIntervalMinutes !== current.heartbeatIntervalMinutes || desired.heartbeatPrompt !== current.heartbeatPrompt;
     if (hbChanged) this.rearmHeartbeatFor(desired);
-    // Reminders: reconcile on EVERY live config change (not gated like hbChanged) — the reminder SET
+    // Reminders: reconcile on EVERY visit of THIS session (not gated like hbChanged) — the reminder SET
     // lives in its own table, independent of CompanionConfig fields, so a rearm is the only way this
     // path picks up a reminder CRUD write (s4's concern) that landed since the last reconcile. Cheap +
     // idempotent: rearmReminders re-reads the current enabled rows and reseeds lastFiredAt from durable
     // fired-events, so a rearm with an unchanged reminder set never double-fires or loses cadence state.
+    // applyDesired's `onlySessionId` scoping means THIS updateOne call — and therefore this rearm — only
+    // ever runs for the session a caller told us actually changed; every OTHER live session's watcher is
+    // never touched by this call (see applyDesired's doc + the cross-companion fix it describes).
     this.rearmRemindersFor(desired.sessionId);
     this.cfgs.set(desired.sessionId, desired);
     this.deps.hooks.companionSessionIds.add(desired.sessionId); // already present — idempotent
@@ -523,12 +547,15 @@ export class CompanionController implements CompanionControl {
    *  this path makes — no watcher is built or started, so DEFAULT-OFF stays truly byte-identical. NEVER
    *  touches another session's reminder watcher.
    *
-   *  KNOWN TRADE-OFF: this rearm is UNGATED (unlike rearmHeartbeatFor's cfg-diff gate) and stop+rebuilds the
-   *  watcher on EVERY reconcile of that session, resetting its in-memory tick PHASE (the next setInterval
-   *  tick is a fresh tickMs away, not continuous from the prior watcher's cadence) — never lost due-ness
-   *  (seedLastFired reseeds lastFiredAt from durable fired-events either way), just possible jitter of up
-   *  to one tick. Acceptable because reconciles are rare (a human config write or a reminder_create/cancel
-   *  MCP call), not a hot path.
+   *  KNOWN TRADE-OFF (intra-session only): this rearm is UNGATED (unlike rearmHeartbeatFor's cfg-diff gate)
+   *  and stop+rebuilds the watcher on every visit of THAT session, resetting ITS OWN in-memory tick PHASE
+   *  (the next setInterval tick is a fresh tickMs away, not continuous from the prior watcher's cadence) —
+   *  never lost due-ness (seedLastFired reseeds lastFiredAt from durable fired-events either way), just
+   *  possible jitter of up to one tick for the session actually being reconciled. Acceptable because
+   *  reconciles are rare (a human config write or a reminder_create/cancel MCP call), not a hot path.
+   *  FIXED (was a cross-companion bug): applyDesired's `onlySessionId` scoping means a config/reminder
+   *  write for session A visits (and can rearm) ONLY A's updateOne — an UNRELATED live sibling B is never
+   *  passed through updateOne at all for that reconcile, so B's tick phase is never perturbed by A's write.
    */
   private rearmRemindersFor(sessionId: string): void {
     this.stopRemindersFor(sessionId);

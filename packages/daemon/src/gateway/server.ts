@@ -823,7 +823,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const homeErr = applyHomeIfPresent(b);
     if (homeErr) return reply.code(400).send({ error: homeErr });
     const row = deps.db.upsertCompanionConfig(built);
-    await deps.companion?.reconcile(); // drive the running companion live (start/re-arm) — no restart
+    await deps.companion?.reconcile(sessionId); // drive the running companion live (start/re-arm) — no restart, scoped to this session
     return reply.code(existing ? 200 : 201).send(maskCompanionConfig(row, homeOf(), process.env));
   });
   app.put("/api/companion/config/:sessionId", async (req, reply) => {
@@ -838,7 +838,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const homeErr = applyHomeIfPresent(b);
     if (homeErr) return reply.code(400).send({ error: homeErr });
     const row = deps.db.upsertCompanionConfig(built);
-    await deps.companion?.reconcile(); // drive the running companion live (re-arm/restart) — no restart
+    await deps.companion?.reconcile(sessionId); // drive the running companion live (re-arm/restart) — no restart, scoped to this session
     return maskCompanionConfig(row, homeOf(), process.env);
   });
   app.delete("/api/companion/config/:sessionId", async (req) => {
@@ -849,7 +849,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // only unarms the companion, it must not stop a session the user still owns.
     const existing = deps.db.getCompanionConfig(sessionId);
     deps.db.deleteCompanionConfig(sessionId); // cascade: config + bindings + allowed-senders + pairing codes
-    await deps.companion?.reconcile(); // tear the live companion down to the OFF state — no restart
+    await deps.companion?.reconcile(sessionId); // tear the live companion down to the OFF state — no restart, scoped to this session
     if (existing?.provisioned) {
       // Best-effort graceful retire (preserves the transcript; the session archives on exit). Never let a
       // teardown fault fail the delete — the durable cascade already succeeded.
@@ -1002,15 +1002,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (home) deps.db.setCompanionHome(home);
       // (d) arm the running companion — reconcile builds the gateway from the bindings above; the Telegram
       // adapter arms ONLY when a token exists (in-app-only ⇒ no external adapter). reconcile is best-effort
-      // (never throws), so it never triggers rollback — only a durable write failure above does.
-      await deps.companion?.reconcile();
+      // (never throws), so it never triggers rollback — only a durable write failure above does. Scoped to
+      // THIS newly-provisioned session — no other live companion is touched.
+      await deps.companion?.reconcile(sessionId);
       return reply.code(201).send(maskCompanionConfig(row, homeOf(), process.env));
     } catch (e) {
       // ROLLBACK: tear the spawned session down so no orphan session/config/binding survives a partial write.
       try { deps.db.deleteCompanionConfig(sessionId); } catch { /* nothing written / already gone */ }
       try { deps.sessions.stopSession(sessionId, "hard"); } catch { /* pty already gone */ }
       try { deps.db.deleteSession(sessionId); } catch { /* row already gone */ }
-      await deps.companion?.reconcile(); // return the live companion to whatever the DB now reflects (OFF)
+      await deps.companion?.reconcile(sessionId); // return the live companion to whatever the DB now reflects (OFF), scoped to this session
       return reply.code(500).send({ error: `companion provision failed and was rolled back: ${(e as Error).message}` });
     }
   });

@@ -17,6 +17,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      both share the SAME stable in-app hub and the SAME global companion_bindings table.
 //   4. single-companion byte-identical: an array-of-one enabled config drives the EXACT same start path as
 //      companion-lifecycle.mjs already proves (re-asserted here as a sanity check on the shared diff code).
+//   5. scoped rearm (cross-companion rearm-all fix): reconcile(sessionId) confines its diff — and any
+//      resulting reminder-watcher rearm — to the ONE session known to have changed; an untouched sibling's
+//      reminder watcher is never stopped/rebuilt by another companion's write. An unscoped reconcile (boot /
+//      no known origin) still rearms every live session, preserving the historical full-diff fallback.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-multi.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -94,10 +98,37 @@ function makeHeartbeatBuilder() {
   return { built, builder, forSession: (sid) => built.filter((b) => b.cfg.sessionId === sid) };
 }
 
+// A fake reminder-watcher builder (mirrors makeHeartbeatBuilder) — records start()/stop() calls per BUILD so
+// Part 5 can tell a rearm (stop the old, build+start a new) apart from "left completely alone".
+function makeReminderBuilder() {
+  const built = []; // { sessionId, startCalls, stopCalls } per build, in build order
+  const builder = (sessionId) => {
+    const rec = { sessionId, startCalls: 0, stopCalls: 0 };
+    built.push(rec);
+    return { start() { rec.startCalls++; }, stop() { rec.stopCalls++; } };
+  };
+  return { built, builder, forSession: (sid) => built.filter((b) => b.sessionId === sid) };
+}
+
 function writeConfig(db, { sessionId, token = TOKEN_A, chatId = "chat-1", scope = "dm", cadence = 0, enabled = true }) {
   db.upsertCompanionConfig({
     sessionId, botTokenBlob: encryptSecret(token), channel: "telegram", allowedChatId: chatId,
     chatScope: scope, heartbeatIntervalMinutes: cadence, heartbeatPrompt: null, enabled,
+  });
+}
+
+// companion_reminders.session_id REFERENCES sessions(id) — Part 5 needs a real session row per companion
+// (unlike companion_config, which carries no such FK) before it can insert a reminder row for it.
+function seedSession(db, id) {
+  const projId = `p-${id}`;
+  const agentId = `a-${id}`;
+  const now = new Date().toISOString();
+  db.insertProject({ id: projId, name: "REM", repoPath: projId, vaultPath: projId, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "companion", startupPrompt: "", position: 0 });
+  db.insertSession({
+    id, projectId: projId, agentId, engineSessionId: "eng-1", title: null, cwd: projId,
+    processState: "live", resumability: "resumable", busy: false,
+    createdAt: now, lastActivity: now, lastError: null, role: "assistant",
   });
 }
 
@@ -290,11 +321,54 @@ try {
     check("4: snapshot() mirrors the legacy shape for the single-companion case", JSON.stringify(controller.snapshot()) === JSON.stringify({ running: true, sessionId: "solo", heartbeatArmed: true }));
     db.close();
   }
+
+  // ============ Part 5 — reconcile(sessionId) scopes the rearm: a sibling's reminder watcher is untouched ============
+  // Regression test for the cross-companion rearm-all bug: applyDesired used to call updateOne() — and its
+  // UNCONDITIONAL rearmRemindersFor — for EVERY live+desired session on EVERY reconcile, so a reminder_create/
+  // cancel or config write for ONE companion reset every OTHER live companion's reminder watcher tick phase.
+  // reconcile/rearmReminders now carry the ONE session known to have changed (the REST route's own :sessionId,
+  // the reminder tool's own bound session), and applyDesired's `onlySessionId` scoping confines the diff to it.
+  {
+    const db = new Db(dbFile("p5.db"));
+    const gw = makeGatewayBuilder();
+    const rem = makeReminderBuilder();
+    const hooks = { companionSessionIds: new Set() };
+    const controller = new CompanionController({
+      db, submitTurn: () => ({ delivered: true }),
+      pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
+      hooks, env: {}, buildGateway: gw.builder, buildReminders: rem.builder,
+    });
+    seedSession(db, "A");
+    seedSession(db, "B");
+    writeConfig(db, { sessionId: "A", token: TOKEN_A, chatId: "chat-A" });
+    writeConfig(db, { sessionId: "B", token: TOKEN_B, chatId: "chat-B" });
+    // Both sessions start with an ENABLED reminder row so the initial reconcile arms a watcher for each.
+    db.insertCompanionReminder({ id: "rem-A", sessionId: "A", cron: "* * * * *", prompt: "a", label: null, route: null, enabled: true, createdAt: new Date().toISOString() });
+    db.insertCompanionReminder({ id: "rem-B", sessionId: "B", cron: "* * * * *", prompt: "b", label: null, route: null, enabled: true, createdAt: new Date().toISOString() });
+    await controller.startInitial(null);
+    await controller.reconcile(); // unscoped boot-style reconcile — arms BOTH watchers
+    check("5 setup: both A and B armed exactly one reminder watcher", rem.forSession("A").length === 1 && rem.forSession("B").length === 1);
+    const recB0 = rem.forSession("B")[0];
+    const recA0 = rem.forSession("A")[0];
+
+    // A reminder_create-style write for A ALONE, reconciled SCOPED to "A" — mirrors rearmReminders(sessionId).
+    db.insertCompanionReminder({ id: "rem-A2", sessionId: "A", cron: "* * * * *", prompt: "a2", label: null, route: null, enabled: true, createdAt: new Date().toISOString() });
+    await controller.reconcile("A");
+    check("5a: A's OWN reminder watcher WAS rearmed (its own write)", recA0.stopCalls === 1 && rem.forSession("A").length === 2 && rem.forSession("A")[1].startCalls === 1);
+    check("5a: B's reminder watcher was NEVER rearmed by A's scoped reconcile — no sibling rearm-all", recB0.stopCalls === 0 && rem.forSession("B").length === 1);
+    check("5a: both companions stay live throughout (no teardown either)", controller.liveSessionIds().sort().join(",") === "A,B");
+
+    // Sanity: an UNSCOPED reconcile (no known origin, e.g. boot) still visits every session, preserving the
+    // historical full-diff fallback — the scoping is additive, not a behavior change for that path.
+    await controller.reconcile();
+    check("5b: an unscoped reconcile still rearms B too (legacy full-diff fallback preserved)", recB0.stopCalls === 1 && rem.forSession("B").length === 2);
+    db.close();
+  }
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — multi-companion runtime: N enabled configs arm N concurrent gateways (not just the oldest), reconcile diffs start/stop/restart per session without cross-touching any other live companion, and a reply/binding for one companion can NEVER reach another's client/route/gateway (proven through the REAL factory's per-session binding scoping)."
+  ? "\n✅ ALL PASS — multi-companion runtime: N enabled configs arm N concurrent gateways (not just the oldest), reconcile diffs start/stop/restart per session without cross-touching any other live companion, a reply/binding for one companion can NEVER reach another's client/route/gateway (proven through the REAL factory's per-session binding scoping), and a reconcile scoped to the session that actually changed never rearms an untouched sibling's reminder watcher (the unscoped/boot fallback still rearms everyone, as before)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
