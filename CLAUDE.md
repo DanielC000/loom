@@ -106,6 +106,17 @@ exit (incl. a crash) stops the loop, so a broken daemon stays visibly down inste
   edits the supervisor needs a **human Ctrl-C + re-run of `pnpm daemon:stable`** to go live — a manager
   must flag that human action in its done-report (mirrors the unsupervised `restarting:false` refusal).
 
+**Isolated-daemon testing on Windows (a throwaway daemon for UI/API review):** spinning up a second,
+disposable daemon (own `LOOM_HOME`, non-default port) to eyeball a change has burned cycles across
+worker sessions on these three footguns:
+- A bash `run_in_background` PID is the **shell's** PID, not the daemon's — `taskkill //PID <that-pid>`
+  fails. Find the real node listener with `netstat -ano | grep :<port>`, then
+  `taskkill //F //T //PID <that-pid>`, and confirm the port actually freed.
+- Run a helper `.mjs` from **inside `packages/daemon`** so its deps (e.g. `ws`) resolve — a scratch-dir
+  script hits `ERR_MODULE_NOT_FOUND` (the scratch dir has no `node_modules`).
+- Pass node / dynamic-`import()` paths as `file://` URLs (or `pathToFileURL`), never a bare drive-letter
+  absolute path — a bare path throws `ERR_UNSUPPORTED_ESM_URL_SCHEME` on Windows.
+
 ## Load-bearing invariants (validated in the spike — do not regress)
 - **Drive the REAL interactive `claude` via node-pty.** Never `claude -p`/headless.
 - **Spawn recipe** (`pty/host.ts`): absolute claude path (Windows node-pty doesn't search %PATH%);

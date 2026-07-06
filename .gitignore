@@ -19,3 +19,7 @@ blob-report/
 
 # Local spike scratch dir (was only in .git/info/exclude → unprotected on a fresh clone)
 spike/
+
+# Python bytecode (packages/daemon/assets/python/*.py run live by the daemon)
+__pycache__/
+*.pyc
