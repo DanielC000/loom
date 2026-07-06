@@ -254,7 +254,10 @@ export class CompanionController implements CompanionControl {
     const msg: InboundMessage = { channel: IN_APP_CHANNEL, chatId: sessionId, body: "", attachments: [{ type: "audio", fileId: filePath }] };
     const result = await this.gateway.handleInbound(msg);
     if (result.accepted && result.submittedText) {
-      this.recordInboundMessageSafely(sessionId, result.submittedText);
+      // viaVoice:true (unified cross-channel chat, card 7d63e200 follow-up) — this whole method exists
+      // BECAUSE the inbound carried audio, so the recorded row is always a voice-note transcript, matching
+      // how a Telegram voice note's inbound row is tagged (chat-gateway.ts's recordInboundSafely).
+      this.recordInboundMessageSafely(sessionId, result.submittedText, true);
       this.mirrorWebInputToOtherChannels(sessionId, result.submittedText);
       // Live echo (VOICE-P4): unlike typed text (the panel already knows what it sent), the sender's own
       // client has no way to know the transcript ahead of time — push it back as their "your turn" bubble.
@@ -264,15 +267,16 @@ export class CompanionController implements CompanionControl {
   }
 
   /** Best-effort chat-history record for an ACCEPTED in-app inbound (bug 0f01f234), scoped to the IN-APP
-   *  channel only — a Telegram-originated turn for the SAME companion is not recorded here (Telegram keeps
-   *  its own history in the Telegram app; deliverReply only ever targets a turn's own originating route, so
-   *  a unified cross-channel history is out of scope for this fix). Never throws — a history-record failure
-   *  must never break the inbound path it's mirroring. */
-  private recordInboundMessageSafely(sessionId: string, text: string): void {
+   *  channel — a Telegram-originated turn records instead through chat-gateway.ts's own generalized hook
+   *  (unified cross-channel chat, card 7d63e200). `viaVoice` (default false — the typed-text call site
+   *  omits it) tags a web-mic voice-note transcript, matching Telegram's own via_voice tagging so the
+   *  unified web panel's mic indicator renders for BOTH channels' voice notes, not just Telegram's. Never
+   *  throws — a history-record failure must never break the inbound path it's mirroring. */
+  private recordInboundMessageSafely(sessionId: string, text: string, viaVoice = false): void {
     try {
       this.deps.db.insertCompanionMessage({
         id: randomUUID(), sessionId, channel: IN_APP_CHANNEL, chatId: sessionId, author: "user", text,
-        createdAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(), viaVoice,
       });
     } catch (err) {
       // eslint-disable-next-line no-console

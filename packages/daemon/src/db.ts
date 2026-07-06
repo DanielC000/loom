@@ -591,17 +591,19 @@ CREATE TABLE IF NOT EXISTS companion_voice_prefs (
   updated_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_voice_prefs_route ON companion_voice_prefs(session_id, channel, chat_id, sender_id);
--- Companion CHAT HISTORY (bug 0f01f234): a durable record of every in-app chat turn, fixing the "reload
--- loses the whole conversation" bug — the in-app channel was live-only with no store-and-forward.
--- Channel-keyed like companion_voice_prefs (Telegram could reuse this table later; today only in-app
--- writes here — Telegram keeps its own history). Brand-new table => CREATE TABLE IF NOT EXISTS is itself
--- the additive migration (an existing DB gains an empty table on boot; zero rows => byte-identical to
--- today until a companion chat actually happens). Bounded growth: pruned to the most recent ~200 rows per
--- (session_id, channel) on every insert (Db.insertCompanionMessage), so this can never grow unbounded
--- across a long-lived companion. HUMAN-facing READ-ONLY over loopback REST (GET /api/companion/messages/
--- :sessionId) — no MCP path, same trust posture as companion_reminders/companion_voice_prefs; the only
--- writers are the in-app inbound/outbound record hooks (companion/controller.ts, companion/in-app.ts),
--- never a body-supplied author/text.
+-- Companion CHAT HISTORY (bug 0f01f234): a durable record of every companion chat turn, fixing the
+-- "reload loses the whole conversation" bug — the in-app channel was live-only with no store-and-forward.
+-- Channel-keyed like companion_voice_prefs; UNIFIED CROSS-CHANNEL CHAT (card 7d63e200) extended writers
+-- from in-app-only to every channel (Telegram inbound/outbound now records here too, tagged via_voice for
+-- a voice-note-originated inbound turn — the unified web panel renders a small mic indicator for those).
+-- Brand-new table => CREATE TABLE IF NOT EXISTS is itself the additive migration (an existing DB gains an
+-- empty table on boot; zero rows => byte-identical to today until a companion chat actually happens).
+-- Bounded growth: pruned to the most recent ~200 rows per (session_id, channel) on every insert
+-- (Db.insertCompanionMessage), so this can never grow unbounded across a long-lived companion.
+-- HUMAN-facing READ-ONLY over loopback REST (GET /api/companion/messages/:sessionId) — no MCP path, same
+-- trust posture as companion_reminders/companion_voice_prefs; the only writers are the inbound/outbound
+-- record hooks (companion/controller.ts, companion/in-app.ts, companion/chat-gateway.ts), never a
+-- body-supplied author/text.
 CREATE TABLE IF NOT EXISTS companion_messages (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -609,7 +611,8 @@ CREATE TABLE IF NOT EXISTS companion_messages (
   chat_id TEXT NOT NULL,
   author TEXT NOT NULL,       -- 'user' | 'companion'
   text TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  via_voice INTEGER NOT NULL DEFAULT 0  -- 1 iff this inbound turn's text is a voice-note STT transcript
 );
 CREATE INDEX IF NOT EXISTS idx_companion_messages_session ON companion_messages(session_id, channel, created_at);
 -- Owner-controlled encrypted credential store (agent-tooling epic, P1 foundation). GLOBAL / daemon-wide,
@@ -847,6 +850,14 @@ const WAKE_ADDED_COLUMNS: Record<string, string> = {
   route: "TEXT",
 };
 
+/** Columns added to `companion_messages` after its initial ship (unified cross-channel chat, card
+ *  7d63e200); applied to existing DBs by migrateCompanionMessages() (fresh installs already have them via
+ *  CREATE TABLE). NOT NULL + constant DEFAULT 0 backfills every legacy (in-app-only) row to via_voice=0 —
+ *  correct, since only a voice-note-originated inbound turn is ever recorded with via_voice=1. */
+const COMPANION_MESSAGES_ADDED_COLUMNS: Record<string, string> = {
+  via_voice: "INTEGER NOT NULL DEFAULT 0",
+};
+
 type Row = Record<string, unknown>;
 
 /**
@@ -910,6 +921,7 @@ export class Db {
     this.migrateCompanionConfig();
     this.migrateCompanionBindings();
     this.migrateWakes();
+    this.migrateCompanionMessages();
   }
 
   /**
@@ -1106,6 +1118,20 @@ export class Db {
     );
     for (const [name, type] of Object.entries(WAKE_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE wakes ADD COLUMN ${name} ${type}`);
+    }
+  }
+
+  /**
+   * Idempotent additive migration for `companion_messages` (unified cross-channel chat, card 7d63e200) —
+   * ADD COLUMN any column added after the table's initial ship missing from an existing DB (fresh installs
+   * already have it via CREATE TABLE). Mirrors migrateWakes/migrateCompanionConfig.
+   */
+  private migrateCompanionMessages(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(companion_messages)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(COMPANION_MESSAGES_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE companion_messages ADD COLUMN ${name} ${type}`);
     }
   }
 
@@ -3362,22 +3388,31 @@ export class Db {
    *  inbound hook, companion/in-app.ts's outbound hook) wrap this in a try/catch: a history-record failure
    *  must never break the reply/inbound path it's mirroring — a dropped history row is acceptable, a
    *  dropped reply or a crashed inbound is not. */
-  insertCompanionMessage(m: { id: string; sessionId: string; channel: string; chatId: string; author: "user" | "companion"; text: string; createdAt: string }): void {
+  insertCompanionMessage(m: { id: string; sessionId: string; channel: string; chatId: string; author: "user" | "companion"; text: string; createdAt: string; viaVoice?: boolean }): void {
     this.db.prepare(
-      `INSERT INTO companion_messages (id, session_id, channel, chat_id, author, text, created_at)
-       VALUES (@id, @sessionId, @channel, @chatId, @author, @text, @createdAt)`,
-    ).run(m);
+      `INSERT INTO companion_messages (id, session_id, channel, chat_id, author, text, created_at, via_voice)
+       VALUES (@id, @sessionId, @channel, @chatId, @author, @text, @createdAt, @viaVoice)`,
+    ).run({ ...m, viaVoice: m.viaVoice ? 1 : 0 });
     this.db.prepare(
       `DELETE FROM companion_messages WHERE session_id = ? AND channel = ? AND id NOT IN (
          SELECT id FROM companion_messages WHERE session_id = ? AND channel = ? ORDER BY created_at DESC, rowid DESC LIMIT ?
        )`,
     ).run(m.sessionId, m.channel, m.sessionId, m.channel, MAX_COMPANION_MESSAGES);
   }
-  /** A session's stored chat history for ONE channel, chronological — the human-only REST read
-   *  (GET /api/companion/messages/:sessionId) and the web cockpit's reload-persists seed. */
+  /** A session's stored chat history for ONE channel, chronological — the "/new"/"/reset" command's
+   *  history-clear half reads no history, but a test/future caller scoped to a single channel can. */
   listCompanionMessages(sessionId: string, channel: string): CompanionMessage[] {
     return (this.db.prepare("SELECT * FROM companion_messages WHERE session_id = ? AND channel = ? ORDER BY created_at, rowid")
       .all(sessionId, channel) as Row[]).map(toCompanionMessage);
+  }
+  /** A session's stored chat history across EVERY channel, chronological (unified cross-channel chat, card
+   *  7d63e200) — the human-only REST read (GET /api/companion/messages/:sessionId) and the web cockpit's
+   *  reload-persists seed. Interleaves in-app + Telegram (+ any future channel) rows by `created_at` so the
+   *  panel renders one merged conversation; each row still carries its own `channel` for the per-bubble
+   *  provenance badge. */
+  listAllCompanionMessages(sessionId: string): CompanionMessage[] {
+    return (this.db.prepare("SELECT * FROM companion_messages WHERE session_id = ? ORDER BY created_at, rowid")
+      .all(sessionId) as Row[]).map(toCompanionMessage);
   }
   /** Wipe a session's stored chat history for ONE channel — the "/new"/"/reset" command's history-clear
    *  half (companion/factory.ts's CompanionHistoryReset impl). A no-op (0 rows deleted) is not an error —
@@ -3584,6 +3619,7 @@ function toCompanionMessage(r0: unknown): CompanionMessage {
   return {
     id: r.id as string, sessionId: r.session_id as string, channel: r.channel as string, chatId: r.chat_id as string,
     author: r.author as CompanionMessage["author"], text: r.text as string, createdAt: (r.created_at as string) ?? "",
+    viaVoice: (r.via_voice as number | undefined) === 1,
   };
 }
 function toCompanionConfigRow(r0: unknown): CompanionConfigRow {

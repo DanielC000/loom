@@ -43,6 +43,14 @@ export interface ChatMessage {
   id: string;
   author: ChatAuthor;
   text: string;
+  /** Provenance for the unified cross-channel chat (card 7d63e200) — which channel this turn happened on.
+   *  Every LIVE message (this WS is in-app-only by construction) is `IN_APP_CHANNEL`; a history-seeded row
+   *  (historyMessage) carries its own real channel (e.g. "telegram"), so a reload surfaces a per-bubble
+   *  provenance badge for anything that didn't happen in this web panel. */
+  channel: string;
+  /** True only for a history-seeded row whose text is itself a voice-note STT transcript (e.g. a Telegram
+   *  voice message) — the panel renders a small mic indicator alongside it. Never set on a live message. */
+  voice?: boolean;
   /** Present only on a voiced companion reply (Companion Voice epic, VOICE-P4 outbound) — never persisted,
    *  never on a "you"/history bubble (audio is live-transport-only; text is what's stored/shown). */
   audio?: InboundAudio;
@@ -138,15 +146,16 @@ export function parseCleared(raw: string): { chatId: string } | null {
   return { chatId: typeof m.chatId === "string" ? m.chatId : "" };
 }
 
-// Build a "you" (local) bubble from a prepared send. Split out so the send path is one testable step.
+// Build a "you" (local) bubble from a prepared send. Split out so the send path is one testable step. This
+// WS is in-app-only by construction, so every live message is tagged IN_APP_CHANNEL.
 export function youMessage(text: string, id: string): ChatMessage {
-  return { id, author: "you", text };
+  return { id, author: "you", text, channel: IN_APP_CHANNEL };
 }
 
 // Build a "companion" (remote) bubble from a parsed inbound reply. `audio` (VOICE-P4 outbound) is present
 // only for a voiced reply — omitted from the returned object when absent (never `audio: undefined`).
 export function companionMessage(text: string, id: string, audio?: InboundAudio): ChatMessage {
-  return audio ? { id, author: "companion", text, audio } : { id, author: "companion", text };
+  return audio ? { id, author: "companion", text, channel: IN_APP_CHANNEL, audio } : { id, author: "companion", text, channel: IN_APP_CHANNEL };
 }
 
 // The panel's connection lifecycle — drives the status pill + whether Send is enabled. `reconnecting`
@@ -154,19 +163,25 @@ export function companionMessage(text: string, id: string, audio?: InboundAudio)
 // `connecting` so the pill copy can differ ("connecting" vs "reconnecting").
 export type ChatConnState = "connecting" | "connected" | "reconnecting";
 
-// ── Chat HISTORY seed (bug 0f01f234 — the "reload loses the whole conversation" fix) ───────────────────
+// ── Chat HISTORY seed (bug 0f01f234 — the "reload loses the whole conversation" fix; UNIFIED
+// CROSS-CHANNEL CHAT, card 7d63e200 — every channel, not just in-app) ──────────────────────────────────
 // One row as served by GET /api/companion/messages/:sessionId (daemon: db.ts CompanionMessage, minus the
-// session/channel/chatId/createdAt columns the panel doesn't render).
+// session/chatId/createdAt columns the panel doesn't render).
 export interface CompanionHistoryRow {
   id: string;
   author: "user" | "companion";
   text: string;
+  channel: string;
+  viaVoice?: boolean;
 }
 
 // Map ONE stored row to a rendered bubble — the daemon's "user"/"companion" author maps to this panel's
 // "you"/"companion" ChatAuthor (mirrors youMessage/companionMessage's author values). The component fetches
 // history BEFORE opening the WebSocket (load-then-connect), so there is no live frame that could arrive
-// before this seed — no separate dedup step is needed here, just the correct author mapping.
+// before this seed — no separate dedup step is needed here, just the correct author mapping. `channel`
+// carries the row's real provenance (e.g. "telegram") so the panel can badge a non-in-app bubble; `voice`
+// is set only when the row is a voice-note transcript (card 7d63e200).
 export function historyMessage(row: CompanionHistoryRow): ChatMessage {
-  return { id: row.id, author: row.author === "user" ? "you" : "companion", text: row.text };
+  const base: ChatMessage = { id: row.id, author: row.author === "user" ? "you" : "companion", text: row.text, channel: row.channel };
+  return row.viaVoice ? { ...base, voice: true } : base;
 }

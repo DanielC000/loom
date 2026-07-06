@@ -7,6 +7,7 @@
  * chat_reply out through `gateway.deliverReply`. Constructing this does NOT touch the network — call
  * `gateway.start()` to begin polling.
  */
+import { randomUUID } from "node:crypto";
 import { ChatGateway } from "./chat-gateway.js";
 import { createDbCompanionAuth, type AllowlistReader } from "./auth.js";
 import { createDbCompanionPairing, type PairingStore } from "./pairing.js";
@@ -14,7 +15,7 @@ import { createDbCompanionVoicePrefs, type VoicePrefStore } from "./voice-prefs.
 import type { CompanionConfig } from "./config.js";
 import { createTelegramAdapter, TELEGRAM_CHANNEL } from "./telegram.js";
 import { IN_APP_CHANNEL, type InAppChannel } from "./in-app.js";
-import type { CompanionHistoryReset, CompanionRoute, CompanionSynthesizer, CompanionTranscriber, SessionBinding, SubmitTurn } from "./types.js";
+import type { CompanionHistoryReset, CompanionMessageRecorder, CompanionRoute, CompanionSynthesizer, CompanionTranscriber, SessionBinding, SubmitTurn } from "./types.js";
 import type { CompanionBinding } from "@loom/shared";
 
 /** The narrow db surface the factory needs: the durable binding store + the allowlist reader (for authz)
@@ -27,6 +28,9 @@ export interface CompanionBindingStore extends AllowlistReader, PairingStore, Vo
    *  turn (as its per-turn route), not consulted by deliverReply. */
   getCompanionHome(): CompanionRoute | null;
   clearCompanionMessages(sessionId: string, channel: string): void;
+  /** The chat-history WRITE (unified cross-channel chat, card 7d63e200) — the gateway's injected recorder
+   *  calls this for every non-in-app channel's inbound/outbound turn (see `recorder` below). */
+  insertCompanionMessage(m: { id: string; sessionId: string; channel: string; chatId: string; author: "user" | "companion"; text: string; createdAt: string; viaVoice?: boolean }): void;
 }
 
 /** Drop the db-only createdAt — the gateway's routing map wants just the SessionBinding shape. */
@@ -62,20 +66,32 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // rate-limit/lockout policy (5 attempts / 10-min window / 15-min lockout) — tests inject a fake clock.
   const pairing = createDbCompanionPairing(db, { now: () => Date.now() });
   // The "/new"/"/reset" command's history-clear half (ChatGateway resets the agent's own context itself,
-  // via the SAME submitTurn above — no dependency needed for that half). Scoped to IN_APP_CHANNEL: it's the
-  // only channel that ever writes companion_messages (Telegram keeps its own history in the Telegram app —
-  // see db.ts/gateway/server.ts's comments), so clearing it is correct regardless of which channel's "/new"
-  // triggered the reset (one companion session, one shared conversation).
+  // via the SAME submitTurn above — no dependency needed for that half). Scoped to IN_APP_CHANNEL only —
+  // a deliberate, KNOWN limitation of this reset command (not a recording gap): every channel now writes
+  // companion_messages (see `recorder` below), but "/new"/"/reset" clears just the in-app rows + pushes the
+  // live "cleared" notice to an attached web viewer; a session's Telegram-channel history survives a reset
+  // and keeps showing in the unified web panel. Widening the clear to every channel is future work.
   const historyReset: CompanionHistoryReset = {
     async clear(sessionId) {
       db.clearCompanionMessages(sessionId, IN_APP_CHANNEL);
       inApp?.pushCleared(sessionId);
     },
   };
+  // CHAT HISTORY recorder (unified cross-channel chat, card 7d63e200) — generalizes the in-app-only
+  // "reload loses history" fix (bug 0f01f234) to every channel the gateway routes (today: Telegram). Skips
+  // the in-app channel: it already records via its own dedicated hooks (controller.ts's inbound record,
+  // in-app.ts's outbound record via the `inApp` recorder passed in from index.ts) — recording it again here
+  // would double-write the same turn.
+  const recorder: CompanionMessageRecorder = {
+    record(sessionId, channel, chatId, author, text, viaVoice) {
+      if (channel === IN_APP_CHANNEL) return;
+      db.insertCompanionMessage({ id: randomUUID(), sessionId, channel, chatId, author, text, createdAt: new Date().toISOString(), viaVoice });
+    },
+  };
   // Per-turn ORIGIN resolver (multi-channel reply routing): deliverReply targets the in-flight turn's
   // originating route (pty.getActiveTurnOrigin, injected). NOT the old home fallback — a proactive/heartbeat
   // turn now carries the home route ON its submit, so its chat_reply flows through the SAME per-turn path.
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset);
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder);
   // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
   // arms NO Telegram long-poll: the gateway comes up with the in-app adapter alone (registered below), so no
   // external network transport is started and default-OFF stays byte-identical. The adapter normalizes each

@@ -123,6 +123,7 @@ try {
     check("3: accepted, submittedText carries the TRANSCRIPT (not empty audio)", result.accepted === true && result.submittedText === "transcribed from the mic");
     check("3: the turn was submitted with the transcript text", submitted.length === 1 && submitted[0].sid === "sess-A" && submitted[0].text === "transcribed from the mic");
     check("3: the transcript was RECORDED as the user message", db.inserted.length === 1 && db.inserted[0].author === "user" && db.inserted[0].text === "transcribed from the mic");
+    check("3: the recorded row is tagged viaVoice:true (unified cross-channel chat, card 7d63e200 — matches Telegram's own voice-note tagging so the web panel's mic indicator renders for BOTH channels)", db.inserted[0].viaVoice === true);
     check("3: a LIVE { type:'transcript' } echo was pushed to the sender's own client", frames.length === 1 && frames[0].type === "transcript" && frames[0].text === "transcribed from the mic" && frames[0].chatId === "sess-A");
     check("3: the transcript echo is DISTINCT from a companion reply frame (never type:'chat')", frames[0].type !== "chat");
   }

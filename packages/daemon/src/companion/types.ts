@@ -192,6 +192,23 @@ export interface CompanionHistoryReset {
   clear(sessionId: string): Promise<void>;
 }
 
+/**
+ * The injected CHAT HISTORY recorder (unified cross-channel chat, card 7d63e200) - generalizes the
+ * original in-app-only "reload loses history" fix (bug 0f01f234) to every channel the gateway routes.
+ * `record` is called for BOTH an accepted inbound turn (author:"user") and a delivered/voiced outbound
+ * reply (author:"companion"); `viaVoice` is true only for an inbound turn whose text is itself a
+ * voice-note STT transcript (always false for an outbound reply - a voiced TTS reply is not tagged).
+ * Optional: undefined ⇒ no recording at all (every existing/test bare `new ChatGateway(...)` construction
+ * stays byte-identical). The daemon's real implementation (companion/factory.ts) deliberately SKIPS the
+ * in-app channel here - it already records via its own dedicated hooks (companion/controller.ts's inbound
+ * record, companion/in-app.ts's outbound record), so recording it again here would double-write the same
+ * turn. Never throws by contract - the gateway wraps every call in a try/catch anyway (a history-record
+ * failure must never break the inbound/reply path it's mirroring).
+ */
+export interface CompanionMessageRecorder {
+  record(sessionId: string, channel: string, chatId: string, author: "user" | "companion", text: string, viaVoice: boolean): void;
+}
+
 /** The OUTBOUND delivery result — STRUCTURED across every failure mode (never throws out of chat_reply).
  *  `no-target` = the in-flight turn had NO reply-to route (a turn that wasn't formed from a companion
  *  inbound / proactive-home submit) ⇒ chat_reply delivers NOWHERE (never broadcasts, never guesses). */

@@ -24,6 +24,7 @@
 import type {
   ChannelAdapter,
   CompanionHistoryReset,
+  CompanionMessageRecorder,
   CompanionRoute,
   CompanionSynthesizer,
   CompanionTranscriber,
@@ -117,6 +118,10 @@ export class ChatGateway {
    *                    Default undefined ⇒ resetConversation only does the context-reset half (every
    *                    existing/test construction stays byte-identical). The daemon injects a db+in-app
    *                    backed impl (factory.ts).
+   * @param recorder    the injected CHAT HISTORY recorder (unified cross-channel chat, card 7d63e200) —
+   *                    see {@link CompanionMessageRecorder}. Default undefined ⇒ no recording (every
+   *                    existing/test construction stays byte-identical). The daemon injects a db-backed
+   *                    impl that skips the in-app channel (already recorded via its own dedicated hooks).
    */
   constructor(
     private readonly submitTurn: SubmitTurn,
@@ -128,6 +133,7 @@ export class ChatGateway {
     private readonly transcribe: CompanionTranscriber | undefined = undefined,
     private readonly synthesize: CompanionSynthesizer | undefined = undefined,
     private readonly historyReset: CompanionHistoryReset | undefined = undefined,
+    private readonly recorder: CompanionMessageRecorder | undefined = undefined,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -333,9 +339,17 @@ export class ChatGateway {
       return { accepted: false, reason: "submit-failed", sessionId: binding.sessionId, acked };
     }
     const { delivered, position } = submit;
-    if (delivered) return { accepted: true, sessionId: binding.sessionId, queued: false, submittedText: body };
+    if (delivered) {
+      // CHAT HISTORY record (unified cross-channel chat, card 7d63e200): only an ACCEPTED turn (delivered
+      // now OR queued below) is a real user message — mirrors controller.ts's in-app-only recordInbound-
+      // MessageSafely, generalized to every channel here. `body` is the FINAL submitted text (the STT
+      // transcript for a voice note); `!!audioAttachment` tags a voice-note-originated turn.
+      this.recordInboundSafely(binding.sessionId, msg.channel, msg.chatId, body, !!audioAttachment);
+      return { accepted: true, sessionId: binding.sessionId, queued: false, submittedText: body };
+    }
     if (position !== undefined) {
       // Busy / not-ready → HELD in the session FIFO. Accepted; it drains when the session frees up.
+      this.recordInboundSafely(binding.sessionId, msg.channel, msg.chatId, body, !!audioAttachment);
       return { accepted: true, sessionId: binding.sessionId, queued: true, position, submittedText: body };
     }
     // No position ⇒ the bound session is DEAD. Surface it: error-ack the chat + log (don't vanish silently).
@@ -378,6 +392,34 @@ export class ChatGateway {
       await this.historyReset.clear(sessionId);
     } catch (err) {
       this.debug(`resetConversation: history clear failed for ${sessionId}: ${describeError(err)}`);
+    }
+  }
+
+  /** Best-effort inbound chat-history record for an ACCEPTED turn (unified cross-channel chat, card
+   *  7d63e200) — generalizes controller.ts's in-app-only recordInboundMessageSafely to every channel the
+   *  gateway routes. The injected recorder decides which channels to actually persist (the daemon's real
+   *  impl skips in-app — see {@link CompanionMessageRecorder}). Never throws: a history-record failure
+   *  must never break the inbound path it's mirroring. */
+  private recordInboundSafely(sessionId: string, channel: string, chatId: string, text: string, viaVoice: boolean): void {
+    if (!this.recorder) return;
+    try {
+      this.recorder.record(sessionId, channel, chatId, "user", text, viaVoice);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[companion] inbound history record failed: ${describeError(err)}`);
+    }
+  }
+
+  /** Best-effort outbound chat-history record for a delivered/voiced reply (unified cross-channel chat,
+   *  card 7d63e200) — generalizes in-app.ts's own outbound record hook to every channel; see
+   *  {@link recordInboundSafely} / {@link CompanionMessageRecorder}. Never throws. */
+  private recordOutboundSafely(sessionId: string, channel: string, chatId: string, text: string): void {
+    if (!this.recorder) return;
+    try {
+      this.recorder.record(sessionId, channel, chatId, "companion", text, false);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[companion] outbound history record failed: ${describeError(err)}`);
     }
   }
 
@@ -433,10 +475,20 @@ export class ChatGateway {
     // NEVER lost to a voice-pipeline problem.
     if (this.synthesize) {
       const voiceResult = await this.tryDeliverVoice(sessionId, target, text);
-      if (voiceResult) return voiceResult;
+      if (voiceResult) {
+        this.recordOutboundSafely(sessionId, target.channel, target.chatId, text);
+        return voiceResult;
+      }
     }
     const result = await this.sendVia(target.channel, target.chatId, text);
     if (!result.delivered) return result.reason === "no-adapter" ? { delivered: false, reason: "no-adapter" } : { delivered: false, reason: "send-failed" };
+    // CHAT HISTORY record (unified cross-channel chat, card 7d63e200): recorded ONCE per logical reply,
+    // AFTER every chunk has succeeded — a long Telegram reply may take several `adapter.send` calls under
+    // its maxMessageLength, but this fires once, mirroring in-app.ts's own "never >1 send call per logical
+    // reply" recording point. NOT called from sendToChannel (the web→other-channels MIRROR, card 92b6445c):
+    // that echoes an ALREADY-recorded user message with a disclaimer — recording it again here would
+    // misattribute it as a companion reply.
+    this.recordOutboundSafely(sessionId, target.channel, target.chatId, text);
     return { delivered: true, chunks: result.chunks };
   }
 

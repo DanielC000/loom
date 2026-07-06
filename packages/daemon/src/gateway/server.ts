@@ -1107,17 +1107,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true, reminders: companionReminderList(sessionId) };
   });
 
-  // --- Companion CHAT HISTORY (bug 0f01f234 — the "reload loses the whole conversation" fix): a READ-ONLY
-  // view over the durable `companion_messages` rows the in-app inbound/outbound record hooks write
-  // (controller.ts / in-app.ts). Same posture as MEMORY/SKILLS/REMINDERS above (VIEW only). Scoped to the
-  // in-app channel — Telegram keeps its own history in the Telegram app, so it never writes this table
-  // today (the table itself is channel-keyed for future reuse). The web cockpit's CompanionChat panel calls
-  // this ONCE on mount (load-then-connect), THEN opens the live WS — see companionChat.ts.
+  // --- Companion CHAT HISTORY (bug 0f01f234 — the "reload loses the whole conversation" fix; UNIFIED
+  // CROSS-CHANNEL CHAT, card 7d63e200): a READ-ONLY view over the durable `companion_messages` rows the
+  // inbound/outbound record hooks write (controller.ts / in-app.ts / chat-gateway.ts). Same posture as
+  // MEMORY/SKILLS/REMINDERS above (VIEW only). Returns EVERY channel's rows for the session, chronological
+  // — so the owner's Telegram conversation (their messages + the companion's replies, including voice-note
+  // transcripts) renders alongside the in-app history as ONE merged stream; each row still carries its own
+  // `channel` (+ `viaVoice`) for the web panel's per-bubble provenance badge / mic indicator. The web
+  // cockpit's CompanionChat panel calls this ONCE on mount (load-then-connect), THEN opens the live WS —
+  // see companionChat.ts.
   app.get("/api/companion/messages/:sessionId", async (req, reply) => {
     const sessionId = (req.params as { sessionId: string }).sessionId;
     const r = resolveCompanionAgent(sessionId);
     if (!r.ok) return reply.code(r.code).send({ error: r.error });
-    return { messages: deps.db.listCompanionMessages(sessionId, IN_APP_CHANNEL) };
+    return { messages: deps.db.listAllCompanionMessages(sessionId) };
   });
 
   // --- Companion VOICE PREFERENCES (Companion Voice epic, VOICE-P1 foundation): a READ-ONLY view over the

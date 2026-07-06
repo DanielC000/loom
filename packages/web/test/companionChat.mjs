@@ -77,9 +77,9 @@ check("parseInbound: malformed JSON or a non-object never throws, returns null",
 
 // ── The message builders that turn a send / a parsed reply into a rendered bubble ────────────────────
 
-check("youMessage / companionMessage: build the correctly-authored bubble", () => {
-  assert.deepEqual(youMessage("mine", "1"), { id: "1", author: "you", text: "mine" });
-  assert.deepEqual(companionMessage("theirs", "2"), { id: "2", author: "companion", text: "theirs" });
+check("youMessage / companionMessage: build the correctly-authored bubble, tagged the in-app channel (this WS is in-app-only)", () => {
+  assert.deepEqual(youMessage("mine", "1"), { id: "1", author: "you", text: "mine", channel: "in-app" });
+  assert.deepEqual(companionMessage("theirs", "2"), { id: "2", author: "companion", text: "theirs", channel: "in-app" });
 });
 
 // End-to-end (pure): a send → a "you" bubble + the emitted frame; that frame, echoed back by a mock WS,
@@ -150,21 +150,34 @@ check("parseInbound: a malformed audio field (missing data/mimeType) is DROPPED,
 });
 
 check("companionMessage: with audio, the bubble carries it; without, the key is absent entirely", () => {
-  assert.deepEqual(companionMessage("voiced", "1", { data: "QUJD", mimeType: "audio/ogg" }), { id: "1", author: "companion", text: "voiced", audio: { data: "QUJD", mimeType: "audio/ogg" } });
+  assert.deepEqual(companionMessage("voiced", "1", { data: "QUJD", mimeType: "audio/ogg" }), { id: "1", author: "companion", text: "voiced", channel: "in-app", audio: { data: "QUJD", mimeType: "audio/ogg" } });
   const noAudio = companionMessage("plain", "2");
-  assert.deepEqual(noAudio, { id: "2", author: "companion", text: "plain" });
+  assert.deepEqual(noAudio, { id: "2", author: "companion", text: "plain", channel: "in-app" });
   assert.equal("audio" in noAudio, false);
 });
 
-// ── historyMessage: the reload-persists seed (bug 0f01f234) maps a stored row to a rendered bubble ────
-check("historyMessage: a stored 'user' row becomes a 'you' bubble", () => {
-  assert.deepEqual(historyMessage({ id: "h1", author: "user", text: "typed earlier" }), { id: "h1", author: "you", text: "typed earlier" });
+// ── historyMessage: the reload-persists seed (bug 0f01f234; UNIFIED CROSS-CHANNEL CHAT, card 7d63e200) —
+// maps a stored row (now carrying its real channel + an optional voice-note flag) to a rendered bubble ───
+check("historyMessage: a stored 'user' row becomes a 'you' bubble, carrying its channel", () => {
+  assert.deepEqual(historyMessage({ id: "h1", author: "user", text: "typed earlier", channel: "in-app" }), { id: "h1", author: "you", text: "typed earlier", channel: "in-app" });
 });
 check("historyMessage: a stored 'companion' row becomes a 'companion' bubble", () => {
-  assert.deepEqual(historyMessage({ id: "h2", author: "companion", text: "replied earlier" }), { id: "h2", author: "companion", text: "replied earlier" });
+  assert.deepEqual(historyMessage({ id: "h2", author: "companion", text: "replied earlier", channel: "in-app" }), { id: "h2", author: "companion", text: "replied earlier", channel: "in-app" });
 });
 check("historyMessage: the row's own id is preserved as the bubble key (never re-derived)", () => {
-  assert.equal(historyMessage({ id: "row-42", author: "user", text: "x" }).id, "row-42");
+  assert.equal(historyMessage({ id: "row-42", author: "user", text: "x", channel: "in-app" }).id, "row-42");
+});
+check("historyMessage: a Telegram row keeps its own channel (unified cross-channel chat, card 7d63e200)", () => {
+  assert.deepEqual(
+    historyMessage({ id: "h3", author: "user", text: "sent from my phone", channel: "telegram" }),
+    { id: "h3", author: "you", text: "sent from my phone", channel: "telegram" },
+  );
+});
+check("historyMessage: viaVoice:true tags the bubble with voice:true; absent/false omits it", () => {
+  const voiced = historyMessage({ id: "h4", author: "user", text: "transcribed from a voice note", channel: "telegram", viaVoice: true });
+  assert.deepEqual(voiced, { id: "h4", author: "you", text: "transcribed from a voice note", channel: "telegram", voice: true });
+  const typed = historyMessage({ id: "h5", author: "user", text: "typed", channel: "telegram", viaVoice: false });
+  assert.equal("voice" in typed, false, "a non-voice row never carries the voice key at all");
 });
 
 // ── isArmedInApp: the in-app route is detected among a companion's now-MULTIPLE bindings ──────────────

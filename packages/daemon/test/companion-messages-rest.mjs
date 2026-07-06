@@ -1,14 +1,15 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Loom Companion — the human-only REST surface for the companion's CHAT HISTORY (bug 0f01f234): GET (list,
-// read-only) over the `companion_messages` rows the in-app inbound/outbound record hooks write
-// (controller.ts / in-app.ts) — the sibling of companion-reminders-rest.mjs / companion-memory-rest.mjs's
-// VIEW-only surfaces. Fully hermetic: a temp LOOM_HOME + a REAL Db + the REAL buildServer (app.inject) with
-// pty/sessions/etc. stubbed out (this route never touches a live pty). NO network, NO real claude, NO daemon.
-// Proves:
-//   1. GET returns the session's in-app messages chronologically as {id,sessionId,channel,chatId,author,text,createdAt}.
-//   2. Scoped to the IN-APP channel only — a row seeded on a different channel for the SAME session is excluded.
-//   3. Per-session isolation — another companion's messages never leak into this one's list.
-//   4. resolveCompanionAgent guards: 404 on an unknown session, 400 on a non-assistant (worker) session.
+// Loom Companion — the human-only REST surface for the companion's CHAT HISTORY (bug 0f01f234; UNIFIED
+// CROSS-CHANNEL CHAT, card 7d63e200): GET (list, read-only) over the `companion_messages` rows the
+// inbound/outbound record hooks write (controller.ts / in-app.ts / chat-gateway.ts) — the sibling of
+// companion-reminders-rest.mjs / companion-memory-rest.mjs's VIEW-only surfaces. Fully hermetic: a temp
+// LOOM_HOME + a REAL Db + the REAL buildServer (app.inject) with pty/sessions/etc. stubbed out (this route
+// never touches a live pty). NO network, NO real claude, NO daemon. Proves:
+//   1. GET returns EVERY channel's rows for the session chronologically, as
+//      {id,sessionId,channel,chatId,author,text,createdAt,viaVoice} — a row on a DIFFERENT channel for the
+//      SAME session (e.g. Telegram) is included, not filtered out (the unified cross-channel stream).
+//   2. Per-session isolation — another companion's messages never leak into this one's list.
+//   3. resolveCompanionAgent guards: 404 on an unknown session, 400 on a non-assistant (worker) session.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-messages-rest.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -71,12 +72,14 @@ db.insertSession({
 const UNKNOWN_SESSION = randomUUID();
 
 // Seed messages directly through the db (mirrors what the record hooks write — this REST surface never
-// creates), chronological on the companion session, plus one on a DIFFERENT channel (must be excluded) and
-// one belonging to the OTHER companion (must be excluded — isolation).
+// creates), chronological on the companion session across TWO channels (in-app + telegram — the unified
+// cross-channel stream), plus one belonging to the OTHER companion (must be excluded — isolation) and one
+// Telegram voice-note-originated turn (viaVoice:true).
 db.insertCompanionMessage({ id: randomUUID(), sessionId: companionSessId, channel: "in-app", chatId: companionSessId, author: "user", text: "hi there", createdAt: "2026-07-06T10:00:00.000Z" });
 db.insertCompanionMessage({ id: randomUUID(), sessionId: companionSessId, channel: "in-app", chatId: companionSessId, author: "companion", text: "hello!", createdAt: "2026-07-06T10:00:01.000Z" });
 db.insertCompanionMessage({ id: randomUUID(), sessionId: companionSessId, channel: "telegram", chatId: "123", author: "user", text: "a telegram row on the SAME session", createdAt: "2026-07-06T10:00:02.000Z" });
-db.insertCompanionMessage({ id: randomUUID(), sessionId: otherSessId, channel: "in-app", chatId: otherSessId, author: "user", text: "belongs to the other companion", createdAt: "2026-07-06T10:00:03.000Z" });
+db.insertCompanionMessage({ id: randomUUID(), sessionId: companionSessId, channel: "telegram", chatId: "123", author: "user", text: "a voice note transcript", createdAt: "2026-07-06T10:00:03.000Z", viaVoice: true });
+db.insertCompanionMessage({ id: randomUUID(), sessionId: otherSessId, channel: "in-app", chatId: otherSessId, author: "user", text: "belongs to the other companion", createdAt: "2026-07-06T10:00:04.000Z" });
 
 try {
   // ============ MESSAGES: GET (list) ============
@@ -84,9 +87,17 @@ try {
     const res = await app.inject({ method: "GET", url: `/api/companion/messages/${companionSessId}` });
     const body = JSON.parse(res.payload);
     check("messages GET: 200", res.statusCode === 200);
-    check("messages GET: returns exactly the two in-app rows, chronological", body.messages.length === 2 && body.messages[0].text === "hi there" && body.messages[1].text === "hello!");
-    check("messages GET: shape is {id,sessionId,channel,chatId,author,text,createdAt}", typeof body.messages[0].id === "string" && body.messages[0].sessionId === companionSessId && body.messages[0].channel === "in-app" && body.messages[0].chatId === companionSessId && body.messages[0].author === "user" && typeof body.messages[0].createdAt === "string");
-    check("messages GET: the telegram-channel row on the SAME session is excluded (in-app only)", !body.messages.some((m) => m.text.includes("telegram")));
+    check(
+      "messages GET: returns ALL FOUR rows across BOTH channels, chronological (unified cross-channel chat)",
+      body.messages.length === 4 &&
+        body.messages[0].text === "hi there" &&
+        body.messages[1].text === "hello!" &&
+        body.messages[2].text === "a telegram row on the SAME session" &&
+        body.messages[3].text === "a voice note transcript",
+    );
+    check("messages GET: shape is {id,sessionId,channel,chatId,author,text,createdAt,viaVoice}", typeof body.messages[0].id === "string" && body.messages[0].sessionId === companionSessId && body.messages[0].channel === "in-app" && body.messages[0].chatId === companionSessId && body.messages[0].author === "user" && typeof body.messages[0].createdAt === "string" && body.messages[0].viaVoice === false);
+    check("messages GET: the telegram-channel row on the SAME session is INCLUDED, tagged its own channel", body.messages.some((m) => m.text.includes("telegram row") && m.channel === "telegram"));
+    check("messages GET: the voice-note row is tagged viaVoice:true; the typed rows are viaVoice:false", body.messages.find((m) => m.text === "a voice note transcript").viaVoice === true);
     check("messages GET: the OTHER companion's message is excluded (isolation)", !body.messages.some((m) => m.text.includes("other companion")));
   }
   // ============ MESSAGES: resolve-by-sessionId guards ============
@@ -108,6 +119,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the companion's chat history is served over human-only REST (GET, in-app-only, chronological), resolved by sessionId, 404/400 on an unknown or non-assistant session, per-session and per-channel isolated — human-only, claude-free."
+  ? "\n✅ ALL PASS — the companion's UNIFIED chat history (every channel, not just in-app) is served over human-only REST (GET, chronological), resolved by sessionId, 404/400 on an unknown or non-assistant session, per-session isolated — human-only, claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

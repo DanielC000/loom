@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import {
-  companionMessage, historyMessage, parseCleared, parseInbound, parseTranscript, prepareSend, prepareSendAudio, youMessage,
+  companionMessage, historyMessage, IN_APP_CHANNEL, parseCleared, parseInbound, parseTranscript, prepareSend, prepareSendAudio, youMessage,
   type ChatConnState, type ChatMessage, type CompanionHistoryRow,
 } from "../lib/companionChat";
 import { Button, StatusPill } from "./ui";
@@ -296,7 +296,12 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
           <EmptyState connected={connected} title={title ?? "your companion"} />
         ) : (
           messages.map((m, i) => (
-            <Bubble key={m.id} msg={m} title={title ?? "Companion"} grouped={messages[i - 1]?.author === m.author} />
+            <Bubble
+              key={m.id}
+              msg={m}
+              title={title ?? "Companion"}
+              grouped={messages[i - 1]?.author === m.author && messages[i - 1]?.channel === m.channel}
+            />
           ))
         )}
         {awaitingReply && !replyTimedOut && <TypingIndicator title={title ?? "Companion"} />}
@@ -369,14 +374,25 @@ function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
   );
 }
 
+// Unified cross-channel chat (card 7d63e200): a subtle per-bubble provenance label for a channel other
+// than in-app (the default, unlabeled web chat) — e.g. "Telegram". Falls back to title-casing an unknown
+// future channel name rather than hiding it.
+function channelLabel(channel: string): string | null {
+  if (channel === IN_APP_CHANNEL) return null;
+  if (channel === "telegram") return "Telegram";
+  return channel.length > 0 ? channel.slice(0, 1).toUpperCase() + channel.slice(1) : null;
+}
+
 // ── One chat bubble ──────────────────────────────────────────────────────────────
 function Bubble({ msg, title, grouped }: { msg: ChatMessage; title: string; grouped: boolean }) {
   const you = msg.author === "you";
+  const badge = channelLabel(msg.channel);
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: you ? "flex-end" : "flex-start", marginTop: grouped ? 4 : 12 }}>
       {!grouped && (
         <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", margin: "0 4px 4px" }}>
           {you ? "You" : title}
+          {badge && <span style={{ opacity: 0.7 }}> · {badge}</span>}
         </span>
       )}
       <div
@@ -390,6 +406,7 @@ function Bubble({ msg, title, grouped }: { msg: ChatMessage; title: string; grou
           borderBottomLeftRadius: you ? 10 : 3,
         }}
       >
+        {msg.voice && <span aria-label="Voice message" title="Voice message">🎤 </span>}
         {msg.text}
         {msg.audio && (
           // Companion Voice epic, VOICE-P4 outbound — the manual play/pause/replay affordance (the ws
