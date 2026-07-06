@@ -221,12 +221,16 @@ export class InAppChannel {
     async stop() {
       /* no long-poll to stop */
     },
-    send: async (chatId: string, text: string) => {
-      // Record UNCONDITIONALLY — even with zero attached clients — so a proactive heartbeat/reminder reply
-      // to a session nobody is viewing right now still shows up in history on the next attach (this is what
-      // "in-app has no store-and-forward" used to mean for chat history; now it's stored, just not LIVE-pushed
-      // to nobody). Contained: a history-record failure must never break the actual reply delivery below.
-      this.recordSafely(chatId, "companion", text);
+    send: async (chatId: string, text: string, opts?: { record?: boolean }) => {
+      // Record by default (`opts.record !== false`) — even with zero attached clients — so a proactive
+      // heartbeat/reminder reply to a session nobody is viewing right now still shows up in history on the
+      // next attach (this is what "in-app has no store-and-forward" used to mean for chat history; now it's
+      // stored, just not LIVE-pushed to nobody). `tryAck` (chat-gateway.ts) explicitly passes `record:false`
+      // for a command/error/pairing ack — that's transport chrome, not conversation, so it must NOT persist
+      // as a history row (cross-channel asymmetry fix: Telegram's `send` never recorded these either). The
+      // "/new"/"/reset" conversation-boundary marker is the one ack `tryAck` opts back IN. Contained: a
+      // history-record failure must never break the actual reply delivery below.
+      if (opts?.record !== false) this.recordSafely(chatId, "companion", text);
       this.deliver(chatId, text);
     },
     // VOICE INBOUND (Companion Voice epic, VOICE-P4). Unlike Telegram's real network fetch, the in-app

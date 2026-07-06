@@ -62,8 +62,17 @@ export interface ChannelAdapter {
   start(): void;
   /** Stop receiving and release resources (best-effort on shutdown). */
   stop(): Promise<void>;
-  /** OUTBOUND: send `text` to `chatId` on this channel. */
-  send(chatId: string, text: string): Promise<void>;
+  /**
+   * OUTBOUND: send `text` to `chatId` on this channel.
+   *
+   * @param opts.record  Whether this send should be persisted as companion chat history, for an adapter
+   *   that self-records on send (in-app; a channel with no separate record hook, like Telegram, ignores
+   *   this — its recording happens generically via chat-gateway's recordOutboundSafely instead). Default
+   *   (omitted) is `true` — a REAL reply (deliverReply/sendToChannel) always records. `tryAck` explicitly
+   *   passes `false` for transport chrome (command/error/pairing acks are not conversation) and `true` only
+   *   for the "/new"/"/reset" conversation-boundary marker.
+   */
+  send(chatId: string, text: string, opts?: { record?: boolean }): Promise<void>;
   /**
    * OPTIONAL: download a non-text attachment to a local temp file (Companion Voice epic, VOICE-P2). Only
    * the adapter that emitted the attachment knows how to resolve it (wire-format-specific — e.g. Telegram's

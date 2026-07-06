@@ -8,7 +8,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      compact ack — both the default (unset) pref and an explicitly-set one.
 //   3. "/start" returns a fixed friendly ack and needs no CommandDeps.
 //   4. End-to-end via CompanionController.handleInAppInbound: both commands are swallowed (never become a
-//      turn — accepted:false, reason:"command") and their ack is recorded/delivered exactly like /new.
+//      turn — accepted:false, reason:"command"), delivered live, but — unlike "/new"'s intentional
+//      conversation-boundary marker — their ack is transport chrome and is NEVER persisted as history
+//      (cross-channel ack-recording asymmetry fix).
 //   5. An unrecognized "/word" is still NOT swallowed (falls through to the normal pipeline byte-identical).
 // Run: 1) build (turbo builds shared first), 2) node test/companion-tier2-commands.mjs
 import fs from "node:fs";
@@ -121,7 +123,7 @@ try {
     check("/status: no turn ever submitted", submitted.length === 0);
 
     const after = db.listCompanionMessages(sessionId, IN_APP_CHANNEL);
-    check("/status: the ack (not the raw '/status' text) was recorded as the companion's reply", after.some((m) => m.author === "companion" && m.text.includes("Voice replies")));
+    check("/status: the ack is transport chrome — NOT recorded as a companion history row", !after.some((m) => m.author === "companion" && m.text.includes("Voice replies")));
   }
 
   {

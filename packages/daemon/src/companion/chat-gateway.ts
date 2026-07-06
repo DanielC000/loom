@@ -331,7 +331,17 @@ export class ChatGateway {
     if (parsed && handler) {
       const route = voicePrefRoute(binding, msg.sender);
       const { ack } = await handler(parsed.args, route, this.voicePrefs, { resetConversation: (sid) => this.resetConversation(sid) });
-      const acked = await this.tryAck(binding, ack);
+      // Every command ack is transport chrome EXCEPT "/new"/"/reset" — that ack IS the intentional
+      // conversation-boundary marker (resetConversation's doc), so it alone is persisted, on EVERY channel.
+      const isConversationBoundary = parsed.name === "new" || parsed.name === "reset";
+      const acked = await this.tryAck(binding, ack, { record: isConversationBoundary });
+      if (isConversationBoundary && acked) {
+        // tryAck's record:true only persists it for an adapter that self-records on send (in-app); a
+        // channel like Telegram never records inside `send`, so record it here too via the SAME generic
+        // hook a real reply uses — a no-op for in-app (recordOutboundSafely's recorder skips that channel,
+        // already recorded above) so this can never double-write.
+        this.recordOutboundSafely(binding.sessionId, binding.channel, binding.chatId, ack);
+      }
       this.debug(`inbound COMMAND /${parsed.name} (channel=${msg.channel} chat=${msg.chatId} session=${binding.sessionId})`);
       return { accepted: false, reason: "command", sessionId: binding.sessionId, command: parsed.name, acked };
     }
@@ -480,12 +490,18 @@ export class ChatGateway {
     }
   }
 
-  /** Best-effort error ack back to a chat (swallows a send failure — an ack must never throw upward). */
-  private async tryAck(binding: SessionBinding, text: string): Promise<boolean> {
+  /**
+   * Best-effort ack back to a chat (swallows a send failure — an ack must never throw upward). An ack is
+   * TRANSPORT CHROME, not conversation — `opts.record` defaults to `false` so it is never persisted as
+   * companion chat history (matches Telegram's `send`, which never records; see the ChannelAdapter.send
+   * doc). Pass `{ record: true }` only for the "/new"/"/reset" conversation-boundary marker (handleInbound's
+   * command branch), which IS an intentional history row.
+   */
+  private async tryAck(binding: SessionBinding, text: string, opts?: { record?: boolean }): Promise<boolean> {
     const adapter = this.adapters.get(binding.channel);
     if (!adapter) return false;
     try {
-      await adapter.send(binding.chatId, text);
+      await adapter.send(binding.chatId, text, { record: opts?.record === true });
       return true;
     } catch (err) {
       this.debug(`ack send failed: ${describeError(err)}`);
