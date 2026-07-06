@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { resolveConfig } from "@loom/shared";
 import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR } from "./paths.js";
 import { installCrashHandlers } from "./crashlog.js";
+import { writeShutdownMarker } from "./shutdown-marker.js";
 import { Db } from "./db.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
@@ -813,9 +814,21 @@ async function main(): Promise<void> {
     console.warn(`[boot] first-run setup auto-launch failed (continuing boot): ${(err as Error).message}`);
   }
 
-  // The one graceful-teardown path — invoked by a SIGINT/SIGTERM signal AND by the loopback
+  // The one graceful-teardown path — invoked by a SIGINT/SIGTERM/SIGHUP signal AND by the loopback
   // POST /internal/shutdown control hook (the cross-platform `loom stop`, since Windows has no SIGTERM).
   gracefulShutdown = (reason: string) => {
+    // Shutdown-reason marker (card 42cf3944): a signal-driven stop used to leave NO trace — crash.log
+    // only fires on a fatal, and a signal exits 0 (clean, by design), so it was indistinguishable from a
+    // hard crash after the fact (a real incident cost a whole session chasing a phantom crash that was
+    // really the machine sleeping). Write it FIRST, before any other teardown step that could stall/throw,
+    // and classify: a raw signal name (SIGINT/SIGTERM/SIGHUP — see HANDLED_SIGNALS below, referenced here
+    // as a closure over a `const` initialized further down but always assigned before this function can
+    // actually run) is an unexpected OS signal; anything else reaching this path (today: only "POST
+    // /internal/shutdown") is the owner's own intentional stop — recorded as such, not masqueraded as a
+    // signal. `daemon_restart` never calls this path at all (see the exit-75 branch below `main`), so its
+    // own restart-intent.json remains the sole marker for that flow — untouched here.
+    const isSignal = (HANDLED_SIGNALS as readonly string[]).includes(reason);
+    writeShutdownMarker({ kind: isSignal ? "signal" : "intentional", reason, signal: isSignal ? reason : null });
     // Crash/shutdown transcript backstop: snapshot every LIVE session's engine transcript BEFORE we
     // exit. The pty onExit hook (the per-session snapshot trigger) never fires on a signal-kill, so
     // without this a long-lived session loses its transcript when Claude later prunes the JSONL.
@@ -837,7 +850,12 @@ async function main(): Promise<void> {
     console.log(`[shutdown] graceful stop (${reason})`);
     process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
   };
-  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  // SIGINT/SIGTERM plus SIGHUP — Node also emits SIGHUP for the Windows console-close case (closing the
+  // terminal window) as well as the POSIX hangup case, so listing it here covers that win32 path too,
+  // with no extra plumbing. Declared here (used by gracefulShutdown's classification above via closure,
+  // and by the registration loop below) so both stay in sync off ONE list.
+  const HANDLED_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+  for (const sig of HANDLED_SIGNALS) {
     process.on(sig, () => gracefulShutdown!(sig));
   }
 }
