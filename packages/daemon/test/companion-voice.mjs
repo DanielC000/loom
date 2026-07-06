@@ -16,7 +16,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   4. An UNRECOGNIZED "/word" (no handler) falls through unchanged to the normal submit path — only
 //      /lang and /voice are ever swallowed. Plain text (no leading "/") is untouched (byte-identical).
 //   5. The db-backed store (createDbCompanionVoicePrefs) round-trips through a REAL Db: default-unset
-//      resolves to {sttLang:null,ttsLang:null,ttsVoice:null,voiceReplies:false}; a partial write preserves
+//      resolves to {sttLang:null,ttsLang:null,ttsVoice:null,voiceReplies:"off"}; a partial write preserves
 //      the other fields; a DM route (senderId:null) and a group member's route on the SAME chat are
 //      independent rows.
 //   6. The human-only REST read (GET /api/companion/voice-prefs/:sessionId) lists a session's rows,
@@ -105,14 +105,22 @@ try {
     check("/lang: NOT accepted as a turn", rLang.accepted === false && rLang.reason === "command" && rLang.command === "lang");
     check("/lang: acked via the adapter", rLang.acked === true && sent.length === 1 && /Language set to en/.test(sent[0].text));
     check("/lang: never submitted a turn", submitted.length === 0);
-    check("/lang: wrote sttLang+ttsLang for the route", JSON.stringify(prefs.resolve(route)) === JSON.stringify({ sttLang: "en", ttsLang: "en", ttsVoice: null, voiceReplies: false }));
+    check("/lang: wrote sttLang+ttsLang for the route", JSON.stringify(prefs.resolve(route)) === JSON.stringify({ sttLang: "en", ttsLang: "en", ttsVoice: null, voiceReplies: "off" }));
 
     sent.length = 0;
     const rVoice = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/voice on" });
     check("/voice on: NOT accepted as a turn", rVoice.accepted === false && rVoice.reason === "command" && rVoice.command === "voice");
     check("/voice on: acked", sent.length === 1 && /turned on/.test(sent[0].text));
-    check("/voice on: toggles voiceReplies WITHOUT clobbering the /lang setting (partial write)", JSON.stringify(prefs.resolve(route)) === JSON.stringify({ sttLang: "en", ttsLang: "en", ttsVoice: null, voiceReplies: true }));
+    check("/voice on: toggles voiceReplies WITHOUT clobbering the /lang setting (partial write)", JSON.stringify(prefs.resolve(route)) === JSON.stringify({ sttLang: "en", ttsLang: "en", ttsVoice: null, voiceReplies: "on" }));
     check("/voice on: still never submitted a turn", submitted.length === 0);
+
+    // VOICE-P4 (card edd11203): the tri-state third value — /voice auto parses, acks, and persists.
+    sent.length = 0;
+    const rAuto = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/voice auto" });
+    check("/voice auto: NOT accepted as a turn", rAuto.accepted === false && rAuto.reason === "command" && rAuto.command === "voice");
+    check("/voice auto: acked with an auto-specific message", sent.length === 1 && /auto/i.test(sent[0].text) && !/turned on/.test(sent[0].text));
+    check("/voice auto: persisted the mode WITHOUT clobbering the /lang setting", JSON.stringify(prefs.resolve(route)) === JSON.stringify({ sttLang: "en", ttsLang: "en", ttsVoice: null, voiceReplies: "auto" }));
+    check("/voice auto: still never submitted a turn", submitted.length === 0);
 
     // Case-normalization: primary lower, subtag upper.
     sent.length = 0;
@@ -128,7 +136,7 @@ try {
     check("/lang with an unrecognized code shape → usage ack, pref unchanged", /Usage: \/lang/.test(sent[0].text) && prefs.resolve(route).sttLang === "pt-BR");
     sent.length = 0;
     await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/voice maybe" });
-    check("/voice with neither on|off → usage ack, pref unchanged", /Usage: \/voice on\|off/.test(sent[0].text) && prefs.resolve(route).voiceReplies === true);
+    check("/voice with neither on|off|auto → usage ack, pref unchanged", /Usage: \/voice on\|off\|auto/.test(sent[0].text) && prefs.resolve(route).voiceReplies === "auto");
 
     // Unrecognized command → falls through unchanged to the normal submit path.
     const rUnknown = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/bogus me" });
@@ -197,7 +205,7 @@ try {
     // Belt-and-suspenders: even though /voice on wrote a per-sender pref row, the outbound reply-to-the-
     // whole-chat path resolves with senderId:null, so it NEVER finds that row — a group reply stays
     // text-only regardless of what /voice acked (proven end-to-end in companion-voice-tts.mjs case 10).
-    check("group /voice on wrote a per-sender pref row (for whenever group voice is real)", prefs.resolve(groupRoute).voiceReplies === true);
+    check("group /voice on wrote a per-sender pref row (for whenever group voice is real)", prefs.resolve(groupRoute).voiceReplies === "on");
 
     sent.length = 0;
     await gw.handleInbound({ channel: "telegram", chatId: "888", body: "/voice off", sender: { id: "member-1" } });
@@ -247,8 +255,8 @@ try {
     check("db-backed store: unset route resolves to the default", JSON.stringify(store.resolve(dmRoute)) === JSON.stringify(DEFAULT_VOICE_PREF));
 
     store.setLang(dmRoute, "en");
-    store.setVoiceReplies(dmRoute, true);
-    check("db-backed store: a voiceReplies write preserves the earlier /lang write (partial upsert)", JSON.stringify(store.resolve(dmRoute)) === JSON.stringify({ sttLang: "en", ttsLang: "en", ttsVoice: null, voiceReplies: true }));
+    store.setVoiceReplies(dmRoute, "on");
+    check("db-backed store: a voiceReplies write preserves the earlier /lang write (partial upsert)", JSON.stringify(store.resolve(dmRoute)) === JSON.stringify({ sttLang: "en", ttsLang: "en", ttsVoice: null, voiceReplies: "on" }));
 
     const groupRoute = { sessionId: "s1", channel: "telegram", chatId: "1", senderId: "sender-1" };
     store.setLang(groupRoute, "fr");
@@ -256,6 +264,25 @@ try {
 
     check("db.getCompanionVoicePref reads the raw row", db.getCompanionVoicePref("s1", "telegram", "1", null)?.sttLang === "en");
     check("db.listCompanionVoicePrefsForSession lists every route for the session", db.listCompanionVoicePrefsForSession("s1").length === 2);
+
+    // VOICE-P4 migration guard (card edd11203, CR follow-up): a pre-existing VOICE-P1 row stored
+    // voice_replies as a raw INTEGER 0/1 — BEFORE the tri-state ever existed, so it was never written
+    // through setVoiceReplies/upsertCompanionVoicePref. Insert that exact legacy shape directly (TS
+    // `private db` erases to a plain JS field at runtime — no ECMAScript #private — so this reaches the
+    // real better-sqlite3 handle underneath the Db wrapper) and prove toVoiceMode normalizes it on read,
+    // so the owner's own existing on/off row doesn't silently flip on this deploy.
+    const legacyNow = new Date().toISOString();
+    const insertLegacyRow = (sessionId, raw) => {
+      db.db.prepare(
+        `INSERT INTO companion_voice_prefs (session_id, channel, chat_id, sender_id, stt_lang, tts_lang, tts_voice, voice_replies, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(sessionId, "telegram", "1", "", null, null, null, raw, legacyNow, legacyNow);
+    };
+    insertLegacyRow("legacy-on", 1);
+    check("legacy INTEGER row (voice_replies=1) normalizes to 'on'", db.getCompanionVoicePref("legacy-on", "telegram", "1", null)?.voiceReplies === "on");
+    insertLegacyRow("legacy-off", 0);
+    check("legacy INTEGER row (voice_replies=0) normalizes to 'off'", db.getCompanionVoicePref("legacy-off", "telegram", "1", null)?.voiceReplies === "off");
+
     db.close();
   }
 
@@ -291,7 +318,7 @@ try {
       const res = await app.inject({ method: "GET", url: `/api/companion/voice-prefs/${sessId}` });
       const body = JSON.parse(res.payload);
       check("voice-prefs GET: 200", res.statusCode === 200);
-      check("voice-prefs GET: includes the seeded row", body.prefs.some((p) => p.chatId === "chat-1" && p.sttLang === "en" && p.voiceReplies === false));
+      check("voice-prefs GET: includes the seeded row", body.prefs.some((p) => p.chatId === "chat-1" && p.sttLang === "en" && p.voiceReplies === "off"));
       check("voice-prefs GET: does NOT include the other session's row (isolation)", !body.prefs.some((p) => p.chatId === "chat-2"));
 
       const notFound = await app.inject({ method: "GET", url: `/api/companion/voice-prefs/${randomUUID()}` });

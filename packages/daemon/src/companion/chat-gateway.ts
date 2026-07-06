@@ -460,21 +460,25 @@ export class ChatGateway {
    * a turn (that would loop back in). Chunks a long reply to the adapter's max length so it can't throw on a
    * platform cap. Returns a STRUCTURED result on every failure (unknown session / no adapter / send threw) —
    * the chat_reply MCP handler stays symmetric.
+   *
+   * @param voice  the agent's PER-REPLY voice request (VOICE-P4, card edd11203) — `chat_reply`'s optional
+   *   `voice` flag, threaded through unchanged. Only consulted when the route's mode is `"auto"`; ignored
+   *   entirely for `"on"`/`"off"` (the user's pref always wins there) — see tryDeliverVoice's gating.
    */
-  async deliverReply(sessionId: string, text: string): Promise<DeliverResult> {
+  async deliverReply(sessionId: string, text: string, voice?: boolean): Promise<DeliverResult> {
     // PURELY per-turn-route: the target is the ORIGINATING route of the session's in-flight turn (the pty
     // pinned it when the turn was formed). NO binding-based / home fallback and NO broadcast — a turn with no
     // reply-to route (not formed from a companion inbound / proactive-home submit) delivers NOWHERE. This is
     // what makes cross-delivery impossible by construction: the reply can only go where the turn came from.
     const target = this.replyTarget(sessionId);
     if (!target) return { delivered: false, reason: "no-target" };
-    // VOICE REPLY (Companion Voice epic, VOICE-P3) — attempted BEFORE the text send, never INSTEAD of it:
+    // VOICE REPLY (Companion Voice epic, VOICE-P3/P4) — attempted BEFORE the text send, never INSTEAD of it:
     // tryDeliverVoice resolves a DeliverResult only on a genuine voice-message success; ANY ineligibility
-    // or failure (no synthesize dep, pref off, adapter lacks sendVoice, synth not ready/fails, sendVoice
-    // throws) resolves null and falls straight through to the EXISTING text send below — the reply is
-    // NEVER lost to a voice-pipeline problem.
+    // or failure (no synthesize dep, mode off, mode auto with no/false agent flag, adapter lacks sendVoice,
+    // synth not ready/fails, sendVoice throws) resolves null and falls straight through to the EXISTING
+    // text send below — the reply is NEVER lost to a voice-pipeline problem.
     if (this.synthesize) {
-      const voiceResult = await this.tryDeliverVoice(sessionId, target, text);
+      const voiceResult = await this.tryDeliverVoice(sessionId, target, text, voice);
       if (voiceResult) {
         this.recordOutboundSafely(sessionId, target.channel, target.chatId, text);
         return voiceResult;
@@ -494,12 +498,16 @@ export class ChatGateway {
 
   /**
    * Attempt to synthesize `text` and deliver it as a native voice message on `target` (Companion Voice
-   * epic, VOICE-P3). Returns a DeliverResult on SUCCESS ONLY; returns null on ANY ineligibility or failure
-   * so `deliverReply` falls through to the plain text send — this method NEVER throws (an OUTER try/catch
-   * contains everything, including a throwing voicePrefs.resolve or a throwing adapter.sendVoice) and the
-   * temp audio file is ALWAYS cleaned up (`finally`) once synthesize() has handed one back.
+   * epic, VOICE-P3/P4). Returns a DeliverResult on SUCCESS ONLY; returns null on ANY ineligibility or
+   * failure so `deliverReply` falls through to the plain text send — this method NEVER throws (an OUTER
+   * try/catch contains everything, including a throwing voicePrefs.resolve or a throwing adapter.sendVoice)
+   * and the temp audio file is ALWAYS cleaned up (`finally`) once synthesize() has handed one back.
+   *
+   * @param agentVoice  the agent's per-reply voice request (VOICE-P4) — consulted ONLY in `"auto"` mode;
+   *   `"on"`/`"off"` never look at it. `"off"` can NEVER be forced to voice by this flag (the user's opt-out
+   *   is load-bearing); an omitted/false flag in `"auto"` mode conservatively stays TEXT (no surprise voice).
    */
-  private async tryDeliverVoice(sessionId: string, target: CompanionRoute, text: string): Promise<DeliverResult | null> {
+  private async tryDeliverVoice(sessionId: string, target: CompanionRoute, text: string, agentVoice?: boolean): Promise<DeliverResult | null> {
     if (!this.synthesize) return null;
     try {
       // Outbound pref resolution FIRST — senderId is ALWAYS null (Companion Voice epic, VOICE-P3 fork #3):
@@ -512,7 +520,10 @@ export class ChatGateway {
       // and not a "works, just chat-wide" fallback. Checked BEFORE isReady()/adapter capability so a route
       // that doesn't want voice replies never kicks TTS provisioning or does any other work on its account.
       const pref = this.voicePrefs.resolve({ sessionId, channel: target.channel, chatId: target.chatId, senderId: null });
-      if (!pref.voiceReplies) return null;
+      // The tri-state gate (VOICE-P4): "on" always speaks, "off" never does (the agent can't override it),
+      // "auto" defers to the agent's PER-REPLY flag — an omitted/false flag stays text, never a surprise.
+      const shouldSpeak = pref.voiceReplies === "on" || (pref.voiceReplies === "auto" && agentVoice === true);
+      if (!shouldSpeak) return null;
       const adapter = this.adapters.get(target.channel);
       if (!adapter?.sendVoice) return null;
       if (!this.synthesize.isReady()) return null;

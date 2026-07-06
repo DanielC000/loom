@@ -97,7 +97,7 @@ try {
     check("/status (default pref): reports auto-detect language", defaultResult.ack.includes("auto-detect"));
 
     prefs.setLang(route, "en");
-    prefs.setVoiceReplies(route, true);
+    prefs.setVoiceReplies(route, "on");
     const setResult = commandHandler("status")(undefined, route, prefs, {});
     check("/status (set pref): reports voice replies on", setResult.ack.includes("Voice replies: on"));
     check("/status (set pref): reports the set language", setResult.ack.includes("en"));

@@ -17,7 +17,7 @@ import type { SessionBinding } from "./types.js";
 export type ResolvedVoicePref = Pick<CompanionVoicePref, "sttLang" | "ttsLang" | "ttsVoice" | "voiceReplies">;
 
 /** The effective pref for a route with no stored row: auto-detect STT, no TTS override, voice replies off. */
-export const DEFAULT_VOICE_PREF: ResolvedVoicePref = { sttLang: null, ttsLang: null, ttsVoice: null, voiceReplies: false };
+export const DEFAULT_VOICE_PREF: ResolvedVoicePref = { sttLang: null, ttsLang: null, ttsVoice: null, voiceReplies: "off" };
 
 /**
  * The route a voice pref is keyed on. `senderId` is present ONLY for a GROUP-scoped binding (a shared
@@ -49,8 +49,8 @@ export interface CompanionVoicePrefs {
   resolve(route: VoicePrefRoute): ResolvedVoicePref;
   /** Set BOTH sttLang and ttsLang for `route` (one "/lang" command covers both directions). */
   setLang(route: VoicePrefRoute, code: string): ResolvedVoicePref;
-  /** Toggle voiceReplies for `route`. */
-  setVoiceReplies(route: VoicePrefRoute, on: boolean): ResolvedVoicePref;
+  /** Set the voice-reply MODE for `route` ("on" | "off" | "auto" — VOICE-P4 tri-state). */
+  setVoiceReplies(route: VoicePrefRoute, mode: "on" | "off" | "auto"): ResolvedVoicePref;
 }
 
 // ASCII Unit Separator — a control char that can never appear in a route component (sessionId/channel/
@@ -80,8 +80,8 @@ export function inMemoryVoicePrefs(): CompanionVoicePrefs {
       map.set(routeKey(route), next);
       return next;
     },
-    setVoiceReplies(route, on) {
-      const next: ResolvedVoicePref = { ...(map.get(routeKey(route)) ?? DEFAULT_VOICE_PREF), voiceReplies: on };
+    setVoiceReplies(route, mode) {
+      const next: ResolvedVoicePref = { ...(map.get(routeKey(route)) ?? DEFAULT_VOICE_PREF), voiceReplies: mode };
       map.set(routeKey(route), next);
       return next;
     },
@@ -93,7 +93,7 @@ export interface VoicePrefStore {
   getCompanionVoicePref(sessionId: string, channel: string, chatId: string, senderId: string | null): CompanionVoicePref | undefined;
   upsertCompanionVoicePref(input: {
     sessionId: string; channel: string; chatId: string; senderId: string | null;
-    sttLang?: string | null; ttsLang?: string | null; ttsVoice?: string | null; voiceReplies?: boolean;
+    sttLang?: string | null; ttsLang?: string | null; ttsVoice?: string | null; voiceReplies?: "on" | "off" | "auto";
   }): CompanionVoicePref;
 }
 
@@ -109,8 +109,8 @@ export function createDbCompanionVoicePrefs(db: VoicePrefStore): CompanionVoiceP
     setLang(route, code) {
       return toResolved(db.upsertCompanionVoicePref({ ...route, sttLang: code, ttsLang: code }));
     },
-    setVoiceReplies(route, on) {
-      return toResolved(db.upsertCompanionVoicePref({ ...route, voiceReplies: on }));
+    setVoiceReplies(route, mode) {
+      return toResolved(db.upsertCompanionVoicePref({ ...route, voiceReplies: mode }));
     },
   };
 }

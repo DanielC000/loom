@@ -578,6 +578,15 @@ CREATE TABLE IF NOT EXISTS companion_reminders (
 -- "/lang"/"/voice" slash-command router (companion/commands.ts via companion/voice-prefs.ts), which
 -- resolves the route SERVER-SIDE from an already-authorized inbound; HUMAN-managed READ-ONLY over the
 -- loopback REST surface (no MCP path — same trust posture as companion_bindings/companion_allowed_senders).
+-- voice_replies started as an INTEGER 0/1 boolean (VOICE-P1); VOICE-P4 (card edd11203) extended it to a
+-- tri-state 'on'|'off'|'auto' WITHOUT an ALTER — kept as INTEGER (not retyped to TEXT) deliberately: SQLite
+-- affinity is a CONVERSION rule, not a passive label, so a TEXT-declared column would actively reformat an
+-- inserted INTEGER (e.g. the JS number 1 becomes the text "1.0"), which would corrupt a genuinely-legacy
+-- row on write. INTEGER affinity has the opposite (safe) behavior: it only converts a TEXT value when that
+-- text IS a well-formed number; 'on'/'off'/'auto' aren't, so they're stored verbatim, while a legacy 0/1
+-- stays a real INTEGER untouched. A legacy row's stored 0/1 and a fresh row's 'on'/'off'/'auto' therefore
+-- coexist in the SAME column, on the SAME declared type, with no ALTER; toVoiceMode() (db.ts) is the one
+-- place that normalizes both shapes on read.
 CREATE TABLE IF NOT EXISTS companion_voice_prefs (
   session_id TEXT NOT NULL,
   channel TEXT NOT NULL,
@@ -3356,7 +3365,7 @@ export class Db {
    */
   upsertCompanionVoicePref(input: {
     sessionId: string; channel: string; chatId: string; senderId: string | null;
-    sttLang?: string | null; ttsLang?: string | null; ttsVoice?: string | null; voiceReplies?: boolean;
+    sttLang?: string | null; ttsLang?: string | null; ttsVoice?: string | null; voiceReplies?: "on" | "off" | "auto";
   }): CompanionVoicePref {
     const sid = input.senderId ?? "";
     const existing = this.db.prepare(
@@ -3368,7 +3377,7 @@ export class Db {
       sttLang: input.sttLang !== undefined ? input.sttLang : ((existing?.stt_lang as string | null) ?? null),
       ttsLang: input.ttsLang !== undefined ? input.ttsLang : ((existing?.tts_lang as string | null) ?? null),
       ttsVoice: input.ttsVoice !== undefined ? input.ttsVoice : ((existing?.tts_voice as string | null) ?? null),
-      voiceReplies: input.voiceReplies !== undefined ? input.voiceReplies : (existing?.voice_replies as number ?? 0) === 1,
+      voiceReplies: input.voiceReplies !== undefined ? input.voiceReplies : toVoiceMode(existing?.voice_replies),
       createdAt: (existing?.created_at as string) ?? now,
       updatedAt: now,
     };
@@ -3377,7 +3386,7 @@ export class Db {
        VALUES (@sessionId, @channel, @chatId, @senderId, @sttLang, @ttsLang, @ttsVoice, @voiceReplies, @createdAt, @updatedAt)
        ON CONFLICT(session_id, channel, chat_id, sender_id) DO UPDATE SET
          stt_lang = @sttLang, tts_lang = @ttsLang, tts_voice = @ttsVoice, voice_replies = @voiceReplies, updated_at = @updatedAt`,
-    ).run({ ...row, senderId: sid, voiceReplies: row.voiceReplies ? 1 : 0 });
+    ).run({ ...row, senderId: sid, voiceReplies: row.voiceReplies });
     return row;
   }
 
@@ -3609,6 +3618,13 @@ function toCompanionAllowedSender(r0: unknown): CompanionAllowedSender {
     createdAt: (r.created_at as string) ?? "",
   };
 }
+/** Normalize a stored `voice_replies` cell to the tri-state mode: a legacy VOICE-P1 row stores it as the
+ *  INTEGER 0/1 (SQLite may hand back either the number or its string form depending on the driver path),
+ *  a VOICE-P4 row stores 'on'/'off'/'auto' directly. See the companion_voice_prefs schema comment (db.ts). */
+function toVoiceMode(raw: unknown): "on" | "off" | "auto" {
+  if (raw === "on" || raw === "off" || raw === "auto") return raw;
+  return raw === 1 || raw === "1" ? "on" : "off";
+}
 function toCompanionVoicePref(r0: unknown): CompanionVoicePref {
   const r = r0 as Row;
   const senderId = r.sender_id as string;
@@ -3618,7 +3634,7 @@ function toCompanionVoicePref(r0: unknown): CompanionVoicePref {
     sttLang: (r.stt_lang as string | null) ?? null,
     ttsLang: (r.tts_lang as string | null) ?? null,
     ttsVoice: (r.tts_voice as string | null) ?? null,
-    voiceReplies: (r.voice_replies as number) === 1,
+    voiceReplies: toVoiceMode(r.voice_replies),
     createdAt: (r.created_at as string) ?? "", updatedAt: (r.updated_at as string) ?? "",
   };
 }

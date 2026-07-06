@@ -52,8 +52,10 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
 export interface CompanionHooks {
   /** The bound companion session id — chat_reply is registered iff sessionId === this. Null/undefined ⇒ off. */
   companionSessionId?: string | null;
-  /** Deliver the agent's chat_reply(text) back OUT to the chat bound to the session (companion/chat-gateway.ts). */
-  deliverReply?: (sessionId: string, text: string) => Promise<{ delivered: boolean; reason?: string }>;
+  /** Deliver the agent's chat_reply(text, voice?) back OUT to the chat bound to the session
+   *  (companion/chat-gateway.ts). `voice` is the agent's PER-REPLY voice request (VOICE-P4, card
+   *  edd11203) — consulted ONLY when the route's pref mode is "auto"; ignored for "on"/"off". */
+  deliverReply?: (sessionId: string, text: string, voice?: boolean) => Promise<{ delivered: boolean; reason?: string }>;
   /**
    * SERVER-DERIVED route capture for reminder_create — the current turn's originating companion route (or
    * null), read at schedule time exactly like wake_me (orchestration/wake.ts). The agent never passes a
@@ -173,12 +175,14 @@ export class OrchestrationMcpRouter {
           "the reply `text`; it is delivered VERBATIM back to the chat you're bound to. This is your ONLY " +
           "way to reach that user — the incoming chat message was injected as this turn, and calling " +
           "chat_reply is how your answer gets OUT (it does NOT loop back in as a new turn). Mirrors " +
-          "worker_report: emit one clean, final reply.",
-        inputSchema: { text: z.string() },
+          "worker_report: emit one clean, final reply. Optional `voice:true` asks to SPEAK this reply " +
+          "instead of texting it — it only has effect when the user's voice-reply setting is 'auto' (their " +
+          "own on/off choice always wins otherwise); omit it (or pass false) to send plain text.",
+        inputSchema: { text: z.string(), voice: z.boolean().optional() },
       },
-      async ({ text }) => {
+      async ({ text, voice }) => {
         if (!deliverReply) return ok({ delivered: false, error: "companion transport not configured" });
-        return ok(await deliverReply(sessionId, text));
+        return ok(await deliverReply(sessionId, text, voice));
       },
     );
   }

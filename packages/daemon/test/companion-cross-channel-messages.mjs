@@ -96,7 +96,7 @@ function makeFakeTelegramAdapter() {
       async send(chatId, text) { sent.push({ chatId, text }); },
       async downloadAttachment() { return { filePath: "/fake/voice-note.ogg", cleanup: async () => {} }; },
       // Native voice-reply send (Companion Voice epic, VOICE-P3 outbound) — only exercised when a test
-      // injects `synthesize` + a voiceReplies:true pref (test 3b); every other test's deliverReply never
+      // injects `synthesize` + a voiceReplies:"on" pref (test 3b); every other test's deliverReply never
       // reaches tryDeliverVoice at all (gated on `this.synthesize` being set), so this is inert elsewhere.
       async sendVoice(chatId, audioFilePath, text) { sentVoice.push({ chatId, audioFilePath, text }); },
     },
@@ -165,7 +165,7 @@ try {
   {
     const { adapter, sentVoice } = makeFakeTelegramAdapter();
     const fakeSynthesize = { isReady: () => true, synthesize: async () => ({ filePath: "/fake/reply.ogg", cleanup: async () => {} }) };
-    const voicedPrefs = { resolve: () => ({ sttLang: null, ttsLang: null, ttsVoice: null, voiceReplies: true }), setLang: (r) => r, setVoiceReplies: (r) => r };
+    const voicedPrefs = { resolve: () => ({ sttLang: null, ttsLang: null, ttsVoice: null, voiceReplies: "on" }), setLang: (r) => r, setVoiceReplies: (r) => r };
     const gw = new ChatGateway(
       () => ({ delivered: true }), [tgBinding], undefined, undefined,
       (sid) => (sid === sessTg ? { channel: TELEGRAM_CHANNEL, chatId: "999" } : null),

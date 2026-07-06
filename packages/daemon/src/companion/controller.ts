@@ -90,7 +90,7 @@ export interface CompanionControl {
  *  routes `deliverReply` back through the controller so it always targets the CURRENT gateway. */
 export interface CompanionReplyHooks {
   companionSessionId: string | null;
-  deliverReply?: (sessionId: string, text: string) => Promise<{ delivered: boolean; reason?: string }>;
+  deliverReply?: (sessionId: string, text: string, voice?: boolean) => Promise<{ delivered: boolean; reason?: string }>;
   /**
    * Server-derived route capture for the reminder_create MCP tool (mirrors wake_me's getActiveTurnOrigin) —
    * consumed by the orchestration MCP router, not by this controller.
@@ -209,9 +209,9 @@ export class CompanionController implements CompanionControl {
    * session until reconnect/resume, and a lingering chat_reply on a running session AFTER teardown routes
    * HERE and no-ops with "companion-off" (the gateway ref is cleared) — never a cross-wire or a throw.
    */
-  async deliverReply(sessionId: string, text: string): Promise<DeliverResult | { delivered: false; reason: "companion-off" }> {
+  async deliverReply(sessionId: string, text: string, voice?: boolean): Promise<DeliverResult | { delivered: false; reason: "companion-off" }> {
     if (!this.gateway) return { delivered: false, reason: "companion-off" };
-    return this.gateway.deliverReply(sessionId, text);
+    return this.gateway.deliverReply(sessionId, text, voice);
   }
 
   /**

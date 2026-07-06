@@ -119,19 +119,20 @@ const COMMANDS: Record<string, CommandDef> = {
     },
   },
   voice: {
-    description: "Turn voice replies on or off",
+    description: "Turn voice replies on, off, or auto (the agent decides per reply)",
     handler(args, route, prefs) {
       const norm = args?.toLowerCase();
-      if (norm !== "on" && norm !== "off") {
-        return { ack: "Usage: /voice on|off" };
+      if (norm !== "on" && norm !== "off" && norm !== "auto") {
+        return { ack: "Usage: /voice on|off|auto" };
       }
-      prefs.setVoiceReplies(route, norm === "on");
+      prefs.setVoiceReplies(route, norm);
       // Group-scoped voice replies aren't deliverable yet (VOICE-P3, DM-first): the outbound reply
       // always resolves senderId:null, so a per-sender group row is never found and the reply always
-      // degrades to text. Don't let "/voice on" claim a success it can't deliver in a group.
-      if (norm === "on" && route.senderId !== null) {
+      // degrades to text. Don't let "/voice on"/"/voice auto" claim a success it can't deliver in a group.
+      if (norm !== "off" && route.senderId !== null) {
         return { ack: "Voice replies aren't available in group chats yet — DM the bot and turn it on there." };
       }
+      if (norm === "auto") return { ack: "✅ Voice replies set to auto — I'll decide when to speak." };
       return { ack: `✅ Voice replies turned ${norm}.` };
     },
   },
@@ -148,7 +149,7 @@ const COMMANDS: Record<string, CommandDef> = {
     handler(_args, route, prefs) {
       const resolved = prefs.resolve(route);
       const lang = resolved.ttsLang ?? "auto-detect";
-      return { ack: `🔎 Voice replies: ${resolved.voiceReplies ? "on" : "off"} · Language: ${lang}` };
+      return { ack: `🔎 Voice replies: ${resolved.voiceReplies} · Language: ${lang}` };
     },
   },
   start: {

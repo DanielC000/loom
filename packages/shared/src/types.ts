@@ -937,8 +937,14 @@ export interface CompanionVoicePref {
   ttsLang: string | null;
   /** TTS voice selection (P3 consumes this), or null = provider default. */
   ttsVoice: string | null;
-  /** Whether an outbound reply on this route should synthesize to voice, once TTS (P3) lands. */
-  voiceReplies: boolean;
+  /**
+   * The route's voice-reply MODE (VOICE-P4 — the agent-decided tri-state, card edd11203; P1 shipped this
+   * as a plain boolean, extended here): `"off"` = always text (the user's opt-out always wins — the agent
+   * can NEVER force voice when off); `"on"` = always voice; `"auto"` = the AGENT decides per reply via the
+   * `chat_reply` MCP tool's optional `voice` flag (deliverReply speaks IFF the reply set `voice:true`,
+   * else text — an omitted flag in auto mode defaults to TEXT, never a surprise voice reply).
+   */
+  voiceReplies: "on" | "off" | "auto";
   createdAt: string;
   updatedAt: string;
 }

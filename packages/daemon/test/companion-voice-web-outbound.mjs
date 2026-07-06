@@ -63,7 +63,7 @@ try {
     const inApp = new InAppChannel();
     const synth = makeSynthesizer({ filePath: "/tmp/loom-voice-web-does-not-exist-12345.ogg" });
     const prefs = inMemoryVoicePrefs();
-    prefs.setVoiceReplies({ sessionId: "sess-A", channel: IN_APP_CHANNEL, chatId: "sess-A", senderId: null }, true);
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: IN_APP_CHANNEL, chatId: "sess-A", senderId: null }, "on");
     const gw = new ChatGateway(
       () => ({ delivered: true }), [inAppBinding("sess-A")], undefined, undefined,
       (sid) => (sid === "sess-A" ? { channel: IN_APP_CHANNEL, chatId: "sess-A" } : null),
@@ -88,7 +88,7 @@ try {
     const inApp = new InAppChannel();
     const synth = makeSynthesizer({ filePath: audioPath });
     const prefs = inMemoryVoicePrefs();
-    prefs.setVoiceReplies({ sessionId: "sess-A", channel: IN_APP_CHANNEL, chatId: "sess-A", senderId: null }, true);
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: IN_APP_CHANNEL, chatId: "sess-A", senderId: null }, "on");
     const gw = new ChatGateway(
       () => ({ delivered: true }), [inAppBinding("sess-A")], undefined, undefined,
       (sid) => (sid === "sess-A" ? { channel: IN_APP_CHANNEL, chatId: "sess-A" } : null),

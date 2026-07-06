@@ -4,9 +4,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // real claude, NO daemon, NO python/venv. Proves the card's SECURITY-CRITICAL DoD:
 //   1. BYTE-IDENTICAL WHEN OFF: no synthesize dep injected ⇒ deliverReply's text path is UNCHANGED —
 //      zero synth calls, the adapter's plain `send` fires exactly as it does today.
-//   2. voiceReplies:false (the default pref) ⇒ zero synth calls even WITH a ready synthesizer injected —
+//   2. voiceReplies:"off" (the default pref) ⇒ zero synth calls even WITH a ready synthesizer injected —
 //      the pref gate is checked before any TTS work is attempted.
-//   3. voiceReplies:true + ready + the adapter advertises sendVoice ⇒ synth() is called with the route's
+//   3. voiceReplies:"on" + ready + the adapter advertises sendVoice ⇒ synth() is called with the route's
 //      ttsLang/ttsVoice, the adapter's sendVoice() receives the synthesized file, and the temp file is
 //      cleaned up — with NO plain text send alongside it.
 //   4. synth not ready (isReady()===false) ⇒ degrades to the plain text send, synth() itself never called.
@@ -24,6 +24,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      group reply ALWAYS degrades to text, even after a member turns voice replies on. Documented P3
 //      limitation (group per-sender outbound voice is future work), asserted here so a regression that
 //      accidentally "fixes" this without the sender-selection design is caught, not silently shipped.
+//  11-14. VOICE-P4 (agent-decided replies, card edd11203) — the full tri-state gating matrix:
+//      "off" + chat_reply's voice:true ⇒ STILL text (the user's opt-out can never be forced by the agent);
+//      "on" ⇒ voice regardless of the agent's flag (unchanged P3 behavior);
+//      "auto" + voice:true ⇒ voice (the agent's per-reply choice is honored);
+//      "auto" + voice:false/omitted ⇒ text (conservative default — no surprise voice).
 // Run: 1) build (turbo builds shared first), 2) node test/companion-voice-tts.mjs
 import { ChatGateway } from "../dist/companion/chat-gateway.js";
 import { inMemoryVoicePrefs } from "../dist/companion/voice-prefs.js";
@@ -80,7 +85,7 @@ try {
   {
     const tg = makeAdapter("telegram");
     const prefs = inMemoryVoicePrefs();
-    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, true); // ON — still must not matter with no dep
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on"); // ON — still must not matter with no dep
     const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs); // no 8th arg
     gw.registerAdapter(tg.adapter);
 
@@ -109,7 +114,7 @@ try {
     const synth = makeSynthesizer({ ready: true, result: () => ({ filePath: "/tmp/voice-reply.ogg" }) });
     const prefs = inMemoryVoicePrefs();
     prefs.setLang({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "es");
-    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, true);
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
     const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
@@ -126,7 +131,7 @@ try {
     const tg = makeAdapter("telegram");
     const synth = makeSynthesizer({ ready: false });
     const prefs = inMemoryVoicePrefs();
-    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, true);
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
     const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
@@ -141,7 +146,7 @@ try {
     const tg = makeAdapter("telegram");
     const synth = makeSynthesizer({ ready: true, result: () => null });
     const prefs = inMemoryVoicePrefs();
-    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, true);
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
     const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
@@ -155,7 +160,7 @@ try {
     const tg = makeAdapter("telegram", { sendVoiceThrows: true });
     const synth = makeSynthesizer({ ready: true, result: () => ({ filePath: "/tmp/voice-reply.ogg" }) });
     const prefs = inMemoryVoicePrefs();
-    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, true);
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
     const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
@@ -169,7 +174,7 @@ try {
     const tg = makeAdapter("telegram", { withSendVoice: false });
     const synth = makeSynthesizer({ ready: true });
     const prefs = inMemoryVoicePrefs();
-    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, true);
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
     const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
@@ -185,7 +190,7 @@ try {
     const prefs = inMemoryVoicePrefs();
     // Set the pref via the EXACT route an inbound voicePrefRoute() would produce for a DM binding
     // (scope:"dm" ⇒ senderId always null) — proves deliverReply's outbound resolve reaches the SAME row.
-    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, true);
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
     const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
@@ -198,7 +203,7 @@ try {
     const tg = makeAdapter("telegram");
     const synth = makeSynthesizer({ ready: true });
     const prefs = inMemoryVoicePrefs();
-    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, true);
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
     const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
@@ -215,7 +220,7 @@ try {
     const prefs = inMemoryVoicePrefs();
     // A group member turns voice replies ON via /voice on — stored PER-SENDER (mirrors voicePrefRoute's
     // group-scope rule: senderId = the authenticated sender who ran the command).
-    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: "member-42" }, true);
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: "member-42" }, "on");
     const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
@@ -223,6 +228,64 @@ try {
     check("10: a group reply ALWAYS degrades to text (outbound senderId:null never matches a per-sender row)", r.delivered === true && tg.sent.length === 1 && tg.sent[0].text === "reply to the group");
     check("10: synth() NEVER called for a group reply (the pref row can never resolve)", synth.calls.length === 0);
     check("10: sendVoice NEVER called", tg.voiceSent.length === 0);
+  }
+
+  // ============ 11 — VOICE-P4: mode "off" + chat_reply's voice:true ⇒ STILL text (agent can NEVER force
+  //                   voice when the user has opted out — the load-bearing trust posture) ==================
+  {
+    const tg = makeAdapter("telegram");
+    const synth = makeSynthesizer({ ready: true });
+    const prefs = inMemoryVoicePrefs(); // default: voiceReplies "off"
+    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    gw.registerAdapter(tg.adapter);
+
+    const r = await gw.deliverReply("sess-A", "hello there", true);
+    check("11: mode off + voice:true ⇒ still plain text (user opt-out wins)", r.delivered === true && tg.sent.length === 1 && tg.sent[0].text === "hello there");
+    check("11: synth() NEVER called (off short-circuits before the agent flag is even consulted)", synth.calls.length === 0);
+  }
+
+  // ============ 12 — VOICE-P4: mode "on" ⇒ voice regardless of the agent's flag (unchanged P3 behavior) =====
+  {
+    const tg = makeAdapter("telegram");
+    const synth = makeSynthesizer({ ready: true, result: () => ({ filePath: "/tmp/voice-reply.ogg" }) });
+    const prefs = inMemoryVoicePrefs();
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
+    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    gw.registerAdapter(tg.adapter);
+
+    const r = await gw.deliverReply("sess-A", "hello there", false); // agent said false — must not matter
+    check("12: mode on + voice:false ⇒ still voice (the user's 'on' is unconditional)", r.delivered === true && tg.voiceSent.length === 1 && tg.sent.length === 0);
+  }
+
+  // ============ 13 — VOICE-P4: mode "auto" + voice:true ⇒ voice (the agent's per-reply choice is honored) ===
+  {
+    const tg = makeAdapter("telegram");
+    const synth = makeSynthesizer({ ready: true, result: () => ({ filePath: "/tmp/voice-reply.ogg" }) });
+    const prefs = inMemoryVoicePrefs();
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "auto");
+    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    gw.registerAdapter(tg.adapter);
+
+    const r = await gw.deliverReply("sess-A", "hello there", true);
+    check("13: mode auto + voice:true ⇒ voice", r.delivered === true && tg.voiceSent.length === 1 && tg.sent.length === 0);
+  }
+
+  // ============ 14 — VOICE-P4: mode "auto" + voice:false/omitted ⇒ text (conservative default) =============
+  {
+    const tg = makeAdapter("telegram");
+    const synth = makeSynthesizer({ ready: true });
+    const prefs = inMemoryVoicePrefs();
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "auto");
+    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    gw.registerAdapter(tg.adapter);
+
+    const rFalse = await gw.deliverReply("sess-A", "hello there", false);
+    check("14: mode auto + voice:false ⇒ text", rFalse.delivered === true && tg.sent.length === 1 && tg.voiceSent.length === 0);
+
+    tg.sent.length = 0;
+    const rOmitted = await gw.deliverReply("sess-A", "hello there");
+    check("14: mode auto + voice omitted ⇒ text (default, no surprise voice)", rOmitted.delivered === true && tg.sent.length === 1 && tg.voiceSent.length === 0);
+    check("14: synth() never called across either omitted/false case", synth.calls.length === 0);
   }
 } catch (err) {
   console.error("UNCAUGHT:", err);
