@@ -51,6 +51,58 @@ const TTS_MODEL_WARM_TIMEOUT_MS = 600_000;
  *  pasted a whole file". */
 export const TTS_MAX_TEXT_LENGTH = 4_000;
 
+/** Emoji + pictographs + variation selectors + ZWJ/keycap combiners — everything a TTS engine would
+ *  otherwise try to read out literally (voice, name, or silence, depending on the engine). Binary Unicode
+ *  property escapes cover the pictograph ranges (all supported by V8's \p{} syntax, so no hand-maintained
+ *  codepoint ranges to keep in sync with new emoji releases); \u200D (ZWJ, joins multi-codepoint emoji
+ *  like family/skin-tone sequences) and \u20E3 (combining enclosing keycap, e.g. the digit in 1\u20E3)
+ *  are explicit escapes since neither is itself a pictograph. */
+const EMOJI_RE = /[\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Regional_Indicator}\p{Variation_Selector}\u200D\u20E3]/gu;
+
+/**
+ * Turn a reply meant for the eyes into prose meant for the ears: strip emoji and flatten markdown to
+ * plain text, so Kokoro never has to sound out a literal `**`, `#`, or pictograph. Pure — never throws,
+ * never touches the original text (callers keep passing that to persistence/display; this only feeds the
+ * TTS subprocess). Order matters: code fences/spans and links are unwrapped to their inner text BEFORE
+ * the emphasis regexes run (so a bolded link label still loses its stars), line-anchored heading/list
+ * markers run against the ORIGINAL line breaks (before the final whitespace collapse erases them), and
+ * the emoji strip runs last so it can't interfere with the markdown patterns above it.
+ *
+ * Bare URLs are DROPPED outright rather than read out as a domain: even a short domain read aloud
+ * (protocol, slashes, dots spelled out) is more jarring than silently omitting it in a conversational
+ * voice reply, and a companion's spoken replies aren't a link-sharing channel — the link still survives
+ * in the stored/displayed text bubble.
+ */
+export function sanitizeForSpeech(text: string): string {
+  let out = text;
+  // fenced code blocks → inner body only (an optional leading "```js\n" language tag is swallowed with
+  // its newline; a same-line "```code```" has no newline to match, so nothing is misread as a language tag)
+  out = out.replace(/```([a-zA-Z0-9]*\n)?([\s\S]*?)```/g, (_m, _lang, body) => body);
+  // inline code spans
+  out = out.replace(/`([^`]+)`/g, "$1");
+  // markdown links: keep the label, drop the URL
+  out = out.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  // bare URLs: dropped outright — see doc comment above
+  out = out.replace(/https?:\/\/\S+/g, "");
+  // heading markers at line start ("# Heading" → "Heading")
+  out = out.replace(/^[ \t]*#{1,6}[ \t]+/gm, "");
+  // list markers ("- ", "* ", "+ ", "1. ") at line start
+  out = out.replace(/^[ \t]*(?:[-*+]|\d+\.)[ \t]+/gm, "");
+  // bold: **x** / __x__
+  out = out.replace(/\*\*([^*]+)\*\*/g, "$1");
+  out = out.replace(/__([^_]+)__/g, "$1");
+  // italic: *x* / _x_ — word-boundary guarded so plain prose like "snake_case_name" is left alone
+  out = out.replace(/(?<![\w*])\*([^*\n]+)\*(?![\w*])/g, "$1");
+  out = out.replace(/(?<![\w_])_([^_\n]+)_(?![\w_])/g, "$1");
+  // read-aloud-hostile symbol runs: ***, ---, ~~~, >>>, ### left over from a malformed/partial match, etc.
+  out = out.replace(/[*_~`#>=-]{3,}/g, " ");
+  // emoji + pictographs + variation selectors + ZWJ/keycap sequences
+  out = out.replace(EMOJI_RE, "");
+  // collapse whitespace runs left behind by every strip above
+  out = out.replace(/\s+/g, " ").trim();
+  return out;
+}
+
 /** Where the one-time Kokoro model + voices download lands — its OWN dedicated dir under LOOM_HOME, kept
  *  separate from STT's HF_HOME cache (kokoro-onnx doesn't fetch via the HF Hub the way faster-whisper
  *  does, so overloading hf-cache would just be a confusing footprint, not a real HF cache). */
@@ -209,9 +261,15 @@ export function createKokoroSynthesizer(pythonInterpreterPath?: string): Compani
     },
     async synthesize({ text, lang, voice }) {
       if (text.length > TTS_MAX_TEXT_LENGTH) return null; // skip straight to the text degrade — never burn the subprocess bound on a reply nobody wants read aloud in full
+      // Sanitize for the SPOKEN input only — the caller (chat-gateway's tryDeliverVoice) keeps passing
+      // the ORIGINAL `text` to persistence/display; this cleaned copy never leaves this function. An
+      // all-emoji/all-markup reply sanitizes to empty — degrade to the plain text reply rather than synth
+      // silence, mirroring the over-length degrade right above.
+      const spoken = sanitizeForSpeech(text);
+      if (!spoken) return null;
       const bin = resolveTtsPython(pythonInterpreterPath);
       if (!bin) return null;
-      return runSynthesizeScript(bin, text, lang, voice);
+      return runSynthesizeScript(bin, spoken, lang, voice);
     },
   };
 }
