@@ -97,7 +97,7 @@ async function toolsFor(router, sessionId, role) {
 {
   const delivered = [];
   const deliverReply = async (sid, text) => { delivered.push({ sid, text }); return { delivered: true, chunks: 1 }; };
-  const router = new OrchestrationMcpRouter({}, {}, { companionSessionId: "companion-sess", deliverReply });
+  const router = new OrchestrationMcpRouter({}, {}, { companionSessionIds: new Set(["companion-sess"]), deliverReply });
 
   // Companion session (manager role) — chat_reply present + it routes to deliverReply.
   {

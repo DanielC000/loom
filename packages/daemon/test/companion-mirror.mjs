@@ -88,7 +88,7 @@ try {
     gw.registerAdapter(inApp);
     gw.registerAdapter(tg);
 
-    const hooks = { companionSessionId: null };
+    const hooks = { companionSessionIds: new Set() };
     const controller = new CompanionController({
       db: { listEnabledCompanionReminders: () => [] },
       submitTurn: submitSpy,
@@ -97,11 +97,16 @@ try {
       env: {},
       buildGateway: () => gw,
     });
-    // Boot the controller with a config so `this.gateway` is live (startGateway wires the injected builder).
-    await controller.startInitial({
-      botToken: null, allowedChatId: "", sessionId: "sess-A", chatScope: "dm",
-      homeChannel: null, homeChatId: null, heartbeatIntervalMinutes: 0, heartbeatPrompt: "",
-    });
+    // Boot the controller with BOTH sessions live (multi-companion runtime: the controller now dispatches
+    // handleInAppInbound/deliverReply by sessionId to the gateway THAT session owns — a session absent from
+    // the enabled set is "companion-off", not silently routed through whichever gateway happens to exist. The
+    // test's `buildGateway` returns the SAME shared gw for both, so this still proves the real invariant: a
+    // web turn on session A mirrors ONLY to A's own bound channels (bindingsForSession(sessionId)), never
+    // broadcasting into session B's, even though both share one underlying ChatGateway instance here).
+    await controller.startInitial([
+      { botToken: null, allowedChatId: "", sessionId: "sess-A", chatScope: "dm", homeChannel: null, homeChatId: null, heartbeatIntervalMinutes: 0, heartbeatPrompt: "" },
+      { botToken: null, allowedChatId: "", sessionId: "sess-B", chatScope: "dm", homeChannel: null, homeChatId: null, heartbeatIntervalMinutes: 0, heartbeatPrompt: "" },
+    ]);
 
     // A web turn on session A (bound to telegram tg-A): accepted, submitted once, and mirrored to tg-A ONLY.
     const resA = await controller.handleInAppInbound("sess-A", "hello from the cockpit");
@@ -142,14 +147,14 @@ try {
       db: { listEnabledCompanionReminders: () => [] },
       submitTurn: submitSpy,
       pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
-      hooks: { companionSessionId: null },
+      hooks: { companionSessionIds: new Set() },
       env: {},
       buildGateway: () => gw,
     });
-    await controller.startInitial({
+    await controller.startInitial([{
       botToken: null, allowedChatId: "", sessionId: "sess-slow", chatScope: "dm",
       homeChannel: null, homeChatId: null, heartbeatIntervalMinutes: 0, heartbeatPrompt: "",
-    });
+    }]);
 
     const started = Date.now();
     const res = await controller.handleInAppInbound("sess-slow", "don't wait on me");
@@ -179,14 +184,14 @@ try {
       db: { listEnabledCompanionReminders: () => [] },
       submitTurn: submitSpy,
       pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
-      hooks: { companionSessionId: null },
+      hooks: { companionSessionIds: new Set() },
       env: {},
       buildGateway: () => gw,
     });
-    await controller.startInitial({
+    await controller.startInitial([{
       botToken: null, allowedChatId: "", sessionId: "sess-fail", chatScope: "dm",
       homeChannel: null, homeChatId: null, heartbeatIntervalMinutes: 0, heartbeatPrompt: "",
-    });
+    }]);
 
     const cap = captureConsoleError();
     let threw = false;

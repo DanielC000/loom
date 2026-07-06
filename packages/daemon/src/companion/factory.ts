@@ -1,11 +1,13 @@
 /**
- * Loom Companion — wiring that assembles the ChatGateway + the productized Telegram adapter from the env
- * companion config AND the DURABLE binding store. Loads the persisted session↔chat bindings from the db
- * (Companion authz layer), bootstrap-seeds the single env binding when the store is empty, injects the
- * db-backed per-binding sender authorization, registers the Telegram adapter, and routes the adapter's
- * inbound through the gateway. Returns the gateway; index.ts starts/stops it and routes the agent's
- * chat_reply out through `gateway.deliverReply`. Constructing this does NOT touch the network — call
- * `gateway.start()` to begin polling.
+ * Loom Companion — wiring that assembles the ChatGateway + the productized Telegram adapter from a
+ * companion config AND the DURABLE binding store (multi-companion runtime: the controller calls this ONCE
+ * PER ENABLED config, one ChatGateway instance per companion session). Loads the persisted session↔chat
+ * bindings from the db SCOPED TO cfg.sessionId (Companion authz layer — never the global binding table, so
+ * one companion's gateway can never hold another's binding), bootstrap-seeds the single env binding when
+ * THAT session has no bindings yet, injects the db-backed per-binding sender authorization, registers the
+ * Telegram adapter, and routes the adapter's inbound through the gateway. Returns the gateway; the
+ * controller starts/stops it and routes the agent's chat_reply out through `gateway.deliverReply`.
+ * Constructing this does NOT touch the network — call `gateway.start()` to begin polling.
  */
 import { randomUUID } from "node:crypto";
 import { ChatGateway } from "./chat-gateway.js";
@@ -49,18 +51,25 @@ function toSessionBinding(b: CompanionBinding): SessionBinding {
  * undefined ⇒ deliverReply's text path is unchanged, byte-identical to today.
  */
 export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitTurn, db: CompanionBindingStore, inApp?: InAppChannel, originResolver?: (sessionId: string) => CompanionRoute | null, transcribe?: CompanionTranscriber, synthesize?: CompanionSynthesizer): ChatGateway {
-  // Load durable bindings. BOOTSTRAP: an empty store + present env config seeds ONE binding (the
-  // single-owner env path). The DM authz rule means the owner works with no allowlist row; a group scope
+  // Load durable bindings SCOPED TO THIS SESSION (multi-companion runtime, SECURITY-CRITICAL): filtering to
+  // cfg.sessionId — rather than the global companion_bindings table — is what guarantees a gateway's OWN
+  // routing map can NEVER contain another companion's binding, even when multiple companions are armed
+  // concurrently (each gets its own ChatGateway instance via the controller's per-session map). It also
+  // fixes a correctness bug the global read would otherwise hit under multi-companion: the bootstrap-seed
+  // guard below checks "this session has NO bindings yet", which the GLOBAL binding count would answer
+  // wrongly (companion B would see companion A's bindings and skip seeding its OWN).
+  // BOOTSTRAP: an empty (session-scoped) store + present env config seeds ONE binding (the single-owner env
+  // path). The DM authz rule means the owner works with no allowlist row; a group scope
   // (LOOM_COMPANION_CHAT_SCOPE=group) seeds a group binding to which senders are added over REST. This
-  // whole path only runs when the companion is configured (index.ts gates on a non-null CompanionConfig),
-  // so an unconfigured daemon never writes a binding row — default-OFF stays byte-identical.
+  // whole path only runs when the companion is configured (index.ts gates on the enabled config SET), so an
+  // unconfigured daemon never writes a binding row — default-OFF stays byte-identical.
   // Bootstrap the single env/Telegram binding ONLY when a token exists (the env single-owner path). An
   // IN-APP-ONLY companion (no token) carries no Telegram route — its in-app binding is minted by the
   // provision endpoint, not here — so seeding a Telegram binding from an empty allowedChatId is skipped.
-  let bindings = db.listCompanionBindings();
+  let bindings = db.listCompanionBindings().filter((b) => b.sessionId === cfg.sessionId);
   if (bindings.length === 0 && cfg.botToken) {
     db.upsertCompanionBinding({ sessionId: cfg.sessionId, channel: TELEGRAM_CHANNEL, chatId: cfg.allowedChatId, scope: cfg.chatScope });
-    bindings = db.listCompanionBindings();
+    bindings = db.listCompanionBindings().filter((b) => b.sessionId === cfg.sessionId);
   }
   // DM-pairing coordinator: the db-backed redemption path with the real wall clock (epoch ms). Default
   // rate-limit/lockout policy (5 attempts / 10-min window / 15-min lockout) — tests inject a fake clock.

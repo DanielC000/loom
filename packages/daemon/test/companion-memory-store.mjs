@@ -202,7 +202,7 @@ try {
     }
     const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
     const svc = new SessionService(db, host, new OrchestrationControl());
-    const orch = new OrchestrationMcpRouter(db, svc, { companionSessionId: SESS, deliverReply: async () => ({ delivered: true }) });
+    const orch = new OrchestrationMcpRouter(db, svc, { companionSessionIds: new Set([SESS]), deliverReply: async () => ({ delivered: true }) });
 
     const connect = async (server) => {
       const [clientT, serverT] = InMemoryTransport.createLinkedPair();

@@ -44,17 +44,22 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * binding). No cached transport, so a dropped stream can't wedge the surface mid-session.
  */
 /**
- * Loom Companion (Phase 0 spike) hooks, threaded from index.ts. The `chat_reply` tool is registered
- * ONLY on the single configured companion session's MCP server, so every OTHER manager/worker spawn's
- * surface stays byte-identical and never sees a stray tool (the "fully additive" discipline). Both fields
- * absent ⇒ companion off ⇒ no session ever gets chat_reply.
+ * Loom Companion hooks, threaded from index.ts (generalized to MULTI-companion by the multi-companion
+ * runtime card). The `chat_reply` tool is registered ONLY on an ENABLED companion session's MCP server —
+ * checked via Set membership (`companionSessionIds.has(sessionId)`), so N concurrently-armed companions
+ * each get it on their OWN session — every OTHER manager/worker spawn's surface stays byte-identical and
+ * never sees a stray tool (the "fully additive" discipline). Absent/empty ⇒ no session gets chat_reply.
  */
 export interface CompanionHooks {
-  /** The bound companion session id — chat_reply is registered iff sessionId === this. Null/undefined ⇒ off. */
-  companionSessionId?: string | null;
+  /** Every currently-ENABLED companion session id — chat_reply is registered iff this Set has the session
+   *  being served. Undefined/empty ⇒ off for everyone. The sessionId tested is always the MCP server's OWN
+   *  closed-over session (never agent-suppliable), so this is a per-session gate, not a routing decision —
+   *  it can never let one companion's tool call act on another's behalf. */
+  companionSessionIds?: ReadonlySet<string>;
   /** Deliver the agent's chat_reply(text, voice?) back OUT to the chat bound to the session
    *  (companion/chat-gateway.ts). `voice` is the agent's PER-REPLY voice request (VOICE-P4, card
-   *  edd11203) — consulted ONLY when the route's pref mode is "auto"; ignored for "on"/"off". */
+   *  edd11203) — consulted ONLY when the route's pref mode is "auto"; ignored for "on"/"off". The
+   *  controller dispatches this by `sessionId` to THAT session's own gateway — never cross-wired. */
   deliverReply?: (sessionId: string, text: string, voice?: boolean) => Promise<{ delivered: boolean; reason?: string }>;
   /**
    * SERVER-DERIVED route capture for reminder_create — the current turn's originating companion route (or
@@ -157,15 +162,16 @@ export class OrchestrationMcpRouter {
   }
 
   /**
-   * Loom Companion (Phase 0 spike): register `chat_reply` ONLY on the single configured companion
-   * session's MCP server. Placed BEFORE the role split so a companion bound to EITHER a manager or a
-   * worker session gets it; a session that isn't the companion never registers it, keeping every other
-   * spawn's tool surface byte-identical. The tool routes to the companion delivery path (deliverReply →
-   * the chat transport) — it does NOT submit a turn (that would loop the reply back into the agent).
+   * Loom Companion: register `chat_reply` ONLY on an ENABLED companion session's MCP server (multi-companion
+   * runtime — `companionSessionIds` may hold several concurrently-armed sessions; each gets its OWN
+   * chat_reply on its OWN server build). Placed BEFORE the role split so a companion bound to EITHER a
+   * manager or a worker session gets it; a session that isn't in the enabled set never registers it, keeping
+   * every other spawn's tool surface byte-identical. The tool routes to THIS session's own delivery path
+   * (deliverReply, dispatched by `sessionId` to that session's own gateway — never another companion's) — it
+   * does NOT submit a turn (that would loop the reply back into the agent).
    */
   private registerChatReplyIfCompanion(server: McpServer, sessionId: string): void {
-    const companionId = this.companion.companionSessionId;
-    if (!companionId || sessionId !== companionId) return;
+    if (!this.companion.companionSessionIds?.has(sessionId)) return;
     const deliverReply = this.companion.deliverReply;
     server.registerTool(
       "chat_reply",
@@ -188,8 +194,8 @@ export class OrchestrationMcpRouter {
   }
 
   /**
-   * Loom Companion (epic Phase 2): self-authored skills. Registered ONLY on the single bound companion
-   * session (the SAME gate as chat_reply) so every other manager/worker spawn's surface stays byte-identical.
+   * Loom Companion (epic Phase 2): self-authored skills. Registered ONLY on an ENABLED companion session
+   * (the SAME per-session gate as chat_reply) so every other manager/worker spawn's surface stays byte-identical.
    * The store is ISOLATED per companion under <LOOM_HOME>/companion-skills/<sessionId>/ (skills/companion-
    * store.ts): writes NEVER touch the global SKILLS_DIR and are NEVER injected into any session's
    * .claude/skills. Loading is ON-DEMAND — the companion consults skill_list (compact) then skill_read (full);
@@ -197,8 +203,7 @@ export class OrchestrationMcpRouter {
    * skill_remove curates.
    */
   private registerCompanionSkillTools(server: McpServer, sessionId: string): void {
-    const companionId = this.companion.companionSessionId;
-    if (!companionId || sessionId !== companionId) return;
+    if (!this.companion.companionSessionIds?.has(sessionId)) return;
 
     server.registerTool(
       "skill_author",
@@ -261,14 +266,13 @@ export class OrchestrationMcpRouter {
 
   /**
    * Loom Companion (epic Phase 2): self-authored DURABLE MEMORY — the sibling surface of
-   * registerCompanionSkillTools (SAME single-companion-session gate), backed by companion-memory-store.ts
+   * registerCompanionSkillTools (SAME per-session gate), backed by companion-memory-store.ts
    * (MEMORY.md entries, isolated per companion under <LOOM_HOME>/companion-memory/<sessionId>/, never the
    * global SKILLS_DIR). Agent surface ONLY — this card does NOT touch recall/turn-formation; a memory
    * entry authored here is not yet injected into any prompt.
    */
   private registerCompanionMemoryTools(server: McpServer, sessionId: string): void {
-    const companionId = this.companion.companionSessionId;
-    if (!companionId || sessionId !== companionId) return;
+    if (!this.companion.companionSessionIds?.has(sessionId)) return;
 
     server.registerTool(
       "memory_write",
@@ -331,7 +335,7 @@ export class OrchestrationMcpRouter {
   /**
    * Loom Companion Reminders (Companion Memory & Reminders Design, Surface 2 s4): the RECURRING reminders
    * engine's agent surface — the sibling of registerCompanionMemoryTools/registerCompanionSkillTools (SAME
-   * single-companion-session gate). Unlike those, there is NO spawn surface here either: a reminder only
+   * per-session gate). Unlike those, there is NO spawn surface here either: a reminder only
    * ever targets the companion's OWN session (server-derived sessionId, never agent-passed — mirrors "the
    * agent never passes a projectId"). Cron is validated AT THE BOUNDARY (never relying on the watcher's
    * defensive catch), the route is captured SERVER-SIDE exactly like wake_me, and create/cancel drive
@@ -339,8 +343,7 @@ export class OrchestrationMcpRouter {
    * immediately instead of waiting on an unrelated config write's reconcile.
    */
   private registerCompanionReminderTools(server: McpServer, sessionId: string): void {
-    const companionId = this.companion.companionSessionId;
-    if (!companionId || sessionId !== companionId) return;
+    if (!this.companion.companionSessionIds?.has(sessionId)) return;
     const db = this.db;
 
     server.registerTool(

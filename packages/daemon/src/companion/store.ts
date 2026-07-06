@@ -1,14 +1,15 @@
 /**
- * Loom Companion — the DB-backed RUN-config layer (Companion epic Phase 3). Bridges the env-only spike
- * config (`config.ts` › readCompanionConfig) and the durable `companion_config` DB row so a human can
- * configure a companion WITHOUT editing a .env and restarting.
+ * Loom Companion — the DB-backed RUN-config layer (Companion epic Phase 3, generalized to MULTI-companion
+ * by the multi-companion runtime card). Bridges the env-only spike config (`config.ts` › readCompanionConfig)
+ * and the durable `companion_config` DB row so a human can configure one or more companions WITHOUT editing
+ * a .env and restarting.
  *
  * Two responsibilities:
- *   1. `resolveCompanionConfig` — the BOOT resolver. Env (LOOM_COMPANION_*) is the BOOTSTRAP/override: if
- *      set, it SEEDS/overrides the DB row (token encrypted) BEFORE the gateway is built, then the effective
- *      CompanionConfig is built from the (DB-sourced) row — so env wins per the PL ruling, and a
- *      REST-configured companion with no env still comes up. No env + no enabled row ⇒ null (OFF,
- *      byte-identical to today).
+ *   1. `resolveAllCompanionConfigs` — the BOOT resolver. Env (LOOM_COMPANION_*) is the BOOTSTRAP/override: if
+ *      set, it SEEDS/overrides the DB row (token encrypted) BEFORE the gateway is built, then every ENABLED
+ *      row's effective CompanionConfig is built (side-effect-free — see `resolveAllEnabledConfigs`) — so env
+ *      wins per the PL ruling, and a REST-configured companion with no env still comes up. No env + no
+ *      enabled rows ⇒ empty array (OFF, byte-identical to today).
  *   2. `maskCompanionConfig` — the REST masking edge. Turns a stored row (with the ENCRYPTED blob) into the
  *      human-facing CompanionConfigMasked: `configured:true` + the token's last 4 only, NEVER the token.
  *
@@ -38,20 +39,20 @@ export interface CompanionConfigStore {
 }
 
 /**
- * Build the effective CompanionConfig for boot from the DB, with env as bootstrap/override. Returns null
- * when neither env nor an enabled DB row configures a companion — the OFF path is byte-identical to today.
- * A row whose token blob can't be decrypted (corrupt / wrong key) is treated as OFF with a warning, never
- * a crash. `keyPath` overrides the envelope key file (test seam only).
+ * Build the effective CompanionConfig set for boot from the DB, with env as bootstrap/override. Returns an
+ * empty array when neither env nor any enabled DB row configures a companion — the OFF path is
+ * byte-identical to today. A row whose token blob can't be decrypted (corrupt / wrong key) is dropped with
+ * a warning, never a crash. `keyPath` overrides the envelope key file (test seam only).
  *
  * This is the BOOT resolver: it performs the env BOOTSTRAP write (seed/override the DB row + lay the home)
- * and then reads back the effective config via `resolveEffectiveConfig`. The hot-lifecycle controller uses
- * the side-effect-FREE `resolveEffectiveConfig` directly (a live REST reconcile must NOT re-bootstrap env).
+ * and then reads back every enabled config via `resolveAllEnabledConfigs`. The hot-lifecycle controller uses
+ * the side-effect-FREE `resolveAllEnabledConfigs` directly (a live REST reconcile must NOT re-bootstrap env).
  */
-export function resolveCompanionConfig(
+export function resolveAllCompanionConfigs(
   db: CompanionConfigStore,
   env: NodeJS.ProcessEnv,
   keyPath?: string,
-): CompanionConfig | null {
+): CompanionConfig[] {
   const envCfg = readCompanionConfig(env);
   // The env spike path ALWAYS carries a token (readCompanionConfig returns null without one — the in-app-only
   // tokenless companion is a DB-provision-only shape, never an env config), so envCfg.botToken is non-null here.
@@ -70,61 +71,57 @@ export function resolveCompanionConfig(
     // Seed the home target from env if unset (app_meta is the single source; a REST PUT can override later).
     if (!db.getCompanionHome()) db.setCompanionHome({ channel: envCfg.homeChannel, chatId: envCfg.homeChatId });
   }
-  return resolveEffectiveConfig(db, env, keyPath);
+  return resolveAllEnabledConfigs(db, env, keyPath);
 }
 
 /**
- * The side-effect-FREE effective-config resolver, factored out of `resolveCompanionConfig` so the hot
- * lifecycle controller can recompute "what the single live companion should be" on a REST config write
- * WITHOUT re-running the env bootstrap (which would re-encrypt/re-write the row every reconcile). It only
- * READS: picks the effective row (env's pinned session when env is present, else the single enabled row),
- * decrypts, and builds the CompanionConfig — or returns null (OFF) when no row configures a companion, a
- * disabled row, or a corrupt/undecryptable blob. Never writes, never throws. `keyPath` is the test seam.
+ * The side-effect-FREE effective-config-SET resolver, factored out of `resolveAllCompanionConfigs` so the
+ * hot lifecycle controller can recompute "which companions should be live" on a REST config write WITHOUT
+ * re-running the env bootstrap (which would re-encrypt/re-write the row every reconcile). It only READS:
+ * builds a CompanionConfig for EVERY enabled row (multi-companion runtime — every enabled config is armed,
+ * not just the oldest), dropping a row that fails to decrypt (corrupt/undecryptable blob — logged, never a
+ * crash). The env-pinned session (when env is present) is just one more enabled row here — env's own
+ * upsert already flipped it `enabled:true`, so it needs no special-casing beyond the bootstrap write above.
+ * Never writes, never throws. `keyPath` is the test seam.
  */
-export function resolveEffectiveConfig(
+export function resolveAllEnabledConfigs(
   db: CompanionConfigStore,
-  env: NodeJS.ProcessEnv,
+  _env: NodeJS.ProcessEnv,
   keyPath?: string,
-): CompanionConfig | null {
-  const envCfg = readCompanionConfig(env);
-  // Effective row: env's session when env is present (boot upserted it), else the single enabled row.
-  // Single-companion today: if a human left MORE THAN ONE enabled config on different sessions, only the
-  // first comes up and the rest silently never do — warn (naming the count + chosen session) so that isn't
-  // invisible. (A hard single-enabled invariant is a future decision; a warning is enough here.)
-  let row: CompanionConfigRow | undefined;
-  if (envCfg) {
-    row = db.getCompanionConfig(envCfg.sessionId);
-  } else {
-    const enabled = db.listCompanionConfigs().filter((c) => c.enabled);
-    const chosen = enabled[0];
-    if (enabled.length > 1 && chosen) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[companion] ${enabled.length} enabled companion configs found — booting the FIRST (session ` +
-          `${chosen.sessionId.slice(0, 8)}) and IGNORING the other ${enabled.length - 1}. Enable exactly one.`,
-      );
-    }
-    row = chosen;
+): CompanionConfig[] {
+  const home = db.getCompanionHome();
+  const enabled = db.listCompanionConfigs().filter((c) => c.enabled);
+  const configs: CompanionConfig[] = [];
+  for (const row of enabled) {
+    const cfg = buildConfigFromRow(row, home, keyPath);
+    if (cfg) configs.push(cfg);
   }
-  if (!row || !row.enabled) return null; // OFF — no env + no enabled row ⇒ byte-identical to today.
+  return configs;
+}
 
+/**
+ * Build a single CompanionConfig from an ENABLED row (caller filters on `enabled` — this never re-checks
+ * it), or null when the token blob fails to decrypt (corrupt / lost key — logged, never a crash). Shared by
+ * `resolveAllEnabledConfigs` for every enabled row.
+ */
+function buildConfigFromRow(row: CompanionConfigRow, home: CompanionRoute | null, keyPath?: string): CompanionConfig | null {
   // An IN-APP-ONLY companion stores NO token (empty blob): botToken stays null and the gateway comes up with
   // only the in-app adapter (no Telegram long-poll — see createCompanionGateway). This is a VALID armed
-  // companion, NOT the OFF path. Only a NON-EMPTY blob is decrypted; a decrypt FAILURE there still ⇒ OFF.
+  // companion, NOT the OFF path. Only a NON-EMPTY blob is decrypted; a decrypt FAILURE there still ⇒ dropped.
   let botToken: string | null = null;
   if (row.botTokenBlob) {
     try {
       botToken = decryptSecret(row.botTokenBlob, keyPath);
     } catch {
-      // A corrupt/undecryptable blob (e.g. a lost key file) — stay OFF rather than crash the daemon. Do NOT
-      // log the blob; the reason is generic on purpose (no ciphertext / no key material in the log).
+      // A corrupt/undecryptable blob (e.g. a lost key file) — drop this one rather than crash the daemon (or
+      // the rest of the enabled set). Do NOT log the blob; the reason is generic on purpose (no ciphertext /
+      // no key material in the log).
       // eslint-disable-next-line no-console
       console.warn(`[companion] stored config for session ${row.sessionId.slice(0, 8)} could not be decrypted — companion NOT started.`);
       return null;
     }
   }
   // Home comes from app_meta (the single source), with the env-style default (channel / allowedChatId).
-  const home = db.getCompanionHome();
   return {
     botToken,
     allowedChatId: row.allowedChatId,

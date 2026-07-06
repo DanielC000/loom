@@ -125,7 +125,7 @@ const inAppBinding = (sessionId) => ({ sessionId, channel: IN_APP_CHANNEL, chatI
     botToken: "unused-by-in-app", allowedChatId: "sess-A", sessionId: "sess-A", chatScope: "dm",
     homeChannel: IN_APP_CHANNEL, homeChatId: "sess-A", heartbeatIntervalMinutes: 0, heartbeatPrompt: "p",
   };
-  const hooks = { companionSessionId: null };
+  const hooks = { companionSessionIds: new Set() };
   const controller = new CompanionController({
     // unused by the injected resolveEffective + buildGateway; listEnabledCompanionReminders is the one
     // method the controller's reconcile path itself calls (rearmReminders' existence check) — every
@@ -137,7 +137,7 @@ const inAppBinding = (sessionId) => ({ sessionId, channel: IN_APP_CHANNEL, chatI
     env: {},
     inApp,
     buildGateway,
-    resolveEffective: () => cfg,
+    resolveEffective: () => [cfg],
   });
 
   // Before any gateway is live: handleInAppInbound is a safe "companion-off" (never throws, never routes).
@@ -145,7 +145,7 @@ const inAppBinding = (sessionId) => ({ sessionId, channel: IN_APP_CHANNEL, chatI
   check("controller: handleInAppInbound is companion-off before a gateway is live", off.accepted === false && off.reason === "companion-off");
 
   await controller.reconcile(); // OFF → ON: builds + starts the gateway
-  check("controller: gateway live after reconcile, chat_reply gate points at the bound session", controller.snapshot().running === true && hooks.companionSessionId === "sess-A");
+  check("controller: gateway live after reconcile, chat_reply gate points at the bound session", controller.snapshot().running === true && hooks.companionSessionIds.has("sess-A"));
 
   const { frames, client } = makeClient();
   inApp.attach("sess-A", client);

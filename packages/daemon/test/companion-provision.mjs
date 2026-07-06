@@ -12,6 +12,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   3. ROLLBACK: a post-spawn write failure tears the spawned session DOWN (no orphan session/config/binding).
 //   4. Provenance: the provision sets provisioned:true; deleting the companion RETIRES a provisioned session
 //      but NOT a manually-bound (provisioned:false) pre-existing session.
+//   5. MULTI-COMPANION (the old single-companion pre-spawn 409 is GONE): provisioning a 2nd companion while
+//      one is already enabled now SUCCEEDS — a distinct session spawns and arms its OWN gateway concurrently.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-provision.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -129,7 +131,7 @@ async function makeRig(name) {
   const submitSpy = () => ({ delivered: true });
   const gw = makeGatewayBuilder(submitSpy);
   const hb = makeHeartbeatBuilder();
-  const hooks = { companionSessionId: null };
+  const hooks = { companionSessionIds: new Set() };
   const controller = new CompanionController({
     db, submitTurn: submitSpy,
     pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
@@ -167,7 +169,7 @@ try {
       !!inAppBind && inAppBind.sessionId === sid && inAppBind.chatId === sid && inAppBind.scope === "dm");
     check("default: NO Telegram binding written (in-app-only)", !binds.some((b) => b.channel === TELEGRAM));
 
-    check("default: the in-app gateway is armed (running), gate points at the session", rig.controller.snapshot().running === true && rig.hooks.companionSessionId === sid);
+    check("default: the in-app gateway is armed (running), gate points at the session", rig.controller.snapshot().running === true && rig.hooks.companionSessionIds.has(sid));
     check("default: exactly one gateway built, in-app adapter started, NO Telegram adapter", rig.gw.built.length === 1 && rig.gw.built[0].telegram === null && rig.gw.built[0].inApp.started === 1);
 
     check("default: masked response — configured, tokenConfigured:false, empty last-4, provisioned", body.configured === true && body.tokenConfigured === false && body.tokenLast4 === "" && body.provisioned === true);
@@ -217,7 +219,7 @@ try {
     check("rollback: NO orphan session row survives", rig.db.getSession(sid) === undefined);
     check("rollback: NO orphan config row survives", rig.db.getCompanionConfig(sid) === undefined);
     check("rollback: NO orphan binding survives for the session", !rig.db.listCompanionBindings().some((b) => b.sessionId === sid));
-    check("rollback: the live companion is OFF (reconciled to the rolled-back DB)", rig.controller.snapshot().running === false && rig.hooks.companionSessionId === null);
+    check("rollback: the live companion is OFF (reconciled to the rolled-back DB)", rig.controller.snapshot().running === false && rig.hooks.companionSessionIds.size === 0);
   }
 
   // ============ Part 4 — provenance-scoped teardown on delete ============
@@ -248,15 +250,20 @@ try {
   }
 
   // ============ Part 6 — fail-closed pre-spawn guards ============
-  // (6a) single-companion precondition: a 2nd provision while one is enabled → 409, and NO 2nd session spawned.
+  // (6a) MULTI-COMPANION (the 409 is GONE): provisioning a 2nd companion while one is already enabled now
+  // SUCCEEDS — a real, distinct session is spawned and its OWN gateway arms concurrently with the first's.
   {
     const rig = await makeRig("p6a.db"); rigs.push(rig);
     const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
-    check("guard(6a): first provision succeeds", first.statusCode === 201 && rig.spawned.length === 1);
+    check("multi(6a): first provision succeeds", first.statusCode === 201 && rig.spawned.length === 1);
+    const firstSid = JSON.parse(first.payload).sessionId;
     const second = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
-    check("guard(6a): a 2nd provision while one is enabled → 409", second.statusCode === 409);
-    check("guard(6a): NO 2nd session was spawned (guard is pre-spawn)", rig.spawned.length === 1);
-    check("guard(6a): the 409 names the single-companion limitation", /already active|multi-companion/.test(JSON.parse(second.payload).error));
+    check("multi(6a): a 2nd provision while one is enabled now SUCCEEDS (201, no 409)", second.statusCode === 201);
+    const secondSid = JSON.parse(second.payload).sessionId;
+    check("multi(6a): a 2nd DISTINCT session was spawned", rig.spawned.length === 2 && secondSid !== firstSid);
+    check("multi(6a): BOTH configs are enabled in the DB", rig.db.getCompanionConfig(firstSid)?.enabled === true && rig.db.getCompanionConfig(secondSid)?.enabled === true);
+    check("multi(6a): BOTH sessions are armed in the live chat_reply gate concurrently", rig.hooks.companionSessionIds.has(firstSid) && rig.hooks.companionSessionIds.has(secondSid));
+    check("multi(6a): the controller shows both live", rig.controller.liveSessionIds().sort().join(",") === [firstSid, secondSid].sort().join(","));
   }
   // (6b) botToken without allowedChatId → 400 (a token with nowhere to reach).
   {

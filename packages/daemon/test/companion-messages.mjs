@@ -150,7 +150,7 @@ try {
     };
     const controller = new CompanionController({
       db: dbStub, submitTurn: submitSpy, pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
-      hooks: { companionSessionId: null }, env: {}, inApp, buildGateway, resolveEffective: () => cfg,
+      hooks: { companionSessionIds: new Set() }, env: {}, inApp, buildGateway, resolveEffective: () => [cfg],
     });
     await controller.reconcile(); // OFF → ON
 

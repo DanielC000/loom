@@ -860,13 +860,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // printable name only. Without this, a name like "Aria\n\n## Untrusted input\n\n…" could inject
     // structure into the one region of the prompt that must never be user-editable.
     const name = typeof b.name === "string" ? sanitizeCompanionName(b.name) : "";
-    // GUARD 1 (single-companion precondition, PRE-SPAWN): resolveEffectiveConfig arms only the OLDEST enabled
-    // config, so a 2nd companion provisioned while one is enabled would spawn a REAL but inert/unrouted session
-    // and mislead with armed:true. Until multi-companion runtime support lands, REFUSE here — BEFORE spawning,
-    // so no inert session is ever created.
-    if (deps.db.listCompanionConfigs().some((c) => c.enabled)) {
-      return reply.code(409).send({ error: "a companion is already active — delete it first, or multi-companion support is not yet available" });
-    }
+    // (multi-companion runtime): the single-companion pre-spawn 409 that used to live here is GONE — the
+    // controller now arms every enabled config concurrently (resolveAllEnabledConfigs), so a 2nd (or Nth)
+    // companion provisioned while another is enabled gets its OWN gateway/session/heartbeat, not an
+    // inert/unrouted one. GUARD 2/3 below (chat-id-needs-token, assistant-role-rig) are unrelated to
+    // single-vs-multi and stay.
     // Resolve the rig: an explicit agentId, else the bundled "Companion" agent in the reserved setup home.
     let agentId: string;
     if (b.agentId !== undefined && b.agentId !== null) {

@@ -150,15 +150,15 @@ function writeConfig(db, { sessionId, token = TOKEN_A, chatId = "chat-1", scope 
 }
 
 // Build a controller + a shared hooks object + an orchMcp that reads the SAME hooks (so chat_reply reflects
-// the controller's live gate). Returns everything the assertions need. `resolveEffective` (optional) drives
-// applyDesired's diff directly (bypassing resolveEffectiveConfig's single-companion row pick) so a test can
-// exercise an ON→ON change of ANY single field in isolation.
+// the controller's live gate). Returns everything the assertions need. `resolveEffective` (optional, returns
+// a CompanionConfig[]) drives applyDesired's diff directly (bypassing resolveAllEnabledConfigs's DB read) so
+// a test can exercise an ON→ON change of ANY single field in isolation.
 function makeRig(db, resolveEffective) {
   const submitted = [];
   const submitSpy = (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; };
   const gw = makeGatewayBuilder(submitSpy);
   const hb = makeHeartbeatBuilder();
-  const hooks = { companionSessionId: null, deliverReply: (sid, text) => controller.deliverReply(sid, text) };
+  const hooks = { companionSessionIds: new Set(), deliverReply: (sid, text) => controller.deliverReply(sid, text) };
   const controller = new CompanionController({
     db,
     submitTurn: submitSpy,
@@ -184,7 +184,7 @@ try {
     const snap = rig.controller.snapshot();
     check("off: startInitial(null) built NO gateway", rig.gw.built.length === 0 && snap.running === false);
     check("off: NO heartbeat armed", rig.hb.built.length === 0 && snap.heartbeatArmed === false);
-    check("off: chat_reply gate is null (companionSessionId)", rig.hooks.companionSessionId === null);
+    check("off: chat_reply gate is empty (companionSessionIds)", rig.hooks.companionSessionIds.size === 0);
     check("off: chat_reply NOT registered on any session's MCP surface", (await chatReplyOn(rig.orch, "assist-1")) === false);
     db.close();
   }
@@ -202,7 +202,7 @@ try {
 
     check("create: adapter built + started exactly once (no restart)", rig.gw.built.length === 1 && rig.gw.built[0].adapter.started === 1 && rig.gw.built[0].adapter.stopped === 0);
     check("create: heartbeat armed (cadence>0)", rig.hb.built.length === 1 && rig.hb.built[0].started === 1 && rig.controller.snapshot().heartbeatArmed === true);
-    check("create: chat_reply gate ON for the bound session", rig.hooks.companionSessionId === "assist-1" && (await chatReplyOn(rig.orch, "assist-1")) === true);
+    check("create: chat_reply gate ON for the bound session", rig.hooks.companionSessionIds.has("assist-1") && (await chatReplyOn(rig.orch, "assist-1")) === true);
     check("create: chat_reply still OFF for a DIFFERENT session (single-session gate)", (await chatReplyOn(rig.orch, "other-sess")) === false);
     // Binding registered: INBOUND routes to the bound session via submitTurn (NOT the outbound path).
     const inb = await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "chat-1", body: "hello" });
@@ -275,16 +275,21 @@ try {
   }
 
   // ============ Part 2b — the adapter rebuilds ONLY on a botToken change (direct applyDesired diff) ============
-  // Drive applyDesired's diff via the resolveEffective seam so each field can change in ISOLATION (the
-  // single-companion row-pick can't produce an ON→ON sessionId change). Proves the adapter/long-poll is
-  // rebuilt ONLY on a token change, while sessionId/allowedChatId/chatScope/cadence changes do NOT rebuild
-  // it (they either no-op or re-point the chat_reply gate + heartbeat, which routing/authz do NOT depend on).
+  // Drive applyDesired's diff via the resolveEffective seam so each field can change in ISOLATION. Proves
+  // the adapter/long-poll is rebuilt ONLY on a token change, while allowedChatId/chatScope/cadence changes
+  // do NOT rebuild it (they either no-op or re-arm the heartbeat, which routing/authz do NOT depend on).
+  // NOTE (no "sessionId change" case here, unlike the pre-multi-companion version of this test): the
+  // controller now keys its live state by session id (a Map<sessionId, …>), so `current`/`desired` in
+  // updateOne are ALWAYS the same session (company_config's sessionId is its primary key and never changes
+  // for an existing row) — there is no more "the one global slot retargets to a different session" case to
+  // exercise. A session leaving the enabled set while a DIFFERENT one joins is a STOP + a START (covered by
+  // Part 1/Part 3's create/delete-live tests), not an in-place diff.
   {
     const db = new Db(dbFile("p2b.db"));
     let desired = cfgOf({ sessionId: "s1", botToken: TOKEN_A, allowedChatId: "c1", chatScope: "dm", cadence: 360 });
-    const rig = makeRig(db, () => desired);
+    const rig = makeRig(db, () => [desired]);
     await rig.controller.reconcile(); // OFF → ON (build #1)
-    check("diff: initial build", rig.gw.built.length === 1 && rig.hb.built.length === 1 && rig.hooks.companionSessionId === "s1");
+    check("diff: initial build", rig.gw.built.length === 1 && rig.hb.built.length === 1 && rig.hooks.companionSessionIds.has("s1"));
 
     desired = { ...desired, allowedChatId: "c2" };
     await rig.controller.reconcile();
@@ -297,10 +302,6 @@ try {
     desired = { ...desired, heartbeatIntervalMinutes: 120 };
     await rig.controller.reconcile();
     check("diff: cadence change → NO adapter rebuild (heartbeat re-armed only)", rig.gw.built.length === 1 && rig.hb.built.length === 2);
-
-    desired = { ...desired, sessionId: "s2" };
-    await rig.controller.reconcile();
-    check("diff: sessionId change → NO adapter rebuild, but gate + heartbeat re-point to s2", rig.gw.built.length === 1 && rig.hooks.companionSessionId === "s2" && rig.hb.built.length === 3 && rig.hb.built[2].cfg.sessionId === "s2");
 
     desired = { ...desired, botToken: TOKEN_B };
     await rig.controller.reconcile();
@@ -324,7 +325,7 @@ try {
     await rig.controller.reconcile();
     check("delete(disable): adapter stopped (long-poll released)", adapter0.stopped === 1);
     check("delete(disable): heartbeat disarmed", watcher0.stopped === 1 && rig.controller.snapshot().heartbeatArmed === false);
-    check("delete(disable): chat_reply OFF (gate cleared)", rig.hooks.companionSessionId === null && (await chatReplyOn(rig.orch, "assist-1")) === false);
+    check("delete(disable): chat_reply OFF (gate cleared)", rig.hooks.companionSessionIds.size === 0 && (await chatReplyOn(rig.orch, "assist-1")) === false);
     check("delete(disable): snapshot byte-identical to the OFF state", JSON.stringify(rig.controller.snapshot()) === OFF_SNAP);
 
     // (3b) re-enable then HARD-DELETE the row → OFF again (no leak across the re-enable).
@@ -353,7 +354,7 @@ try {
     check("toggle: exactly one adapter built per ENABLE (no double-start)", rig.gw.built.length === 4);
     check("toggle: every built adapter started once and is now stopped (no leaked long-poll)", rig.gw.built.every((b) => b.adapter.started === 1 && b.adapter.stopped === 1));
     check("toggle: exactly one watcher built per ENABLE, all stopped (no stacked watcher)", rig.hb.built.length === 4 && rig.hb.built.every((h) => h.started === 1 && h.stopped === 1));
-    check("toggle: ends in the OFF state (gate cleared)", JSON.stringify(rig.controller.snapshot()) === OFF_SNAP && rig.hooks.companionSessionId === null);
+    check("toggle: ends in the OFF state (gate cleared)", JSON.stringify(rig.controller.snapshot()) === OFF_SNAP && rig.hooks.companionSessionIds.size === 0);
     // A redundant enable while ALREADY live must not stack a second adapter.
     writeConfig(db, { sessionId: "assist-1", cadence: 360, enabled: true });
     await rig.controller.reconcile();

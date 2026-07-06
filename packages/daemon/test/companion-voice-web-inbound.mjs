@@ -109,10 +109,10 @@ try {
       return gw;
     };
     const cfg = { botToken: null, allowedChatId: "sess-A", sessionId: "sess-A", chatScope: "dm", homeChannel: IN_APP_CHANNEL, homeChatId: "sess-A", heartbeatIntervalMinutes: 0, heartbeatPrompt: "p" };
-    const hooks = { companionSessionId: null };
+    const hooks = { companionSessionIds: new Set() };
     const controller = new CompanionController({
       db, submitTurn: submitSpy, pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
-      hooks, env: {}, inApp, buildGateway, resolveEffective: () => cfg,
+      hooks, env: {}, inApp, buildGateway, resolveEffective: () => [cfg],
     });
     await controller.reconcile();
 
@@ -143,11 +143,11 @@ try {
       return gw;
     };
     const cfg = { botToken: null, allowedChatId: "sess-B", sessionId: "sess-B", chatScope: "dm", homeChannel: IN_APP_CHANNEL, homeChatId: "sess-B", heartbeatIntervalMinutes: 0, heartbeatPrompt: "p" };
-    const hooks = { companionSessionId: null };
+    const hooks = { companionSessionIds: new Set() };
     const controller = new CompanionController({
       db, submitTurn: (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; },
       pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
-      hooks, env: {}, inApp, buildGateway, resolveEffective: () => cfg,
+      hooks, env: {}, inApp, buildGateway, resolveEffective: () => [cfg],
     });
     await controller.reconcile();
     const { frames, client } = makeClient();
@@ -178,11 +178,11 @@ try {
       return gw;
     };
     const cfg = { botToken: null, allowedChatId: "sess-C", sessionId: "sess-C", chatScope: "dm", homeChannel: IN_APP_CHANNEL, homeChatId: "sess-C", heartbeatIntervalMinutes: 0, heartbeatPrompt: "p" };
-    const hooks = { companionSessionId: null };
+    const hooks = { companionSessionIds: new Set() };
     const controller = new CompanionController({
       db, submitTurn: (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; },
       pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
-      hooks, env: {}, inApp, buildGateway, resolveEffective: () => cfg,
+      hooks, env: {}, inApp, buildGateway, resolveEffective: () => [cfg],
     });
     await controller.reconcile();
     const { frames, client } = makeClient();

@@ -162,7 +162,7 @@ try {
   const stubDb = { getSession: (id) => ({ role: id === "asst-sess" ? "assistant" : id === "mgr-sess" ? "manager" : null }) };
   const delivered = [];
   const deliverReply = async (sid, text) => { delivered.push({ sid, text }); return { delivered: true }; };
-  const router = new OrchestrationMcpRouter(stubDb, {}, { companionSessionId: "asst-sess", deliverReply });
+  const router = new OrchestrationMcpRouter(stubDb, {}, { companionSessionIds: new Set(["asst-sess"]), deliverReply });
 
   check("(e) resolveRole ADMITS an assistant session (returns role assistant, not 404)", router.resolveRole("asst-sess")?.role === "assistant");
   check("(e) resolveRole still 404s a plain session", router.resolveRole("plain-sess") === null);

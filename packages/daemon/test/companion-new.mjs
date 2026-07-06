@@ -108,7 +108,7 @@ try {
     const controller = new CompanionController({
       db, submitTurn: submitSpy,
       pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
-      hooks: { companionSessionId: null }, env: {}, inApp, resolveEffective: () => cfg,
+      hooks: { companionSessionIds: new Set() }, env: {}, inApp, resolveEffective: () => [cfg],
     });
     await controller.reconcile(); // OFF → ON: builds the REAL gateway via factory.ts's createCompanionGateway
 
@@ -151,7 +151,7 @@ try {
     const controller = new CompanionController({
       db, submitTurn: submitSpy,
       pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
-      hooks: { companionSessionId: null }, env: {}, inApp, resolveEffective: () => cfg,
+      hooks: { companionSessionIds: new Set() }, env: {}, inApp, resolveEffective: () => [cfg],
     });
     await controller.reconcile();
 

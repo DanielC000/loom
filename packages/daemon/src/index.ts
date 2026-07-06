@@ -49,7 +49,7 @@ import { rateLimitDeadline, rateLimitedUntil } from "./orchestration/usage-limit
 import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent } from "./orchestration/restart.js";
 import { startVaultVersioners, type VaultVersioner } from "./vault/versioner.js";
 import { buildServer } from "./gateway/server.js";
-import { resolveCompanionConfig } from "./companion/store.js";
+import { resolveAllCompanionConfigs } from "./companion/store.js";
 import { CompanionController, type CompanionReplyHooks } from "./companion/controller.js";
 import { InAppChannel, IN_APP_CHANNEL } from "./companion/in-app.js";
 import { reviveCompanionSessionAtBoot, withCompanionSelfHeal } from "./companion/revive.js";
@@ -359,26 +359,28 @@ async function main(): Promise<void> {
     spawn: (agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt }),
     intervalMs: pollIntervalMs,
   });
-  // Loom Companion (Phase 1): a chat-native companion whose brain is a live `claude` PTY session, served
-  // by the ChatGateway subsystem (registry of channel adapters + inbound routing + outbound deliverReply).
-  // OFF by default — the gateway is only constructed when LOOM_COMPANION_BOT_TOKEN (+ the allowlisted chat
-  // id + the bound session id) is set, so a normal daemon is byte-identical. Built here (so orchMcp can
-  // route the agent's chat_reply through deliverReply); the long-poll adapters are started after `listen`
-  // below. INBOUND submits a turn via the EXISTING pty.enqueueStdin primitive (busy-gating / composer-defer
-  // / FIFO coalesce / rate-limit park all reused) as a 'system' source.
-  // The effective CompanionConfig is now built from the DURABLE companion_config DB row (token decrypted
-  // via the envelope helper), with LOOM_COMPANION_* env as the BOOTSTRAP/override: env, when set, seeds/
-  // overrides the DB row (token encrypted) AND lays the app_meta home target if unset, BEFORE this resolve
-  // returns — so env wins, a REST-configured companion with no env still boots, and no env + no enabled
-  // row ⇒ null ⇒ every path below is byte-identical to an unconfigured daemon (default-OFF).
-  const companionCfg = resolveCompanionConfig(db, process.env);
-  // The mutable chat_reply gate the OrchestrationMcpRouter reads per MCP request. companionSessionId is
-  // SEEDED from the boot config (so a configured companion's bound session gets chat_reply immediately) and
-  // then FLIPPED live by the controller as the companion starts/stops (a REST enable/disable takes effect
-  // with no restart). deliverReply routes THROUGH the controller so it always targets the CURRENT gateway
-  // (stable across a token-change adapter rebuild — never a stale closure).
+  // Loom Companion (multi-companion runtime): ONE OR MORE chat-native companions, each a live `claude` PTY
+  // session, served by the ChatGateway subsystem (registry of channel adapters + inbound routing + outbound
+  // deliverReply) — one gateway per enabled companion config. OFF by default — no gateway is constructed
+  // unless at least one companion config is enabled (LOOM_COMPANION_BOT_TOKEN + the allowlisted chat id +
+  // the bound session id, or a REST-provisioned row), so a normal daemon is byte-identical. Built here (so
+  // orchMcp can route each companion's chat_reply through deliverReply); the long-poll adapters are started
+  // after `listen` below. INBOUND submits a turn via the EXISTING pty.enqueueStdin primitive (busy-gating /
+  // composer-defer / FIFO coalesce / rate-limit park all reused) as a 'system' source.
+  // The FULL enabled-config SET is built from the DURABLE companion_config DB rows (token decrypted via the
+  // envelope helper), with LOOM_COMPANION_* env as the BOOTSTRAP/override: env, when set, seeds/overrides
+  // its DB row (token encrypted) AND lays the app_meta home target if unset, BEFORE this resolve returns —
+  // so env wins for its own session, a REST-configured companion with no env still boots, and no env + no
+  // enabled row ⇒ [] ⇒ every path below is byte-identical to an unconfigured daemon (default-OFF).
+  const companionCfgs = resolveAllCompanionConfigs(db, process.env);
+  // The mutable chat_reply gate the OrchestrationMcpRouter reads per MCP request. companionSessionIds is
+  // SEEDED from the boot set (so every configured companion's bound session gets chat_reply immediately) and
+  // then kept in sync live by the controller as each companion starts/stops (a REST enable/disable takes
+  // effect with no restart, and never touches any OTHER companion's membership). deliverReply routes THROUGH
+  // the controller so it always dispatches to THAT session's own CURRENT gateway (stable across a
+  // token-change adapter rebuild — never a stale closure, never cross-wired to a different companion).
   const companionHooks: CompanionReplyHooks = {
-    companionSessionId: companionCfg?.sessionId ?? null,
+    companionSessionIds: new Set(companionCfgs.map((c) => c.sessionId)),
     deliverReply: (sid, text, voice) => companionController.deliverReply(sid, text, voice),
     // reminder_create's route capture (mirrors wake_me's schedule-time getActiveTurnOrigin read).
     getActiveTurnOrigin: (sid) => pty.getActiveTurnOrigin(sid),
@@ -415,17 +417,18 @@ async function main(): Promise<void> {
   // ALWAYS, stable across a gateway rebuild, no provisioning work at construction time (lazy, memoized —
   // see companion/tts.ts). The shared venv is ONE per machine, so the SAME interpreter path applies.
   const ttsSynthesizer = createKokoroSynthesizer(sttInterpreterPath, companionVoiceEnabled);
-  if (shouldPrewarmCompanionVoice(!!companionCfg, companionVoiceEnabled)) {
+  if (shouldPrewarmCompanionVoice(companionCfgs.length > 0, companionVoiceEnabled)) {
     console.log("[boot] pre-warming the faster-whisper venv (the companion is configured + voice is enabled)");
     prewarmStt(sttInterpreterPath);
     console.log("[boot] pre-warming the kokoro-onnx venv (the companion is configured + voice is enabled)");
     prewarmTts(sttInterpreterPath);
   }
-  // The hot-lifecycle controller (Companion Phase 3 backend): owns the live ChatGateway (Telegram long-poll)
-  // + the proactive heartbeat, and drives BOTH from the human-only REST config writes with NO daemon
-  // restart. Constructed ALWAYS — even when the companion is OFF at boot — so a REST enable can start it
-  // live. Default-OFF stays byte-identical: with companionCfg null it builds no gateway, arms no heartbeat,
-  // and leaves companionSessionId null (chat_reply never registers) — every path below is unchanged.
+  // The hot-lifecycle controller (multi-companion runtime): owns ONE live ChatGateway (Telegram long-poll) +
+  // ONE proactive heartbeat + ONE reminder watcher PER ENABLED companion config, and drives ALL of them from
+  // the human-only REST config writes with NO daemon restart. Constructed ALWAYS — even when no companion is
+  // enabled at boot — so a REST enable can start one live. Default-OFF stays byte-identical: with
+  // companionCfgs empty it builds no gateway, arms no heartbeat, and leaves companionSessionIds empty
+  // (chat_reply never registers for anyone) — every path below is unchanged.
   const companionController = new CompanionController({
     db,
     // INBOUND submit carries the originating {channel, chatId} route as the pty turn's route (5th arg), so
@@ -552,40 +555,44 @@ async function main(): Promise<void> {
     console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);
   });
 
-  // Boot-revive (bug 4cc7826d, companion/revive.ts): revive the bound session BEFORE the controller wires
-  // the gateway around it — see revive.ts for the full why (no human viewer to click "Resume" like a
-  // manager/worker has). Best-effort; never gates boot.
-  reviveCompanionSessionAtBoot(companionCfg, { isAlive: (sid) => pty.isAlive(sid), resume: (sid) => { sessions.resume(sid); } });
-  // Loom Companion: start the initial companion now that the server is up (chat_reply routes back through
-  // this process). The controller builds+starts the Telegram long-poll, arms the proactive heartbeat if a
-  // positive cadence is set, and flips the chat_reply gate on — a no-op when the companion is OFF at boot
-  // (companionCfg null). From here a human-only REST config write reconciles this SAME live state with no
-  // daemon restart (start/re-arm/restart/teardown), so this is the ONLY boot-time companion start.
-  await companionController.startInitial(companionCfg);
-  if (companionCfg) {
-    // Boot-time warn: inbound is role-agnostic, but chat_reply only registers for manager|worker|assistant.
-    // A binding to any OTHER role could "hear but not reply" — surface it rather than fail silently.
-    const boundRole = db.getSession(companionCfg.sessionId)?.role ?? null;
-    if (boundRole && boundRole !== "manager" && boundRole !== "worker" && boundRole !== "assistant") {
-      console.warn(
-        `[companion] WARNING: bound session ${companionCfg.sessionId.slice(0, 8)} has role '${boundRole}' — ` +
-          "inbound will be delivered but chat_reply is NOT registered for this role (companion can HEAR but " +
-          "not REPLY). Bind an assistant/manager/worker session.",
-      );
-    }
-    console.log(`[boot] Loom Companion on (bound session ${companionCfg.sessionId.slice(0, 8)}, allowlisted chat ${companionCfg.allowedChatId})`);
-    if (companionCfg.heartbeatIntervalMinutes > 0) {
-      console.log(`[boot] Companion heartbeat on (every ${companionCfg.heartbeatIntervalMinutes}m, session ${companionCfg.sessionId.slice(0, 8)})`);
-    } else {
-      console.log("[boot] Companion heartbeat off (set LOOM_COMPANION_HEARTBEAT_INTERVAL_MINUTES to a positive value)");
-    }
-    // Recurring reminders (Companion Memory & Reminders Design, Surface 2 s3): armed by the SAME
-    // startInitial → controller.applyDesired call above (rearmReminders), not a separate boot path — this
-    // is purely an observability log, mirroring the heartbeat one. Zero rows (the common case today; s4
-    // ships the reminder_* MCP tools) ⇒ this always reads 0, byte-identical to no watcher having existed.
-    const reminderCount = db.listEnabledCompanionReminders(companionCfg.sessionId).length;
-    if (reminderCount > 0) {
-      console.log(`[boot] Companion reminders on (${reminderCount} enabled, session ${companionCfg.sessionId.slice(0, 8)})`);
+  // Boot-revive (bug 4cc7826d, companion/revive.ts): revive each bound session BEFORE the controller wires
+  // its gateway around it — see revive.ts for the full why (no human viewer to click "Resume" like a
+  // manager/worker has). Best-effort per session; never gates boot.
+  for (const cfg of companionCfgs) {
+    reviveCompanionSessionAtBoot(cfg, { isAlive: (sid) => pty.isAlive(sid), resume: (sid) => { sessions.resume(sid); } });
+  }
+  // Loom Companion: start every enabled companion now that the server is up (chat_reply routes back through
+  // this process). The controller builds+starts each one's Telegram long-poll, arms its proactive heartbeat
+  // if a positive cadence is set, and adds it to the chat_reply gate — a no-op when NO companion is enabled
+  // at boot (companionCfgs empty). From here a human-only REST config write reconciles this SAME live set
+  // with no daemon restart (start/update/stop per session), so this is the ONLY boot-time companion start.
+  await companionController.startInitial(companionCfgs);
+  if (companionCfgs.length > 0) {
+    for (const cfg of companionCfgs) {
+      // Boot-time warn: inbound is role-agnostic, but chat_reply only registers for manager|worker|assistant.
+      // A binding to any OTHER role could "hear but not reply" — surface it rather than fail silently.
+      const boundRole = db.getSession(cfg.sessionId)?.role ?? null;
+      if (boundRole && boundRole !== "manager" && boundRole !== "worker" && boundRole !== "assistant") {
+        console.warn(
+          `[companion] WARNING: bound session ${cfg.sessionId.slice(0, 8)} has role '${boundRole}' — ` +
+            "inbound will be delivered but chat_reply is NOT registered for this role (companion can HEAR but " +
+            "not REPLY). Bind an assistant/manager/worker session.",
+        );
+      }
+      console.log(`[boot] Loom Companion on (bound session ${cfg.sessionId.slice(0, 8)}, allowlisted chat ${cfg.allowedChatId})`);
+      if (cfg.heartbeatIntervalMinutes > 0) {
+        console.log(`[boot] Companion heartbeat on (every ${cfg.heartbeatIntervalMinutes}m, session ${cfg.sessionId.slice(0, 8)})`);
+      } else {
+        console.log("[boot] Companion heartbeat off (set LOOM_COMPANION_HEARTBEAT_INTERVAL_MINUTES to a positive value)");
+      }
+      // Recurring reminders (Companion Memory & Reminders Design, Surface 2 s3): armed by the SAME
+      // startInitial → controller.applyDesired call above (rearmReminders), not a separate boot path — this
+      // is purely an observability log, mirroring the heartbeat one. Zero rows (the common case today; s4
+      // ships the reminder_* MCP tools) ⇒ this always reads 0, byte-identical to no watcher having existed.
+      const reminderCount = db.listEnabledCompanionReminders(cfg.sessionId).length;
+      if (reminderCount > 0) {
+        console.log(`[boot] Companion reminders on (${reminderCount} enabled, session ${cfg.sessionId.slice(0, 8)})`);
+      }
     }
   } else {
     console.log("[boot] Loom Companion off (set LOOM_COMPANION_BOT_TOKEN + LOOM_COMPANION_CHAT_ID + LOOM_COMPANION_SESSION_ID)");

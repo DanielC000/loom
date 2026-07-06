@@ -3329,8 +3329,8 @@ export class Db {
     return (this.db.prepare("SELECT * FROM companion_reminders WHERE session_id = ? ORDER BY created_at, rowid")
       .all(sessionId) as Row[]).map(toCompanionReminder);
   }
-  /** Enabled reminders — the watcher's work set. Scoped to ONE session when given, else every session's
-   *  (a future multi-companion reconcile-all; today there is only ever one live companion). */
+  /** Enabled reminders — the watcher's work set. Scoped to ONE session when given (the controller's
+   *  per-session rearm, multi-companion runtime), else every session's (an admin/all-companions read). */
   listEnabledCompanionReminders(sessionId?: string): CompanionReminder[] {
     if (sessionId !== undefined) {
       return (this.db.prepare("SELECT * FROM companion_reminders WHERE session_id = ? AND enabled = 1 ORDER BY created_at, rowid")

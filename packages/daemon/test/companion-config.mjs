@@ -4,13 +4,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // under the temp home; NO live network, NO real claude, NO daemon, NO live Telegram. The bot token is an
 // OUTWARD credential the daemon must decrypt to use, so the whole point of this layer is: encrypted at
 // rest, decrypted only internally, and NEVER returned in clear or logged. These assert it holds:
-//   0. default-OFF byte-identical: no env + no DB row ⇒ resolveCompanionConfig null + no row written.
+//   0. default-OFF byte-identical: no env + no DB row ⇒ resolveAllCompanionConfigs empty + no row written.
 //   1. round-trip + encryption-at-rest + masked read: the stored blob is CIPHERTEXT (plaintext absent),
 //      decrypts internally to the token, but the masked view is configured:true + last-4 only (plaintext
 //      NEVER present in the masked JSON).
 //   2. env bootstrap + OVERRIDE precedence: LOOM_COMPANION_* with no row seeds the row (token encrypted) +
 //      lays app_meta home; with BOTH env and a row, env WINS; an enabled row with no env resolves; a
-//      disabled row / a corrupt blob ⇒ OFF (null), never a crash.
+//      disabled row / a corrupt blob ⇒ dropped (never a crash); MORE THAN ONE enabled row resolves ALL of
+//      them (multi-companion runtime — no more "pick one, warn the rest away").
 //   3. REST CRUD via the real buildServer: POST→GET(masked)→PUT→DELETE, token never in ANY body, the stored
 //      blob is ciphertext, and every validation 400 leaves no row.
 //   4. token never in any captured log line across the whole run.
@@ -47,7 +48,7 @@ for (const m of ["log", "warn", "error", "info"]) {
 }
 
 const { Db } = await import("../dist/db.js");
-const { resolveCompanionConfig, maskCompanionConfig } = await import("../dist/companion/store.js");
+const { resolveAllCompanionConfigs, maskCompanionConfig } = await import("../dist/companion/store.js");
 const { encryptSecret, decryptSecret } = await import("../dist/keys/envelope.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { PtyHost } = await import("../dist/pty/host.js");
@@ -68,7 +69,7 @@ try {
     const db = new Db(dbFile("p0.db"));
     check("default-off: pristine db has NO companion configs", db.listCompanionConfigs().length === 0);
     check("default-off: getCompanionConfig(any) is undefined", db.getCompanionConfig("nope") === undefined);
-    check("default-off: no env + no row ⇒ resolveCompanionConfig null (companion never built)", resolveCompanionConfig(db, {}) === null);
+    check("default-off: no env + no row ⇒ resolveAllCompanionConfigs empty (companion never built)", resolveAllCompanionConfigs(db, {}).length === 0);
     check("default-off: the resolve wrote NO row (reads/OFF never seed)", db.listCompanionConfigs().length === 0);
     db.close();
   }
@@ -114,7 +115,7 @@ try {
     db.close();
   }
 
-  // ============ Part 2 — env bootstrap + OVERRIDE precedence + OFF edge cases (resolveCompanionConfig) ============
+  // ============ Part 2 — env bootstrap + OVERRIDE precedence + OFF edge cases (resolveAllCompanionConfigs) ============
   {
     // (2a) env set, NO existing row → boot seeding creates the row (token encrypted) + lays app_meta home.
     const db = new Db(dbFile("p2a.db"));
@@ -122,9 +123,9 @@ try {
       LOOM_COMPANION_BOT_TOKEN: PLAINTEXT, LOOM_COMPANION_CHAT_ID: "chat-env", LOOM_COMPANION_SESSION_ID: "sess-env",
       LOOM_COMPANION_HEARTBEAT_INTERVAL_MINUTES: "120",
     };
-    const resolved = resolveCompanionConfig(db, env);
-    check("env-bootstrap: resolves a live config", !!resolved && resolved.sessionId === "sess-env" && resolved.botToken === PLAINTEXT);
-    check("env-bootstrap: cadence carried from env", resolved.heartbeatIntervalMinutes === 120);
+    const resolved = resolveAllCompanionConfigs(db, env);
+    check("env-bootstrap: resolves a live config", resolved.length === 1 && resolved[0].sessionId === "sess-env" && resolved[0].botToken === PLAINTEXT);
+    check("env-bootstrap: cadence carried from env", resolved[0].heartbeatIntervalMinutes === 120);
     const seeded = db.getCompanionConfig("sess-env");
     check("env-bootstrap: a DB row was seeded", !!seeded && seeded.allowedChatId === "chat-env");
     check("env-bootstrap: the seeded token is ENCRYPTED (blob decrypts to the token, not stored plaintext)", seeded.botTokenBlob !== PLAINTEXT && decryptSecret(seeded.botTokenBlob) === PLAINTEXT);
@@ -141,56 +142,55 @@ try {
       LOOM_COMPANION_BOT_TOKEN: PLAINTEXT, LOOM_COMPANION_CHAT_ID: "chat-ENV-new", LOOM_COMPANION_SESSION_ID: "sess-1",
       LOOM_COMPANION_HEARTBEAT_INTERVAL_MINUTES: "45",
     };
-    const over = resolveCompanionConfig(db2, envOverride);
-    check("env-override: resolved config reflects ENV token", over.botToken === PLAINTEXT);
-    check("env-override: resolved config reflects ENV chat id + cadence", over.allowedChatId === "chat-ENV-new" && over.heartbeatIntervalMinutes === 45);
+    const over = resolveAllCompanionConfigs(db2, envOverride);
+    check("env-override: resolved config reflects ENV token", over.length === 1 && over[0].botToken === PLAINTEXT);
+    check("env-override: resolved config reflects ENV chat id + cadence", over[0].allowedChatId === "chat-ENV-new" && over[0].heartbeatIntervalMinutes === 45);
     const overRow = db2.getCompanionConfig("sess-1");
     check("env-override: the DB row was overwritten to env (blob decrypts to env token)", decryptSecret(overRow.botTokenBlob) === PLAINTEXT && overRow.allowedChatId === "chat-ENV-new" && overRow.heartbeatIntervalMinutes === 45);
     db2.close();
 
-    // (2c) NO env, an enabled DB row present → resolve picks the row (the REST-configured, env-free path).
+    // (2c) NO env, an enabled DB row present → resolve picks it up (the REST-configured, env-free path).
     const db3 = new Db(dbFile("p2c.db"));
     db3.upsertCompanionConfig({
       sessionId: "sess-rest", botTokenBlob: encryptSecret(PLAINTEXT), channel: "telegram", allowedChatId: "chat-rest",
       chatScope: "group", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true,
     });
-    const noEnv = resolveCompanionConfig(db3, {});
-    check("no-env: an enabled DB row alone resolves (REST-configured companion boots)", !!noEnv && noEnv.sessionId === "sess-rest" && noEnv.botToken === PLAINTEXT && noEnv.chatScope === "group");
+    const noEnv = resolveAllCompanionConfigs(db3, {});
+    check("no-env: an enabled DB row alone resolves (REST-configured companion boots)", noEnv.length === 1 && noEnv[0].sessionId === "sess-rest" && noEnv[0].botToken === PLAINTEXT && noEnv[0].chatScope === "group");
 
-    // (2d) a DISABLED row + no env → OFF (null).
+    // (2d) a DISABLED row + no env → OFF (empty array).
     db3.upsertCompanionConfig({
       sessionId: "sess-rest", botTokenBlob: encryptSecret(PLAINTEXT), channel: "telegram", allowedChatId: "chat-rest",
       chatScope: "group", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: false,
     });
-    check("disabled: a disabled row + no env ⇒ OFF (null)", resolveCompanionConfig(db3, {}) === null);
+    check("disabled: a disabled row + no env ⇒ OFF (empty array)", resolveAllCompanionConfigs(db3, {}).length === 0);
     db3.close();
 
-    // (2e) a CORRUPT/undecryptable blob → OFF (null), never a crash.
+    // (2e) a CORRUPT/undecryptable blob → dropped from the set (OFF for that row), never a crash.
     const db4 = new Db(dbFile("p2e.db"));
     db4.upsertCompanionConfig({
       sessionId: "sess-x", botTokenBlob: "not-a-valid-envelope", channel: "telegram", allowedChatId: "chat-x",
       chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true,
     });
     let threw = false, corrupt;
-    try { corrupt = resolveCompanionConfig(db4, {}); } catch { threw = true; }
-    check("corrupt: an undecryptable blob ⇒ OFF (null), NOT a crash", threw === false && corrupt === null);
+    try { corrupt = resolveAllCompanionConfigs(db4, {}); } catch { threw = true; }
+    check("corrupt: an undecryptable blob ⇒ dropped (empty array), NOT a crash", threw === false && corrupt.length === 0);
     db4.close();
 
-    // (2f) MORE THAN ONE enabled row + no env → boots the FIRST (deterministic by created_at) and WARNS
-    // naming the count, so the silently-ignored extras aren't invisible.
+    // (2f) MULTI-COMPANION (the whole point of the card): MORE THAN ONE enabled row + no env → resolves
+    // ALL of them (every enabled row gets its own CompanionConfig, no "pick one + warn the rest away").
     const db5 = new Db(dbFile("p2f.db"));
     db5.upsertCompanionConfig({ sessionId: "sess-A", botTokenBlob: encryptSecret(PLAINTEXT), channel: "telegram", allowedChatId: "chat-A", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
     db5.upsertCompanionConfig({ sessionId: "sess-B", botTokenBlob: encryptSecret(PLAINTEXT), channel: "telegram", allowedChatId: "chat-B", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
     const warnBefore = logSink.filter((l) => /enabled companion configs found/.test(l)).length;
-    const multi = resolveCompanionConfig(db5, {});
+    const multi = resolveAllCompanionConfigs(db5, {});
     const warnAfter = logSink.filter((l) => /enabled companion configs found/.test(l)).length;
-    check(">1-enabled: resolves the FIRST enabled row (deterministic by created_at)", !!multi && multi.sessionId === "sess-A");
-    check(">1-enabled: emitted exactly one boot warning naming the count + chosen session", warnAfter === warnBefore + 1 && logSink.some((l) => /2 enabled companion configs found/.test(l) && /sess-A/.test(l)));
-    // A single enabled row does NOT warn (guard against a false-positive warning).
+    check(">1-enabled: resolves BOTH enabled rows (multi-companion runtime)", multi.length === 2 && multi.some((c) => c.sessionId === "sess-A") && multi.some((c) => c.sessionId === "sess-B"));
+    check(">1-enabled: emits NO 'pick one, warn the rest' log (multi-companion is first-class, not a misconfiguration)", warnAfter === warnBefore);
+    // A single enabled row still resolves to exactly that one (no regression from the multi-row case).
     db5.upsertCompanionConfig({ sessionId: "sess-B", botTokenBlob: encryptSecret(PLAINTEXT), channel: "telegram", allowedChatId: "chat-B", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: false });
-    const warnBefore1 = logSink.filter((l) => /enabled companion configs found/.test(l)).length;
-    resolveCompanionConfig(db5, {});
-    check(">1-enabled: a SINGLE enabled row does not warn", logSink.filter((l) => /enabled companion configs found/.test(l)).length === warnBefore1);
+    const single = resolveAllCompanionConfigs(db5, {});
+    check(">1-enabled: disabling one drops it — exactly the remaining enabled row resolves", single.length === 1 && single[0].sessionId === "sess-A");
     db5.close();
   }
 
@@ -273,7 +273,7 @@ try {
     }
     const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
     const svc = new SessionService(db, host, new OrchestrationControl());
-    const orch = new OrchestrationMcpRouter(db, svc, { companionSessionId: "assist-1", deliverReply: async () => ({ delivered: true }) });
+    const orch = new OrchestrationMcpRouter(db, svc, { companionSessionIds: new Set(["assist-1"]), deliverReply: async () => ({ delivered: true }) });
     const listOf = async (server) => {
       const [clientT, serverT] = InMemoryTransport.createLinkedPair();
       await server.connect(serverT);

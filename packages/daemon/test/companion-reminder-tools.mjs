@@ -137,7 +137,7 @@ try {
   let originRoute = null; // the test flips this to simulate "the current turn's origin"
   const reconcileCalls = { n: 0 };
   const companionHooks = {
-    companionSessionId: SESS,
+    companionSessionIds: new Set([SESS]),
     deliverReply: async () => ({ delivered: true }),
     getActiveTurnOrigin: () => originRoute,
     // Wraps controller.reconcile() so tests can also assert HOW MANY TIMES arm-on-create actually reconciled.
@@ -151,7 +151,7 @@ try {
     env: {},
     buildGateway: gwBuilder.builder,
     buildReminders: remBuilder.builder,
-    resolveEffective: () => cfgOf(SESS),
+    resolveEffective: () => [cfgOf(SESS)],
   });
   const orch = new OrchestrationMcpRouter(db, {}, companionHooks);
 
