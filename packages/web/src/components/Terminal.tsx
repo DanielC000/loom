@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import type { TerminalControl } from "@loom/shared";
@@ -31,6 +31,10 @@ export function TerminalPane({ sessionId, resizable = false, readOnly = false, h
   // (which would tear down + re-attach the websocket). It's constant per page in practice.
   const budgetRef = useRef(heightBudget);
   budgetRef.current = heightBudget;
+  // applyFontSize lives inside the attach effect (it closes over the live xterm + the pinned grid).
+  // Expose it via a ref so the budget-change effect below can re-invoke it WITHOUT re-running the
+  // attach effect (which would tear down + rebuild the websocket).
+  const applyFontSizeRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -152,6 +156,8 @@ export function TerminalPane({ sessionId, resizable = false, readOnly = false, h
         el.style.height = `${gridH}px`;
       }
     };
+    // Publish for the heightBudget-change effect (below), which re-scales grow-back explicitly.
+    applyFontSizeRef.current = applyFontSize;
 
     const decoder = new TextDecoder();
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -212,6 +218,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly = false, h
     ro.observe(el);
 
     return () => {
+      applyFontSizeRef.current = null;
       onData.dispose();
       ro.disconnect();
       textarea?.removeEventListener("focus", onFocus);
@@ -229,6 +236,22 @@ export function TerminalPane({ sessionId, resizable = false, readOnly = false, h
       term.dispose();
     };
   }, [sessionId, resizable, readOnly]);
+
+  // Re-scale the font on a heightBudget CHANGE (HUG mode only — FILL passes a constant `undefined`, so
+  // this never fires there). The budget GROWS when below-terminal chrome is reclaimed — most visibly
+  // when a queued-message strip DRAINS (SessionQueue → null) and TerminalCard hands the terminal back
+  // its space. The attach effect's ResizeObserver(el) only re-scales when the pane element's own box
+  // changes; on a grow-back the pane sat pinned at its shrunk grid height, so RO(el) never re-fired and
+  // the font LATCHED shrunk until an unrelated re-render forced a re-measure (the bug this fixes). Driving
+  // applyFontSize directly off the prop makes grow-back EXPLICIT + deterministic. budgetRef.current is
+  // already the new value (assigned during render, above), so applyFontSize reads the grown budget.
+  //
+  // This does NOT reopen the 5b89fae/ff002d9 oscillation: it fires on a PROP change (fed by TerminalCard's
+  // belowRef-only measure, never by the pane's own resize), and applyFontSize is idempotent at a fixed
+  // budget — RO(el) re-fires once from the height it sets, recomputes the same font, and settles.
+  useLayoutEffect(() => {
+    applyFontSizeRef.current?.();
+  }, [heightBudget]);
 
   // overflow:hidden so the xterm canvas is clipped to this box — a font rescale (applyFontSize, fired
   // on container resize) can briefly overshoot the cell math; this stops the canvas painting outside.
