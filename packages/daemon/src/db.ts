@@ -625,7 +625,9 @@ CREATE TABLE IF NOT EXISTS companion_messages (
   conversation_seq INTEGER NOT NULL DEFAULT 1  -- which conversation this turn belongs to (see companion_conversations)
 );
 CREATE INDEX IF NOT EXISTS idx_companion_messages_session ON companion_messages(session_id, channel, created_at);
-CREATE INDEX IF NOT EXISTS idx_companion_messages_conversation ON companion_messages(session_id, conversation_seq);
+-- NOTE: the (session_id, conversation_seq) index is created in migrateCompanionMessages() — NOT here —
+-- because a legacy DB's companion_messages table lacks conversation_seq until the ALTER in that migration
+-- runs, and exec(SCHEMA) precedes the migrations (same hazard the runs idempotency index avoids).
 -- Companion CONVERSATION HISTORY (card 85f62475): one row per conversation boundary — a conversation is the
 -- span of companion_messages between two "/new"/"/reset" boundaries (or session start / "still live"). Exactly
 -- one OPEN row (ended_at IS NULL) exists per session at a time; "/new" closes it (sets ended_at) and opens the
@@ -1178,6 +1180,11 @@ export class Db {
     for (const [name, type] of Object.entries(COMPANION_MESSAGES_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE companion_messages ADD COLUMN ${name} ${type}`);
     }
+    // Created HERE, after the conversation_seq column is guaranteed to exist — a legacy DB lacks it until
+    // the ALTER above runs, and this index cannot live in SCHEMA (exec(SCHEMA) precedes migrations).
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_companion_messages_conversation ON companion_messages(session_id, conversation_seq)",
+    );
   }
 
   /**
