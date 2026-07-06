@@ -16,19 +16,25 @@ export interface ModelPrice {
   outputPerMillion: number;
 }
 
-/** The date the default prices below were last checked (cached from the claude-api skill, 2026-05-26). */
-export const PRICES_AS_OF = "2026-05-26";
+/** The date the default prices below were last checked (cached from the claude-api skill, 2026-07-06). */
+export const PRICES_AS_OF = "2026-07-06";
 
 /**
  * Default per-model list prices (USD / 1M tokens). Keyed by the engine model id as it appears in the
  * transcript (e.g. "claude-opus-4-8"). Cache pricing is NOT a separate table entry — it is derived from
  * the input rate via Anthropic's standard multipliers (see CACHE_WRITE_MULT / CACHE_READ_MULT below).
+ *
+ * claude-sonnet-5 carries a standing $2/$10 introductory rate through 2026-08-31 (vs. the $3/$15 list
+ * price below) — this table intentionally prices at the durable list rate since it isn't kept on an
+ * expiry-aware refresh cycle; actual cost during the intro window will run slightly high.
  */
 export const MODEL_PRICES: Record<string, ModelPrice> = {
+  "claude-fable-5": { inputPerMillion: 10, outputPerMillion: 50 },
   "claude-opus-4-8": { inputPerMillion: 5, outputPerMillion: 25 },
   "claude-opus-4-7": { inputPerMillion: 5, outputPerMillion: 25 },
   "claude-opus-4-6": { inputPerMillion: 5, outputPerMillion: 25 },
   "claude-opus-4-5": { inputPerMillion: 5, outputPerMillion: 25 },
+  "claude-sonnet-5": { inputPerMillion: 3, outputPerMillion: 15 },
   "claude-sonnet-4-6": { inputPerMillion: 3, outputPerMillion: 15 },
   "claude-sonnet-4-5": { inputPerMillion: 3, outputPerMillion: 15 },
   "claude-haiku-4-5": { inputPerMillion: 1, outputPerMillion: 5 },

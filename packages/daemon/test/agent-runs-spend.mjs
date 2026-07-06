@@ -61,6 +61,14 @@ try {
     priceForModel("claude-haiku-4-5-20251001")?.inputPerMillion === 1);
   const haikuCost = computeRunCostUsd({ inputTokens: 1_000_000, outputTokens: 0, model: "claude-haiku-4-5-20251001" });
   check("1 haiku date-suffixed cost computed via prefix ($1)", approx(haikuCost, 1));
+  // current-lineup regression guard (the reported bug: claude-sonnet-5 — the daemon's own worker model —
+  // and claude-fable-5 were missing from the table and silently priced at $0, cost 0).
+  for (const model of ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5", "claude-fable-5"]) {
+    const price = priceForModel(model);
+    check(`1 ${model} resolves to a non-null price`, price !== null);
+    const cost = computeRunCostUsd({ inputTokens: 1_000_000, outputTokens: 1_000_000, model });
+    check(`1 ${model} computeRunCostUsd > 0 for nonzero usage`, cost > 0);
+  }
   // UNKNOWN model → 0 and NO throw.
   let threw = false; let unknownCost = NaN;
   try { unknownCost = computeRunCostUsd({ inputTokens: 9_999_999, outputTokens: 9_999_999, model: "gpt-some-thing" }); }
