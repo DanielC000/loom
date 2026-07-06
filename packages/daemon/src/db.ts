@@ -3414,11 +3414,19 @@ export class Db {
     return (this.db.prepare("SELECT * FROM companion_messages WHERE session_id = ? ORDER BY created_at, rowid")
       .all(sessionId) as Row[]).map(toCompanionMessage);
   }
-  /** Wipe a session's stored chat history for ONE channel — the "/new"/"/reset" command's history-clear
-   *  half (companion/factory.ts's CompanionHistoryReset impl). A no-op (0 rows deleted) is not an error —
-   *  a fresh companion with no prior in-app history clears to the same empty state. */
+  /** Wipe a session's stored chat history for ONE channel. Superseded by `clearAllCompanionMessages` as the
+   *  "/new"/"/reset" command's history-clear half (card 4124b61e) — kept for a single-channel-scoped caller/
+   *  test. A no-op (0 rows deleted) is not an error — a fresh companion with no prior history clears to the
+   *  same empty state. */
   clearCompanionMessages(sessionId: string, channel: string): void {
     this.db.prepare("DELETE FROM companion_messages WHERE session_id = ? AND channel = ?").run(sessionId, channel);
+  }
+  /** Wipe a session's stored chat history across EVERY channel — the "/new"/"/reset" command's history-clear
+   *  half (companion/factory.ts's CompanionHistoryReset impl, card 4124b61e). Mirrors `listAllCompanionMessages`'
+   *  session-wide scope so a reset actually empties the unified cross-channel panel, not just the in-app rows.
+   *  A no-op (0 rows deleted) is not an error. */
+  clearAllCompanionMessages(sessionId: string): void {
+    this.db.prepare("DELETE FROM companion_messages WHERE session_id = ?").run(sessionId);
   }
 }
 

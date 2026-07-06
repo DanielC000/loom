@@ -7,7 +7,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   1. Both "/new" and "/reset" are registered, and are a LITERAL alias (the SAME handler function object)
 //      — zero risk of the two drifting apart.
 //   2. End-to-end via CompanionController.handleInAppInbound: "/new" (a) submits "/clear" via the injected
-//      submitTurn (the context-reset half), (b) clears the session's persisted companion_messages, and
+//      submitTurn (the context-reset half), (b) clears the session's persisted companion_messages ACROSS
+//      EVERY CHANNEL (card 4124b61e — a seeded Telegram row is gone too, not just the in-app ones), and
 //      (c) pushes a live {type:"cleared"} frame BEFORE the ack {type:"chat"} frame reaches an attached web
 //      client — in that order, so an open panel empties before the ack bubble lands as the first message of
 //      the new, empty conversation.
@@ -42,6 +43,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { InAppChannel, IN_APP_CHANNEL } = await import("../dist/companion/in-app.js");
+const { TELEGRAM_CHANNEL } = await import("../dist/companion/telegram.js");
 const { CompanionController } = await import("../dist/companion/controller.js");
 const { commandHandler, registeredCommandNames, COMMAND_MENU } = await import("../dist/companion/commands.js");
 const { inMemoryVoicePrefs } = await import("../dist/companion/voice-prefs.js");
@@ -84,6 +86,10 @@ try {
     db.insertCompanionMessage({ id: randomUUID(), sessionId, channel: IN_APP_CHANNEL, chatId: sessionId, author: "user", text: "my name is Daniel", createdAt: now0 });
     db.insertCompanionMessage({ id: randomUUID(), sessionId, channel: IN_APP_CHANNEL, chatId: sessionId, author: "companion", text: "hi Daniel!", createdAt: now0 });
     check("setup: history seeded before /new", db.listCompanionMessages(sessionId, IN_APP_CHANNEL).length === 2);
+    // ALSO seed a Telegram row for the SAME session — proves /new's clear is cross-channel (card 4124b61e),
+    // not just in-app. This session has no Telegram binding, but the FK only cares about session_id.
+    db.insertCompanionMessage({ id: randomUUID(), sessionId, channel: TELEGRAM_CHANNEL, chatId: "999", author: "user", text: "hey from telegram", createdAt: now0 });
+    check("setup: a telegram-channel row also exists before /new", db.listAllCompanionMessages(sessionId).some((m) => m.channel === TELEGRAM_CHANNEL));
 
     // The SAME outbound-record wiring index.ts uses (bug 0f01f234) — an outbound in-app send persists.
     const inApp = new InAppChannel({
@@ -115,6 +121,10 @@ try {
 
     const after = db.listCompanionMessages(sessionId, IN_APP_CHANNEL);
     check("/new: persisted history cleared down to just the ack (prior 2 rows gone)", after.length === 1 && after[0].author === "companion" && after[0].text === "🆕 Started a fresh conversation.");
+
+    const afterAll = db.listAllCompanionMessages(sessionId);
+    check("/new: the seeded TELEGRAM row is gone too — the clear is cross-channel, not just in-app (card 4124b61e)", !afterAll.some((m) => m.channel === TELEGRAM_CHANNEL));
+    check("/new: listAllCompanionMessages holds ONLY the in-app ack (every other channel/row wiped)", afterAll.length === 1 && afterAll[0].channel === IN_APP_CHANNEL && afterAll[0].text === "🆕 Started a fresh conversation.");
 
     check("/new: exactly TWO live frames reached the attached client — 'cleared' then the ack 'chat'", frames.length === 2 && frames[0].type === "cleared" && frames[0].chatId === sessionId && frames[1].type === "chat" && frames[1].text === "🆕 Started a fresh conversation.");
 
