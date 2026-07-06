@@ -96,7 +96,7 @@ try {
     // Internally the daemon CAN decrypt it back (that's the point of a recoverable envelope).
     check("at-rest: decrypts internally back to the exact token", decryptSecret(row.botTokenBlob) === PLAINTEXT);
     // Masked read: configured + last-4 only — the plaintext is NEVER present in the masked JSON.
-    const masked = maskCompanionConfig(row, db.getCompanionHome());
+    const masked = maskCompanionConfig(row, db.getCompanionHome("sess-1"));
     check("masked: configured:true", masked.configured === true);
     check("masked: exposes ONLY the last-4 of the token", masked.tokenLast4 === LAST4);
     check("masked: carries channel/cadence/scope/enabled", masked.channel === "telegram" && masked.heartbeatIntervalMinutes === 360 && masked.chatScope === "dm" && masked.enabled === true);
@@ -106,16 +106,16 @@ try {
       sessionId: "sess-1", botTokenBlob: blob, channel: "telegram", allowedChatId: "chat-1",
       chatScope: "dm", heartbeatIntervalMinutes: 360, heartbeatPrompt: null, enabled: true, name: "Ada",
     });
-    check("masked: a set name round-trips through maskCompanionConfig", maskCompanionConfig(named, db.getCompanionHome()).name === "Ada");
+    check("masked: a set name round-trips through maskCompanionConfig", maskCompanionConfig(named, db.getCompanionHome("sess-1")).name === "Ada");
     const maskedJson = JSON.stringify(masked);
     check("masked: the plaintext token is ABSENT from the masked JSON", !maskedJson.includes(PLAINTEXT));
     check("masked: no property named like a token blob leaked", !maskedJson.includes("botToken") && !maskedJson.includes("v1:"));
     // envPinned: false with no env; true only when an env config targets THIS row's sessionId.
     check("masked: envPinned false when no env passed", masked.envPinned === false);
     const envMatch = { LOOM_COMPANION_BOT_TOKEN: "t", LOOM_COMPANION_CHAT_ID: "c", LOOM_COMPANION_SESSION_ID: "sess-1" };
-    check("masked: envPinned TRUE when env config targets this row's sessionId (env would override on next boot)", maskCompanionConfig(row, db.getCompanionHome(), envMatch).envPinned === true);
+    check("masked: envPinned TRUE when env config targets this row's sessionId (env would override on next boot)", maskCompanionConfig(row, db.getCompanionHome("sess-1"), envMatch).envPinned === true);
     const envOther = { LOOM_COMPANION_BOT_TOKEN: "t", LOOM_COMPANION_CHAT_ID: "c", LOOM_COMPANION_SESSION_ID: "other-sess" };
-    check("masked: envPinned FALSE when env targets a DIFFERENT session", maskCompanionConfig(row, db.getCompanionHome(), envOther).envPinned === false);
+    check("masked: envPinned FALSE when env targets a DIFFERENT session", maskCompanionConfig(row, db.getCompanionHome("sess-1"), envOther).envPinned === false);
     db.close();
   }
 
@@ -133,7 +133,7 @@ try {
     const seeded = db.getCompanionConfig("sess-env");
     check("env-bootstrap: a DB row was seeded", !!seeded && seeded.allowedChatId === "chat-env");
     check("env-bootstrap: the seeded token is ENCRYPTED (blob decrypts to the token, not stored plaintext)", seeded.botTokenBlob !== PLAINTEXT && decryptSecret(seeded.botTokenBlob) === PLAINTEXT);
-    check("env-bootstrap: app_meta home laid from env (defaults to allowedChatId)", JSON.stringify(db.getCompanionHome()) === JSON.stringify({ channel: "telegram", chatId: "chat-env" }));
+    check("env-bootstrap: app_meta home laid from env, PER SESSION (defaults to allowedChatId)", JSON.stringify(db.getCompanionHome("sess-env")) === JSON.stringify({ channel: "telegram", chatId: "chat-env" }));
     db.close();
 
     // (2b) BOTH env AND a pre-existing DB row (SAME session) → env OVERRIDES (env wins per the PL ruling).

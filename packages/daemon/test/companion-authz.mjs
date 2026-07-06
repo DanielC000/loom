@@ -63,7 +63,7 @@ try {
     const db = new Db(dbFile("p0.db"));
     check("default-off: pristine db has NO companion bindings", db.listCompanionBindings().length === 0);
     check("default-off: pristine db has NO allowed senders", db.listAllowedSenders("anything").length === 0);
-    check("default-off: pristine db has NO home", db.getCompanionHome() === null);
+    check("default-off: pristine db has NO home", db.getCompanionHome("anything") === null);
     check("default-off: no bot token → readCompanionConfig null (gateway never constructed)", readCompanionConfig({}) === null);
     check("default-off: token but no chat/session → null", readCompanionConfig({ LOOM_COMPANION_BOT_TOKEN: "t" }) === null);
     // Nothing above WROTE a row — reading must not seed.
@@ -123,7 +123,7 @@ try {
     const db1 = new Db(dbFile("p2.db"));
     db1.upsertCompanionBinding({ sessionId: "sess-G", channel: "telegram", chatId: "group-1", scope: "group" });
     db1.addAllowedSender({ sessionId: "sess-G", channel: "telegram", senderId: "alice" });
-    db1.setCompanionHome({ channel: "telegram", chatId: "home-1" });
+    db1.setCompanionHome("sess-G", { channel: "telegram", chatId: "home-1" });
     db1.close();
 
     const db2 = new Db(dbFile("p2.db")); // reopen the SAME db file — proves persistence
@@ -131,7 +131,8 @@ try {
     check("durable: binding persisted across reopen", bindings.length === 1 && bindings[0].sessionId === "sess-G" && bindings[0].scope === "group");
     check("durable: allowlist persisted + isSenderAllowed reads it", db2.isSenderAllowed("sess-G", "telegram", "alice") === true);
     check("durable: isSenderAllowed false for an unlisted id", db2.isSenderAllowed("sess-G", "telegram", "mallory") === false);
-    check("durable: home persisted across reopen", JSON.stringify(db2.getCompanionHome()) === JSON.stringify({ channel: "telegram", chatId: "home-1" }));
+    check("durable: home persisted across reopen (PER SESSION)", JSON.stringify(db2.getCompanionHome("sess-G")) === JSON.stringify({ channel: "telegram", chatId: "home-1" }));
+    check("durable: a DIFFERENT session's home is untouched", db2.getCompanionHome("sess-D") === null);
 
     // The UNIQUE (channel, chat_id) route index: a 2nd, DIFFERENT session claiming the bound route is rejected.
     let threw = false;
@@ -259,13 +260,19 @@ try {
     await app.inject({ method: "DELETE", url: `/api/companion/allowed-senders/${senderId}` });
     check("REST allowed-senders: DELETE revokes it (live)", db.isSenderAllowed("s1", "telegram", "alice") === false);
 
-    // Home GET/PUT round-trip.
-    check("REST home: GET is null before set", JSON.parse((await app.inject({ method: "GET", url: "/api/companion/home" })).payload ?? "null") === null);
-    const putHome = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { channel: "telegram", chatId: "home-9" } });
+    // Home GET/PUT round-trip — PER SESSION (multi-companion cross-delivery fix): every route requires
+    // sessionId, and a 2nd session's home is untouched by the 1st's write.
+    check("REST home: GET without sessionId → 400", (await app.inject({ method: "GET", url: "/api/companion/home" })).statusCode === 400);
+    check("REST home: GET is null before set", JSON.parse((await app.inject({ method: "GET", url: "/api/companion/home?sessionId=s1" })).payload ?? "null") === null);
+    const putMissingSid = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { channel: "telegram", chatId: "home-9" } });
+    check("REST home: PUT missing sessionId → 400", putMissingSid.statusCode === 400);
+    const putHome = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "s1", channel: "telegram", chatId: "home-9" } });
     check("REST home: PUT sets + echoes", putHome.statusCode === 200 && JSON.parse(putHome.payload).chatId === "home-9");
-    check("REST home: PUT missing chatId → 400", (await app.inject({ method: "PUT", url: "/api/companion/home", payload: { channel: "telegram" } })).statusCode === 400);
-    const delHome = await app.inject({ method: "DELETE", url: "/api/companion/home" });
-    check("REST home: DELETE clears it (proactive falls back to OFF)", delHome.statusCode === 200 && db.getCompanionHome() === null);
+    check("REST home: PUT missing chatId → 400", (await app.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "s1", channel: "telegram" } })).statusCode === 400);
+    check("REST home: a DIFFERENT session's home is untouched by s1's PUT", JSON.parse((await app.inject({ method: "GET", url: "/api/companion/home?sessionId=s2" })).payload ?? "null") === null);
+    check("REST home: DELETE without sessionId → 400", (await app.inject({ method: "DELETE", url: "/api/companion/home" })).statusCode === 400);
+    const delHome = await app.inject({ method: "DELETE", url: "/api/companion/home?sessionId=s1" });
+    check("REST home: DELETE clears it (proactive heartbeat turns OFF for that session)", delHome.statusCode === 200 && db.getCompanionHome("s1") === null);
 
     // DELETE a binding (no channel) → the live map is unbound too (channel undefined ⇒ omit path).
     await app.inject({ method: "DELETE", url: "/api/companion/bindings/s1" });

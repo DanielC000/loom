@@ -190,29 +190,28 @@ function CompanionSwitcher({ companions, selectedId, onSelect, onNew }: {
 }
 
 // ── Proactive home (Manage-tab section) ──────────────────────────────────────────
-// The proactive HOME is a daemon-GLOBAL value (app_meta), NOT per-companion. With exactly one companion, it
-// lives inside that companion's Manage tab (alongside run config / channels / persona / …) rather than a
-// standalone sidebar card. Behavior is unchanged — set / change / clear the ONE shared home; changing it
-// moves every heartbeat. Styled as a Manage `<section>` to match its siblings (no nested card).
-function ProactiveHomeSection() {
+// The proactive HOME is a PER-COMPANION value (app_meta, keyed by sessionId — the multi-companion
+// cross-delivery fix): each companion's Manage tab edits its OWN home, never a value shared with a
+// sibling companion. Styled as a Manage `<section>` to match its siblings (no nested card).
+function ProactiveHomeSection({ sessionId }: { sessionId: string }) {
   const qc = useQueryClient();
-  const home = useQuery({ queryKey: ["companionHome"], queryFn: api.companionHome });
+  const home = useQuery({ queryKey: ["companionHome", sessionId], queryFn: () => api.companionHome(sessionId) });
   const [editing, setEditing] = useState(false);
   const [channel, setChannel] = useState("");
   const [chatId, setChatId] = useState("");
   const [localErr, setLocalErr] = useState<string | null>(null);
 
-  // A masked config echoes the global home, so refresh the config list too when it changes.
+  // A masked config echoes this companion's home, so refresh the config list too when it changes.
   const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["companionHome"] });
+    qc.invalidateQueries({ queryKey: ["companionHome", sessionId] });
     qc.invalidateQueries({ queryKey: ["companionConfigs"] });
   };
   const save = useMutation({
-    mutationFn: (b: { channel: string; chatId: string }) => api.setCompanionHome(b),
+    mutationFn: (b: { channel: string; chatId: string }) => api.setCompanionHome(sessionId, b),
     onSuccess: () => { invalidate(); setEditing(false); },
   });
   const clear = useMutation({
-    mutationFn: () => api.clearCompanionHome(),
+    mutationFn: () => api.clearCompanionHome(sessionId),
     onSuccess: invalidate,
   });
 
@@ -232,8 +231,8 @@ function ProactiveHomeSection() {
     <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <SectionLabel style={{ margin: 0 }}>Proactive home</SectionLabel>
       <p style={{ ...hint, margin: 0 }}>
-        Daemon-<strong style={{ color: color.text }}>global</strong> — the one chat this companion's
-        heartbeats post to (shared by every companion; changing it moves them all).
+        The chat <strong style={{ color: color.text }}>this companion's own</strong> heartbeats post to.
+        Unset turns its proactive heartbeat off; other companions are never affected.
       </p>
       {editing ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -470,7 +469,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
         <div role="tabpanel" id="companion-panel-manage" aria-labelledby="companion-tab-manage"
           style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <ConfigSection companion={companion} onChanged={onChanged} onDeleted={onDeleted} />
-          <ProactiveHomeSection />
+          <ProactiveHomeSection sessionId={companion.sessionId} />
           <VoiceProvisioningSection />
           <ChannelsSection companion={companion} onChanged={onChanged} />
           <PersonaSection sessionId={companion.sessionId} />

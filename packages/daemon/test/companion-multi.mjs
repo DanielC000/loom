@@ -21,6 +21,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      resulting reminder-watcher rearm — to the ONE session known to have changed; an untouched sibling's
 //      reminder watcher is never stopped/rebuilt by another companion's write. An unscoped reconcile (boot /
 //      no known origin) still rearms every live session, preserving the historical full-diff fallback.
+//   6. heartbeat home cross-delivery fix (task e849a487): with A + B both enabled (distinct sessions), each
+//      one's proactive heartbeat carries ITS OWN configured home route — never a sibling's — because home is
+//      now a PER-SESSION app_meta key (db.getCompanionHome(sessionId)), not a single daemon-GLOBAL value
+//      every heartbeat used to read regardless of which companion armed it.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-multi.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -46,6 +50,8 @@ const { Db } = await import("../dist/db.js");
 const { CompanionController } = await import("../dist/companion/controller.js");
 const { ChatGateway } = await import("../dist/companion/chat-gateway.js");
 const { createCompanionGateway } = await import("../dist/companion/factory.js");
+const { resolveAllEnabledConfigs } = await import("../dist/companion/store.js");
+const { CompanionHeartbeatWatcher } = await import("../dist/companion/heartbeat.js");
 const { InAppChannel, IN_APP_CHANNEL } = await import("../dist/companion/in-app.js");
 const { encryptSecret } = await import("../dist/keys/envelope.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
@@ -364,11 +370,77 @@ try {
     check("5b: an unscoped reconcile still rearms B too (legacy full-diff fallback preserved)", recB0.stopCalls === 1 && rem.forSession("B").length === 2);
     db.close();
   }
+
+  // ============ Part 6 — heartbeat home cross-delivery fix (task e849a487) ============
+  // Regression test for the bug: heartbeat.ts's tick() used to read db.getCompanionHome() — a SINGLE
+  // daemon-GLOBAL app_meta key — while the controller arms ONE heartbeat watcher PER enabled companion. With
+  // ≥2 enabled companions, every heartbeat carried the SAME global route regardless of which companion armed
+  // it, so B's proactive chat_reply resolved to A's home and was sent through B's own bot. Home is now a
+  // PER-SESSION app_meta key (db.getCompanionHome(sessionId)) — this proves each session's heartbeat carries
+  // ONLY its own configured route, using the REAL resolveAllEnabledConfigs + CompanionHeartbeatWatcher (not
+  // the fake builders above), so the actual per-row home resolution in store.ts is exercised end to end.
+  {
+    const db = new Db(dbFile("p6.db"));
+    seedSession(db, "hbA");
+    seedSession(db, "hbB");
+    writeConfig(db, { sessionId: "hbA", token: TOKEN_A, chatId: "chat-A", cadence: 60 });
+    writeConfig(db, { sessionId: "hbB", token: TOKEN_B, chatId: "chat-B", cadence: 60 });
+    // Both A and B armed CONCURRENTLY — mirrors the card's repro ("enable A + B, distinct bots/owner chats").
+    db.setCompanionHome("hbA", { channel: "telegram", chatId: "home-A" });
+    db.setCompanionHome("hbB", { channel: "telegram", chatId: "home-B" });
+
+    const resolved = resolveAllEnabledConfigs(db, {});
+    const cfgA = resolved.find((c) => c.sessionId === "hbA");
+    const cfgB = resolved.find((c) => c.sessionId === "hbB");
+    check("6 setup: both hbA and hbB resolve as enabled configs", !!cfgA && !!cfgB);
+
+    const enqueued = []; // { sessionId, route } — one entry per fired heartbeat turn
+    const pty = {
+      isAlive: () => true,
+      enqueueStdin: (id, _text, _source, _onDeliver, route) => { enqueued.push({ sessionId: id, route }); return { delivered: false, position: 1 }; },
+      getPending: () => [],
+    };
+    const hbWatcherA = new CompanionHeartbeatWatcher({ db, pty, sessionId: "hbA", intervalMinutes: cfgA.heartbeatIntervalMinutes, prompt: cfgA.heartbeatPrompt });
+    const hbWatcherB = new CompanionHeartbeatWatcher({ db, pty, sessionId: "hbB", intervalMinutes: cfgB.heartbeatIntervalMinutes, prompt: cfgB.heartbeatPrompt });
+
+    const now = new Date();
+    hbWatcherA.tick(now);
+    hbWatcherB.tick(now);
+    const fireA = enqueued.find((e) => e.sessionId === "hbA");
+    const fireB = enqueued.find((e) => e.sessionId === "hbB");
+    check("6a: A's heartbeat carries A's OWN home route", !!fireA && JSON.stringify(fireA.route) === JSON.stringify({ channel: "telegram", chatId: "home-A" }));
+    check("6b: B's heartbeat carries B's OWN home route while A is enabled — never A's", !!fireB && JSON.stringify(fireB.route) === JSON.stringify({ channel: "telegram", chatId: "home-B" }));
+    check("6c: the exact cross-delivery bug — B's route is NOT A's home", JSON.stringify(fireB.route) !== JSON.stringify(fireA.route));
+
+    // The narrower repro as literally stated on the card: ONLY A's home is ever configured (B's is left
+    // unset) — B must NOT inherit A's home (no route at all, same as an unconfigured single companion).
+    const db2 = new Db(dbFile("p6b.db"));
+    seedSession(db2, "hbC");
+    seedSession(db2, "hbD");
+    writeConfig(db2, { sessionId: "hbC", token: TOKEN_A, chatId: "chat-C", cadence: 60 });
+    writeConfig(db2, { sessionId: "hbD", token: TOKEN_B, chatId: "chat-D", cadence: 60 });
+    db2.setCompanionHome("hbC", { channel: "telegram", chatId: "home-C" }); // only hbC has a configured home
+    const resolved2 = resolveAllEnabledConfigs(db2, {});
+    const cfgD = resolved2.find((c) => c.sessionId === "hbD");
+    const enqueued2 = [];
+    const pty2 = {
+      isAlive: () => true,
+      enqueueStdin: (id, _text, _source, _onDeliver, route) => { enqueued2.push({ sessionId: id, route }); return { delivered: false, position: 1 }; },
+      getPending: () => [],
+    };
+    const hbWatcherD = new CompanionHeartbeatWatcher({ db: db2, pty: pty2, sessionId: "hbD", intervalMinutes: cfgD.heartbeatIntervalMinutes, prompt: cfgD.heartbeatPrompt });
+    hbWatcherD.tick(new Date());
+    const fireD = enqueued2.find((e) => e.sessionId === "hbD");
+    check("6d: with ONLY hbC's home configured, hbD's heartbeat carries NO route (never inherits hbC's home)", !!fireD && fireD.route === undefined);
+    db2.close();
+
+    db.close();
+  }
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — multi-companion runtime: N enabled configs arm N concurrent gateways (not just the oldest), reconcile diffs start/stop/restart per session without cross-touching any other live companion, a reply/binding for one companion can NEVER reach another's client/route/gateway (proven through the REAL factory's per-session binding scoping), and a reconcile scoped to the session that actually changed never rearms an untouched sibling's reminder watcher (the unscoped/boot fallback still rearms everyone, as before)."
+  ? "\n✅ ALL PASS — multi-companion runtime: N enabled configs arm N concurrent gateways (not just the oldest), reconcile diffs start/stop/restart per session without cross-touching any other live companion, a reply/binding for one companion can NEVER reach another's client/route/gateway (proven through the REAL factory's per-session binding scoping), a reconcile scoped to the session that actually changed never rearms an untouched sibling's reminder watcher (the unscoped/boot fallback still rearms everyone, as before), and each companion's proactive heartbeat carries ONLY its own configured home route — never a sibling's, and never inherited when only one companion has a home configured."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

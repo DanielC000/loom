@@ -114,7 +114,9 @@ export class CompanionHeartbeatWatcher {
     // no route ⇒ a proactive reply has nowhere to go (chat_reply → no-target), which is correct. If the
     // session is busy, enqueueStdin queues it FIFO (the no-stacking guard above ensures at most one pending).
     // Record lastFiredAt + emit the durable event. A real fire ends the current defer streak.
-    const home = this.deps.db.getCompanionHome();
+    // PER-SESSION home (multi-companion cross-delivery fix, task e849a487): read THIS companion's OWN
+    // app_meta home key, never a value shared with a sibling companion session.
+    const home = this.deps.db.getCompanionHome(this.deps.sessionId);
     // kind:"agent" — a user-configured proactive prompt, the companion's own analogue of an inbound
     // chat message; it must land as its own turn, never mashed with a sibling reminder/heartbeat.
     this.deps.pty.enqueueStdin(this.deps.sessionId, framedHeartbeat(this.deps.prompt), "system", undefined, home ?? undefined, "agent");

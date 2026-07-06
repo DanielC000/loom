@@ -26,9 +26,9 @@ import type { CompanionBinding } from "@loom/shared";
 export interface CompanionBindingStore extends AllowlistReader, PairingStore, VoicePrefStore {
   listCompanionBindings(): CompanionBinding[];
   upsertCompanionBinding(input: { sessionId: string; scope?: "dm" | "group" } & CompanionRoute): CompanionBinding;
-  /** The proactive HOME channel target (card 9488951e) — carried explicitly on the heartbeat's submitted
-   *  turn (as its per-turn route), not consulted by deliverReply. */
-  getCompanionHome(): CompanionRoute | null;
+  /** The proactive HOME channel target (card 9488951e), PER SESSION — carried explicitly on the
+   *  heartbeat's submitted turn (as its per-turn route), not consulted by deliverReply. */
+  getCompanionHome(sessionId: string): CompanionRoute | null;
   /** The "/new"/"/reset" command's history-ARCHIVE half (card 85f62475): closes the session's current
    *  conversation and opens the next one — replaces the old delete-everything `clearAllCompanionMessages`. */
   startNewCompanionConversation(sessionId: string): void;

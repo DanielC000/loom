@@ -36,7 +36,7 @@ function makeEnv(opts = {}) {
     createdAt: now, lastActivity: now, lastError: null, role: "assistant",
   });
   if (opts.parked) db.setRateLimitedUntil(sessId, new Date(Date.now() + 3_600_000).toISOString(), "usage limit");
-  if (opts.home) db.setCompanionHome(opts.home); // configure the proactive HOME the heartbeat pins as its route
+  if (opts.home) db.setCompanionHome(sessId, opts.home); // configure THIS session's proactive HOME the heartbeat pins as its route
 
   const alive = new Set(opts.notLive ? [] : [sessId]); // isAlive source of truth
   const enqueued = [];   // { sessionId, text, route } — permanent record of every enqueue (route = 5th arg)

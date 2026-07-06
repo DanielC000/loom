@@ -651,17 +651,26 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true };
   });
 
-  // The proactive HOME channel target (the proactive card 9488951e reads it). Single {channel, chatId}.
-  app.get("/api/companion/home", async () => deps.db.getCompanionHome());
+  // The proactive HOME channel target (the proactive card 9488951e reads it), PER COMPANION SESSION
+  // (multi-companion cross-delivery fix, task e849a487) — {channel, chatId}, keyed by ?sessionId=.
+  app.get("/api/companion/home", async (req, reply) => {
+    const q = req.query as { sessionId?: unknown };
+    if (!isNonBlankStr(q.sessionId)) return reply.code(400).send({ error: "sessionId query param is required" });
+    return deps.db.getCompanionHome(q.sessionId.trim());
+  });
   app.put("/api/companion/home", async (req, reply) => {
-    const b = (req.body ?? {}) as { channel?: unknown; chatId?: unknown };
+    const b = (req.body ?? {}) as { sessionId?: unknown; channel?: unknown; chatId?: unknown };
+    if (!isNonBlankStr(b.sessionId)) return reply.code(400).send({ error: "sessionId must be a non-empty string" });
     if (!isNonBlankStr(b.channel)) return reply.code(400).send({ error: "channel must be a non-empty string" });
     if (!isNonBlankStr(b.chatId)) return reply.code(400).send({ error: "chatId must be a non-empty string" });
-    deps.db.setCompanionHome({ channel: b.channel.trim(), chatId: b.chatId.trim() });
-    return deps.db.getCompanionHome();
+    const sessionId = b.sessionId.trim();
+    deps.db.setCompanionHome(sessionId, { channel: b.channel.trim(), chatId: b.chatId.trim() });
+    return deps.db.getCompanionHome(sessionId);
   });
-  app.delete("/api/companion/home", async () => {
-    deps.db.clearCompanionHome(); // proactive delivery falls back to OFF until a home is set again
+  app.delete("/api/companion/home", async (req, reply) => {
+    const q = req.query as { sessionId?: unknown };
+    if (!isNonBlankStr(q.sessionId)) return reply.code(400).send({ error: "sessionId query param is required" });
+    deps.db.clearCompanionHome(q.sessionId.trim()); // that session's proactive heartbeat turns OFF until a home is set again
     return { ok: true };
   });
 
@@ -708,7 +717,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   const COMPANION_TOKEN_MAX = 4096;
   const COMPANION_PROMPT_MAX = 10_000;
   const COMPANION_CADENCE_MAX = 525_600; // one year in minutes — a generous upper bound, not a working value
-  const homeOf = () => deps.db.getCompanionHome();
+  const homeOf = (sessionId: string) => deps.db.getCompanionHome(sessionId);
   // Validate + merge a config body against any existing row, returning either an error string (→ 400) or the
   // resolved upsert input (token encrypted). `requireCreateFields` is true for POST-create/PUT where the
   // full record must be present; on update the caller keeps existing values for omitted fields.
@@ -799,23 +808,24 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!collidingSessionId) return null;
     return `this Telegram bot token is already used by another enabled companion (session ${collidingSessionId.slice(0, 8)}) — Telegram allows only one getUpdates consumer per token; give this companion its own token or disable the other one first`;
   };
-  // Optional home update carried on a config write — writes app_meta (the single source), returns error|null.
-  const applyHomeIfPresent = (body: Record<string, unknown>): string | null => {
+  // Optional home update carried on a config write — writes app_meta PER SESSION (never a value shared
+  // across companions), returns error|null.
+  const applyHomeIfPresent = (body: Record<string, unknown>, sessionId: string): string | null => {
     if (body.home === undefined || body.home === null) return null;
     const h = body.home as { channel?: unknown; chatId?: unknown };
     if (!isNonBlankStr(h.channel) || !isNonBlankStr(h.chatId)) return "home must be { channel, chatId } non-empty strings";
-    deps.db.setCompanionHome({ channel: h.channel.trim(), chatId: h.chatId.trim() });
+    deps.db.setCompanionHome(sessionId, { channel: h.channel.trim(), chatId: h.chatId.trim() });
     return null;
   };
 
   app.get("/api/companion/config", async () => {
-    const home = homeOf();
-    return deps.db.listCompanionConfigs().map((row) => maskCompanionConfig(row, home, process.env));
+    return deps.db.listCompanionConfigs().map((row) => maskCompanionConfig(row, homeOf(row.sessionId), process.env));
   });
   app.get("/api/companion/config/:sessionId", async (req, reply) => {
-    const row = deps.db.getCompanionConfig((req.params as { sessionId: string }).sessionId);
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const row = deps.db.getCompanionConfig(sessionId);
     if (!row) return reply.code(404).send({ error: "no companion config for that session" });
-    return maskCompanionConfig(row, homeOf(), process.env);
+    return maskCompanionConfig(row, homeOf(sessionId), process.env);
   });
   app.post("/api/companion/config", async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
@@ -828,11 +838,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if ("error" in built) return reply.code(400).send({ error: built.error });
     const tokenErr = checkTokenCollision(built);
     if (tokenErr) return reply.code(409).send({ error: tokenErr });
-    const homeErr = applyHomeIfPresent(b);
+    const homeErr = applyHomeIfPresent(b, sessionId);
     if (homeErr) return reply.code(400).send({ error: homeErr });
     const row = deps.db.upsertCompanionConfig(built);
     await deps.companion?.reconcile(sessionId); // drive the running companion live (start/re-arm) — no restart, scoped to this session
-    return reply.code(existing ? 200 : 201).send(maskCompanionConfig(row, homeOf(), process.env));
+    return reply.code(existing ? 200 : 201).send(maskCompanionConfig(row, homeOf(sessionId), process.env));
   });
   app.put("/api/companion/config/:sessionId", async (req, reply) => {
     const sessionId = (req.params as { sessionId: string }).sessionId;
@@ -843,11 +853,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if ("error" in built) return reply.code(400).send({ error: built.error });
     const tokenErr = checkTokenCollision(built);
     if (tokenErr) return reply.code(409).send({ error: tokenErr });
-    const homeErr = applyHomeIfPresent(b);
+    const homeErr = applyHomeIfPresent(b, sessionId);
     if (homeErr) return reply.code(400).send({ error: homeErr });
     const row = deps.db.upsertCompanionConfig(built);
     await deps.companion?.reconcile(sessionId); // drive the running companion live (re-arm/restart) — no restart, scoped to this session
-    return maskCompanionConfig(row, homeOf(), process.env);
+    return maskCompanionConfig(row, homeOf(sessionId), process.env);
   });
   app.delete("/api/companion/config/:sessionId", async (req) => {
     const sessionId = (req.params as { sessionId: string }).sessionId;
@@ -1007,13 +1017,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (botToken && allowedChatId) {
         deps.db.upsertCompanionBinding({ sessionId, channel, chatId: allowedChatId, scope: "dm" });
       }
-      if (home) deps.db.setCompanionHome(home);
+      if (home) deps.db.setCompanionHome(sessionId, home);
       // (d) arm the running companion — reconcile builds the gateway from the bindings above; the Telegram
       // adapter arms ONLY when a token exists (in-app-only ⇒ no external adapter). reconcile is best-effort
       // (never throws), so it never triggers rollback — only a durable write failure above does. Scoped to
       // THIS newly-provisioned session — no other live companion is touched.
       await deps.companion?.reconcile(sessionId);
-      return reply.code(201).send(maskCompanionConfig(row, homeOf(), process.env));
+      return reply.code(201).send(maskCompanionConfig(row, homeOf(sessionId), process.env));
     } catch (e) {
       // ROLLBACK: tear the spawned session down so no orphan session/config/binding survives a partial write.
       try { deps.db.deleteCompanionConfig(sessionId); } catch { /* nothing written / already gone */ }

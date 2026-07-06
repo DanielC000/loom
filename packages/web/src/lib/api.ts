@@ -614,13 +614,16 @@ export const api = {
   // is returned ONCE (the store keeps only a salted hash); the human relays it to the person enrolling.
   mintCompanionPairing: (b: { sessionId: string; grantType: "dm-bind" | "group-sender"; ttlMinutes?: number }) =>
     postErr<CompanionPairingCode>("/api/companion/pairing", b),
-  // Proactive HOME — the daemon-GLOBAL outbound target where heartbeats post (a single app_meta value, NOT
-  // per-companion). Managed on its own global control so a per-companion edit can't silently redirect the
-  // shared value. `setCompanionHome` surfaces the server's `{ error }` verbatim; clearing turns proactive OFF.
-  companionHome: () => get<{ channel: string; chatId: string } | null>("/api/companion/home"),
-  setCompanionHome: (b: { channel: string; chatId: string }) =>
-    putErr<{ channel: string; chatId: string } | null>("/api/companion/home", b),
-  clearCompanionHome: () => del<{ ok: boolean }>("/api/companion/home"),
+  // Proactive HOME — the PER-COMPANION outbound target where that companion's heartbeats post (an
+  // app_meta value keyed by sessionId, never shared across companions — the multi-companion
+  // cross-delivery fix). `setCompanionHome` surfaces the server's `{ error }` verbatim; clearing turns
+  // THIS companion's proactive heartbeat OFF (no route ⇒ nothing to chat_reply) until a home is set again.
+  companionHome: (sessionId: string) =>
+    get<{ channel: string; chatId: string } | null>(`/api/companion/home?sessionId=${encodeURIComponent(sessionId)}`),
+  setCompanionHome: (sessionId: string, b: { channel: string; chatId: string }) =>
+    putErr<{ channel: string; chatId: string } | null>("/api/companion/home", { sessionId, ...b }),
+  clearCompanionHome: (sessionId: string) =>
+    del<{ ok: boolean }>(`/api/companion/home?sessionId=${encodeURIComponent(sessionId)}`),
 
   // --- Companion "brain": persona prompt + self-authored skills (Companion epic — the Manage tab's home
   // for everything companion). HUMAN-only loopback REST, resolved by sessionId, same trust posture as the

@@ -7,8 +7,9 @@
 //   2. Branches on existence + a `creating` flag: no companion (or the owner opted to create) → the
 //      CompanionCreate box; else the switcher + the focused companion's CompanionDetail. Selection is
 //      client-only via `selectedId`, tolerating a stale/deleted selection by falling back to companions[0].
-//   3. The daemon-GLOBAL proactive HOME still lives INSIDE the companion's Manage tab as a <section>
-//      (unchanged from the single-companion design).
+//   3. The proactive HOME lives INSIDE each companion's OWN Manage tab as a <section>, scoped to that
+//      companion's sessionId (multi-companion heartbeat cross-delivery fix, task e849a487 — home used to be
+//      one daemon-GLOBAL app_meta value shared by every companion; it is now per-session).
 //   4. Settings.tsx is untouched — no companion surface leaked into it.
 //
 // The web package has no component test runner (Companion.tsx is real runtime JSX that node's
@@ -77,12 +78,12 @@ check("CompanionCreate's onCancel is optional (it can be the whole page when the
 check("the standalone GlobalHome sidebar card is gone; ProactiveHomeSection replaces it", () => {
   assert.ok(!compSrc.includes("function GlobalHome"), "the standalone GlobalHome component must be gone");
   assert.ok(compSrc.includes("function ProactiveHomeSection"), "a ProactiveHomeSection (Manage-tab section) exists");
-  assert.ok(compSrc.includes("<ProactiveHomeSection />"), "ProactiveHomeSection is rendered");
+  assert.ok(compSrc.includes("<ProactiveHomeSection sessionId="), "ProactiveHomeSection is rendered, scoped to the focused companion's sessionId (per-companion home, not a shared global)");
 });
 
 check("ProactiveHomeSection is rendered INSIDE the Manage tab panel", () => {
   const managePanelAt = compSrc.indexOf('id="companion-panel-manage"');
-  const homeRenderAt = compSrc.indexOf("<ProactiveHomeSection />");
+  const homeRenderAt = compSrc.indexOf("<ProactiveHomeSection sessionId=");
   const pairingAt = compSrc.indexOf("<PairingSection");
   assert.ok(managePanelAt !== -1, "the Manage tab panel exists");
   assert.ok(homeRenderAt > managePanelAt, "the proactive home renders within the Manage panel");
@@ -90,10 +91,10 @@ check("ProactiveHomeSection is rendered INSIDE the Manage tab panel", () => {
   assert.ok(homeRenderAt < pairingAt, "the proactive home is grouped among the Manage sections");
 });
 
-check("proactive-home behavior is preserved (set / change / clear the daemon-global home)", () => {
-  assert.ok(compSrc.includes("api.setCompanionHome"), "set/change home write preserved");
-  assert.ok(compSrc.includes("api.clearCompanionHome"), "clear home write preserved");
-  assert.ok(compSrc.includes("api.companionHome"), "home read preserved");
+check("proactive-home behavior is preserved (set / change / clear THIS companion's OWN home, per-session)", () => {
+  assert.ok(compSrc.includes("api.setCompanionHome(sessionId"), "set/change home write preserved, scoped to sessionId");
+  assert.ok(compSrc.includes("api.clearCompanionHome(sessionId)"), "clear home write preserved, scoped to sessionId");
+  assert.ok(compSrc.includes("api.companionHome(sessionId)"), "home read preserved, scoped to sessionId");
 });
 
 // ── 5. The Manage-tab copy is correct; nothing leaked into Settings ───────────────────────────────────

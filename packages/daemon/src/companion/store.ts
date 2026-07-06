@@ -16,7 +16,9 @@
  * SECURITY (load-bearing): the plaintext bot token exists only transiently — encrypted at rest via the
  * envelope helper (AES-256-GCM, LOOM_HOME key file), decrypted here only to hand the live gateway a token
  * to call Telegram or to derive the masked last-4. It is NEVER logged and NEVER returned in clear. Home is
- * NOT stored in the config row — it stays the single source of truth in app_meta (get/setCompanionHome).
+ * NOT stored in the config row — it stays in app_meta, PER SESSION (get/setCompanionHome(sessionId)) —
+ * see resolveAllEnabledConfigs, which resolves each row's OWN home rather than one shared value (the
+ * multi-companion cross-delivery fix, task e849a487).
  */
 import { createHash } from "node:crypto";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
@@ -35,8 +37,8 @@ export interface CompanionConfigStore {
     provisioned?: boolean;
     name?: string;
   }): CompanionConfigRow;
-  getCompanionHome(): CompanionRoute | null;
-  setCompanionHome(home: CompanionRoute): void;
+  getCompanionHome(sessionId: string): CompanionRoute | null;
+  setCompanionHome(sessionId: string, home: CompanionRoute): void;
 }
 
 /**
@@ -69,8 +71,9 @@ export function resolveAllCompanionConfigs(
       heartbeatPrompt: envCfg.heartbeatPrompt,
       enabled: true,
     });
-    // Seed the home target from env if unset (app_meta is the single source; a REST PUT can override later).
-    if (!db.getCompanionHome()) db.setCompanionHome({ channel: envCfg.homeChannel, chatId: envCfg.homeChatId });
+    // Seed THIS session's home target from env if unset (app_meta is the source, PER SESSION; a REST PUT
+    // can override later — never touches another companion's home).
+    if (!db.getCompanionHome(envCfg.sessionId)) db.setCompanionHome(envCfg.sessionId, { channel: envCfg.homeChannel, chatId: envCfg.homeChatId });
   }
   return resolveAllEnabledConfigs(db, env, keyPath);
 }
@@ -90,7 +93,6 @@ export function resolveAllEnabledConfigs(
   _env: NodeJS.ProcessEnv,
   keyPath?: string,
 ): CompanionConfig[] {
-  const home = db.getCompanionHome();
   const enabled = db.listCompanionConfigs().filter((c) => c.enabled);
   const configs: CompanionConfig[] = [];
   // SAME-TOKEN COLLISION GUARD (companion multi-bot-token collision guard): Telegram allows only ONE
@@ -102,6 +104,9 @@ export function resolveAllEnabledConfigs(
   // Distinct tokens (the normal multi-companion case) are completely unaffected.
   const armedByTokenFingerprint = new Map<string, string>(); // fingerprint -> sessionId already armed on it
   for (const row of enabled) {
+    // PER-ROW home (multi-companion cross-delivery fix, task e849a487): each session's home is read from
+    // ITS OWN app_meta key, never a single value shared across every row in this loop.
+    const home = db.getCompanionHome(row.sessionId);
     const cfg = buildConfigFromRow(row, home, keyPath);
     if (!cfg) continue;
     if (cfg.botToken) {
@@ -194,7 +199,8 @@ function buildConfigFromRow(row: CompanionConfigRow, home: CompanionRoute | null
 /**
  * Mask a stored run-config for a human REST read: `configured:true` + the token's last-4 only, NEVER the
  * token. Decrypts the blob solely to derive the last-4 (a corrupt blob yields an empty last-4, never a
- * throw). `home` is the app_meta home target (passed in — the single source). `env` (optional) is the
+ * throw). `home` is THIS row's OWN app_meta home target (the caller resolves it via
+ * `db.getCompanionHome(row.sessionId)` — never a value shared across rows). `env` (optional) is the
  * process env: when a LOOM_COMPANION_* config is set for THIS row's sessionId, `envPinned` is true — env
  * would OVERRIDE this row on the next boot, so the UI can warn instead of silently reverting a REST edit.
  * `keyPath` is the test seam.

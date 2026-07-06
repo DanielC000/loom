@@ -63,7 +63,8 @@ export type PairingRedeemResult =
  * A durable Companion RUN config row (Companion epic Phase 3) as stored/read at the DB layer. Carries the
  * ENCRYPTED bot token (`botTokenBlob`, envelope ciphertext) for the boot resolver to decrypt — this shape
  * is DAEMON-INTERNAL and must NEVER be returned over REST (the REST layer masks to CompanionConfigMasked,
- * exposing only configured + last-4). Home is deliberately absent — it stays in app_meta (single source).
+ * exposing only configured + last-4). Home is deliberately absent — it stays in app_meta, keyed PER
+ * SESSION (getCompanionHome(sessionId)/setCompanionHome(sessionId, …)), never a cross-session singleton.
  */
 export interface CompanionConfigRow {
   sessionId: string;
@@ -529,8 +530,9 @@ CREATE TABLE IF NOT EXISTS companion_pairing_attempts (
 -- loopback REST — INTENTIONALLY NO MCP path (an injection-exposed companion must not read/write its own
 -- token). Brand-new table ⇒ CREATE TABLE IF NOT EXISTS is itself the additive migration (an existing DB
 -- gains an empty table on boot; no row ⇒ companion OFF, byte-identical). Home is DELIBERATELY NOT stored
--- here — it stays the single source of truth in app_meta (get/setCompanionHome), surfaced in the masked
--- read by joining that value, so there are never two conflicting home stores.
+-- here — it stays the source of truth in app_meta, PER SESSION (get/setCompanionHome(sessionId)),
+-- surfaced in the masked read by joining that session's value, so there are never two conflicting home
+-- stores for the same companion.
 CREATE TABLE IF NOT EXISTS companion_config (
   session_id TEXT PRIMARY KEY,               -- the bound companion session id this run-config keys on
   bot_token_blob TEXT NOT NULL,              -- envelope ciphertext (v1:iv:tag:ct) — NEVER plaintext
@@ -704,11 +706,18 @@ const ARCHIVED_AT_BACKFILL_KEY = "archived_at_backfill_done";
 const HELD_BACKFILL_KEY = "task_held_title_backfill_done";
 
 /**
- * app_meta key for the Companion home channel (the proactive/outbound "where to reach the owner"
- * target — a single JSON blob `{channel, chatId}`). Daemon-GLOBAL, mirroring getPlatformConfig's
- * singleton pattern but over app_meta (NO new table). Read by getCompanionHome/setCompanionHome.
+ * app_meta key PREFIX for a companion's home channel (the proactive/outbound "where to reach the owner"
+ * target — a single JSON blob `{channel, chatId}`), PER-SESSION (multi-companion cross-delivery fix,
+ * task e849a487): each companion session gets its OWN key `companion_home:<sessionId>`, mirroring the
+ * per-row route already used by companion_reminders.route — NOT a single daemon-GLOBAL singleton (that
+ * was the bug: with ≥2 enabled companions, one shared key meant every heartbeat carried the SAME route
+ * regardless of which companion armed it). Still app_meta (NO new table). Read by
+ * getCompanionHome/setCompanionHome/clearCompanionHome.
  */
-const COMPANION_HOME_KEY = "companion_home";
+const COMPANION_HOME_KEY_PREFIX = "companion_home:";
+/** Legacy PRE-multi-companion global key (single shared home for the one-companion era). Read ONLY by
+ *  the one-shot migrateCompanionHomeToPerSession() backfill below; never written again. */
+const COMPANION_HOME_KEY_LEGACY = "companion_home";
 
 /**
  * app_meta key for the wedged-worktree tracking set (task dea6728e — the threadpool-safe redo of
@@ -965,6 +974,7 @@ export class Db {
     this.migrateSchedules();
     this.migrateRuns();
     this.migrateCompanionConfig();
+    this.migrateCompanionHomeToPerSession();
     this.migrateCompanionBindings();
     this.migrateWakes();
     this.migrateCompanionMessages();
@@ -1151,6 +1161,34 @@ export class Db {
     for (const [name, type] of Object.entries(COMPANION_CONFIG_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE companion_config ADD COLUMN ${name} ${type}`);
     }
+  }
+
+  /**
+   * One-shot backfill for the multi-companion heartbeat cross-delivery fix (task e849a487): the PRE-fix
+   * home was a single daemon-GLOBAL app_meta key (COMPANION_HOME_KEY_LEGACY) with no session scoping.
+   * Migrate it to the new per-session key (COMPANION_HOME_KEY_PREFIX) so an upgraded single-companion DB
+   * doesn't silently lose its configured home. Attribution is only unambiguous with EXACTLY ONE
+   * companion_config row (the pre-multi-companion shape this legacy key was ever valid for) — with zero
+   * or several rows there is no single session the old global value can be safely assigned to, so it is
+   * just dropped (losing a since-ambiguous setting beats reintroducing the exact cross-delivery bug this
+   * migration exists to fix). Idempotent: the legacy key is deleted after reading, so a second run is a
+   * no-op (getMeta returns undefined). Runs AFTER migrateCompanionConfig (companion_config's columns must
+   * already be settled) and BEFORE anything reads the new per-session key live.
+   */
+  private migrateCompanionHomeToPerSession(): void {
+    const raw = this.getMeta(COMPANION_HOME_KEY_LEGACY);
+    if (!raw) return; // fresh install, or already migrated — nothing to do
+    try {
+      const rows = this.db.prepare("SELECT session_id FROM companion_config").all() as { session_id: string }[];
+      const only = rows.length === 1 ? rows[0] : undefined;
+      if (only) {
+        const v = JSON.parse(raw) as { channel?: unknown; chatId?: unknown };
+        if (v && typeof v.channel === "string" && typeof v.chatId === "string") {
+          this.setMeta(COMPANION_HOME_KEY_PREFIX + only.session_id, JSON.stringify({ channel: v.channel, chatId: v.chatId }));
+        }
+      }
+    } catch { /* corrupt legacy blob — nothing to carry forward, fall through to delete it */ }
+    this.deleteMeta(COMPANION_HOME_KEY_LEGACY);
   }
 
   /**
@@ -1746,12 +1784,11 @@ export class Db {
     this.db.prepare("DELETE FROM companion_pairing_attempts WHERE channel = ? AND sender_id = ?").run(channel, senderId);
   }
 
-  // --- companion home channel (the proactive/outbound "where to reach the owner" target; app_meta JSON) ---
-  // Durable over the EXISTING app_meta key/value store (single JSON key, NO new table) — mirrors
-  // getPlatformConfig/setPlatformConfig. Phase 1 only LAYS this; the proactive card (9488951e) reads it.
-  /** The stored home channel target, or null when unset/corrupt (never throws). */
-  getCompanionHome(): CompanionRoute | null {
-    const raw = this.getMeta(COMPANION_HOME_KEY);
+  // --- companion home channel (the proactive/outbound "where to reach the owner" target; app_meta JSON,
+  // PER-SESSION — see COMPANION_HOME_KEY_PREFIX doc) ---
+  /** The stored home channel target for ONE companion session, or null when unset/corrupt (never throws). */
+  getCompanionHome(sessionId: string): CompanionRoute | null {
+    const raw = this.getMeta(COMPANION_HOME_KEY_PREFIX + sessionId);
     if (!raw) return null;
     try {
       const v = JSON.parse(raw) as { channel?: unknown; chatId?: unknown };
@@ -1759,13 +1796,14 @@ export class Db {
     } catch { /* corrupt blob ⇒ null (like getPlatformConfig) */ }
     return null;
   }
-  /** Upsert the home channel target (a single app_meta JSON key). */
-  setCompanionHome(home: CompanionRoute): void {
-    this.setMeta(COMPANION_HOME_KEY, JSON.stringify({ channel: home.channel, chatId: home.chatId }));
+  /** Upsert the home channel target for ONE companion session (its own app_meta JSON key). */
+  setCompanionHome(sessionId: string, home: CompanionRoute): void {
+    this.setMeta(COMPANION_HOME_KEY_PREFIX + sessionId, JSON.stringify({ channel: home.channel, chatId: home.chatId }));
   }
-  /** Clear the home channel target (drop the app_meta key) — proactive delivery falls back to OFF. */
-  clearCompanionHome(): void {
-    this.deleteMeta(COMPANION_HOME_KEY);
+  /** Clear ONE companion session's home channel target — that companion's proactive HEARTBEAT turns OFF
+   *  (heartbeat.ts's tick() reads null ⇒ no route ⇒ nothing to chat_reply), never another session's home. */
+  clearCompanionHome(sessionId: string): void {
+    this.deleteMeta(COMPANION_HOME_KEY_PREFIX + sessionId);
   }
 
   // --- wedged-worktree tracking (task dea6728e; app_meta JSON array) — SLOW retry, not permanent skip ---
@@ -1895,6 +1933,7 @@ export class Db {
       this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM companion_allowed_senders WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM companion_pairing_codes WHERE session_id = ?").run(sessionId);
+      this.db.prepare("DELETE FROM app_meta WHERE key = ?").run(COMPANION_HOME_KEY_PREFIX + sessionId);
     })();
   }
 
