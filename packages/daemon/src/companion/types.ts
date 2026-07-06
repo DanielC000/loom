@@ -206,7 +206,27 @@ export interface CompanionHistoryReset {
  * failure must never break the inbound/reply path it's mirroring).
  */
 export interface CompanionMessageRecorder {
-  record(sessionId: string, channel: string, chatId: string, author: "user" | "companion", text: string, viaVoice: boolean): void;
+  /** `id` (added for the live-push card below) is the id THIS turn is persisted under — optional so an
+   *  existing/test recorder that ignores it (ignores the extra arg, mints its own id) stays byte-identical;
+   *  the daemon's real impl (factory.ts) uses it verbatim so the persisted row and the live-pushed frame
+   *  (see CompanionLivePush) share the SAME id — the client's dedup identity. */
+  record(sessionId: string, channel: string, chatId: string, author: "user" | "companion", text: string, viaVoice: boolean, id?: string): void;
+}
+
+/**
+ * The injected LIVE PUSH hook for a NON-in-app channel turn (e.g. Telegram) — pushes an already-recorded
+ * turn to any CONNECTED in-app web client for `sessionId`, so an open CompanionChat panel sees it appear
+ * without a reload (closes the gap left by the unified cross-channel chat's seed-only rendering, card
+ * 7d63e200). `msg.id` is the SAME id `CompanionMessageRecorder.record` persisted the row under — the stable
+ * dedup identity a client uses so a live-pushed row and the same row's later history-reload never both
+ * render. Optional: undefined ⇒ no live push (every existing/test bare `new ChatGateway(...)` construction
+ * stays byte-identical). The daemon's real implementation (factory.ts) skips the in-app channel — an in-app
+ * turn already renders live via its own dedicated WS round-trip, never through this generic hook. Never
+ * throws by contract — the gateway wraps every call in a try/catch anyway (a live-push failure must never
+ * break the inbound/reply path it's mirroring).
+ */
+export interface CompanionLivePush {
+  push(sessionId: string, msg: { id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean }): void;
 }
 
 /** The OUTBOUND delivery result — STRUCTURED across every failure mode (never throws out of chat_reply).

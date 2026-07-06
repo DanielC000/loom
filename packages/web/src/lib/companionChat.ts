@@ -19,6 +19,13 @@
 // `audio` field — {"type":"chat","chatId":"…","text":"…","audio":{"data":"<base64>","mimeType":"…"}} —
 // present only when `/voice on` is active for this DM route and synthesis succeeded. Always a Kokoro
 // OGG/Opus clip; absent on every plain text reply (the overwhelming default).
+//
+// CROSS-CHANNEL LIVE PUSH (live-push card, closing a unified cross-channel chat gap, card 7d63e200):
+//   • INBOUND (we receive): {"type":"cross-channel","chatId":"…","id":"…","channel":"telegram","author":
+//     "user"|"companion","text":"…","viaVoice":bool} — a turn that happened on a NON-in-app channel (e.g.
+//     Telegram), pushed the moment the daemon persists it. `id` is the companion_messages row id — the
+//     SAME id a later history reload (GET /api/companion/messages/:sessionId) returns for this row, so the
+//     panel can dedup a live-pushed row against its own reload instead of rendering it twice.
 
 // The in-app channel name — mirrors IN_APP_CHANNEL in the daemon's companion/in-app.ts. Used to decide
 // whether a companion is reachable in-app (its binding must be on THIS channel to get a reply frame).
@@ -146,6 +153,26 @@ export function parseCleared(raw: string): { chatId: string } | null {
   return { chatId: typeof m.chatId === "string" ? m.chatId : "" };
 }
 
+// Parse an inbound {type:"cross-channel"} frame (live-push card) — a turn that happened on a NON-in-app
+// channel (e.g. Telegram), pushed live the moment the daemon persists it. Returns null for malformed JSON,
+// a non-object, a non-cross-channel frame, or a malformed shape (missing/wrong-typed id/channel/text/
+// author) — defensive by construction, like every other frame parser here.
+export function parseCrossChannel(
+  raw: string,
+): { chatId: string; id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean } | null {
+  let msg: unknown;
+  try {
+    msg = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof msg !== "object" || msg === null) return null;
+  const m = msg as { type?: unknown; chatId?: unknown; id?: unknown; channel?: unknown; author?: unknown; text?: unknown; viaVoice?: unknown };
+  if (m.type !== "cross-channel" || typeof m.id !== "string" || typeof m.channel !== "string" || typeof m.text !== "string") return null;
+  if (m.author !== "user" && m.author !== "companion") return null;
+  return { chatId: typeof m.chatId === "string" ? m.chatId : "", id: m.id, channel: m.channel, author: m.author, text: m.text, viaVoice: m.viaVoice === true };
+}
+
 // Build a "you" (local) bubble from a prepared send. Split out so the send path is one testable step. This
 // WS is in-app-only by construction, so every live message is tagged IN_APP_CHANNEL.
 export function youMessage(text: string, id: string): ChatMessage {
@@ -184,4 +211,14 @@ export interface CompanionHistoryRow {
 export function historyMessage(row: CompanionHistoryRow): ChatMessage {
   const base: ChatMessage = { id: row.id, author: row.author === "user" ? "you" : "companion", text: row.text, channel: row.channel };
   return row.viaVoice ? { ...base, voice: true } : base;
+}
+
+// Build a rendered bubble from a parsed {type:"cross-channel"} live push (live-push card) — the SAME shape
+// historyMessage produces (down to using the row's own persisted `id` as the ChatMessage id, never a local
+// counter), so a live-pushed row and the same row's later history-reload are structurally identical and can
+// be deduped by id alone: the panel drops one when it already holds a message with that id (see
+// CompanionChat's ws handler).
+export function crossChannelMessage(msg: { id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean }): ChatMessage {
+  const base: ChatMessage = { id: msg.id, author: msg.author === "user" ? "you" : "companion", text: msg.text, channel: msg.channel };
+  return msg.viaVoice ? { ...base, voice: true } : base;
 }

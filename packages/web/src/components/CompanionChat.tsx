@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import {
-  companionMessage, historyMessage, IN_APP_CHANNEL, parseCleared, parseInbound, parseTranscript, prepareSend, prepareSendAudio, youMessage,
+  companionMessage, crossChannelMessage, historyMessage, IN_APP_CHANNEL, parseCleared, parseCrossChannel, parseInbound, parseTranscript,
+  prepareSend, prepareSendAudio, youMessage,
   type ChatConnState, type ChatMessage, type CompanionHistoryRow,
 } from "../lib/companionChat";
 import { Button, StatusPill } from "./ui";
@@ -33,7 +34,10 @@ function blobToBase64(blob: Blob): Promise<string> {
  * friendly chat-bubble panel over the dedicated in-app WebSocket `/ws/companion/:sessionId` (separate from
  * the terminal route `/ws/term/:sessionId`; see daemon companion/in-app.ts). You type → the panel sends
  * {type:"chat",text}; the companion's reply arrives as a {type:"chat",chatId,text} frame and renders as a
- * companion bubble. All wire framing + parsing lives in the pure, unit-tested lib/companionChat.
+ * companion bubble. A turn that happened on a NON-in-app channel (e.g. Telegram) arrives as a
+ * {type:"cross-channel",...} frame (live-push card) and renders with the same badge/mic treatment a
+ * reload's history seed would give it. All wire framing + parsing lives in the pure, unit-tested
+ * lib/companionChat.
  *
  * Connection lifecycle mirrors Terminal.tsx's discipline (open/close/reconnect, and the CONNECTING-state
  * close guard so a pane abandoned mid-handshake never logs a spurious close) — but with JSON chat framing,
@@ -42,8 +46,10 @@ function blobToBase64(blob: Blob): Promise<string> {
  * HISTORY (bug 0f01f234 — reload used to lose the whole conversation): on every sessionId mount, this LOADS
  * the durable history first (GET /api/companion/messages/:sessionId) and seeds `messages` from it, THEN
  * opens the WebSocket — load-then-connect, so no live frame can arrive before the history snapshot is
- * taken (no history/live overlap to dedup). A fetch failure degrades to an empty seed and still connects
- * live (never blocks the chat on a history read).
+ * taken (no history/live overlap to dedup on THIS mount's initial seed). A cross-channel live push is still
+ * deduped by its persisted row id (see the ws handler) — a defensive backstop for a reconnect or a duplicate
+ * push, not for the initial seed. A fetch failure degrades to an empty seed and still connects live (never
+ * blocks the chat on a history read).
  *
  * `armed` (optional) is whether this companion actually has an in-app route. When false, we surface a
  * gentle "not wired" notice: a message to an unbound companion gets no reply frame, so we must not imply it
@@ -141,6 +147,17 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
           setAwaitingReply(false);
           setReplyTimedOut(false);
           clearReplyTimer();
+          return;
+        }
+        // A NON-in-app channel turn (e.g. Telegram), pushed live the moment the daemon persists it
+        // (live-push card — closes the "only shows up after a reload" gap in the unified cross-channel
+        // chat, card 7d63e200). Renders with the SAME historyMessage shape a reload would produce (the
+        // "Telegram" badge + 🎤 for a voice transcript). Dedup by `id` (the companion_messages row id, the
+        // SAME id a later reload's seed carries for this row): this load-then-connect panel can't seed the
+        // same row twice within one mount, but a reconnect or a duplicate push could otherwise double-render.
+        const crossChannel = parseCrossChannel(e.data);
+        if (crossChannel) {
+          setMessages((m) => (m.some((x) => x.id === crossChannel.id) ? m : [...m, crossChannelMessage(crossChannel)]));
           return;
         }
         // any other frame (control/garbage) is ignored — never rendered

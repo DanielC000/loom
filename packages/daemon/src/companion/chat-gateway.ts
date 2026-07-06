@@ -21,9 +21,11 @@
  * inbound is never ambiguous. Ingested text is handed to the agent as a turn (data it reads), never
  * interpreted as an instruction to the gateway.
  */
+import { randomUUID } from "node:crypto";
 import type {
   ChannelAdapter,
   CompanionHistoryReset,
+  CompanionLivePush,
   CompanionMessageRecorder,
   CompanionRoute,
   CompanionSynthesizer,
@@ -131,6 +133,10 @@ export class ChatGateway {
    *                    history-clear halves (every existing/test construction stays byte-identical). The
    *                    daemon injects `(sid) => { const p = sessions.composeCompanionReinjectPrompt(sid); if
    *                    (p) pty.enqueueStdin(sid, p, "system"); }` (index.ts).
+   * @param livePush    the injected LIVE PUSH hook (Telegram live-chat push card) — see {@link
+   *                    CompanionLivePush}. Default undefined ⇒ no live push (every existing/test construction
+   *                    stays byte-identical). The daemon injects an impl that skips the in-app channel and
+   *                    pushes to `deps.inApp` for every other channel (factory.ts).
    */
   constructor(
     private readonly submitTurn: SubmitTurn,
@@ -144,6 +150,7 @@ export class ChatGateway {
     private readonly historyReset: CompanionHistoryReset | undefined = undefined,
     private readonly recorder: CompanionMessageRecorder | undefined = undefined,
     private readonly reinjectPersona: ((sessionId: string) => void) | undefined = undefined,
+    private readonly livePush: CompanionLivePush | undefined = undefined,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -423,28 +430,53 @@ export class ChatGateway {
   /** Best-effort inbound chat-history record for an ACCEPTED turn (unified cross-channel chat, card
    *  7d63e200) — generalizes controller.ts's in-app-only recordInboundMessageSafely to every channel the
    *  gateway routes. The injected recorder decides which channels to actually persist (the daemon's real
-   *  impl skips in-app — see {@link CompanionMessageRecorder}). Never throws: a history-record failure
-   *  must never break the inbound path it's mirroring. */
+   *  impl skips in-app — see {@link CompanionMessageRecorder}). ADDITIONALLY (live-push card) pushes the
+   *  SAME turn, under the SAME id, to any connected in-app web client via the injected `livePush` — so an
+   *  open CompanionChat panel sees a Telegram message pop up without a reload; the real impl likewise skips
+   *  in-app (that channel already renders live via its own dedicated path). Never throws: a history-record
+   *  or live-push failure must never break the inbound path it's mirroring. */
   private recordInboundSafely(sessionId: string, channel: string, chatId: string, text: string, viaVoice: boolean): void {
-    if (!this.recorder) return;
-    try {
-      this.recorder.record(sessionId, channel, chatId, "user", text, viaVoice);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error(`[companion] inbound history record failed: ${describeError(err)}`);
+    if (!this.recorder && !this.livePush) return;
+    const id = randomUUID();
+    if (this.recorder) {
+      try {
+        this.recorder.record(sessionId, channel, chatId, "user", text, viaVoice, id);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[companion] inbound history record failed: ${describeError(err)}`);
+      }
     }
+    this.pushLiveSafely(sessionId, channel, "user", text, viaVoice, id);
   }
 
   /** Best-effort outbound chat-history record for a delivered/voiced reply (unified cross-channel chat,
    *  card 7d63e200) — generalizes in-app.ts's own outbound record hook to every channel; see
-   *  {@link recordInboundSafely} / {@link CompanionMessageRecorder}. Never throws. */
+   *  {@link recordInboundSafely} / {@link CompanionMessageRecorder}. ADDITIONALLY live-pushes the reply —
+   *  see {@link recordInboundSafely}'s live-push note. Never throws. */
   private recordOutboundSafely(sessionId: string, channel: string, chatId: string, text: string): void {
-    if (!this.recorder) return;
+    if (!this.recorder && !this.livePush) return;
+    const id = randomUUID();
+    if (this.recorder) {
+      try {
+        this.recorder.record(sessionId, channel, chatId, "companion", text, false, id);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[companion] outbound history record failed: ${describeError(err)}`);
+      }
+    }
+    this.pushLiveSafely(sessionId, channel, "companion", text, false, id);
+  }
+
+  /** Shared live-push containment (live-push card): a push failure must NEVER break the record/inbound/
+   *  reply path it's mirroring — contained exactly like {@link recordInboundSafely}/{@link
+   *  recordOutboundSafely}'s own recorder try/catch. No-op when no `livePush` is injected. */
+  private pushLiveSafely(sessionId: string, channel: string, author: "user" | "companion", text: string, viaVoice: boolean, id: string): void {
+    if (!this.livePush) return;
     try {
-      this.recorder.record(sessionId, channel, chatId, "companion", text, false);
+      this.livePush.push(sessionId, { id, channel, author, text, viaVoice });
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.error(`[companion] outbound history record failed: ${describeError(err)}`);
+      console.error(`[companion] live cross-channel push failed: ${describeError(err)}`);
     }
   }
 

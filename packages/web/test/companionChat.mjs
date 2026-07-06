@@ -14,8 +14,8 @@
 //   node --experimental-strip-types packages/web/test/companionChat.mjs
 import assert from "node:assert/strict";
 import {
-  IN_APP_CHANNEL, companionMessage, historyMessage, isArmedInApp, parseInbound, parseTranscript, prepareSend,
-  prepareSendAudio, youMessage,
+  IN_APP_CHANNEL, companionMessage, crossChannelMessage, historyMessage, isArmedInApp, parseCrossChannel, parseInbound,
+  parseTranscript, prepareSend, prepareSendAudio, youMessage,
 } from "../src/lib/companionChat.ts";
 
 let pass = 0;
@@ -199,6 +199,45 @@ check("isArmedInApp: false when only a telegram binding exists (no in-app route)
 
 check("isArmedInApp: an in-app binding whose chatId is NOT the session id does not arm (not the loopback self-address)", () => {
   assert.equal(isArmedInApp([{ channel: "in-app", chatId: "someone-else" }], "sess-1"), false);
+});
+
+// ── parseCrossChannel / crossChannelMessage: the live-push card's NON-in-app-channel live frame ─────────
+check("parseCrossChannel: a well-formed frame parses every field, including viaVoice defaulting to false", () => {
+  assert.deepEqual(
+    parseCrossChannel(JSON.stringify({ type: "cross-channel", chatId: "sess-1", id: "row-9", channel: "telegram", author: "user", text: "hi" })),
+    { chatId: "sess-1", id: "row-9", channel: "telegram", author: "user", text: "hi", viaVoice: false },
+  );
+});
+check("parseCrossChannel: viaVoice:true is preserved", () => {
+  const parsed = parseCrossChannel(JSON.stringify({ type: "cross-channel", chatId: "s", id: "r1", channel: "telegram", author: "user", text: "a voice note transcript", viaVoice: true }));
+  assert.equal(parsed.viaVoice, true);
+});
+check("parseCrossChannel: a companion-authored frame parses too", () => {
+  const parsed = parseCrossChannel(JSON.stringify({ type: "cross-channel", chatId: "s", id: "r2", channel: "telegram", author: "companion", text: "reply" }));
+  assert.equal(parsed.author, "companion");
+});
+check("parseCrossChannel: any other frame type / malformed shape returns null (never rendered)", () => {
+  assert.equal(parseCrossChannel(JSON.stringify({ type: "chat", chatId: "s", text: "t" })), null, "a plain chat frame is not a cross-channel frame");
+  assert.equal(parseCrossChannel(JSON.stringify({ type: "cross-channel", chatId: "s", channel: "telegram", author: "user", text: "t" })), null, "missing id");
+  assert.equal(parseCrossChannel(JSON.stringify({ type: "cross-channel", chatId: "s", id: "r", author: "user", text: "t" })), null, "missing channel");
+  assert.equal(parseCrossChannel(JSON.stringify({ type: "cross-channel", chatId: "s", id: "r", channel: "telegram", author: "nobody", text: "t" })), null, "bogus author");
+  assert.equal(parseCrossChannel("not json"), null);
+  assert.equal(parseCrossChannel(JSON.stringify(null)), null);
+});
+check("crossChannelMessage: maps to the SAME shape historyMessage would for an equivalent row (same id, dedupable)", () => {
+  const live = crossChannelMessage({ id: "row-9", channel: "telegram", author: "user", text: "sent from my phone", viaVoice: false });
+  const seeded = historyMessage({ id: "row-9", author: "user", text: "sent from my phone", channel: "telegram", viaVoice: false });
+  assert.deepEqual(live, seeded, "a live-pushed row and its later history-reload produce an IDENTICAL ChatMessage, keyed on the same id");
+});
+check("crossChannelMessage: viaVoice:true tags the bubble voice:true; a companion author maps to the companion bubble", () => {
+  assert.deepEqual(
+    crossChannelMessage({ id: "r1", channel: "telegram", author: "user", text: "a voice note transcript", viaVoice: true }),
+    { id: "r1", author: "you", text: "a voice note transcript", channel: "telegram", voice: true },
+  );
+  assert.deepEqual(
+    crossChannelMessage({ id: "r2", channel: "telegram", author: "companion", text: "reply", viaVoice: false }),
+    { id: "r2", author: "companion", text: "reply", channel: "telegram" },
+  );
 });
 
 console.log(`\n${pass} passed`);

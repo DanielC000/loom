@@ -17,7 +17,7 @@ import { createDbCompanionVoicePrefs, type VoicePrefStore } from "./voice-prefs.
 import type { CompanionConfig } from "./config.js";
 import { createTelegramAdapter, TELEGRAM_CHANNEL } from "./telegram.js";
 import { IN_APP_CHANNEL, type InAppChannel } from "./in-app.js";
-import type { CompanionHistoryReset, CompanionMessageRecorder, CompanionRoute, CompanionSynthesizer, CompanionTranscriber, SessionBinding, SubmitTurn } from "./types.js";
+import type { CompanionHistoryReset, CompanionLivePush, CompanionMessageRecorder, CompanionRoute, CompanionSynthesizer, CompanionTranscriber, SessionBinding, SubmitTurn } from "./types.js";
 import type { CompanionBinding } from "@loom/shared";
 
 /** The narrow db surface the factory needs: the durable binding store + the allowlist reader (for authz)
@@ -96,15 +96,27 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // in-app.ts's outbound record via the `inApp` recorder passed in from index.ts) — recording it again here
   // would double-write the same turn.
   const recorder: CompanionMessageRecorder = {
-    record(sessionId, channel, chatId, author, text, viaVoice) {
+    record(sessionId, channel, chatId, author, text, viaVoice, id) {
       if (channel === IN_APP_CHANNEL) return;
-      db.insertCompanionMessage({ id: randomUUID(), sessionId, channel, chatId, author, text, createdAt: new Date().toISOString(), viaVoice });
+      db.insertCompanionMessage({ id: id ?? randomUUID(), sessionId, channel, chatId, author, text, createdAt: new Date().toISOString(), viaVoice });
+    },
+  };
+  // LIVE PUSH (live-push card, closing a gap in the unified cross-channel chat): pushes the SAME turn the
+  // recorder above just persisted — under the SAME `msg.id` — to any web client attached to `sessionId` via
+  // the stable in-app hub, so an already-open CompanionChat panel sees a Telegram message appear without a
+  // reload. Skips the in-app channel exactly like `recorder` above: it already renders live via its own
+  // dedicated {type:"chat"}/{type:"transcript"} round trip, so pushing it again here would double-render.
+  // `inApp` optional (Telegram-only / test seams without a hub) ⇒ this is a no-op.
+  const livePush: CompanionLivePush = {
+    push(sessionId, msg) {
+      if (msg.channel === IN_APP_CHANNEL) return;
+      inApp?.pushCrossChannel(sessionId, msg);
     },
   };
   // Per-turn ORIGIN resolver (multi-channel reply routing): deliverReply targets the in-flight turn's
   // originating route (pty.getActiveTurnOrigin, injected). NOT the old home fallback — a proactive/heartbeat
   // turn now carries the home route ON its submit, so its chat_reply flows through the SAME per-turn path.
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona);
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush);
   // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
   // arms NO Telegram long-poll: the gateway comes up with the in-app adapter alone (registered below), so no
   // external network transport is started and default-OFF stays byte-identical. The adapter normalizes each

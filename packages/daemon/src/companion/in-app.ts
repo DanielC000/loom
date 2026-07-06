@@ -64,6 +64,12 @@ export interface InAppServerAudio {
  * `resetConversation`) tells an attached web viewer its conversation was just reset: the daemon has already
  * cleared the durable history, so this is PURELY the live push — an open panel empties immediately instead
  * of waiting for its next reload/history-fetch.
+ *
+ * `type:"cross-channel"` (live-push card, closing a gap in the unified cross-channel chat, card 7d63e200) —
+ * a turn that happened on a NON-in-app channel (e.g. Telegram), pushed live to an attached web client the
+ * moment chat-gateway.ts's generic recorder path persists it, so an already-OPEN CompanionChat panel sees it
+ * appear without a reload. `id` is the SAME id the row was persisted under (companion_messages.id) — the
+ * stable identity a client dedups on against the same row's later history-reload.
  */
 export type InAppServerFrame =
   | {
@@ -83,6 +89,18 @@ export type InAppServerFrame =
   | {
       type: "cleared";
       chatId: string;
+    }
+  | {
+      type: "cross-channel";
+      chatId: string;
+      /** The persisted companion_messages row id — the client's dedup identity. */
+      id: string;
+      /** The originating channel, e.g. "telegram" (never "in-app" — that channel renders live via its own
+       *  dedicated {type:"chat"}/{type:"transcript"} round trip, not this frame). */
+      channel: string;
+      author: "user" | "companion";
+      text: string;
+      viaVoice: boolean;
     };
 
 /** The minimal surface of a connected web client the hub pushes outbound frames to. The WS route wraps the
@@ -307,6 +325,18 @@ export class InAppChannel {
    */
   pushCleared(chatId: string): void {
     this.pushFrame(chatId, { type: "cleared", chatId });
+  }
+
+  /**
+   * Push an ALREADY-recorded NON-in-app channel turn (live-push card) to every client attached to `chatId`
+   * (== the companion session id) — chat-gateway.ts's generic recorder path calls this right after
+   * persisting the row, so an open CompanionChat panel sees a Telegram message appear without a reload.
+   * `msg.id` is the SAME id the row was persisted under — the client's dedup identity against the same
+   * row's later history-reload. Purely the live push (mirrors pushCleared/pushTranscript): never writes to
+   * the db itself.
+   */
+  pushCrossChannel(chatId: string, msg: { id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean }): void {
+    this.pushFrame(chatId, { type: "cross-channel", chatId, id: msg.id, channel: msg.channel, author: msg.author, text: msg.text, viaVoice: msg.viaVoice });
   }
 
   /** Shared per-client fan-out: a client `deliver` that throws is CONTAINED (one bad socket can't drop the
