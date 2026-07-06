@@ -26,23 +26,55 @@
  * NOT flow through an adapter-constructor handler (there is no long-poll): it enters via the controller's
  * stable `handleInAppInbound` indirection (symmetric with deliverReply) so it always targets the CURRENT
  * gateway and never a torn-down one — see controller.ts.
+ *
+ * VOICE (Companion Voice epic, VOICE-P4): the web mic's inbound audio and Kokoro's synthesized outbound
+ * replies both ride THIS SAME channel — inbound as a server-generated temp file resolved via
+ * `downloadAttachment` (mirrors Telegram's file download, except the bytes are already local — see
+ * `decodeInAppAudioToTempFile`), outbound as a base64 field on the existing `{type:"chat"}` frame
+ * (`sendVoice`). Neither touches the terminal WS or adds a new route.
  */
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { LOOM_HOME } from "../paths.js";
 import type { ChannelAdapter, InboundMessage } from "./types.js";
 
 /** The stable channel name — the key in the gateway registry and the `channel` on every in-app binding. */
 export const IN_APP_CHANNEL = "in-app";
 
+/** Base64-encoded audio carried on an outbound frame (Companion Voice epic, VOICE-P4 outbound) — always a
+ *  Kokoro-synthesized OGG/Opus clip. Never persisted (text is what's stored/shown); transport only. */
+export interface InAppServerAudio {
+  /** Base64-encoded audio bytes. */
+  data: string;
+  mimeType: string;
+}
+
 /**
  * A framed OUTBOUND message pushed to a connected in-app web client. `type:"chat"` is DELIBERATELY distinct
  * from the terminal stream (raw pty bytes / `{type:"data"|"exit"|…}` control events), so the two multiplex
  * on the same session without collision — a terminal viewer ignores a `chat` frame and vice versa.
+ *
+ * `type:"transcript"` (Companion Voice epic, VOICE-P4 inbound) is the daemon's live echo of the SENDER'S OWN
+ * web-mic recording once STT completes — a genuine round trip, unlike a typed message (the panel already
+ * knows its own typed text and renders it locally without waiting on the server). Kept as a DISTINCT frame
+ * type (never `"chat"`) so the panel can never confuse "your own transcribed turn" with a companion reply.
  */
-export interface InAppServerFrame {
-  type: "chat";
-  /** The in-app chat id this reply is for (== the bound companion session id). */
-  chatId: string;
-  text: string;
-}
+export type InAppServerFrame =
+  | {
+      type: "chat";
+      /** The in-app chat id this reply is for (== the bound companion session id). */
+      chatId: string;
+      text: string;
+      /** Present only when this reply was voiced (`/voice on` + successful synthesis) — see `sendVoice`. */
+      audio?: InAppServerAudio;
+    }
+  | {
+      type: "transcript";
+      chatId: string;
+      /** The STT transcript of the sender's own just-recorded web-mic clip. */
+      text: string;
+    };
 
 /** The minimal surface of a connected web client the hub pushes outbound frames to. The WS route wraps the
  *  real socket; a test injects a fake recorder. */
@@ -72,6 +104,65 @@ export interface InAppMessageRecorder {
 export function normalizeInAppMessage(chatId: string, body: unknown): InboundMessage | null {
   if (typeof body !== "string" || body.length === 0) return null;
   return { channel: IN_APP_CHANNEL, chatId, body };
+}
+
+/** Inbound web-mic audio size cap (Companion Voice epic, VOICE-P4 inbound) — a chat voice clip is far
+ *  smaller than Telegram's 20MB cloud-download cap (telegram.ts), but nothing bounds a browser recording's
+ *  length on its own, so this caps the DECODED byte count generously above a normal few-minutes clip while
+ *  still bounding the in-memory Buffer this allocates. */
+export const IN_APP_AUDIO_MAX_BYTES = 15 * 1024 * 1024;
+
+/** Where an in-app inbound audio clip's decoded temp file lands — the SAME dir Telegram's downloaded voice
+ *  notes and Kokoro's synthesized replies use (companion-audio), so there is exactly one temp-audio
+ *  lifecycle to reason about across every channel. */
+function audioTmpDir(): string {
+  return path.join(LOOM_HOME, "tmp", "companion-audio");
+}
+
+/** Map a MediaRecorder mimeType to a plausible file extension — cosmetic only (the STT pipeline sniffs the
+ *  real container from the bytes via PyAV, not the extension); kept for on-disk debuggability. */
+function extForMimeType(mimeType: string): string {
+  if (mimeType.includes("ogg")) return ".ogg";
+  if (mimeType.includes("webm")) return ".webm";
+  return ".bin";
+}
+
+/**
+ * Decode a base64-encoded inbound web-mic clip to a SERVER-GENERATED temp file (Companion Voice epic,
+ * VOICE-P4 inbound). The caller (gateway/server.ts's `/ws/companion` route) hands this the RAW base64
+ * payload off an `{type:"audio"}` frame — untrusted bytes, never a client-supplied path. Rejects an
+ * oversized payload by its BASE64 length BEFORE decoding (bounds the `Buffer.from` allocation itself, not
+ * just the eventual byte count) and again after decode as a belt-and-suspenders check. Returns null on ANY
+ * failure (empty/non-string input, oversize, write failure) — NEVER throws; the caller degrades to a
+ * friendly ack via the SAME STT-unavailable path a download failure already takes. The returned path is
+ * ALWAYS a fresh `randomUUID` under `LOOM_HOME/tmp/companion-audio` — `downloadAttachment` below only ever
+ * hands back a path THIS function minted, never one derived from client input.
+ */
+export function decodeInAppAudioToTempFile(base64: unknown, mimeType: unknown): { filePath: string; cleanup: () => Promise<void> } | null {
+  if (typeof base64 !== "string" || base64.length === 0) return null;
+  const mime = typeof mimeType === "string" ? mimeType : "";
+  // Base64 encodes 3 bytes as 4 chars (plus up to 2 padding chars) — reject before ever materializing the
+  // decoded Buffer.
+  if (base64.length > Math.ceil((IN_APP_AUDIO_MAX_BYTES * 4) / 3) + 4) return null;
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(base64, "base64");
+  } catch {
+    return null;
+  }
+  if (bytes.length === 0 || bytes.length > IN_APP_AUDIO_MAX_BYTES) return null;
+  try {
+    const dir = audioTmpDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, `${randomUUID()}${extForMimeType(mime)}`);
+    fs.writeFileSync(filePath, bytes);
+    return {
+      filePath,
+      cleanup: async () => { try { await fs.promises.unlink(filePath); } catch { /* best-effort */ } },
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -110,6 +201,33 @@ export class InAppChannel {
       // to nobody). Contained: a history-record failure must never break the actual reply delivery below.
       this.recordSafely(chatId, "companion", text);
       this.deliver(chatId, text);
+    },
+    // VOICE INBOUND (Companion Voice epic, VOICE-P4). Unlike Telegram's real network fetch, the in-app
+    // channel's audio is ALREADY local by the time handleInbound sees it: the /ws/companion route decodes
+    // the client's base64 bytes into a server-generated temp file (decodeInAppAudioToTempFile) BEFORE
+    // calling the controller, threading that path through as `attachment.fileId` — so this is a pass-through,
+    // not a real download. It still returns the SAME { filePath, cleanup } shape Telegram's version does, so
+    // chat-gateway.ts's existing download→transcribe→cleanup discipline (including its `finally` unlink)
+    // runs unchanged. `attachment.fileId` is NEVER client-supplied — only ever a path THIS channel's own
+    // decodeInAppAudioToTempFile minted for this exact request.
+    async downloadAttachment(attachment) {
+      if (!attachment.fileId) return null;
+      const filePath = attachment.fileId;
+      return {
+        filePath,
+        cleanup: async () => { try { await fs.promises.unlink(filePath); } catch { /* best-effort */ } },
+      };
+    },
+    // VOICE OUTBOUND (Companion Voice epic, VOICE-P4). Unlike Telegram, `sendVoice` here REPLACES `send`
+    // entirely on the voice path (chat-gateway.ts's tryDeliverVoice calls sendVoice INSTEAD of send when
+    // synthesis succeeds) — so recording + live delivery must both happen HERE, exactly mirroring `send`
+    // above, or a successful voice reply would silently vanish from history/reload. Reads + base64-encodes
+    // the synthesized OGG/Opus file; a read failure THROWS (deliberately) so chat-gateway's tryDeliverVoice
+    // catch degrades to the plain `send` above instead of this method silently double-recording nothing.
+    sendVoice: async (chatId: string, audioFilePath: string, text: string) => {
+      const data = await fs.promises.readFile(audioFilePath, { encoding: "base64" });
+      this.recordSafely(chatId, "companion", text);
+      this.deliver(chatId, text, { data, mimeType: "audio/ogg" });
     },
   };
 
@@ -151,17 +269,33 @@ export class InAppChannel {
   }
 
   /**
-   * OUTBOUND sink: frame `text` and push it to every client attached to `chatId`. A client `deliver` that
-   * throws is CONTAINED (one bad socket can't drop the others or bubble out of the reply path). With no
-   * attached client the LIVE push is simply dropped — nobody is there to receive a frame — but the reply is
-   * still RECORDED to chat history by `adapter.send` before this runs, so a proactive reply (heartbeat) to a
-   * session nobody is viewing right now shows up on the next attach instead of vanishing. A reply-to-inbound
-   * always has an attached client (they just sent the message).
+   * OUTBOUND sink: frame `text` (+ optional `audio`, VOICE-P4 outbound) and push it to every client attached
+   * to `chatId`. With no attached client the LIVE push is simply dropped — nobody is there to receive a
+   * frame — but the reply is still RECORDED to chat history by `adapter.send`/`sendVoice` before this runs,
+   * so a proactive reply (heartbeat) to a session nobody is viewing right now shows up on the next attach
+   * instead of vanishing. A reply-to-inbound always has an attached client (they just sent the message).
    */
-  private deliver(chatId: string, text: string): void {
+  private deliver(chatId: string, text: string, audio?: InAppServerAudio): void {
+    this.pushFrame(chatId, audio ? { type: "chat", chatId, text, audio } : { type: "chat", chatId, text });
+  }
+
+  /**
+   * Push the STT transcript of an ACCEPTED web-mic inbound back to the SAME session's attached client(s) as
+   * the sender's OWN "your turn" bubble (Companion Voice epic, VOICE-P4 inbound) — a genuine round trip,
+   * unlike a typed message (the panel already knows its own typed text and renders it locally without
+   * waiting on the server). A distinct `type:"transcript"` frame so the panel can never confuse this with a
+   * companion reply. The daemon already recorded this text to history (controller.ts's
+   * `recordInboundMessageSafely`) — this call is PURELY the live push, so it never records again.
+   */
+  pushTranscript(chatId: string, text: string): void {
+    this.pushFrame(chatId, { type: "transcript", chatId, text });
+  }
+
+  /** Shared per-client fan-out: a client `deliver` that throws is CONTAINED (one bad socket can't drop the
+   *  others or bubble out of the reply/transcript path). */
+  private pushFrame(chatId: string, frame: InAppServerFrame): void {
     const set = this.clients.get(chatId);
     if (!set || set.size === 0) return;
-    const frame: InAppServerFrame = { type: "chat", chatId, text };
     for (const client of set) {
       try {
         client.deliver(frame);

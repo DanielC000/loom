@@ -37,7 +37,7 @@ import { CompanionReminderWatcher } from "./reminders.js";
 import { resolveEffectiveConfig } from "./store.js";
 import { IN_APP_CHANNEL, normalizeInAppMessage, type InAppChannel } from "./in-app.js";
 import type { CompanionConfig } from "./config.js";
-import type { CompanionRoute, CompanionSynthesizer, CompanionTranscriber, DeliverResult, InboundResult, SessionBinding, SubmitTurn } from "./types.js";
+import type { CompanionRoute, CompanionSynthesizer, CompanionTranscriber, DeliverResult, InboundMessage, InboundResult, SessionBinding, SubmitTurn } from "./types.js";
 
 /** The minimal lifecycle handle the controller needs from a heartbeat watcher (satisfied by
  *  CompanionHeartbeatWatcher; narrowed so a test can inject a spy). */
@@ -71,6 +71,16 @@ export interface CompanionControl {
    * MIRRORED out to the session's other bound channels — see mirrorWebInputToOtherChannels.
    */
   handleInAppInbound(sessionId: string, body: string): Promise<InboundResult | { accepted: false; reason: "companion-off" }>;
+  /**
+   * INBOUND for a web-mic voice clip (Companion Voice epic, VOICE-P4). `filePath` is the SERVER-GENERATED
+   * temp file the /ws/companion route already decoded the client's base64 audio into
+   * (in-app.ts's `decodeInAppAudioToTempFile`) — never a client-supplied path. Mirrors `handleInAppInbound`
+   * exactly, except the final text isn't known up front (it's the STT transcript, resolved INSIDE
+   * `gateway.handleInbound`) — so recording + the cross-channel mirror + the live "your turn" echo all read
+   * it off the result's `submittedText` instead of a passed-in `body`. Returns "companion-off" when no
+   * gateway is live; never throws.
+   */
+  handleInAppAudioInbound(sessionId: string, filePath: string): Promise<InboundResult | { accepted: false; reason: "companion-off" }>;
   /** Best-effort teardown on daemon shutdown (stops the adapter long-poll + the heartbeat). */
   stop(): Promise<void>;
 }
@@ -229,6 +239,27 @@ export class CompanionController implements CompanionControl {
     // OUTBOUND MIRROR (card 92b6445c): an accepted web-chat turn echoes out to the session's other bound
     // channels — NOT awaited (fire-and-forget: the cockpit's own turn/reply never waits on a Telegram send).
     if (result.accepted) this.mirrorWebInputToOtherChannels(sessionId, body);
+    return result;
+  }
+
+  /**
+   * The in-app AUDIO INBOUND indirection wired into the /ws/companion route (Companion Voice epic, VOICE-P4
+   * inbound). Stable across gateway rebuilds, mirrors `handleInAppInbound` — except the final text (the STT
+   * transcript) isn't known ahead of time, so it's read off `result.submittedText` once `gateway.handleInbound`
+   * resolves it, rather than a caller-supplied `body`. `filePath` is ALWAYS the server-generated temp file the
+   * WS route already decoded the client's audio bytes into — never a client-supplied path.
+   */
+  async handleInAppAudioInbound(sessionId: string, filePath: string): Promise<InboundResult | { accepted: false; reason: "companion-off" }> {
+    if (!this.gateway) return { accepted: false, reason: "companion-off" };
+    const msg: InboundMessage = { channel: IN_APP_CHANNEL, chatId: sessionId, body: "", attachments: [{ type: "audio", fileId: filePath }] };
+    const result = await this.gateway.handleInbound(msg);
+    if (result.accepted && result.submittedText) {
+      this.recordInboundMessageSafely(sessionId, result.submittedText);
+      this.mirrorWebInputToOtherChannels(sessionId, result.submittedText);
+      // Live echo (VOICE-P4): unlike typed text (the panel already knows what it sent), the sender's own
+      // client has no way to know the transcript ahead of time — push it back as their "your turn" bubble.
+      this.deps.inApp?.pushTranscript(sessionId, result.submittedText);
+    }
     return result;
   }
 

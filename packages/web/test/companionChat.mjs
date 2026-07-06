@@ -14,7 +14,8 @@
 //   node --experimental-strip-types packages/web/test/companionChat.mjs
 import assert from "node:assert/strict";
 import {
-  IN_APP_CHANNEL, companionMessage, historyMessage, isArmedInApp, parseInbound, prepareSend, youMessage,
+  IN_APP_CHANNEL, companionMessage, historyMessage, isArmedInApp, parseInbound, parseTranscript, prepareSend,
+  prepareSendAudio, youMessage,
 } from "../src/lib/companionChat.ts";
 
 let pass = 0;
@@ -98,6 +99,61 @@ check("round-trip: send emits a frame; the echoed frame parses into a companion 
 
 check("IN_APP_CHANNEL mirrors the daemon's channel name", () => {
   assert.equal(IN_APP_CHANNEL, "in-app");
+});
+
+// ── VOICE INBOUND (Companion Voice epic, VOICE-P4): prepareSendAudio + parseTranscript ─────────────────
+
+check("prepareSendAudio: frames a recorded clip as exactly {type:\"audio\",data,mimeType}", () => {
+  const frame = prepareSendAudio("QUJD", "audio/webm;codecs=opus");
+  assert.deepEqual(JSON.parse(frame), { type: "audio", data: "QUJD", mimeType: "audio/webm;codecs=opus" });
+});
+
+check("parseTranscript: a {type:\"transcript\"} frame yields { chatId, text } — the daemon's live echo of OUR OWN mic clip", () => {
+  assert.deepEqual(
+    parseTranscript(JSON.stringify({ type: "transcript", chatId: "sess-1", text: "transcribed from the mic" })),
+    { chatId: "sess-1", text: "transcribed from the mic" },
+  );
+});
+
+check("parseTranscript: a missing chatId defaults to \"\"", () => {
+  assert.deepEqual(parseTranscript(JSON.stringify({ type: "transcript", text: "no id" })), { chatId: "", text: "no id" });
+});
+
+check("parseTranscript: a non-transcript frame is ignored (null) — incl. a companion chat reply", () => {
+  assert.equal(parseTranscript(JSON.stringify({ type: "chat", chatId: "sess-1", text: "a companion reply" })), null);
+  assert.equal(parseTranscript(JSON.stringify({ type: "transcript" })), null, "no text string is not renderable");
+  assert.equal(parseTranscript("not json {"), null);
+  assert.equal(parseTranscript("[1,2,3]"), null);
+});
+
+check("parseInbound never mistakes a transcript frame for a companion reply (the two frame types are disjoint)", () => {
+  assert.equal(parseInbound(JSON.stringify({ type: "transcript", chatId: "sess-1", text: "mine" })), null);
+});
+
+// ── VOICE OUTBOUND (Companion Voice epic, VOICE-P4): parseInbound's optional audio field ───────────────
+
+check("parseInbound: a voiced reply carries the audio field through", () => {
+  const frame = JSON.stringify({ type: "chat", chatId: "sess-1", text: "voiced reply", audio: { data: "QUJD", mimeType: "audio/ogg" } });
+  assert.deepEqual(parseInbound(frame), { chatId: "sess-1", text: "voiced reply", audio: { data: "QUJD", mimeType: "audio/ogg" } });
+});
+
+check("parseInbound: a plain (non-voiced) reply has NO audio key at all (not even undefined)", () => {
+  const parsed = parseInbound(JSON.stringify({ type: "chat", chatId: "sess-1", text: "plain reply" }));
+  assert.deepEqual(parsed, { chatId: "sess-1", text: "plain reply" });
+  assert.equal("audio" in parsed, false);
+});
+
+check("parseInbound: a malformed audio field (missing data/mimeType) is DROPPED, reply still renders as text", () => {
+  assert.deepEqual(parseInbound(JSON.stringify({ type: "chat", chatId: "sess-1", text: "t", audio: { data: "" } })), { chatId: "sess-1", text: "t" });
+  assert.deepEqual(parseInbound(JSON.stringify({ type: "chat", chatId: "sess-1", text: "t", audio: "not-an-object" })), { chatId: "sess-1", text: "t" });
+  assert.deepEqual(parseInbound(JSON.stringify({ type: "chat", chatId: "sess-1", text: "t", audio: null })), { chatId: "sess-1", text: "t" });
+});
+
+check("companionMessage: with audio, the bubble carries it; without, the key is absent entirely", () => {
+  assert.deepEqual(companionMessage("voiced", "1", { data: "QUJD", mimeType: "audio/ogg" }), { id: "1", author: "companion", text: "voiced", audio: { data: "QUJD", mimeType: "audio/ogg" } });
+  const noAudio = companionMessage("plain", "2");
+  assert.deepEqual(noAudio, { id: "2", author: "companion", text: "plain" });
+  assert.equal("audio" in noAudio, false);
 });
 
 // ── historyMessage: the reload-persists seed (bug 0f01f234) maps a stored row to a rendered bubble ────

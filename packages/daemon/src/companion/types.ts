@@ -79,8 +79,14 @@ export interface ChannelAdapter {
    * gateway hands it (Telegram: OGG/Opus via `sendVoice`). Absent ⇒ the gateway never attempts voice replies
    * on this channel (degrades to the plain text send). May throw — the caller (deliverReply) contains it and
    * degrades to text, exactly like a `send` failure.
+   *
+   * `text` (Companion Voice epic, VOICE-P4 outbound) is the SAME reply text `deliverReply` is sending —
+   * threaded through so an adapter whose channel has no separate "this is what `send` would have recorded"
+   * concept (in-app: `sendVoice` REPLACES `send` entirely on the voice path, so it's the only place left to
+   * record chat history + push the live frame) can still do so. Telegram's implementation ignores it (a
+   * native voice bubble needs no accompanying text).
    */
-  sendVoice?(chatId: string, audioFilePath: string): Promise<void>;
+  sendVoice?(chatId: string, audioFilePath: string, text: string): Promise<void>;
 }
 
 /**
@@ -181,7 +187,12 @@ export type DeliverResult =
 
 /** The result of routing one inbound message. */
 export type InboundResult =
-  | { accepted: true; sessionId: string; queued: boolean; position?: number }
+  // `submittedText` is the FINAL text the turn was formed from — the typed body verbatim, or (Companion
+  // Voice epic, VOICE-P4 inbound) the STT transcript when the inbound carried audio. A caller that already
+  // knows the text up front (the in-app WS route, for typed messages) doesn't need it; the audio path does
+  // — the transcript is only known INSIDE handleInbound, so this is the only way it gets back out to the
+  // caller for chat-history recording + the live "your turn" echo (controller.ts's handleInAppAudioInbound).
+  | { accepted: true; sessionId: string; queued: boolean; position?: number; submittedText?: string }
   | { accepted: false; reason: "no-text" | "chat-not-allowlisted" }
   // The (channel, chatId) binding matched, but the SENDER is not authorized for it (Companion authz
   // layer): a GROUP-scoped binding with a missing or unlisted sender.id. Rejected BEFORE any turn is

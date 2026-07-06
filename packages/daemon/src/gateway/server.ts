@@ -29,7 +29,7 @@ import type { SetupMcpRouter } from "../mcp/setup.js";
 import type { RunMcpRouter } from "../mcp/run.js";
 import type { CompanionControl } from "../companion/controller.js";
 import type { InAppChannel } from "../companion/in-app.js";
-import { IN_APP_CHANNEL } from "../companion/in-app.js";
+import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig } from "../companion/store.js";
 import { listConnections, createConnection, deleteConnection } from "../connections/store.js";
@@ -2756,7 +2756,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     socket.on("close", unsub); // detach does NOT kill the pty — sessions/shells outlive viewers
   });
 
-  // --- Live IN-APP companion chat: attach/detach (JSON chat frames only) ---
+  // --- Live IN-APP companion chat: attach/detach (JSON chat + audio frames only) ---
   // The DEFAULT companion transport. DELIBERATELY SEPARATE from /ws/term above (which streams raw pty bytes):
   // a distinct route + a distinct JSON message channel, so the in-app chat multiplexes cleanly ALONGSIDE
   // terminal-attach on the SAME session with no collision (the chat WS never touches the pty stream). The
@@ -2766,6 +2766,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // there (this carries traffic only for an already-provisioned in-app companion — it creates nothing).
   // OUTBOUND companion replies arrive via the in-app hub (deps.inApp) pushing a { type:"chat" } frame here.
   // ADDITIVE: with no in-app companion, attach is a no-op and inbound is rejected — every session unaffected.
+  //
+  // VOICE (Companion Voice epic, VOICE-P4 inbound): a { type:"audio", data, mimeType } frame carries a
+  // web-mic recording as base64 — untrusted bytes, decoded here (decodeInAppAudioToTempFile) into a
+  // SERVER-GENERATED temp file under LOOM_HOME/tmp/companion-audio (never a client-supplied path), then
+  // routed through companion.handleInAppAudioInbound exactly like typed text routes through
+  // handleInAppInbound. The temp file's cleanup is normally owned by the STT pipeline's own download→
+  // transcribe→cleanup discipline (via the in-app adapter's downloadAttachment, chat-gateway.ts's `finally`)
+  // — but that path is only reached when the pipeline actually attempts transcription, so this route ALSO
+  // best-effort-cleans-up in its own `finally` as a backstop against every other early-exit (companion-off,
+  // no in-app binding, no transcriber injected) — a harmless no-op unlink if the inner path already removed it.
   app.get("/ws/companion/:sessionId", { websocket: true }, (socket: WebSocket, req) => {
     const { sessionId } = req.params as { sessionId: string };
     // Attach this web client to the in-app chat (chatId == sessionId — the loopback self-address) so the
@@ -2774,17 +2784,37 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       deliver: (frame) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame)); },
     });
     socket.on("message", (raw: Buffer) => {
-      let msg: { type?: unknown; text?: unknown };
+      let msg: { type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown };
       try { msg = JSON.parse(raw.toString()); } catch { return; }
-      // Only a { type:"chat", text } frame is inbound chat — ignore anything else (never the terminal stream).
-      if (msg.type !== "chat" || typeof msg.text !== "string") return;
-      // Route through the bindings-authoritative gateway. Fire-and-forget: any routing/submit error is
-      // contained by the gateway (structured result), so this .catch is only a backstop against an unhandled
-      // rejection crashing the daemon (the same posture as the Telegram inbound backstop in factory.ts).
-      void deps.companion?.handleInAppInbound(sessionId, msg.text).catch((err) => {
-        // eslint-disable-next-line no-console
-        console.error(`[companion] in-app inbound failed: ${err instanceof Error ? err.message : String(err)}`);
-      });
+      if (msg.type === "chat" && typeof msg.text === "string") {
+        // Route through the bindings-authoritative gateway. Fire-and-forget: any routing/submit error is
+        // contained by the gateway (structured result), so this .catch is only a backstop against an
+        // unhandled rejection crashing the daemon (the same posture as the Telegram inbound backstop in
+        // factory.ts).
+        void deps.companion?.handleInAppInbound(sessionId, msg.text).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.error(`[companion] in-app inbound failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+        return;
+      }
+      if (msg.type === "audio") {
+        const decoded = decodeInAppAudioToTempFile(msg.data, msg.mimeType);
+        if (!decoded) return; // malformed/oversize — silently dropped, mirrors the non-string-text guard above
+        // Cleanup is hoisted OUT of the optional chain below: `deps.companion?...finally(...)` would
+        // short-circuit the whole chain (finally included) if companion were ever nullish, leaking this
+        // temp file — not reachable today (companionController is always constructed), but it would
+        // silently defeat the "always cleans up" backstop this branch promises.
+        if (!deps.companion) { void decoded.cleanup(); return; }
+        void deps.companion
+          .handleInAppAudioInbound(sessionId, decoded.filePath)
+          .catch((err) => {
+            // eslint-disable-next-line no-console
+            console.error(`[companion] in-app audio inbound failed: ${err instanceof Error ? err.message : String(err)}`);
+          })
+          .finally(() => { void decoded.cleanup(); });
+        return;
+      }
+      // Any other frame (control/garbage) is ignored — never the terminal stream.
     });
     socket.on("close", () => { unsub?.(); }); // detach never affects the session — it outlives viewers
   });

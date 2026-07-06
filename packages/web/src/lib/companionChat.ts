@@ -8,6 +8,17 @@
 //   • INBOUND  (we receive): {"type":"chat","chatId":"…","text":"…"} — chatId == the companion session id.
 //   • Any frame that is not a well-formed {type:"chat"} is IGNORED (the same session also carries — on a
 //     SEPARATE route — terminal control frames; a stray/garbage frame here must never render as a bubble).
+//
+// VOICE INBOUND (Companion Voice epic, VOICE-P4 inbound):
+//   • OUTBOUND (we send):    {"type":"audio","data":"<base64>","mimeType":"…"} — a recorded mic clip.
+//   • INBOUND  (we receive): {"type":"transcript","chatId":"…","text":"…"} — the daemon's live echo of OUR
+//     OWN clip once STT completes (a genuine round trip: unlike typed text, the client can't know the
+//     transcript ahead of time). Kept as a DISTINCT frame type from a companion reply — see parseTranscript.
+//
+// VOICE OUTBOUND (Companion Voice epic, VOICE-P4 outbound): a companion reply frame MAY carry an optional
+// `audio` field — {"type":"chat","chatId":"…","text":"…","audio":{"data":"<base64>","mimeType":"…"}} —
+// present only when `/voice on` is active for this DM route and synthesis succeeded. Always a Kokoro
+// OGG/Opus clip; absent on every plain text reply (the overwhelming default).
 
 // The in-app channel name — mirrors IN_APP_CHANNEL in the daemon's companion/in-app.ts. Used to decide
 // whether a companion is reachable in-app (its binding must be on THIS channel to get a reply frame).
@@ -32,6 +43,9 @@ export interface ChatMessage {
   id: string;
   author: ChatAuthor;
   text: string;
+  /** Present only on a voiced companion reply (Companion Voice epic, VOICE-P4 outbound) — never persisted,
+   *  never on a "you"/history bubble (audio is live-transport-only; text is what's stored/shown). */
+  audio?: InboundAudio;
 }
 
 // Validate + frame an outbound send. Returns null for an empty/whitespace-only draft (nothing to send —
@@ -44,10 +58,57 @@ export function prepareSend(draft: string): { text: string; frame: string } | nu
   return { text, frame: JSON.stringify({ type: "chat", text }) };
 }
 
-// Parse an inbound WS frame. Returns the companion reply { chatId, text } ONLY for a well-formed
-// {type:"chat"} frame; returns null for malformed JSON, a non-object, or any non-chat frame (which the
-// panel silently ignores). Defensive by construction — the socket payload is untrusted transport data.
-export function parseInbound(raw: string): { chatId: string; text: string } | null {
+// Frame a recorded mic clip for the wire (Companion Voice epic, VOICE-P4 inbound). `base64` is the clip's
+// raw bytes already base64-encoded by the caller (DOM/FileReader work — kept out of this pure module);
+// `mimeType` is the browser's own MediaRecorder mimeType (e.g. "audio/webm;codecs=opus"), passed through
+// verbatim so the daemon can pick a sensible temp-file extension. No client-side size/format validation
+// here — the daemon is the single source of truth for the size cap (mirrors decodeInAppAudioToTempFile).
+export function prepareSendAudio(base64: string, mimeType: string): string {
+  return JSON.stringify({ type: "audio", data: base64, mimeType });
+}
+
+// Base64-encoded audio carried on a voiced companion reply (Companion Voice epic, VOICE-P4 outbound).
+export interface InboundAudio {
+  data: string;
+  mimeType: string;
+}
+
+// Validate the optional `audio` field on a {type:"chat"} frame — both `data` and `mimeType` must be
+// non-empty strings, else the field is DROPPED (never a half-shaped audio object reaches the player; the
+// reply still renders as plain text, exactly as if synthesis hadn't been attempted).
+function parseInboundAudio(raw: unknown): InboundAudio | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const a = raw as { data?: unknown; mimeType?: unknown };
+  if (typeof a.data !== "string" || a.data.length === 0 || typeof a.mimeType !== "string" || a.mimeType.length === 0) return null;
+  return { data: a.data, mimeType: a.mimeType };
+}
+
+// Parse an inbound WS frame. Returns the companion reply { chatId, text, audio? } ONLY for a well-formed
+// {type:"chat"} frame (`audio` present only when the reply was voiced — VOICE-P4 outbound); returns null
+// for malformed JSON, a non-object, or any non-chat frame (which the panel silently ignores). Defensive by
+// construction — the socket payload is untrusted transport data.
+export function parseInbound(raw: string): { chatId: string; text: string; audio?: InboundAudio } | null {
+  let msg: unknown;
+  try {
+    msg = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof msg !== "object" || msg === null) return null;
+  const m = msg as { type?: unknown; chatId?: unknown; text?: unknown; audio?: unknown };
+  if (m.type !== "chat" || typeof m.text !== "string") return null;
+  const chatId = typeof m.chatId === "string" ? m.chatId : "";
+  const audio = parseInboundAudio(m.audio);
+  return audio ? { chatId, text: m.text, audio } : { chatId, text: m.text };
+}
+
+// Parse an inbound {type:"transcript"} frame (Companion Voice epic, VOICE-P4 inbound) — the daemon's live
+// echo of YOUR OWN web-mic recording once STT completes. A typed message never needs this (the panel
+// already knows what it sent and renders it locally without waiting on the server); a recorded clip does,
+// since the transcript is only known server-side. Returns { chatId, text } only for a well-formed
+// {type:"transcript"} frame; null for anything else (malformed, or any other frame type — incl. a
+// companion reply, which parseInbound handles instead).
+export function parseTranscript(raw: string): { chatId: string; text: string } | null {
   let msg: unknown;
   try {
     msg = JSON.parse(raw);
@@ -56,7 +117,7 @@ export function parseInbound(raw: string): { chatId: string; text: string } | nu
   }
   if (typeof msg !== "object" || msg === null) return null;
   const m = msg as { type?: unknown; chatId?: unknown; text?: unknown };
-  if (m.type !== "chat" || typeof m.text !== "string") return null;
+  if (m.type !== "transcript" || typeof m.text !== "string") return null;
   return { chatId: typeof m.chatId === "string" ? m.chatId : "", text: m.text };
 }
 
@@ -65,9 +126,10 @@ export function youMessage(text: string, id: string): ChatMessage {
   return { id, author: "you", text };
 }
 
-// Build a "companion" (remote) bubble from a parsed inbound reply.
-export function companionMessage(text: string, id: string): ChatMessage {
-  return { id, author: "companion", text };
+// Build a "companion" (remote) bubble from a parsed inbound reply. `audio` (VOICE-P4 outbound) is present
+// only for a voiced reply — omitted from the returned object when absent (never `audio: undefined`).
+export function companionMessage(text: string, id: string, audio?: InboundAudio): ChatMessage {
+  return audio ? { id, author: "companion", text, audio } : { id, author: "companion", text };
 }
 
 // The panel's connection lifecycle — drives the status pill + whether Send is enabled. `reconnecting`

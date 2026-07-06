@@ -325,10 +325,10 @@ export class ChatGateway {
       return { accepted: false, reason: "submit-failed", sessionId: binding.sessionId, acked };
     }
     const { delivered, position } = submit;
-    if (delivered) return { accepted: true, sessionId: binding.sessionId, queued: false };
+    if (delivered) return { accepted: true, sessionId: binding.sessionId, queued: false, submittedText: body };
     if (position !== undefined) {
       // Busy / not-ready → HELD in the session FIFO. Accepted; it drains when the session frees up.
-      return { accepted: true, sessionId: binding.sessionId, queued: true, position };
+      return { accepted: true, sessionId: binding.sessionId, queued: true, position, submittedText: body };
     }
     // No position ⇒ the bound session is DEAD. Surface it: error-ack the chat + log (don't vanish silently).
     this.debug(`inbound to DEAD session ${binding.sessionId} (channel=${msg.channel} chat=${msg.chatId})`);
@@ -425,7 +425,7 @@ export class ChatGateway {
       const audio = await this.synthesize.synthesize({ text, lang: pref.ttsLang, voice: pref.ttsVoice });
       if (!audio) return null;
       try {
-        await adapter.sendVoice(target.chatId, audio.filePath);
+        await adapter.sendVoice(target.chatId, audio.filePath, text);
         return { delivered: true, chunks: 1 };
       } finally {
         await audio.cleanup().catch(() => { /* best-effort — cleanup must never block/throw */ });

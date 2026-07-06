@@ -1,10 +1,32 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import {
-  companionMessage, historyMessage, parseInbound, prepareSend, youMessage,
+  companionMessage, historyMessage, parseInbound, parseTranscript, prepareSend, prepareSendAudio, youMessage,
   type ChatConnState, type ChatMessage, type CompanionHistoryRow,
 } from "../lib/companionChat";
 import { Button, StatusPill } from "./ui";
 import { color, font, radius } from "../theme";
+
+// Feature-detect mic support ONCE at module load (Companion Voice epic, VOICE-P4 inbound) — Safari/older
+// browsers or a non-HTTPS/non-loopback origin may lack getUserMedia or MediaRecorder entirely; the mic
+// button simply doesn't render rather than throwing when clicked. The daemon's loopback origin (http on
+// 127.0.0.1) is a getUserMedia-secure-context exception in every major browser, so this isn't gated further.
+const MIC_SUPPORTED =
+  typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== "undefined";
+
+// Convert a recorded Blob to a bare base64 string (no "data:...;base64," prefix) — DOM/FileReader work,
+// kept out of the pure lib/companionChat module.
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
 
 /**
  * Companion chat surface — a companion's DEFAULT face in the cockpit (NOT the raw session terminal). A
@@ -40,11 +62,13 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
   const [draft, setDraft] = useState("");
   const [awaitingReply, setAwaitingReply] = useState(false);
   const [replyTimedOut, setReplyTimedOut] = useState(false);
+  const [recording, setRecording] = useState(false); // Companion Voice epic, VOICE-P4 inbound
 
   const wsRef = useRef<WebSocket | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const idRef = useRef(0);
   const replyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const nextId = () => String(++idRef.current);
 
   // ── WebSocket lifecycle: connect, ingest chat frames, auto-reconnect with backoff. ─────────────
@@ -78,11 +102,38 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
       ws.onmessage = (e) => {
         if (disposed || typeof e.data !== "string") return;
         const reply = parseInbound(e.data);
-        if (!reply) return; // ignore any non-{type:"chat"} frame (control/garbage) — never render it
-        clearReplyTimer();
-        setAwaitingReply(false);
-        setReplyTimedOut(false);
-        setMessages((m) => [...m, companionMessage(reply.text, nextId())]);
+        if (reply) {
+          clearReplyTimer();
+          setAwaitingReply(false);
+          setReplyTimedOut(false);
+          setMessages((m) => [...m, companionMessage(reply.text, nextId(), reply.audio)]);
+          if (reply.audio) {
+            // Autoplay ONLY a LIVE reply (never a history-seeded row — that path never carries audio at
+            // all, since audio is transport-only). Scoped to this interaction per the design note: the
+            // user's own Send/mic press is the gesture that started this turn, so the browser's autoplay
+            // policy (interaction-gated, not same-callstack-gated) allows it; a rendered <audio controls>
+            // on the bubble is the fallback if a browser still blocks it.
+            try {
+              const audio = new Audio(`data:${reply.audio.mimeType};base64,${reply.audio.data}`);
+              void audio.play().catch(() => { /* autoplay blocked — the bubble's own <audio controls> still lets the user play it */ });
+            } catch { /* never let a playback attempt break the chat */ }
+          }
+          return;
+        }
+        // The daemon's live echo of OUR OWN web-mic recording once STT completes (Companion Voice epic,
+        // VOICE-P4 inbound) — a recorded clip has no text to render locally at send time (unlike typed
+        // text), so this is a genuine round trip. Render it as "your turn" and arm the SAME reply-await/
+        // timeout `send()` arms for typed text, so a stalled STT/agent still surfaces the "no reply yet" hint.
+        const transcript = parseTranscript(e.data);
+        if (transcript) {
+          setMessages((m) => [...m, youMessage(transcript.text, nextId())]);
+          setAwaitingReply(true);
+          setReplyTimedOut(false);
+          clearReplyTimer();
+          replyTimer.current = setTimeout(() => setReplyTimedOut(true), REPLY_TIMEOUT_MS);
+          return;
+        }
+        // any other frame (control/garbage) is ignored — never rendered
       };
       ws.onclose = () => {
         if (disposed) return;
@@ -117,6 +168,11 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
       disposed = true;
       clearTimeout(reconnectTimer);
       clearReplyTimer();
+      // A sessionId swap or unmount mid-recording must release the mic (never leak an open stream) —
+      // MediaRecorder's own onstop still fires and would otherwise try to send audio on the OLD/closing ws.
+      mediaRecorderRef.current?.stop();
+      mediaRecorderRef.current = null;
+      setRecording(false); // else the NEXT session's mic button renders stuck on "■" until clicked
       const ws = wsRef.current;
       wsRef.current = null;
       if (ws) {
@@ -156,6 +212,48 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } // Shift+Enter = newline
+  };
+
+  // ── Mic recording (Companion Voice epic, VOICE-P4 inbound) ────────────────────────────────────
+  const sendAudio = async (blob: Blob) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== ws.OPEN) return; // dropped silently — mirrors send()'s own connected guard
+    const base64 = await blobToBase64(blob);
+    ws.send(prepareSendAudio(base64, blob.type || "audio/webm"));
+    // No local "you" bubble here (unlike send()) — the transcript isn't known yet; the daemon's
+    // { type:"transcript" } echo renders it once STT completes. Still arm the SAME reply-await/timeout so a
+    // silently-dropped clip (STT off / unsupported format) surfaces the existing "no reply yet" hint instead
+    // of leaving the panel looking stuck.
+    setAwaitingReply(true);
+    setReplyTimedOut(false);
+    clearTimeout(replyTimer.current);
+    replyTimer.current = setTimeout(() => setReplyTimedOut(true), REPLY_TIMEOUT_MS);
+  };
+
+  const startRecording = async () => {
+    if (!MIC_SUPPORTED || recording) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const chunks: BlobPart[] = [];
+      const recorder = new MediaRecorder(stream);
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        void sendAudio(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }));
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setRecording(true);
+    } catch {
+      // Permission denied / no device / any getUserMedia failure — degrade silently to text-only; the mic
+      // button just does nothing rather than breaking the panel (mirrors the !MIC_SUPPORTED guard below).
+    }
+  };
+
+  const stopRecording = () => {
+    mediaRecorderRef.current?.stop();
+    mediaRecorderRef.current = null;
+    setRecording(false);
   };
 
   const connected = conn === "connected";
@@ -215,6 +313,18 @@ export function CompanionChat({ sessionId, title, armed }: { sessionId: string; 
             borderRadius: radius.base, padding: "8px 12px",
           }}
         />
+        {MIC_SUPPORTED && (
+          <Button
+            variant={recording ? "danger" : "default"}
+            disabled={!connected}
+            onClick={recording ? stopRecording : startRecording}
+            title={recording ? "Stop recording" : `Record a voice message to ${title ?? "your companion"}`}
+            aria-pressed={recording}
+            style={{ padding: "8px 12px", alignSelf: "stretch" }}
+          >
+            {recording ? "■" : "●"}
+          </Button>
+        )}
         <Button variant="primary" disabled={!canSend} onClick={send} style={{ padding: "8px 16px", alignSelf: "stretch" }}>
           Send
         </Button>
@@ -261,6 +371,16 @@ function Bubble({ msg, title, grouped }: { msg: ChatMessage; title: string; grou
         }}
       >
         {msg.text}
+        {msg.audio && (
+          // Companion Voice epic, VOICE-P4 outbound — the manual play/pause/replay affordance (the ws
+          // handler already attempted a one-shot autoplay on arrival; this stays regardless of whether
+          // that succeeded, and gives a replay control either way).
+          <audio
+            controls
+            src={`data:${msg.audio.mimeType};base64,${msg.audio.data}`}
+            style={{ display: "block", marginTop: 8, height: 32, width: "100%" }}
+          />
+        )}
       </div>
     </div>
   );
