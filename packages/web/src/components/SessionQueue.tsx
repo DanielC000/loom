@@ -2,23 +2,34 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type QueuedMessage } from "../lib/api";
 import { Button, Dot } from "./ui";
-import { color, font } from "../theme";
+import { color, font, radius } from "../theme";
 
-// Shows — and lets the human MANAGE — a session's QUEUED inbound messages held while the session is
-// busy or while the human is mid-compose. Two kinds share the one FIFO and render together:
+// ── SessionQueue — the "ledger bar" for a session's QUEUED inbound messages ─────────────────────────
+//
+// Direction B, owner-approved 2026-07-06 (`Projects/Loom/Design/Queue Redesign.md`). When ≥1 message is
+// held (session busy / human mid-compose) the queue renders as ONE constant-height "ledger bar" directly
+// under the terminal: an amber tick, "QUEUED (n)", a one-line peek of the next-up message, and a chevron.
+// The bar's footprint NEVER changes with backlog depth — a card with 1 queued and a card with 50 queued
+// look identical at rest — and (in TerminalCard's HUG height model) the bar GROWS THE CARD rather than
+// shrinking the terminal: TerminalCard excludes this element from the terminal's height budget, so the
+// terminal region holds a fixed height in every queue state. Clicking the bar expands a BOUNDED,
+// internally-scrollable drawer listing every queued message with its full affordances; collapse returns
+// to the one-liner. Renders nothing when empty, so it stays completely out of the way.
+//
+// Two kinds share the one FIFO and render together in the drawer:
 //   • 'human' entries (composer turns) are adjustable: reorder (↑/↓), edit in place (✎), remove (✕);
-//   • 'system' entries (worker reports / nudges) render READ-ONLY — the human never rewrites or
-//     reorders an agent's message out from under it (the daemon mutators refuse it too).
-// They still drain on their own (next turn boundary / reconcile tick). Every mutation is id-addressed:
-// the FIFO head can drain between the 3s poll and a click, so an id op targets exactly one entry and is
-// a harmless no-op once it has drained. Renders nothing when empty, so it stays out of the way.
+//   • 'system' entries (worker reports / nudges) render READ-ONLY — the human never rewrites or reorders
+//     an agent's message out from under it (the daemon mutators refuse it too).
+// They still drain on their own (next turn boundary / reconcile tick). Every mutation is id-addressed: the
+// FIFO head can drain between the 3s poll and a click, so an id op targets exactly one entry and is a
+// harmless no-op once it has drained.
 //
-// Reorder moves a human entry only among the OTHER human entries (system entries hold their slot), so
-// ↑/↓ sends the human ids' desired order and the daemon permutes them within the human slots.
-//
-// Long queues stay calm: ≤ INLINE_MAX entries render as rows directly; beyond that they collapse to a
-// one-line summary (count + a peek) that expands to the full list on click.
-const INLINE_MAX = 3;
+// Reorder moves a human entry only among the OTHER human entries (system entries hold their slot), so ↑/↓
+// sends the human ids' desired order and the daemon permutes them within the human slots.
+
+// Bounded drawer height (px) — the approved mockup's cap. Beyond it, the drawer scrolls internally so the
+// footprint stays bounded no matter how deep the backlog is.
+const DRAWER_MAX_H = 118;
 
 export function SessionQueue({ sessionId }: { sessionId: string }) {
   const qc = useQueryClient();
@@ -50,60 +61,74 @@ export function SessionQueue({ sessionId }: { sessionId: string }) {
     reorder.mutate(order);
   };
 
-  const label = (
-    <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>
-      Queued ({pending.length})
-    </span>
-  );
-
-  const rows = (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
-      {pending.map((m) => {
-        const hIdx = m.source === "human" ? humanIds.indexOf(m.id) : -1;
-        return (
-          <QueueRow
-            key={m.id}
-            m={m}
-            canUp={hIdx > 0}
-            canDown={hIdx >= 0 && hIdx < humanIds.length - 1}
-            editing={editingId === m.id}
-            busy={mutating}
-            onEditStart={() => setEditingId(m.id)}
-            onEditCancel={() => setEditingId(null)}
-            onEditSave={(text) => edit.mutate({ id: m.id, text })}
-            onDelete={() => del.mutate(m.id)}
-            onUp={() => move(m.id, -1)}
-            onDown={() => move(m.id, 1)}
-          />
-        );
-      })}
-    </div>
-  );
-
-  // Small queue: label + rows, today's at-a-glance behavior.
-  if (pending.length <= INLINE_MAX) {
-    return <div style={{ marginTop: 4 }}>{label}{rows}</div>;
-  }
-
-  // Long queue: one calm collapsed row (count + toggle + a one-line peek); click reveals the full list.
   const peek = pending[0]!.text.replace(/\s+/g, " ").trim();
+
   return (
-    <div style={{ marginTop: 4 }}>
+    <div style={{ marginTop: 6 }}>
+      {/* The constant-height ledger bar. Its height is invariant to backlog depth (always one peek line);
+          click anywhere on it to expand / collapse the drawer. */}
       <div
+        data-testid="queue-ledger-bar"
         onClick={() => setExpanded((e) => !e)}
-        title={expanded ? "Collapse" : "Expand to edit / reorder / delete"}
-        style={{ display: "flex", gap: 6, alignItems: "center", cursor: "pointer", userSelect: "none" }}
+        title={expanded ? "Collapse the queue" : "Expand to reorder / edit / remove queued messages"}
+        style={{
+          display: "flex", alignItems: "center", gap: 8, cursor: "pointer", userSelect: "none",
+          background: color.panel2, border: `1px solid ${expanded ? color.borderStrong : color.border}`,
+          borderRadius: radius.base, padding: "5px 8px",
+        }}
       >
         <Dot tone="amber" />
-        {label}
-        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>{expanded ? "▾" : "▸"}</span>
-        {!expanded && (
-          <span title={pending[0]!.text} style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 360 }}>
-            {peek}
+        <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted, flexShrink: 0 }}>
+          Queued <span style={{ color: color.amber }}>({pending.length})</span>
+        </span>
+        {expanded ? (
+          <span style={{ flex: 1, minWidth: 0, fontFamily: font.head, fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textMuted }}>
+            manage · reorder · edit
           </span>
+        ) : (
+          <>
+            <span style={{ fontFamily: font.head, fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textMuted, flexShrink: 0 }}>next</span>
+            <span title={pending[0]!.text} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
+              {peek}
+            </span>
+          </>
         )}
+        <span aria-hidden style={{ marginLeft: "auto", flexShrink: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono }}>
+          {expanded ? "▾" : "▸"}
+        </span>
       </div>
-      {expanded && rows}
+
+      {/* Bounded, internally-scrollable drawer — the full queue with its per-entry controls. It grows the
+          card (in HUG mode) rather than the terminal, then scrolls once it hits DRAWER_MAX_H. */}
+      {expanded && (
+        <div
+          data-testid="queue-drawer"
+          style={{
+            marginTop: 4, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.base,
+            padding: 4, maxHeight: DRAWER_MAX_H, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3,
+          }}
+        >
+          {pending.map((m) => {
+            const hIdx = m.source === "human" ? humanIds.indexOf(m.id) : -1;
+            return (
+              <QueueRow
+                key={m.id}
+                m={m}
+                canUp={hIdx > 0}
+                canDown={hIdx >= 0 && hIdx < humanIds.length - 1}
+                editing={editingId === m.id}
+                busy={mutating}
+                onEditStart={() => setEditingId(m.id)}
+                onEditCancel={() => setEditingId(null)}
+                onEditSave={(text) => edit.mutate({ id: m.id, text })}
+                onDelete={() => del.mutate(m.id)}
+                onUp={() => move(m.id, -1)}
+                onDown={() => move(m.id, 1)}
+              />
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -123,7 +148,7 @@ function QueueRow({
   onUp: () => void;
   onDown: () => void;
 }) {
-  const rowStyle = { display: "flex", gap: 6, alignItems: editing ? "flex-start" : "center" } as const;
+  const rowStyle = { display: "flex", gap: 6, alignItems: editing ? "flex-start" : "center", padding: "2px 4px", borderRadius: radius.sm } as const;
   const preview = m.text.replace(/\s+/g, " ").trim();
 
   // System entries (worker reports / nudges) are READ-ONLY: a calm cyan-dot row, no controls, no edit.

@@ -177,6 +177,18 @@ export function TerminalCard({
   const belowRef = useRef<HTMLDivElement>(null);
   const [measuredBudget, setMeasuredBudget] = useState<number | undefined>(undefined);
 
+  // Direction B — the queued-message "ledger bar" (SessionQueue) must GROW THE CARD, never shrink the
+  // terminal. It's the one below-terminal element that grows at runtime (a bar when ≥1 queued, a bounded
+  // drawer when expanded), so we measure it separately: its height is SUBTRACTED from the chrome that sets
+  // the terminal budget (so the terminal region holds a fixed height across every queue state) and instead
+  // ADDED to the HUG height cap (so the card grows by exactly the bar/drawer and the composer rides down
+  // with it). `queueChromeH` is that measured height, 0 when the queue is empty (SessionQueue → null). The
+  // cap bump carries an extra `BUDGET_SLACK` (mirroring the at-rest headroom the budget already leaves) so
+  // the grown content sits a few px BELOW the cap, not ON it — otherwise a height-bound grid's 1px font
+  // settle would repeatedly cross the maxHeight clamp boundary and oscillate.
+  const queueRef = useRef<HTMLDivElement>(null);
+  const [queueChromeH, setQueueChromeH] = useState(0);
+
   // Role-scoped tab bar (opt-in via `tabs`). Terminal + Transcript are always offered; Timeline/Diff
   // appear only when the caller supplies that panel node. `activeTab` guards against a stale selection
   // (e.g. the "diff" tab if a caller ever stopped passing a diff node) by falling back to "terminal".
@@ -242,9 +254,14 @@ export function TerminalCard({
       // scrollHeight reports the FULL content even when the panel's border-box is clamped at maxHeight, so
       // this stays accurate at the cap. chrome includes the panel's padding; BUDGET_SLACK covers the 1px
       // border AND keeps the grid a few px below the cap (see its declaration).
-      const chrome = panelEl.scrollHeight - pane.offsetHeight;
+      // The queue ledger grows the CARD, not the terminal (Direction B): subtract its measured height back
+      // out of the chrome so the budget stays invariant to queue depth / drawer state, and remember it so
+      // the render can bump the HUG height cap by the same amount (the card grows to fit the bar/drawer).
+      const queueH = queueRef.current?.offsetHeight ?? 0;
+      const chrome = panelEl.scrollHeight - pane.offsetHeight - queueH;
       const next = Math.max(120, (height as number) - chrome - BUDGET_SLACK);
       setMeasuredBudget((cur) => (cur != null && Math.abs(cur - next) <= 1 ? cur : next));
+      setQueueChromeH((cur) => (Math.abs(cur - queueH) <= 1 ? cur : queueH));
     };
     measure();
     // Observe ONLY the below-strip — NEVER the panel (which contains the pane) — so the pane resizing itself
@@ -320,7 +337,14 @@ export function TerminalCard({
           composer + strips at natural height — the terminal is the element that gives up space. */}
       <div ref={belowRef} style={{ flexShrink: 0 }}>
         {subPanels?.wakes && <SessionWakes sessionId={session.id} />}
-        {subPanels?.queue && <SessionQueue sessionId={session.id} />}
+        {/* The queue ledger is measured on its OWN (queueRef) so it can grow the card without shrinking the
+            terminal. flex-column so the SessionQueue root's marginTop counts in offsetHeight (a plain block
+            wrapper would collapse that margin through its top edge and under-measure the ledger). */}
+        {subPanels?.queue && (
+          <div ref={queueRef} style={{ display: "flex", flexDirection: "column" }}>
+            <SessionQueue sessionId={session.id} />
+          </div>
+        )}
         {!readOnly && <Composer sessionId={session.id} />}
       </div>
     </>
@@ -353,7 +377,7 @@ export function TerminalCard({
   }
 
   return (
-    <Panel style={{ ...(hug ? { maxHeight: height } : { height }), padding: 6, display: "flex", flexDirection: "column", ...(maxWidth != null ? { maxWidth } : null) }}>
+    <Panel style={{ ...(hug ? { maxHeight: (height as number) + (queueChromeH > 0 ? queueChromeH + BUDGET_SLACK : 0) } : { height }), padding: 6, display: "flex", flexDirection: "column", ...(maxWidth != null ? { maxWidth } : null) }}>
       {header}
       {body(false)}
     </Panel>
