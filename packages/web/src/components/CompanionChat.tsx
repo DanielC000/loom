@@ -2,10 +2,11 @@ import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } f
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { CompanionConversationSummary } from "@loom/shared";
 import {
-  companionMessage, crossChannelMessage, historyMessage, IN_APP_CHANNEL, parseCleared, parseCrossChannel, parseInbound, parseTranscript,
+  companionMessage, crossChannelMessage, historyMessage, parseCleared, parseCrossChannel, parseInbound, parseTranscript,
   prepareSend, prepareSendAudio, youMessage,
-  type ChatConnState, type ChatMessage, type CompanionHistoryRow,
+  type ChatConnState, type ChatMessage,
 } from "../lib/companionChat";
+import { channelBadgeLabel } from "../lib/companion";
 import { api } from "../lib/api";
 import { Button, Dot, SectionLabel, StatusPill } from "./ui";
 import { color, font, radius } from "../theme";
@@ -192,12 +193,9 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
     // fast sessionId swap (or unmount) landing a stale fetch's result on the NEW session's transcript.
     (async () => {
       try {
-        const res = await fetch(`/api/companion/messages/${sessionId}`);
-        if (res.ok) {
-          const body = (await res.json()) as { messages?: CompanionHistoryRow[] };
-          if (!disposed && Array.isArray(body.messages)) {
-            setMessages(body.messages.map(historyMessage));
-          }
+        const body = await api.companionMessages(sessionId);
+        if (!disposed && Array.isArray(body.messages)) {
+          setMessages(body.messages.map(historyMessage));
         }
       } catch {
         // best-effort — an unreachable history endpoint just means an empty seed, never blocks live chat
@@ -405,19 +403,13 @@ function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
   );
 }
 
-// Unified cross-channel chat (card 7d63e200): a subtle per-bubble provenance label for a channel other
-// than in-app (the default, unlabeled web chat) — e.g. "Telegram". Falls back to title-casing an unknown
-// future channel name rather than hiding it.
-function channelLabel(channel: string): string | null {
-  if (channel === IN_APP_CHANNEL) return null;
-  if (channel === "telegram") return "Telegram";
-  return channel.length > 0 ? channel.slice(0, 1).toUpperCase() + channel.slice(1) : null;
-}
-
 // ── One chat bubble ──────────────────────────────────────────────────────────────
+// The per-bubble provenance badge (a channel other than the default, unlabeled in-app web chat — e.g.
+// "Telegram") comes from channelBadgeLabel, the single owner of channel → label shared with the Manage
+// channel row: null for in-app suppresses the badge; every other channel shows its display name verbatim.
 function Bubble({ msg, title, grouped }: { msg: ChatMessage; title: string; grouped: boolean }) {
   const you = msg.author === "you";
-  const badge = channelLabel(msg.channel);
+  const badge = channelBadgeLabel(msg.channel);
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: you ? "flex-end" : "flex-start", marginTop: grouped ? 4 : 12 }}>
       {!grouped && (

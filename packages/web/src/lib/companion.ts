@@ -296,11 +296,20 @@ export function bindingsForDisplay(bindings: CompanionBinding[]): CompanionBindi
 }
 
 // A friendly display name for a channel row. Known channels get a proper-cased label; anything else shows
-// verbatim (never invents a name for a channel the daemon added that the UI hasn't been taught).
+// verbatim (never invents a name for a channel the daemon added that the UI hasn't been taught). The SINGLE
+// OWNER of channel → display label: both the Manage channel row and the chat-bubble provenance badge (via
+// channelBadgeLabel) resolve through this, so they can never diverge for any channel — known OR unknown.
 export function channelDisplayName(channel: string): string {
   if (channel === IN_APP_CHANNEL) return "In-app";
   if (channel === TELEGRAM_CHANNEL) return "Telegram";
   return channel;
+}
+
+// The chat-bubble provenance badge label — reuses channelDisplayName (the single owner above) but returns
+// null for the in-app channel to SUPPRESS the badge entirely: in-app is the default, unlabeled web chat, so
+// its bubbles show no channel badge. A thin wrapper so the badge and the Manage row agree for every channel.
+export function channelBadgeLabel(channel: string): string | null {
+  return channel === IN_APP_CHANNEL ? null : channelDisplayName(channel);
 }
 
 // Whether a companion already has a binding on the given channel — used to hide the "Connect Telegram" flow

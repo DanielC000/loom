@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import {
   COMPANION_DEFAULT_NAME, COMPANION_ID_MAX, COMPANION_TOKEN_MAX, TELEGRAM_CHANNEL, bindingFromCreateForm,
-  bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, companionDisplayName,
+  bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelBadgeLabel, channelDisplayName, companionDisplayName,
   emptyConfigForm, emptyTelegramForm, formFromMasked, hasChannelBinding, maskedToken, provisionBody,
   provisionErrorMessage, validateBinding, validateSender, validatePairing, validateTelegramConnect,
 } from "../src/lib/companion.ts";
@@ -235,6 +235,15 @@ check("channelDisplayName: known channels get friendly names, unknown ones show 
   assert.equal(channelDisplayName("in-app"), "In-app");
   assert.equal(channelDisplayName("telegram"), "Telegram");
   assert.equal(channelDisplayName("discord"), "discord", "an unknown channel is never renamed");
+});
+
+check("channelBadgeLabel: reuses channelDisplayName but suppresses the in-app badge — never diverges", () => {
+  // The chat-bubble badge and the Manage channel row share ONE owner (channelDisplayName): the badge is
+  // exactly the row's label for every non-in-app channel, and null for in-app (the default, unlabeled chat).
+  assert.equal(channelBadgeLabel("in-app"), null, "in-app shows no badge");
+  assert.equal(channelBadgeLabel("telegram"), channelDisplayName("telegram"), "known channel matches the row");
+  assert.equal(channelBadgeLabel("discord"), channelDisplayName("discord"), "unknown channel matches the row verbatim — no divergence");
+  assert.equal(channelBadgeLabel("discord"), "discord");
 });
 
 check("hasChannelBinding: detects whether a companion already holds a binding on a channel", () => {

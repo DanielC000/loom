@@ -1,4 +1,7 @@
 import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, CapabilitySummary, CapabilityProvisionKind, PollJob } from "@loom/shared";
+// Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
+// at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
+import type { CompanionHistoryRow } from "./companionChat";
 
 // A one-time DM-pairing enrollment code, returned ONCE by the mint endpoint (the store keeps only a
 // salted hash). The human relays `code` to the person being enrolled; it is never recoverable after.
@@ -657,6 +660,11 @@ export const api = {
   // returns summaries newest-first (seq DESC); `endedAt === null` marks the CURRENT (open, live) conversation,
   // a closed one carries an `endedAt`. `companionConversation` fetches one conversation's full unified message
   // list (every channel, chronological) — 404 (surfaced via getErr) on an unknown/invalid seq.
+  // The durable in-app chat history seed for the cockpit chat panel (GET /api/companion/messages/:sessionId).
+  // CompanionChat loads this BEFORE opening its WebSocket (load-then-connect, bug 0f01f234). Same human-only
+  // loopback posture as the reads above (NO agent MCP path).
+  companionMessages: (sessionId: string) =>
+    get<{ messages?: CompanionHistoryRow[] }>(`/api/companion/messages/${encodeURIComponent(sessionId)}`),
   companionConversations: (sessionId: string) =>
     get<{ conversations: CompanionConversationSummary[] }>(`/api/companion/conversations/${encodeURIComponent(sessionId)}`).then((r) => r.conversations),
   companionConversation: (sessionId: string, seq: number) =>
