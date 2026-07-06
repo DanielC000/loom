@@ -221,6 +221,18 @@ try {
     const companion = { bind: (b) => bound.push(b), unbind: (id, channel) => unbound.push({ sessionId: id, channel }) };
     const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub, companion });
 
+    // Real assistant-role sessions backing every sessionId this part POSTs to a write route (the
+    // write routes now resolve the session via resolveCompanionAgent, same as the read routes).
+    const p5Now = new Date().toISOString();
+    db.insertProject({ id: "p5-proj", name: "Authz REST", repoPath: "p5-proj", vaultPath: "p5-proj", config: {}, createdAt: p5Now, archivedAt: null });
+    db.insertAgent({ id: "p5-agent-asst", projectId: "p5-proj", name: "Companion", startupPrompt: "P", position: 0, profileId: null, endpoint: false, ioSchema: null });
+    for (const sid of ["s1", "s2"]) {
+      db.insertSession({
+        id: sid, projectId: "p5-proj", agentId: "p5-agent-asst", engineSessionId: `eng-${sid}`, title: null, cwd: "p5-proj",
+        processState: "live", resumability: "resumable", busy: false, createdAt: p5Now, lastActivity: p5Now, lastError: null, role: "assistant",
+      });
+    }
+
     // FIX [1]: scope is REQUIRED on the REST bind endpoint.
     const noScope = await app.inject({ method: "POST", url: "/api/companion/bindings", payload: { sessionId: "s1", channel: "telegram", chatId: "c1" } });
     check("REST bind: MISSING scope → 400 (no silent 'dm' default)", noScope.statusCode === 400);

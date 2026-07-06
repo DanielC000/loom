@@ -589,6 +589,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/companion/bindings", async (req, reply) => {
     const b = (req.body ?? {}) as { sessionId?: unknown; channel?: unknown; chatId?: unknown; scope?: unknown };
     if (!isNonBlankStr(b.sessionId)) return reply.code(400).send({ error: "sessionId must be a non-empty string" });
+    const roleCheck = resolveCompanionAgent(b.sessionId.trim());
+    if (!roleCheck.ok) return reply.code(roleCheck.code).send({ error: roleCheck.error });
     if (!isNonBlankStr(b.channel)) return reply.code(400).send({ error: "channel must be a non-empty string" });
     if (!isNonBlankStr(b.chatId)) return reply.code(400).send({ error: "chatId must be a non-empty string" });
     // scope is REQUIRED on the REST surface (product-safety): a human binding a GROUP chat MUST consciously
@@ -633,6 +635,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/companion/allowed-senders", async (req, reply) => {
     const b = (req.body ?? {}) as { sessionId?: unknown; channel?: unknown; senderId?: unknown; label?: unknown };
     if (!isNonBlankStr(b.sessionId)) return reply.code(400).send({ error: "sessionId must be a non-empty string" });
+    const roleCheck = resolveCompanionAgent(b.sessionId.trim());
+    if (!roleCheck.ok) return reply.code(roleCheck.code).send({ error: roleCheck.error });
     if (!isNonBlankStr(b.channel)) return reply.code(400).send({ error: "channel must be a non-empty string" });
     if (!isNonBlankStr(b.senderId)) return reply.code(400).send({ error: "senderId must be a non-empty string" });
     if (b.label !== undefined && b.label !== null && (typeof b.label !== "string" || b.label.length > COMPANION_ID_MAX)) {
@@ -672,6 +676,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/companion/pairing", async (req, reply) => {
     const b = (req.body ?? {}) as { sessionId?: unknown; grantType?: unknown; ttlMinutes?: unknown };
     if (!isNonBlankStr(b.sessionId)) return reply.code(400).send({ error: "sessionId must be a non-empty string" });
+    const roleCheck = resolveCompanionAgent(b.sessionId.trim());
+    if (!roleCheck.ok) return reply.code(roleCheck.code).send({ error: roleCheck.error });
     if (b.grantType !== "dm-bind" && b.grantType !== "group-sender") {
       return reply.code(400).send({ error: "grantType is required and must be 'dm-bind' or 'group-sender'" });
     }
@@ -815,6 +821,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const b = (req.body ?? {}) as Record<string, unknown>;
     if (!isNonBlankStr(b.sessionId)) return reply.code(400).send({ error: "sessionId must be a non-empty string" });
     const sessionId = b.sessionId.trim();
+    const roleCheck = resolveCompanionAgent(sessionId);
+    if (!roleCheck.ok) return reply.code(roleCheck.code).send({ error: roleCheck.error });
     const existing = deps.db.getCompanionConfig(sessionId);
     const built = buildCompanionUpsert(b, sessionId, existing);
     if ("error" in built) return reply.code(400).send({ error: built.error });

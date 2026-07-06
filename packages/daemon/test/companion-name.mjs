@@ -245,6 +245,13 @@ try {
   {
     const rig = await makeRig("e-rename.db"); apps.push(rig.app);
 
+    // A real assistant-role session backing "sess-rename" — the write route resolves the session via
+    // resolveCompanionAgent, same as the read routes.
+    rig.db.insertSession({
+      id: "sess-rename", projectId: rig.db.listAllProjects()[0].id, agentId: rig.companionAgentId, engineSessionId: "eng-sess-rename", title: null, cwd: repo,
+      processState: "live", resumability: "resumable", busy: false, createdAt: new Date().toISOString(), lastActivity: new Date().toISOString(), lastError: null, role: "assistant",
+    });
+
     // Create a config (POST) with no name — matches the create-flow contract (name is optional there too).
     const created = await rig.app.inject({
       method: "POST", url: "/api/companion/config",

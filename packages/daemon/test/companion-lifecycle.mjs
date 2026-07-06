@@ -373,6 +373,16 @@ try {
     const stub = {};
     const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub, companion: rig.controller, requestShutdown: () => {} });
 
+    // A real assistant-role session backing "assist-1" — the write routes below now resolve the session
+    // via resolveCompanionAgent, same as the read routes.
+    const p5Now = new Date().toISOString();
+    db.insertProject({ id: "p5-proj", name: "Lifecycle REST", repoPath: "p5-proj", vaultPath: "p5-proj", config: {}, createdAt: p5Now, archivedAt: null });
+    db.insertAgent({ id: "p5-agent-asst", projectId: "p5-proj", name: "Companion", startupPrompt: "P", position: 0, profileId: null, endpoint: false, ioSchema: null });
+    db.insertSession({
+      id: "assist-1", projectId: "p5-proj", agentId: "p5-agent-asst", engineSessionId: "eng-assist-1", title: null, cwd: "p5-proj",
+      processState: "live", resumability: "resumable", busy: false, createdAt: p5Now, lastActivity: p5Now, lastError: null, role: "assistant",
+    });
+
     // POST create → 201, and the LIVE controller started (no restart), chat_reply lit.
     const create = await app.inject({ method: "POST", url: "/api/companion/config", payload: {
       sessionId: "assist-1", botToken: TOKEN_A, allowedChatId: "chat-1", chatScope: "dm", heartbeatIntervalMinutes: 360,

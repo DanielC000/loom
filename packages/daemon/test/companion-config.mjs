@@ -14,6 +14,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      them (multi-companion runtime — no more "pick one, warn the rest away").
 //   3. REST CRUD via the real buildServer: POST→GET(masked)→PUT→DELETE, token never in ANY body, the stored
 //      blob is ciphertext, and every validation 400 leaves no row.
+//   3b. WRITE-ROUTE ROLE GATE: POST /config, /bindings, /allowed-senders, /pairing resolve the sessionId via
+//      the SAME resolveCompanionAgent the read routes use — a non-assistant (manager/worker) sessionId is
+//      refused (400, matching the read routes' error shape) and writes no row; an assistant sessionId still
+//      succeeds on every one of the four routes.
 //   4. token never in any captured log line across the whole run.
 //   5. HUMAN-ONLY: the companion's OWN agent-facing MCP surface (orchestration assistant + manager) carries
 //      NO config/token tool — it can never read/write its own bot token.
@@ -225,6 +229,24 @@ try {
     const bodies = []; // every response body — swept for the plaintext at the end.
     const inject = async (opts) => { const r = await app.inject(opts); bodies.push(r.payload); return r; };
 
+    // Real assistant-role sessions backing every sessionId this part exercises on a WRITE route (the
+    // write routes now resolve the session via resolveCompanionAgent, same as the read routes) — plus one
+    // non-assistant (worker) session to prove the write-route role gate below.
+    const p3Now = new Date().toISOString();
+    db.insertProject({ id: "p3-proj", name: "Config REST", repoPath: "p3-proj", vaultPath: "p3-proj", config: {}, createdAt: p3Now, archivedAt: null });
+    db.insertAgent({ id: "p3-agent-asst", projectId: "p3-proj", name: "Companion", startupPrompt: "P", position: 0, profileId: null, endpoint: false, ioSchema: null });
+    for (const sid of ["sess-1", "sess-2", "fresh"]) {
+      db.insertSession({
+        id: sid, projectId: "p3-proj", agentId: "p3-agent-asst", engineSessionId: `eng-${sid}`, title: null, cwd: "p3-proj",
+        processState: "live", resumability: "resumable", busy: false, createdAt: p3Now, lastActivity: p3Now, lastError: null, role: "assistant",
+      });
+    }
+    db.insertAgent({ id: "p3-agent-worker", projectId: "p3-proj", name: "Worker", startupPrompt: "W", position: 1, profileId: null, endpoint: false, ioSchema: null });
+    db.insertSession({
+      id: "sess-worker", projectId: "p3-proj", agentId: "p3-agent-worker", engineSessionId: "eng-sess-worker", title: null, cwd: "p3-proj",
+      processState: "live", resumability: "resumable", busy: false, createdAt: p3Now, lastActivity: p3Now, lastError: null, role: "worker",
+    });
+
     // Empty list to start.
     const list0 = await inject({ method: "GET", url: "/api/companion/config" });
     check("REST GET: empty list before any create", list0.statusCode === 200 && JSON.parse(list0.payload).length === 0);
@@ -301,6 +323,53 @@ try {
     check("REST POST: invalid chatScope → 400", (await inject({ method: "POST", url: "/api/companion/config", payload: { sessionId: "fresh", botToken: PLAINTEXT, allowedChatId: "c", chatScope: "public" } })).statusCode === 400);
     check("REST POST: negative cadence → 400", (await inject({ method: "POST", url: "/api/companion/config", payload: { sessionId: "fresh", botToken: PLAINTEXT, allowedChatId: "c", heartbeatIntervalMinutes: -5 } })).statusCode === 400);
     check("REST POST: a rejected create left no 'fresh' row", db.getCompanionConfig("fresh") === undefined);
+
+    // ---- WRITE-ROUTE ROLE GATE (bug fix regression): POST /config, /bindings, /allowed-senders, /pairing
+    // now resolve the session via resolveCompanionAgent — same as the read routes — so a non-assistant
+    // (manager/worker) sessionId is refused, matching the read routes' error shape, while an assistant
+    // sessionId still succeeds. Previously these write routes took ANY raw sessionId with no role check.
+    const wrongRoleConfig = await inject({ method: "POST", url: "/api/companion/config", payload: {
+      sessionId: "sess-worker", botToken: PLAINTEXT, allowedChatId: "chat-worker",
+    } });
+    check("write-gate: POST /config on a worker (non-assistant) sessionId → 400", wrongRoleConfig.statusCode === 400);
+    check("write-gate: POST /config error matches the read routes' shape", /not a companion \(assistant-role\) session/.test(JSON.parse(wrongRoleConfig.payload).error));
+    check("write-gate: the rejected config write left no row for 'sess-worker'", db.getCompanionConfig("sess-worker") === undefined);
+
+    const unknownSessionConfig = await inject({ method: "POST", url: "/api/companion/config", payload: {
+      sessionId: "no-such-session", botToken: PLAINTEXT, allowedChatId: "chat-x",
+    } });
+    check("write-gate: POST /config on a sessionId with no session row at all → 404", unknownSessionConfig.statusCode === 404);
+
+    const wrongRoleBinding = await inject({ method: "POST", url: "/api/companion/bindings", payload: {
+      sessionId: "sess-worker", channel: "telegram", chatId: "chat-worker", scope: "dm",
+    } });
+    check("write-gate: POST /bindings on a worker sessionId → 400", wrongRoleBinding.statusCode === 400);
+    check("write-gate: the rejected binding write created no binding row", db.listCompanionBindings().every((b) => b.sessionId !== "sess-worker"));
+
+    const wrongRoleAllowedSender = await inject({ method: "POST", url: "/api/companion/allowed-senders", payload: {
+      sessionId: "sess-worker", channel: "telegram", senderId: "u1",
+    } });
+    check("write-gate: POST /allowed-senders on a worker sessionId → 400", wrongRoleAllowedSender.statusCode === 400);
+
+    const wrongRolePairing = await inject({ method: "POST", url: "/api/companion/pairing", payload: {
+      sessionId: "sess-worker", grantType: "dm-bind",
+    } });
+    check("write-gate: POST /pairing on a worker sessionId → 400", wrongRolePairing.statusCode === 400);
+
+    // An assistant-role sessionId still succeeds on every one of the four write routes (no regression).
+    const okBinding = await inject({ method: "POST", url: "/api/companion/bindings", payload: {
+      sessionId: "sess-1", channel: "telegram", chatId: "chat-ok", scope: "dm",
+    } });
+    check("write-gate: POST /bindings on an assistant sessionId still succeeds → 201", okBinding.statusCode === 201);
+    const okAllowedSender = await inject({ method: "POST", url: "/api/companion/allowed-senders", payload: {
+      sessionId: "sess-1", channel: "telegram", senderId: "u1",
+    } });
+    check("write-gate: POST /allowed-senders on an assistant sessionId still succeeds → 201", okAllowedSender.statusCode === 201);
+    const okPairing = await inject({ method: "POST", url: "/api/companion/pairing", payload: {
+      sessionId: "sess-1", grantType: "dm-bind",
+    } });
+    check("write-gate: POST /pairing on an assistant sessionId still succeeds → 201", okPairing.statusCode === 201);
+    // (POST /config on an assistant sessionId is already proven throughout Part 3's create/update flow above.)
 
     // DELETE.
     const del = await inject({ method: "DELETE", url: "/api/companion/config/sess-1" });

@@ -68,6 +68,18 @@ try {
     const db = new Db(dbFile("A.db"));
     const app = await buildServer({ db, pty: {}, sessions: {}, mcp: {}, orchMcp: {}, platformMcp: {}, auditMcp: {}, userAuditMcp: {}, setupMcp: {}, runMcp: {}, control: {}, usageStatus: {}, companion: null });
 
+    // Real assistant-role sessions backing every sessionId this part POSTs to the mint route (the route
+    // now resolves the session via resolveCompanionAgent, same as the read routes).
+    const partANow = new Date().toISOString();
+    db.insertProject({ id: "A-proj", name: "Pairing REST", repoPath: "A-proj", vaultPath: "A-proj", config: {}, createdAt: partANow, archivedAt: null });
+    db.insertAgent({ id: "A-agent-asst", projectId: "A-proj", name: "Companion", startupPrompt: "P", position: 0, profileId: null, endpoint: false, ioSchema: null });
+    for (const sid of ["sess-D", "s"]) {
+      db.insertSession({
+        id: sid, projectId: "A-proj", agentId: "A-agent-asst", engineSessionId: `eng-${sid}`, title: null, cwd: "A-proj",
+        processState: "live", resumability: "resumable", busy: false, createdAt: partANow, lastActivity: partANow, lastError: null, role: "assistant",
+      });
+    }
+
     const minted = await app.inject({ method: "POST", url: "/api/companion/pairing", payload: { sessionId: "sess-D", grantType: "dm-bind" } });
     check("mint: valid POST → 201", minted.statusCode === 201);
     const body = JSON.parse(minted.payload);
