@@ -1106,10 +1106,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // --- Companion CHAT HISTORY (bug 0f01f234 — the "reload loses the whole conversation" fix; UNIFIED
-  // CROSS-CHANNEL CHAT, card 7d63e200): a READ-ONLY view over the durable `companion_messages` rows the
-  // inbound/outbound record hooks write (controller.ts / in-app.ts / chat-gateway.ts). Same posture as
-  // MEMORY/SKILLS/REMINDERS above (VIEW only). Returns EVERY channel's rows for the session, chronological
-  // — so the owner's Telegram conversation (their messages + the companion's replies, including voice-note
+  // CROSS-CHANNEL CHAT, card 7d63e200; CONVERSATION HISTORY, card 85f62475): a READ-ONLY view over the
+  // durable `companion_messages` rows the inbound/outbound record hooks write (controller.ts / in-app.ts /
+  // chat-gateway.ts). Same posture as MEMORY/SKILLS/REMINDERS above (VIEW only). Returns the session's
+  // CURRENT (open) conversation's rows only — a "/new" boundary is respected, so a browser reload never
+  // resurfaces a conversation the owner already archived; see GET /api/companion/conversations/:sessionId
+  // below to browse archived ones. Every channel's rows for that conversation, chronological — so the
+  // owner's Telegram conversation (their messages + the companion's replies, including voice-note
   // transcripts) renders alongside the in-app history as ONE merged stream; each row still carries its own
   // `channel` (+ `viaVoice`) for the web panel's per-bubble provenance badge / mic indicator. The web
   // cockpit's CompanionChat panel calls this ONCE on mount (load-then-connect), THEN opens the live WS —
@@ -1118,7 +1121,35 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const sessionId = (req.params as { sessionId: string }).sessionId;
     const r = resolveCompanionAgent(sessionId);
     if (!r.ok) return reply.code(r.code).send({ error: r.error });
-    return { messages: deps.db.listAllCompanionMessages(sessionId) };
+    return { messages: deps.db.listCurrentCompanionMessages(sessionId) };
+  });
+
+  // --- Companion CONVERSATION HISTORY (card 85f62475): browse the session's ARCHIVED conversations — every
+  // "/new"/"/reset" closes the current conversation (retained, never deleted, up to the retention cap in
+  // db.ts) and opens a fresh one. READ-ONLY, same posture as the routes above — no MCP path, human-only
+  // loopback REST.
+  app.get("/api/companion/conversations/:sessionId", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    return { conversations: deps.db.listCompanionConversations(sessionId) };
+  });
+  // Fetch ONE conversation's full unified message list (every channel, chronological) — the history list's
+  // drill-down. 404s when `seq` isn't a valid integer or names a conversation the session never had (checked
+  // via listCompanionConversations rather than trusting an empty listCompanionMessagesForConversation result,
+  // which is also empty for a conversation that legitimately has zero messages).
+  app.get("/api/companion/conversations/:sessionId/:seq", async (req, reply) => {
+    const { sessionId, seq: seqParam } = req.params as { sessionId: string; seq: string };
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const seq = Number(seqParam);
+    if (!Number.isInteger(seq)) return reply.code(400).send({ error: "seq must be an integer" });
+    const conversation = deps.db.listCompanionConversations(sessionId).find((c) => c.seq === seq);
+    if (!conversation) return reply.code(404).send({ error: "conversation not found" });
+    return {
+      conversation: { seq: conversation.seq, startedAt: conversation.startedAt, endedAt: conversation.endedAt },
+      messages: deps.db.listCompanionMessagesForConversation(sessionId, seq),
+    };
   });
 
   // --- Companion VOICE PREFERENCES (Companion Voice epic, VOICE-P1 foundation): a READ-ONLY view over the

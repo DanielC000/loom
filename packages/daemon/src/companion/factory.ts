@@ -29,7 +29,9 @@ export interface CompanionBindingStore extends AllowlistReader, PairingStore, Vo
   /** The proactive HOME channel target (card 9488951e) — carried explicitly on the heartbeat's submitted
    *  turn (as its per-turn route), not consulted by deliverReply. */
   getCompanionHome(): CompanionRoute | null;
-  clearAllCompanionMessages(sessionId: string): void;
+  /** The "/new"/"/reset" command's history-ARCHIVE half (card 85f62475): closes the session's current
+   *  conversation and opens the next one — replaces the old delete-everything `clearAllCompanionMessages`. */
+  startNewCompanionConversation(sessionId: string): void;
   /** The chat-history WRITE (unified cross-channel chat, card 7d63e200) — the gateway's injected recorder
    *  calls this for every non-in-app channel's inbound/outbound turn (see `recorder` below). */
   insertCompanionMessage(m: { id: string; sessionId: string; channel: string; chatId: string; author: "user" | "companion"; text: string; createdAt: string; viaVoice?: boolean }): void;
@@ -77,16 +79,18 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // DM-pairing coordinator: the db-backed redemption path with the real wall clock (epoch ms). Default
   // rate-limit/lockout policy (5 attempts / 10-min window / 15-min lockout) — tests inject a fake clock.
   const pairing = createDbCompanionPairing(db, { now: () => Date.now() });
-  // The "/new"/"/reset" command's history-clear half (ChatGateway resets the agent's own context itself,
-  // via the SAME submitTurn above — no dependency needed for that half). Clears EVERY channel's stored
-  // history (card 4124b61e) — one companion shares one claude context across channels, so "/new" forgetting
-  // everything means forgetting it everywhere, not just the in-app rows. This wipes LOOM's own stored
-  // history (the unified panel view); it does NOT and cannot clear the owner's Telegram-app history —
-  // Telegram keeps its own message history client-side, independent of this reset. Still pushes the live
-  // "cleared" notice to an attached web viewer.
+  // The "/new"/"/reset" command's history-ARCHIVE half (ChatGateway resets the agent's own context itself,
+  // via the SAME submitTurn above — no dependency needed for that half). Archives EVERY channel's stored
+  // history as ONE closed conversation and opens the next (card 85f62475, superseding the old delete-
+  // everything behavior from card 4124b61e) — one companion shares one claude context across channels, so
+  // "/new" starting fresh means starting fresh everywhere, not just the in-app rows. Every prior message is
+  // RETAINED (tagged with the now-closed conversation seq), browsable via the history REST surface; this
+  // does NOT and cannot clear the owner's Telegram-app history — Telegram keeps its own message history
+  // client-side, independent of this reset. Still pushes the live "cleared" notice to an attached web viewer
+  // — the panel empties immediately even though the old conversation's rows live on server-side.
   const historyReset: CompanionHistoryReset = {
     async clear(sessionId) {
-      db.clearAllCompanionMessages(sessionId);
+      db.startNewCompanionConversation(sessionId);
       inApp?.pushCleared(sessionId);
     },
   };

@@ -973,6 +973,28 @@ export interface CompanionMessage {
    *  message and for every companion-authored reply (a voiced TTS reply is not tagged; this flags only an
    *  inbound turn that ITSELF arrived as audio). */
   viaVoice: boolean;
+  /** Which conversation (per-session, 1-based, monotonic) this turn belongs to — conversation history (card
+   *  85f62475). Every "/new"/"/reset" closes the current conversation and opens the next `conversationSeq`;
+   *  a message's conversationSeq never changes after insert. See {@link CompanionConversationSummary}. */
+  conversationSeq: number;
+}
+
+/**
+ * ONE conversation's summary for the session's history list (conversation history, card 85f62475) — a
+ * conversation is the span of companion_messages between two "/new"/"/reset" boundaries (or session start /
+ * "still live"). `endedAt` is `null` for the CURRENT (open, still-accumulating) conversation — exactly one
+ * open conversation exists per session at a time. `preview` is the first message's text, truncated + single-
+ * lined for a list row (the full text is available via the fetch-one-conversation route). A conversation with
+ * zero messages (e.g. two "/new" in a row with nothing sent between) is never surfaced here — see
+ * `Db.listCompanionConversations`.
+ */
+export interface CompanionConversationSummary {
+  sessionId: SessionId;
+  seq: number;
+  startedAt: string;
+  endedAt: string | null;
+  messageCount: number;
+  preview: string | null;
 }
 
 /**

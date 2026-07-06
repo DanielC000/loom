@@ -33,7 +33,7 @@ import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, PresetPrompt, PresetPromptSuggestion,
-  CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionRoute,
+  CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
@@ -621,9 +621,26 @@ CREATE TABLE IF NOT EXISTS companion_messages (
   author TEXT NOT NULL,       -- 'user' | 'companion'
   text TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  via_voice INTEGER NOT NULL DEFAULT 0  -- 1 iff this inbound turn's text is a voice-note STT transcript
+  via_voice INTEGER NOT NULL DEFAULT 0,  -- 1 iff this inbound turn's text is a voice-note STT transcript
+  conversation_seq INTEGER NOT NULL DEFAULT 1  -- which conversation this turn belongs to (see companion_conversations)
 );
 CREATE INDEX IF NOT EXISTS idx_companion_messages_session ON companion_messages(session_id, channel, created_at);
+CREATE INDEX IF NOT EXISTS idx_companion_messages_conversation ON companion_messages(session_id, conversation_seq);
+-- Companion CONVERSATION HISTORY (card 85f62475): one row per conversation boundary — a conversation is the
+-- span of companion_messages between two "/new"/"/reset" boundaries (or session start / "still live"). Exactly
+-- one OPEN row (ended_at IS NULL) exists per session at a time; "/new" closes it (sets ended_at) and opens the
+-- next seq. Brand-new table so CREATE TABLE IF NOT EXISTS is itself the additive migration. Existing DBs get
+-- their history backfilled into a single open conversation-1 by migrateCompanionConversations() below (mirrors
+-- migrateCompanionMessages's idempotent-additive pattern), so history browsing on an upgraded DB shows correct
+-- data immediately rather than only after the next chat message lazily opens one.
+CREATE TABLE IF NOT EXISTS companion_conversations (
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  seq INTEGER NOT NULL,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  PRIMARY KEY (session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_companion_conversations_session ON companion_conversations(session_id, seq);
 -- Owner-controlled encrypted credential store (agent-tooling epic, P1 foundation). GLOBAL / daemon-wide,
 -- HUMAN-managed only over the loopback REST surface — NO MCP tool creates/reads/lists a connection or its
 -- secret. secret_blob is envelope ciphertext (v1:iv:tag:ct); the REST layer never returns it (masked read).
@@ -706,6 +723,21 @@ const WORKTREE_WEDGED_KEY = "worktree_wedged";
  * insert, so the table is a ring buffer and can never grow unbounded across a long-lived companion.
  */
 const MAX_COMPANION_MESSAGES = 200;
+
+/**
+ * The bounded-growth cap for conversation history (card 85f62475): the most recent N conversations retained
+ * per session — "/new" evicts the whole OLDEST conversation (its companion_messages rows + its
+ * companion_conversations row) once this is exceeded, never a partial/mid-conversation prune. Hardcoded,
+ * mirroring MAX_COMPANION_MESSAGES's own hardcoded-const pattern (no PlatformConfig knob — no demand signal
+ * yet). MAX_COMPANION_MESSAGES's ring buffer is per (session, channel, conversation), so a single-channel
+ * session bounds to ~4k rows (20 x 200), but a session spanning 2 channels (in-app + Telegram) can hold up
+ * to ~200 rows PER CHANNEL PER conversation — ~8k rows total for that session.
+ */
+const MAX_RETAINED_CONVERSATIONS = 20;
+
+/** Max chars for a conversation-list preview (card 85f62475) — full text is always available via the
+ *  fetch-one-conversation read; the list is not the place to ship whole message bodies. */
+const CONVERSATION_PREVIEW_MAX_CHARS = 120;
 
 /**
  * One worktree dir whose killable removal was force-KILLED on timeout (genuinely wedged, not a clean
@@ -865,6 +897,9 @@ const WAKE_ADDED_COLUMNS: Record<string, string> = {
  *  correct, since only a voice-note-originated inbound turn is ever recorded with via_voice=1. */
 const COMPANION_MESSAGES_ADDED_COLUMNS: Record<string, string> = {
   via_voice: "INTEGER NOT NULL DEFAULT 0",
+  // Conversation history (card 85f62475): DEFAULT 1 backfills every legacy row into conversation 1 — correct,
+  // since migrateCompanionConversations() below gives every such session exactly one open conversation-1 row.
+  conversation_seq: "INTEGER NOT NULL DEFAULT 1",
 };
 
 type Row = Record<string, unknown>;
@@ -931,6 +966,7 @@ export class Db {
     this.migrateCompanionBindings();
     this.migrateWakes();
     this.migrateCompanionMessages();
+    this.migrateCompanionConversations();
   }
 
   /**
@@ -1142,6 +1178,31 @@ export class Db {
     for (const [name, type] of Object.entries(COMPANION_MESSAGES_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE companion_messages ADD COLUMN ${name} ${type}`);
     }
+  }
+
+  /**
+   * Idempotent additive DATA backfill for conversation history (card 85f62475) — runs AFTER
+   * migrateCompanionMessages (so conversation_seq already exists + every legacy row already defaults to 1).
+   * For every session with companion_messages rows but NO companion_conversations row yet, opens exactly one
+   * OPEN conversation (seq=1, started_at = that session's earliest message, ended_at=NULL) so a pre-upgrade
+   * session's history is immediately correct in the conversation list — not just once its next message lazily
+   * opens one (currentConversationSeq below would otherwise do the same thing, just later and with
+   * started_at=now instead of the true earliest-message time). Guard: only sessions missing a row are
+   * touched, so re-running on a warm DB is a no-op; a session with zero companion_messages rows ever is left
+   * alone (currentConversationSeq lazily opens conversation 1 for it on its first message).
+   */
+  private migrateCompanionConversations(): void {
+    const missing = this.db.prepare(
+      `SELECT m.session_id AS sessionId, MIN(m.created_at) AS startedAt
+       FROM companion_messages m
+       LEFT JOIN companion_conversations c ON c.session_id = m.session_id
+       WHERE c.session_id IS NULL
+       GROUP BY m.session_id`,
+    ).all() as { sessionId: string; startedAt: string }[];
+    const insert = this.db.prepare(
+      "INSERT INTO companion_conversations (session_id, seq, started_at, ended_at) VALUES (?, 1, ?, NULL)",
+    );
+    for (const row of missing) insert.run(row.sessionId, row.startedAt);
   }
 
   /**
@@ -3392,50 +3453,161 @@ export class Db {
 
   // --- companion chat history (bug 0f01f234 — the durable store behind the "reload loses the whole
   // conversation" fix). Channel-keyed like companion_voice_prefs; today only the in-app channel writes here. ---
-  /** Record ONE chat turn, then prune to the most recent {@link MAX_COMPANION_MESSAGES} rows for its
-   *  (session, channel) — a ring buffer enforced on every insert. Callers (companion/controller.ts's
-   *  inbound hook, companion/in-app.ts's outbound hook) wrap this in a try/catch: a history-record failure
-   *  must never break the reply/inbound path it's mirroring — a dropped history row is acceptable, a
-   *  dropped reply or a crashed inbound is not. */
-  insertCompanionMessage(m: { id: string; sessionId: string; channel: string; chatId: string; author: "user" | "companion"; text: string; createdAt: string; viaVoice?: boolean }): void {
-    this.db.prepare(
-      `INSERT INTO companion_messages (id, session_id, channel, chat_id, author, text, created_at, via_voice)
-       VALUES (@id, @sessionId, @channel, @chatId, @author, @text, @createdAt, @viaVoice)`,
-    ).run({ ...m, viaVoice: m.viaVoice ? 1 : 0 });
-    this.db.prepare(
-      `DELETE FROM companion_messages WHERE session_id = ? AND channel = ? AND id NOT IN (
-         SELECT id FROM companion_messages WHERE session_id = ? AND channel = ? ORDER BY created_at DESC, rowid DESC LIMIT ?
-       )`,
-    ).run(m.sessionId, m.channel, m.sessionId, m.channel, MAX_COMPANION_MESSAGES);
+  /**
+   * The session's currently OPEN conversation seq (ended_at IS NULL) — lazily opens conversation 1 (or
+   * MAX(seq)+1, for the rare case a session has closed conversations but none open — see
+   * `startNewCompanionConversation`) if none is open yet, so a brand-new session with zero chat history
+   * never needs special-casing. INVARIANT: exactly one open conversation exists per session at a time; this
+   * is the ONLY method that opens one, and it is idempotent (a second call with nothing closed in between
+   * returns the SAME seq it just opened).
+   */
+  private currentConversationSeq(sessionId: string): number {
+    const open = this.db.prepare("SELECT seq FROM companion_conversations WHERE session_id = ? AND ended_at IS NULL")
+      .get(sessionId) as { seq: number } | undefined;
+    if (open) return open.seq;
+    const max = (this.db.prepare("SELECT MAX(seq) AS m FROM companion_conversations WHERE session_id = ?")
+      .get(sessionId) as { m: number | null }).m;
+    const seq = (max ?? 0) + 1;
+    this.db.prepare("INSERT INTO companion_conversations (session_id, seq, started_at, ended_at) VALUES (?, ?, ?, NULL)")
+      .run(sessionId, seq, new Date().toISOString());
+    return seq;
   }
-  /** A session's stored chat history for ONE channel, chronological — the "/new"/"/reset" command's
-   *  history-clear half reads no history, but a test/future caller scoped to a single channel can. */
+  /**
+   * Evict whole ARCHIVED (closed) conversations once a session holds more than {@link MAX_RETAINED_CONVERSATIONS}
+   * — deletes the oldest closed conversations' companion_messages rows AND their companion_conversations row,
+   * never a partial/mid-conversation prune. Called ONLY from `startNewCompanionConversation`, i.e. only at a
+   * close/open boundary — never mid-conversation, and never on the currently-open conversation (eviction only
+   * ever removes conversations strictly older than the retained-count window, and the just-opened one is
+   * always the newest).
+   */
+  private pruneOldConversations(sessionId: string): void {
+    const keep = this.db.prepare("SELECT seq FROM companion_conversations WHERE session_id = ? ORDER BY seq DESC LIMIT ?")
+      .all(sessionId, MAX_RETAINED_CONVERSATIONS) as { seq: number }[];
+    if (keep.length < MAX_RETAINED_CONVERSATIONS) return; // nothing to evict yet
+    const minKeep = Math.min(...keep.map((r) => r.seq));
+    this.db.prepare("DELETE FROM companion_messages WHERE session_id = ? AND conversation_seq < ?").run(sessionId, minKeep);
+    this.db.prepare("DELETE FROM companion_conversations WHERE session_id = ? AND seq < ?").run(sessionId, minKeep);
+  }
+  /**
+   * The "/new"/"/reset" command's history-ARCHIVE half (replaces the old delete-everything
+   * `clearAllCompanionMessages`, card 85f62475): closes the session's currently-open conversation (sets
+   * ended_at=now) and opens the next one (seq=MAX+1), then evicts the oldest archived conversation(s) past
+   * the retention cap. Every existing/prior-conversation row is RETAINED, tagged with its now-closed
+   * conversation_seq — nothing here ever deletes a message that belongs to the conversation being closed.
+   * The web/Telegram panel still empties immediately (the caller's `pushCleared` fires unconditionally,
+   * regardless of this method's early return below) — only retention differs from the old delete.
+   *
+   * NO-OP GUARD: if the currently-open conversation has ZERO messages (or none is open yet), this returns
+   * WITHOUT closing/opening anything — an empty conversation is reused rather than abandoned. Without this,
+   * a burst of "/new" with nothing sent between each would mint a run of empty conversations that are never
+   * surfaced in the history list (listCompanionConversations excludes them) but STILL consume a retention
+   * slot each, so "/new"-spam could silently evict real, browsable history. The next actual message still
+   * lazily opens/reuses the right conversation via `currentConversationSeq` either way.
+   */
+  startNewCompanionConversation(sessionId: string): void {
+    const open = this.db.prepare("SELECT seq FROM companion_conversations WHERE session_id = ? AND ended_at IS NULL")
+      .get(sessionId) as { seq: number } | undefined;
+    if (open) {
+      const { n } = this.db.prepare("SELECT COUNT(*) AS n FROM companion_messages WHERE session_id = ? AND conversation_seq = ?")
+        .get(sessionId, open.seq) as { n: number };
+      if (n === 0) return; // reuse the still-empty open conversation — nothing to archive
+    }
+    const now = new Date().toISOString();
+    this.db.prepare("UPDATE companion_conversations SET ended_at = ? WHERE session_id = ? AND ended_at IS NULL")
+      .run(now, sessionId);
+    const max = (this.db.prepare("SELECT MAX(seq) AS m FROM companion_conversations WHERE session_id = ?")
+      .get(sessionId) as { m: number | null }).m;
+    this.db.prepare("INSERT INTO companion_conversations (session_id, seq, started_at, ended_at) VALUES (?, ?, ?, NULL)")
+      .run(sessionId, (max ?? 0) + 1, now);
+    this.pruneOldConversations(sessionId);
+  }
+  /** Record ONE chat turn, tagged with the session's CURRENT (open) conversation, then prune to the most
+   *  recent {@link MAX_COMPANION_MESSAGES} rows for its (session, channel, conversation) — a ring buffer
+   *  enforced on every insert, scoped to the open conversation ONLY (an archived/closed conversation never
+   *  receives new rows, so it can never be reached by this prune — see `startNewCompanionConversation`'s
+   *  count-based eviction for archived history instead). Callers (companion/controller.ts's inbound hook,
+   *  companion/in-app.ts's outbound hook) wrap this in a try/catch: a history-record failure must never break
+   *  the reply/inbound path it's mirroring — a dropped history row is acceptable, a dropped reply or a
+   *  crashed inbound is not. */
+  insertCompanionMessage(m: { id: string; sessionId: string; channel: string; chatId: string; author: "user" | "companion"; text: string; createdAt: string; viaVoice?: boolean }): void {
+    const conversationSeq = this.currentConversationSeq(m.sessionId);
+    this.db.prepare(
+      `INSERT INTO companion_messages (id, session_id, channel, chat_id, author, text, created_at, via_voice, conversation_seq)
+       VALUES (@id, @sessionId, @channel, @chatId, @author, @text, @createdAt, @viaVoice, @conversationSeq)`,
+    ).run({ ...m, viaVoice: m.viaVoice ? 1 : 0, conversationSeq });
+    this.db.prepare(
+      `DELETE FROM companion_messages WHERE session_id = ? AND channel = ? AND conversation_seq = ? AND id NOT IN (
+         SELECT id FROM companion_messages WHERE session_id = ? AND channel = ? AND conversation_seq = ? ORDER BY created_at DESC, rowid DESC LIMIT ?
+       )`,
+    ).run(m.sessionId, m.channel, conversationSeq, m.sessionId, m.channel, conversationSeq, MAX_COMPANION_MESSAGES);
+  }
+  /** A session's stored chat history for ONE channel, chronological, across EVERY conversation (not scoped to
+   *  current) — the "/new"/"/reset" command's history-clear half reads no history, but a test/future caller
+   *  scoped to a single channel can. */
   listCompanionMessages(sessionId: string, channel: string): CompanionMessage[] {
     return (this.db.prepare("SELECT * FROM companion_messages WHERE session_id = ? AND channel = ? ORDER BY created_at, rowid")
       .all(sessionId, channel) as Row[]).map(toCompanionMessage);
   }
-  /** A session's stored chat history across EVERY channel, chronological (unified cross-channel chat, card
-   *  7d63e200) — the human-only REST read (GET /api/companion/messages/:sessionId) and the web cockpit's
-   *  reload-persists seed. Interleaves in-app + Telegram (+ any future channel) rows by `created_at` so the
-   *  panel renders one merged conversation; each row still carries its own `channel` for the per-bubble
-   *  provenance badge. */
+  /** A session's stored chat history across EVERY channel AND EVERY conversation, chronological (unified
+   *  cross-channel chat, card 7d63e200) — an audit/test utility spanning the session's full lifetime.
+   *  Interleaves in-app + Telegram (+ any future channel) rows by `created_at` so they render as one merged
+   *  conversation; each row still carries its own `channel` for the per-bubble provenance badge. NOT what the
+   *  live seed/REST route use post-85f62475 — see `listCurrentCompanionMessages` for the current-conversation-
+   *  scoped read those need. */
   listAllCompanionMessages(sessionId: string): CompanionMessage[] {
     return (this.db.prepare("SELECT * FROM companion_messages WHERE session_id = ? ORDER BY created_at, rowid")
       .all(sessionId) as Row[]).map(toCompanionMessage);
   }
-  /** Wipe a session's stored chat history for ONE channel. Superseded by `clearAllCompanionMessages` as the
-   *  "/new"/"/reset" command's history-clear half (card 4124b61e) — kept for a single-channel-scoped caller/
-   *  test. A no-op (0 rows deleted) is not an error — a fresh companion with no prior history clears to the
-   *  same empty state. */
+  /** A session's stored chat history across EVERY channel, scoped to ONLY its CURRENT (open) conversation —
+   *  conversation history (card 85f62475): the human-only REST read (GET /api/companion/messages/:sessionId)
+   *  and the web cockpit's reload-persists seed use this so a "/new" boundary is respected — a browser reload
+   *  never resurfaces a conversation the owner already archived. Empty (not an error) for a session with no
+   *  open conversation (i.e. it has never received a single message). */
+  listCurrentCompanionMessages(sessionId: string): CompanionMessage[] {
+    const open = this.db.prepare("SELECT seq FROM companion_conversations WHERE session_id = ? AND ended_at IS NULL")
+      .get(sessionId) as { seq: number } | undefined;
+    if (!open) return [];
+    return this.listCompanionMessagesForConversation(sessionId, open.seq);
+  }
+  /** A session's stored chat history across EVERY channel for ONE specific conversation `seq` — the
+   *  fetch-one-conversation half of the history REST surface (GET /api/companion/conversations/:sessionId/:seq).
+   *  Empty for an unknown/never-existed seq (the REST layer 404s by checking `listCompanionConversations`
+   *  first, not by trusting a non-empty result here). */
+  listCompanionMessagesForConversation(sessionId: string, seq: number): CompanionMessage[] {
+    return (this.db.prepare("SELECT * FROM companion_messages WHERE session_id = ? AND conversation_seq = ? ORDER BY created_at, rowid")
+      .all(sessionId, seq) as Row[]).map(toCompanionMessage);
+  }
+  /** The session's conversation HISTORY LIST (card 85f62475) — one summary row per conversation that holds at
+   *  least one message, newest-first (seq DESC), each with its message count and a short, single-line preview
+   *  of its first message (truncated to {@link CONVERSATION_PREVIEW_MAX_CHARS} chars with newlines collapsed
+   *  to spaces — the full text is available via `listCompanionMessagesForConversation`). A conversation with
+   *  ZERO messages (e.g. two "/new" in a row with nothing sent between) is excluded via the INNER JOIN — there
+   *  is nothing meaningful to preview or open for it. The human-only REST read (GET
+   *  /api/companion/conversations/:sessionId). */
+  listCompanionConversations(sessionId: string): CompanionConversationSummary[] {
+    const rows = this.db.prepare(
+      `SELECT c.seq AS seq, c.started_at AS startedAt, c.ended_at AS endedAt,
+              COUNT(m.id) AS messageCount,
+              (SELECT text FROM companion_messages
+                 WHERE session_id = c.session_id AND conversation_seq = c.seq
+                 ORDER BY created_at, rowid LIMIT 1) AS preview
+       FROM companion_conversations c
+       JOIN companion_messages m ON m.session_id = c.session_id AND m.conversation_seq = c.seq
+       WHERE c.session_id = ?
+       GROUP BY c.seq
+       ORDER BY c.seq DESC`,
+    ).all(sessionId) as { seq: number; startedAt: string; endedAt: string | null; messageCount: number; preview: string | null }[];
+    return rows.map((r) => ({
+      sessionId, seq: r.seq, startedAt: r.startedAt, endedAt: r.endedAt, messageCount: r.messageCount,
+      preview: r.preview === null ? null : truncateConversationPreview(r.preview),
+    }));
+  }
+  /** Wipe a session's stored chat history for ONE channel. Kept for a single-channel-scoped caller/test — not
+   *  part of the "/new"/"/reset" flow (that's `startNewCompanionConversation`, which ARCHIVES rather than
+   *  deletes, card 85f62475). A no-op (0 rows deleted) is not an error — a fresh companion with no prior
+   *  history clears to the same empty state. */
   clearCompanionMessages(sessionId: string, channel: string): void {
     this.db.prepare("DELETE FROM companion_messages WHERE session_id = ? AND channel = ?").run(sessionId, channel);
-  }
-  /** Wipe a session's stored chat history across EVERY channel — the "/new"/"/reset" command's history-clear
-   *  half (companion/factory.ts's CompanionHistoryReset impl, card 4124b61e). Mirrors `listAllCompanionMessages`'
-   *  session-wide scope so a reset actually empties the unified cross-channel panel, not just the in-app rows.
-   *  A no-op (0 rows deleted) is not an error. */
-  clearAllCompanionMessages(sessionId: string): void {
-    this.db.prepare("DELETE FROM companion_messages WHERE session_id = ?").run(sessionId);
   }
 }
 
@@ -3644,7 +3816,15 @@ function toCompanionMessage(r0: unknown): CompanionMessage {
     id: r.id as string, sessionId: r.session_id as string, channel: r.channel as string, chatId: r.chat_id as string,
     author: r.author as CompanionMessage["author"], text: r.text as string, createdAt: (r.created_at as string) ?? "",
     viaVoice: (r.via_voice as number | undefined) === 1,
+    conversationSeq: (r.conversation_seq as number | undefined) ?? 1,
   };
+}
+/** Collapse a preview candidate to one line and cap its length (card 85f62475's conversation-list preview). */
+function truncateConversationPreview(text: string): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > CONVERSATION_PREVIEW_MAX_CHARS
+    ? `${oneLine.slice(0, CONVERSATION_PREVIEW_MAX_CHARS)}…`
+    : oneLine;
 }
 function toCompanionConfigRow(r0: unknown): CompanionConfigRow {
   const r = r0 as Row;

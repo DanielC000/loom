@@ -13,9 +13,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (2) END TO END via CompanionController.handleInAppInbound("/new"): the reinject fires via the injected
 //       side-channel (never the narrow submitTurn primitive) and carries the REAL composed persona text.
 //   (3) ORDERING: the reinject is enqueued strictly AFTER "/clear" (FIFO — proven by a shared call-order log).
-//   (4) NO PERSIST / NO RENDER: the persona text never becomes a companion_messages row (history holds only
-//       the ack, exactly like today) and never reaches an attached web viewer as a frame (still exactly the
-//       'cleared' + ack pair) — proving the raw-enqueue side-channel is invisible on both axes.
+//   (4) NO PERSIST / NO RENDER: the persona text never becomes a companion_messages row (the newly-opened
+//       current conversation holds only the ack, exactly like today) and never reaches an attached web viewer
+//       as a frame (still exactly the 'cleared' + ack pair) — proving the raw-enqueue side-channel is
+//       invisible on both axes.
 //   (5) Default-OFF: omitting `reinjectPersona` from CompanionControllerDeps leaves "/new" byte-identical to
 //       before this card (no reinject attempted).
 // Run: 1) build (turbo builds shared first), 2) node test/companion-persona-reinject.mjs
@@ -151,8 +152,8 @@ try {
 
     check("(3) ORDERING: '/clear' is enqueued strictly before the persona reinject (FIFO)", order.length === 2 && order[0] === "clear" && order[1] === "reinject");
 
-    const afterMessages = db.listCompanionMessages(sessionId, IN_APP_CHANNEL);
-    check("(4) NO PERSIST: history cleared down to just the ack — the persona reinject added NO row", afterMessages.length === 1 && afterMessages[0].author === "companion");
+    const afterMessages = db.listCurrentCompanionMessages(sessionId);
+    check("(4) NO PERSIST: the NEW current conversation holds just the ack — the persona reinject added NO row", afterMessages.length === 1 && afterMessages[0].author === "companion");
     check("(4) NO PERSIST: none of the persisted rows carry the persona/base-brief text", !afterMessages.some((m) => m.text.includes("Loom Companion") || m.text.includes("Your name is Aria.")));
 
     check("(4) NO RENDER: exactly the SAME two live frames as a plain /new — 'cleared' then the ack", frames.length === 2 && frames[0].type === "cleared" && frames[1].type === "chat");
@@ -186,7 +187,7 @@ try {
     await controller.handleInAppInbound(sessionId, "/new");
 
     check("(5) default-OFF: '/clear' still submitted (unaffected)", submitted.length === 1 && submitted[0].text === "/clear");
-    check("(5) default-OFF: history still clears down to just the ack (no reinject attempted, no crash)", db.listCompanionMessages(sessionId, IN_APP_CHANNEL).length === 1);
+    check("(5) default-OFF: the NEW current conversation holds just the ack (no reinject attempted, no crash)", db.listCurrentCompanionMessages(sessionId).length === 1);
     check("(5) default-OFF: still exactly the 'cleared' + ack frame pair", frames.length === 2 && frames[0].type === "cleared" && frames[1].type === "chat");
   }
 } finally {
