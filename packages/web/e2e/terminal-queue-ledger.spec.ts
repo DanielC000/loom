@@ -81,8 +81,8 @@ test("a HUG tile's terminal height stays fixed when the queue ledger appears, ex
   await expect(page.getByText(/Queued \(1\)/)).toBeVisible({ timeout: 8000 });
   await expect
     .poll(async () => (await paneHeight(page)) ?? 0, { timeout: 5000 })
-    .toBeGreaterThanOrEqual(beforeH - 2);
-  expect(Math.abs(((await paneHeight(page)) ?? 0) - beforeH), "terminal height unchanged when the ledger bar appears").toBeLessThanOrEqual(2);
+    .toBeGreaterThanOrEqual(beforeH - 4);
+  expect(Math.abs(((await paneHeight(page)) ?? 0) - beforeH), "terminal height unchanged when the ledger bar appears").toBeLessThanOrEqual(4);
   const barH1 = (await bar.boundingBox())?.height ?? 0;
   expect(barH1, "the ledger bar has a real height").toBeGreaterThan(0);
 
@@ -94,13 +94,17 @@ test("a HUG tile's terminal height stays fixed when the queue ledger appears, ex
   const barH2 = (await bar.boundingBox())?.height ?? 0;
   expect(Math.abs(barH2 - barH1), "ledger bar height is constant across 1 vs 2 queued").toBeLessThanOrEqual(1);
   // The terminal still has not moved at the deeper backlog.
-  expect(Math.abs(((await paneHeight(page)) ?? 0) - beforeH), "terminal height unchanged at a deeper backlog").toBeLessThanOrEqual(2);
+  expect(Math.abs(((await paneHeight(page)) ?? 0) - beforeH), "terminal height unchanged at a deeper backlog").toBeLessThanOrEqual(4);
 
   // (c) EXPAND → a BOUNDED, internally-scrollable drawer with the per-entry controls; the terminal must
   // still not move (the drawer grows the card). NOTE the height-bound canned grid (80×40 pinned to the
-  // budget) drives xterm's applyFontSize into a cosmetic ±1px font settle, so the below-terminal chrome
-  // jitters 1px — real WIDTH-bound production tiles (120 cols scaled to tile width) don't. We force past
-  // that 1px actionability jitter; the height assertions (±2) are what verify the Direction B invariant.
+  // budget) drives xterm's applyFontSize into a cosmetic FONT SETTLE (a few px), so the below-terminal
+  // chrome jitters — real WIDTH-bound production tiles (120 cols scaled to tile width) don't. The settle
+  // amplitude tracks the font size, which grew when the composer's status line stopped permanently
+  // reserving ~22px (fix(web): drop the redundant queued caption) — so at this larger budget the settle is
+  // ~3px, not ~1px. We force past that actionability jitter; the height assertions (a few px of tolerance)
+  // are what verify the Direction B invariant — a REAL shrink (the terminal ceding space to the queue)
+  // would be tens of px, far outside this cosmetic band.
   await bar.click({ force: true });
   const drawer = page.getByTestId("queue-drawer");
   await expect(drawer).toBeVisible();
@@ -112,12 +116,12 @@ test("a HUG tile's terminal height stays fixed when the queue ledger appears, ex
   await expect(page.getByTitle("Move up").first()).toBeVisible();
   await expect(page.getByTitle("Edit this queued message").first()).toBeVisible();
   await expect(page.getByTitle("Remove from queue")).toHaveCount(2);
-  expect(Math.abs(((await paneHeight(page)) ?? 0) - beforeH), "terminal height unchanged when the drawer expands").toBeLessThanOrEqual(2);
+  expect(Math.abs(((await paneHeight(page)) ?? 0) - beforeH), "terminal height unchanged when the drawer expands").toBeLessThanOrEqual(4);
 
   // (d) DELETE works: remove one entry → the live count drops to (1); the terminal has still not moved.
   await page.getByTitle("Remove from queue").first().click({ force: true });
   await expect(page.getByText(/Queued \(1\)/)).toBeVisible({ timeout: 8000 });
-  expect(Math.abs(((await paneHeight(page)) ?? 0) - beforeH), "terminal height unchanged after a delete").toBeLessThanOrEqual(2);
+  expect(Math.abs(((await paneHeight(page)) ?? 0) - beforeH), "terminal height unchanged after a delete").toBeLessThanOrEqual(4);
 
   // DRAIN the rest: the bar vanishes and the terminal is STILL at its at-rest height (it never gave up
   // space in the first place).
@@ -125,6 +129,6 @@ test("a HUG tile's terminal height stays fixed when the queue ledger appears, ex
   await expect(page.getByText(/Queued/)).toHaveCount(0);
   await expect
     .poll(async () => (await paneHeight(page)) ?? 0, { timeout: 5000 })
-    .toBeGreaterThanOrEqual(beforeH - 2);
-  expect(Math.abs(((await paneHeight(page)) ?? 0) - beforeH), "terminal height unchanged after the queue drains").toBeLessThanOrEqual(2);
+    .toBeGreaterThanOrEqual(beforeH - 4);
+  expect(Math.abs(((await paneHeight(page)) ?? 0) - beforeH), "terminal height unchanged after the queue drains").toBeLessThanOrEqual(4);
 });

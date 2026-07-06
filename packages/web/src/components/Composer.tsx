@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Button, Select, StatusPill, Panel, SectionLabel, Chip } from "./ui";
 import { color, font } from "../theme";
@@ -33,12 +33,18 @@ export function Composer({ sessionId }: { sessionId: string }) {
     });
   };
 
+  const qc = useQueryClient();
   const send = useMutation({
     mutationFn: (t: string) => api.sendInput(sessionId, t),
     onSuccess: (r) => {
+      // A QUEUED send shows NO caption: the "ledger bar" (SessionQueue) already surfaces every held
+      // message, so a "queued #N …" line under the composer would just duplicate it. The cleared box +
+      // the ledger entry ARE the feedback; nudge the queue query so the bar reflects it without waiting
+      // out its 3s poll. A DELIVERED send keeps the transient "sent"; a non-live session keeps its error.
       if (r.delivered) { setStatus("sent"); setText(""); clearDraft(sessionId); setExpanded(false); }
-      else if (r.position) { setStatus(`queued #${r.position} — sends when the turn ends`); setText(""); clearDraft(sessionId); setExpanded(false); }
+      else if (r.position) { setStatus(null); setText(""); clearDraft(sessionId); setExpanded(false); }
       else setStatus("session not live");
+      qc.invalidateQueries({ queryKey: ["queue", sessionId] });
     },
     onError: () => setStatus("failed"),
   });
@@ -98,8 +104,10 @@ export function Composer({ sessionId }: { sessionId: string }) {
           <Button variant="primary" disabled={!text.trim() || send.isPending} onClick={submit}>Send turn</Button>
         </div>
       </div>
-      {/* ONE status line beneath the box, ALWAYS rendered at a reserved height: it carries both the
-          send result and the live voice state, so neither can pop into existence and jolt the layout. */}
+      {/* ONE status line beneath the box, rendered ONLY when it has something to say (voice state or a
+          send result). At rest it COLLAPSES to nothing so the composer sits flush against the card's
+          bottom edge — the queued-send caption used to live here and pad the composer away from the
+          edge, but the ledger bar surfaces held messages now, so this stays empty on the common path. */}
       <ComposerStatusLine speech={speech} sendStatus={status} />
 
       {expanded && (
@@ -270,10 +278,14 @@ function VoiceLangSelect({ lang, setLang, disabled }: { lang: string; setLang: (
   );
 }
 
-// One muted line beneath the box, ALWAYS rendered at a reserved minHeight so it never changes the
-// composer's footprint (a constant footprint matters because the terminal pane is flex:1: any height
-// change here resizes the pane → Terminal.tsx's ResizeObserver rescales the xterm font). It carries
-// the live voice recognition state when a recording is active/terminal, otherwise the send result.
+// One muted line beneath the box, rendered ONLY when there's content — the live voice recognition state
+// when a recording is active/terminal, otherwise a send result worth surfacing. At rest it renders
+// NOTHING (returns null) so the composer hugs the card's bottom edge. This is safe against layout jitter
+// because the RESTING state is stable: a HUG terminal hugs its own grid height (Terminal.tsx applyFontSize
+// → the pane is sized to the rendered grid, not the budget), so the composer's below-buttons height sets
+// how close the card bottom sits — collapsing an empty line just tightens that gap, it doesn't resize the
+// terminal. Content that DOES appear (voice / an error) grows the card by one short line on a deliberate
+// action, never spontaneously. The common send path (queued) sets no status, so it stays collapsed.
 function ComposerStatusLine({ speech, sendStatus }: { speech: SpeechRecognitionApi; sendStatus: string | null }) {
   const { status, interim, error, secure, supported } = speech;
   let node: React.ReactNode = null;
@@ -297,8 +309,10 @@ function ComposerStatusLine({ speech, sendStatus }: { speech: SpeechRecognitionA
   } else if (sendStatus) {
     node = <span style={{ color: color.textMuted }}>{sendStatus}</span>;
   }
+  // Nothing to say → render nothing, so the composer sits flush against the card's bottom edge.
+  if (!node) return null;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, fontFamily: font.mono, fontSize: 10, minHeight: 18 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, fontFamily: font.mono, fontSize: 10, minHeight: 16 }}>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{node}</span>
     </div>
   );
