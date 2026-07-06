@@ -155,6 +155,13 @@ export interface CompanionControllerDeps {
    *  builder exactly like `transcribe` — STABLE across a gateway rebuild. Optional: absent ⇒ every built
    *  gateway's deliverReply is byte-identical to today (no synth attempted, default OFF). */
   synthesize?: CompanionSynthesizer;
+  /** The injected "/new" PERSONA reinject (companion-persona-after-clear card), threaded into the default
+   *  gateway builder exactly like `transcribe`/`synthesize`. The daemon injects a raw-pty-enqueue impl built
+   *  from SessionService.composeCompanionReinjectPrompt (index.ts) — deliberately NOT the narrow `submitTurn`
+   *  primitive above, since the reinject must bypass chat-history recording + live-viewer rendering entirely
+   *  (see chat-gateway.ts's resetConversation). Optional: absent ⇒ every built gateway's "/new" leaves the
+   *  companion identity-less after `/clear`, byte-identical to today. */
+  reinjectPersona?: (sessionId: string) => void;
   /** Envelope key-file override (test seam only). */
   keyPath?: string;
   /** Build the gateway for an effective config (test seam — defaults to createCompanionGateway with the
@@ -461,7 +468,7 @@ export class CompanionController implements CompanionControl {
     // injected buildGateway test seam supplies its own). The hub is stable across rebuilds — see in-app.ts.
     const build =
       this.deps.buildGateway ??
-      ((c: CompanionConfig, submit: SubmitTurn, db: typeof this.deps.db) => createCompanionGateway(c, submit, db, this.deps.inApp, this.deps.originResolver, this.deps.transcribe, this.deps.synthesize));
+      ((c: CompanionConfig, submit: SubmitTurn, db: typeof this.deps.db) => createCompanionGateway(c, submit, db, this.deps.inApp, this.deps.originResolver, this.deps.transcribe, this.deps.synthesize, this.deps.reinjectPersona));
     const gateway = build(cfg, this.deps.submitTurn, this.deps.db);
     this.gateways.set(cfg.sessionId, gateway);
     gateway.start();

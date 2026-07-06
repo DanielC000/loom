@@ -495,6 +495,40 @@ export class SessionService {
   }
 
   /**
+   * Compose the fresh-spawn-EQUIVALENT persona+recall prompt for an already-live companion session — the
+   * "/new" reinject (chat-gateway.ts's `resetConversation`, companion-persona-after-clear card). COMPOSE-ONLY
+   * / side-effect-free: reuses `resolveAgentSpawn` purely to extract the composed startup-prompt STRING
+   * (that method only READS `db.getProfile`, no writes) and appends the SAME memory-recall digest a fresh
+   * spawn/resume gets (`buildFramedMemoryRecall`/`appendMemoryRecallToStartupPrompt`) — this NEVER spawns,
+   * writes, or re-arms anything; it is called from a raw-enqueue reinject path, never a spawn path. Returns
+   * undefined for anything that isn't a live, still-assistant-role companion session (nothing to reinject).
+   *
+   * `companionName` — baked into the ORIGINAL startup prompt at creation-time only (startNew's
+   * `opts.companionName`) and never stored on the session/agent row — is re-sourced here from the durable
+   * `companion_config.name` column (the provision endpoint persists it there, gateway/server.ts) rather than
+   * threaded through some new session-row field, so a re-inject years after provisioning still gets the same
+   * name. `explicitRole:"assistant"` is passed (not re-resolved from the agent's CURRENT profile) mirroring
+   * resume()'s "carry session.role forward" pattern — a profile edited after this companion was created must
+   * not change what a reinject composes for it.
+   */
+  composeCompanionReinjectPrompt(sessionId: string): string | undefined {
+    const session = this.db.getSession(sessionId);
+    if (!session || session.role !== "assistant") return undefined;
+    const agent = this.db.getAgent(session.agentId);
+    if (!agent) return undefined;
+    const project = this.db.getProject(agent.projectId);
+    if (!project) return undefined;
+    const config = resolveConfig(project.config);
+    const companionName = this.db.getCompanionConfig(sessionId)?.name || undefined;
+    const { startupPrompt } = this.resolveAgentSpawn(agent, config, "assistant", false, companionName);
+    if (!startupPrompt) return undefined;
+    return appendMemoryRecallToStartupPrompt(
+      startupPrompt,
+      buildFramedMemoryRecall(listCompanionMemories(sessionId), (name) => readCompanionMemory(sessionId, name)),
+    );
+  }
+
+  /**
    * Start a NEW session in an agent — injects the agent startup prompt once. `opts.forcePlain` (P3
    * web "Spawn → force plain") overrides any profile-conferred role to spawn a role-null session.
    * `opts.companionName` (companion provision only) bakes the companion's given name into its startup

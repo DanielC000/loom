@@ -449,6 +449,15 @@ async function main(): Promise<void> {
     originResolver: (sid) => pty.getActiveTurnOrigin(sid),
     transcribe: sttTranscriber,
     synthesize: ttsSynthesizer,
+    // "/new" PERSONA reinject (companion-persona-after-clear card): composes THIS session's fresh-spawn-
+    // equivalent startup prompt (base brief + name + memory recall) and enqueues it via a RAW pty.enqueueStdin
+    // — deliberately bypassing submitTurn/handleInbound so it is never recorded to chat history and never
+    // pushed to a live web viewer (source:"system", kind defaults "warning" — mirrors the resume-half memory-
+    // recall reinject at sessions/service.ts). No prompt (session gone / no longer assistant) ⇒ no enqueue.
+    reinjectPersona: (sid) => {
+      const prompt = sessions.composeCompanionReinjectPrompt(sid);
+      if (prompt) pty.enqueueStdin(sid, prompt, "system");
+    },
   });
 
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after. The

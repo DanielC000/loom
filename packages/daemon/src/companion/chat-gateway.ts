@@ -122,6 +122,15 @@ export class ChatGateway {
    *                    see {@link CompanionMessageRecorder}. Default undefined ⇒ no recording (every
    *                    existing/test construction stays byte-identical). The daemon injects a db-backed
    *                    impl that skips the in-app channel (already recorded via its own dedicated hooks).
+   * @param reinjectPersona  the injected "/new" PERSONA reinject (companion-persona-after-clear card) — given
+   *                    a sessionId, composes+enqueues that session's fresh-spawn-equivalent startup prompt
+   *                    (base brief + name + memory recall) via a RAW pty enqueue, entirely OUTSIDE
+   *                    `submitTurn`/`handleInbound` — so it is never recorded to chat history and never
+   *                    pushed to a live web viewer (mirrors the resume-half memory-recall reinject in
+   *                    sessions/service.ts). Default undefined ⇒ resetConversation only does the /clear +
+   *                    history-clear halves (every existing/test construction stays byte-identical). The
+   *                    daemon injects `(sid) => { const p = sessions.composeCompanionReinjectPrompt(sid); if
+   *                    (p) pty.enqueueStdin(sid, p, "system"); }` (index.ts).
    */
   constructor(
     private readonly submitTurn: SubmitTurn,
@@ -134,6 +143,7 @@ export class ChatGateway {
     private readonly synthesize: CompanionSynthesizer | undefined = undefined,
     private readonly historyReset: CompanionHistoryReset | undefined = undefined,
     private readonly recorder: CompanionMessageRecorder | undefined = undefined,
+    private readonly reinjectPersona: ((sessionId: string) => void) | undefined = undefined,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -374,7 +384,15 @@ export class ChatGateway {
    *       nothing for a route to target). A throwing submitTurn (e.g. pty.write racing a dying session) is
    *       contained here — mirrors handleInbound's own submit-failed containment — so a `/new` never crashes
    *       the inbound path that's running it.
-   *   (b) HISTORY CLEAR — best-effort, via the optional injected `historyReset` (undefined ⇒ no-op: e.g. a
+   *   (b) PERSONA REINJECT — best-effort, via the optional injected `reinjectPersona` (undefined ⇒ no-op:
+   *       e.g. a non-assistant gateway, or a test that doesn't inject one). Enqueued via a RAW pty primitive
+   *       immediately after (a)'s `/clear` enqueue, in the SAME synchronous flow — both ride the same
+   *       per-session pty FIFO queue, so `/clear`'s queue slot always precedes this one (FIFO), and `/clear`
+   *       submits as turn-kind "agent" while this reinjects as the default "warning" kind, so a drain can
+   *       never mash the two into one turn (kinds never coalesce together — see pty/host.ts). Without this,
+   *       `/clear` wipes the companion's ONE persona turn (baked in only at fresh spawn) along with the rest
+   *       of the conversation, leaving a blank, identity-less agent — see composeCompanionReinjectPrompt.
+   *   (c) HISTORY CLEAR — best-effort, via the optional injected `historyReset` (undefined ⇒ no-op: e.g. a
    *       Telegram-only gateway, or a test that doesn't inject one). Clears whatever durable chat-history
    *       record exists for `sessionId` and pushes a live "cleared" notice to an attached web viewer.
    * Runs BEFORE the command's ack is sent (see handleInbound) — the persisted history is already empty and
@@ -386,6 +404,13 @@ export class ChatGateway {
       this.submitTurn(sessionId, "/clear");
     } catch (err) {
       this.debug(`resetConversation: /clear submit failed for ${sessionId}: ${describeError(err)}`);
+    }
+    if (this.reinjectPersona) {
+      try {
+        this.reinjectPersona(sessionId);
+      } catch (err) {
+        this.debug(`resetConversation: persona reinject failed for ${sessionId}: ${describeError(err)}`);
+      }
     }
     if (!this.historyReset) return;
     try {
