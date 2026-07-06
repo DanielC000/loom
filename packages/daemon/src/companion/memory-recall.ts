@@ -15,6 +15,10 @@ import type { CompanionMemoryEntry } from "../skills/companion-memory-store.js";
  * name-sorted PREFIX (stop at the first one that would overflow); the index is included as a name-sorted
  * prefix too (drop from the tail — i.e. alphabetically-later names are dropped first). Same memory set ⇒
  * same digest, every time — no dependency on directory iteration order or timing.
+ * A pinned entry dropped from the full-text tier for size falls back into the INDEX tier (name+description
+ * only), merged with the non-pinned entries and re-sorted by name — pinning something oversized must never
+ * make it strictly LESS discoverable than leaving it unpinned (an unpinned oversized entry is at least
+ * indexed).
  *
  * Framed EXPLICITLY as DATA/CONTEXT, never instructions — extending the ASSISTANT_BASE_BRIEF untrusted-
  * input posture (assistant-prompt.ts) to the companion's OWN memory: a memory entry is self-authored, but
@@ -67,15 +71,22 @@ export function composeMemoryRecallDigest(
 
   // Pinned FIRST, against the FULL budget: build the assembled section incrementally (header + one block at
   // a time) so the byte check is against the ACTUAL joined string — no under-counted headers/separators.
+  // A pinned entry dropped for size falls back into the index tier below (name+description only) — pinning
+  // must never make an entry STRICTLY LESS discoverable than leaving it unpinned.
   let pinnedSection: string | null = null;
+  const droppedPinned: CompanionMemoryEntry[] = [];
   if (pinned.length > 0) {
     const blocks: string[] = [];
-    for (const m of pinned) {
+    for (let i = 0; i < pinned.length; i++) {
+      const m = pinned[i]!;
       const content = readFull(m.name);
       if (content == null) continue; // vanished between list + read — skip, never throw
       const block = `### ${m.name}\n${content.trim()}`;
       const candidate = ["## Pinned memories (in full)", ...blocks, block].join(SECTION_SEP);
-      if (Buffer.byteLength(candidate, "utf8") > maxBytes) break; // deterministic: stop at the first overflow
+      if (Buffer.byteLength(candidate, "utf8") > maxBytes) {
+        droppedPinned.push(...pinned.slice(i)); // this one and any remaining name-sorted pinned entries
+        break; // deterministic: stop at the first overflow
+      }
       blocks.push(block);
       pinnedSection = candidate;
     }
@@ -84,10 +95,12 @@ export function composeMemoryRecallDigest(
 
   // Index SECOND, against whatever's left — exactly accounting for the separator the final join will add
   // between the two sections (so the TOTAL assembled digest, not just this section, respects maxBytes).
+  // Includes size-dropped pinned entries alongside the non-pinned rest, re-sorted by name together.
+  const indexCandidates = [...rest, ...droppedPinned].sort((a, b) => a.name.localeCompare(b.name));
   let indexSection: string | null = null;
-  if (rest.length > 0) {
+  if (indexCandidates.length > 0) {
     const header = "## Other memories (name: description — memory_read the name for the full entry)";
-    const lines = rest.map((m) => `- ${m.name}: ${m.description}`);
+    const lines = indexCandidates.map((m) => `- ${m.name}: ${m.description}`);
     const remaining = maxBytes - usedBytes - (pinnedSection ? SECTION_SEP_BYTES : 0);
     // Deterministic tail-truncation: the longest name-sorted PREFIX of lines that fits the remaining budget.
     for (let n = lines.length; n > 0; n--) {

@@ -93,8 +93,21 @@ const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
   const readFull = (name) => (name === "a-short" ? "X".repeat(50) : "Y".repeat(9_000));
   const digest = composeMemoryRecallDigest(memories, readFull, 500);
   check("bounded (pinned): the small entry that fits is included", digest.includes("### a-short"));
-  check("bounded (pinned): the entry that would overflow is DROPPED", !digest.includes("### b-long") && !digest.includes("b-long"));
+  check("bounded (pinned): the entry that would overflow is NOT rendered in full", !digest.includes("### b-long"));
   check("bounded (pinned): the whole digest respects the byte budget", Buffer.byteLength(digest, "utf8") <= 500);
+  // The bug this fix closes: pinning must never make an entry STRICTLY LESS discoverable than leaving it
+  // unpinned — a size-dropped pinned entry falls back into the index as a name+description line.
+  check("bounded (pinned): the size-dropped pinned entry still surfaces in the INDEX (name+description)", digest.includes("## Other memories") && digest.includes("- b-long: long"));
+
+  // 2a2. Whole-pinned-section-empty: the OVERSIZED entry is the ONLY pinned one — no surviving pinned
+  // sibling to keep the "## Pinned memories" header alive. It must still fall back into the index.
+  const sole = [{ name: "only-pinned", description: "important but huge", pinned: true }];
+  const soleReadFull = () => "Z".repeat(9_000);
+  const soleDigest = composeMemoryRecallDigest(sole, soleReadFull, 500);
+  check("bounded (pinned, sole+oversized): no '## Pinned memories' section (nothing survived in full)", !soleDigest.includes("## Pinned memories"));
+  check("bounded (pinned, sole+oversized): falls back to the index with name+description", soleDigest.includes("## Other memories") && soleDigest.includes("- only-pinned: important but huge"));
+  check("bounded (pinned, sole+oversized): the full oversized content never leaks in", !soleDigest.includes("Z".repeat(9_000)));
+  check("bounded (pinned, sole+oversized): the whole digest respects the byte budget", Buffer.byteLength(soleDigest, "utf8") <= 500);
 
   // 2b. Index: a name-sorted PREFIX of lines is kept — dropped from the TAIL (alphabetically-later first).
   const names = Array.from({ length: 10 }, (_, i) => `mem${String(i).padStart(2, "0")}`);
