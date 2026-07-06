@@ -328,6 +328,7 @@ const platformConfigOverrideSchema = z.object({
   timeouts: timeoutsOverride.optional(),
   connections: connectionsOverride.optional(),
   coalesceAgentMessages: z.boolean().optional(),
+  companionVoiceEnabled: z.boolean().optional(),
 }).strict();
 
 /**

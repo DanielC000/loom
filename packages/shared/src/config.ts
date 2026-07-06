@@ -404,7 +404,24 @@ export interface PlatformConfig {
    * `PlatformConfig`.
    */
   coalesceAgentMessages: boolean;
+  /**
+   * Opt-in gate for companion VOICE (STT/TTS) provisioning (owner-directed 2026-07-06): faster-whisper
+   * (~500MB) and kokoro-onnx (~197MB) are heavyweight Python installs that used to provision automatically
+   * the moment a companion was configured. Default OFF — the owner decides if/when to pull those installs
+   * down. OFF is fully inert: boot pre-warm (`prewarmStt`/`prewarmTts`) is skipped entirely, and
+   * `companion/stt.ts`'s `createFasterWhisperTranscriber` / `companion/tts.ts`'s `createKokoroSynthesizer`
+   * never kick venv provisioning and report `isReady()===false`, so voice notes/replies degrade through
+   * their EXISTING text paths (transcribe-unavailable / null synth) exactly as if faster-whisper/kokoro-onnx
+   * were never installed. ON restores today's auto-provisioning behavior. Read ONCE at daemon boot (like
+   * `coalesceAgentMessages`) — a toggle takes effect on the next daemon restart. DAEMON-GLOBAL (no
+   * per-project layer) + HUMAN-only, mirroring the rest of `PlatformConfig`.
+   */
+  companionVoiceEnabled: boolean;
 }
+
+/** Default for `PlatformConfig.companionVoiceEnabled` — a single named constant so flipping the shipped
+ *  default is a one-line change. OFF: companion voice provisioning is explicit human opt-in. */
+export const COMPANION_VOICE_ENABLED_DEFAULT = false;
 
 /** The fully-resolved, effective config for a project. */
 export interface ResolvedConfig {
@@ -476,6 +493,8 @@ export interface PlatformConfigOverride {
   connections?: Partial<ConnectionsGuardConfig>;
   /** See PlatformConfig.coalesceAgentMessages. */
   coalesceAgentMessages?: boolean;
+  /** See PlatformConfig.companionVoiceEnabled. */
+  companionVoiceEnabled?: boolean;
 }
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
@@ -527,6 +546,8 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     connections: { requestTimeoutMs: 20000, maxResponseBytes: 1000000, rateLimitMax: 30, rateLimitWindowMs: 300000 },
     // Default false = deliver agent/human messages one-per-turn (the 2026-07-03 owner-directed fix).
     coalesceAgentMessages: false,
+    // Default OFF (COMPANION_VOICE_ENABLED_DEFAULT) — companion voice provisioning is explicit opt-in.
+    companionVoiceEnabled: COMPANION_VOICE_ENABLED_DEFAULT,
   },
   docLint: true, // Pillar D vault-lint hook on by default
   // Obsidian auto-start OFF by default: opt-in per project (a daemon-launched GUI process is deliberate).
@@ -768,6 +789,7 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
       rateLimitWindowMs: po?.connections?.rateLimitWindowMs ?? d.connections.rateLimitWindowMs,
     },
     coalesceAgentMessages: po?.coalesceAgentMessages ?? d.coalesceAgentMessages,
+    companionVoiceEnabled: po?.companionVoiceEnabled ?? d.companionVoiceEnabled,
   };
 }
 

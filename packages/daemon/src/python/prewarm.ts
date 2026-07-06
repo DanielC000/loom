@@ -53,3 +53,14 @@ export function prewarmMarkitdownForProfilesAtBoot(db: PrewarmDeps): boolean {
   prewarmMarkitdown(resolvePrewarmInterpreterPath(db.listAllProjects()));
   return true;
 }
+
+/**
+ * Pure decision for the companion-voice (STT/TTS) boot pre-warm: only worth kicking when a companion is
+ * actually configured AND the daemon-global `platform.companionVoiceEnabled` opt-in (default OFF — see
+ * PlatformConfig) is on. Extracted as its own pure function (mirrors the shape of
+ * `prewarmMarkitdownForProfilesAtBoot`'s wanted-check) so the gate is hermetically testable without
+ * booting the daemon; `index.ts` calls `prewarmStt`/`prewarmTts` itself only when this returns true.
+ */
+export function shouldPrewarmCompanionVoice(companionConfigured: boolean, companionVoiceEnabled: boolean): boolean {
+  return companionConfigured && companionVoiceEnabled;
+}

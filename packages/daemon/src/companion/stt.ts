@@ -166,13 +166,20 @@ async function warmSttModel(pythonBin: string): Promise<boolean> {
 /**
  * Build the injected CompanionTranscriber — local faster-whisper via the shared venv. `pythonInterpreterPath`
  * is the human-only `python.interpreterPath` override (same resolution as the markitdown pre-warm).
+ * `enabled` is the daemon-global `platform.companionVoiceEnabled` opt-in gate (default OFF — see
+ * PlatformConfig's doc comment); when false, this NEVER calls `resolveSttPython` (so it never kicks venv
+ * provisioning) and always reports not-ready, degrading through the EXISTING `transcribe-unavailable` path
+ * exactly as if faster-whisper were never installed. Defaults to `true` so existing direct callers/tests are
+ * unaffected — the daemon boot path is the one place that resolves and passes the real flag.
  */
-export function createFasterWhisperTranscriber(pythonInterpreterPath?: string): CompanionTranscriber {
+export function createFasterWhisperTranscriber(pythonInterpreterPath?: string, enabled = true): CompanionTranscriber {
   return {
     isReady() {
+      if (!enabled) return false;
       return resolveSttPython(pythonInterpreterPath) !== null;
     },
     async transcribe({ filePath, langHint }) {
+      if (!enabled) return null;
       const bin = resolveSttPython(pythonInterpreterPath);
       if (!bin) return null;
       return runTranscribeScript(bin, filePath, langHint);

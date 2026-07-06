@@ -15,7 +15,7 @@ import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
 import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles, migrateHumanHoldToHeld } from "./tasks/columns.js";
-import { prewarmMarkitdownForProfilesAtBoot, resolvePrewarmInterpreterPath } from "./python/prewarm.js";
+import { prewarmMarkitdownForProfilesAtBoot, resolvePrewarmInterpreterPath, shouldPrewarmCompanionVoice } from "./python/prewarm.js";
 import { createFasterWhisperTranscriber, prewarmStt } from "./companion/stt.js";
 import { createKokoroSynthesizer, prewarmTts } from "./companion/tts.js";
 import { PtyHost } from "./pty/host.js";
@@ -391,15 +391,20 @@ async function main(): Promise<void> {
   // it does NO provisioning work itself (lazy, memoized — see companion/stt.ts); pre-warm it now IFF the
   // companion is configured at boot, so a real deployment's first voice note usually finds the venv warm.
   const sttInterpreterPath = resolvePrewarmInterpreterPath(db.listAllProjects());
-  const sttTranscriber = createFasterWhisperTranscriber(sttInterpreterPath);
+  // Opt-in gate (owner-directed 2026-07-06, default OFF): companion voice provisioning (faster-whisper +
+  // kokoro-onnx, ~700MB combined) no longer fires automatically just because a companion is configured —
+  // the owner flips `platform.companionVoiceEnabled` on in Settings. Read ONCE here off the ALREADY-resolved
+  // boot config (line ~171 above), like `coalesceAgentMessages` — a toggle takes effect on the next restart.
+  const companionVoiceEnabled = resolved.platform.companionVoiceEnabled;
+  const sttTranscriber = createFasterWhisperTranscriber(sttInterpreterPath, companionVoiceEnabled);
   // Local TTS synthesizer (Companion Voice epic, VOICE-P3) — same shape as sttTranscriber above: built
   // ALWAYS, stable across a gateway rebuild, no provisioning work at construction time (lazy, memoized —
   // see companion/tts.ts). The shared venv is ONE per machine, so the SAME interpreter path applies.
-  const ttsSynthesizer = createKokoroSynthesizer(sttInterpreterPath);
-  if (companionCfg) {
-    console.log("[boot] pre-warming the faster-whisper venv (the companion is configured)");
+  const ttsSynthesizer = createKokoroSynthesizer(sttInterpreterPath, companionVoiceEnabled);
+  if (shouldPrewarmCompanionVoice(!!companionCfg, companionVoiceEnabled)) {
+    console.log("[boot] pre-warming the faster-whisper venv (the companion is configured + voice is enabled)");
     prewarmStt(sttInterpreterPath);
-    console.log("[boot] pre-warming the kokoro-onnx venv (the companion is configured)");
+    console.log("[boot] pre-warming the kokoro-onnx venv (the companion is configured + voice is enabled)");
     prewarmTts(sttInterpreterPath);
   }
   // The hot-lifecycle controller (Companion Phase 3 backend): owns the live ChatGateway (Telegram long-poll)

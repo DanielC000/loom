@@ -1,6 +1,6 @@
 import { useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { CompanionConfigMasked, CompanionBinding } from "@loom/shared";
+import { resolveConfig, type CompanionConfigMasked, type CompanionBinding } from "@loom/shared";
 import { api, restartCompanionSession, type CompanionProvisionError, type CompanionSkillEntry, type CompanionMemoryEntry, type CompanionReminderEntry } from "../lib/api";
 import {
   bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, companionDisplayName, emptyConfigForm,
@@ -184,6 +184,46 @@ function ProactiveHomeSection() {
   );
 }
 
+// ── Voice provisioning (Manage-tab section) ───────────────────────────────────────
+// Voice (STT/TTS) is a daemon-GLOBAL opt-in (owner-directed 2026-07-06), NOT per-companion — it gates
+// whether the daemon is ALLOWED to install faster-whisper (~500MB) + kokoro-onnx (~197MB) at all. Off
+// (the default): voice notes/replies degrade to plain text, exactly as if voice were never configured.
+// Styled + wired exactly like ProactiveHomeSection above (a daemon-global value surfaced in this Manage
+// tab): reads/writes the SAME `/api/platform/config` surface the (human-only) daemon tuning uses.
+function VoiceProvisioningSection() {
+  const qc = useQueryClient();
+  const { data, isLoading, isError, error } = useQuery({ queryKey: ["platformConfig"], queryFn: api.getPlatformConfig });
+  const save = useMutation({
+    mutationFn: (enabled: boolean) => api.updatePlatformConfig({ ...(data?.override ?? {}), companionVoiceEnabled: enabled }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["platformConfig"] }),
+  });
+
+  const def = resolveConfig(undefined).platform.companionVoiceEnabled;
+  const enabled = data?.resolved.companionVoiceEnabled ?? def;
+
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <SectionLabel style={{ margin: 0 }}>Voice provisioning</SectionLabel>
+      <p style={{ ...hint, margin: 0 }}>
+        Daemon-<strong style={{ color: color.text }}>global</strong> — gates whether faster-whisper (STT)
+        and kokoro-onnx (TTS) are ever installed. Off (default): voice notes and replies degrade to plain
+        text. Takes effect on the next daemon restart.
+      </p>
+      {isLoading && <span style={hint}>loading…</span>}
+      {isError && <span style={errStyle}>{(error as Error)?.message ?? "failed to load /api/platform/config"}</span>}
+      {data && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <Chip label="voice" value={enabled ? "enabled" : "disabled"} tone={enabled ? undefined : "muted"} />
+          <Button disabled={save.isPending} onClick={() => save.mutate(!enabled)}>
+            {save.isPending ? "Saving…" : enabled ? "Disable" : "Enable"}
+          </Button>
+        </div>
+      )}
+      {save.isError && <span style={errStyle}>{(save.error as Error).message}</span>}
+    </section>
+  );
+}
+
 // ── Create: the simple, in-app-first "New companion" flow ────────────────────────
 // One field (a friendly name) + Create. POST /api/companion/provision { name } mints a working IN-APP-ONLY
 // companion — ZERO external config, no session id, no bot token, no chat binding. On success the parent
@@ -355,6 +395,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
           style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <ConfigSection companion={companion} onChanged={onChanged} onDeleted={onDeleted} />
           <ProactiveHomeSection />
+          <VoiceProvisioningSection />
           <ChannelsSection companion={companion} onChanged={onChanged} />
           <PersonaSection sessionId={companion.sessionId} />
           <SkillsSection sessionId={companion.sessionId} />

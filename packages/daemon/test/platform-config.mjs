@@ -66,6 +66,17 @@ clearWatcherEnvs();
   // Single-arg callers behave identically with an override too (no 2nd arg → platform defaults).
   check("(1) single-arg w/ project override still yields platform defaults",
     resolveConfig({ orchestration: { gateCommand: "pnpm build" } }).platform.timeouts.gitPushMs === 45000);
+  // companionVoiceEnabled defaults OFF (owner-directed opt-in for companion voice provisioning).
+  check("(1) companionVoiceEnabled defaults false", p.companionVoiceEnabled === false);
+}
+
+// ============================ (1b) companionVoiceEnabled — global override wins ============================
+clearWatcherEnvs();
+{
+  check("(1b) global override true wins",
+    resolveConfig(undefined, { companionVoiceEnabled: true }).platform.companionVoiceEnabled === true);
+  check("(1b) no override still defaults false",
+    resolveConfig(undefined, {}).platform.companionVoiceEnabled === false);
 }
 
 // ============================ (2) per-project timeouts — override wins ============================
@@ -178,6 +189,11 @@ clearWatcherEnvs();
   check("(8) unknown nested key rejected", badNested.ok === false);
   const reason = validatePlatformConfigOverride({ timeouts: { gitPushMs: 999 } });
   check("(8) rejection reason names the field", reason.ok === false && /gitPushMs/.test(reason.error));
+
+  // companionVoiceEnabled: a plain boolean, accepted both ways, non-boolean rejected.
+  check("(8) companionVoiceEnabled:true accepted", validatePlatformConfigOverride({ companionVoiceEnabled: true }).ok === true);
+  check("(8) companionVoiceEnabled:false accepted", validatePlatformConfigOverride({ companionVoiceEnabled: false }).ok === true);
+  check("(8) companionVoiceEnabled non-boolean rejected", validatePlatformConfigOverride({ companionVoiceEnabled: "yes" }).ok === false);
 }
 
 // ============================ (9) SQLite store: round-trip + singleton upsert + bad-JSON→{} ============================

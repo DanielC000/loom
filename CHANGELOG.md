@@ -7,6 +7,12 @@ patch = fixes — see [`docs/releasing.md`](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+- **Companion voice provisioning opt-in (`companionVoiceEnabled`)** — installing faster-whisper (STT,
+  ~500MB) and kokoro-onnx (TTS, ~197MB) is now an explicit, off-by-default daemon-global toggle (Companion
+  page → Manage → Voice provisioning) instead of firing automatically the moment a companion is configured.
+  Off: voice notes/replies degrade to plain text exactly as before voice shipped.
+
 ## [0.15.0] — 2026-07-04
 
 **Orchestration control, message clarity, and worktree robustness** — managers gain direct control over a

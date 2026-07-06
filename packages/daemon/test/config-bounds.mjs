@@ -84,6 +84,10 @@ for (const key of ["idleNudgeMinutes", "maxUnansweredNudges", "idleDefaultSnooze
 {
   check("project REST validator rejects a `platform` key (unknown)", validateProjectConfigOverride({ platform: {} }).ok === false);
   check("project AGENT validator rejects a `platform` key (unknown)", validateAgentProjectConfigOverride({ platform: { watchers: { wakeMs: 60000 } } }).ok === false);
+  // companionVoiceEnabled specifically (owner-directed 2026-07-06 opt-in): same structural rejection — an
+  // agent can never reach it, human-only via the separate /api/platform/config path.
+  check("project AGENT validator rejects `platform.companionVoiceEnabled` (unknown top-level key)",
+    validateAgentProjectConfigOverride({ platform: { companionVoiceEnabled: true } }).ok === false);
 }
 
 // --- a fully-valid override still round-trips, and .strict() unknown-key guard is intact ------------

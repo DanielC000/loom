@@ -253,13 +253,20 @@ async function warmTtsModel(pythonBin: string): Promise<boolean> {
 /**
  * Build the injected CompanionSynthesizer — local kokoro-onnx via the shared venv. `pythonInterpreterPath`
  * is the human-only `python.interpreterPath` override (same resolution as STT/markitdown pre-warm).
+ * `enabled` is the daemon-global `platform.companionVoiceEnabled` opt-in gate (default OFF — see
+ * PlatformConfig's doc comment); when false, this NEVER calls `resolveTtsPython` (so it never kicks venv
+ * provisioning) and always reports not-ready, degrading through the EXISTING null-synth → text path exactly
+ * as if kokoro-onnx were never installed. Defaults to `true` so existing direct callers/tests are
+ * unaffected — the daemon boot path is the one place that resolves and passes the real flag.
  */
-export function createKokoroSynthesizer(pythonInterpreterPath?: string): CompanionSynthesizer {
+export function createKokoroSynthesizer(pythonInterpreterPath?: string, enabled = true): CompanionSynthesizer {
   return {
     isReady() {
+      if (!enabled) return false;
       return resolveTtsPython(pythonInterpreterPath) !== null;
     },
     async synthesize({ text, lang, voice }) {
+      if (!enabled) return null;
       if (text.length > TTS_MAX_TEXT_LENGTH) return null; // skip straight to the text degrade — never burn the subprocess bound on a reply nobody wants read aloud in full
       // Sanitize for the SPOKEN input only — the caller (chat-gateway's tryDeliverVoice) keeps passing
       // the ORIGINAL `text` to persistence/display; this cleaned copy never leaves this function. An
