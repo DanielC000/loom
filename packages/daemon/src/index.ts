@@ -262,6 +262,13 @@ async function main(): Promise<void> {
       // — Agent Run sessions are ephemeral (finalized + GC'd via onRunSessionExit) and must never clutter
       // the project Archive tab; a null row (non-DB shell terminal) is skipped too.
       if (exited && exited.role !== "run") db.archiveSession(sessionId);
+      // Disarm a leaked companion heartbeat/reminder timer on exit (fix 9227335b): an enabled companion's
+      // config row survives the pty death (see companion/revive.ts), so a plain reconcile() would no-op —
+      // onSessionExit bypasses that diff and tears down THIS session's live gateway/heartbeat/reminders
+      // directly, same as index.ts→orchMcp's forward-reference pattern below (companionController is
+      // constructed later in this function, but only ever invoked here at runtime). A no-op for any
+      // non-companion session (nothing live to tear down). Best-effort: never disturb the exit path.
+      try { void companionController.onSessionExit(sessionId); } catch { /* never disturb the exit path */ }
       // Clear any rate-limit park on EXIT: an exited session can never auto-resume, so a lingering
       // rate_limited_until (whose timestamp is still in the future) would keep showing RATE-LIMITED in
       // the Attention queue for hours after the session is gone. Clears ONLY the two park columns

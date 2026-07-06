@@ -27,6 +27,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   6. cascade-on-delete: deleteCompanionConfig cascade-cleans the session's bindings + allowed-senders +
 //      pairing codes in one txn (an unrelated session untouched); ONE-WAY (removing a binding never deletes
 //      its config — provisioned-but-unarmed is valid).
+//   7. onSessionExit (fix 9227335b): a pty exit tears the live session down DIRECTLY (adapter stopped,
+//      heartbeat/reminders disarmed, chat_reply gate cleared) WITHOUT touching its still-`enabled` DB row —
+//      unlike delete, a plain reconcile() would no-op here since the row never leaves the enabled set. A
+//      later reconcile (a future config write / revive) restarts it fresh; repeat/unknown-session calls
+//      are safe no-ops.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-lifecycle.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -438,6 +443,42 @@ try {
     db.deleteCompanionConfig("sess-nonexistent");
     db.deleteCompanionBinding("sess-B");
     check("cascade: one-way — removing B's binding did NOT delete B's config (provisioned-but-unarmed is valid)", !!db.getCompanionConfig("sess-B"));
+    db.close();
+  }
+
+  // ============ Part 7 — onSessionExit disarms a leaked timer on pty exit (fix 9227335b) ============
+  // Unlike the DELETE REST path (which drops the config row BEFORE reconcile, so applyDesired's STOP
+  // branch naturally fires), a pty exit does NOT touch the config row — the companion stays `enabled`
+  // (see companion/revive.ts). onSessionExit must therefore tear the live session down DIRECTLY (bypassing
+  // the enabled-set diff), leaving every other live companion and the DB row itself untouched.
+  {
+    const db = new Db(dbFile("p7.db"));
+    const rig = makeRig(db);
+    writeConfig(db, { sessionId: "assist-1", cadence: 360 });
+    await rig.controller.startInitial(null);
+    await rig.controller.reconcile();
+    check("exit: live before the pty exit", rig.controller.snapshot().running === true && rig.controller.snapshot().heartbeatArmed === true);
+    const adapter0 = rig.gw.built[0].adapter;
+    const watcher0 = rig.hb.built[0];
+
+    await rig.controller.onSessionExit("assist-1");
+    check("exit: adapter stopped (long-poll released)", adapter0.stopped === 1);
+    check("exit: heartbeat disarmed", watcher0.stopped === 1 && rig.controller.snapshot().heartbeatArmed === false);
+    check("exit: chat_reply OFF (gate cleared)", rig.hooks.companionSessionIds.size === 0 && (await chatReplyOn(rig.orch, "assist-1")) === false);
+    check("exit: snapshot byte-identical to the OFF state", JSON.stringify(rig.controller.snapshot()) === OFF_SNAP);
+    check("exit: the DB config row is UNTOUCHED — still enabled (only the live runtime was torn down)", db.getCompanionConfig("assist-1")?.enabled === true);
+
+    // A later reconcile (e.g. a config write, or a chat-triggered revive) sees the row is STILL enabled and
+    // the session no longer live ⇒ starts it fresh — proving the config survives for a future revival.
+    await rig.controller.reconcile();
+    check("exit: a later reconcile restarts it fresh (config untouched by the exit)", rig.controller.snapshot().running === true && rig.gw.built.length === 2 && rig.gw.built[1].adapter.started === 1);
+
+    // A repeat onSessionExit (already torn down) and a call for a session with NO live companion are both
+    // safe no-ops — never throw, never touch a DIFFERENT session's live state.
+    await rig.controller.onSessionExit("assist-1");
+    await rig.controller.onSessionExit("assist-1");
+    await rig.controller.onSessionExit("no-such-session");
+    check("exit: repeat/unknown-session onSessionExit is a safe no-op", rig.gw.built.length === 2 && rig.gw.built[1].adapter.stopped === 1);
     db.close();
   }
 } finally {

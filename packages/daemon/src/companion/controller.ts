@@ -112,6 +112,16 @@ export interface CompanionControl {
   handleInAppAudioInbound(sessionId: string, filePath: string): Promise<InboundResult | { accepted: false; reason: "companion-off" }>;
   /** Best-effort teardown on daemon shutdown (stops the adapter long-poll + the heartbeat). */
   stop(): Promise<void>;
+  /**
+   * Disarm ONE session's live gateway/heartbeat/reminders on an UNEXPECTED pty exit (index.ts's onExit),
+   * without touching its DB config row. A plain `reconcile(sessionId)` would no-op here: the config's
+   * `enabled` flag is untouched by a pty death (see companion/revive.ts — an exited-but-enabled companion
+   * is later auto-revived), so the session is STILL in the desired set and applyDesired's STOP branch never
+   * fires. This bypasses that diff and reuses `teardownOne` directly — the same teardown the config-DELETE
+   * REST path drives indirectly by deleting the row first. Serialized on the same chain as reconcile/stop.
+   * A no-op for any session with no live entry (non-companion sessions, or an already-torn-down one).
+   */
+  onSessionExit(sessionId: string): Promise<void>;
 }
 
 /** The mutable chat_reply gate the OrchestrationMcpRouter reads per MCP request. The controller adds/removes
@@ -241,6 +251,10 @@ export class CompanionController implements CompanionControl {
 
   stop(): Promise<void> {
     return this.enqueue(() => this.teardownAll());
+  }
+
+  onSessionExit(sessionId: string): Promise<void> {
+    return this.enqueue(() => this.teardownOne(sessionId));
   }
 
   /**
