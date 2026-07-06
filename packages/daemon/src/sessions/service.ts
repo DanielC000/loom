@@ -31,6 +31,7 @@ import { rateLimitDeadline } from "../orchestration/usage-limit.js";
 import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, supervisorScriptChangedSince, SUPERVISOR_CHANGED_WARNING, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
+import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { RESUME_NUDGE_TAIL } from "../orchestration/resume-nudge.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential } from "../orchestration/gate-runner.js";
@@ -1413,6 +1414,97 @@ export class SessionService {
       failed.push(reqId);
     }
 
+    return { resumed, skippedParked, failed };
+  }
+
+  /**
+   * Boot-time crash recovery ACTION (card 9fc41af5) — resumes the candidates
+   * `deriveCrashOrphanedWorkers` (orchestration/crash-orphaned-workers.ts) derived from the pre-archive
+   * `recoverStaleSessions()` snapshot. The caller invokes this ONLY when no RestartIntent was captured
+   * this boot — the exit-75 path already recovers its own fleet (incl. these same workers) via
+   * resumeFleetOnBoot, so running both would double-nudge the same sessions.
+   *
+   * Resumes each candidate's MANAGER first (`resume()` no-ops if already alive) — a worker whose manager
+   * can't be resumed (dead transcript, gone worktree, superseded) is left UNTOUCHED in its clean
+   * exited/archived state rather than half-resumed into an orphan with no live parent to see it. Once the
+   * manager is live, resuming the worker itself un-archives it via the SAME `db.restoreSession()` side
+   * effect `resume()` already performs — `listWorkers` (what `worker_list` reads) filters only
+   * `archived_at IS NULL`, so that's the whole "re-parent": parentSessionId was never touched.
+   *
+   * A worker that had already reported `done` (`reportedDone`) is recovered for VISIBILITY (it reappears
+   * in worker_list so the manager notices it's awaiting merge review) but does NOT get the "continue your
+   * task" nudge — it isn't mid-work. Every other recovered worker gets the same "worktree WIP intact,
+   * continue" nudge resumeFleetOnBoot sends. A PARKED (rate-limited) manager or worker is resumed live
+   * (so the rate-limit watcher can recover it in its own time) but its nudge is WITHHELD — mirrors
+   * resumeFleetOnBoot's `isParked`/`skippedParked` handling; a crash must never push a held turn back
+   * into a usage-limit cap. Each affected (non-parked) manager gets ONE summary nudge naming how many of
+   * its candidate workers were recovered (and how many of those are awaiting review, and how many
+   * couldn't be resumed at all) — sent even when EVERY candidate worker failed to resume, so the manager
+   * (already silently resumed with no other signal) still learns a crash happened and its workers didn't
+   * come back, rather than sitting there with no orientation at all.
+   */
+  recoverCrashOrphanedWorkers(
+    candidates: CrashOrphanedWorker[],
+    opts: { resumeOne?: (id: string) => boolean; now?: Date } = {},
+  ): { resumed: string[]; skippedParked: string[]; failed: string[] } {
+    const now = opts.now ?? new Date();
+    const resumeOne = opts.resumeOne ?? ((id: string): boolean => {
+      try { this.resume(id); return true; } catch { return false; }
+    });
+    const isParked = (id: string): boolean => {
+      const s = this.db.getSession(id);
+      return !!s?.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > now.getTime();
+    };
+    const resumed: string[] = [];
+    const skippedParked: string[] = [];
+    const failed: string[] = [];
+    const byManager = new Map<string, CrashOrphanedWorker[]>();
+    for (const c of candidates) {
+      const list = byManager.get(c.managerSessionId) ?? [];
+      list.push(c);
+      byManager.set(c.managerSessionId, list);
+    }
+    for (const [managerId, workers] of byManager) {
+      const managerParked = isParked(managerId); // read BEFORE resume — resume() never touches the park fields
+      if (!resumeOne(managerId)) { failed.push(...workers.map((w) => w.workerSessionId)); continue; }
+      let recoveredCount = 0;
+      let awaitingReviewCount = 0;
+      let failedCount = 0;
+      for (const w of workers) {
+        const workerParked = isParked(w.workerSessionId);
+        if (!resumeOne(w.workerSessionId)) { failed.push(w.workerSessionId); failedCount++; continue; }
+        resumed.push(w.workerSessionId);
+        recoveredCount++;
+        if (workerParked) { skippedParked.push(w.workerSessionId); continue; } // resumed live; honor the park — no nudge
+        if (w.reportedDone) {
+          awaitingReviewCount++;
+        } else {
+          try {
+            this.pty.enqueueStdin(
+              w.workerSessionId,
+              `[loom:crash-recovered] The daemon crashed and Loom auto-resumed you on relaunch — your ` +
+              `worktree WIP is intact. Continue your assigned task from where you left off. If you had ` +
+              `already finished, call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL,
+            );
+          } catch { /* not ready yet — the resume stands */ }
+        }
+      }
+      if (managerParked) continue; // resumed live; honor the park — no summary nudge
+      const parts = [
+        recoveredCount > 0
+          ? `${recoveredCount} of your ${workers.length} in-flight worker(s) were recovered and are back in worker_list`
+          : `none of your ${workers.length} in-flight worker(s) could be recovered`,
+        awaitingReviewCount > 0 ? `${awaitingReviewCount} of those already reported done and are awaiting your review/merge` : null,
+        failedCount > 0 ? `${failedCount} could not be resumed (check worker_list / logs)` : null,
+      ].filter(Boolean).join("; ");
+      try {
+        this.pty.enqueueStdin(
+          managerId,
+          `[loom:crash-recovered] The daemon crashed and Loom auto-resumed it — ${parts}. Re-check their ` +
+          `state and continue orchestrating.` + RESUME_NUDGE_TAIL,
+        );
+      } catch { /* not ready yet — the resume stands */ }
+    }
     return { resumed, skippedParked, failed };
   }
 

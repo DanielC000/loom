@@ -9,6 +9,7 @@ import { Db } from "./db.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
 import { snapshotAndArchiveRecovered } from "./sessions/boot-backstop.js";
+import { deriveCrashOrphanedWorkers } from "./orchestration/crash-orphaned-workers.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
 import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
@@ -204,6 +205,12 @@ async function main(): Promise<void> {
   }
   const recovered = db.recoverStaleSessions();
   if (recovered.length > 0) console.log(`[boot] reconciled ${recovered.length} stale session(s) -> exited`);
+  // Crash-orphaned-worker recovery (card 9fc41af5): derive candidates from `recovered` NOW, BEFORE the
+  // archive pass below stamps archived_at on every one of them — deriveCrashOrphanedWorkers's own
+  // "wasn't archived pre-crash" guard would otherwise always fail. Pure DB read; the actual resume runs
+  // later (after `listen`, alongside the restart-intent resume block) and ONLY when no RestartIntent was
+  // captured this boot (the exit-75 path already recovers its own fleet, incl. these same workers).
+  const crashOrphanedWorkers = deriveCrashOrphanedWorkers(db, recovered);
   // Crash-path backstop (card b37750a4): a daemon crash fires no onExit, so snapshot the transcript +
   // auto-archive each recovered session HERE, while the JSONL still exists (before sweepDeadSessions can
   // mark it dead / Claude can prune it). The ONLY snapshot+archive point on the crash path. See module.
@@ -309,6 +316,12 @@ async function main(): Promise<void> {
   // on a normal boot.
   const restartIntent = readRestartIntent();
   const protectedSessionIds = restartIntent ? protectedIdsFromIntent(restartIntent) : new Set<string>();
+  // Crash-orphaned-worker recovery (card 9fc41af5): fold the derived candidates' worker + manager ids
+  // into the SAME protected set, for the SAME reason (pass-B GC must not reclaim a worktree we're about
+  // to resume into). Harmless no-op overlap on the exit-75 path (those ids are already covered by
+  // protectedIdsFromIntent above); the only NEW behavior is on a genuine crash, where restartIntent is
+  // null and this is the ONLY protection these workers get.
+  for (const c of crashOrphanedWorkers) { protectedSessionIds.add(c.workerSessionId); protectedSessionIds.add(c.managerSessionId); }
   // Agent Runs R2: fail any run interrupted by a crash/restart (runs are ephemeral and do NOT resume) and
   // sweep orphaned run-snapshot dirs. Pure DB + fs, best-effort — never gate boot. recoverStaleSessions
   // already marked each interrupted run's `run` session exited, so this only finalizes the run rows.
@@ -757,6 +770,16 @@ async function main(): Promise<void> {
       (skippedParked.length ? `, ${skippedParked.length} resumed-but-parked (usage hold honored)` : "") +
       (failed.length ? `, ${failed.length} unresumable (skipped)` : "") +
       ` (requester ${restartIntent.managerSessionId.slice(0, 8)})`,
+    );
+  } else if (crashOrphanedWorkers.length > 0) {
+    // Crash-orphaned-worker recovery (card 9fc41af5): no restart-intent means this was a genuine crash
+    // (or an OS-service restart), not a deliberate daemon_restart — resumeFleetOnBoot never ran, so this
+    // is the ONLY path that brings these workers' managers back to see them. Best-effort + runs once.
+    const { resumed, skippedParked, failed } = sessions.recoverCrashOrphanedWorkers(crashOrphanedWorkers);
+    console.log(
+      `[boot] crash recovery: re-parented ${resumed.length} in-flight worker(s) to their resumed manager(s)` +
+      (skippedParked.length ? `, ${skippedParked.length} resumed-but-parked (usage hold honored)` : "") +
+      (failed.length ? `, ${failed.length} unresumable (skipped)` : ""),
     );
   }
   // Durable queued-message recovery (card 2ca18433): re-drive any session_message/message_worker that was

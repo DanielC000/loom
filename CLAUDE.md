@@ -73,6 +73,14 @@ manager/worker PTYs (the watch-restart-kills-PTYs gotcha — it caused an overni
 once and runs the daemon from `dist/` with **no watcher**, so source merges don't restart the running
 daemon. The supervisor relaunches **only** on the explicit restart sentinel (exit `75`); any other
 exit (incl. a crash) stops the loop, so a broken daemon stays visibly down instead of crash-looping.
+  A crash (no `restart-intent.json`, unlike a `daemon_restart`) still needs a **human** to notice and
+  re-run `pnpm daemon:stable` — but on THAT relaunch, boot-reconcile now recovers a manager's in-flight
+  WORKERS too, not just the standing sessions: it derives crash-orphaned workers (exited + resumable +
+  parented to a manager/platform + task still non-terminal) straight from the DB, protects their
+  worktrees from the same boot's GC pass, resumes their manager, then resumes each worker back into
+  `worker_list` with its worktree/branch intact — closing the gap where a crash used to strand in-flight
+  workers as silently-archived orphans until a manager noticed an empty `worker_list` and re-dispatched
+  fresh, losing in-context reasoning.
 - **Manager self-restart:** under the supervisor, a manager that has merged daemon-`src` can make that
   code go live itself via the `daemon_restart` orchestration tool — it rebuilds first (a failed build
   aborts the restart and leaves the daemon up), then exits `75`; the supervisor relaunches and boot
