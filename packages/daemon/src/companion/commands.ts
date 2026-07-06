@@ -6,14 +6,19 @@
  * RECOGNIZED command's text NEVER becomes an agent turn (mirrors the redeemed-pairing-code path). An
  * unrecognized "/word" (no handler registered) is NOT treated as a command by this router: it falls
  * through unchanged to the normal text pipeline, so only a REGISTERED command name (see COMMANDS below —
- * today "/lang", "/voice", "/new", "/reset", "/help") is ever swallowed — every other message (including
- * one that merely starts with "/") is byte-identical to today.
+ * today "/lang", "/voice", "/new", "/reset", "/status", "/start", "/help") is ever swallowed — every other
+ * message (including one that merely starts with "/") is byte-identical to today.
  *
  * Platform-agnostic: this sits ONE layer above the normalizer (Telegram, in-app, …), so it works the same
  * for every channel.
  *
  * Clean-room: modeled on OpenClaw's channel-level command dispatcher (pattern, not code) — see the design
  * note `Projects/Loom/Design/Companion Voice — STT-TTS Design.md` Part 2.
+ *
+ * Tier-2 slash commands (card 9db7d09c, first slice — `/export`/`/whoami` are a later slice): `/status`
+ * (in-chat state readout) and `/start` (Telegram's automatic first-contact message, intercepted so it
+ * never leaks a raw agent turn) need no new `CommandDeps` — both read only from the existing `prefs`/
+ * `route` params already threaded through every handler.
  */
 import type { CompanionVoicePrefs, VoicePrefRoute } from "./voice-prefs.js";
 
@@ -137,6 +142,23 @@ const COMMANDS: Record<string, CommandDef> = {
   reset: {
     description: "Alias of /new — start a fresh conversation",
     handler: startFreshConversation,
+  },
+  status: {
+    description: "Show your current voice reply and language settings",
+    handler(_args, route, prefs) {
+      const resolved = prefs.resolve(route);
+      const lang = resolved.ttsLang ?? "auto-detect";
+      return { ack: `🔎 Voice replies: ${resolved.voiceReplies ? "on" : "off"} · Language: ${lang}` };
+    },
+  },
+  start: {
+    // Telegram sends a literal "/start" on first contact with a bot; with no handler registered it fell
+    // straight through to `submitTurn` as a raw agent turn. Registering it here swallows that handshake
+    // instead — platform-agnostic (a human typing "/start" in the in-app chat gets the same harmless ack).
+    description: "Say hello",
+    handler() {
+      return { ack: "👋 I'm your Loom companion — I'm here. Send me a message anytime." };
+    },
   },
   help: {
     description: "List every recognized command",
