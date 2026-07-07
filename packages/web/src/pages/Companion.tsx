@@ -505,7 +505,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
       ) : (
         <div role="tabpanel" id="companion-panel-manage" aria-labelledby="companion-tab-manage"
           style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-          <ConfigSection companion={companion} onChanged={onChanged} onDeleted={onDeleted} />
+          <ConfigSection companion={companion} onChanged={onChanged} />
           <ProactiveHomeSection sessionId={companion.sessionId} />
           <VoiceProvisioningSection />
           <ChannelsSection companion={companion} onChanged={onChanged} />
@@ -515,6 +515,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
           <RemindersSection sessionId={companion.sessionId} />
           <RestrictToolsSection sessionId={companion.sessionId} />
           <PairingSection sessionId={companion.sessionId} />
+          <DeleteCompanionSection companion={companion} label={label} onDeleted={onDeleted} />
         </div>
       )}
     </div>
@@ -586,12 +587,11 @@ function CompanionTerminal({ sessionId }: { sessionId: string }) {
   );
 }
 
-function ConfigSection({ companion, onChanged, onDeleted }: { companion: CompanionRow; onChanged: () => void; onDeleted: () => void }) {
+function ConfigSection({ companion, onChanged }: { companion: CompanionRow; onChanged: () => void }) {
   const cfg = companion.config;
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<CompanionConfigForm>(() => (cfg ? formFromMasked(cfg) : emptyConfigForm(companion.sessionId)));
   const [localErr, setLocalErr] = useState<string | null>(null);
-  const [confirmDel, setConfirmDel] = useState(false);
   const set = <K extends keyof CompanionConfigForm>(k: K, v: CompanionConfigForm[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   const save = useMutation({
@@ -602,10 +602,6 @@ function ConfigSection({ companion, onChanged, onDeleted }: { companion: Compani
   const toggleEnabled = useMutation({
     mutationFn: (enabled: boolean) => api.updateCompanionConfig(companion.sessionId, { enabled }),
     onSuccess: onChanged,
-  });
-  const remove = useMutation({
-    mutationFn: () => api.deleteCompanionConfig(companion.sessionId),
-    onSuccess: onDeleted,
   });
 
   const beginEdit = () => { setForm(cfg ? formFromMasked(cfg) : emptyConfigForm(companion.sessionId)); setLocalErr(null); setEditing(true); };
@@ -660,17 +656,9 @@ function ConfigSection({ companion, onChanged, onDeleted }: { companion: Compani
           <p style={{ ...hint, margin: 0 }}>Changes apply on the next daemon restart.</p>
           <p style={{ ...hint, margin: 0 }}>
             The proactive <strong style={{ color: color.text }}>home</strong> is per-companion — manage it under{" "}
-            <strong style={{ color: color.text }}>Proactive home</strong> below in this Manage tab.
+            <strong style={{ color: color.text }}>Proactive home</strong> below in this Manage tab. To remove the
+            whole companion, use <strong style={{ color: color.text }}>Delete companion</strong> at the bottom of this tab.
           </p>
-          <div>
-            {confirmDel ? (
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={errStyle}>Delete this run config? The token is erased.</span>
-                <Button variant="danger" disabled={remove.isPending} onClick={() => remove.mutate()}>Confirm</Button>
-                <Button variant="ghost" onClick={() => setConfirmDel(false)}>Cancel</Button>
-              </div>
-            ) : <Button variant="danger" onClick={() => setConfirmDel(true)}>Delete config</Button>}
-          </div>
         </>
       ) : (
         <p style={hint}>No run config for this session yet — <strong style={{ color: color.text }}>Configure</strong> to set a bot token and cadence.</p>
@@ -1389,6 +1377,88 @@ function PairingCode({ code, expiresAt, onDismiss }: { code: string; expiresAt: 
         <Button variant="primary" onClick={copy} style={{ whiteSpace: "nowrap" }}>{copied ? "Copied ✓" : "Copy"}</Button>
       </div>
     </Panel>
+  );
+}
+
+// ── Delete companion: the destructive, human-only full retire (card 7eae6030) ────────────────────────
+// Wired to the EXISTING DELETE /api/companion/config/:sessionId route (no backend change needed — it
+// already fully cleans up): it cascade-removes the run config + every channel binding + sender allowlist +
+// pairing codes + proactive home, disarms the live heartbeat + reminder watchers (reconcile → teardownOne),
+// and — for a PROVISIONED companion (one Loom minted via "New companion") — gracefully retires the assistant
+// session it spawned (stopped + ARCHIVED, so the transcript is KEPT, not purged; conversation history rows
+// survive too). A pre-existing, human-bound session (provisioned:false — env/manual) is LEFT RUNNING; only
+// its companion wiring is removed. Because the config row is deleted, a later daemon boot's reconcile never
+// revives it. This is deliberately a full retire, not a soft archive: the reversible part (the session +
+// its transcript/history) is preserved by the retire itself.
+//
+// SAFETY: two-step, never a single click. The confirm names the companion and enumerates exactly what's
+// removed vs. preserved, styled as a distinct red "Destructive" panel (not a low-stakes inline confirm like
+// the memory/skill/reminder prunes). An env-pinned companion is warned that its LOOM_COMPANION_* env would
+// re-create it on the next daemon restart.
+function DeleteCompanionSection({ companion, label, onDeleted }: { companion: CompanionRow; label: string; onDeleted: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const provisioned = companion.config?.provisioned ?? false;
+  const envPinned = companion.config?.envPinned ?? false;
+
+  const remove = useMutation({
+    mutationFn: () => api.deleteCompanionConfig(companion.sessionId),
+    onSuccess: onDeleted,
+  });
+
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <SectionLabel style={{ margin: 0 }}>Delete companion</SectionLabel>
+      <p style={{ ...hint, margin: 0 }}>
+        Permanently remove <strong style={{ color: color.text }}>{label}</strong> from Loom — it disappears
+        from the picker and stops responding. This can't be undone.
+      </p>
+      {confirming ? (
+        <div
+          role="alertdialog"
+          aria-label={`Delete ${label}`}
+          data-testid="companion-delete-confirm"
+          style={{
+            display: "flex", flexDirection: "column", gap: 12, padding: 14,
+            border: `1px solid ${color.red}`, borderRadius: radius.base, background: color.panel2,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <StatusPill tone="red" label="Destructive" glow />
+            <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 12, color: color.text }}>
+              Delete {label}?
+            </strong>
+          </div>
+          <div style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, lineHeight: 1.6 }}>
+            This removes:
+            <ul style={{ margin: "6px 0 0", paddingLeft: 18, display: "flex", flexDirection: "column", gap: 3 }}>
+              <li>its run configuration and any stored bot token</li>
+              <li>every channel it's reachable on — in-app and Telegram</li>
+              <li>its proactive heartbeat and any reminders it scheduled</li>
+              {provisioned
+                ? <li>its own <strong style={{ color: color.text }}>session</strong> — gracefully retired and archived (the transcript is kept)</li>
+                : <li>only the companion wiring — its session was bound by you and keeps running</li>}
+            </ul>
+          </div>
+          {envPinned && (
+            <Callout tone="amber">
+              <code>LOOM_COMPANION_*</code> env is set for this session — it will <strong>re-create</strong> this
+              companion on the next daemon restart. Unset the env to delete it for good.
+            </Callout>
+          )}
+          {remove.error && <span style={errStyle}>{(remove.error as Error).message}</span>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <Button variant="danger" disabled={remove.isPending} onClick={() => remove.mutate()} data-testid="companion-delete-go">
+              {remove.isPending ? "Deleting…" : `Delete ${label}`}
+            </Button>
+            <Button variant="ghost" disabled={remove.isPending} onClick={() => { setConfirming(false); remove.reset(); }}>Cancel</Button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <Button variant="danger" onClick={() => setConfirming(true)} data-testid="companion-delete">Delete companion</Button>
+        </div>
+      )}
+    </section>
   );
 }
 

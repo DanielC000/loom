@@ -175,6 +175,42 @@ test("conversation history: the rail lists an archived conversation, opening it 
   await expect(chat.getByText("read-only")).toHaveCount(0);
 });
 
+test("Manage tab: Delete companion is two-step, names the companion, then removes it (observable)", async ({ page, loomDaemon }) => {
+  // Two seeded companions on the SHARED worker daemon (unique-suffixed names so this targets only ours).
+  // Deleting one must (a) never fire on a single click — it opens a destructive confirm that NAMES the
+  // companion, and (b) as an observable state change, make that companion vanish from the page while the
+  // sibling stays. Seeded companions are provisioned:false, so DELETE runs the config/binding cascade +
+  // reconcile teardown WITHOUT a session stop — no real claude spawn (the fixture's [pty] spawn guard).
+  const suffix = randomUUID().slice(0, 8);
+  const nameA = `Doomed-${suffix}`;
+  const nameB = `Keeper-${suffix}`;
+  await loomDaemon.seedCompanion({ name: nameA });
+  await loomDaemon.seedCompanion({ name: nameB });
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  // Focus companion A (the picker renders with 2+ companions on the shared daemon).
+  const picker = page.getByRole("group", { name: "Select companion" });
+  await picker.getByRole("button", { name: nameA }).click();
+
+  // Open its Manage tab; the Delete companion control lives at the bottom.
+  await page.getByRole("tab", { name: "Manage" }).click();
+  const del = page.getByTestId("companion-delete");
+  await expect(del).toBeVisible();
+
+  // One click opens a destructive CONFIRM that NAMES the companion — it does NOT delete yet.
+  await del.click();
+  const confirm = page.getByRole("alertdialog", { name: `Delete ${nameA}` });
+  await expect(confirm).toBeVisible();
+  await expect(confirm.getByText(`Delete ${nameA}?`, { exact: true })).toBeVisible();
+  // Still present until we actually confirm (never a single-click delete).
+  await expect(picker.getByRole("button", { name: nameA })).toBeVisible();
+
+  // Confirm → the companion is retired. Observable state change: A vanishes from the page; the sibling stays.
+  await page.getByTestId("companion-delete-go").click();
+  await expect(page.getByText(nameA, { exact: true })).toHaveCount(0);
+  await expect(page.getByText(nameB, { exact: true }).first()).toBeVisible();
+});
+
 test("multi-companion: the create form opens over the current companion and cancels back", async ({ page, loomDaemon }) => {
   await loomDaemon.seedCompanion({ name: `Ada-${randomUUID().slice(0, 8)}` });
   await page.goto(`${loomDaemon.baseURL}/companion`);
