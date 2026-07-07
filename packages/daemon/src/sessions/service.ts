@@ -3362,6 +3362,16 @@ export class SessionService {
    * message_worker/redirect_worker event appears after that progress report) and the worker goes idle
    * again without a fresh report, the condition no longer holds — that's a real stall and gets the
    * normal nudge, so an acked-then-stalled worker is never silently missed.
+   *
+   * BROKEN-SPAWN BRANCH: `busy` can fall to false WITHOUT the worker ever having run a turn — the
+   * fresh-spawn kickoff race (host.ts's scheduleKickoffGuarantee / the short pre-first-turn healIfStuck
+   * window; see both) can still leave a worker that never got a real engine session. That worker never
+   * called worker_report, sits in `active`, and would otherwise get the generic "finished a turn and is
+   * idle" nudge below — which is FALSE (it never finished a turn) and misleads the manager into treating
+   * a broken spawn as a normal, benign park. `engineSessionId` is captured ONLY on the engine's own
+   * SessionStart hook (host.ts), so `null` here is definitive proof no turn — not even the kickoff —
+   * ever started. Branch to a DISTINCT signal so the manager re-drives (worker_message / recycle /
+   * respawn) instead of waiting on a "did not call worker_report" nudge that will never resolve itself.
    */
   notifyManagerOfIdleWorker(workerSessionId: string): void {
     const w = this.db.getSession(workerSessionId);
@@ -3371,6 +3381,12 @@ export class SessionService {
     // Still sitting in the `active` lane ⇒ hasn't reported (worker_report would have moved it out).
     const activeKey = this.columnKeyForProjectRole(w.projectId, "active");
     if (!task || task.columnKey !== activeKey) return; // reported done/blocked, already merged, or no active lane
+
+    if (!w.engineSessionId) {
+      const msg = `[loom:worker-spawn-broken] worker ${workerSessionId} (task ${w.taskId}) went idle WITHOUT ever starting a turn — its spawn kickoff never ran (no engine session was ever established). This is NOT a benign idle park; it will not resolve on its own. Re-drive it: worker_message it with the task direction, or worker_recycle/re-spawn if it stays stuck.`;
+      try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
+      return;
+    }
 
     const events = this.db.listEventsForWorker(workerSessionId);
     const lastReportIdx = events.findLastIndex((e) => e.kind === "worker_report");

@@ -268,6 +268,36 @@ const RESUME_MODE_MAX_PRESSES = Number(process.env.LOOM_RESUME_MODE_MAX_PRESSES)
 const READY_FALLBACK_MS = Number(process.env.LOOM_READY_FALLBACK_MS) || 20_000;
 
 /**
+ * KICKOFF GUARANTEE (the "start/ready-gating race" — board card guaranteeing worker_spawn drives turn
+ * 1). A positional-arg startup/kickoff prompt (buildSpawnArgs) — a fresh worker_spawn, a recycle
+ * handoff (recycleWorker/recycleManager/the platform-lead recycle), or a run's startup prompt — rides
+ * the CLI as a positional arg; the vendor CLI is responsible for auto-typing + auto-submitting it as
+ * turn 1 once its TUI boots. That internal auto-submit can lose the race against Loom's own boot
+ * machinery (mode-cycle keystrokes, dialog dismissals) under load and never land as a real turn: the
+ * session then sits `ready`+optimistically-`busy` with NO `UserPromptSubmit` ever observed (see
+ * Live.firstTurnStarted) and no engine session id captured for context. Grace window AFTER markReady
+ * (not after spawn — mode-cycling must finish first) before `scheduleKickoffGuarantee` force-submits the
+ * SAME text via the exact reliable path (`submit()`) every later turn — and the §19c-b rate-limit
+ * replay — already uses. NOT applicable to resume/fork (they never carry a positional startup prompt —
+ * see scheduleKickoffGuarantee's own doc comment). Short relative to READY_FALLBACK_MS/BUSY_STALE_MS: it
+ * only needs to outlast the CLI's own submit latency under load, not a missed SessionStart or a
+ * genuinely long tool call. Env-overridable so tests don't wait for it.
+ */
+const STARTUP_PROMPT_GRACE_MS = Number(process.env.LOOM_STARTUP_PROMPT_GRACE_MS) || 10_000;
+
+/**
+ * SHORT stale-busy threshold for a session that has NEVER started its first turn (Live.firstTurnStarted
+ * still false — see the UserPromptSubmit hook handler). Used by healIfStuck INSTEAD of the full
+ * `busyStaleMs` (5min default): there is no such thing as a legitimately long tool call before turn 1 has
+ * even started, so a pre-first-turn session with stale pty output is already known-broken and should
+ * self-heal to `busy:false` fast — surfacing to the manager via the existing onBusy→notifyManagerOfIdleWorker
+ * path (which branches on `engineSessionId` there to distinguish this from a genuine post-turn idle) instead
+ * of sitting masked as "busy" for the full 5-minute window. Once a real turn starts, firstTurnStarted flips
+ * true and the normal, more generous busyStaleMs applies. Env-overridable for tests.
+ */
+const FIRST_TURN_STALE_MS = Number(process.env.LOOM_FIRST_TURN_STALE_MS) || 30_000;
+
+/**
  * Graceful-stop escalation — makes a graceful stop ALWAYS terminate the session (the deterministic-stop
  * fix). A double Ctrl-C EXITS an IDLE `claude` (the second press exits from an empty prompt), but on a
  * session that's mid-turn the two Ctrl-Cs only INTERRUPT the running turn — the pty stays alive at a (now)
@@ -814,6 +844,11 @@ interface Live {
                         // into the capped account and CLOBBER lastPrompt — the killed turn resumeAfterRateLimit
                         // must replay. Set when the StopFailure is detected as rate_limit; cleared on resume.
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
+  // True once ANY turn has ever started for this session (the first UserPromptSubmit hook observed).
+  // Gates the fresh-spawn kickoff guarantee (scheduleKickoffGuarantee) and healIfStuck's short pre-first-
+  // turn stale window (FIRST_TURN_STALE_MS) — see both for why "never started a turn" needs distinct
+  // handling from "mid a long turn". Irrelevant for shell/canned entries (seeded true — no kickoff to guarantee).
+  firstTurnStarted: boolean;
   // Loom Companion (multi-channel reply routing): the ORIGINATING chat route of the IN-FLIGHT turn, or null
   // when the turn wasn't formed from a companion inbound / proactive-home submit. Set SYNCHRONOUSLY in
   // submit() (both the idle-submit and drain paths), read by getActiveTurnOrigin when the companion's
@@ -1541,6 +1576,7 @@ export class PtyHost {
       // a cap on the FIRST turn must still be re-submittable on resume (§19c-b). It carries NO companion
       // route (a startup turn is never a companion inbound), so the route fields start null.
       lastPrompt: opts.startupPrompt ?? null,
+      firstTurnStarted: false, // flips true on the first UserPromptSubmit — see scheduleKickoffGuarantee/healIfStuck
       activeTurnRoute: null,
       lastPromptRoute: null,
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
@@ -1668,6 +1704,7 @@ export class PtyHost {
       busy: false, ready: true, busySince: null,
       lastOutputAt: Date.now(), composerLen: 0,
       pending: [], stopping: false, rateLimited: false, lastPrompt: null,
+      firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       activeTurnRoute: null, lastPromptRoute: null,
       startupModeCycles: 0, startupCyclesDone: true,
       mcpPromptHandled: true, bootScan: "",
@@ -1729,6 +1766,7 @@ export class PtyHost {
       busy: false, ready: true, busySince: null,
       lastOutputAt: Date.now(), composerLen: 0,
       pending: [], stopping: false, rateLimited: false, lastPrompt: null,
+      firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       activeTurnRoute: null, lastPromptRoute: null,
       startupModeCycles: 0, startupCyclesDone: true,
       mcpPromptHandled: true, bootScan: "",
@@ -1978,6 +2016,10 @@ export class PtyHost {
         }
         break;
       case "UserPromptSubmit":
+        // Observed for EVERY turn, including the fresh-spawn startup-prompt arg — the FIRST one proves a
+        // turn actually started, closing scheduleKickoffGuarantee's fallback window and healIfStuck's
+        // short pre-first-turn stale window (see both). Idempotent after the first.
+        live.firstTurnStarted = true;
         this.setBusy(sessionId, true); // rising edge — fires for the startup-prompt arg and injected prompts alike
         break;
       case "Stop":
@@ -2261,11 +2303,20 @@ export class PtyHost {
     return live.composerLen > 0;
   }
 
-  /** Clear a phantom 'busy' (busy with no engine output for BUSY_STALE_MS) so its queue can drain. */
+  /**
+   * Clear a phantom 'busy' (busy with no engine output for a stale window) so its queue can drain.
+   * A session that has NEVER started its first turn (`!firstTurnStarted`) uses the much SHORTER
+   * FIRST_TURN_STALE_MS instead of `busyStaleMs` — there's no such thing as a legitimately long tool
+   * call before turn 1 has even started, so stale output there already means broken (a lost kickoff
+   * race the STARTUP_PROMPT_GRACE_MS fallback didn't recover, or an engine that never got past boot),
+   * and it should surface via the onBusy→notifyManagerOfIdleWorker path fast rather than sit masked as
+   * "busy" for the full 5-minute window. Once a real turn starts, the normal, more generous window applies.
+   */
   private healIfStuck(live: Live, sessionId: string): void {
     const now = Date.now();
+    const staleMs = live.firstTurnStarted ? this.busyStaleMs : FIRST_TURN_STALE_MS;
     if (live.busy && live.busySince != null
-      && now - live.busySince > this.busyStaleMs && now - live.lastOutputAt > this.busyStaleMs) {
+      && now - live.busySince > staleMs && now - live.lastOutputAt > staleMs) {
       this.setBusy(sessionId, false);
     }
   }
@@ -2503,8 +2554,41 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.ready) return;
     live.ready = true;
+    this.scheduleKickoffGuarantee(sessionId); // force the kickoff in if the CLI's own auto-submit never lands (no-op for resume/fork — see below)
     this.drainPending(sessionId); // deliver the first queued injection now that the composer is live
     this.logLandedMode(sessionId); // record the landed mode + the role-gated plan auto-heal backstop
+  }
+
+  /**
+   * KICKOFF GUARANTEE — see the STARTUP_PROMPT_GRACE_MS doc comment for the full race being closed.
+   * Called exactly once per session from markReady (which itself only proceeds once, guarded by
+   * `live.ready`), so this schedules at most one grace-window check per (re)spawn.
+   *
+   * Fires for EVERY positional-arg spawn, not just a fresh worker_spawn: `live.lastPrompt` is seeded
+   * from `opts.startupPrompt` at spawn (see spawn()), and recycleWorker/recycleManager/the platform-lead
+   * recycle ALL pass a real handoff prompt through that SAME positional-arg path (a fresh startup-prompt
+   * spawn, deliberately not `--resume`, so the recycled session doesn't drag the old context forward) —
+   * so a recycled session's handoff is just as exposed to the CLI's own lost-auto-submit race as a fresh
+   * spawn's kickoff, and the guarantee correctly covers it too. A run session's startup prompt
+   * (composeRunStartupPrompt) rides the same path and is covered the same way.
+   *
+   * A no-op ONLY for resume and fork: neither ever passes `opts.startupPrompt` (a resume's continuation
+   * is injected via enqueueStdin post-boot, not a CLI-arg turn — and boot-reconcile's resume path is
+   * covered by the SAME resume mechanics, not this one), so `lastPrompt` stays null there and this
+   * returns immediately, leaving their behavior byte-identical. Also a no-op if the turn already started
+   * (firstTurnStarted) by the time markReady lands — the common, healthy case.
+   */
+  private scheduleKickoffGuarantee(sessionId: string): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive || live.lastPrompt == null || live.firstTurnStarted) return;
+    const kickoff = live.lastPrompt; // capture NOW — a later unrelated drain must not change what we replay
+    setTimeout(() => {
+      const l = this.live.get(sessionId);
+      if (!l?.alive || l.firstTurnStarted) return; // the CLI's own auto-submit landed in time — no-op
+      // eslint-disable-next-line no-console
+      console.log(`[pty] ${sessionId} startup-prompt grace elapsed with no turn started — force-submitting the kickoff`);
+      this.submit(sessionId, kickoff);
+    }, STARTUP_PROMPT_GRACE_MS);
   }
 
   /**
