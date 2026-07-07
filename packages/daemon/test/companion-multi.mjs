@@ -25,6 +25,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      one's proactive heartbeat carries ITS OWN configured home route — never a sibling's — because home is
 //      now a PER-SESSION app_meta key (db.getCompanionHome(sessionId)), not a single daemon-GLOBAL value
 //      every heartbeat used to read regardless of which companion armed it.
+//   7. same-home re-arm on a winner's exit (card 134368ac): two LIVE same-home companions ⇒ the suppression
+//      guard (store.ts's suppressDuplicateHomeHeartbeats) arms only the more-active WINNER's heartbeat and
+//      zeroes the survivor's. When the winner's session EXITS, onSessionExit re-arms the still-live
+//      survivor's heartbeat AS PART OF THE EXIT ITSELF — not deferred to the next boot or an unrelated config
+//      write — while never re-starting the now-dead winner's own gateway. A solo exit (no same-home live
+//      sibling) and a non-companion session's exit are both safe no-ops.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-multi.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -436,11 +442,130 @@ try {
 
     db.close();
   }
+
+  // ============ Part 7 — same-home re-arm on a winner's exit (card 134368ac) ============
+  // Regression test for the store.ts "KNOWN RESIDUAL LATENCY" gap: two LIVE same-home companions ⇒ the
+  // suppression guard arms only the more-active WINNER's heartbeat and zeroes the survivor's. Without this
+  // fix, the survivor stayed silently disarmed until the next boot or an unrelated config write once the
+  // winner exited. onSessionExit must now re-arm the survivor AS PART OF THE EXIT ITSELF, while never
+  // re-starting the now-dead winner's own gateway (that's exactly why onSessionExit bypasses reconcile()).
+  {
+    const db = new Db(dbFile("p7.db"));
+    const gw = makeGatewayBuilder();
+    const hb = makeHeartbeatBuilder();
+    const hooks = { companionSessionIds: new Set() };
+    const controller = new CompanionController({
+      db, submitTurn: () => ({ delivered: true }),
+      pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
+      hooks, env: {}, buildGateway: gw.builder, buildHeartbeat: hb.builder,
+    });
+    seedSession(db, "winner");
+    seedSession(db, "survivor");
+    // Each session has its OWN bound chat (companion_bindings enforces one session per channel+chatId), but
+    // both are explicitly configured to deliver proactive messages to the SAME home route — the real-world
+    // collision this guard exists for (e.g. two companions, both told to heartbeat the same owner chat).
+    writeConfig(db, { sessionId: "winner", token: TOKEN_A, chatId: "chat-winner", cadence: 60 });
+    writeConfig(db, { sessionId: "survivor", token: TOKEN_B, chatId: "chat-survivor", cadence: 90 });
+    db.setCompanionHome("winner", { channel: "telegram", chatId: "shared-home" });
+    db.setCompanionHome("survivor", { channel: "telegram", chatId: "shared-home" });
+    // Give "winner" more real activity so the suppression guard's most-active pick is deterministic.
+    db.setContextCounters("winner", { ctxInputTokens: 1000, ctxTurns: 50 });
+    db.setContextCounters("survivor", { ctxInputTokens: 100, ctxTurns: 5 });
+    await controller.startInitial(null);
+    await controller.reconcile();
+    check("7 setup: both winner and survivor are live", controller.liveSessionIds().sort().join(",") === "survivor,winner");
+    check("7 setup: winner's heartbeat is armed (the group's winner)", hb.forSession("winner").length === 1 && hb.forSession("winner")[0].started === 1);
+    check("7 setup: survivor's heartbeat is SUPPRESSED (zeroed by the same-home guard)", hb.forSession("survivor").length === 0);
+
+    // The winner's session EXITS — mirrors index.ts's onExit ordering (processState -> exited, then
+    // archived, THEN companionController.onSessionExit) — the survivor stays live throughout.
+    db.setProcessState("winner", "exited");
+    db.archiveSession("winner");
+    await controller.onSessionExit("winner");
+
+    check("7a: winner's gateway is torn down and never re-started", gw.forSession("winner").length === 1 && gw.forSession("winner")[0].adapter.stopped === 1);
+    check("7a: winner's heartbeat is disarmed", hb.forSession("winner")[0].stopped === 1);
+    check("7a: winner is no longer live", controller.liveSessionIds().join(",") === "survivor");
+    check("7a: survivor's heartbeat WAS re-armed by the exit itself — not deferred to the next boot/write", hb.forSession("survivor").length === 1 && hb.forSession("survivor")[0].started === 1);
+    check("7a: survivor's gateway was never touched (no rebuild)", gw.forSession("survivor").length === 1 && gw.forSession("survivor")[0].adapter.stopped === 0);
+    check("7a: chat_reply still gated for survivor, dropped for the exited winner", hooks.companionSessionIds.has("survivor") && !hooks.companionSessionIds.has("winner"));
+    db.close();
+  }
+
+  // ============ Part 7c — a THREE-way same-home group converges on exactly ONE armed survivor ============
+  // With ≥2 surviving siblings after the winner exits, the re-arm must not blanket-arm every sibling — the
+  // re-resolved set's own suppression pass picks exactly ONE new winner among them; re-arming every sibling
+  // here must converge on that single winner armed, the other(s) still suppressed.
+  {
+    const db = new Db(dbFile("p7c.db"));
+    const gw = makeGatewayBuilder();
+    const hb = makeHeartbeatBuilder();
+    const hooks = { companionSessionIds: new Set() };
+    const controller = new CompanionController({
+      db, submitTurn: () => ({ delivered: true }),
+      pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
+      hooks, env: {}, buildGateway: gw.builder, buildHeartbeat: hb.builder,
+    });
+    seedSession(db, "winner3");
+    seedSession(db, "runnerUp3");
+    seedSession(db, "lastPlace3");
+    writeConfig(db, { sessionId: "winner3", token: TOKEN_A, chatId: "chat-winner3", cadence: 60 });
+    writeConfig(db, { sessionId: "runnerUp3", token: TOKEN_B, chatId: "chat-runnerup3", cadence: 70 });
+    writeConfig(db, { sessionId: "lastPlace3", token: "7333333333:CCtoken-C-secret", chatId: "chat-lastplace3", cadence: 80 });
+    db.setCompanionHome("winner3", { channel: "telegram", chatId: "shared-home-3" });
+    db.setCompanionHome("runnerUp3", { channel: "telegram", chatId: "shared-home-3" });
+    db.setCompanionHome("lastPlace3", { channel: "telegram", chatId: "shared-home-3" });
+    // Deterministic ranking: winner3 > runnerUp3 > lastPlace3 by ctxTurns.
+    db.setContextCounters("winner3", { ctxInputTokens: 1000, ctxTurns: 50 });
+    db.setContextCounters("runnerUp3", { ctxInputTokens: 500, ctxTurns: 20 });
+    db.setContextCounters("lastPlace3", { ctxInputTokens: 100, ctxTurns: 5 });
+    await controller.startInitial(null);
+    await controller.reconcile();
+    check("7c setup: all three are live", controller.liveSessionIds().sort().join(",") === "lastPlace3,runnerUp3,winner3");
+    check("7c setup: only winner3's heartbeat is armed", hb.forSession("winner3").length === 1 && hb.forSession("runnerUp3").length === 0 && hb.forSession("lastPlace3").length === 0);
+
+    // winner3 exits — among the two survivors, runnerUp3 is now the most active and should become the
+    // sole NEW winner; lastPlace3 must stay suppressed (never armed).
+    db.setProcessState("winner3", "exited");
+    db.archiveSession("winner3");
+    await controller.onSessionExit("winner3");
+
+    check("7c: winner3 is no longer live and its gateway was never re-started", controller.liveSessionIds().sort().join(",") === "lastPlace3,runnerUp3" && gw.forSession("winner3").length === 1 && gw.forSession("winner3")[0].adapter.stopped === 1);
+    check("7c: EXACTLY ONE survivor (runnerUp3, the new most-active) is armed", hb.forSession("runnerUp3").length === 1 && hb.forSession("runnerUp3")[0].started === 1);
+    check("7c: the other survivor (lastPlace3) stays suppressed — never armed", hb.forSession("lastPlace3").length === 0);
+    db.close();
+  }
+
+  // ============ Part 7b — a solo exit / a non-companion exit are both safe no-ops ============
+  {
+    const db = new Db(dbFile("p7b.db"));
+    const gw = makeGatewayBuilder();
+    const hb = makeHeartbeatBuilder();
+    const hooks = { companionSessionIds: new Set() };
+    const controller = new CompanionController({
+      db, submitTurn: () => ({ delivered: true }),
+      pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
+      hooks, env: {}, buildGateway: gw.builder, buildHeartbeat: hb.builder,
+    });
+    seedSession(db, "solo7b");
+    writeConfig(db, { sessionId: "solo7b", token: TOKEN_A, chatId: "solo-chat", cadence: 60 });
+    await controller.startInitial(null);
+    await controller.reconcile();
+    db.setProcessState("solo7b", "exited");
+    db.archiveSession("solo7b");
+    await controller.onSessionExit("solo7b");
+    check("7b: a solo exit (no same-home live sibling) tears down cleanly with no crash", controller.liveSessionIds().length === 0 && gw.forSession("solo7b")[0].adapter.stopped === 1);
+
+    // A non-companion session's exit (never in cfgs — nothing to re-arm) is a safe no-op too.
+    await controller.onSessionExit("never-a-companion");
+    check("7b: a non-companion session's exit is a safe no-op", controller.liveSessionIds().length === 0);
+    db.close();
+  }
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — multi-companion runtime: N enabled configs arm N concurrent gateways (not just the oldest), reconcile diffs start/stop/restart per session without cross-touching any other live companion, a reply/binding for one companion can NEVER reach another's client/route/gateway (proven through the REAL factory's per-session binding scoping), a reconcile scoped to the session that actually changed never rearms an untouched sibling's reminder watcher (the unscoped/boot fallback still rearms everyone, as before), and each companion's proactive heartbeat carries ONLY its own configured home route — never a sibling's, and never inherited when only one companion has a home configured."
+  ? "\n✅ ALL PASS — multi-companion runtime: N enabled configs arm N concurrent gateways (not just the oldest), reconcile diffs start/stop/restart per session without cross-touching any other live companion, a reply/binding for one companion can NEVER reach another's client/route/gateway (proven through the REAL factory's per-session binding scoping), a reconcile scoped to the session that actually changed never rearms an untouched sibling's reminder watcher (the unscoped/boot fallback still rearms everyone, as before), each companion's proactive heartbeat carries ONLY its own configured home route — never a sibling's, and never inherited when only one companion has a home configured — and a same-home winner's exit re-arms its still-live survivor's heartbeat promptly, as part of the exit itself, without ever re-starting the exited session's own gateway."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

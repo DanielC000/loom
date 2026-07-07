@@ -151,17 +151,16 @@ export function resolveAllEnabledConfigs(
  * `createdAt`, i.e. the longest-running real thread). Mutates `heartbeatIntervalMinutes` of the losing
  * config(s) in place.
  *
- * KNOWN RESIDUAL LATENCY (documented, not fixed here — reported up as a follow-up): if the winning LIVE
- * session later exits, this guard only re-runs on the NEXT full `resolveAllEnabledConfigs` (boot, or a
- * REST config write's `reconcile(sessionId)`). A bare pty exit alone does not trigger one —
- * controller.ts's `onSessionExit` deliberately bypasses `reconcile()` (the config row's `enabled` stays
- * true across a pty death, so an unscoped reconcile would try to re-START the now-dead session's gateway
- * — see that method's own doc). And even a REST-scoped `reconcile(sessionId)` for an unrelated write only
- * diffs that ONE session (the `onlySessionId` cross-companion-rearm-all fix), so it would not re-arm a
- * suppressed sibling either. Net effect: a suppressed survivor can stay silently disarmed until the next
- * boot or a config write that happens to touch it. Re-arming siblings promptly on a same-home winner's
- * exit needs its own scoped mechanism (walk live sessions for the exited session's home, `reconcile()`
- * each live sibling) and its own tests — left as follow-up rather than bolted on here.
+ * RESIDUAL LATENCY ON A WINNER'S EXIT — FIXED (card 134368ac): if the winning LIVE session later exits, a
+ * bare pty exit alone does not re-run this guard — controller.ts's `onSessionExit` deliberately bypasses
+ * `reconcile()` (the config row's `enabled` stays true across a pty death, so an unscoped reconcile would
+ * try to re-START the now-dead session's gateway), and even a REST-scoped `reconcile(sessionId)` for an
+ * unrelated write only diffs that ONE session (the `onlySessionId` cross-companion-rearm-all fix), never a
+ * sibling. `onSessionExit` now closes this itself: `teardownOneAndRearmSameHomeSiblings` captures the
+ * exited session's home before tearing it down, then re-resolves + reconciles (via `applyDesired`, scoped
+ * per sibling — never through `reconcile()`, which would recurse into the same serialization chain this
+ * runs inside of) every still-LIVE sibling sharing that home — so a suppressed survivor re-arms promptly on
+ * the exit itself, never deferred to the next boot or an unrelated config write. See controller.ts.
  */
 function suppressDuplicateHomeHeartbeats(db: CompanionConfigStore, configs: CompanionConfig[]): void {
   const byHome = new Map<string, CompanionConfig[]>(); // "channel\0chatId" -> every armed config on it
@@ -174,7 +173,7 @@ function suppressDuplicateHomeHeartbeats(db: CompanionConfigStore, configs: Comp
   }
   for (const group of byHome.values()) {
     // Only LIVE, non-archived sessions may compete for — or be silenced by — this guard (see the
-    // KNOWN RESIDUAL LATENCY note above for the reverse gap this does NOT close).
+    // RESIDUAL LATENCY note above for the reverse gap — a winner's exit — and how it's re-armed).
     const liveGroup = group.filter((cfg) => isLiveSession(db, cfg.sessionId));
     if (liveGroup.length < 2) continue;
     const winner = mostActive(db, liveGroup);

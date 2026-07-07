@@ -120,6 +120,12 @@ export interface CompanionControl {
    * fires. This bypasses that diff and reuses `teardownOne` directly — the same teardown the config-DELETE
    * REST path drives indirectly by deleting the row first. Serialized on the same chain as reconcile/stop.
    * A no-op for any session with no live entry (non-companion sessions, or an already-torn-down one).
+   *
+   * Also closes the SAME-HOME suppression's known residual latency (store.ts's
+   * `suppressDuplicateHomeHeartbeats`): if this exited session was the WINNER of a same-home group, any
+   * still-LIVE sibling(s) sharing its home are re-armed as part of this same call — see `teardownOne`'s
+   * caller below — instead of staying silently suppressed until the next boot or an unrelated config write.
+   * The exited session itself is NEVER re-resolved/reconciled (that would re-START its now-dead gateway).
    */
   onSessionExit(sessionId: string): Promise<void>;
 }
@@ -254,7 +260,7 @@ export class CompanionController implements CompanionControl {
   }
 
   onSessionExit(sessionId: string): Promise<void> {
-    return this.enqueue(() => this.teardownOne(sessionId));
+    return this.enqueue(() => this.teardownOneAndRearmSameHomeSiblings(sessionId));
   }
 
   /**
@@ -596,6 +602,52 @@ export class CompanionController implements CompanionControl {
     this.stopRemindersFor(sessionId);
     this.cfgs.delete(sessionId);
     this.deps.hooks.companionSessionIds.delete(sessionId);
+  }
+
+  /**
+   * `teardownOne` PLUS the same-home rearm (store.ts's KNOWN RESIDUAL LATENCY, closed): if the exited
+   * session shared its home with a still-LIVE sibling, that sibling may currently be SUPPRESSED (its
+   * heartbeat zeroed by `suppressDuplicateHomeHeartbeats` because the exited session was the group's
+   * winner) — re-resolving + reconciling just that sibling re-arms it promptly instead of leaving it
+   * disarmed until the next boot or an unrelated config write.
+   *
+   * ONE SOURCE OF TRUTH for the same-home match (CR fix): both the exited session's home AND the
+   * candidate-sibling homes are read from the freshly-`resolve`d set — the SAME authoritative source
+   * `suppressDuplicateHomeHeartbeats`'s own winner-pick uses (`db.getCompanionHome` via `buildConfigFromRow`)
+   * — never from the `this.cfgs` CACHE. A home REST write (`PUT /api/companion/home`) mutates app_meta
+   * WITHOUT calling `reconcile()`, so a live sibling's cached `cfgs` entry can go stale on a home change;
+   * matching against the cache could then MISS a survivor whose home just changed — exactly the latency
+   * class this card exists to close, in a home-changed sub-case. `desired` already includes the exited
+   * session's own (still-enabled) row — resolving liveness has no bearing on `buildConfigFromRow`, only on
+   * the suppression step — so its home is read off `desired` too, before `teardownOne` clears its `cfgs`
+   * entry (order doesn't matter functionally here, since `resolve` is a pure DB read, but reading it up
+   * front keeps the "one resolve, one source" property obvious).
+   *
+   * A non-companion session (absent from `desired` — no enabled row at all) or one with no same-home LIVE
+   * sibling is a no-op — `siblingIds` is simply empty (still-live is checked against `this.cfgs`, the
+   * controller's own liveness truth, which `desired` alone can't tell — an enabled-but-long-dead row would
+   * otherwise wrongly count as a "sibling"). Each sibling is reconciled via `applyDesired` DIRECTLY (not
+   * `reconcile()`/`enqueue()`, which would recursively await this very op's own place in the serialization
+   * chain and deadlock) — this method already runs serialized inside that chain via `onSessionExit`'s
+   * `enqueue`, so a plain sequential `applyDesired` call preserves the same ordering guarantee for free. The
+   * exited session's id is NEVER passed to `applyDesired` here — only its still-live siblings — so its
+   * now-dead gateway is never re-started (see `onSessionExit`'s doc on the CompanionControl interface). With
+   * ≥2 surviving same-home siblings, `desired`'s own suppression pass has already picked the NEW winner
+   * among them (the exited session is excluded from that competition via `isLiveSession`, since its
+   * `processState`/`archivedAt` are set BEFORE `onSessionExit` is ever called — see index.ts's `onExit`) —
+   * so re-arming every sibling here converges on exactly one winner armed, the rest still suppressed.
+   */
+  private async teardownOneAndRearmSameHomeSiblings(sessionId: string): Promise<void> {
+    const resolve = this.deps.resolveEffective ?? resolveAllEnabledConfigs;
+    const desired = resolve(this.deps.db, this.deps.env, this.deps.keyPath);
+    const exited = desired.find((cfg) => cfg.sessionId === sessionId);
+    await this.teardownOne(sessionId);
+    if (!exited) return;
+    const siblingIds = desired
+      .filter((cfg) => cfg.sessionId !== sessionId && cfg.homeChannel === exited.homeChannel && cfg.homeChatId === exited.homeChatId)
+      .map((cfg) => cfg.sessionId)
+      .filter((sid) => this.cfgs.has(sid));
+    for (const siblingId of siblingIds) await this.applyDesired(desired, siblingId);
   }
 
   /** Tear down EVERY live session (daemon shutdown only — `stop()`). */
