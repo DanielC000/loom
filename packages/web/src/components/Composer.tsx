@@ -48,8 +48,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
       // A QUEUED send shows NO caption: the "ledger bar" (SessionQueue) already surfaces every held
       // message, so a "queued #N …" line under the composer would just duplicate it. The cleared box +
       // the ledger entry ARE the feedback; nudge the queue query so the bar reflects it without waiting
-      // out its 3s poll. A DELIVERED send keeps the transient "sent"; a non-live session keeps its error.
-      if (r.delivered) { setStatus("sent"); setText(""); clearDraft(sessionId); setExpanded(false); }
+      // out its 3s poll. A DELIVERED send shows no caption; a non-live session keeps its error.
+      if (r.delivered) { setStatus(null); setText(""); clearDraft(sessionId); setExpanded(false); }
       else if (r.position) { setStatus(null); setText(""); clearDraft(sessionId); setExpanded(false); }
       else setStatus("session not live");
       qc.invalidateQueries({ queryKey: ["queue", sessionId] });
