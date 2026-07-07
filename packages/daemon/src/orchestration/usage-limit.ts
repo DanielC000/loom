@@ -13,7 +13,7 @@
  * caller (index.ts) does the SQLite read + resolve and passes it in — this module never imports `db`
  * (stays pure; a type-only import is erased at compile). Omitting the arg = byte-identical to before.
  */
-import type { RateLimitConfig } from "@loom/shared";
+import type { RateLimitConfig, UsageLimitsStatus } from "@loom/shared";
 
 /** Backstop pattern (the predecessor's), matched against StopFailure error text if `error` isn't exactly "rate_limit". */
 export const RATE_LIMIT_ERROR_RE =
@@ -34,6 +34,12 @@ const RESET_BUFFER_MS = 10_000;
 const DEADLINE_AFTER_RESET_MS = 30 * 60_000;
 /** Give-up horizon when NO reset is known (the predecessor's reset-absent deadline). */
 const DEADLINE_NO_RESET_MS = 6 * 60 * 60_000;
+
+/**
+ * A plan-usage window (UsageWindow.utilization, 0–100 scale) counts as EXHAUSTED at/above this —
+ * the threshold `resumeResetFromUsageStatus` uses to pick a real reset over the flat default backoff.
+ */
+const DEFAULT_EXHAUSTED_THRESHOLD_PCT = 95;
 
 /** The subset of a relayed hook payload this detector reads. */
 export interface UsageLimitHook {
@@ -109,4 +115,30 @@ export function rateLimitDeadline(
     return new Date(resetsAtSeconds * 1000 + deadlineAfterResetMs).toISOString();
   }
   return new Date(now.getTime() + deadlineNoResetMs).toISOString();
+}
+
+/**
+ * Fallback reset derivation for a StopFailure that carries NO resetsAtSeconds (the common case — the
+ * interactive hook doesn't include one). Loom already polls the account's real plan-usage windows
+ * (fiveHour/sevenDay/sevenDayOpus/sevenDaySonnet); among the ones that are EXHAUSTED (utilization ≥
+ * `cfg.exhaustedThresholdPct`, 0–100 scale, default 95) AND have a reset still in the future, returns
+ * the LATEST such reset (unix seconds) — so a caller never resumes back into a still-capped window.
+ * `undefined` when the status is unavailable, no window is exhausted, or every exhausted window's
+ * reset has already passed. Pure: `status` + `now` are both passed in, never read live.
+ */
+export function resumeResetFromUsageStatus(
+  status: UsageLimitsStatus | undefined, now: Date = new Date(),
+  cfg?: Pick<RateLimitConfig, "exhaustedThresholdPct">,
+): number | undefined {
+  if (!status || status.available !== true) return undefined;
+  const threshold = cfg?.exhaustedThresholdPct ?? DEFAULT_EXHAUSTED_THRESHOLD_PCT;
+  const windows = [status.fiveHour, status.sevenDay, status.sevenDayOpus, status.sevenDaySonnet];
+  let latestResetMs: number | undefined;
+  for (const w of windows) {
+    if (!w || w.utilization < threshold || !w.resetsAt) continue;
+    const resetMs = new Date(w.resetsAt).getTime();
+    if (!Number.isFinite(resetMs) || resetMs <= now.getTime()) continue;
+    if (latestResetMs === undefined || resetMs > latestResetMs) latestResetMs = resetMs;
+  }
+  return latestResetMs === undefined ? undefined : Math.floor(latestResetMs / 1000);
 }

@@ -292,6 +292,7 @@ const rateLimitOverride = z.object({
   deadlineAfterResetMs: z.number().int().min(60000).max(86400000).optional(),
   deadlineNoResetMs: z.number().int().min(600000).max(172800000).optional(),
   recencyWindowMs: z.number().int().min(0).max(86400000).optional(),
+  exhaustedThresholdPct: z.number().int().min(50).max(100).optional(),
 }).strict();
 // Every watcher cadence shares the §bounds 5000–3600000 range (5s floor guards against busy-looping).
 const watcherMs = z.number().int().min(5000).max(3600000).optional();

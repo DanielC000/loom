@@ -294,6 +294,12 @@ export interface RateLimitConfig {
   deadlineNoResetMs: number;
   /** How recent (ms) a rate-limit signal must be to still count as active. Default 21600000 (6h). */
   recencyWindowMs: number;
+  /**
+   * Utilization (0–100 scale, matching UsageWindow.utilization) at/above which a plan-usage window
+   * counts as EXHAUSTED for the no-hook-reset resume fallback (usage-limit.ts's
+   * resumeResetFromUsageStatus). Default 95.
+   */
+  exhaustedThresholdPct: number;
 }
 
 /**
@@ -539,7 +545,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   // mirror the hardcoded module consts at each call-site; the global override (resolveConfig's 2nd arg)
   // + LOOM_* watcher env layer beneath. See RateLimitConfig/WatcherConfig/TimeoutConfig for unit docs.
   platform: {
-    rateLimit: { defaultBackoffMs: 18000000, resetBufferMs: 10000, deadlineAfterResetMs: 1800000, deadlineNoResetMs: 21600000, recencyWindowMs: 21600000 },
+    rateLimit: { defaultBackoffMs: 18000000, resetBufferMs: 10000, deadlineAfterResetMs: 1800000, deadlineNoResetMs: 21600000, recencyWindowMs: 21600000, exhaustedThresholdPct: 95 },
     watchers: { contextWatchMs: 60000, idleWatchMs: 60000, rateLimitWatchMs: 60000, usagePollMs: 60000, wakeMs: 60000, schedulerMs: 60000, reconcileMs: 10000, snapshotMs: 420000, crashRecoveryWatchMs: 60000, pollMs: 60000 },
     timeouts: { gitOpMs: 15000, gitLocalMs: 15000, gitPushMs: 45000, provisionMs: 180000, busyStaleMs: 300000, runMs: 600000 },
     // P2 authenticated-request bounds: 20s timeout, 1MB response cap, 30 req/5min per connection.
@@ -761,6 +767,7 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
       deadlineAfterResetMs: po?.rateLimit?.deadlineAfterResetMs ?? d.rateLimit.deadlineAfterResetMs,
       deadlineNoResetMs: po?.rateLimit?.deadlineNoResetMs ?? d.rateLimit.deadlineNoResetMs,
       recencyWindowMs: po?.rateLimit?.recencyWindowMs ?? d.rateLimit.recencyWindowMs,
+      exhaustedThresholdPct: po?.rateLimit?.exhaustedThresholdPct ?? d.rateLimit.exhaustedThresholdPct,
     },
     watchers: {
       contextWatchMs: po?.watchers?.contextWatchMs ?? envWatcherIntervalMs("LOOM_CONTEXT_WATCH_INTERVAL_MS") ?? d.watchers.contextWatchMs,

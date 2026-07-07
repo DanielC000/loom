@@ -45,7 +45,7 @@ import { CrashRecoveryWatcher, recordUnexpectedExit } from "./orchestration/cras
 import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestration/db-backup.js";
 import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
-import { rateLimitDeadline, rateLimitedUntil } from "./orchestration/usage-limit.js";
+import { rateLimitDeadline, rateLimitedUntil, resumeResetFromUsageStatus } from "./orchestration/usage-limit.js";
 import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent } from "./orchestration/restart.js";
 import { startVaultVersioners, type VaultVersioner } from "./vault/versioner.js";
 import { buildServer } from "./gateway/server.js";
@@ -239,9 +239,16 @@ async function main(): Promise<void> {
       // takes effect with no restart. PtyHost is db-unaware by design (layering boundary); the `_until`
       // it passes is a module-default fallback we deliberately re-derive with the resolved config.
       const rl = resolveConfig(undefined, db.getPlatformConfig()).platform.rateLimit;
-      const until = rateLimitedUntil(detail.resetsAtSeconds, new Date(), rl);
+      const now = new Date();
+      // The interactive StopFailure hook usually carries NO resetsAtSeconds — the common case. Rather
+      // than fall straight to the flat default backoff (which can resume BACK INTO a still-active
+      // weekly cap and re-loop), fall back to the ALREADY-POLLED plan-usage status: if a window is
+      // known-exhausted with a future reset, resume at THAT reset instead of guessing. Unavailable /
+      // nothing-exhausted status ⇒ undefined ⇒ byte-identical to today's default-backoff behavior.
+      const resetsAtSeconds = detail.resetsAtSeconds ?? resumeResetFromUsageStatus(usageStatus.getStatus(), now, rl);
+      const until = rateLimitedUntil(resetsAtSeconds, now, rl);
       db.setRateLimitedUntil(sessionId, until, `usage limit — resumes ${until}`);
-      db.armRateLimitDeadline(sessionId, rateLimitDeadline(detail.resetsAtSeconds, new Date(), rl));
+      db.armRateLimitDeadline(sessionId, rateLimitDeadline(resetsAtSeconds, now, rl));
       recordClaudeRateLimit(detail.resetsAtSeconds);
     },
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.

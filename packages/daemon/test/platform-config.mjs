@@ -169,6 +169,13 @@ clearWatcherEnvs();
   check("(8) resetBufferMs:-1 (<0) rejected", validatePlatformConfigOverride({ rateLimit: { resetBufferMs: -1 } }).ok === false);
   check("(8) deadlineNoResetMs:172800000 (48h ceiling) accepted", validatePlatformConfigOverride({ rateLimit: { deadlineNoResetMs: 172800000 } }).ok === true);
   check("(8) deadlineNoResetMs:172800001 (>48h) rejected", validatePlatformConfigOverride({ rateLimit: { deadlineNoResetMs: 172800001 } }).ok === false);
+  // exhaustedThresholdPct edges (0-100 utilization scale, bounded 50-100 — a threshold below 50% would
+  // park on a barely-used window; card 6df15380's resumeResetFromUsageStatus tunable).
+  check("(8) exhaustedThresholdPct:49 (<50 floor) rejected", validatePlatformConfigOverride({ rateLimit: { exhaustedThresholdPct: 49 } }).ok === false);
+  check("(8) exhaustedThresholdPct:50 (floor) accepted", validatePlatformConfigOverride({ rateLimit: { exhaustedThresholdPct: 50 } }).ok === true);
+  check("(8) exhaustedThresholdPct:100 (ceiling) accepted", validatePlatformConfigOverride({ rateLimit: { exhaustedThresholdPct: 100 } }).ok === true);
+  check("(8) exhaustedThresholdPct:101 (>100 ceiling) rejected", validatePlatformConfigOverride({ rateLimit: { exhaustedThresholdPct: 101 } }).ok === false);
+  check("(8) exhaustedThresholdPct non-integer rejected", validatePlatformConfigOverride({ rateLimit: { exhaustedThresholdPct: 90.5 } }).ok === false);
 
   // watcher floor/ceiling (per epic BOUNDS): watchers.* 5000–3600000, .int().
   check("(8) watcher 4999 (<5s floor) rejected", validatePlatformConfigOverride({ watchers: { idleWatchMs: 4999 } }).ok === false);
@@ -263,6 +270,17 @@ const dbFile = path.join(TMP, "loom.db");
     // Bare-body form (no `config` wrapper) is also accepted (mirrors the project config PATCH `?? body`).
     const bare = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { rateLimit: { resetBufferMs: 0 } } });
     check("(10) bare-body PATCH accepted", bare.statusCode === 200 && bare.json().override.rateLimit.resetBufferMs === 0);
+
+    // exhaustedThresholdPct is REACHABLE via REST (card 6df15380 review finding: it must not be a
+    // dead tunable pinned at its 95 default because the .strict() schema rejected the key wholesale).
+    const thresholdGood = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { rateLimit: { exhaustedThresholdPct: 90 } } });
+    check("(10) PATCH rateLimit.exhaustedThresholdPct:90 accepted (not 400'd)", thresholdGood.statusCode === 200 && thresholdGood.json().override.rateLimit.exhaustedThresholdPct === 90);
+    check("(10) exhaustedThresholdPct persisted + resolvable", db.getPlatformConfig().rateLimit?.exhaustedThresholdPct === 90);
+    const thresholdLow = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { rateLimit: { exhaustedThresholdPct: 40 } } });
+    check("(10) PATCH rateLimit.exhaustedThresholdPct:40 (<50 floor) → 400", thresholdLow.statusCode === 400 && /exhaustedThresholdPct/.test(thresholdLow.json().error));
+    const thresholdHigh = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { rateLimit: { exhaustedThresholdPct: 120 } } });
+    check("(10) PATCH rateLimit.exhaustedThresholdPct:120 (>100 ceiling) → 400", thresholdHigh.statusCode === 400 && /exhaustedThresholdPct/.test(thresholdHigh.json().error));
+    check("(10) rejected PATCHes did not clobber the persisted 90", db.getPlatformConfig().rateLimit?.exhaustedThresholdPct === 90);
   } finally {
     try { await app.close(); } catch { /* ignore */ }
     db.close();
