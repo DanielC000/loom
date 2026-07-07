@@ -4,55 +4,45 @@ import type { PresetPrompt, PresetPromptSuggestion } from "@loom/shared";
 import { api } from "../lib/api";
 import { Button, SectionLabel } from "./ui";
 import { color, font, radius } from "../theme";
-import { useDismissable } from "../lib/useDismissable";
 
-// Preset Prompts — the terminal-card "action buttons" popover. A GLOBAL list of label+prompt presets
-// (one shared store, same on every terminal card — keyed without the sessionId so the cache is shared);
-// clicking a preset SENDS its prompt straight to THIS tile's session over the coordinated input path
-// (api.sendInput — the same busy-gated enqueue the Composer uses), no extra confirm. The list is managed
-// INLINE here (add / edit / delete via the /api/preset-prompts CRUD). Human/UI data only — no MCP path.
+// Preset Prompts — the composer's "Spark" popover. A GLOBAL list of label+prompt presets (one shared
+// store, same on every composer — keyed without the sessionId so the cache is shared). Clicking a preset
+// INSERTS its prompt text into the composer textarea for the human to review/edit, then Send — it does
+// NOT fire at the agent (the immediate-send path was removed 2026-07-07; the composer owns the send). The
+// list is managed INLINE here (add / edit / delete via the /api/preset-prompts CRUD). Human/UI data only —
+// no MCP path. Dismiss (outside-click / Esc) + the bottom-right sparkle trigger are owned by the Composer.
 
 const PRESETS_KEY = ["presetPrompts"] as const;
 const SUGGESTIONS_KEY = ["presetPromptSuggestions"] as const;
 
-export function PresetPromptsButton({ sessionId }: { sessionId: string }) {
-  const [open, setOpen] = useState(false);
-  const ref = useDismissable<HTMLDivElement>(open, () => setOpen(false));
-  return (
-    <div ref={ref} style={{ position: "relative", display: "inline-flex" }}>
-      <Button style={{ padding: "0 8px" }} aria-haspopup="dialog" aria-expanded={open}
-        title="Preset prompts — send a saved prompt to this session"
-        onClick={(ev) => { ev.stopPropagation(); setOpen((o) => !o); }}>Presets</Button>
-      {open && <PresetPopover sessionId={sessionId} onClose={() => setOpen(false)} />}
-    </div>
-  );
-}
-
-function PresetPopover({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
+// The "Spark" overlay: a full-bleed panel over the composer textarea, right-aligned and rising from the
+// bottom-right corner (position:absolute inside the composer's relative left column — left/right/bottom:0,
+// min-height matches the textarea; taller content grows UPWARD over the terminal pane). It NEVER pushes
+// layout: absolute ⇒ out of flow, so the composer footprint stays fixed and the flex:1 xterm never
+// rescales. `onInsert(prompt)` hands the text up to the composer's own text state (writeText), so an
+// insert round-trips with the inline box + the large editor. The parent (Composer) owns open/close.
+export function PresetPromptsPopover({ onInsert }: { onInsert: (prompt: string) => void }) {
   const presets = useQuery({ queryKey: PRESETS_KEY, queryFn: () => api.presetPrompts() });
   const [editing, setEditing] = useState<string | "new" | null>(null);
-  const [sendErr, setSendErr] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Open with focus on the dialog itself (not a send button) so a stray Enter on open can't fire a
-  // preset at the live agent; Tab then reaches the controls. Esc / outside-click dismiss via useDismissable.
+  // Open with focus on the dialog itself so a stray Enter on open lands on no control; Tab then reaches
+  // the rows. Esc / outside-click dismiss is owned by the Composer's useDismissable wrapper.
   useEffect(() => { dialogRef.current?.focus(); }, []);
-
-  const send = useMutation({
-    mutationFn: (p: PresetPrompt) => api.sendInput(sessionId, p.prompt),
-    onSuccess: (r) => { if (r.delivered || r.position) onClose(); else setSendErr("session not live"); },
-    onError: () => setSendErr("send failed"),
-  });
 
   const list = [...(presets.data ?? [])].sort((a, b) => a.position - b.position);
   const empty = !presets.isLoading && list.length === 0 && editing !== "new";
 
   return (
     <div ref={dialogRef} role="dialog" aria-label="Preset prompts" tabIndex={-1}
+      className="loom-preset-overlay-in"
       onClick={(e) => e.stopPropagation()}
-      style={{ position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 20, width: 300,
-        maxHeight: 380, overflowY: "auto", background: color.panel, border: `1px solid ${color.borderStrong}`,
-        borderRadius: radius.base, padding: 8, display: "flex", flexDirection: "column", gap: 6, outline: "none" }}>
+      style={{ position: "absolute", left: 0, right: 0, bottom: 0, zIndex: 30, minHeight: "100%",
+        maxHeight: 320, overflowY: "auto", background: "rgba(15,18,21,0.985)",
+        border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
+        boxShadow: `inset 0 0 0 1px ${color.phosphorDim}, 0 12px 40px rgba(0,0,0,0.6)`,
+        padding: 8, display: "flex", flexDirection: "column", gap: 6, outline: "none",
+        transformOrigin: "bottom right" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <SectionLabel style={{ margin: 0 }}>Preset prompts</SectionLabel>
         <Button variant="ghost" style={{ padding: "2px 8px" }} disabled={editing === "new"}
@@ -62,12 +52,11 @@ function PresetPopover({ sessionId, onClose }: { sessionId: string; onClose: () 
       {presets.isLoading && <Muted>Loading…</Muted>}
       {presets.isError && <Muted tone="red">Couldn't load presets.</Muted>}
       {empty && <Muted>No presets yet — add one.</Muted>}
-      {sendErr && <Muted tone="red">{sendErr}</Muted>}
 
       {list.map((p) => editing === p.id
         ? <PresetForm key={p.id} preset={p} onDone={() => setEditing(null)} />
-        : <PresetRow key={p.id} preset={p} sending={send.isPending}
-            onSend={() => { setSendErr(null); send.mutate(p); }} onEdit={() => setEditing(p.id)} />)}
+        : <PresetRow key={p.id} preset={p}
+            onInsert={() => onInsert(p.prompt)} onEdit={() => setEditing(p.id)} />)}
 
       {editing === "new" && <PresetForm onDone={() => setEditing(null)} />}
 
@@ -157,8 +146,8 @@ function SuggestionRow({ suggestion }: { suggestion: PresetPromptSuggestion }) {
   );
 }
 
-function PresetRow({ preset, onSend, sending, onEdit }: {
-  preset: PresetPrompt; onSend: () => void; sending: boolean; onEdit: () => void;
+function PresetRow({ preset, onInsert, onEdit }: {
+  preset: PresetPrompt; onInsert: () => void; onEdit: () => void;
 }) {
   const qc = useQueryClient();
   const del = useMutation({
@@ -167,12 +156,16 @@ function PresetRow({ preset, onSend, sending, onEdit }: {
   });
   return (
     <div style={{ display: "flex", alignItems: "stretch", gap: 4 }}>
-      <button type="button" onClick={onSend} disabled={sending || del.isPending} title={preset.prompt}
+      {/* Click INSERTS the prompt into the composer for review — it does NOT send. Label on line 1, a
+          dim prompt preview on line 2 (the "Spark" signature — the prompt is visible before you insert). */}
+      <button type="button" onClick={onInsert} disabled={del.isPending} title={preset.prompt}
         className="loom-btn loom-btn-default"
         style={{ flex: 1, minWidth: 0, textAlign: "left", color: color.text, fontFamily: font.mono,
           fontSize: 12, padding: "5px 8px", border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {preset.label}
+          overflow: "hidden", display: "flex", flexDirection: "column", gap: 2 }}>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{preset.label}</span>
+        <span style={{ color: color.textMuted, fontSize: 11, lineHeight: 1.35, overflow: "hidden",
+          textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{preset.prompt}</span>
       </button>
       <IconButton label={`Edit ${preset.label}`} onClick={onEdit} disabled={del.isPending}>✎</IconButton>
       <IconButton label={`Delete ${preset.label}`} onClick={() => del.mutate()} disabled={del.isPending} danger>×</IconButton>

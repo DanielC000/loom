@@ -42,7 +42,7 @@ export function TerminalTile({
       stopPending={stopPending}
       maximizable
       statusMode="busy"
-      subPanels={{ presets: true, queue: true, wakes: true, taskCard: true }}
+      subPanels={{ queue: true, wakes: true, taskCard: true }}
     />
   );
 }

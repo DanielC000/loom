@@ -44,11 +44,12 @@ test.describe("PlatformSessionTile (Operator session)", () => {
 
     await page.goto(`${loomDaemon.baseURL}/platform`);
 
-    // The Operator session section mounts the live PlatformSessionTile: presets + graceful Stop + maximize
-    // in the header, the turn composer + the seeded wake in the body. (Substring, not exact: with a live
-    // session the section label carries a status pill, so its full text is "Operator session" + "idle".)
+    // The Operator session section mounts the live PlatformSessionTile: graceful Stop + maximize in the
+    // header, the turn composer + its presets (Spark) trigger + the seeded wake in the body. (Substring,
+    // not exact: with a live session the section label carries a status pill, so its full text is
+    // "Operator session" + "idle". Presets moved OFF the header and INTO the composer 2026-07-07.)
     await expect(page.getByText("Operator session", { exact: false }).first()).toBeVisible();
-    await expect(page.getByRole("button", { name: "Presets" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Preset prompts" }).first()).toBeVisible();
     await expect(page.getByTitle("Maximize terminal")).toBeVisible();
     await expect(page.getByRole("button", { name: "Send turn" })).toBeVisible();
     await expect(page.getByText(new RegExp(seeded.wakeNote!))).toBeVisible();

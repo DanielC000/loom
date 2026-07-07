@@ -8,7 +8,6 @@ import { Composer } from "./Composer";
 import { SessionQueue } from "./SessionQueue";
 import { SessionWakes } from "./SessionWakes";
 import { SessionTaskCard } from "./SessionTaskCard";
-import { PresetPromptsButton } from "./PresetPrompts";
 import { Panel, Button, StatusPill } from "./ui";
 import { font, color } from "../theme";
 
@@ -59,7 +58,6 @@ export interface TerminalTabs {
 }
 
 export interface TerminalSubPanels {
-  presets?: boolean; // PresetPrompts button in the header action cluster
   queue?: boolean; // SessionQueue strip below the terminal
   wakes?: boolean; // SessionWakes strip below the terminal
   taskCard?: boolean; // slim bound-board-task bar above the terminal
@@ -270,7 +268,7 @@ export function TerminalCard({
     if (belowRef.current) ro.observe(belowRef.current);
     return () => ro.disconnect();
   }, [hug, maximized, height, activeTab, !!task, readOnly, !!tabs,
-      subPanels?.queue, subPanels?.wakes, subPanels?.taskCard, subPanels?.presets]);
+      subPanels?.queue, subPanels?.wakes, subPanels?.taskCard]);
 
   const lifecycleButton = lifecycle === "kill"
     ? <Button variant="danger" style={{ padding: "0 8px" }} disabled={stopPending}
@@ -283,7 +281,6 @@ export function TerminalCard({
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
       {title ?? <TileTitle s={session} showProject={showProject} />}
       <div style={{ display: "flex", gap: 4 }}>
-        {subPanels?.presets && <PresetPromptsButton sessionId={session.id} />}
         {offerFork && <ForkButton onFork={() => onFork?.()} busy={session.busy ?? false} pending={forkPending} />}
         {lifecycleButton}
         {actionsExtra}

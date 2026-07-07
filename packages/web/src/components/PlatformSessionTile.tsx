@@ -43,7 +43,7 @@ export function PlatformSessionTile({
       stopTitle={stopTitle}
       maximizable
       statusMode="busy"
-      subPanels={{ presets: true, queue: true, wakes: true, taskCard: true }}
+      subPanels={{ queue: true, wakes: true, taskCard: true }}
     />
   );
 }

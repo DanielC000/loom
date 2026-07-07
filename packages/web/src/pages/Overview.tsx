@@ -417,7 +417,7 @@ function SessionCockpit({ session }: { session: SessionListItem }) {
       height={500}
       lifecycle="none"
       maximizable
-      subPanels={{ presets: true, queue: true, wakes: true, taskCard: true }}
+      subPanels={{ queue: true, wakes: true, taskCard: true }}
       tabs={tabs}
     />
   );

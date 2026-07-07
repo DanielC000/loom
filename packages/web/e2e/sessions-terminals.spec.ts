@@ -59,18 +59,22 @@ test.describe("TerminalTile (unified full-feature card)", () => {
     // title (showProject on), so match the first.
     await expect(page.getByText(new RegExp(`${seeded.agentName} · ${shortId(seeded.sessionId)}`)).first()).toBeVisible();
 
-    // The full header action cluster: Fork (idle-only) + graceful Stop + Presets + Maximize.
+    // The header action cluster: Fork (idle-only) + graceful Stop + Maximize. (Presets moved OFF the header
+    // and INTO the composer — the bottom-right sparkle trigger — with the "Spark" presets change 2026-07-07.)
     await expect(page.getByRole("button", { name: "Fork" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Presets" })).toBeVisible();
     await expect(page.getByTitle("Maximize terminal")).toBeVisible();
-    // The body sub-panels + composer: the bound task card, the wake chip, and the turn composer.
+    // The body sub-panels + composer: the bound task card, the wake chip, the turn composer, and the
+    // composer's own presets (Spark) trigger.
     await expect(page.getByText(seeded.taskTitle!, { exact: true })).toBeVisible();
     await expect(page.getByText(new RegExp(seeded.wakeNote!))).toBeVisible();
     await expect(page.getByRole("button", { name: "Send turn" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Preset prompts" }).first()).toBeVisible();
 
-    // EXERCISE #1 — Presets: clicking opens the preset popover dialog (observable state change), Esc closes.
-    await page.getByRole("button", { name: "Presets" }).click();
+    // EXERCISE #1 — Presets: clicking the composer's sparkle trigger opens the preset popover dialog
+    // (observable state change), Esc closes it. (force: the corner trigger sits over the terminal, whose
+    // font settle can jitter it a sub-pixel past the actionability "stable" check.)
+    await page.getByRole("button", { name: "Preset prompts" }).first().click({ force: true });
     await expect(page.getByRole("dialog", { name: "Preset prompts" })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: "Preset prompts" })).toHaveCount(0);
@@ -99,7 +103,7 @@ test.describe("TerminalTile (unified full-feature card)", () => {
     await expect(page.getByText("(1 live)", { exact: false })).toBeVisible();
     await expect(page.getByRole("button", { name: "Fork" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Presets" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Preset prompts" }).first()).toBeVisible();
     await expect(page.getByTitle("Maximize terminal")).toBeVisible();
     await expect(page.getByRole("button", { name: "Send turn" })).toBeVisible();
     // The task title appears in the tile's SessionTaskCard AND the Overview Board card below — match first.
@@ -118,7 +122,7 @@ test.describe("TerminalTile (unified full-feature card)", () => {
     await expect(page.getByText(`${seeded.agentName} · ${shortId(seeded.sessionId)}`, { exact: false })).toBeVisible();
     await expect(page.getByRole("button", { name: "Fork" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Presets" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Preset prompts" }).first()).toBeVisible();
     await expect(page.getByRole("button", { name: "Send turn" })).toBeVisible();
   });
 });
@@ -177,13 +181,13 @@ test.describe("SessionCockpit (Overview fleet expand)", () => {
     await expect(page.getByRole("button", { name: "Timeline" })).toBeVisible();
     const cockpit = page.locator("div")
       .filter({ has: page.getByRole("button", { name: "Timeline" }) })
-      .filter({ has: page.getByRole("button", { name: "Presets" }) })
+      .filter({ has: page.getByRole("button", { name: "Preset prompts" }) })
       .last();
     await expect(cockpit.getByRole("button", { name: "Terminal" })).toBeVisible();
     await expect(cockpit.getByRole("button", { name: "Transcript" })).toBeVisible();
     await expect(cockpit.getByRole("button", { name: "Timeline" })).toBeVisible();
     await expect(cockpit.getByRole("button", { name: "Diff" })).toHaveCount(0); // Diff is worker-only
-    await expect(cockpit.getByRole("button", { name: "Presets" })).toBeVisible();
+    await expect(cockpit.getByRole("button", { name: "Preset prompts" })).toBeVisible();
     await expect(cockpit.getByTitle("Maximize terminal")).toBeVisible();
     await expect(cockpit.getByText(mgr.taskTitle!, { exact: true })).toBeVisible();
 
@@ -216,7 +220,7 @@ test.describe("SessionCockpit (Overview fleet expand)", () => {
     await expect(page.getByRole("button", { name: "Diff" })).toBeVisible();
     const cockpit = page.locator("div")
       .filter({ has: page.getByRole("button", { name: "Diff" }) })
-      .filter({ has: page.getByRole("button", { name: "Presets" }) })
+      .filter({ has: page.getByRole("button", { name: "Preset prompts" }) })
       .last();
     await expect(cockpit.getByRole("button", { name: "Terminal" })).toBeVisible();
     await expect(cockpit.getByRole("button", { name: "Transcript" })).toBeVisible();

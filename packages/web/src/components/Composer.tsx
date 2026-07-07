@@ -6,6 +6,8 @@ import { color, font } from "../theme";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
 import { useVoiceLang, voiceLangOptions } from "../lib/useVoiceLang";
 import { getDraft, setDraft, clearDraft } from "../lib/composerDrafts";
+import { useDismissable } from "../lib/useDismissable";
+import { PresetPromptsPopover } from "./PresetPrompts";
 
 // Reliable "send a turn" box: posts through the daemon's busy-gated enqueue (auto-Enter, queues
 // if a turn is in flight) so a human send and the programmatic worker_report enqueue can't collide.
@@ -21,6 +23,12 @@ export function Composer({ sessionId }: { sessionId: string }) {
   // The large-editor overlay. It shares EVERYTHING below (text/send/speech) with the inline box, so
   // toggling it never copies or risks losing the draft — it is the same component, just a roomier view.
   const [expanded, setExpanded] = useState(false);
+  // The "Spark" preset popover, opened from the bottom-right sparkle trigger. A ref on the inline box lets
+  // an insert focus it with the caret at the end; useDismissable closes the popover on outside-click / Esc
+  // (its ref wraps the trigger + popover — the composer's relative left column — see the render below).
+  const [presetsOpen, setPresetsOpen] = useState(false);
+  const inlineTaRef = useRef<HTMLTextAreaElement | null>(null);
+  const presetsWrapRef = useDismissable<HTMLDivElement>(presetsOpen, () => setPresetsOpen(false));
 
   // Mirror every text change into the per-session draft store. Accepts a value or an updater (voice
   // append uses the functional form). The store write is idempotent, so a StrictMode double-invoke
@@ -51,6 +59,24 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const submit = () => { if (text.trim()) send.mutate(text); };
   const onComposeKey = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); }
+  };
+
+  // Insert a preset's prompt INTO the box for the human to review/edit — NOT a send (the old send-at-agent
+  // path is gone). Goes through writeText so it round-trips with the large editor + the composerDrafts
+  // store, and Send enables the moment there's text. It APPENDS to an existing draft (never clobbers it —
+  // the draft is the human's, and blowing it away is the one thing we don't do); sets it when the box is
+  // empty. Then focus the box with the caret at the end so the human can immediately edit + Send.
+  const insertPreset = (prompt: string) => {
+    writeText((prev) => (prev.trim() ? `${prev.replace(/\s+$/, "")}\n${prompt}` : prompt));
+    setStatus("inserted — review, then Send");
+    setPresetsOpen(false);
+    requestAnimationFrame(() => {
+      const ta = inlineTaRef.current;
+      if (!ta) return;
+      ta.focus();
+      const end = ta.value.length;
+      ta.setSelectionRange(end, end);
+    });
   };
 
   // GLOBAL voice-input language (shared across every mounted composer, persisted; default =
@@ -86,8 +112,12 @@ export function Composer({ sessionId }: { sessionId: string }) {
   return (
     <div style={{ marginTop: 3 }}>
       <div style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
-        <div style={{ flex: 1, position: "relative", display: "flex" }}>
+        {/* Relative left column: the textarea + the bottom-right icon cluster + the Spark popover. The
+            useDismissable ref wraps all three so an outside-click / Esc closes the popover while a click
+            on the trigger or inside the overlay does not (the overlay covers the textarea when open). */}
+        <div ref={presetsWrapRef} style={{ flex: 1, position: "relative", display: "flex" }}>
           <textarea
+            ref={inlineTaRef}
             value={text}
             onChange={(e) => { writeText(e.target.value); setStatus(null); }}
             onKeyDown={onComposeKey}
@@ -95,9 +125,18 @@ export function Composer({ sessionId }: { sessionId: string }) {
             // FIXED footprint: resize is off (a draggable box could eat the terminal's space) and the
             // height is pinned to ~2 lines via minHeight while flex-stretch matches the controls column.
             // Constant height ⇒ the flex:1 terminal pane never rescales (Terminal.tsx's ResizeObserver).
-            style={{ flex: 1, resize: "none", minHeight: 44, boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: "6px 30px 6px 8px", fontFamily: font.mono, fontSize: 13 }}
+            // The 52px right gutter clears the bottom-right two-icon cluster (presets + expand).
+            style={{ flex: 1, resize: "none", minHeight: 44, boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: "6px 52px 6px 8px", fontFamily: font.mono, fontSize: 13 }}
           />
-          <ExpandButton onClick={() => setExpanded(true)} />
+          {/* Two-icon cluster in the bottom-right corner: the presets (Spark) trigger + the expand
+              button, both ghost, absolutely positioned so they add ZERO height to the composer. */}
+          <div style={{ position: "absolute", bottom: 4, right: 4, display: "flex", alignItems: "center", gap: 2 }}>
+            <PresetsButton open={presetsOpen} onClick={() => setPresetsOpen((o) => !o)} />
+            <ExpandButton onClick={() => { setPresetsOpen(false); setExpanded(true); }} />
+          </div>
+          {/* Spark popover — a full-bleed overlay of the textarea, rising from the bottom-right corner.
+              Absolute ⇒ never pushes layout; the composer footprint stays fixed. */}
+          {presetsOpen && <PresetPromptsPopover onInsert={insertPreset} />}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 4, justifyContent: "flex-end", width: 176 }}>
           {voiceCluster}
@@ -127,8 +166,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
   );
 }
 
-// Small unobtrusive corner affordance over the textarea: opens the large editor. Pure-icon, ghost
-// styling so it recedes until hovered; absolutely positioned so it adds ZERO height to the composer.
+// Small unobtrusive corner affordance: opens the large editor. Pure-icon, ghost styling so it recedes
+// until hovered. Positioning is owned by the bottom-right cluster in the composer, so it adds no height.
 function ExpandButton({ onClick }: { onClick: () => void }) {
   return (
     <Button
@@ -137,10 +176,39 @@ function ExpandButton({ onClick }: { onClick: () => void }) {
       title="Expand to a larger editor"
       aria-label="Expand to a larger editor"
       onClick={onClick}
-      style={{ position: "absolute", top: 4, right: 4, padding: "2px 4px", lineHeight: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+      style={{ padding: "2px 4px", lineHeight: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
     >
       <ExpandIcon />
     </Button>
+  );
+}
+
+// The presets (Spark) trigger — the bottom-right twin of the expand button. Toggles the preset popover
+// over the textarea; phosphor-tinted while open. Ghost, icon-only, zero added height.
+function PresetsButton({ open, onClick }: { open: boolean; onClick: () => void }) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      title="Preset prompts — insert a saved prompt into the box"
+      aria-label="Preset prompts"
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      onClick={onClick}
+      style={{ padding: "2px 4px", lineHeight: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", ...(open ? { color: color.phosphor, background: color.phosphorDim } : null) }}
+    >
+      <SparkIcon />
+    </Button>
+  );
+}
+
+// 12px 4-point sparkle glyph (SVG so it renders crisply at any font; no glyph-coverage gamble). The nod
+// to the "Suggested from your usage" section is deliberate — this is the presets/suggestions surface.
+function SparkIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden focusable="false">
+      <path d="M6 1.5 L6.9 5.1 L10.5 6 L6.9 6.9 L6 10.5 L5.1 6.9 L1.5 6 L5.1 5.1 Z" />
+    </svg>
   );
 }
 
