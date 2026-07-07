@@ -1440,19 +1440,30 @@ function withReapTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
  * cheap-to-rule-out) case where the daemon's own cwd/exePath/commandLine happens to satisfy the match
  * (e.g. a misconfigured LOOM_HOME nested under the very worktree being torn down). The task's own DoD
  * requires this can never happen; this makes it structurally impossible rather than merely unlikely.
+ *
+ * `deps.excludePids` (Code Review finding on card 864e79fe): additional pids a caller knows are
+ * genuinely rooted in `worktreePath` but must survive anyway — specifically, a worker's OWN claude pty
+ * when this is invoked BEFORE that worker has been stopped (confirmWorkerMerge's pre-gate sweep, run
+ * while the confirming worker may still be live). Without this, the sweep would kill the worker's own
+ * process on every gated confirm — on a subsequent gate FAILURE that would strand a worker meant to
+ * survive for re-tasking. This is deliberately separate from the unconditional `process.pid`
+ * self-exclusion above: that one is a blanket, always-on backstop for the daemon itself; this one is a
+ * caller-supplied, call-site-specific allowance.
  */
 export async function reapProcessesRootedInWorktree(
   worktreePath: string,
-  deps: { enumerate?: ProcessEnumerator; kill?: ProcessKiller; timeoutMs?: number } = {},
+  deps: { enumerate?: ProcessEnumerator; kill?: ProcessKiller; timeoutMs?: number; excludePids?: number[] } = {},
 ): Promise<{ killedPids: number[] }> {
   const enumerate = deps.enumerate ?? (process.platform === "win32" ? enumerateProcessesWin32 : enumerateProcessesPosix);
   const kill = deps.kill ?? killProcessById;
   const timeoutMs = deps.timeoutMs ?? 10_000;
+  const excluded = new Set(deps.excludePids ?? []);
   try {
     const procs = await withReapTimeout(enumerate(timeoutMs), timeoutMs);
     const killedPids: number[] = [];
     for (const proc of procs) {
       if (proc.pid === process.pid) continue; // NEVER the daemon's own process — see SELF-EXCLUSION above
+      if (excluded.has(proc.pid)) continue; // caller-supplied survivor — see excludePids doc above
       if (!processRootedInWorktree(proc, worktreePath)) continue;
       try { kill(proc.pid); killedPids.push(proc.pid); } catch { /* best effort */ }
     }
@@ -2732,6 +2743,14 @@ export class PtyHost {
 
   isAlive(sessionId: string): boolean {
     return this.live.get(sessionId)?.alive ?? false;
+  }
+
+  /** The OS pid of this session's own pty process, or undefined if it isn't live. Lets a caller that's
+   *  about to reap OTHER processes rooted in this session's cwd (e.g. a pre-gate worktree sweep) exclude
+   *  the session's own still-live process from that sweep — see {@link reapProcessesRootedInWorktree}'s
+   *  `excludePids`. */
+  getPid(sessionId: string): number | undefined {
+    return this.live.get(sessionId)?.pid;
   }
 
   private appendRing(live: Live, buf: Buffer): void {

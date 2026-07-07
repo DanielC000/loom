@@ -98,6 +98,29 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   check("(unit) killedPids in the return value excludes the daemon's own pid too", !result.killedPids.includes(process.pid));
 }
 
+// ============================== (unit) reapProcessesRootedInWorktree excludePids ==============================
+// Code Review finding (card 864e79fe, BLOCKING): confirmWorkerMerge's pre-gate sweep runs BEFORE the
+// confirming worker's own claude pty is stopped, so that worker's process is genuinely rooted in its own
+// worktree (cwd/exePath match) and would otherwise be killed by this exact sweep. `excludePids` lets a
+// caller name pids that must survive the sweep even though they structurally match — proves the excluded
+// pid is skipped while a DIFFERENT, genuinely-escaped matching pid (the real target: an orphaned
+// vite/esbuild) is still killed.
+{
+  const WT = "/home/x/.loom/worktrees/proj1/feedbead0002";
+  const killed = [];
+  const result = await reapProcessesRootedInWorktree(WT, {
+    enumerate: async () => [
+      { pid: 55555, exePath: null, cwd: WT, commandLine: null }, // the "worker's own claude" — rooted in WT, must survive
+      { pid: 66666, exePath: `${WT}/node_modules/.bin/vite`, cwd: null, commandLine: null }, // a genuinely escaped build child
+    ],
+    kill: (pid) => killed.push(pid),
+    excludePids: [55555],
+  });
+  check("(unit) a caller-excluded pid rooted in the worktree is NEVER killed", !killed.includes(55555));
+  check("(unit) a different matching pid NOT in excludePids IS still killed", killed.includes(66666));
+  check("(unit) killedPids in the return value excludes the caller-excluded pid too", !result.killedPids.includes(55555));
+}
+
 // ============================== (real) real OS processes, real enumerator/killer ==============================
 {
   const wtA = path.join(os.tmpdir(), `loom-wpr-wtA-${sfx}`);
@@ -168,8 +191,8 @@ function initRepo(repo, readme) {
 // Always seed a task + manager + worker row with `taskId` SET on the worker (Pass A's per-session filter
 // requires `s.taskId` to even consider a session — omitting it, as an earlier version of this test did,
 // makes Pass A skip the session entirely regardless of a genuinely-landed squash trailer).
-function seed(db, p) {
-  db.insertProject({ id: p.projId, name: "WPR", repoPath: p.repo, vaultPath: p.repo, config: {}, createdAt: now, archivedAt: null });
+function seed(db, p, gateCommand) {
+  db.insertProject({ id: p.projId, name: "WPR", repoPath: p.repo, vaultPath: p.repo, config: gateCommand ? { orchestration: { gateCommand } } : {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: p.agentId, projectId: p.projId, name: "t", startupPrompt: "", position: 0 });
   db.insertTask({ id: p.taskId, projectId: p.projId, title: "WPR-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
   db.insertSession({ id: p.mgrId, projectId: p.projId, agentId: p.agentId, engineSessionId: null, title: null, cwd: p.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
@@ -177,13 +200,19 @@ function seed(db, p) {
 }
 
 const reapCalls = [];
+const reapExcludePids = []; // index-aligned with reapCalls — the excludePids opts each call was made with
 const reapedBeforeRemove = new Map(); // worktreePath -> true once the injected reap has completed for it
 const removeDirAttempts = [];
-const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+const workerPids = new Map(); // sessionId -> fake live pty pid, for getPid()
+const ptyStub = {
+  stop() {}, isAlive() { return false; }, enqueueStdin() {},
+  getPid(sessionId) { return workerPids.get(sessionId); },
+};
 const db = new Db();
 const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
-  reapWorktreeProcesses: async (worktreePath) => {
+  reapWorktreeProcesses: async (worktreePath, opts) => {
     reapCalls.push(worktreePath);
+    reapExcludePids.push(opts?.excludePids ?? []);
     reapedBeforeRemove.set(worktreePath, true);
     return { killedPids: [123456] }; // simulate finding + killing an escaped process
   },
@@ -248,10 +277,61 @@ try {
   check("(B) reap was NEVER called for the kept (live/protected-shaped) worktree — the safety invariant",
     !reapCalls.includes(stillHoldingWork.worktreePath));
   check("(B) reconcile reports it as kept, not pruned", reconcile.worktreesKept >= 1);
+
+  // --- (C) confirmWorkerMerge's PRE-GATE reap (finding c21487e8): with a gateCommand configured, the
+  //     confirming worker's OWN worktree is reaped a SECOND time — once BEFORE the gate runs (the new
+  //     call site under test), in addition to the existing reap already proven in (A) right before
+  //     removal — while an unrelated, unconfirmed SIBLING worktree (a live worker in a different
+  //     project) is never touched at all (finding 55e983c5 — the scoping safety invariant).
+  const G = { projId: `wpr-g-proj-${sfx}`, agentId: `wpr-g-top-${sfx}`, taskId: `wpr-g-task-${sfx}`, mgrId: `wpr-g-mgr-${sfx}`, workerId: `wpr-g-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-wpr-gate-${sfx}`), file: "gate.txt" };
+  initRepo(G.repo, "# wpr gate\n");
+  {
+    const { worktreePath, branch } = await createWorktree(G.repo, G.projId, G.taskId);
+    fs.writeFileSync(path.join(worktreePath, G.file), "worker change\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${G.file}"`, { cwd: worktreePath });
+    G.worktreePath = worktreePath; G.branch = branch;
+  }
+  seed(db, G, 'node -e "process.exit(0)"'); // a PASSING gate — confirmWorkerMerge must still reap before running it
+  const G_WORKER_PID = 918273; // fake "still-live claude pty" pid for the confirming worker itself
+  workerPids.set(G.workerId, G_WORKER_PID);
+
+  const sibling = { projId: `wpr-s-proj-${sfx}`, agentId: `wpr-s-top-${sfx}`, taskId: `wpr-s-task-${sfx}`, mgrId: `wpr-s-mgr-${sfx}`, workerId: `wpr-s-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-wpr-sibling-${sfx}`), file: "sibling.txt" };
+  initRepo(sibling.repo, "# wpr sibling\n");
+  {
+    const { worktreePath, branch } = await createWorktree(sibling.repo, sibling.projId, sibling.taskId);
+    fs.writeFileSync(path.join(worktreePath, sibling.file), "unrelated live work\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${sibling.file}"`, { cwd: worktreePath });
+    sibling.worktreePath = worktreePath; sibling.branch = branch;
+  }
+  seed(db, sibling, 'node -e "process.exit(0)"'); // never confirmed — must stay completely untouched
+
+  const reapCallsBeforeC = reapCalls.length;
+  const confirmG = await sessions.confirmWorkerMerge(G.mgrId, G.workerId);
+  check("(C) confirmWorkerMerge (gate configured) lands the merge", confirmG.merged === true);
+  check("(C) the confirming worker's OWN worktree was reaped TWICE (pre-gate + the existing pre-removal reap)",
+    reapCalls.filter((p) => p === G.worktreePath).length === 2);
+  check("(C) both of those reap calls happened during THIS confirm (not carried over from an earlier scenario)",
+    reapCalls.length - reapCallsBeforeC === 2);
+  check("(C) the UNRELATED, unconfirmed sibling worktree was NEVER reaped — the scoping safety invariant",
+    !reapCalls.includes(sibling.worktreePath));
+  check("(C) the sibling worktree is untouched on disk (never removed either)", fs.existsSync(sibling.worktreePath));
+
+  // THE BLOCKING FIX (Code Review, card 864e79fe): the FIRST reap call for G.worktreePath is the PRE-GATE
+  // sweep, made while the confirming worker is still (fake-)live — it must exclude that worker's own pid
+  // so a subsequent real gate FAILURE can still re-task a SURVIVING worker instead of one this sweep just
+  // killed. The SECOND call (gcWorktreeDir, post-merge) runs after finalizeMerge has already stopped the
+  // worker, so it carries no excludePids at all — nothing to exclude by then.
+  const gCallIdxs = reapCalls.reduce((acc, p, i) => (p === G.worktreePath ? [...acc, i] : acc), []);
+  check("(C) confirmWorkerMerge's PRE-GATE reap call excludes the confirming worker's OWN live pty pid",
+    reapExcludePids[gCallIdxs[0]].includes(G_WORKER_PID));
+  check("(C) the POST-MERGE (gcWorktreeDir) reap call for the same worktree carries no excludePids",
+    reapExcludePids[gCallIdxs[1]].length === 0);
+  fs.rmSync(sibling.worktreePath, { recursive: true, force: true }); // cleanup: never confirmed/removed by the service
 } finally {
   db.close();
   for (const dir of fs.readdirSync(os.tmpdir())) {
-    if (dir.includes(`loom-wpr-merge-${sfx}`) || dir.includes(`loom-wpr-disposable-${sfx}`) || dir.includes(`loom-wpr-kept-${sfx}`)) {
+    if (dir.includes(`loom-wpr-merge-${sfx}`) || dir.includes(`loom-wpr-disposable-${sfx}`) || dir.includes(`loom-wpr-kept-${sfx}`) ||
+        dir.includes(`loom-wpr-gate-${sfx}`) || dir.includes(`loom-wpr-sibling-${sfx}`)) {
       try { fs.rmSync(path.join(os.tmpdir(), dir), { recursive: true, force: true }); } catch { /* ignore */ }
     }
   }
@@ -259,6 +339,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — an escaped process rooted in a worktree (by exe path, cwd, or command line, matched on a path-segment boundary so a sibling worktree can never collide) is identified and killed via the REAL OS process enumerator BEFORE removal is attempted, wired into gcWorktreeDir so both finalizeMerge and boot-reconcile Pass B inherit it — and a worktree Pass B decides to KEEP (still holds real work, a live/protected shape) is NEVER swept."
+  ? "\n✅ ALL PASS — an escaped process rooted in a worktree (by exe path, cwd, or command line, matched on a path-segment boundary so a sibling worktree can never collide) is identified and killed via the REAL OS process enumerator BEFORE removal is attempted, wired into gcWorktreeDir so both finalizeMerge and boot-reconcile Pass B inherit it — and a worktree Pass B decides to KEEP (still holds real work, a live/protected shape) is NEVER swept. confirmWorkerMerge ALSO reaps its OWN worktree pre-gate (a second, earlier call site) while an unrelated sibling worktree is never touched."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

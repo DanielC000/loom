@@ -48,7 +48,7 @@ const GIT_TIMEOUT_FLOOR_MS = 1_000;
 
 /** {@link SessionService.confirmWorkerMerge}'s settled result shape — named so it can be threaded
  *  through {@link PendingOpRegistry} (card fb8df559 Part 1) without repeating the inline object type. */
-type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked" };
+type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string };
 
 /**
  * worker_set_mode's mode ALLOWLIST (card 610abe29) — the security boundary for `setWorkerMode`.
@@ -286,9 +286,11 @@ export class SessionService {
    * PREVENTION: kill an escaped build/dev-server process rooted in the worktree BEFORE the removal below
    * even attempts to run). `undefined` in production ⇒ {@link gcWorktreeDir} falls back to the real OS
    * process-enumerate-and-kill. Lets a test drive a deterministic fake process list through gcWorktreeDir
-   * without touching real OS processes.
+   * without touching real OS processes. The optional second-arg `excludePids` lets confirmWorkerMerge's
+   * pre-gate sweep (run BEFORE the confirming worker is stopped) exclude that worker's own still-live pty
+   * pid from the kill set — see the pre-gate call site's doc comment.
    */
-  private readonly reapWorktreeProcesses: ((worktreePath: string) => Promise<{ killedPids: number[] }>) | undefined;
+  private readonly reapWorktreeProcesses: ((worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>) | undefined;
   /**
    * SLOW-retry policy for a wedged worktree (task dea6728e — the owner-directed refinement: "quarantine"
    * must not mean "dangles forever"). A wedge is usually eventually-resolvable (a held OS-indexer/
@@ -382,7 +384,7 @@ export class SessionService {
     opts?: {
       gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number; runTimeoutMs?: number;
       removeDir?: (target: string, timeoutMs: number) => Promise<{ removed: boolean; killed: boolean }>;
-      reapWorktreeProcesses?: (worktreePath: string) => Promise<{ killedPids: number[] }>;
+      reapWorktreeProcesses?: (worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>;
       wedgeSweepIntervalMs?: number; wedgeGiveUpAttempts?: number; wedgeGiveUpMs?: number;
     },
   ) {
@@ -4305,6 +4307,33 @@ export class SessionService {
     const orchestration = resolveConfig(project.config).orchestration;
     const gate = orchestration.gateCommand;
     const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
+
+    // EARLY IDEMPOTENCY (finding 864e79fe — false-negative "build gate failed" after a SUCCESSFUL merge):
+    // a stale confirm retry (e.g. a client-timeout on the FIRST call — see confirmWorkerMergeTracked —
+    // followed by a re-call that lands after the pending-op entry already settled+evicted) re-invokes this
+    // method for real, but a PRIOR call may have already merged + finalized this exact worker: worktree
+    // removed, branch deleted. Running the gate below against that now-gone worktreePath used to make the
+    // gate fail (its cwd doesn't exist) and falsely report a build-gate failure for a merge that had
+    // already SUCCEEDED. Gated on BOTH signals, not just one:
+    //  - worktreePath is GONE from disk — cheap, checked first, and is what actually breaks the gate; a
+    //    branch that's landed but whose worktree is still genuinely present (e.g. merge-reject-notify-
+    //    suppress.mjs scenario B: an out-of-band manual squash-merge racing a daemon confirm whose gate is
+    //    STILL failing for its own real reason) must keep running the gate/report the real failure — only
+    //    the manager-facing NOTIFY is reconciled away there (shouldSuppressMergeReject), never the return
+    //    value or the gate itself skipped.
+    //  - the branch's work is reachable from main via the deterministic `Loom-Worker-Branch` trailer
+    //    (findLandedSquashCommit — same signal mergeBranch's own ALREADY_MERGED classification uses, incl.
+    //    its re-task guard: a branch RE-CUT onto a prior squash with genuine NEW work returns null, so a
+    //    live re-task is never short-circuited here).
+    // Only when the worktree is gone AND the landing is proven do we finish idempotently without touching
+    // the gate or any git state that's already been retired.
+    if (!fs.existsSync(worktreePath)) {
+      const alreadyLanded = await findLandedSquashCommit(project.repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
+      if (alreadyLanded) {
+        return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath });
+      }
+    }
+
     const evt = (kind: OrchestrationEvent["kind"], detail?: Record<string, unknown>) => this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId, taskId, kind, detail,
     });
@@ -4349,6 +4378,37 @@ export class SessionService {
     // Auditor finding b9515beb). Same fail-closed short-circuit semantics as the old `&&` chain: the
     // first non-zero step stops the run.
     if (gate) {
+      // PRE-GATE CLEANUP (finding c21487e8 — Windows EPERM): a lingering dev-server/build process the
+      // worker left running (an escaped vite/esbuild that detached from the pty's process tree) can hold
+      // a lock on this worktree's node_modules, making the gate's own install/build step fail with a
+      // spurious EPERM/sharing-violation even though the code is fine. Reap it BEFORE running the gate —
+      // reusing the EXACT SAME worktree-scoped predicate {@link reapProcessesRootedInWorktree} already
+      // uses to clear a worktree right before removal (task 8e5a7a5e, wired via the same injectable
+      // `reapWorktreeProcesses` seam as gcWorktreeDir): matched STRICTLY by executable path / cwd /
+      // command line rooted under THIS worker's OWN `worktreePath`, at a path-segment boundary (never a
+      // bare image-name or port match — see that function's SAFETY doc for the full scoping proof), and
+      // never the daemon's own pid. No new kill logic is introduced here — this is the identical, already
+      // safety-reviewed helper applied at an earlier point in the same lifecycle.
+      //
+      // WORKER SELF-EXCLUSION (Code Review finding on card 864e79fe): unlike gcWorktreeDir's reap — which
+      // only ever runs AFTER the confirming worker has already been hard-stopped (finalizeMerge stops it
+      // before this method retires the worktree) — THIS sweep runs BEFORE that stop. The worker's own
+      // claude pty is genuinely rooted in `worktreePath` (cwd==worktreePath on Linux; the worktree path
+      // appears in its own spawn argv on Windows) and would otherwise match and get killed here. That's
+      // wrong: on a subsequent real gate FAILURE this method fails closed and RETAINS the worktree for
+      // re-tasking — but a worker killed here can't be re-tasked, it can only be resumed (losing its
+      // in-context reasoning). The worker's own pty does not hold the node_modules lock this sweep exists
+      // to clear (that's always an escaped/detached build child, e.g. vite/esbuild) — so excluding it costs
+      // nothing. Do NOT instead hard-stop the worker before this sweep: that would break the fail-closed
+      // retain-for-re-task contract on a genuine gate failure.
+      const workerPid = this.pty.getPid?.(workerSessionId);
+      const reap = this.reapWorktreeProcesses ?? ((p: string, o?: { excludePids?: number[] }) => reapProcessesRootedInWorktree(p, { excludePids: o?.excludePids }));
+      try {
+        await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] });
+      } catch {
+        // Best-effort by construction, mirroring gcWorktreeDir's identical guard: an injected/broken seam
+        // must never abort the gate/merge it's only meant to help along.
+      }
       const gateResult = await runGateSequential(gate, worktreePath, gateTimeoutMs);
       evt("build_gate", { passed: gateResult.passed });
       if (!gateResult.passed) {
@@ -4399,17 +4459,8 @@ export class SessionService {
         return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", emptyKind: "STAGE_EMPTY_RETRY" };
       }
       // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the
-      // bookkeeping idempotently — retire the worktree + mark the task done — and report it distinguishably.
-      // NOT routed through rejectNotify/shouldSuppressMergeReject: this is a SUCCESS announcement (not a
-      // rejection) and this branch is BY DEFINITION the already-landed case, so the ancestry check would
-      // suppress it unconditionally — it always sends.
-      try { this.pty.enqueueStdin(managerSessionId, `[loom:already-merged] worker ${workerSessionId} (task ${taskId ?? "none"}) — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.`, "system", undefined, undefined, "agent"); } catch { /* manager not live */ }
-      this.pty.stop(workerSessionId, "hard");
-      for (let i = 0; i < 50 && this.pty.isAlive(workerSessionId); i++) {
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath });
-      return { merged: true, emptyKind: "ALREADY_MERGED" };
+      // bookkeeping idempotently via the SAME helper the early-idempotency check above uses.
+      return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath });
     }
 
     // Green: the branch is on the canonical repo. The worker (which reported 'done' but is still
@@ -4425,15 +4476,44 @@ export class SessionService {
     // id8-colliding task — doesn't hit "branch already exists"), and finish the task. The rejected
     // paths above return early WITHOUT deleting, so a re-task keeps its retained worktree + branch.
     await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath });
-    return { merged: true };
+    // NO-GATE WARNING (finding 8363e602): with no gateCommand configured, the branch above merges
+    // unconditionally — carry that forward explicitly so the manager knows this merge was NOT verified by
+    // any build/DoD check, rather than silently rubber-stamping it with no signal either way.
+    return gate ? { merged: true } : { merged: true, warning: "unverified: no gateCommand is configured for this project — the merge was NOT checked by any build/DoD gate" };
+  }
+
+  /**
+   * Shared finish for the ALREADY_MERGED case (the branch's work is already reachable from main) —
+   * reached either EARLY, before the gate/stranded-check/merge even run (a stale confirm retry landing
+   * after a PRIOR call already merged + finalized this worker), or from {@link mergeBranch}'s own
+   * noop/ALREADY_MERGED classification (a duplicate confirm that races the squash itself). Idempotent:
+   * retires the worktree + branch and marks the task done without a new commit. NOT routed through
+   * rejectNotify/shouldSuppressMergeReject: this is a SUCCESS announcement (not a rejection) and the
+   * caller only ever reaches this on an already-confirmed-landed branch, so the ancestry check would
+   * suppress it unconditionally — it always sends.
+   */
+  private async finishAlreadyMerged(args: {
+    managerSessionId: string; workerSessionId: string; taskId: string | null;
+    worktreePath: string; branch: string; repoPath: string;
+  }): Promise<ConfirmMergeResult> {
+    try { this.pty.enqueueStdin(args.managerSessionId, `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.`, "system", undefined, undefined, "agent"); } catch { /* manager not live */ }
+    this.pty.stop(args.workerSessionId, "hard");
+    for (let i = 0; i < 50 && this.pty.isAlive(args.workerSessionId); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await this.finalizeMerge(args);
+    return { merged: true, emptyKind: "ALREADY_MERGED" };
   }
 
   /**
    * CLIENT-TIMEOUT-RESILIENT entry point for the `worker_merge_confirm` MCP tool (card fb8df559 Part 1) —
    * the ONLY caller-visible change is at this outer layer; {@link confirmWorkerMerge} itself (the
    * stranded-work backstop, the gate, the squash-merge, the ALREADY_MERGED/STAGE_EMPTY_RETRY idempotency)
-   * is completely untouched. Keyed `merge:${workerSessionId}` — unambiguous, no prefix-resolution
-   * involved, so unlike spawn there is no "different string, same target" edge case here at all.
+   * is unchanged BY THIS card — confirmWorkerMerge now also short-circuits an already-landed branch
+   * EARLY (before the gate), which only makes a stale retry through this same registry cheaper and
+   * correct, without changing this outer layer's own contract at all. Keyed `merge:${workerSessionId}` —
+   * unambiguous, no prefix-resolution involved, so unlike spawn there is no "different string, same
+   * target" edge case here at all.
    *
    * A stale retry that lands AFTER the op has settled+been consumed just re-invokes confirmWorkerMerge for
    * real — safe because that method's OWN ALREADY_MERGED re-derive-from-clean-index already handles a
