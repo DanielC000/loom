@@ -12,6 +12,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (S) SURFACE — my_context stays READ-ONLY: NO set/propose/confirm gate tool is registered on the
 //       manager or worker surface (the trust boundary is untouched), and the worker surface is still
 //       exactly { my_context, worker_report }.
+//   (W) Pre-first-turn contextWindow/model reflect the session's CONFIGURED profile model (not the
+//       misleading DEFAULT_CONTEXT_WINDOW/null), with an explicit measured:false marker either way.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -114,6 +116,79 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
     try { c = ctx("does-not-exist"); } catch { threw = true; }
     check("(G) unknown session → resolves to 'none configured', does not throw",
       !threw && c?.gateCommand?.configured === false && c?.gateCommand?.command === null);
+  }
+
+  db.close();
+  rmDb(file);
+}
+
+// ================ (W) pre-first-turn contextWindow reflects the CONFIGURED model ================
+// Board bug: before any measured turn, my_context used to return the DEFAULT_CONTEXT_WINDOW (200k) +
+// model:null even for a session whose Profile pins a genuine 1M-window model — a manager reading that
+// pre-turn could misjudge headroom or recycle prematurely. The CONFIGURED model is knowable at spawn
+// (session.agentId → agent.profileId → profile.model), so the unmeasured branch must reuse it instead
+// of guessing, and must mark `measured:false` so a genuine 200k (no profile) is never confused for one.
+{
+  const file = tmpDbFile("premeasure");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+
+  db.insertProject({
+    id: "pW", name: "Windowed", repoPath: "/w", vaultPath: "/w", config: {}, createdAt: now, archivedAt: null,
+  });
+  // A Profile pinned to a genuine 1M-window model (Claude 5 flagship family).
+  db.insertProfile({
+    id: "profBig", name: "Big Window", role: "worker", description: "", allowDelta: [], skills: null,
+    model: "claude-opus-4-8", icon: null,
+  });
+  // A Profile with NO model set (null = engine default — genuinely unknown pre-turn).
+  db.insertProfile({
+    id: "profNoModel", name: "No Model", role: "worker", description: "", allowDelta: [], skills: null,
+    model: null, icon: null,
+  });
+  db.insertAgent({ id: "aBig", projectId: "pW", name: "big", startupPrompt: "x", position: 0, profileId: "profBig" });
+  db.insertAgent({ id: "aNoModel", projectId: "pW", name: "nm", startupPrompt: "x", position: 0, profileId: "profNoModel" });
+  db.insertAgent({ id: "aNoProfile", projectId: "pW", name: "np", startupPrompt: "x", position: 0, profileId: null });
+
+  const mkUnmeasured = (id, agentId) => db.insertSession({
+    id, projectId: "pW", agentId, engineSessionId: null, title: null, cwd: "/w",
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "worker",
+  });
+  mkUnmeasured("wkrBig", "aBig");
+  mkUnmeasured("wkrNoModel", "aNoModel");
+  mkUnmeasured("wkrNoProfile", "aNoProfile");
+
+  const router = new OrchestrationMcpRouter(db, {});
+  const ctx = (id) => router.myContext(id);
+
+  // A 1M-model Profile's window is surfaced BEFORE any measured turn (the fix).
+  {
+    const c = ctx("wkrBig");
+    check("(W) unmeasured 1M-profile session → contextWindow reflects the CONFIGURED model, not 200k",
+      c.contextWindow === 1_000_000);
+    check("(W) unmeasured 1M-profile session → model is the CONFIGURED model id (not null)",
+      c.model === "claude-opus-4-8");
+    check("(W) unmeasured session → measured:false explicitly marks the unmeasured reading",
+      c.measured === false);
+    check("(W) unmeasured session → pct stays null (never a fake occupancy)", c.pct === null);
+  }
+
+  // A Profile with no model set (engine default) → genuinely unknown pre-turn: falls back to the
+  // DEFAULT_CONTEXT_WINDOW, but still explicit measured:false (never mistaken for a real 200k reading).
+  {
+    const c = ctx("wkrNoModel");
+    check("(W) unmeasured no-model-profile session → falls back to DEFAULT_CONTEXT_WINDOW (200k)",
+      c.contextWindow === 200_000);
+    check("(W) unmeasured no-model-profile session → measured:false", c.measured === false);
+  }
+
+  // No profile at all (plain agent) → same graceful fallback, never throws.
+  {
+    let threw = false; let c;
+    try { c = ctx("wkrNoProfile"); } catch { threw = true; }
+    check("(W) unmeasured no-profile session → resolves gracefully, no throw",
+      !threw && c?.contextWindow === 200_000 && c?.measured === false);
   }
 
   db.close();

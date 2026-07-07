@@ -124,15 +124,28 @@ export class OrchestrationMcpRouter {
    */
   private myContext(sessionId: string): Record<string, unknown> {
     const s = this.db.getSession(sessionId);
-    const model = s?.model ?? null;
-    const contextWindow = contextWindowForModel(model);
     const ctxInputTokens = s?.ctxInputTokens ?? null;
     const measuredAt = s?.ctxUpdatedAt ?? null;
     const gateCommand = this.resolvedGateCommand(s?.projectId);
     if (ctxInputTokens == null) {
-      return { ctxInputTokens: null, contextWindow, pct: null, model, measuredAt, gateCommand,
-        note: "context not measured yet (no completed turn) — occupancy unknown" };
+      // Pre-first-turn: the transcript-derived `s.model` is still null (nothing measured yet), but the
+      // CONFIGURED model is already known at spawn via the session's agent → Profile (`profile.model`,
+      // the same value `resolveProfile` reads to pick --model). Reuse it so an unmeasured 1M-window
+      // session reports its real window instead of the DEFAULT_CONTEXT_WINDOW fallback. `measured:false`
+      // marks the reading explicit either way, so a genuine 200k (no profile / engine-default model —
+      // truly unknown pre-turn) is never mistaken for a measured occupancy.
+      const agent = s?.agentId ? this.db.getAgent(s.agentId) : undefined;
+      const profile = agent?.profileId ? this.db.getProfile(agent.profileId) : undefined;
+      const model = profile?.model ?? null;
+      const contextWindow = contextWindowForModel(model);
+      return {
+        ctxInputTokens: null, contextWindow, pct: null, model, measuredAt, gateCommand, measured: false,
+        note: "context not measured yet (no completed turn) — occupancy unknown; contextWindow/model " +
+          "reflect the CONFIGURED profile model when set, else the DEFAULT_CONTEXT_WINDOW fallback",
+      };
     }
+    const model = s?.model ?? null;
+    const contextWindow = contextWindowForModel(model);
     return {
       ctxInputTokens,
       contextWindow,
@@ -153,10 +166,12 @@ export class OrchestrationMcpRouter {
           "{ctxInputTokens, contextWindow, pct, model, measuredAt, gateCommand}: pct is your measured " +
           "context size as a percentage of your model's window. Use it at a clean seam to self-assess — " +
           "a manager to decide whether to recycle_me, a worker to worker_report that it's getting heavy. " +
-          "If not yet measured, pct is null with a note (not a fake 0). `gateCommand` is the project's " +
-          "RESOLVED build/DoD gate, READ-ONLY: {configured:true, command} when set, else " +
-          "{configured:false, command:null, note} — when unconfigured, ASK THE OWNER to set one (a " +
-          "human-only action); never hand-roll a gate command into a worker's DoD.",
+          "If not yet measured (no completed turn), pct is null and `measured:false` is set explicitly — " +
+          "contextWindow/model in that case reflect your CONFIGURED profile model (still accurate), not a " +
+          "fake reading. `gateCommand` is the project's RESOLVED build/DoD gate, READ-ONLY: " +
+          "{configured:true, command} when set, else {configured:false, command:null, note} — when " +
+          "unconfigured, ASK THE OWNER to set one (a human-only action); never hand-roll a gate command " +
+          "into a worker's DoD.",
         inputSchema: {},
       },
       async () => ok(this.myContext(sessionId)),
