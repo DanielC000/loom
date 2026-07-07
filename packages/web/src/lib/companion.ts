@@ -47,8 +47,8 @@ export const TELEGRAM_CHANNEL = "telegram";
 
 // The write-side form state for creating/configuring a companion. `botToken` is write-only: blank on an
 // EDIT means "keep the stored token"; on a CREATE it is required. `heartbeatIntervalMinutes` is a text
-// field (blank = 0 = off). The proactive HOME is DAEMON-GLOBAL (app_meta), so it is deliberately NOT on
-// this per-companion form — it is managed on its own global control (PL ruling 2026-07-01).
+// field (blank = 0 = off). The proactive HOME is per-session (app_meta), so it is deliberately NOT on
+// this per-companion form — it is managed on its own dedicated control (PL ruling 2026-07-01).
 export interface CompanionConfigForm {
   sessionId: string;
   botToken: string;
@@ -151,8 +151,9 @@ export function buildConfigBody(form: CompanionConfigForm, mode: "create" | "edi
   if (allowedChatId) body.allowedChatId = allowedChatId;
   // botToken: WRITE-ONLY. Only ever attach a user-typed token; a blank field never sends one.
   if (token) body.botToken = token;
-  // NOTE: the proactive HOME is intentionally NOT written here — it is daemon-global (app_meta), owned by
-  // the dedicated global-home control, so a per-companion config write can never clobber the shared value.
+  // NOTE: the proactive HOME is intentionally NOT written here — it is per-session (app_meta, keyed
+  // companion_home:<sessionId>), owned by the dedicated per-companion home control, so this config write
+  // can never clobber another companion's home value.
 
   return { body };
 }

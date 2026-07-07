@@ -262,8 +262,9 @@ function ProactiveHomeSection({ sessionId }: { sessionId: string }) {
 // Voice (STT/TTS) is a daemon-GLOBAL opt-in (owner-directed 2026-07-06), NOT per-companion — it gates
 // whether the daemon is ALLOWED to install faster-whisper (~500MB) + kokoro-onnx (~197MB) at all. Off
 // (the default): voice notes/replies degrade to plain text, exactly as if voice were never configured.
-// Styled + wired exactly like ProactiveHomeSection above (a daemon-global value surfaced in this Manage
-// tab): reads/writes the SAME `/api/platform/config` surface the (human-only) daemon tuning uses.
+// Styled like ProactiveHomeSection above (which is per-companion) — unlike that section, voice
+// provisioning genuinely IS daemon-global: it reads/writes the SAME `/api/platform/config` surface the
+// (human-only) daemon tuning uses.
 function VoiceProvisioningSection() {
   const qc = useQueryClient();
   const { data, isLoading, isError, error } = useQuery({ queryKey: ["platformConfig"], queryFn: api.getPlatformConfig });
@@ -618,12 +619,12 @@ function ConfigSection({ companion, onChanged, onDeleted }: { companion: Compani
             <Chip label="scope" value={cfg.chatScope} />
             <Chip label="chat" value={cfg.allowedChatId} />
             <Chip label="heartbeat" value={cfg.heartbeatIntervalMinutes ? `${cfg.heartbeatIntervalMinutes}m` : "off"} tone={cfg.heartbeatIntervalMinutes ? "phosphor" : "muted"} />
-            <Chip label="home (global)" value={cfg.home ? `${cfg.home.channel}:${cfg.home.chatId}` : "unset"} tone={cfg.home ? undefined : "muted"} />
+            <Chip label="home" value={cfg.home ? `${cfg.home.channel}:${cfg.home.chatId}` : "unset"} tone={cfg.home ? undefined : "muted"} />
           </div>
           <p style={{ ...hint, margin: 0 }}>Changes apply on the next daemon restart.</p>
           <p style={{ ...hint, margin: 0 }}>
-            The proactive <strong style={{ color: color.text }}>home</strong> is daemon-global (shared by every
-            companion) — manage it under <strong style={{ color: color.text }}>Proactive home</strong> below in this Manage tab.
+            The proactive <strong style={{ color: color.text }}>home</strong> is per-companion — manage it under{" "}
+            <strong style={{ color: color.text }}>Proactive home</strong> below in this Manage tab.
           </p>
           <div>
             {confirmDel ? (
