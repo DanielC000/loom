@@ -804,6 +804,13 @@ export type TurnRoute = CompanionRoute;
  */
 export type QueuedMessageKind = "warning" | "agent";
 export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind };
+/**
+ * Distinguishes `enqueueStdin`'s two `delivered:false` outcomes, which otherwise read identically at a
+ * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
+ * `"held"` = queued FIFO on a live-but-busy/not-ready session — it WILL deliver at the next turn
+ * boundary. A caller that only checked `delivered:false` could conflate "dropped" with "queued".
+ */
+export type EnqueueDeliveryReason = "session-dead" | "held";
 
 interface Live {
   pty: IPty;
@@ -2081,7 +2088,10 @@ export class PtyHost {
    *     into one garbled message (the observed manager/worker collision) — so we HOLD until the human
    *     frees their box (Enter/Ctrl-C/Esc/kill-line, or backspaces it empty). See deferForHumanDraft.
    * Also self-heals a STUCK-busy session first, so a report can't strand behind a phantom 'busy'.
-   * Returns whether it went out now, or its 1-based queue position.
+   * Returns whether it went out now, or its 1-based queue position. A `delivered:false` result also
+   * carries `reason` (see EnqueueDeliveryReason) so a caller can tell a dead-drop (`"session-dead"` —
+   * no live pty, nothing will ever deliver this) apart from a hold (`"held"` — queued FIFO, will
+   * deliver at the next turn boundary); both used to read as the same bare `{delivered:false}`.
    *
    * `source` defaults to 'system' so EVERY existing programmatic caller (worker reports, idle/context/
    * busy nudges, resume notes, escalations) stays 'system' unchanged; only the REST composer passes
@@ -2091,9 +2101,9 @@ export class PtyHost {
    * keeps today's full-coalesce behavior byte-identical; every production call site that enqueues an
    * agent/human-authored message passes `"agent"` explicitly.
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning"): { delivered: boolean; position?: number } {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning"): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason } {
     const live = this.live.get(sessionId);
-    if (!live?.alive) return { delivered: false };
+    if (!live?.alive) return { delivered: false, reason: "session-dead" };
     this.healIfStuck(live, sessionId);
     // `ready` gate: a freshly (re)spawned pty is not ready until SessionStart. Submitting before then
     // writes into a still-booting TUI — the Enter is swallowed and the text strands in the composer
@@ -2123,7 +2133,7 @@ export class PtyHost {
     // entry is finally handed to the recipient (drainPending or consumePending), the durable queued
     // message can be marked delivered. Undefined for every existing (non-messaging) caller → a no-op.
     live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind });
-    return { delivered: false, position: live.pending.length };
+    return { delivered: false, position: live.pending.length, reason: "held" };
   }
 
   /**

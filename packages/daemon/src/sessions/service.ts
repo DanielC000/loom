@@ -9,7 +9,7 @@ import {
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
-import type { PtyHost, QueuedMessage, LandedMode } from "../pty/host.js";
+import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
 import { sessionScratchDir } from "../paths.js";
@@ -2427,7 +2427,7 @@ export class SessionService {
    */
   messageWorker(
     managerSessionId: string, workerSessionId: string, text: string,
-  ): { delivered: boolean; position?: number } {
+  ): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason } {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     const framed = `[loom:from-manager]\n${text}`;
@@ -2540,7 +2540,7 @@ export class SessionService {
    */
   private enqueueDurableMessage(
     recipientId: string, framedText: string, ctx: { sender: string; taskId?: string | null },
-  ): { delivered: boolean; position?: number } {
+  ): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason } {
     const msgId = randomUUID();
     // onDeliver carries an OPTIONAL reason: the normal drain/pull paths fire it with no arg (a plain
     // delivery); a flush/SUPERSEDE caller (redirectWorker) passes "superseded" so the resolution event
