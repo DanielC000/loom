@@ -28,7 +28,14 @@ function resolveInVault(vaultPath: string, relPath: string): string | null {
   const root = path.resolve(vaultPath);
   const target = path.resolve(root, relPath);
   // Reject writing the root itself, and any path that is not strictly within root (lexical guard).
+  // This — not the symlink walk below — is what rejects a genuine `..`/absolute escape, so it applies
+  // whether or not the vault root itself exists on disk yet.
   if (target === root || !target.startsWith(root + path.sep)) return null;
+  // The vault root hasn't been scaffolded yet (e.g. a freshly created project's vaultPath). Nothing on
+  // disk can be a symlink escape if the root doesn't even exist, and the lexical check above already
+  // proved `target` is confined to it — so let the caller create it (writeVaultFile/createVaultFile
+  // mkdir the parent chain before writing). This is NOT a traversal case; it's just an uncreated root.
+  if (!fs.existsSync(root)) return target;
   // Symlink guard: the target may not exist yet (create/write), so walk up to the deepest existing
   // ancestor and confirm its REAL path is still within the real vault root.
   try {
@@ -41,8 +48,19 @@ function resolveInVault(vaultPath: string, relPath: string): string | null {
     }
     const realProbe = fs.realpathSync(probe);
     if (realProbe !== realRoot && !realProbe.startsWith(realRoot + path.sep)) return null;
-  } catch { return null; } // missing/unreadable root → reject
+  } catch { return null; } // unreadable root/ancestor → reject
   return target;
+}
+
+/**
+ * Best-effort scaffold of a project's vault ROOT directory (mkdir -p; never throws). Called from
+ * project_create/project_init so a freshly bound vaultPath is writable immediately — without this, a
+ * project whose vaultPath doesn't yet exist on disk hits `resolveInVault`'s missing-root path on its
+ * FIRST write instead (which now scaffolds it there too), but scaffolding at create time means the
+ * directory — and thus the project — is visibly ready right away.
+ */
+export function ensureVaultRoot(vaultPath: string): void {
+  try { fs.mkdirSync(vaultPath, { recursive: true }); } catch { /* best-effort — vault_write surfaces real errors */ }
 }
 
 /** Write (create or overwrite) a file's text content within the vault, then commit. */

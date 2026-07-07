@@ -11,6 +11,7 @@ import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
+import { ensureVaultRoot } from "../vault/writer.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
@@ -128,6 +129,10 @@ export class SetupMcpRouter {
           if (!(await isGitRepo(repoPath))) return ok({ error: `repoPath is not an existing git repository: ${repoPath}` });
           repo = repoPath;
           vault = vaultPath ?? repoPath;
+          // Scaffold a vaultPath that differs from repoPath (repoPath is already confirmed to exist
+          // as a git repo, so this is a no-op in the default case) so the project's vault is writable
+          // immediately — a vault_write against an uncreated root otherwise looks like a path escape.
+          ensureVaultRoot(vault);
           isCodeRepo = true;
         } else {
           // VAULT-ONLY project: no repo. vaultPath must be an existing directory (need NOT be a git repo) —

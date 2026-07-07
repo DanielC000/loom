@@ -10,7 +10,7 @@ import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { GitWriter } from "../git/writer.js";
-import { writeVaultFile } from "../vault/writer.js";
+import { writeVaultFile, ensureVaultRoot } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
 import { isPlatformProfile } from "../profiles/seed.js";
@@ -423,8 +423,14 @@ export class PlatformMcpRouter {
         const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
         if (!(await isGitRepo(repoPath))) return ok({ error: `repoPath is not an existing git repository: ${repoPath}` });
+        const vault = vaultPath ?? repoPath;
+        // Scaffold a vaultPath that differs from repoPath (repoPath is already a real, existing git
+        // repo, so this is a no-op in the default case) so the project's vault is writable immediately
+        // — without this, a fresh vaultPath with no directory yet on disk misdirects vault_write's
+        // traversal guard (see vault/writer.ts resolveInVault) into looking like a path escape.
+        ensureVaultRoot(vault);
         const project: Project = {
-          id: randomUUID(), name, repoPath, vaultPath: vaultPath ?? repoPath,
+          id: randomUUID(), name, repoPath, vaultPath: vault,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // an agent-created project is NEVER a reserved/system one (boot-seed only)
         };

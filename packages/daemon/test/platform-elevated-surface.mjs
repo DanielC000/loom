@@ -62,6 +62,7 @@ execSync(`git remote add origin "${bare}"`, { cwd: repo }); // local bare remote
 // --- a real temp VAULT dir (the project vaultPath), git-init'd so vault_write's commit path is exercised.
 const vault = path.join(os.tmpdir(), `loom-p3-vault-${Date.now()}`);
 const outside = path.join(os.tmpdir(), `loom-p3-outside-${Date.now()}`); // path-escape target (must stay empty)
+const freshVault = path.join(os.tmpdir(), `loom-p3-fresh-vault-${Date.now()}`); // (c2) — deliberately NOT created here
 fs.mkdirSync(vault, { recursive: true });
 fs.mkdirSync(outside, { recursive: true });
 execSync("git init -q && git config user.email p3@loom && git config user.name p3", { cwd: vault });
@@ -188,10 +189,25 @@ try {
   check("(c) vault_write REJECTS an absolute path escape", vwAbs.ok === false && vwAbs.reason === "traversal" && !fs.existsSync(path.join(outside, "abs-evil.md")));
   check("(c) vault_write on an unknown project 404s", (await call("vault_write", { projectId: "ghost", path: "a.md", content: "x" })).error === "project not found");
 
+  // ===== (c2) vault_write against a project whose vaultPath doesn't exist on disk yet — a freshly
+  //       bound project. This must SCAFFOLD the root and write, not misreport 'traversal' (the bug this
+  //       fixes: a security-flavored reason was returned for a merely-uncreated vault root). A genuine
+  //       escape attempt against that same missing root must still be rejected as 'traversal'. =====
+  db.insertProject({ id: "pFresh", name: "Fresh", repoPath: repo, vaultPath: freshVault, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  check("(c2) the fresh project's vaultPath does not exist yet", !fs.existsSync(freshVault));
+  const vwFresh = await call("vault_write", { projectId: "pFresh", path: "notes/hello.md", content: "hello from a fresh vault\n" });
+  check("(c2) vault_write on a missing vault root SUCCEEDS (scaffolded, not 'traversal')", vwFresh.ok === true);
+  check("(c2) the vault root now exists on disk",
+    fs.existsSync(freshVault) && fs.readFileSync(path.join(freshVault, "notes", "hello.md"), "utf8").includes("hello from a fresh vault"));
+  const vwFreshEscape = await call("vault_write", { projectId: "pFresh", path: "../" + path.basename(outside) + "/evil-fresh.md", content: "PWNED" });
+  check("(c2) an escape attempt against a MISSING vault root is still rejected as 'traversal'",
+    vwFreshEscape.ok === false && vwFreshEscape.reason === "traversal");
+  check("(c2) the escape wrote nothing outside", !fs.existsSync(path.join(outside, "evil-fresh.md")));
+
   await client.close();
 } finally {
   db.close();
-  for (const d of [tmpHome, repo, bare, vault, outside]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
+  for (const d of [tmpHome, repo, bare, vault, outside, freshVault]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
 }
 
 console.log(failures === 0

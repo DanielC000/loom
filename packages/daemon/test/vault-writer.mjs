@@ -61,6 +61,23 @@ try {
   check("nothing written/removed outside the vault", JSON.stringify(fs.readdirSync(outside).sort()) === outsideBefore);
   check("outside secret untouched", fs.readFileSync(path.join(outside, "secret.md"), "utf8").includes("TOP SECRET"));
 
+  // 5b. MISSING VAULT ROOT is scaffolded on first write — NOT rejected as 'traversal'. A freshly
+  //     bound project (vaultPath set, but nothing on disk yet) must be writable with no manual mkdir.
+  const freshVault = path.join(root, "fresh-vault");
+  check("fresh vault root does not exist yet", !fs.existsSync(freshVault));
+  const scaffolded = await writeVaultFile(freshVault, "notes/hello.md", "# hello\nscaffolded\n");
+  check("write into a missing vault root succeeds (scaffolded, not 'traversal')", scaffolded.ok === true);
+  check("the vault root now exists on disk", fs.existsSync(freshVault) && fs.statSync(freshVault).isDirectory());
+  check("scaffolded write round-trips", (readVaultFile(freshVault, "notes/hello.md") ?? "").includes("scaffolded"));
+  // A genuine escape against a MISSING root must still be rejected as 'traversal' — scaffolding the
+  // root must never widen the traversal guard.
+  const freshVault2 = path.join(root, "fresh-vault-2");
+  const escapeAgainstMissingRoot = await writeVaultFile(freshVault2, "../outside/evil2.md", "PWNED");
+  check("'../' escape against a MISSING vault root is still rejected as 'traversal'",
+    escapeAgainstMissingRoot.ok === false && escapeAgainstMissingRoot.reason === "traversal");
+  check("escape against a missing root did not scaffold or write anything", !fs.existsSync(freshVault2));
+  check("escape against a missing root wrote nothing outside", !fs.existsSync(path.join(root, "outside", "evil2.md")));
+
   // 6. COMMIT verification — the writer's ops land in the vault's git history.
   const log = git("log", "--pretty=%s");
   check("history shows the UI write", log.includes("loom: write notes/hello.md (via UI)"));

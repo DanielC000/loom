@@ -191,6 +191,18 @@ try {
   check("(c) project_create: a non-git repoPath is rejected", typeof badRepo.error === "string" && !badRepo.id);
   check("(c) project_create: the rejected create made NO project", db.listAllProjects().length === nBefore);
 
+  // project_create with a CODE repo + a DISTINCT vaultPath that does NOT exist on disk yet → the vault
+  // root is SCAFFOLDED at create time, so the project's vault is writable immediately with no manual
+  // mkdir (the bug this fixes: an uncreated vaultPath used to misdirect vault_write into a misleading
+  // 'traversal' error on its first write).
+  const freshVault = path.join(os.tmpdir(), `loom-setup-fresh-vault-${Date.now()}`);
+  check("(c) fresh vaultPath does not exist yet", !fs.existsSync(freshVault));
+  const createdFreshVault = await call("project_create", { name: "FreshVaultProj", repoPath: repo, vaultPath: freshVault });
+  check("(c) project_create: a distinct non-existent vaultPath is ACCEPTED (not rejected like the vault-only case below)",
+    !!createdFreshVault.id && !createdFreshVault.error);
+  check("(c) project_create: SCAFFOLDS the vaultPath directory on disk",
+    fs.existsSync(freshVault) && fs.statSync(freshVault).isDirectory());
+
   // project_configure with a valid override (AGENT validator) → applied; resolveConfig reflects it.
   const cfg = { kanbanColumns: [{ key: "a", label: "A", role: "defaultLanding" }, { key: "b", label: "B", role: "terminal" }] };
   const configured = await call("project_configure", { projectId: created.id, config: cfg });
@@ -493,6 +505,7 @@ try {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(nonGit, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(freshVault, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0
