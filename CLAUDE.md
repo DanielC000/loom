@@ -291,9 +291,14 @@ root-pinned set: `Architecture.md`, `Vision & Architecture.md`, `Setup Assistant
 living resume doc is **not** a vault note — it's a LOOM_HOME operational file at
 `~/.loom/PLATFORM-LEAD-RESUME.md`, injected into each Lead spawn.)
 **Every other note lives in a taxonomy folder:** `Design/`, `Operations/`, `Roadmap/`, `Release/`,
-`Spikes/`. An **`_Index.md`** map-of-content at the vault root lists every note by group — **read it to
-locate a note instead of Globbing, and update its line when you add or move a note.** Wikilinks resolve by
-note name, so moving a note between folders never breaks a `[[link]]`.
+`Spikes/`. One non-note folder, **`Mockups/`**, archives design-mockup deliverable SETS the owner
+reviews before a build — one sub-folder per feature named `YYYY-MM-DD <Feature>`, each holding the
+interactive mockup HTML + rendered PNG directions (see `Mockups/README.md` for the set list + which
+direction was picked). The **LEAD files a completed mockup set there** (the Web Designer produces it and
+reports the path); verification screenshots of a *built* change are NOT mockups — those stay under
+`~/.loom/workspaces/`, never the vault. An **`_Index.md`** map-of-content at the vault root lists every
+note by group — **read it to locate a note instead of Globbing, and update its line when you add or move a
+note.** Wikilinks resolve by note name, so moving a note between folders never breaks a `[[link]]`.
 
 Like "Commit scopes", this folder vocabulary is **Loom-specific** — every project keeps its own "Vault
 structure" section in its own `CLAUDE.md`; the shipped skills teach the generic shallow-taxonomy +
