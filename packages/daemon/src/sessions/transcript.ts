@@ -58,10 +58,41 @@ export function engineTranscriptExists(cwd: string, engineSessionId: string): bo
  */
 export const TOOL_RESULT_BODY_CAP = 2048;
 
+/**
+ * Repair a CONFIRMED engine-side transcript-capture quirk (Claude Code CLI on Windows, v2.1.202): the
+ * last line of a Grep/Read `-C` context hunk occasionally has its leading comment token collapsed to a
+ * bare backslash where the ENGINE WRITES ITS OWN on-disk JSONL — `// Guard the X` -> `\ Guard the X`,
+ * `/** Every Y` -> `\** Every Y` (verified against a real transcript; the source file itself is
+ * untouched — `git show`/`Read` on the same line reads back clean `//`/`/**`). Loom's daemon never
+ * touches this text before this point (it's a straight `fs.readFileSync` + `JSON.parse` of the engine's
+ * file), so this can't be fixed at the source — but the loom-audit surface must still hand an auditor
+ * VERBATIM code, so repair the known corruption here at read time instead of passing it through.
+ *
+ * Per LINE (Grep/Read output is always line-oriented — `NNNN-`/`NNNN:`/`NNNN\t` decoration then the
+ * source indentation): strip that leading decoration, and if what remains starts with a bare `\`
+ * followed by a space or `*`, restore the dropped slash(es). A source/comment line never legitimately
+ * starts (after its own indentation) with `\ ` or `\*` — that exact pair only arises from this engine
+ * collapse — so the repair can't false-positive on real content; a mid-line backslash (e.g. a quoted
+ * Windows path) is untouched since it never sits at this leading position.
+ */
+const LINE_DECORATION_RE = /^[ \t]*(?:\d+[:\t-])?[ \t]*/;
+function repairMangledCommentMarkers(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const prefixLen = LINE_DECORATION_RE.exec(line)![0].length;
+      const rest = line.slice(prefixLen);
+      if (rest.startsWith("\\ ")) return line.slice(0, prefixLen) + "//" + rest.slice(1);
+      if (rest.startsWith("\\*")) return line.slice(0, prefixLen) + "/" + rest.slice(1);
+      return line;
+    })
+    .join("\n");
+}
+
 /** Pull the human-readable body out of a tool_result content block (string or array-of-blocks form). */
 function toolResultBody(c: Record<string, unknown>): string {
   const content = c.content;
-  if (typeof content === "string") return content;
+  if (typeof content === "string") return repairMangledCommentMarkers(content);
   if (Array.isArray(content)) {
     const parts: string[] = [];
     for (const p of content) {
@@ -71,7 +102,7 @@ function toolResultBody(c: Record<string, unknown>): string {
         if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
       }
     }
-    return parts.join("\n");
+    return repairMangledCommentMarkers(parts.join("\n"));
   }
   return "";
 }
