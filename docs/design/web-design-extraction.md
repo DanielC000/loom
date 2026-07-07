@@ -1,8 +1,6 @@
 # `web-design` skill — source extraction report (step 1/2)
 
-**Status:** Analysis complete — **awaiting human sign-off** before the authoring ticket (step 2/2) starts.
-**Author:** worker session, branch `loom/0006d99170b3`, 2026-06-07.
-**Scope:** Deep-read of the *real* source material of three public design skills and a decision-ready plan for what to carry into Loom's distilled `web-design` skill. **This document writes no skill.** It decides what the skill should contain.
+**Status:** Analysis complete — **awaiting human sign-off** before the authoring ticket (step 2/2) starts. **Author:** worker session, branch `loom/0006d99170b3`, 2026-06-07. **Scope:** Deep-read of the *real* source material of three public design skills and a decision-ready plan for what to carry into Loom's distilled `web-design` skill. **This document writes no skill.** It decides what the skill should contain.
 
 Sources were cloned and read at the content level (not READMEs/landing pages):
 

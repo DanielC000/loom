@@ -1,12 +1,8 @@
 # Package-manager submission runbook (Homebrew · Scoop · winget)
 
-How to ship the Loom CLI through Homebrew, Scoop, and winget — the Phase-2 convenience wrappers around
-the published [`loomctl`](https://www.npmjs.com/package/loomctl) npm package (distribution rationale:
-[`docs/spikes/releases-distribution-research.md`](spikes/releases-distribution-research.md), Option C).
-npm stays the **primary** channel ([`docs/releasing.md`](releasing.md)); these wrap the same payload.
+How to ship the Loom CLI through Homebrew, Scoop, and winget — the Phase-2 convenience wrappers around the published [`loomctl`](https://www.npmjs.com/package/loomctl) npm package (distribution rationale: [`docs/spikes/releases-distribution-research.md`](spikes/releases-distribution-research.md), Option C). npm stays the **primary** channel ([`docs/releasing.md`](releasing.md)); these wrap the same payload.
 
-The **manifest files** live in [`packaging/`](../packaging/) and are generated from the root version
-(see [`packaging/README.md`](../packaging/README.md)). This doc is the **submission** half.
+The **manifest files** live in [`packaging/`](../packaging/) and are generated from the root version (see [`packaging/README.md`](../packaging/README.md)). This doc is the **submission** half.
 
 > ## ⚠️ Everything in this runbook is an OWNER ACTION
 > Creating registry/tap/bucket repos, computing hashes against published artifacts, and opening
@@ -20,18 +16,15 @@ The **manifest files** live in [`packaging/`](../packaging/) and are generated f
    scoop pull the npm registry tarball, so it must exist first.
 2. **[OWNER]** The public GitHub repo `DanielC000/loom` exists with the `vX.Y.Z` release (tag + Release).
 3. **[OWNER]** `packaging/**` has been regenerated at the release version and the `sha256` placeholders
-   filled (see *Computing the hashes* below). Confirm `PackageVersion` / `url` / `version` all read
-   `X.Y.Z` and no `REPLACE_WITH_SHA256_OF_PUBLISHED_ARTIFACT` remains.
+   filled (see *Computing the hashes* below). Confirm `PackageVersion` / `url` / `version` all read `X.Y.Z` and no `REPLACE_WITH_SHA256_OF_PUBLISHED_ARTIFACT` remains.
 
 ## Computing the hashes
 
-The generator leaves `REPLACE_WITH_SHA256_OF_PUBLISHED_ARTIFACT`. Fill the real values once the artifacts
-are published, then re-run `pnpm manifests --sha-npm=… --sha-win-zip=…` (or hand-edit).
+The generator leaves `REPLACE_WITH_SHA256_OF_PUBLISHED_ARTIFACT`. Fill the real values once the artifacts are published, then re-run `pnpm manifests --sha-npm=… --sha-win-zip=…` (or hand-edit).
 
 ### npm tarball sha256 (Homebrew + Scoop)
 
-Both wrap `https://registry.npmjs.org/loomctl/-/loomctl-X.Y.Z.tgz`. Download the **published** tarball
-(not your locally-built one — they can differ) and hash it:
+Both wrap `https://registry.npmjs.org/loomctl/-/loomctl-X.Y.Z.tgz`. Download the **published** tarball (not your locally-built one — they can differ) and hash it:
 
 ```sh
 # [OWNER]
@@ -47,17 +40,10 @@ shasum -a 256 loomctl-X.Y.Z.tgz          # macOS/Linux  → the sha256 (hex)
 
 ### win zip sha256 (winget) — **plus a prerequisite artifact**
 
-winget cannot run npm, and its `portable` installer type accepts only an **`.exe`**. So winget wraps a
-GitHub-Release zip `loomctl-X.Y.Z-win.zip` that must contain a `loom.exe` launcher:
+winget cannot run npm, and its `portable` installer type accepts only an **`.exe`**. So winget wraps a GitHub-Release zip `loomctl-X.Y.Z-win.zip` that must contain a `loom.exe` launcher:
 
 - **[OWNER / INFRA — deferred]** Produce `loomctl-X.Y.Z-win.zip`. It must contain the assembled bundle
-  under a top-level `loomctl-X.Y.Z-win/` dir with a working **`loom.exe`** at its root (the manifest's
-  `NestedInstallerFiles.RelativeFilePath`). Options for `loom.exe`: a **Node SEA** (single-executable
-  app) wrapping `bin/loom.mjs`, a packager (`pkg`/`nexe`), or a thin native stub that execs
-  `node bin\loom.mjs`. If the launcher does **not** bundle Node, Node 22+ must be on the user's PATH —
-  winget cannot declare a node/npm dependency. This artifact is **not produced by the release today**
-  (the release attaches only the `.tgz`); building it is the deferred single-binary work. **Until it
-  exists, do not submit the winget manifest.**
+  under a top-level `loomctl-X.Y.Z-win/` dir with a working **`loom.exe`** at its root (the manifest's `NestedInstallerFiles.RelativeFilePath`). Options for `loom.exe`: a **Node SEA** (single-executable app) wrapping `bin/loom.mjs`, a packager (`pkg`/`nexe`), or a thin native stub that execs `node bin\loom.mjs`. If the launcher does **not** bundle Node, Node 22+ must be on the user's PATH — winget cannot declare a node/npm dependency. This artifact is **not produced by the release today** (the release attaches only the `.tgz`); building it is the deferred single-binary work. **Until it exists, do not submit the winget manifest.**
 - Then hash it: `shasum -a 256 loomctl-X.Y.Z-win.zip` (or `Get-FileHash`).
 
 ## Homebrew
@@ -85,9 +71,7 @@ Two routes; **a custom tap is the right first step** (homebrew-core has a high b
 
 ### Route B — homebrew-core **[OWNER, later]**
 
-Only once Loom is established (homebrew-core requires notability + a stable release history). Fork
-`Homebrew/homebrew-core`, add `Formula/l/loomctl.rb`, run `brew audit --strict --new loomctl` +
-`brew test`, and open a PR. Expect maintainer review. The tap (Route A) is the practical channel.
+Only once Loom is established (homebrew-core requires notability + a stable release history). Fork `Homebrew/homebrew-core`, add `Formula/l/loomctl.rb`, run `brew audit --strict --new loomctl` + `brew test`, and open a PR. Expect maintainer review. The tap (Route A) is the practical channel.
 
 ## Scoop
 
@@ -104,8 +88,7 @@ Scoop distributes via **buckets** (git repos of manifests). **[OWNER]**
    scoop install .\bucket\loomctl.json
    loom --version
    ```
-   (Scoop ships `checkver.ps1`/`auto-pr.ps1` in its `Scoop-Bucket` template — the committed manifest's
-   `checkver` + `autoupdate` blocks drive them so a version bump can be auto-PR'd.)
+   (Scoop ships `checkver.ps1`/`auto-pr.ps1` in its `Scoop-Bucket` template — the committed manifest's `checkver` + `autoupdate` blocks drive them so a version bump can be auto-PR'd.)
 4. Commit + push. Users then install with:
    ```powershell
    scoop bucket add loom https://github.com/DanielC000/scoop-loom
@@ -132,9 +115,7 @@ winget uses a **central community repo** — `microsoft/winget-pkgs` — there i
    ```powershell
    wingetcreate submit packaging\winget       # opens the PR to microsoft/winget-pkgs for you
    ```
-   Or manually: fork `microsoft/winget-pkgs`, place the three files under
-   `manifests/l/Loom/Loomctl/X.Y.Z/`, and open a PR. An automated validation pipeline + maintainer review
-   runs on the PR.
+   Or manually: fork `microsoft/winget-pkgs`, place the three files under `manifests/l/Loom/Loomctl/X.Y.Z/`, and open a PR. An automated validation pipeline + maintainer review runs on the PR.
 4. Users then install with:
    ```powershell
    winget install Loom.Loomctl       # exposes `loom`
