@@ -88,6 +88,68 @@ body {
   background-size: 32px 32px;
 }
 
+/* ── Board (kanban) responsive lane grid ─────────────────────────────────────────
+   Desktop-first, degrade-on-narrow. On a WIDE viewport the lanes are equal 1fr tracks that fill
+   the width and stay all-visible — identical to the old `repeat(N, 1fr)` (min 0 lets them share the
+   width however many there are, no forced scroll). Below the breakpoints a per-lane MIN width kicks
+   in: once the lanes can't all fit at that min, the board scrolls HORIZONTALLY inside its own box
+   instead of crushing every lane to an unreadable sliver — self-adapting to the lane count (a
+   3-lane board still fills the width; a 7-lane board scrolls). A partial next-lane peek is the
+   swipe affordance. Auto-flow:column keeps the lanes in a single row at every width. */
+.loom-board-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px; /* breathing room so the scrollbar never sits on a lane's bottom edge */
+}
+@media (max-width: 1100px) {
+  /* Tablet / small-laptop: stop crushing — a full board of lanes now scrolls rather than shrinking
+     below a readable width. Few lanes still fill the width (1fr wins until the mins overflow). */
+  .loom-board-grid {
+    grid-auto-columns: minmax(240px, 1fr);
+  }
+}
+@media (max-width: 560px) {
+  /* Phone: a tighter min so a full lane plus a peek of the next fits a ~380px viewport. */
+  .loom-board-grid {
+    grid-auto-columns: minmax(200px, 1fr);
+  }
+}
+
+/* Contextual add-lane rail: width lives here (not inline) so it can shrink on phones without an
+   !important override; the vertical "column" word is hidden once the rail narrows. */
+.loom-add-column-rail {
+  width: 42px;
+}
+@media (max-width: 560px) {
+  .loom-add-column-rail {
+    width: 34px;
+  }
+  .loom-add-column-rail .loom-rail-word {
+    display: none;
+  }
+}
+
+/* Skeleton shimmer for the board's first-load placeholder — a faint breathing pulse (dropped under
+   prefers-reduced-motion below). Beats a spinner: the lane layout is already in place as it loads. */
+@keyframes loom-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+.loom-skeleton {
+  animation: loom-skeleton-pulse 1.4s ease-in-out infinite;
+}
+
 /* ── Component-kit interaction states (see components/ui) ─────────────────────── */
 
 /* Button: primary fills on hover; danger tints; default brightens its border. */
@@ -299,6 +361,9 @@ body {
     animation: none;
   }
   .loom-typing-dot {
+    animation: none;
+  }
+  .loom-skeleton {
     animation: none;
   }
 }

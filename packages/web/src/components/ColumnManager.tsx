@@ -313,7 +313,7 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAcc
         opacity: isDragging ? 0.4 : 1,
         transform: transform ? `translateY(${transform.y}px)` : undefined,
       }}>
-      <div ref={dragRef} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 9px" }}>
+      <div ref={dragRef} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 9px", flexWrap: "wrap" }}>
         <span {...listeners} {...attributes} title="Drag to reorder"
           style={{ cursor: "grab", color: color.textMuted, touchAction: "none", userSelect: "none", lineHeight: "16px" }}>⠿</span>
 

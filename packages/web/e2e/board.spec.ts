@@ -286,6 +286,64 @@ test("a deferred card shows as deferred (distinct from held), and un-deferring i
     .toBe(false);
 });
 
+test("pressing Enter in the new-task field adds the card to Inbox and clears the field", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`board-enter-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+
+  await page.goto(`${loomDaemon.baseURL}/board`);
+
+  const title = uniq("via-enter");
+  const input = page.getByPlaceholder("new task title");
+  await input.fill(title);
+  await input.press("Enter"); // keyboard parity with the "Add to Inbox" button
+
+  // Observable #1: the card lands in the Inbox lane; #2: the field clears on a successful add.
+  await expect(cardInLane(page, "Inbox", title)).toBeVisible();
+  await expect(input).toHaveValue("");
+});
+
+test("an empty lane shows a calm empty state, not a blank column", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`board-empty-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+
+  // One card in Inbox → every other default lane is genuinely empty (no filter active).
+  await loomDaemon.createTask(project.id, { title: uniq("lone-card"), columnKey: "inbox" });
+
+  await page.goto(`${loomDaemon.baseURL}/board`);
+
+  // An empty lane reads "no cards yet" (deliberate empty state); the populated lane does not.
+  await expect(lane(page, "Backlog").getByText("no cards yet")).toBeVisible();
+  await expect(lane(page, "Inbox").getByText("no cards yet")).toHaveCount(0);
+});
+
+test("on a narrow viewport the board degrades to a horizontal-scroll lane grid without crushing lanes", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`board-responsive-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+  await loomDaemon.createTask(project.id, { title: uniq("resp-card"), columnKey: "inbox" });
+
+  // A phone-sized viewport, set BEFORE navigating so the first layout is the narrow one.
+  await page.setViewportSize({ width: 380, height: 820 });
+  await page.goto(`${loomDaemon.baseURL}/board`);
+
+  await expect(lane(page, "Inbox")).toBeVisible();
+
+  // The seven default lanes can't fit 380px, so the grid becomes a HORIZONTAL scroll region rather
+  // than squeezing every lane to a sliver: its scroll width exceeds its client width.
+  const grid = page.locator(".loom-board-grid").first();
+  const gridOverflow = await grid.evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(gridOverflow).toBeGreaterThan(0);
+
+  // Each lane keeps a usable minimum width (the crush this fix prevents would be ~40px at repeat(7,1fr)).
+  const inboxBox = await lane(page, "Inbox").boundingBox();
+  expect(inboxBox).not.toBeNull();
+  expect(inboxBox!.width).toBeGreaterThanOrEqual(180);
+
+  // And the board's own content region (<main>) never forces the page to scroll sideways — the board
+  // scrolls INSIDE its grid box, not by widening the page. (The app header is out of scope here.)
+  const mainOverflow = await page.locator("main").evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(mainOverflow).toBeLessThanOrEqual(1);
+});
+
 test("a Blocked lane added to the board renders and holds a card seeded into it", async ({ page, loomDaemon }) => {
   const project = await loomDaemon.createProject(`board-blocked-${Date.now()}`);
   await pinActiveProject(page, project.id);

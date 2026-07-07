@@ -165,6 +165,15 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   return (
     <div>
       {!projectId && <p style={{ color: color.textMuted }}>No project selected.</p>}
+      {/* First-load placeholder: lane shells so the layout settles in, not a blank flash. keepPreviousData
+          keeps this from re-appearing on the 4s refetch — it shows only before the very first response. */}
+      {projectId && !board.data && board.isLoading && <BoardSkeleton />}
+      {/* First-load failure (retries under the hood): a calm line rather than a permanently empty page. */}
+      {projectId && !board.data && board.isError && (
+        <div style={{ marginTop: 10, color: color.red, fontFamily: font.mono, fontSize: 12 }}>
+          couldn’t load the board — retrying…
+        </div>
+      )}
       {projectId && board.data && (
         <>
           <NewTask onCreate={(t) => create.mutate(t)} />
@@ -190,7 +199,10 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
           )}
           <div style={{ display: "flex", gap: 10, marginTop: 10, alignItems: "stretch" }}>
             <DndContext onDragEnd={onDragEnd}>
-              <div style={{ display: "grid", gridTemplateColumns: `repeat(${board.data.columns.length}, 1fr)`, gap: 10, flex: 1, minWidth: 0 }}>
+              {/* Responsive lane grid (.loom-board-grid): equal 1fr lanes when they fit, horizontal
+                  scroll with a usable per-lane min width when they don't (narrow viewport / many lanes)
+                  — so the board degrades gracefully instead of crushing every lane. */}
+              <div className="loom-board-grid">
                 {board.data.columns.map((col) => (
                   <Column key={col.key} col={col}
                     tasks={shownTasks.filter((t) => t.columnKey === col.key)
@@ -374,6 +386,16 @@ function Column({ col, tasks, filterActive, workers, onOpen, cardCount, landingL
         {tasks.length === 0 && filterActive && (
           <div style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11, padding: "8px 2px" }}>no matches</div>
         )}
+        {/* Genuinely-empty lane (no filter): a calm placeholder that doubles as a drop-target hint, so an
+            empty column reads as intentional rather than a broken blank — and lights up when dragged over. */}
+        {tasks.length === 0 && !filterActive && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: 72, textAlign: "center",
+            color: isOver ? color.phosphor : color.textMuted, fontFamily: font.mono, fontSize: 11,
+            border: `1px dashed ${isOver ? color.phosphor : color.border}`, borderRadius: 4,
+            transition: "color 120ms ease, border-color 120ms ease" }}>
+            {isOver ? "drop to move here" : "no cards yet"}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -400,12 +422,12 @@ function HeaderIconButton({ label, onClick, disabled, danger, children }:
 function AddColumnRail({ onAdd, busy }: { onAdd: () => void; busy: boolean }) {
   return (
     <button type="button" onClick={onAdd} disabled={busy} aria-label="Add a column" title="Add a column"
-      className="loom-toggle"
-      style={{ flexShrink: 0, width: 42, alignSelf: "stretch", minHeight: 200, maxHeight: "75vh",
+      className="loom-toggle loom-add-column-rail"
+      style={{ flexShrink: 0, alignSelf: "stretch", minHeight: 200, maxHeight: "75vh",
         background: color.panel, border: `1px dashed ${color.border}`, borderRadius: 4, color: color.textMuted,
         cursor: busy ? "default" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10 }}>
       <span aria-hidden style={{ fontSize: 20, lineHeight: 1 }}>+</span>
-      <span aria-hidden style={{ writingMode: "vertical-rl", textTransform: "uppercase", fontFamily: font.head, fontSize: 10, fontWeight: 700, letterSpacing: "0.12em" }}>column</span>
+      <span aria-hidden className="loom-rail-word" style={{ writingMode: "vertical-rl", textTransform: "uppercase", fontFamily: font.head, fontSize: 10, fontWeight: 700, letterSpacing: "0.12em" }}>column</span>
     </button>
   );
 }
@@ -803,10 +825,38 @@ function DescriptionVoiceNote({ speech }: { speech: SpeechRecognitionApi }) {
 
 function NewTask({ onCreate }: { onCreate: (title: string) => void }) {
   const [title, setTitle] = useState("");
+  const submit = () => { if (title.trim()) { onCreate(title); setTitle(""); } };
+  // flexWrap + a shrinkable, growing input: on a narrow viewport the button wraps below instead of
+  // forcing the row (and the page) to overflow horizontally. Enter submits (keyboard parity with the button).
   return (
-    <div style={{ marginTop: 10, display: "flex", gap: 6 }}>
-      <Input placeholder="new task title" value={title} onChange={(e) => setTitle(e.target.value)} style={{ minWidth: 280 }} />
-      <Button variant="primary" disabled={!title} onClick={() => { onCreate(title); setTitle(""); }}>Add to Inbox</Button>
+    <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
+      <Input placeholder="new task title" value={title} onChange={(e) => setTitle(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } }}
+        style={{ flex: "1 1 260px", minWidth: 0 }} />
+      <Button variant="primary" disabled={!title.trim()} onClick={submit}>Add to Inbox</Button>
+    </div>
+  );
+}
+
+// First-load placeholder for the board — a few lane shells matching the real column chrome (border,
+// radius, the 3px top-bar reserve) so the layout doesn't pop in from a blank page. The faint pulse
+// (.loom-skeleton) is dropped under prefers-reduced-motion. Reuses .loom-board-grid so it's responsive too.
+function BoardSkeleton() {
+  return (
+    <div className="loom-board-grid loom-skeleton" style={{ marginTop: 10 }} aria-hidden>
+      {Array.from({ length: 4 }).map((_, i) => (
+        <div key={i} style={{ background: color.panel, border: `1px solid ${color.border}`, borderRadius: 4,
+          minHeight: 200, maxHeight: "75vh", display: "flex", flexDirection: "column" }}>
+          <div style={{ height: 3 }} />
+          <div style={{ height: 11, width: "44%", margin: "12px 12px 12px", background: color.border, borderRadius: 3 }} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "0 12px 12px" }}>
+            {Array.from({ length: 3 }).map((_, j) => (
+              <div key={j} style={{ height: 34, background: color.panel2, border: `1px solid ${color.border}`,
+                borderLeft: `3px solid ${color.border}`, borderRadius: 4 }} />
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
