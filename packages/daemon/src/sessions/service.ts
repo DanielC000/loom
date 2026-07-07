@@ -1481,11 +1481,19 @@ export class SessionService {
    */
   recoverCrashOrphanedWorkers(
     candidates: CrashOrphanedWorker[],
-    opts: { resumeOne?: (id: string) => boolean; now?: Date } = {},
-  ): { resumed: string[]; skippedParked: string[]; failed: string[] } {
+    opts: { resumeOne?: (id: string) => boolean; now?: Date; soloManagerIds?: string[] } = {},
+  ): { resumed: string[]; skippedParked: string[]; failed: string[]; managersFailed: string[] } {
     const now = opts.now ?? new Date();
+    // Default resumeOne LOGS the real thrown reason (dead transcript / gone worktree / recycled/…) on
+    // failure instead of silently collapsing it to a bare boolean — a resume that doesn't happen must
+    // never be a silent no-op (board evidence: a session was "marked dead-and-skipped" with nothing in
+    // the log explaining why).
     const resumeOne = opts.resumeOne ?? ((id: string): boolean => {
-      try { this.resume(id); return true; } catch { return false; }
+      try { this.resume(id); return true; }
+      catch (e) {
+        console.warn(`[crash-recovery] resume(${id.slice(0, 8)}) failed: ${(e as Error).message}`);
+        return false;
+      }
     });
     const isParked = (id: string): boolean => {
       const s = this.db.getSession(id);
@@ -1494,15 +1502,27 @@ export class SessionService {
     const resumed: string[] = [];
     const skippedParked: string[] = [];
     const failed: string[] = [];
+    const managersFailed: string[] = [];
     const byManager = new Map<string, CrashOrphanedWorker[]>();
     for (const c of candidates) {
       const list = byManager.get(c.managerSessionId) ?? [];
       list.push(c);
       byManager.set(c.managerSessionId, list);
     }
+    // A manager whose ENTIRE worker set was excluded (legitimately terminal/recycled, or previously a
+    // stale-dead worker before the derive-time fix) never appears as a `candidates` key above — seed it
+    // here so it still gets ONE independent resume attempt, not silence (crash-orphaned-workers.ts ›
+    // deriveCrashOrphanedManagers).
+    for (const soloId of opts.soloManagerIds ?? []) {
+      if (!byManager.has(soloId)) byManager.set(soloId, []);
+    }
     for (const [managerId, workers] of byManager) {
       const managerParked = isParked(managerId); // read BEFORE resume — resume() never touches the park fields
-      if (!resumeOne(managerId)) { failed.push(...workers.map((w) => w.workerSessionId)); continue; }
+      if (!resumeOne(managerId)) {
+        failed.push(...workers.map((w) => w.workerSessionId));
+        managersFailed.push(managerId);
+        continue;
+      }
       let recoveredCount = 0;
       let awaitingReviewCount = 0;
       let failedCount = 0;
@@ -1526,22 +1546,27 @@ export class SessionService {
         }
       }
       if (managerParked) continue; // resumed live; honor the park — no summary nudge
-      const parts = [
-        recoveredCount > 0
-          ? `${recoveredCount} of your ${workers.length} in-flight worker(s) were recovered and are back in worker_list`
-          : `none of your ${workers.length} in-flight worker(s) could be recovered`,
-        awaitingReviewCount > 0 ? `${awaitingReviewCount} of those already reported done and are awaiting your review/merge` : null,
-        failedCount > 0 ? `${failedCount} could not be resumed (check worker_list / logs)` : null,
-      ].filter(Boolean).join("; ");
+      // A solo manager (no candidate workers at all) gets a plain heads-up instead of the "0 of your 0
+      // in-flight worker(s)" phrasing the per-worker summary below would otherwise produce.
+      const note = workers.length === 0
+        ? `[loom:crash-recovered] The daemon crashed and Loom auto-resumed you — re-check your state and ` +
+          `continue orchestrating.` + RESUME_NUDGE_TAIL
+        : (() => {
+          const parts = [
+            recoveredCount > 0
+              ? `${recoveredCount} of your ${workers.length} in-flight worker(s) were recovered and are back in worker_list`
+              : `none of your ${workers.length} in-flight worker(s) could be recovered`,
+            awaitingReviewCount > 0 ? `${awaitingReviewCount} of those already reported done and are awaiting your review/merge` : null,
+            failedCount > 0 ? `${failedCount} could not be resumed (check worker_list / logs)` : null,
+          ].filter(Boolean).join("; ");
+          return `[loom:crash-recovered] The daemon crashed and Loom auto-resumed it — ${parts}. Re-check their ` +
+            `state and continue orchestrating.` + RESUME_NUDGE_TAIL;
+        })();
       try {
-        this.pty.enqueueStdin(
-          managerId,
-          `[loom:crash-recovered] The daemon crashed and Loom auto-resumed it — ${parts}. Re-check their ` +
-          `state and continue orchestrating.` + RESUME_NUDGE_TAIL,
-        );
+        this.pty.enqueueStdin(managerId, note);
       } catch { /* not ready yet — the resume stands */ }
     }
-    return { resumed, skippedParked, failed };
+    return { resumed, skippedParked, failed, managersFailed };
   }
 
   /**

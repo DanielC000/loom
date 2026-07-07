@@ -10,7 +10,7 @@ import { Db } from "./db.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
 import { snapshotAndArchiveRecovered } from "./sessions/boot-backstop.js";
-import { deriveCrashOrphanedWorkers } from "./orchestration/crash-orphaned-workers.js";
+import { deriveCrashOrphanedWorkers, deriveCrashOrphanedManagers } from "./orchestration/crash-orphaned-workers.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
 import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
@@ -212,6 +212,11 @@ async function main(): Promise<void> {
   // later (after `listen`, alongside the restart-intent resume block) and ONLY when no RestartIntent was
   // captured this boot (the exit-75 path already recovers its own fleet, incl. these same workers).
   const crashOrphanedWorkers = deriveCrashOrphanedWorkers(db, recovered);
+  // A manager/platform session whose ENTIRE worker set is legitimately excluded (all landed, all
+  // recycled, all archived pre-crash) has no entry above at all — without this it would never get an
+  // independent resume attempt, even though it was just as much a live/starting victim of THIS crash as
+  // any manager that happens to still have a worker (see crash-orphaned-workers.ts's DIAGNOSIS).
+  const crashOrphanedManagers = deriveCrashOrphanedManagers(db, recovered, crashOrphanedWorkers);
   // Crash-path backstop (card b37750a4): a daemon crash fires no onExit, so snapshot the transcript +
   // auto-archive each recovered session HERE, while the JSONL still exists (before sweepDeadSessions can
   // mark it dead / Claude can prune it). The ONLY snapshot+archive point on the crash path. See module.
@@ -812,15 +817,18 @@ async function main(): Promise<void> {
       (failed.length ? `, ${failed.length} unresumable (skipped)` : "") +
       ` (requester ${restartIntent.managerSessionId.slice(0, 8)})`,
     );
-  } else if (crashOrphanedWorkers.length > 0) {
-    // Crash-orphaned-worker recovery (card 9fc41af5): no restart-intent means this was a genuine crash
-    // (or an OS-service restart), not a deliberate daemon_restart — resumeFleetOnBoot never ran, so this
-    // is the ONLY path that brings these workers' managers back to see them. Best-effort + runs once.
-    const { resumed, skippedParked, failed } = sessions.recoverCrashOrphanedWorkers(crashOrphanedWorkers);
+  } else if (crashOrphanedWorkers.length > 0 || crashOrphanedManagers.length > 0) {
+    // Crash-orphaned recovery (card 9fc41af5): no restart-intent means this was a genuine crash (or an
+    // OS-service restart), not a deliberate daemon_restart — resumeFleetOnBoot never ran, so this is the
+    // ONLY path that brings these workers' managers (and any solo manager with no surviving worker) back.
+    // Best-effort + runs once.
+    const { resumed, skippedParked, failed, managersFailed } =
+      sessions.recoverCrashOrphanedWorkers(crashOrphanedWorkers, { soloManagerIds: crashOrphanedManagers });
     console.log(
       `[boot] crash recovery: re-parented ${resumed.length} in-flight worker(s) to their resumed manager(s)` +
       (skippedParked.length ? `, ${skippedParked.length} resumed-but-parked (usage hold honored)` : "") +
-      (failed.length ? `, ${failed.length} unresumable (skipped)` : ""),
+      (failed.length ? `, ${failed.length} unresumable (skipped)` : "") +
+      (managersFailed.length ? `, ${managersFailed.length} manager(s) themselves unresumable (check [crash-recovery] logs above for why)` : ""),
     );
   }
   // Durable queued-message recovery (card 2ca18433): re-drive any session_message/message_worker that was

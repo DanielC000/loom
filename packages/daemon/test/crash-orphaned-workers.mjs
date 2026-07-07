@@ -34,6 +34,26 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (7) STALE reportedDone — a worker_report(done) event superseded by a LATER merge_rejected (the
 //       manager sent it back to fix a failed gate/conflict) is NOT treated as reportedDone, so it still
 //       gets the continue-your-task nudge instead of being silently parked as "awaiting review".
+//   (8) STALE-DEAD-FLAG RACE (the inconsistently-partial-recovery bug): a worker whose `resumability`
+//       column was already stamped 'dead' BEFORE this crash — e.g. by liveness.ts's debounced
+//       chokidar watcher misreading a transient TOCTOU gap on an UNRELATED session's transcript rewrite
+//       during normal operation — but whose OWN transcript is genuinely still on disk right now, IS
+//       recovered (the stale flag is re-verified live, not trusted) and its stamp is healed back to
+//       'resumable'. A worker whose transcript is ACTUALLY gone right now is still correctly excluded,
+//       with the exclusion logged (never silent).
+//   (9) SOLO MANAGER — a manager whose entire worker set is legitimately excluded (e.g. every worker's
+//       task already landed) has no entry in the derived worker candidates at all, yet it was just as
+//       much a live/starting victim of the crash as any manager that kept a worker — it still gets ONE
+//       independent resume attempt (deriveCrashOrphanedManagers + recoverCrashOrphanedWorkers's
+//       `soloManagerIds`), with a plain nudge (not the "0 of your 0 in-flight worker(s)" phrasing a
+//       naive reuse of the per-worker summary would produce). And when a resume attempt genuinely
+//       fails (engine id set, transcript genuinely missing — 9b), the real thrown reason is logged
+//       (not silently swallowed into a bare boolean). deriveCrashOrphanedManagers mirrors the WORKER
+//       path's own guards exactly: a manager already archived pre-crash (9c), superseded by a recycle
+//       successor (9d), or never having captured an engine id at all (9e, structurally unresumable —
+//       excluded up front rather than attempted-and-failed) is never resurrected. A `platform`-role
+//       solo session is derived + attempted identically to `manager` (9f), and a PARKED solo manager is
+//       resumed live but withheld its summary nudge, honoring the usage hold (9g).
 // Run: 1) build daemon, 2) node test/crash-orphaned-workers.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -46,10 +66,19 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { deriveCrashOrphanedWorkers } = await import("../dist/orchestration/crash-orphaned-workers.js");
+const { deriveCrashOrphanedWorkers, deriveCrashOrphanedManagers } = await import("../dist/orchestration/crash-orphaned-workers.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
 const { snapshotAndArchiveRecovered } = await import("../dist/sessions/boot-backstop.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
+
+// Capture console.log/warn (the exclusion + resume-failure reasons are logged, never silent) — restore
+// the real functions in `finally` so genuine test output still shows.
+const logs = [];
+const warns = [];
+const realLog = console.log;
+const realWarn = console.warn;
+console.log = (...a) => { logs.push(a.join(" ")); realLog(...a); };
+console.warn = (...a) => { warns.push(a.join(" ")); realWarn(...a); };
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -292,7 +321,136 @@ try {
   sessions.recoverCrashOrphanedWorkers(derived7, { resumeOne: () => true });
   check("(7) it therefore STILL gets the continue-your-task nudge (it's actually mid-fix, not awaiting review)",
     pty.getPending(id7.wkr).some((m) => m.includes("[loom:crash-recovered]") && /continue your assigned task/i.test(m)));
+
+  // ============================ (8) STALE-DEAD-FLAG RACE — re-verified live, not trusted ==============
+  const id8 = { mgr: `cow-mgr8-${sfx}`, staleDead: `cow-wkr8-staledead-${sfx}`, genuinelyDead: `cow-wkr8-gendead-${sfx}` };
+  const t8a = mkTask(`cow-t8a-${sfx}`, P.proj);
+  const t8b = mkTask(`cow-t8b-${sfx}`, P.proj);
+  mkSession({ id: id8.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+
+  // A worker's `resumability` column is already 'dead' — simulating liveness.ts's watcher having
+  // falsely stamped it during a transient TOCTOU race on an UNRELATED session's transcript rewrite — but
+  // its OWN transcript file genuinely EXISTS on disk right now.
+  const cwd8a = path.join(os.tmpdir(), `loom-cow-cwd8a-${sfx}`);
+  const eng8a = `eng-${id8.staleDead}`;
+  mkSession({ id: id8.staleDead, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id8.mgr, taskId: t8a, processState: "live", cwd: cwd8a, engineSessionId: eng8a, resumability: "dead" });
+  transcriptDirs.push(writeTranscript(cwd8a, eng8a));
+
+  // A SIBLING worker ALSO flagged 'dead' whose transcript is GENUINELY gone right now — re-verification
+  // must confirm the flag rather than blanket-heal every dead-flagged row.
+  const cwd8b = path.join(os.tmpdir(), `loom-cow-cwd8b-${sfx}`);
+  const eng8b = `eng-${id8.genuinelyDead}`;
+  mkSession({ id: id8.genuinelyDead, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id8.mgr, taskId: t8b, processState: "live", cwd: cwd8b, engineSessionId: eng8b, resumability: "dead" });
+
+  const derived8 = deriveCrashOrphanedWorkers(db, [db.getSession(id8.mgr), db.getSession(id8.staleDead), db.getSession(id8.genuinelyDead)]);
+  check("(8) a worker with a STALE 'dead' flag but a REAL transcript IS recovered (re-verified, not trusted)",
+    derived8.some((c) => c.workerSessionId === id8.staleDead));
+  check("(8) its stale 'dead' stamp is HEALED back to 'resumable' (self-heals the sticky flag)",
+    db.getSession(id8.staleDead).resumability === "resumable");
+  check("(8) a worker whose transcript is GENUINELY missing right now is still excluded",
+    !derived8.some((c) => c.workerSessionId === id8.genuinelyDead));
+  check("(8) the genuinely-dead worker's resumability is stamped 'dead'",
+    db.getSession(id8.genuinelyDead).resumability === "dead");
+  check("(8) the exclusion is LOGGED with a clear reason (never silent)",
+    logs.some((l) => l.includes("[crash-recovery]") && l.includes(id8.genuinelyDead.slice(0, 8)) && l.includes("engine transcript missing")));
+  // The reported bug: a manager whose ONLY worker was wrongly excluded never even got a resume attempt.
+  // With the stale flag no longer trusted, the manager DOES still have a surviving candidate (staleDead)
+  // and is attempted, proving the fix closes exactly that gap.
+  const result8 = sessions.recoverCrashOrphanedWorkers(derived8, { resumeOne: () => true });
+  check("(8) the manager (whose only surviving worker was previously wrongly excluded) IS resumed",
+    result8.resumed.includes(id8.staleDead) && !result8.managersFailed.includes(id8.mgr));
+
+  // ============================ (9) SOLO MANAGER — independent attempt, no worker candidates =========
+  const id9 = { mgr: `cow-mgr9-${sfx}`, wkrLanded: `cow-wkr9-landed-${sfx}` };
+  const t9 = mkTask(`cow-t9-${sfx}`, P.proj, "done"); // terminal — landed, genuinely finished
+  mkSession({ id: id9.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id9.wkrLanded, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id9.mgr, taskId: t9, processState: "live" });
+  const recovered9 = [db.getSession(id9.mgr), db.getSession(id9.wkrLanded)];
+  const derived9 = deriveCrashOrphanedWorkers(db, recovered9);
+  check("(9-pre) the landed worker is correctly excluded — nothing to recover", !derived9.some((c) => c.managerSessionId === id9.mgr));
+  const soloManagers9 = deriveCrashOrphanedManagers(db, recovered9, derived9);
+  check("(9-pre) the manager (zero surviving worker candidates) IS derived as a solo manager", soloManagers9.includes(id9.mgr));
+  const result9 = sessions.recoverCrashOrphanedWorkers(derived9, { resumeOne: () => true, soloManagerIds: soloManagers9 });
+  check("(9) the solo manager still gets an independent resume attempt (no worker candidates required)",
+    !result9.managersFailed.includes(id9.mgr));
+  check("(9) it gets a PLAIN nudge, not the '0 of your 0 in-flight worker(s)' phrasing",
+    pty.getPending(id9.mgr).some((m) => m.includes("[loom:crash-recovered]") && /re-check your state and continue orchestrating/i.test(m) && !/in-flight worker/i.test(m)));
+
+  // A solo manager whose OWN resume attempt genuinely fails (real resume(), no stub) lands in
+  // `managersFailed`, with the actual thrown reason logged — never a silent no-op. RESUMABLE-BUT-BROKEN:
+  // an engine id IS captured (so the new engineSessionId guard does NOT exclude it as a candidate — it's
+  // a real derive() candidate), but its transcript file genuinely doesn't exist on disk, so `resume()`'s
+  // OWN fresh check throws at resume-time. This is a materially different failure mode than "never had an
+  // engine id to begin with" (excluded up front, never even attempted — see the engineSessionId guard).
+  const id9b = { mgr: `cow-mgr9b-${sfx}` };
+  const eng9b = `eng-${id9b.mgr}`;
+  mkSession({ id: id9b.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live", engineSessionId: eng9b });
+  const soloManagers9b = deriveCrashOrphanedManagers(db, [db.getSession(id9b.mgr)], []);
+  check("(9b-pre) a resumable-but-broken manager (engine id set, no transcript) IS derived as a candidate", soloManagers9b.includes(id9b.mgr));
+  const result9b = sessions.recoverCrashOrphanedWorkers([], { soloManagerIds: soloManagers9b });
+  check("(9b) a solo manager whose OWN resume genuinely fails lands in `managersFailed`",
+    result9b.managersFailed.includes(id9b.mgr));
+  check("(9b) the real failure reason is LOGGED (not silently swallowed into a bare boolean)",
+    warns.some((w) => w.includes("[crash-recovery]") && w.includes(id9b.mgr.slice(0, 8)) && w.includes("engine transcript missing")));
+
+  // (9e) NO ENGINE ID — a manager caught mid-`starting` at crash time (no captured engine id yet) is
+  // structurally NEVER resumable (there's no transcript to resume into) and must be excluded UP FRONT,
+  // not attempted-and-failed — proving the new engineSessionId guard (mirrors the worker path's own).
+  // mkSession's `?? eng-<id>` default can't express a genuinely-null engine id (`??` treats an explicit
+  // `null` as nullish too), so insert the row directly.
+  const id9e = { mgr: `cow-mgr9e-${sfx}` };
+  db.insertSession({
+    id: id9e.mgr, projectId: P.proj, agentId: P.agent, engineSessionId: null,
+    title: null, cwd: os.tmpdir(), processState: "starting", resumability: "unknown",
+    busy: false, createdAt: now, lastActivity: now, lastError: null,
+    role: "manager", parentSessionId: null, taskId: null, worktreePath: null, branch: null,
+  });
+  const soloManagers9e = deriveCrashOrphanedManagers(db, [db.getSession(id9e.mgr)], []);
+  check("(9e) a manager with NO captured engine id is NOT derived as a solo manager candidate", !soloManagers9e.includes(id9e.mgr));
+
+  // (9c) ARCHIVED PRE-CRASH — a manager row that is `live`/`starting` in the DB (recoverStaleSessions
+  // does NOT filter on archivedAt) but was already archived BEFORE this crash must NOT be resurrected as
+  // a solo manager, exactly like the worker path's own archivedAt guard.
+  const id9c = { mgr: `cow-mgr9c-${sfx}` };
+  mkSession({ id: id9c.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live", archived: true });
+  const soloManagers9c = deriveCrashOrphanedManagers(db, [db.getSession(id9c.mgr)], []);
+  check("(9c) a manager already ARCHIVED pre-crash is NOT derived as a solo manager", !soloManagers9c.includes(id9c.mgr));
+
+  // (9d) RECYCLED/SUPERSEDED — a `recycle_me` predecessor can still show live/starting at crash time
+  // even though a successor already took over; it must NOT be resurrected as a solo manager, exactly
+  // like the worker path's own hasSuccessor guard (never resurrect a superseded row).
+  const id9d = { mgrPredecessor: `cow-mgr9d-pred-${sfx}`, mgrSuccessor: `cow-mgr9d-succ-${sfx}` };
+  mkSession({ id: id9d.mgrPredecessor, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id9d.mgrSuccessor, projId: P.proj, agentId: P.agent, role: "manager", processState: "live", recycledFrom: id9d.mgrPredecessor });
+  const soloManagers9d = deriveCrashOrphanedManagers(db, [db.getSession(id9d.mgrPredecessor), db.getSession(id9d.mgrSuccessor)], []);
+  check("(9d) a RECYCLED/superseded manager predecessor is NOT derived as a solo manager", !soloManagers9d.includes(id9d.mgrPredecessor));
+  check("(9d) its successor (not itself superseded) IS derived as a solo manager", soloManagers9d.includes(id9d.mgrSuccessor));
+
+  // (9f) PLATFORM ROLE — a `platform`-role session is derived + independently attempted exactly like a
+  // `manager`-role one (the role check in deriveCrashOrphanedManagers handles both; this was untested).
+  const id9f = { plat: `cow-plat9f-${sfx}` };
+  mkSession({ id: id9f.plat, projId: P.proj, agentId: P.agent, role: "platform", processState: "live" });
+  const soloManagers9f = deriveCrashOrphanedManagers(db, [db.getSession(id9f.plat)], []);
+  check("(9f-pre) a PLATFORM-role solo session IS derived as a candidate", soloManagers9f.includes(id9f.plat));
+  const result9f = sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers9f });
+  check("(9f) it gets the SAME independent resume attempt + plain nudge as a manager-role session",
+    !result9f.managersFailed.includes(id9f.plat) &&
+    pty.getPending(id9f.plat).some((m) => m.includes("[loom:crash-recovered]") && /re-check your state and continue orchestrating/i.test(m)));
+
+  // (9g) PARKED SOLO MANAGER — a solo manager (zero worker candidates) that is usage-limit PARKED is
+  // resumed live (so the rate-limit watcher can recover it on its own schedule) but withheld its summary
+  // nudge, mirroring the with-workers park handling (section 5) — untested for the zero-worker path.
+  const id9g = { mgr: `cow-mgr9g-${sfx}` };
+  mkSession({ id: id9g.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  db.setRateLimitedUntil(id9g.mgr, future, "usage limit — parked");
+  const soloManagers9g = deriveCrashOrphanedManagers(db, [db.getSession(id9g.mgr)], []);
+  const result9g = sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers9g });
+  check("(9g) a PARKED solo manager is still resumed (in the successful path, not `managersFailed`)",
+    !result9g.managersFailed.includes(id9g.mgr));
+  check("(9g) it receives NO summary nudge (usage hold honored)", pty.getPending(id9g.mgr).length === 0);
 } finally {
+  console.log = realLog;
+  console.warn = realWarn;
   db.close();
   for (const repo of repoRoots) {
     try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -304,6 +462,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a crash-orphaned worker (exited+resumable+parented+task in_progress) is derived from the pre-archive recoverStaleSessions snapshot, survives the boot-backstop auto-archive AND Pass B worktree-GC (via protectedSessionIds), and reappears in its manager's worker_list once resumed for real; a done-but-unmerged worker is recovered for visibility without a stray 'continue' nudge (unless a later merge_rejected supersedes that report, in which case it DOES get the nudge); a landed/recycled/pre-archived worker is never resurrected; a parked worker/manager is resumed but never nudged (usage hold honored); a manager whose workers ALL fail to resume still gets a summary nudge; an unprotected control worker's worktree IS reclaimed (proving protection mattered); and a worker whose manager can't be resumed is left untouched in its clean exited+archived state, not half-resumed."
+  ? "\n✅ ALL PASS — a crash-orphaned worker (exited+resumable+parented+task in_progress) is derived from the pre-archive recoverStaleSessions snapshot, survives the boot-backstop auto-archive AND Pass B worktree-GC (via protectedSessionIds), and reappears in its manager's worker_list once resumed for real; a done-but-unmerged worker is recovered for visibility without a stray 'continue' nudge (unless a later merge_rejected supersedes that report, in which case it DOES get the nudge); a landed/recycled/pre-archived worker is never resurrected; a parked worker/manager is resumed but never nudged (usage hold honored); a manager whose workers ALL fail to resume still gets a summary nudge; an unprotected control worker's worktree IS reclaimed (proving protection mattered); a worker whose manager can't be resumed is left untouched in its clean exited+archived state, not half-resumed; a worker wrongly stale-flagged 'dead' by an earlier watcher race is re-verified live and recovered (healing the flag) instead of silently stranding its manager, while a genuinely-dead sibling is still excluded WITH a logged reason; and a manager with zero surviving worker candidates still gets an independent resume attempt, with any genuine failure logged instead of swallowed."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
