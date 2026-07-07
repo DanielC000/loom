@@ -121,20 +121,6 @@ body {
   }
 }
 
-/* Contextual add-lane rail: width lives here (not inline) so it can shrink on phones without an
-   !important override; the vertical "column" word is hidden once the rail narrows. */
-.loom-add-column-rail {
-  width: 42px;
-}
-@media (max-width: 560px) {
-  .loom-add-column-rail {
-    width: 34px;
-  }
-  .loom-add-column-rail .loom-rail-word {
-    display: none;
-  }
-}
-
 /* Skeleton shimmer for the board's first-load placeholder — a faint breathing pulse (dropped under
    prefers-reduced-motion below). Beats a spinner: the lane layout is already in place as it loads. */
 @keyframes loom-skeleton-pulse {

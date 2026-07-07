@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
-import type { Task, TaskPriority, KanbanColumn, SessionListItem, ColumnRole } from "@loom/shared";
-import { api, type DesiredColumn } from "../lib/api";
+import type { Task, TaskPriority, KanbanColumn, SessionListItem } from "@loom/shared";
+import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Button, Input, SectionLabel, StatusPill, Chip } from "../components/ui";
 import { color, font, tone, roleTone, type Tone } from "../theme";
@@ -22,34 +22,6 @@ const byPriorityThenPosition = (a: Task, b: Task) =>
 // reshuffle on the 3s refetch (deterministic, no flicker).
 const byRecentlyDone = (a: Task, b: Task) =>
   a.updatedAt === b.updatedAt ? (a.position - b.position || (a.id < b.id ? -1 : 1)) : (a.updatedAt > b.updatedAt ? -1 : 1);
-
-// ── Contextual board-header column editing (card 5d) ─────────────────────────────
-// Lightweight rename/add/remove ON THE BOARD itself — the full editor (reorder, role assignment,
-// advanced key edit) stays in Settings (ColumnManager). Every mutation rebuilds the WHOLE desired
-// layout and PUTs it through the SAME atomic columns API (api.updateProjectColumns → re-keys cards,
-// enforces the guards, returns soft warnings) — never a new endpoint.
-const slugKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-// Rebuild the atomic-API payload from the board's live columns, carrying EVERY field through (role,
-// accentColor, wipLimit) so editing one column never strips another's accent / soft WIP limit — the
-// PUT replaces the entire array.
-function columnsToDesired(cols: KanbanColumn[]): DesiredColumn[] {
-  return cols.map((c) => {
-    const d: DesiredColumn = { key: c.key, label: c.label };
-    if (c.role) d.role = c.role;
-    if (c.accentColor !== undefined) d.accentColor = c.accentColor;
-    if (c.wipLimit !== undefined) d.wipLimit = c.wipLimit;
-    return d;
-  });
-}
-// Human labels for the lifecycle roles — only for the remove-confirm heads-up ("this is the Review
-// lane"). The authoritative, full coupling text comes back from the server in the PUT response.
-const ROLE_LABEL: Record<ColumnRole, string> = {
-  intake: "Intake", defaultLanding: "Default landing", workReady: "Work ready", active: "Active",
-  review: "Review", parked: "Parked", terminal: "Terminal (done)",
-};
-// The two roles the server requires exactly once — their columns can't be removed from the board
-// (a hard reject), so the contextual remove affordance is disabled for them.
-const isRequiredRole = (role?: ColumnRole) => role === "defaultLanding" || role === "terminal";
 
 // Per-project kanban. Reads/writes the SAME task store the MCP tools use — moving a card
 // POSTs columnKey, which a spawned agent's tasks_list immediately sees, and vice versa.
@@ -96,51 +68,6 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
     if (e.over && e.active.id !== e.over.id) move.mutate({ id: String(e.active.id), columnKey: String(e.over.id) });
   };
 
-  // ── Contextual column editing — all three ops rebuild the full layout + PUT it atomically ──────────
-  // Soft warnings from the last apply (e.g. removing a role-bearing lane), surfaced in a board banner.
-  const [colWarnings, setColWarnings] = useState<string[]>([]);
-  const columns = useMutation({
-    mutationFn: (desired: DesiredColumn[]) => api.updateProjectColumns(projectId!, desired),
-    meta: { inlineError: true }, // surfaced in the banner, not a blocking alert
-    onSuccess: (res) => {
-      setColWarnings(res.warnings);
-      qc.invalidateQueries({ queryKey: ["board", projectId] });
-      qc.invalidateQueries({ queryKey: ["projects"] }); // the resolved override the editor mutated
-    },
-  });
-  const liveCols = board.data?.columns ?? [];
-  // Rename = change the label, and re-key from the new label so cards FOLLOW (prevKey re-keys them
-  // server-side). Guard the re-key: only when the slug is non-empty, actually changes, and stays unique
-  // — otherwise keep the existing key (a label-only change; cards trivially stay).
-  const renameColumn = (key: string, rawLabel: string) => {
-    const label = rawLabel.trim();
-    const target = liveCols.find((c) => c.key === key);
-    if (!target || !label || label === target.label) return; // no-op
-    const desired = columnsToDesired(liveCols);
-    const row = desired.find((d) => d.key === key);
-    if (!row) return;
-    row.label = label;
-    const newKey = slugKey(label);
-    const others = desired.filter((d) => d.key !== key).map((d) => d.key);
-    if (newKey && newKey !== key && !others.includes(newKey)) { row.prevKey = key; row.key = newKey; }
-    columns.mutate(desired);
-  };
-  const addColumn = () => {
-    const desired = columnsToDesired(liveCols);
-    const existing = new Set(desired.map((d) => d.key));
-    let key = "new_column";
-    for (let i = 2; existing.has(key); i++) key = `new_column_${i}`;
-    const newCol: DesiredColumn = { key, label: "New column" }; // no role → server keeps the required-role assignments
-    // Insert just LEFT of the terminal (Done) lane so a new column reads with the left→right→Done flow,
-    // not appended after Done. No terminal lane → append at the end (graceful fallback).
-    const termIdx = desired.findIndex((d) => d.role === "terminal");
-    if (termIdx >= 0) desired.splice(termIdx, 0, newCol);
-    else desired.push(newCol);
-    columns.mutate(desired);
-  };
-  const removeColumn = (key: string) => columns.mutate(columnsToDesired(liveCols).filter((d) => d.key !== key));
-  const landingLabel = liveCols.find((c) => c.role === "defaultLanding")?.label ?? "the landing column";
-
   const openTask = board.data?.tasks.find((t) => t.id === openTaskId) ?? null;
 
   // ── Client-side view filter (no server round-trip) ───────────────────────────
@@ -180,23 +107,6 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
           <FilterBar search={search} onSearch={setSearch} columns={board.data.columns}
             priFilter={priFilter} onTogglePri={togglePri} colFilter={colFilter} onToggleCol={toggleCol}
             shown={shownTasks.length} total={allTasks.length} active={filterActive} onClear={clearFilters} />
-          {/* Soft coupling warnings the server returned on the last column edit (e.g. removing a
-              role-bearing lane). Non-blocking — the change already applied; the user is informed. */}
-          {colWarnings.length > 0 && (
-            <div role="status" style={{ marginTop: 10, background: color.panel, border: `1px solid ${color.amber}`, borderRadius: 4,
-              padding: "8px 10px", display: "flex", flexDirection: "column", gap: 4 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ flex: 1, fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: color.amber }}>
-                  column change applied — heads up
-                </span>
-                <button type="button" aria-label="Dismiss" title="Dismiss" onClick={() => setColWarnings([])}
-                  className="loom-toggle" style={{ background: "transparent", border: "none", color: color.textMuted, cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 2, borderRadius: 3 }}>✕</button>
-              </div>
-              {colWarnings.map((w, i) => (
-                <span key={i} style={{ color: color.amber, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>⚠ {w}</span>
-              ))}
-            </div>
-          )}
           <div style={{ display: "flex", gap: 10, marginTop: 10, alignItems: "stretch" }}>
             <DndContext onDragEnd={onDragEnd}>
               {/* Responsive lane grid (.loom-board-grid): equal 1fr lanes when they fit, horizontal
@@ -208,19 +118,11 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
                     tasks={shownTasks.filter((t) => t.columnKey === col.key)
                       .sort(isDoneColumn(col) ? byRecentlyDone : byPriorityThenPosition)}
                     filterActive={filterActive} workers={workerByTask} onOpen={setOpenTaskId}
-                    cardCount={allTasks.filter((t) => t.columnKey === col.key).length}
-                    landingLabel={landingLabel} busy={columns.isPending}
-                    onRename={renameColumn} onRemove={removeColumn} />
+                    cardCount={allTasks.filter((t) => t.columnKey === col.key).length} />
                 ))}
               </div>
-              <AddColumnRail onAdd={addColumn} busy={columns.isPending} />
             </DndContext>
           </div>
-          {columns.isError && (
-            <div style={{ marginTop: 8, color: color.red, fontSize: 12, fontFamily: font.mono }}>
-              column change failed: {(columns.error as Error).message}
-            </div>
-          )}
         </>
       )}
       {openTask && (
@@ -281,9 +183,9 @@ function labelColorFor(accent: string | null): string {
   return accent;
 }
 
-function Column({ col, tasks, filterActive, workers, onOpen, cardCount, landingLabel, busy, onRename, onRemove }:
+function Column({ col, tasks, filterActive, workers, onOpen, cardCount }:
   { col: KanbanColumn; tasks: Task[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void;
-    cardCount: number; landingLabel: string; busy: boolean; onRename: (key: string, label: string) => void; onRemove: (key: string) => void }) {
+    cardCount: number }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key });
   // ONE resolved color for the lane (role → tone, else accentColor, else null). Drives the accent bar,
   // the header label, and each card's left border so all three agree. null = un-accented: transparent
@@ -298,88 +200,37 @@ function Column({ col, tasks, filterActive, workers, onOpen, cardCount, landingL
   const hasWipLimit = col.wipLimit !== undefined;
   const atOrOverWip = hasWipLimit && cardCount >= col.wipLimit!;
 
-  // ── Contextual header editing (card 5d) ────────────────────────────────────────
-  // The actions (✎ rename, ✕ remove) are hover/focus-revealed to keep the header clean; the rename
-  // mode swaps the label for an inline input (live preview — you see the new label as you type, before
-  // commit). Remove arms an inline confirm that previews the card re-home + a role-coupling heads-up.
-  const [hover, setHover] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-  const [draft, setDraft] = useState(col.label);
-  const [confirmingRemove, setConfirmingRemove] = useState(false);
-  const startRename = () => { setDraft(col.label); setRenaming(true); setConfirmingRemove(false); };
-  const commitRename = () => { setRenaming(false); onRename(col.key, draft); };
-  const cancelRename = () => { setRenaming(false); setDraft(col.label); };
-  const removable = !isRequiredRole(col.role);
-  const showActions = hover || confirmingRemove;
-
+  // The board header is plain, non-editable display — column CRUD (add/rename/delete/reorder/role/
+  // accent/WIP) lives ONLY in Settings › Board Columns (ColumnManager). Here we render the label, its
+  // resolved role tint, and the card count / soft-WIP readout.
+  //
   // Bounded, viewport-relative height so a long column scrolls internally instead of stretching the
   // page. Flex column: header stays pinned; the card list is the lone flex:1 scroll region. The
   // droppable ref stays on this outer wrapper, so a drop lands anywhere over the column (incl. when
   // scrolled — dnd-kit measures this wrapper's rect, and its auto-scroll drives the inner list).
   return (
     <div ref={setNodeRef} className="loom-grid"
-      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
-      onFocus={() => setHover(true)} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setHover(false); }}
       style={{ background: isOver ? color.phosphorDim : color.panel, border: `1px solid ${color.border}`, borderRadius: 4,
         display: "flex", flexDirection: "column", minHeight: 200, maxHeight: "75vh" }}>
       {/* Restrained per-column header accent: a thin top bar in the lane's resolved color. The 3px height
-          is ALWAYS reserved (transparent when un-accented) so accented and freshly-added lanes share one
+          is ALWAYS reserved (transparent when un-accented) so accented and un-accented lanes share one
           label baseline. Top corners rounded to nest inside the wrapper's radius. */}
       <div aria-hidden style={{ height: 3, background: accent ?? "transparent", flexShrink: 0,
         borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />
       <SectionLabel style={{ color: labelColor, margin: 0, padding: "12px 12px 8px", display: "flex", alignItems: "center", gap: 6 }}>
-        {renaming ? (
-          <Input autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} aria-label={`Rename ${col.label} column`}
-            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitRename(); } else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cancelRename(); } }}
-            onBlur={commitRename} disabled={busy}
-            style={{ flex: 1, minWidth: 0, padding: "2px 6px", fontFamily: font.head, fontSize: 11, fontWeight: 700,
-              textTransform: "uppercase", letterSpacing: "0.1em", color: labelColor }} />
-        ) : (
-          <span onDoubleClick={startRename} title="Double-click to rename"
-            style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", cursor: "text" }}>{col.label}</span>
-        )}
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{col.label}</span>
         {hasWipLimit ? (
           <span aria-label={`${cardCount} of ${col.wipLimit} cards${atOrOverWip ? ", at or over the soft WIP limit" : ""}`}
             title={atOrOverWip
               ? `At or over the soft WIP limit of ${col.wipLimit} (advisory — does not block; counts the column's true load)`
               : `Soft WIP limit of ${col.wipLimit} (advisory; counts the column's true load)`}
-            style={{ flexShrink: 0, color: atOrOverWip ? color.amber : color.textDim, fontWeight: atOrOverWip ? 700 : undefined }}>
+            style={{ marginLeft: "auto", flexShrink: 0, color: atOrOverWip ? color.amber : color.textDim, fontWeight: atOrOverWip ? 700 : undefined }}>
             {cardCount} / {col.wipLimit}
           </span>
         ) : (
-          <span style={{ flexShrink: 0, color: "inherit" }}>({tasks.length})</span>
-        )}
-        {/* Hover/focus-revealed header actions — kept in the DOM (so keyboard reaches them), faded out
-            when idle. Hidden entirely while the inline rename input owns the header. */}
-        {!renaming && (
-          <span className="loom-fade" style={{ marginLeft: "auto", flexShrink: 0, display: "inline-flex", gap: 2,
-            opacity: showActions ? 1 : 0, pointerEvents: showActions ? "auto" : "none" }}>
-            <HeaderIconButton label={`Rename ${col.label} column`} onClick={startRename} disabled={busy}>✎</HeaderIconButton>
-            <HeaderIconButton label={removable ? `Remove ${col.label} column` : `${col.label} can't be removed — it's a required lifecycle lane`}
-              onClick={() => setConfirmingRemove(true)} disabled={busy || !removable} danger>✕</HeaderIconButton>
-          </span>
+          <span style={{ marginLeft: "auto", flexShrink: 0, color: "inherit" }}>({tasks.length})</span>
         )}
       </SectionLabel>
-      {/* Inline remove confirm: previews where the lane's cards re-home + a role-coupling heads-up. The
-          authoritative coupling text comes back from the server and shows in the board-level banner. */}
-      {confirmingRemove && (
-        <div style={{ margin: "0 12px 8px", padding: "8px", borderRadius: 4, background: color.panel2, border: `1px solid ${color.red}`,
-          display: "flex", flexDirection: "column", gap: 6 }}>
-          <span style={{ fontFamily: font.mono, fontSize: 11, color: color.text, lineHeight: 1.5 }}>
-            Remove <span style={{ color: color.red }}>{col.label}</span>?
-            {cardCount > 0 && <> Its {cardCount} card{cardCount === 1 ? "" : "s"} move{cardCount === 1 ? "s" : ""} to <span style={{ color: color.text }}>{landingLabel}</span>.</>}
-          </span>
-          {col.role && !isRequiredRole(col.role) && (
-            <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, lineHeight: 1.5 }}>
-              ⚠ This is the {ROLE_LABEL[col.role]} lane — removing it drops that role until you reassign it.
-            </span>
-          )}
-          <div style={{ display: "flex", gap: 6 }}>
-            <Button variant="danger" disabled={busy} onClick={() => { setConfirmingRemove(false); onRemove(col.key); }}>Remove</Button>
-            <Button variant="ghost" disabled={busy} onClick={() => setConfirmingRemove(false)}>Cancel</Button>
-          </div>
-        </div>
-      )}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
         {tasks.map((task) => <Card key={task.id} task={task} accent={cardAccent} worker={workers.get(task.id)} onOpen={() => onOpen(task.id)} />)}
         {/* Filtered-empty state: the filter hid every card in this column. Reads as deliberate, not broken. */}
@@ -398,37 +249,6 @@ function Column({ col, tasks, filterActive, workers, onOpen, cardCount, landingL
         )}
       </div>
     </div>
-  );
-}
-
-// A tiny ghost icon-button for the column header (rename / remove). Native <button> → keyboard +
-// focus ring for free; `danger` tints the hover/label red. Carries an explicit aria-label since the
-// glyph alone isn't descriptive.
-function HeaderIconButton({ label, onClick, disabled, danger, children }:
-  { label: string; onClick: () => void; disabled?: boolean; danger?: boolean; children: React.ReactNode }) {
-  return (
-    <button type="button" aria-label={label} title={label} onClick={onClick} disabled={disabled}
-      className="loom-toggle"
-      style={{ background: "transparent", border: "none", padding: "1px 4px", borderRadius: 3, lineHeight: 1, fontSize: 12,
-        color: disabled ? color.textMuted : danger ? color.red : color.textDim, cursor: disabled ? "default" : "pointer" }}>
-      {children}
-    </button>
-  );
-}
-
-// The "+" add-column affordance at the end of the header row — a slim full-height rail to the right of
-// the board grid. Clicking appends a "New column" (rename it inline). Dashed + muted so it reads as an
-// affordance, not a real lane.
-function AddColumnRail({ onAdd, busy }: { onAdd: () => void; busy: boolean }) {
-  return (
-    <button type="button" onClick={onAdd} disabled={busy} aria-label="Add a column" title="Add a column"
-      className="loom-toggle loom-add-column-rail"
-      style={{ flexShrink: 0, alignSelf: "stretch", minHeight: 200, maxHeight: "75vh",
-        background: color.panel, border: `1px dashed ${color.border}`, borderRadius: 4, color: color.textMuted,
-        cursor: busy ? "default" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10 }}>
-      <span aria-hidden style={{ fontSize: 20, lineHeight: 1 }}>+</span>
-      <span aria-hidden className="loom-rail-word" style={{ writingMode: "vertical-rl", textTransform: "uppercase", fontFamily: font.head, fontSize: 10, fontWeight: 700, letterSpacing: "0.12em" }}>column</span>
-    </button>
   );
 }
 

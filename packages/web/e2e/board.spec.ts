@@ -23,7 +23,7 @@ async function pinActiveProject(page: Page, projectId: string) {
 }
 
 // A board lane (Column) is the `.loom-grid` wrapper whose header carries the lane label. `.loom-grid` is used
-// ONLY by board columns on this route (Board.tsx:308; the shared Panel `grid` prop is the only other user and
+// ONLY by board columns on this route (Board.tsx Column; the shared Panel `grid` prop is the only other user and
 // the board route never mounts one), and the header label <span> is an exact-text match — so this resolves to
 // exactly one element per lane. Scoping a card assertion through it proves the card sits in the RIGHT lane
 // (the column filter chips share the label text but live outside `.loom-grid`, so they never interfere).
@@ -348,8 +348,8 @@ test("a Blocked lane added to the board renders and holds a card seeded into it"
   const project = await loomDaemon.createProject(`board-blocked-${Date.now()}`);
   await pinActiveProject(page, project.id);
 
-  // The default board has no brake/blocked lane; add one through the SAME atomic columns API the board's
-  // contextual column editor uses (PUT /api/projects/:id/columns replaces the whole layout). Keeping the
+  // The default board has no brake/blocked lane; add one through the SAME atomic columns API Settings ›
+  // Board Columns uses (PUT /api/projects/:id/columns replaces the whole layout). Keeping the
   // required defaultLanding + terminal roles present, we insert a role-less "Blocked" lane before Done.
   const columns = [
     { key: "inbox", label: "Inbox", role: "intake" },
