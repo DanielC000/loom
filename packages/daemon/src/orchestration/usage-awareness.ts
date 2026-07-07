@@ -71,9 +71,12 @@ export function getClaudeExpectedResetAt(now: Date = new Date()): Date | undefin
 const RECENCY_WINDOW_MS = 6 * 60 * 60_000;
 
 /**
- * Are we likely near the Claude usage limit right now? A known reset that has passed clears it;
- * otherwise a hit within `recencyWindowMs` (the recency heuristic — default 6h, slightly wider than
- * the 5h cap window to stay conservative about firing into a still-capped account).
+ * Are we likely near the Claude usage limit right now? A KNOWN reset is authoritative — still in the
+ * future ⇒ still limited (however far out; e.g. a weekly cap's reset can be well past `recencyWindowMs`),
+ * already passed ⇒ clear. Only when NO reset is known do we fall back to the recency heuristic: a hit
+ * within `recencyWindowMs` (default 6h, slightly wider than the 5h cap window to stay conservative about
+ * firing into a still-capped account). A known reset must never be capped back down to the recency
+ * window — that would relax awareness before the binding window actually clears (card 2110726d).
  *
  * `recencyWindowMs` is an OPTIONAL daemon-global tunable (the resolved `platform.rateLimit.recencyWindowMs`);
  * the daemon caller does the SQLite read + resolve and passes it in. Absent → the module const (6h) =
@@ -85,7 +88,7 @@ export function isLikelyNearClaudeUsageLimit(now: Date = new Date(), recencyWind
 
   if (state.lastResetsAt) {
     const resetAt = new Date(state.lastResetsAt);
-    if (!Number.isNaN(resetAt.getTime()) && now.getTime() > resetAt.getTime()) return false;
+    if (!Number.isNaN(resetAt.getTime())) return now.getTime() <= resetAt.getTime();
   }
 
   const hitAt = new Date(state.lastRateLimitAt);

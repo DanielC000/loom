@@ -249,7 +249,16 @@ async function main(): Promise<void> {
       const until = rateLimitedUntil(resetsAtSeconds, now, rl);
       db.setRateLimitedUntil(sessionId, until, `usage limit — resumes ${until}`);
       db.armRateLimitDeadline(sessionId, rateLimitDeadline(resetsAtSeconds, now, rl));
-      recordClaudeRateLimit(detail.resetsAtSeconds);
+      // Feed the SAME derived reset into GLOBAL awareness (not just this session's park) — otherwise
+      // the Scheduler/worker_spawn gate (isLikelyNearClaudeUsageLimit) falls back to its own ~6h
+      // recency heuristic and can fire fresh work into a still-capped account hours before a real
+      // (e.g. weekly) reset actually clears (card 2110726d, a fleet-level follow-up to 6df15380's
+      // per-session fix). Guarded so the derived reset can only EXTEND the awareness hold, never
+      // shorten it below what the recency heuristic alone would already give.
+      const recencyFloorSeconds = now.getTime() / 1000 + rl.recencyWindowMs / 1000;
+      const globalResetsAtSeconds =
+        typeof resetsAtSeconds === "number" && resetsAtSeconds >= recencyFloorSeconds ? resetsAtSeconds : undefined;
+      recordClaudeRateLimit(globalResetsAtSeconds);
     },
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
     onExit: (sessionId, _code, info) => {
