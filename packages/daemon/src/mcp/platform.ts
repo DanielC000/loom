@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import type { Project, ProjectConfigOverride, PlatformConfigOverride, Agent, Profile, Schedule, Task } from "@loom/shared";
+import type { Project, ProjectConfigOverride, PlatformConfigOverride, Profile, Schedule, Task } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo } from "../git/reader.js";
@@ -13,8 +13,8 @@ import { GitWriter } from "../git/writer.js";
 import { writeVaultFile, ensureVaultRoot } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
-import { isPlatformProfile } from "../profiles/seed.js";
 import { validateAgentPatch } from "../agents/validate.js";
+import { createAgentCore, cloneAgentCore } from "../agents/clone-core.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
@@ -471,31 +471,6 @@ export class PlatformMcpRouter {
       },
     );
 
-    // Shared core behind agent_create/agent_clone/agent_clone_batch — ONE place that mints an Agent row,
-    // so the clone/batch primitives added for card 54da5815 (batch/templated agent creation) reuse the
-    // EXACT same validation as a hand-written single-record agent_create rather than forking a second
-    // create path. Returns the same { error } shape the tool handlers already return via `ok(...)`.
-    const createAgentCore = (
-      { projectId, name, startupPrompt, profileId }:
-        { projectId: string; name: string; startupPrompt?: string; profileId?: string | null },
-    ): { ok: true; agent: Agent } | { ok: false; error: string } => {
-      if (!db.getProject(projectId)) return { ok: false, error: "project not found" };
-      // Option B: a manager/platform-lead may ASSIGN an existing human-authored profile but never
-      // create one — a provided profileId MUST resolve (else reject). Absent/null ⇒ profile-less agent.
-      if (profileId != null && !db.getProfile(profileId)) return { ok: false, error: "profile not found" };
-      const agent: Agent = {
-        id: randomUUID(), projectId, name,
-        startupPrompt: startupPrompt ?? "", position: db.listAgents(projectId).length,
-        profileId: profileId ?? null, // assign the (validated) profile, or stay profile-less
-        // Agent Runs R1: an agent created via MCP is NEVER an endpoint — publishing an agent as an API
-        // endpoint is a HUMAN-only trust-boundary action (the agent-edit REST surface), so this
-        // capability-gated create path always mints a non-endpoint agent.
-        endpoint: false, ioSchema: null,
-      };
-      db.insertAgent(agent);
-      return { ok: true, agent };
-    };
-
     server.registerTool(
       "agent_create",
       {
@@ -508,7 +483,7 @@ export class PlatformMcpRouter {
         },
       },
       async ({ projectId, name, startupPrompt, profileId }) => {
-        const res = createAgentCore({ projectId, name, startupPrompt, profileId });
+        const res = createAgentCore(db, { projectId, name, startupPrompt, profileId });
         return res.ok ? ok(res.agent) : ok({ error: res.error });
       },
     );
@@ -540,40 +515,6 @@ export class PlatformMcpRouter {
       },
     );
 
-    // Least-privilege guard shared by agent_clone/agent_clone_batch: a clone carries the source agent's
-    // profileId through VERBATIM (same as any other field), so it must be refused under the exact same
-    // condition assigning that profileId directly would be refused under — the source's profile role is
-    // one of the two platform-exclusive roles (isPlatformProfile, profiles/seed.ts). This is the ONLY
-    // escalation surface cloning adds over agent_create (which never rejects an elevated profileId today —
-    // the Lead's single-record agent_create/agent_update stay byte-identical, unchanged by this task), so
-    // the clone path must not silently propagate a platform/auditor rig into a project that never had one.
-    const clonedProfileRoleError = (sourceProfileId: string | null): string | null => {
-      if (sourceProfileId == null) return null;
-      const profile = db.getProfile(sourceProfileId);
-      // A dangling profileId (its profile was since deleted) resolves to the plain backstop elsewhere —
-      // nothing elevated to guard against.
-      if (!profile || !isPlatformProfile(profile)) return null;
-      return `cannot clone agent: its profile role is "${profile.role}" — cloning an elevated platform/auditor rig into another project is never allowed (mirrors the least-privilege guard on assigning one directly)`;
-    };
-
-    // Shared core behind agent_clone/agent_clone_batch: read the source agent, apply the least-privilege
-    // guard, then mint the clone through createAgentCore — the SAME validated path agent_create uses.
-    const cloneAgentCore = (
-      sourceAgentId: string, targetProjectId: string,
-      patch: { nameOverride?: string; promptPatch?: string },
-    ): { ok: true; agent: Agent } | { ok: false; error: string } => {
-      const source = db.getAgent(sourceAgentId);
-      if (!source) return { ok: false, error: "source agent not found" };
-      const roleErr = clonedProfileRoleError(source.profileId);
-      if (roleErr) return { ok: false, error: roleErr };
-      return createAgentCore({
-        projectId: targetProjectId,
-        name: patch.nameOverride ?? source.name,
-        startupPrompt: patch.promptPatch ?? source.startupPrompt,
-        profileId: source.profileId,
-      });
-    };
-
     server.registerTool(
       "agent_clone",
       {
@@ -598,7 +539,7 @@ export class PlatformMcpRouter {
         },
       },
       async ({ sourceAgentId, targetProjectId, nameOverride, promptPatch }) => {
-        const res = cloneAgentCore(sourceAgentId, targetProjectId, { nameOverride, promptPatch });
+        const res = cloneAgentCore(db, sourceAgentId, targetProjectId, { nameOverride, promptPatch });
         return res.ok ? ok(res.agent) : ok({ error: res.error });
       },
     );
@@ -626,7 +567,7 @@ export class PlatformMcpRouter {
       },
       async ({ sourceAgentId, targets }) => {
         const results = targets.map((t) => {
-          const res = cloneAgentCore(sourceAgentId, t.targetProjectId, {
+          const res = cloneAgentCore(db, sourceAgentId, t.targetProjectId, {
             nameOverride: t.nameOverride, promptPatch: t.promptPatch,
           });
           return res.ok

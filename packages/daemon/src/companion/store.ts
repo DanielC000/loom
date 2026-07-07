@@ -42,8 +42,9 @@ export interface CompanionConfigStore {
   /** Narrowed session read (home-collision heartbeat de-dup, below) — most callers pass the real `Db`,
    *  whose `getSession` returns the full `Session`; only these fields are used here. `processState` +
    *  `archivedAt` gate LIVENESS (a dead-but-still-enabled companion must never win/suppress in the
-   *  home-collision guard — see `isLiveSession`); `ctxTurns`/`createdAt` break ties among live members. */
-  getSession(sessionId: string): { ctxTurns?: number | null; createdAt: string; processState: string; archivedAt?: string | null } | undefined;
+   *  home-collision guard — see `isLiveSession`); `ctxTurns`/`createdAt` break ties among live members;
+   *  `agentId` backs the same-agent collision guard (`findEnabledAgentCollision` below). */
+  getSession(sessionId: string): { ctxTurns?: number | null; createdAt: string; processState: string; archivedAt?: string | null; agentId?: string } | undefined;
 }
 
 /**
@@ -241,6 +242,30 @@ export function findEnabledTokenCollision(
       continue; // corrupt/undecryptable — not a comparable token, never throw
     }
     if (tokenFingerprint(token) === candidateFingerprint) return row.sessionId;
+  }
+  return undefined;
+}
+
+/**
+ * Same-agent collision guard (companion "+ New companion" auto-new-agent, e6f68bc4): does ANOTHER enabled
+ * companion config already run on the SAME agentId? Mirrors `findEnabledTokenCollision`'s shape (scan every
+ * enabled row, skip the row being written itself via `excludeSessionId`), but the candidate isn't a secret —
+ * it's the session's agentId, read via `getSession`. Only a row whose OWN session is still LIVE (not
+ * archived/exited — `isLiveSession`) counts as a collision: a companion whose session died leaves its config
+ * row `enabled` (see controller.ts's `onSessionExit`), so treating that stale row as "occupying" the agent
+ * would wrongly block re-provisioning onto it. Returns the colliding row's sessionId, or undefined when clear.
+ */
+export function findEnabledAgentCollision(
+  db: CompanionConfigStore,
+  agentId: string,
+  excludeSessionId?: string,
+): string | undefined {
+  for (const row of db.listCompanionConfigs()) {
+    if (!row.enabled || row.sessionId === excludeSessionId) continue;
+    const session = db.getSession(row.sessionId);
+    if (!session || session.agentId !== agentId) continue;
+    if (!isLiveSession(db, row.sessionId)) continue;
+    return row.sessionId;
   }
   return undefined;
 }

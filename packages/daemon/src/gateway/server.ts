@@ -31,7 +31,7 @@ import type { CompanionControl } from "../companion/controller.js";
 import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
-import { maskCompanionConfig, findEnabledTokenCollision } from "../companion/store.js";
+import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
 import { listConnections, createConnection, deleteConnection } from "../connections/store.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
@@ -49,6 +49,7 @@ import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/write
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff } from "../skills/store.js";
 import { validateProfile } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
+import { cloneAgentCore } from "../agents/clone-core.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
 import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge, profileUpdateDiff, adoptProfileUpdate, type ProfileFieldResolution } from "../profiles/customization.js";
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
@@ -904,8 +905,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // companion provisioned while another is enabled gets its OWN gateway/session/heartbeat, not an
     // inert/unrouted one. GUARD 2/3 below (chat-id-needs-token, assistant-role-rig) are unrelated to
     // single-vs-multi and stay.
-    // Resolve the rig: an explicit agentId, else the bundled "Companion" agent in the reserved setup home.
-    let agentId: string;
+    // Resolve the rig: an explicit agentId, else the bundled "Companion" agent in the reserved setup home —
+    // AUTO-CLONING a fresh agent when that default is already running a live enabled companion (card
+    // e6f68bc4, owner-chosen option A): "+ New companion" still "just works" with no picker, but a 2nd+
+    // companion gets bound to its OWN distinct agent/persona instead of racing a duplicate session onto the
+    // SAME agent as the first. The FIRST companion (default not yet occupied) still binds the bundled agent
+    // directly — existing single-companion users are unaffected.
+    //
+    // The clone itself is DEFERRED — minted only right before the spawn, well below — rather than performed
+    // here: minting it this early would insert an Agent row before the remaining pre-spawn guards (chatId,
+    // token collision, assistant-role) run, and none of their reject paths delete it, leaking a ghost agent
+    // on every rejected 2nd-companion attempt. `agentId` stays null while a clone is pending; `cloneSource`
+    // carries what to clone from once every guard below has passed.
+    let agentId: string | null = null;
+    let cloneSource: { sourceAgentId: string; targetProjectId: string } | null = null;
     if (b.agentId !== undefined && b.agentId !== null) {
       if (!isNonBlankStr(b.agentId)) return reply.code(400).send({ error: "agentId must be a non-empty string" });
       if (!deps.db.getAgent(b.agentId.trim())) return reply.code(404).send({ error: "agent not found" });
@@ -913,15 +926,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     } else {
       const home = deps.db.getReservedProjectByName(SETUP_PROJECT_NAME);
       const companionAgent = home ? deps.db.listAgents(home.id).find((a) => a.name === COMPANION_AGENT_NAME) : undefined;
-      if (!companionAgent) return reply.code(400).send({ error: "no default Companion rig is available — pass an explicit agentId" });
-      agentId = companionAgent.id;
+      if (!home || !companionAgent) return reply.code(400).send({ error: "no default Companion rig is available — pass an explicit agentId" });
+      if (findEnabledAgentCollision(deps.db, companionAgent.id)) {
+        cloneSource = { sourceAgentId: companionAgent.id, targetProjectId: home.id };
+      } else {
+        agentId = companionAgent.id;
+      }
     }
     // GUARD 3 (assistant-role rig, correctness + least-privilege): chat_reply is gated on role=assistant, so a
     // non-assistant rig yields a companion that can't reply — and binding a chat-reachable/injection-exposed
     // agent to a manager/platform/worker rig is a blast-radius escalation. REJECT any rig whose resolved
     // profile role isn't "assistant" (a profile-less / null-role agent is rejected too). The bundled Companion
     // rig is assistant, so the default path is unaffected; only an explicit non-assistant agentId is rejected.
-    const rigAgent = deps.db.getAgent(agentId);
+    // A still-PENDING clone carries its source's profileId VERBATIM (cloneAgentCore), so checking the SOURCE
+    // agent's role here is equivalent to checking the eventual clone's — without minting it early.
+    const rigAgent = deps.db.getAgent(agentId ?? cloneSource!.sourceAgentId);
     const rigProfile = rigAgent?.profileId ? deps.db.getProfile(rigAgent.profileId) : undefined;
     if (rigProfile?.role !== "assistant") {
       return reply.code(400).send({ error: "a companion rig must be an assistant-role profile" });
@@ -973,6 +992,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         });
       }
     }
+    // GUARD 5 (same-agent collision backstop, card e6f68bc4): an agent may host only ONE live enabled
+    // companion at a time. Only meaningful for an ALREADY-resolved agentId (the explicit-agentId path) — a
+    // still-PENDING clone (agentId null here) is by construction a brand-new agent that cannot already host
+    // a companion, so it's exempt; this catches what the auto-clone doesn't — an EXPLICIT agentId that
+    // collides with an already-live enabled companion, or any other race — before spawning a 2nd session
+    // that would silently duplicate it.
+    if (enabled && agentId) {
+      const agentCollision = findEnabledAgentCollision(deps.db, agentId);
+      if (agentCollision) {
+        return reply.code(409).send({
+          error: `this agent already has a live enabled companion (session ${agentCollision.slice(0, 8)}) — an agent can host only one enabled companion at a time; give this companion its own agent`,
+        });
+      }
+    }
     // home: optional { channel, chatId } proactive target.
     let home: CompanionRoute | null = null;
     if (b.home !== undefined && b.home !== null) {
@@ -981,18 +1014,38 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       home = { channel: h.channel.trim(), chatId: h.chatId.trim() };
     }
 
+    // Mint the DEFERRED clone now — every pre-spawn guard above has passed, so this insert and the session
+    // spawn below live on the SAME guarded/rollback path (no orphan agent on a later spawn/post-spawn
+    // failure — see the two rollback sites below). An unnamed clone gets a distinguishing numeric-suffixed
+    // label instead of inheriting the bundled rig's bare name verbatim (else every unnamed companion would
+    // be indistinguishable in the picker). cloneAgentCore's least-privilege guard is a no-op here (the
+    // bundled Companion rig is always an assistant-role profile), but it stays load-bearing if that rig were
+    // ever repointed at something elevated — REJECTED (403), not silently propagated.
+    let clonedAgentId: string | null = null;
+    if (cloneSource) {
+      const source = deps.db.getAgent(cloneSource.sourceAgentId)!;
+      const label = name || `${source.name} ${deps.db.listAgents(cloneSource.targetProjectId).length + 1}`;
+      const cloned = cloneAgentCore(deps.db, cloneSource.sourceAgentId, cloneSource.targetProjectId, { nameOverride: label });
+      if (!cloned.ok) return reply.code(403).send({ error: `failed to clone a new companion agent: ${cloned.error}` });
+      agentId = cloned.agent.id;
+      clonedAgentId = cloned.agent.id;
+    }
+
     // (a) Spawn the long-lived assistant session on the chosen rig. A spawn failure here has nothing to roll
-    // back (no session, no writes) — surface it directly. companionName bakes the given name into the
-    // startup prompt at creation (a blank name is a harmless no-op — see composeAssistantStartupPrompt).
+    // back except a just-minted clone (if any) — no session/config/binding was written yet. companionName
+    // bakes the given name into the startup prompt at creation (a blank name is a harmless no-op — see
+    // composeAssistantStartupPrompt).
     let sessionId: string;
     try {
-      sessionId = deps.sessions.startNew(agentId, { companionName: name }).id;
+      sessionId = deps.sessions.startNew(agentId!, { companionName: name }).id;
     } catch (e) {
+      if (clonedAgentId) { try { deleteAgentCore(deps.db, clonedAgentId); } catch { /* best-effort — nothing else was written */ } }
       return reply.code(500).send({ error: `failed to spawn the companion session: ${(e as Error).message}` });
     }
 
-    // (b–d) Everything AFTER the spawn is wrapped so a failure tears the session down (no orphan). The
-    // cascade delete cleans any partial config/binding writes; deleteSession + a hard stop remove the row.
+    // (b–d) Everything AFTER the spawn is wrapped so a failure tears the session (and a just-cloned agent)
+    // down (no orphan). The cascade delete cleans any partial config/binding writes; deleteSession + a hard
+    // stop remove the row.
     try {
       // (b) config row bound to the NEW session — token encrypted IF given, else empty blob (no token stored).
       const row = deps.db.upsertCompanionConfig({
@@ -1029,6 +1082,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       try { deps.db.deleteCompanionConfig(sessionId); } catch { /* nothing written / already gone */ }
       try { deps.sessions.stopSession(sessionId, "hard"); } catch { /* pty already gone */ }
       try { deps.db.deleteSession(sessionId); } catch { /* row already gone */ }
+      // A just-cloned agent has no reason to survive a rolled-back provision either — the session it was
+      // minted for is already gone (deleteSession above), so deleteAgentCore's live-session check is clear.
+      if (clonedAgentId) { try { deleteAgentCore(deps.db, clonedAgentId); } catch { /* best-effort */ } }
       await deps.companion?.reconcile(sessionId); // return the live companion to whatever the DB now reflects (OFF), scoped to this session
       return reply.code(500).send({ error: `companion provision failed and was rolled back: ${(e as Error).message}` });
     }

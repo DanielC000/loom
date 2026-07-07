@@ -250,20 +250,110 @@ try {
   }
 
   // ============ Part 6 — fail-closed pre-spawn guards ============
-  // (6a) MULTI-COMPANION (the 409 is GONE): provisioning a 2nd companion while one is already enabled now
-  // SUCCEEDS — a real, distinct session is spawned and its OWN gateway arms concurrently with the first's.
+  // (6a) MULTI-COMPANION, now AUTO-NEW-AGENT (card e6f68bc4, option A): provisioning a 2nd companion while
+  // one is already enabled SUCCEEDS, but instead of racing a duplicate session onto the SAME agent as the
+  // first, it CLONES a fresh agent from the bundled default and binds the 2nd companion to THAT — a
+  // genuinely distinct persona, not a duplicate.
   {
     const rig = await makeRig("p6a.db"); rigs.push(rig);
-    const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
+    const agentsBefore = rig.db.listAgents(rig.db.getReservedProjectByName(SETUP_PROJECT_NAME).id).length;
+    const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { name: "Aria" } });
     check("multi(6a): first provision succeeds", first.statusCode === 201 && rig.spawned.length === 1);
     const firstSid = JSON.parse(first.payload).sessionId;
-    const second = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
+    check("multi(6a): the FIRST companion binds the bundled default agent directly (no clone, backward-compat)", rig.db.getSession(firstSid)?.agentId === rig.companionAgentId);
+    const second = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { name: "Nova" } });
     check("multi(6a): a 2nd provision while one is enabled now SUCCEEDS (201, no 409)", second.statusCode === 201);
     const secondSid = JSON.parse(second.payload).sessionId;
     check("multi(6a): a 2nd DISTINCT session was spawned", rig.spawned.length === 2 && secondSid !== firstSid);
+    const firstAgentId = rig.db.getSession(firstSid)?.agentId;
+    const secondAgentId = rig.db.getSession(secondSid)?.agentId;
+    check("multi(6a): the 2nd companion is bound to a DISTINCT agent (cloned, not the busy default)", !!secondAgentId && secondAgentId !== firstAgentId);
+    check("multi(6a): the 2nd companion's agent is NOT the bundled default (a real clone, not a re-bind)", secondAgentId !== rig.companionAgentId);
+    const home = rig.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+    const clonedAgent = rig.db.getAgent(secondAgentId);
+    check("multi(6a): the clone lives in the SAME (setup) home project", clonedAgent?.projectId === home.id);
+    check("multi(6a): the clone carries the assistant profile through (least-priv, unchanged)", clonedAgent?.profileId === rig.db.getAgent(rig.companionAgentId)?.profileId);
+    check("multi(6a): exactly ONE new agent was minted (the clone)", rig.db.listAgents(home.id).length === agentsBefore + 1);
     check("multi(6a): BOTH configs are enabled in the DB", rig.db.getCompanionConfig(firstSid)?.enabled === true && rig.db.getCompanionConfig(secondSid)?.enabled === true);
     check("multi(6a): BOTH sessions are armed in the live chat_reply gate concurrently", rig.hooks.companionSessionIds.has(firstSid) && rig.hooks.companionSessionIds.has(secondSid));
     check("multi(6a): the controller shows both live", rig.controller.liveSessionIds().sort().join(",") === [firstSid, secondSid].sort().join(","));
+  }
+  // (6e) SAME-AGENT GUARD (backstop): an EXPLICIT agentId that already has a live enabled companion is
+  // REJECTED (409) rather than silently spawning a 2nd session that would duplicate it — no session spawned.
+  {
+    const rig = await makeRig("p6e.db"); rigs.push(rig);
+    const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
+    check("guard(6e): first (default) provision succeeds", first.statusCode === 201 && rig.spawned.length === 1);
+    const dup = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { agentId: rig.companionAgentId } });
+    check("guard(6e): an explicit agentId colliding with a live enabled companion → 409", dup.statusCode === 409 && /already has a live enabled companion/.test(JSON.parse(dup.payload).error));
+    check("guard(6e): NO session spawned for the rejected collision", rig.spawned.length === 1);
+    // A companion that later DISABLES its config frees the agent up for an explicit re-bind.
+    await rig.app.inject({ method: "PUT", url: `/api/companion/config/${JSON.parse(first.payload).sessionId}`, payload: { enabled: false } });
+    const rebind = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { agentId: rig.companionAgentId } });
+    check("guard(6e): once the first companion is DISABLED, the same agent can be re-bound explicitly", rebind.statusCode === 201);
+  }
+  // (6f) LEAST-PRIVILEGE on the auto-clone path: if the bundled default's profile is (hypothetically)
+  // elevated to platform/auditor AFTER its first companion is already live, a 2nd provision that would
+  // otherwise auto-clone from it must never mint an agent off that elevated source. In practice GUARD 3
+  // (assistant-role rig, above) catches this FIRST and more broadly — it checks the role of the pending
+  // clone's SOURCE agent (equivalent to checking the eventual clone's, since profileId carries over
+  // VERBATIM) before the clone is ever minted, so it never reaches cloneAgentCore's own elevation guard
+  // (clonedProfileRoleError) here. That guard stays load-bearing as a backstop for its OTHER caller, the
+  // Platform Lead's agent_clone tool (no equivalent role precondition there) — exercised directly in
+  // platform-agent-clone.mjs. Either way: no new agent, no new session.
+  {
+    const rig = await makeRig("p6f.db"); rigs.push(rig);
+    const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
+    check("guard(6f): first (assistant-role) provision succeeds", first.statusCode === 201 && rig.spawned.length === 1);
+    const home = rig.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+    const agentsBefore = rig.db.listAgents(home.id).length;
+    const companionAgent = rig.db.getAgent(rig.companionAgentId);
+    rig.db.updateProfile(companionAgent.profileId, { role: "platform" }); // simulate an elevated rig
+    const second = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
+    check("guard(6f): the auto-clone is REJECTED (400, GUARD 3) rather than cloning an elevated rig", second.statusCode === 400 && /assistant-role/.test(JSON.parse(second.payload).error));
+    check("guard(6f): NO new agent was minted", rig.db.listAgents(home.id).length === agentsBefore);
+    check("guard(6f): NO 2nd session was spawned", rig.spawned.length === 1);
+  }
+  // (6g) NO ORPHAN AGENT LEAK (blocker fix): the auto-clone is DEFERRED until every pre-spawn guard has
+  // passed, so a 2nd-companion attempt that WOULD clone (collision on the default) but is then rejected by
+  // a LATER guard must reject WITHOUT ever minting the agent — proving the fix for the "clone happens
+  // during agentId resolution, before GUARD 2/4 run, and nothing on their reject paths deletes it" leak.
+  {
+    const rig = await makeRig("p6g.db"); rigs.push(rig);
+    const home = rig.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+    const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
+    check("noleak(6g-i): first (default) provision succeeds", first.statusCode === 201 && rig.spawned.length === 1);
+    const agentsBefore = rig.db.listAgents(home.id).length;
+    // GUARD 2 (chatId required with token) rejects a would-be-cloned 2nd companion — no agent leaked.
+    const g2 = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN } });
+    check("noleak(6g-i): the auto-clone path still enforces GUARD 2 (400)", g2.statusCode === 400 && /allowedChatId is required/.test(JSON.parse(g2.payload).error));
+    check("noleak(6g-i): NO agent leaked on the rejected attempt", rig.db.listAgents(home.id).length === agentsBefore);
+    check("noleak(6g-i): NO session spawned either", rig.spawned.length === 1);
+  }
+  {
+    const rig = await makeRig("p6g2.db"); rigs.push(rig);
+    const home = rig.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+    const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "chat-first" } });
+    check("noleak(6g-ii): first (default, telegram) provision succeeds", first.statusCode === 201 && rig.spawned.length === 1);
+    const agentsBefore = rig.db.listAgents(home.id).length;
+    // GUARD 4 (token collision) rejects a would-be-cloned 2nd companion — no agent leaked.
+    const g4 = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "chat-second" } });
+    check("noleak(6g-ii): the auto-clone path still enforces GUARD 4 (409)", g4.statusCode === 409 && /already used by another enabled companion/.test(JSON.parse(g4.payload).error));
+    check("noleak(6g-ii): NO agent leaked on the rejected attempt", rig.db.listAgents(home.id).length === agentsBefore);
+    check("noleak(6g-ii): NO 2nd session spawned either", rig.spawned.length === 1);
+  }
+  // (6h) an UNNAMED clone gets a distinguishing label rather than inheriting the bundled rig's bare name
+  // verbatim — otherwise every unnamed companion would be indistinguishable in the picker.
+  {
+    const rig = await makeRig("p6h.db"); rigs.push(rig);
+    const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
+    check("label(6h): first (unnamed) provision succeeds", first.statusCode === 201);
+    const second = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
+    check("label(6h): second (unnamed, cloned) provision succeeds", second.statusCode === 201);
+    const secondSid = JSON.parse(second.payload).sessionId;
+    const secondAgent = rig.db.getAgent(rig.db.getSession(secondSid).agentId);
+    check("label(6h): the unnamed clone gets a label DISTINCT from the bundled default's bare name",
+      secondAgent.name !== COMPANION_AGENT_NAME && secondAgent.name.startsWith(COMPANION_AGENT_NAME));
   }
   // (6b) botToken without allowedChatId → 400 (a token with nowhere to reach).
   {
