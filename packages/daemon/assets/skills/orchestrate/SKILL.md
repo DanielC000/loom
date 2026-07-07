@@ -256,12 +256,13 @@ mid-report — before sending anything.
    silently later (atomicity, races, environment pollution, hidden coupling, an upstream bug). Then
    `worker_merge` → review → `worker_merge_confirm`. If it's not ready, request changes via
    `worker_message`. Never merge unreviewed work.
-   - **A schema or migration change gets exercised against a real pre-migration database, not just a
-     fresh one.** Verifying it only against a fresh/empty DB is structurally blind to a schema that
-     references a migration-added column or table — the fresh DB never had a "before" state to migrate
-     from. Require the worker (or do it yourself) to run the migration against a COPY of a real
-     pre-migration database and confirm the upgrade path. And review the schema itself for the inverse
-     bug: no index or constraint may reference a column that only a later migration adds.
+   - **A schema or migration change to a persistent datastore gets exercised against a real
+     pre-migration snapshot, not just a fresh one.** Verifying it only against a fresh/empty store is
+     structurally blind to a schema that references a migration-added column or table — the fresh store
+     never had a "before" state to migrate from. Require the worker (or do it yourself) to run the
+     migration against a COPY of a real pre-migration snapshot and confirm the upgrade path. And review
+     the schema itself for the inverse bug: no base-schema index or constraint may reference a column
+     that only a later migration adds.
 6. **Hold the line on honesty.** "Done" must be TRUE — never declare a milestone complete with scoped
    work outstanding, and never let scoped work quietly become a "follow-up." Surface limitations and
    known bugs instead of papering over them. Keep docs accurate: rewrite stale claims in place.
