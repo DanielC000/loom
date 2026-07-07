@@ -20,6 +20,43 @@ export const RATE_LIMIT_ERROR_RE =
   /rate.?limit|too many requests|429|overloaded|usage.*limit|exceeded.*limit|out of extra usage/i;
 
 /**
+ * Weekly/account usage-cap TEXT sentinel (card b16320bc). Unlike the SESSION-scoped 5h cap (which kills
+ * the turn and fires a `StopFailure{error:"rate_limit"}` — see {@link detectUsageLimit}), a weekly/account
+ * cap is answered by the interactive CLI as an ordinary assistant reply — e.g. "You've hit your weekly
+ * limit · resets 5pm (America/Los_Angeles)." — followed by a CLEAN `Stop`, not a `StopFailure`. So the
+ * structured detector never fires and the worker just stalls, replying bare "No response requested" to
+ * every later nudge: invisible in structured state (busy:false, rateLimitedUntil/rateLimitDeadline empty).
+ *
+ * host.ts tests this against the LAST assistant turn's TEXT-ONLY reply (`ContextStats.lastAssistantText` —
+ * `content[].type==="text"` blocks only, tool_use/tool_result excluded), read from the SAME single-pass
+ * transcript scan `readContextStats` already does at the Stop/StopFailure chokepoint, on EVERY clean Stop
+ * — so this MUST be precise, not just plausible: any session (worker, manager, OR companion — they all
+ * share this chokepoint) that happens to end a turn discussing "weekly limits" and "resets" would
+ * otherwise get spuriously parked for hours, manufacturing a FALSE parked-on-quota signal that's worse
+ * than the visibility gap this feature closes (a Loom dev session — including this one's own follow-up
+ * work — routinely discusses exactly this feature). So this anchors on the CLI's DISTINCTIVE shape rather
+ * than generic vocabulary, requiring BOTH:
+ *   1. the CLI's own "hit your weekly/account limit" framing (WEEKLY_LIMIT_HIT_RE) — ordinary prose
+ *      discussing "the weekly limit" or "your account limit" almost never phrases it this way; AND
+ *   2. "resets" immediately followed by a real CLOCK-TIME SHAPE (WEEKLY_LIMIT_RESET_CLOCK_RE: "resets
+ *      5pm", "resets 17:00", "resets at 11:30pm") — a BARE INTEGER doesn't count ("resets 5 items",
+ *      "the counter resets 5×" must NOT qualify even alongside HIT_RE), and neither does a dateless
+ *      mention ("resets on Monday" / "resets detection"): the match requires either an am/pm suffix or an
+ *      `HH:MM` colon pair, both of which a bare count/quantity never carries.
+ * Bias is deliberately toward precision over recall: a missed real cap is a visible stall the manager can
+ * still diagnose by reading the transcript (today's status quo); a false park silently freezes a healthy
+ * session with a confidently-wrong signal.
+ */
+const WEEKLY_LIMIT_HIT_RE = /\bhit your (?:weekly|account) (?:usage )?limit\b/i;
+// A clock time REQUIRES an `HH:MM` pair and/or an am/pm suffix — a bare `\d{1,2}` alone (e.g. "resets 5
+// items", "resets 5×") must NOT qualify. The `:MM` branch optionally still allows a trailing am/pm
+// ("11:30pm"); the no-colon branch REQUIRES am/pm ("5pm") — so at least one real time marker is mandatory.
+const WEEKLY_LIMIT_RESET_CLOCK_RE = /\bresets?\s+(?:at\s+)?\d{1,2}(?:(?::\d{2})\s*(?:am|pm)?|\s*(?:am|pm))\b/i;
+export function isWeeklyUsageLimitSentinel(text: string): boolean {
+  return WEEKLY_LIMIT_HIT_RE.test(text) && WEEKLY_LIMIT_RESET_CLOCK_RE.test(text);
+}
+
+/**
  * Park window when the StopFailure carries NO reset time — the common case (the predecessor left
  * `error_details` unparsed and used a default backoff). 5h = the Claude Max rolling usage-cap
  * window, so "don't resume / don't fire into the account" until roughly the cap could clear.

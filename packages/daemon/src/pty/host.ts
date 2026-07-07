@@ -12,7 +12,7 @@ import { writeSessionSettings, writeSessionMcpConfig } from "./claude-settings.j
 import { ensureTrusted } from "./claude-config.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
-import { detectUsageLimit, rateLimitedUntil } from "../orchestration/usage-limit.js";
+import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
@@ -2044,13 +2044,15 @@ export class PtyHost {
         this.finalizingTurn = true;
         try {
           this.setBusy(sessionId, false); // falling edge — exactly one Stop per end-of-turn (no per-tool-use)
-          // Refresh context occupancy at the turn boundary. Cheap SYNCHRONOUS tail-read; done for EVERY
-          // session (the host doesn't know role — a manager's own occupancy matters too, "who recycles
-          // the manager"). Keep it sync — see the M2 box above before making this (or anything here) async.
-          if (live.engineSessionId) {
-            const stats = readContextStats(live.cwd, live.engineSessionId);
-            if (stats) this.events.onContextStats(sessionId, stats);
-          }
+          // Refresh context occupancy at the turn boundary — ONE single-pass tail-read of the transcript
+          // (card b16320bc review: this used to be read TWICE — once here, once again below for the
+          // weekly-cap text sentinel — doubling synchronous parse work of a potentially multi-MB JSONL on
+          // this M2-sensitive Stop-hook chokepoint; `stats.lastAssistantText` now comes from this SAME
+          // read). Cheap SYNCHRONOUS tail-read; done for EVERY session (the host doesn't know role — a
+          // manager's own occupancy matters too, "who recycles the manager"). Keep it sync — see the M2
+          // box above before making this (or anything here) async.
+          const stats = live.engineSessionId ? readContextStats(live.cwd, live.engineSessionId) : null;
+          if (stats) this.events.onContextStats(sessionId, stats);
           // §19c usage-limit park: a StopFailure with error==="rate_limit" means the turn died on the
           // cap. The pty stays alive; we record the resume-at and do NOT drain a new turn into a capped
           // account (the pending queue is held intact for #19c-b's resume). billing_error / a clean Stop
@@ -2066,6 +2068,21 @@ export class PtyHost {
               this.events.onRateLimited(sessionId, until, { resetsAtSeconds: det.resetsAtSeconds, message: `usage limit — resumes ${until}` });
               break;
             }
+          }
+          // Weekly/account usage-cap TEXT sentinel fallback (card b16320bc): the interactive CLI answers
+          // THAT cap with an ordinary assistant message + a CLEAN Stop, not a StopFailure — so the
+          // structured check above never fires and the worker would otherwise stall, replying bare "No
+          // response requested" to every later nudge with no visible park. Test the LAST assistant turn's
+          // text-only reply (tool_use/tool_result excluded — see ContextStats.lastAssistantText) from the
+          // SAME `stats` read above for the sentinel; on a match, park through the EXACT SAME path as the
+          // structured detector above (no resetsAtSeconds — plain text carries no machine-readable reset —
+          // so rateLimitedUntil falls back to the default backoff / the already-polled usage-window reset,
+          // same as a reset-less StopFailure).
+          if (stats?.lastAssistantText && isWeeklyUsageLimitSentinel(stats.lastAssistantText)) {
+            const until = rateLimitedUntil(undefined);
+            live.rateLimited = true;
+            this.events.onRateLimited(sessionId, until, { message: `usage limit — resumes ${until}` });
+            break;
           }
           // The turn ended → safe to write. Drain ONE queued message (FIFO), re-arming busy so the
           // next Stop releases the next: strict per-session serialization. Writing only at the turn

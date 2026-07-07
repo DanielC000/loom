@@ -536,6 +536,14 @@ export class OrchestrationMcpRouter {
     // appended as an ADDITIVE PLACEHOLDER row instead — `workerSessionId:null`, `pendingSpawn` set,
     // `processState:"starting"`, `reportedState:null`, `awaitingReview:false`, so an existing "count live
     // workers" / "find one awaiting review" consumer skips it rather than miscounting a phantom worker.
+    //
+    // `rateLimitedUntil`/`rateLimitDeadline` (card b16320bc): additive — a non-limited worker's row is
+    // otherwise unchanged, both fields simply read null. Without this, a worker parked on a usage cap
+    // (§19c — detectUsageLimit's StopFailure signal, or the weekly/account TEXT-sentinel fallback in
+    // pty/host.ts) showed as plain `busy:false` here, indistinguishable from a healthy idle worker; a
+    // manager had to worker_status(id) — or read the transcript — to discover the park. worker_status(id)
+    // already surfaced both fields (it returns the full session record), so this closes the SAME gap for
+    // the fleet view without adding a new field/scanner.
     const fleetView = () => {
       const workers = db.listWorkers(managerSessionId).map((w) => ({
         workerSessionId: w.id,
@@ -547,6 +555,8 @@ export class OrchestrationMcpRouter {
         model: w.model ?? null,
         lastActivity: w.lastActivity,
         pendingMerge: sessions.peekPendingMerge(w.id) ?? null,
+        rateLimitedUntil: w.rateLimitedUntil ?? null,
+        rateLimitDeadline: w.rateLimitDeadline ?? null,
         ...reportedProjection(w.id),
       }));
       const pendingSpawns = sessions.listPendingSpawns(managerSessionId).map((op) => ({
@@ -559,6 +569,8 @@ export class OrchestrationMcpRouter {
         model: null,
         lastActivity: op.startedAt,
         pendingMerge: null,
+        rateLimitedUntil: null,
+        rateLimitDeadline: null,
         pendingSpawn: { opId: op.opId, startedAt: op.startedAt },
         reportedState: null,
         awaitingReview: false,
@@ -568,7 +580,7 @@ export class OrchestrationMcpRouter {
 
     server.registerTool(
       "worker_list",
-      { description: "List the workers you (this manager) have spawned — your direct children. `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is still running its gate in the background — poll here or re-call worker_merge_confirm to fetch the result once ready. A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result.", inputSchema: {} },
+      { description: "List the workers you (this manager) have spawned — your direct children. `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is still running its gate in the background — poll here or re-call worker_merge_confirm to fetch the result once ready. `rateLimitedUntil`/`rateLimitDeadline` (non-null) mean the worker is PARKED ON A USAGE CAP — busy will read false but this is NOT a healthy idle worker; it resumes on its own once `rateLimitedUntil` passes (`rateLimitDeadline` is the give-up horizon). A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result.", inputSchema: {} },
       async () => ok(fleetView()),
     );
 

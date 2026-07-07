@@ -8,14 +8,38 @@ export interface ContextStats {
   turns: number;
   /** Model id from the most recent assistant line (e.g. "claude-opus-4-8"); null if absent. */
   model: string | null;
+  /**
+   * The LAST assistant turn's TEXT-ONLY reply — concatenated `content[].type==="text"` blocks, with
+   * `tool_use` blocks (and any `tool_result`, which only ever appear on a `user`-role line anyway)
+   * deliberately excluded. This is exactly what the interactive TUI shows the user as the model's own
+   * spoken response. Used by host.ts to scan for the weekly/account usage-cap TEXT sentinel
+   * (isWeeklyUsageLimitSentinel) off this SAME single-pass read (card b16320bc review: avoid a second
+   * full transcript parse on the Stop hot path) — narrower than a raw-transcript render specifically so
+   * a tool call's JSON args or a tool result's file dump can never masquerade as the model's own words.
+   * null if no assistant line carries text content.
+   */
+  lastAssistantText: string | null;
 }
 
 function num(x: unknown): number {
   return typeof x === "number" ? x : 0;
 }
 
+/** Text-only extraction from an assistant message's `content` array — tool_use/tool_result excluded. */
+function textOnlyContent(content: unknown): string | null {
+  if (!Array.isArray(content)) return null;
+  const parts: string[] = [];
+  for (const c of content as Array<Record<string, unknown>>) {
+    if (c.type === "text" && typeof c.text === "string") parts.push(c.text);
+  }
+  return parts.length ? parts.join("\n") : null;
+}
+
 /**
- * Measure a session's current engine-context occupancy by tail-scanning its transcript JSONL.
+ * Measure a session's current engine-context occupancy by tail-scanning its transcript JSONL — ONE
+ * single-pass read (card b16320bc review folded the last-assistant-text scan into this SAME loop rather
+ * than a second full-file parse, since a long session's JSONL can be multi-MB and this runs on the
+ * M2-sensitive synchronous Stop-hook chokepoint).
  * The LAST assistant turn's `usage` approximates how much the model is now carrying as input:
  * input_tokens + cache_read + cache_creation (the cache fields hold the bulk of a warm context).
  * `turns` counts assistant lines (with a message) as a coarse secondary signal.
@@ -29,15 +53,18 @@ export function readContextStats(cwd: string, engineSessionId: string): ContextS
   let turns = 0;
   let lastUsage: Record<string, unknown> | null = null;
   let lastModel: string | null = null;
+  let lastText: string | null = null;
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let o: Record<string, unknown>;
     try { o = JSON.parse(line); } catch { continue; }
     if (o.type !== "assistant" || !o.message) continue;
     turns++;
-    const msg = o.message as { usage?: Record<string, unknown>; model?: string };
+    const msg = o.message as { usage?: Record<string, unknown>; model?: string; content?: unknown };
     if (msg.usage) lastUsage = msg.usage; // keep the most recent turn's usage
     if (typeof msg.model === "string") lastModel = msg.model; // …and its model id
+    const text = textOnlyContent(msg.content);
+    if (text !== null) lastText = text; // …and its text-only reply (independent of whether usage was present)
   }
 
   if (!lastUsage) return null; // assistant lines but none with usage (or no assistant lines)
@@ -45,7 +72,7 @@ export function readContextStats(cwd: string, engineSessionId: string): ContextS
     num(lastUsage.input_tokens) +
     num(lastUsage.cache_read_input_tokens) +
     num(lastUsage.cache_creation_input_tokens);
-  return { inputTokens, turns, model: lastModel };
+  return { inputTokens, turns, model: lastModel, lastAssistantText: lastText };
 }
 
 /** Cumulative usage summed across ALL of a run's turns (Agent Runs #2 — the per-run cost meter source). */
