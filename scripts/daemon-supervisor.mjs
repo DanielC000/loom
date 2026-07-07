@@ -11,11 +11,12 @@
 // Restart policy: relaunch ONLY on the explicit restart sentinel. ANY other exit (including a crash)
 // STOPS the loop, so a broken daemon stays visibly down instead of crash-looping — that crash-loop
 // is exactly what burned us on 2026-06-03 (ELIFECYCLE 255, repeated).
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createRotatingLog } from "./lib/rotating-log.mjs";
 
 const RESTART_EXIT_CODE = 75; // must match packages/daemon/src/orchestration/restart.ts
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -43,6 +44,61 @@ function rotateCrashlog() {
 function sh(command, cwd, extraEnv) {
   const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
   return spawnSync(command, { cwd, stdio: "inherit", shell: true, env }).status ?? 1;
+}
+
+// ---- Daemon-death diagnostics (card 4c0dc6e6) ----
+//
+// A real daemon crash once left NO trace: the daemon runs stdio:"inherit" under this supervisor
+// (terminal-only, nothing persisted), and packages/daemon/src/crashlog.ts's uncaughtException /
+// unhandledRejection / exit handlers only fire for a JS-level death — they never ran, so it wasn't a
+// JS crash, but nothing else recorded what happened either. These two additions widen the net
+// WITHOUT changing the restart control flow above:
+//
+//   1. Tee the daemon's stdout/stderr to a size-bounded rotating file, so the last output before a
+//      death survives even a death with no signature of its own (crashlog.ts complements this for
+//      the JS-crash case; this covers everything, including a silent native/external death).
+//   2. Run the daemon with Node's built-in diagnostic report (--report-on-fatalerror
+//      --report-uncaught-exception), so a NATIVE fatal error (OOM, an abort inside a native addon
+//      like node-pty/better-sqlite3) that crashlog.ts's JS-only handlers can't observe still drops a
+//      report.*.json with a stack/heap/handle snapshot.
+//
+// Deliberately NOT attempted here: detaching the daemon from a closable console/RDP session (so a
+// closed terminal can't take the daemon down with it). That needs a real design decision — full
+// detachment on Windows means giving up stdio:"inherit" entirely (a detached child can't share the
+// parent console), trading today's "watch it live in the terminal" workflow for a headless,
+// log-file-only one — which is more than a diagnostics-only change should decide unilaterally. Left
+// as a follow-up; see the worker report for a sketch.
+const OUTPUT_LOG = createRotatingLog({
+  basePath: path.join(LOOM_HOME, "logs", "daemon-output.log"),
+  maxBytes: 5 * 1024 * 1024, // 5MB per file
+  maxFiles: 3, // live file + 2 rotated slots — bounded at ~15MB total, never grows unbounded
+});
+const REPORTS_DIR = path.join(LOOM_HOME, "reports");
+
+/**
+ * Launch the daemon, teeing its stdout/stderr to BOTH the console (as before) and OUTPUT_LOG, with
+ * Node's diagnostic-report flags passed as CLI args (NOT via NODE_OPTIONS — NODE_OPTIONS runs its
+ * OWN mini-parser that treats `\` as an escape character, so a Windows REPORTS_DIR like
+ * `C:\Users\name\.loom\reports` gets silently mangled to `C:UsersnameloomReports`; verified against a
+ * real Windows node — CLI args use ordinary argv parsing and have no such escaping). Resolves the
+ * daemon's exit code; a signal-kill resolves as 1, matching the previous spawnSync `.status ?? 1`
+ * behavior.
+ */
+function runDaemon(cwd, extraEnv) {
+  fs.mkdirSync(REPORTS_DIR, { recursive: true });
+  const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
+  const cmd = `node --report-on-fatalerror --report-uncaught-exception --report-directory="${REPORTS_DIR}" dist/index.js`;
+  return new Promise((resolve) => {
+    const child = spawn(cmd, { cwd, shell: true, env, stdio: ["inherit", "pipe", "pipe"] });
+    const tee = (out) => (chunk) => { out.write(chunk); OUTPUT_LOG.append(chunk); };
+    child.stdout.on("data", tee(process.stdout));
+    child.stderr.on("data", tee(process.stderr));
+    child.on("error", (err) => {
+      console.error(`[supervisor] failed to start daemon: ${err.message}`);
+      resolve(1);
+    });
+    child.on("close", (code) => resolve(code ?? 1));
+  });
 }
 
 for (;;) {
@@ -78,7 +134,7 @@ for (;;) {
   // Widened here since this spawns a FRESH node process — set BEFORE the daemon starts, which is the only
   // point a bump actually takes effect (libuv reads it once, lazily, on first threadpool use). Never
   // overrides an operator's own explicit setting.
-  const runCode = sh("node dist/index.js", daemonDir, {
+  const runCode = await runDaemon(daemonDir, {
     LOOM_SUPERVISED: "1", LOOM_DEV: process.env.LOOM_DEV ?? "1", UV_THREADPOOL_SIZE: process.env.UV_THREADPOOL_SIZE ?? "16",
   });
   if (runCode === RESTART_EXIT_CODE) {
