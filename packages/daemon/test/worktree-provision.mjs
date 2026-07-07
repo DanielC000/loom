@@ -27,7 +27,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const storeDir = path.join(os.tmpdir(), `loom-wtp-store-${stamp}`);
 process.env.npm_config_store_dir = storeDir;
 
-const { createWorktree, removeWorktree, provisionWorktreeDeps } = await import("../dist/git/worktrees.js");
+const { createWorktree, removeWorktree, provisionWorktreeDeps, appendTail, formatTail } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -253,6 +253,51 @@ try {
     });
     check('(xii) npm single-package (no "workspaces" field): build seam is never invoked',
       JSON.stringify(calls2) === JSON.stringify([]));
+  }
+
+  // (xiii) BUILD GATE (runBuild:false): a build-free/no-commit rig (Code Reviewer, Docs & Vault, …)
+  //        skips the monorepo build phase entirely — the build seam is never invoked — while a normal
+  //        (build-needing) spawn still triggers it, exactly as proven in (vii).
+  {
+    const calls = [];
+    await provisionWorktreeDeps(worktreePath, {
+      provision: async () => ({ ok: true }),
+      build: async (_wt, _ms, manager) => { calls.push(manager); return { ok: true }; },
+      runBuild: false,
+    });
+    check("(xiii) runBuild:false skips the monorepo build phase (build seam never invoked)",
+      JSON.stringify(calls) === JSON.stringify([]));
+  }
+
+  // (xiv) OUTPUT-TAIL RING: appendTail keeps only the LAST OUTPUT_TAIL_MAX_CHARS (4000) chars of a
+  //       captured child's stdout+stderr, so a chatty/failing install/build can never grow the buffer
+  //       unboundedly before the child is killed or exits — and it retains the END of the output (the
+  //       most recent bytes), not the start.
+  {
+    const content = "HEAD".repeat(100) + "z".repeat(4500) + "TAIL_MARKER_END"; // 4915 chars
+    const tail = appendTail("", content);
+    check("(xiv) appendTail caps a single oversized chunk at exactly 4000 chars", tail.length === 4000);
+    check("(xiv) appendTail retains the END of the content, not the start",
+      tail.endsWith("TAIL_MARKER_END") && !tail.includes("HEAD"));
+
+    // Multiple appended chunks must cap the SAME way, not just a single big write.
+    const afterX = appendTail("", "x".repeat(3000));
+    const afterY = appendTail(afterX, "y".repeat(3000));
+    check("(xiv) appendTail caps across MULTIPLE appended chunks, not just a single big one", afterY.length === 4000);
+    check("(xiv) appendTail keeps the most-recent bytes across chunks (last 1000 x's + all 3000 y's)",
+      afterY === "x".repeat(1000) + "y".repeat(3000));
+
+    // Under the cap, appendTail is a plain, lossless concatenation.
+    check("(xiv) appendTail under the cap is a lossless concatenation", appendTail("abc", "def") === "abcdef");
+  }
+
+  // (xv) formatTail: empty/whitespace-only tail formats to "" (no dangling empty section on a clean
+  //      failure message); a real tail is wrapped with a header for inclusion in a failure `reason`.
+  {
+    check("(xv) formatTail('') is empty", formatTail("") === "");
+    check("(xv) formatTail(whitespace-only) is empty", formatTail("   \n\t") === "");
+    check("(xv) formatTail wraps a real tail with a header",
+      formatTail("boom: exit 1") === "\n--- output tail ---\nboom: exit 1");
   }
 
   // cleanup the first worktree.

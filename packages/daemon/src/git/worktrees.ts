@@ -119,6 +119,17 @@ export interface ProvisionDeps {
   /** Overrides {@link PROVISION_BUILD_TIMEOUT_MS} for the build step specifically — INDEPENDENT of the
    *  install's `timeoutMs`, so a test (or a slow install) can never starve the build's own budget. */
   buildTimeoutMs?: number;
+  /**
+   * Whether the monorepo BUILD phase may run at all for this worktree (default true — every existing
+   * caller stays byte-identical). A build-free rig — a `noCommit`/read-only role such as Code Reviewer
+   * or Docs & Vault — never runs a build gate, so paying for a full top-level `pnpm build` at worktree
+   * creation is pure spawn-latency with zero benefit. INSTALL still runs unconditionally when `false`
+   * (a no-commit rig still needs `node_modules` to run/read the repo) — only the build phase is gated.
+   * Threaded from the spawn caller (`sessions/service.ts`) off the session's resolved `noCommit` flag.
+   * Named `runBuild`, not `build`, to avoid colliding with the injectable {@link ProvisionDeps.build}
+   * function seam above.
+   */
+  runBuild?: boolean;
 }
 
 /**
@@ -130,16 +141,17 @@ export interface ProvisionDeps {
 const OUTPUT_TAIL_MAX_CHARS = 4000;
 
 /** Append `chunk` to `tail`, keeping only the LAST {@link OUTPUT_TAIL_MAX_CHARS} chars — a bounded ring
- *  so a chatty child's captured output can never grow without limit. */
-function appendTail(tail: string, chunk: Buffer | string): string {
+ *  so a chatty child's captured output can never grow without limit. Exported so the ring itself (the
+ *  cap + which end is retained) has direct unit coverage, independent of spawning a real child. */
+export function appendTail(tail: string, chunk: Buffer | string): string {
   const next = tail + chunk.toString("utf8");
   return next.length > OUTPUT_TAIL_MAX_CHARS ? next.slice(next.length - OUTPUT_TAIL_MAX_CHARS) : next;
 }
 
 /** Format a captured output tail for inclusion in a failure `reason` — empty string when nothing was
  *  captured (e.g. the child errored before producing any output), so a clean failure message doesn't
- *  grow a dangling empty section. */
-function formatTail(tail: string): string {
+ *  grow a dangling empty section. Exported for direct unit coverage alongside {@link appendTail}. */
+export function formatTail(tail: string): string {
   return tail.trim() ? `\n--- output tail ---\n${tail.trim()}` : "";
 }
 
@@ -339,9 +351,10 @@ const WORKSPACE_BUILD_COMMANDS: Record<PackageManager, string> = {
  *      detectPackageManager} — pnpm-lock.yaml / package-lock.json / yarn.lock, in that deterministic
  *      precedence; a non-JS repo, incl. the bare temp repos in tests, is skipped silently).
  *   2. BUILD — only attempted after a SUCCESSFUL install (a build over incomplete/missing deps is
- *      pointless) AND only when {@link isWorkspaceMonorepo} detects a workspace root; a single-package
- *      repo skips this phase entirely, byte-identical to before this change. Runs on its OWN budget
- *      ({@link PROVISION_BUILD_TIMEOUT_MS}), independent of the install's.
+ *      pointless), only when {@link isWorkspaceMonorepo} detects a workspace root (a single-package
+ *      repo skips this phase entirely), AND only when {@link ProvisionDeps.runBuild} isn't explicitly
+ *      `false` (a build-free/noCommit rig gets install only — see {@link ProvisionDeps.runBuild}).
+ *      Runs on its OWN budget ({@link PROVISION_BUILD_TIMEOUT_MS}), independent of the install's.
  * Either phase's failure/timeout is CLASSIFIED and logged LOUDLY (see {@link logProvisionFailure} — the
  * specific reason plus a captured output tail, not a silent `console.warn`) and then SWALLOWED — the
  * worker simply falls back to installing/building itself. This function MUST NEVER throw past
@@ -363,11 +376,12 @@ export async function provisionWorktreeDeps(worktreePath: string, deps: Provisio
   }
 
   if (!installOk || !isWorkspaceMonorepo(worktreePath, manager)) return;
+  if (deps.runBuild === false) return; // build-free rig (e.g. a noCommit review role) — install only, skip the monorepo build
 
   const buildTimeoutMs = deps.buildTimeoutMs ?? PROVISION_BUILD_TIMEOUT_MS;
-  const runBuild = deps.build ?? ((wt: string, ms: number, mgr: PackageManager) => runBoundedInstall(WORKSPACE_BUILD_COMMANDS[mgr], wt, ms));
+  const buildRunner = deps.build ?? ((wt: string, ms: number, mgr: PackageManager) => runBoundedInstall(WORKSPACE_BUILD_COMMANDS[mgr], wt, ms));
   try {
-    const res = await runBuild(worktreePath, buildTimeoutMs, manager);
+    const res = await buildRunner(worktreePath, buildTimeoutMs, manager);
     if (!res.ok) logProvisionFailure("build", manager, worktreePath, res.reason ?? "unknown reason");
   } catch (e) {
     // A builder should never throw, but belt-and-suspenders: a throw here must NOT abort createWorktree.

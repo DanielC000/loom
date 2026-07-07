@@ -2291,7 +2291,9 @@ export class SessionService {
     if (liveWorkers + this.inFlightSpawnTaskIds.size >= cap) throw new Error(`concurrency cap reached (${cap})`);
     this.inFlightSpawnTaskIds.add(taskId);
     try {
-      const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, taskId, { timeoutMs: this.provisionMs });
+      // A noCommit/read-only rig (Code Reviewer, Docs & Vault, …) never runs a build gate, so skip the
+      // monorepo BUILD phase for it — install still runs (it still needs node_modules to run/read).
+      const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, taskId, { timeoutMs: this.provisionMs, runBuild: !noCommit });
 
       const now = new Date().toISOString();
       const worker: Session = {
