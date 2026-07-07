@@ -14,6 +14,16 @@ function claudeJsonPath(): string {
   return dir ? path.join(dir, ".claude.json") : path.join(os.homedir(), ".claude.json");
 }
 
+// Windows can transiently throw EPERM/EACCES/EBUSY (instead of succeeding, or EEXIST/ENOENT as
+// POSIX would) when a create/rename/delete races another process's brief handle on the SAME path —
+// an AV/indexer mid-scan, or (for the lock below) a create landing just as another process's
+// release-delete of that lockfile is completing. It clears in milliseconds, so both writeJsonAtomic's
+// rename retry and withTrustLock's lock-acquire retry treat it as transient and retry it with this
+// SAME bounded count + backoff, rather than inventing separate numbers that could drift apart.
+const TRANSIENT_FS_RETRY_LIMIT = 12; // worst case (1,2,4,8,16,32,50,50,…ms backoff) well under 1s
+const isTransientFsError = (code: string): boolean =>
+  code === "EPERM" || code === "EACCES" || code === "EBUSY";
+
 /**
  * Atomically write `value` as pretty JSON to `filePath`: a uniquely-named temp file in the
  * same directory (so two concurrent writers can't collide on it) followed by a rename onto
@@ -34,7 +44,7 @@ export function writeJsonAtomic(filePath: string, value: unknown): void {
     try { fs.renameSync(tmp, filePath); return; }
     catch (err) {
       const code = (err as NodeJS.ErrnoException).code ?? "";
-      if (attempt >= 12 || !(code === "EPERM" || code === "EACCES" || code === "EBUSY")) {
+      if (attempt >= TRANSIENT_FS_RETRY_LIMIT || !isTransientFsError(code)) {
         try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort cleanup */ }
         throw err;
       }
@@ -134,6 +144,10 @@ function sleepSync(ms: number): void {
  *   break it and retry.
  * - If we still can't acquire within the timeout, proceed best-effort WITHOUT the lock (warn).
  *   Worst case degrades to exactly the pre-lock behavior (a possible clobber) — never a hang.
+ * - A transient Windows EPERM/EACCES/EBUSY on the acquire `open` (see TRANSIENT_FS_RETRY_LIMIT
+ *   above writeJsonAtomic) is retried, bounded, THEN degrades to the same best-effort fallback —
+ *   never treated as an immediate lock-abandon (that used to let a real writer through unlocked;
+ *   see the acquire loop below).
  * - `fn` ALWAYS runs, and the lock (if held) is ALWAYS released in `finally`. We never throw a
  *   new error that would abort the spawn.
  *
@@ -150,6 +164,7 @@ function withTrustLock(lockPath: string, fn: () => void): void {
   const timeout = trustLockMs();
   const deadline = Date.now() + timeout;
   let held = false;
+  let transientAttempt = 0;
   try { fs.mkdirSync(path.dirname(lockPath), { recursive: true }); } catch { /* best-effort */ }
   while (true) {
     try {
@@ -157,7 +172,22 @@ function withTrustLock(lockPath: string, fn: () => void): void {
       held = true;
       break;
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") break; // odd FS error → best-effort
+      const code = (err as NodeJS.ErrnoException).code ?? "";
+      if (isTransientFsError(code)) {
+        // Windows can throw EPERM/EACCES/EBUSY here instead of EEXIST when our create races another
+        // process's release (rmSync) of this SAME lockfile — reproduced with 12 concurrent writers and
+        // ZERO ambient processes involved, i.e. a real bug, not ambient load. Treating it as a permanent
+        // "odd FS error" used to break out lock-FREE and run the read-modify-write below unlocked — a
+        // genuine clobber. Retry it bounded (same limit/backoff as writeJsonAtomic's rename retry);
+        // only once that budget is exhausted does it fall through to the pre-existing best-effort
+        // (lock-free) degrade below.
+        if (transientAttempt < TRANSIENT_FS_RETRY_LIMIT) {
+          sleepSync(Math.min(50, 2 ** transientAttempt));
+          transientAttempt++;
+          continue;
+        }
+      }
+      if (code !== "EEXIST") break; // genuinely unexpected (or exhausted-transient) error → best-effort
       // Lock is held by someone else. Break it only if it looks stale (crashed holder).
       try {
         const age = Date.now() - fs.statSync(lockPath).mtimeMs;
