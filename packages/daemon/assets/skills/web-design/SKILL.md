@@ -85,7 +85,9 @@ The corroborated core. Compact here; full treatment in `references/`.
   undo beats confirm; skeletons beat spinners. → `references/interaction.md`
 - **Motion** — short and motivated. UI animations <300ms, exits ~75% of the enter; custom
   decelerating easing, never bounce/elastic, never `ease-in` for UI; animate only `transform`/`opacity`;
-  respect `prefers-reduced-motion`. Decide *whether* to animate before *how*. → `references/motion.md`
+  respect `prefers-reduced-motion`. Decide *whether* to animate before *how* — and motion you commit to
+  must actually ship: a page that reads as animated but sits static is broken, so if you can't land it
+  cleanly, dial motion down and ship clean static. → `references/motion.md`
 - **Copy** — buttons are verb+object (never OK/Submit/Yes); errors say what happened, why, and how to
   fix; no em-dashes; no marketing buzzwords. → `references/ux-writing.md`
 - **Accessibility** — WCAG AA minimum (4.5:1 body text, 3:1 large text and UI); this is a floor, not
@@ -101,11 +103,25 @@ em-dashes, overused fonts). Read it before building and check against it before 
 
 ## If a real design system fits, use it
 
-If the project already uses — or the brief clearly calls for — an established design system, adopt it
-rather than hand-rolling CSS that approximates it. One system per project; don't recreate its tokens
-by hand. (This skill is stack-agnostic and prescribes no specific framework or package.) If the brief
-is an *aesthetic* (glassmorphism, bento, brutalist, editorial) rather than a system, build it with
-native CSS and be honest that there's no official package for it.
+If the project already uses — or the brief clearly calls for — an established design system, adopt its
+**official** package rather than hand-rolling CSS that approximates it. **One system per project;** don't
+recreate its tokens by hand, and don't import a system and then override most of it. Match the brief to
+the ecosystem it lives in:
+
+| Brief reads as… | Reach for its official system |
+|---|---|
+| Microsoft / enterprise SaaS / dashboards | Fluent UI |
+| Google-flavored / Material product | Material 3 (Material Web) |
+| IBM-style B2B / data-dense analytics | Carbon |
+| Shopify app surface | Polaris |
+| Atlassian / Jira-style product | Atlaskit |
+| GitHub-style devtool or marketing | Primer (Brand variant for marketing) |
+| UK / US public-sector service | GOV.UK Frontend / USWDS — often legally expected |
+
+(This skill is stack-agnostic and prescribes no framework or package beyond naming these systems.) If the
+brief is an *aesthetic* (glassmorphism, bento, brutalist, editorial) rather than a system, there's no
+official package — build it with native CSS and be honest about what's borrowed inspiration vs. official
+material. If nothing fits, build restrained native CSS on the fundamentals above.
 
 ## Output modes
 
@@ -114,6 +130,27 @@ native CSS and be honest that there's no official package for it.
   default review format: concrete, scannable, each change justified.
 - **Full critique** (on request) — a deeper pass using the compressed review lens in
   `references/anti-patterns.md` (heuristics + cognitive-load + persona lenses).
+
+## Redesigning an existing UI
+
+A redesign is not a greenfield build — misclassifying the mode is the biggest source of bad redesign
+output. First decide: **preserve** (modernise without breaking the brand) or **overhaul** (a new visual
+language over the same content and IA). If genuinely ambiguous, ask once.
+
+**Audit before you touch anything.** Record the current brand tokens (accent, type stack, radii), the
+information architecture (page tree, nav labels, conversion paths), and the SEO/analytics baseline —
+**SEO and analytics migration is the #1 redesign risk.** Extract the existing brand accent *before*
+applying the color rules: a brand that is already purple stays purple (the anti-AI-purple rule governs
+your defaults, not an established identity).
+
+**Apply the levers in priority order and stop when the brief is satisfied** — each is more risk than the
+last: (1) typography, (2) spacing & rhythm, (3) color recalibration (unify neutrals, keep the brand
+accent), (4) a motion layer, (5) hero / key-section recomposition, (6) full block replacement (only for a
+block that's unsalvageable). Targeted evolution (1–4) is most of the value at a fraction of the risk.
+
+**Never change silently** — get explicit sign-off before touching URL slugs / anchor IDs, primary nav
+labels, form field names or order (breaks analytics + autofill), the brand logo/wordmark, or legal /
+consent copy.
 
 ## Iterate by eye
 
@@ -172,5 +209,5 @@ A short gate — not an exhaustive audit. Run it before calling any screen done:
 
 This skill distills three public design skills into Loom's own guidance. See the `NOTICE` file in this
 directory for full attribution: **Impeccable** (Apache-2.0, Paul Bakaus — itself building on
-Anthropic's frontend-design skill and ehmo's typecraft additions), **taste-skill** (MIT, Leonxlnx),
-and **Emil Kowalski's** design-engineering skill (MIT).
+Anthropic's frontend-design skill and ehmo's typecraft additions), **taste-skill** (MIT, Leonxlnx —
+including its v2 "design-taste-frontend" rewrite), and **Emil Kowalski's** design-engineering skill (MIT).

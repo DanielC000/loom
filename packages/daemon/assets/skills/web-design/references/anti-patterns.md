@@ -39,11 +39,36 @@ enough to spot in a screenshot or a diff.
   kicker labels as section scaffolding. (Eyebrow restraint is the single most-violated rule.)
 - **No numbered section markers** (01 / 02 / 03) as default scaffolding.
 - **No three-equal-feature-cards** row, and no icon-tile-stacked-above-heading feature template.
+- ★ **No div-built fake product preview** — a "screenshot" of a dashboard / task list / terminal / chart
+  assembled from styled `<div>`s (often with a fake `v0.6 · last sync 4s ago` chrome) is a top generated
+  tell. Use a real screenshot or generated image, or show no preview.
+- **No one-layout-family-repeated** down the page — reusing the same section shape (three-cards, or
+  image-left/text-right split) for every section reads as templated; vary the families, and cap
+  consecutive image+text "zigzag" splits at ~2 before breaking the pattern.
 - **No oversized long-sentence hero headline** that eats the fold.
 - **No monotonous/uniform spacing** — vary tight grouping vs section separation.
 - **No content overflow / body text flush to the viewport edge / cramped padding** inside bordered
   containers.
 - **No floating element clipped by an `overflow: hidden` ancestor** (tooltips, menus, dropdowns).
+
+## Decoration & fake-status tells
+
+Small ornamental strings and glyphs sprinkled on to make a page "feel designed." Each is a generated
+tell on its own; together they're unmistakable. Allowed only when carrying real, semantic content.
+
+- **No decorative status dots** — a colored dot before every nav item / list row / badge. Keep it only
+  when it conveys real state (live/available), and sparingly.
+- **No middle-dot (`·`) as the universal separator** — ration it (≤1 per metadata line); prefer line
+  breaks, hairlines, or columns.
+- **No scroll cues** — `Scroll`, `↓ scroll`, `Scroll to explore`, animated mouse-wheel icons. The viewer
+  knows how to scroll.
+- **No fake version / build stamps** — `v1.4.2`, `Build 0048`, `last sync 4s ago`, or `BETA` /
+  `EARLY ACCESS` / `INVITE-ONLY` eyebrows on a marketing page (fine only when the brief is genuinely a
+  launch or status surface).
+- **No atmospheric locale / time / weather strips** — `Lisbon 14:23 · 18°C` — unless the brand is
+  genuinely place- or timezone-focused. Same for mono-caps decoration bands (`BRAND. MOTION. SPATIAL.`).
+- **No overlaid pills or decorative photo-credit captions on images** (`Plate · 02`, `Field study no. 12
+  · A. Photographer`) — let the image speak or caption it plainly below; credit only a real photographer.
 
 ## Motion
 
@@ -59,12 +84,17 @@ enough to spot in a screenshot or a diff.
 
 ## Copy / UX writing
 
-- ★ **No em-dashes** (`—` or `--`) — the strongest copy-level AI tell.
+- ★ **No em-dashes** (`—` or `--`) — the strongest copy-level AI tell. Also don't use an en-dash (`–`) as
+  a separator; ranges (`2018-2026`, `$40-80`) take a plain hyphen.
 - ★ **No marketing buzzwords** (streamline / empower / supercharge / seamless / world-class /
   next-generation / leverage / robust / elevate / delve / tapestry / "in today's…" / "let's dive in").
 - **No aphoristic "Not X — just Y." cadence** repeated across sections.
 - **No generic button labels** (OK / Submit / Yes) — use verb+object; no vague errors; no humor in
   errors; never blame the user.
+- **No duplicate CTA intent** — one label per intent across the page; don't mix "Get started" / "Sign up
+  free" / "Try it" (or "Contact us" / "Let's talk" / "Reach out") for the same action.
+- **No performative-craftsman section labels** ("Field notes" / "On our desks" / "Quietly trusted by") —
+  use a plain functional label ("Latest writing", "Trusted by") or none.
 - **No "Jane Doe" / fake-perfect numbers (99.99%, 50%) / generic company names** as shipped placeholders.
 
 ## Quality & accessibility

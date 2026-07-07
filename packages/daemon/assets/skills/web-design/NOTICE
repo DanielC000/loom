@@ -28,9 +28,15 @@ facts and numeric values it carries are not themselves copyrightable. Credit and
    License: MIT License
    Copyright: © 2026 Leonxlnx
    Used: the anti-default discipline (avoid the generated look), the brief-inference / "read the room"
-   step, and the intent-dials concept. Loom adapts the dials to three named levels with a
-   restraint-biased default (it does not copy taste-skill's 1–10 numerology, its stack prescriptions,
-   or its aesthetic-variant skills).
+   step, and the intent-dials concept. Re-distilled from taste-skill's v2 rewrite ("design-taste-frontend")
+   are: the brief → design-system mapping (which official system suits which ecosystem), the redesign
+   audit-first protocol (preserve-vs-overhaul, audit brand/IA/SEO before touching, priority-ordered
+   modernisation levers, the never-change-silently list), and the expanded production-test anti-pattern
+   tells (div-built fake previews, decorative status dots, middle-dot rationing, scroll cues, fake
+   version/build stamps, locale strips, duplicate-CTA-intent). Loom adapts the dials to three named levels
+   with a restraint-biased default and does not copy taste-skill's 1–10 numerology, its stack/framework
+   prescriptions and code skeletons (React/Next/Tailwind/Motion/GSAP, icon-library lists), or its
+   aesthetic-variant skills.
 
 
 3. Emil Kowalski — design-engineering skill — https://emilkowal.ski/skill
