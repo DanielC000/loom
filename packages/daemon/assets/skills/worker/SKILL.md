@@ -118,6 +118,16 @@ map-of-content at the vault root (read `_Index.md` to find an existing note rath
 the `CLAUDE.md` pins by exact path stay at the root. Wikilinks resolve by note name, so the folder never
 breaks a `[[link]]`.
 
+**Worktree isolation — stay inside your own tree.** Your worktree may be nested inside another git
+working tree, so a careless relative path can climb out of it. Use **absolute paths** for every
+git/build/file command. **Never `cd ..`** to climb above your worktree root — if you must change
+directory, `cd` to an absolute path you own. **Never run a bare `git stash`** (or any other repo-wide
+git mutation) from a directory you haven't verified — a bare stash is repo-wide and can sweep up
+unrelated uncommitted work in a parent repo; if you must stash, scope it to explicit paths (`git stash
+push -- <paths>`). If you ever cause an unresolved out-of-scope side effect anyway — a stash you
+couldn't restore, a process you killed, a file touched outside your worktree — **report it explicitly**
+in your `worker_report`; never claim a cleanup you didn't actually do.
+
 **Never let a shell command hang your turn.** Your session is **unattended** — a command that blocks on
 input never returns, so the turn never ends and you wedge at `busy` (a false "stuck" trip + your report
 sits undelivered). Always inspect git with **`git --no-pager`** (`git --no-pager diff`, `git --no-pager
