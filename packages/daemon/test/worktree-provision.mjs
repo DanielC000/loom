@@ -156,6 +156,105 @@ try {
     .then(() => { npmThrewResolved = true; });
   check("(vi) a throwing npm/yarn provisioner is swallowed (never throws past createWorktree)", npmThrewResolved);
 
+  // (vii) MONOREPO-AWARE BUILD: a SUCCESSFUL install in a workspace root ALSO triggers a build step —
+  //       the fix for the ERR_MODULE_NOT_FOUND-on-sibling-dist gap. `worktreePath` already carries the
+  //       fixture's pnpm-workspace.yaml (copied by `git worktree add`), so it's a real monorepo root.
+  //       Inject BOTH `provision` and `build` so no real install/build ever runs (hermetic).
+  {
+    const calls = [];
+    await provisionWorktreeDeps(worktreePath, {
+      provision: async () => ({ ok: true }),
+      build: async (_wt, _ms, manager) => { calls.push(manager); return { ok: true }; },
+    });
+    check("(vii) monorepo worktree: a SUCCESSFUL install triggers the build seam (dispatched with the detected manager)",
+      JSON.stringify(calls) === JSON.stringify(["pnpm"]));
+  }
+
+  // (viii) SINGLE-PACKAGE worktree (pnpm lockfile, no pnpm-workspace.yaml): the build seam must NEVER
+  //        fire — a plain single-package repo has no siblings to build, so this stays a no-op exactly
+  //        like the pre-existing install-only behavior.
+  {
+    const singlePkgDir = markerDir("single-pkg-pnpm", ["pnpm-lock.yaml"]);
+    fs.writeFileSync(path.join(singlePkgDir, "package.json"), JSON.stringify({ name: "single", version: "0.0.0" }, null, 2));
+    const calls = [];
+    await provisionWorktreeDeps(singlePkgDir, {
+      provision: async () => ({ ok: true }),
+      build: async (_wt, _ms, manager) => { calls.push(manager); return { ok: true }; },
+    });
+    check("(viii) single-package worktree (no workspace marker): build seam is never invoked",
+      JSON.stringify(calls) === JSON.stringify([]));
+  }
+
+  // (ix) BUILD ONLY AFTER A SUCCESSFUL INSTALL: a FAILED install must skip the build phase entirely —
+  //      building over incomplete/missing deps is pointless, and the worker will install from scratch.
+  {
+    const calls = [];
+    await provisionWorktreeDeps(worktreePath, {
+      provision: async () => ({ ok: false, reason: "boom" }),
+      build: async (_wt, _ms, manager) => { calls.push(manager); return { ok: true }; },
+    });
+    check("(ix) a FAILED install skips the build phase entirely (build seam never invoked)",
+      JSON.stringify(calls) === JSON.stringify([]));
+  }
+
+  // (x) BUILD DEGRADE: a failing or throwing build must be swallowed — best-effort, never escapes
+  //     provisionWorktreeDeps, exactly like the install-phase degrade in (iv)/(vi).
+  {
+    let resolved = false;
+    await provisionWorktreeDeps(worktreePath, {
+      provision: async () => ({ ok: true }),
+      build: async () => ({ ok: false, reason: "build failed" }),
+    }).then(() => { resolved = true; });
+    check("(x) a failing build DEGRADES (best-effort, provisionWorktreeDeps never throws)", resolved);
+
+    let threwResolved = false;
+    await provisionWorktreeDeps(worktreePath, {
+      provision: async () => ({ ok: true }),
+      build: async () => { throw new Error("build boom"); },
+    }).then(() => { threwResolved = true; });
+    check("(x) a throwing build is swallowed (never throws past provisionWorktreeDeps)", threwResolved);
+  }
+
+  // (xi) BUILD IS INDEPENDENTLY BOUNDED: a slow build is bounded by its OWN buildTimeoutMs, not starved
+  //      by (or borrowing from) the install's timeoutMs budget.
+  {
+    const t0 = Date.now();
+    let resolved = false;
+    await provisionWorktreeDeps(worktreePath, {
+      provision: async () => ({ ok: true }),
+      build: (_wt, ms) => new Promise((res) => setTimeout(() => res({ ok: false, reason: "slow build" }), ms + 50)),
+      buildTimeoutMs: 150,
+    }).then(() => { resolved = true; });
+    check("(xi) a slow build is bounded and returns (best-effort, degrades to worker-builds-itself)", resolved);
+    check("(xi) the injected buildTimeoutMs is threaded through to the build seam (independent of install's timeoutMs)",
+      Date.now() - t0 >= 150);
+  }
+
+  // (xii) NPM/YARN WORKSPACE DETECTION: for non-pnpm managers, a workspace root is detected via a
+  //       `"workspaces"` field in the root package.json (pnpm uses pnpm-workspace.yaml instead — see
+  //       (vii)/(viii)). A marker-only package.json with no "workspaces" field stays a no-op.
+  {
+    const npmWsDir = markerDir("npm-workspace", ["package-lock.json"]);
+    fs.writeFileSync(path.join(npmWsDir, "package.json"), JSON.stringify({ name: "root", workspaces: ["packages/*"] }, null, 2));
+    const calls = [];
+    await provisionWorktreeDeps(npmWsDir, {
+      provision: async () => ({ ok: true }),
+      build: async (_wt, _ms, manager) => { calls.push(manager); return { ok: true }; },
+    });
+    check('(xii) npm workspace ("workspaces" field in package.json) triggers the build seam',
+      JSON.stringify(calls) === JSON.stringify(["npm"]));
+
+    const npmNoWsDir = markerDir("npm-no-workspace", ["package-lock.json"]);
+    fs.writeFileSync(path.join(npmNoWsDir, "package.json"), JSON.stringify({ name: "root" }, null, 2));
+    const calls2 = [];
+    await provisionWorktreeDeps(npmNoWsDir, {
+      provision: async () => ({ ok: true }),
+      build: async (_wt, _ms, manager) => { calls2.push(manager); return { ok: true }; },
+    });
+    check('(xii) npm single-package (no "workspaces" field): build seam is never invoked',
+      JSON.stringify(calls2) === JSON.stringify([]));
+  }
+
   // cleanup the first worktree.
   await removeWorktree(repo, worktreePath);
 } finally {
@@ -165,6 +264,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — createWorktree leaves a pnpm worktree BUILD-READY (own node_modules) without a worker install, removeWorktree CANNOT touch the main checkout's node_modules (landmine guarded), provisioning is a no-op off-pnpm, and the install is best-effort + bounded (a throw/hang degrades instead of wedging the spawn path)."
+  ? "\n✅ ALL PASS — createWorktree leaves a pnpm worktree BUILD-READY (own node_modules) without a worker install, removeWorktree CANNOT touch the main checkout's node_modules (landmine guarded), provisioning is a no-op off-pnpm, the install is best-effort + bounded (a throw/hang degrades instead of wedging the spawn path), and a WORKSPACE MONOREPO root additionally gets a best-effort, independently-bounded BUILD step after a successful install (skipped for single-package repos, skipped after a failed install, dispatched off each manager's own workspace marker)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

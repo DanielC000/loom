@@ -84,6 +84,16 @@ function taskKey(taskId: string): string {
 const PROVISION_TIMEOUT_MS = 180_000;
 
 /**
+ * Per-creation ceiling for the MONOREPO BUILD step (only run after a successful install — see
+ * {@link provisionWorktreeDeps}). INDEPENDENT of {@link PROVISION_TIMEOUT_MS} (the install's own budget)
+ * so a slow-but-successful install can never crowd out the build's window — each phase gets its own full
+ * bound rather than sharing one clock. Same order of magnitude as the install bound for the same reason
+ * (a cold monorepo build can legitimately take a while); on timeout the child is killed and the build
+ * DEGRADES (the worker builds sibling packages itself) rather than wedging the daemon.
+ */
+const PROVISION_BUILD_TIMEOUT_MS = 180_000;
+
+/**
  * The JS package managers we provision for, in DETERMINISTIC precedence order when several lockfiles
  * coexist in one worktree root (see {@link detectPackageManager}): pnpm → npm → yarn.
  */
@@ -99,6 +109,38 @@ type PackageManager = "pnpm" | "npm" | "yarn";
 export interface ProvisionDeps {
   provision?: (worktreePath: string, timeoutMs: number, manager: PackageManager) => Promise<{ ok: boolean; reason?: string }>;
   timeoutMs?: number;
+  /**
+   * Injectable seam for the MONOREPO BUILD step — only invoked after a successful install, and only
+   * when {@link isWorkspaceMonorepo} detects a workspace root. Defaults to the real bounded runner for
+   * {@link WORKSPACE_BUILD_COMMANDS}. Lets a test assert the build fires/skips/degrades without running
+   * a real build.
+   */
+  build?: (worktreePath: string, timeoutMs: number, manager: PackageManager) => Promise<{ ok: boolean; reason?: string }>;
+  /** Overrides {@link PROVISION_BUILD_TIMEOUT_MS} for the build step specifically — INDEPENDENT of the
+   *  install's `timeoutMs`, so a test (or a slow install) can never starve the build's own budget. */
+  buildTimeoutMs?: number;
+}
+
+/**
+ * Bound on the captured stdout+stderr TAIL kept per provisioning child — enough to diagnose a real
+ * failure (the actual tool error, e.g. an npm/pnpm/yarn error block) without letting a noisy/failing
+ * install grow the buffer unboundedly in memory before the child is killed or exits. Mirrors the
+ * markitdown provisioning-status pattern's captured ~4KB error tail (see CLAUDE.md).
+ */
+const OUTPUT_TAIL_MAX_CHARS = 4000;
+
+/** Append `chunk` to `tail`, keeping only the LAST {@link OUTPUT_TAIL_MAX_CHARS} chars — a bounded ring
+ *  so a chatty child's captured output can never grow without limit. */
+function appendTail(tail: string, chunk: Buffer | string): string {
+  const next = tail + chunk.toString("utf8");
+  return next.length > OUTPUT_TAIL_MAX_CHARS ? next.slice(next.length - OUTPUT_TAIL_MAX_CHARS) : next;
+}
+
+/** Format a captured output tail for inclusion in a failure `reason` — empty string when nothing was
+ *  captured (e.g. the child errored before producing any output), so a clean failure message doesn't
+ *  grow a dangling empty section. */
+function formatTail(tail: string): string {
+  return tail.trim() ? `\n--- output tail ---\n${tail.trim()}` : "";
 }
 
 /**
@@ -113,15 +155,22 @@ export interface ProvisionDeps {
  * `CI=1` keeps pnpm non-interactive (no update-notifier / prompts that could hang the child). Even if a
  * killed child orphans a lingering pnpm on the rare timeout path, it is merely finishing the install we
  * wanted; the function has already RETURNED within the bound, which is the load-bearing guarantee.
+ *
+ * stdout+stderr are PIPED (not ignored) and captured into a bounded {@link OUTPUT_TAIL_MAX_CHARS} tail
+ * so a failure's `reason` carries the actual tool output, not just an exit code — {@link
+ * provisionWorktreeDeps} logs it loudly instead of the old silent degrade.
  */
 function pnpmInstall(worktreePath: string, timeoutMs: number): Promise<{ ok: boolean; reason?: string }> {
   return new Promise((resolve) => {
     const child = spawn("pnpm install --frozen-lockfile --prefer-offline", {
       cwd: worktreePath,
       shell: true,
-      stdio: "ignore",
+      stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, CI: "1" },
     });
+    let tail = "";
+    child.stdout?.on("data", (d) => { tail = appendTail(tail, d); });
+    child.stderr?.on("data", (d) => { tail = appendTail(tail, d); });
     let settled = false;
     const done = (r: { ok: boolean; reason?: string }) => {
       if (settled) return;
@@ -131,10 +180,10 @@ function pnpmInstall(worktreePath: string, timeoutMs: number): Promise<{ ok: boo
     };
     const timer = setTimeout(() => {
       try { child.kill("SIGKILL"); } catch { /* already gone */ }
-      done({ ok: false, reason: `pnpm install exceeded ${timeoutMs}ms (killed)` });
+      done({ ok: false, reason: `pnpm install exceeded ${timeoutMs}ms (killed)${formatTail(tail)}` });
     }, timeoutMs);
     child.on("error", (e) => done({ ok: false, reason: e.message }));
-    child.on("exit", (code) => done(code === 0 ? { ok: true } : { ok: false, reason: `pnpm install exited ${code ?? "null"}` }));
+    child.on("exit", (code) => done(code === 0 ? { ok: true } : { ok: false, reason: `pnpm install exited ${code ?? "null"}${formatTail(tail)}` }));
   });
 }
 
@@ -148,15 +197,23 @@ function pnpmInstall(worktreePath: string, timeoutMs: number): Promise<{ ok: boo
  * the OS resolve npm/yarn[.cmd] from PATH, mirroring pnpmInstall + the gate runner) carries no
  * gateCommand-style trust-boundary concern. `CI=1` keeps the tool non-interactive (no prompts/notifiers
  * that could hang the child).
+ *
+ * Also used for the monorepo BUILD step ({@link WORKSPACE_BUILD_COMMANDS}) — same bounded, best-effort,
+ * output-capturing shape applies to a build command as much as an install. stdout+stderr are PIPED (not
+ * ignored) and captured into a bounded {@link OUTPUT_TAIL_MAX_CHARS} tail so a failure's `reason` carries
+ * the actual tool output, not just an exit code.
  */
 function runBoundedInstall(command: string, worktreePath: string, timeoutMs: number): Promise<{ ok: boolean; reason?: string }> {
   return new Promise((resolve) => {
     const child = spawn(command, {
       cwd: worktreePath,
       shell: true,
-      stdio: "ignore",
+      stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, CI: "1" },
     });
+    let tail = "";
+    child.stdout?.on("data", (d) => { tail = appendTail(tail, d); });
+    child.stderr?.on("data", (d) => { tail = appendTail(tail, d); });
     let settled = false;
     const done = (r: { ok: boolean; reason?: string }) => {
       if (settled) return;
@@ -166,10 +223,10 @@ function runBoundedInstall(command: string, worktreePath: string, timeoutMs: num
     };
     const timer = setTimeout(() => {
       try { child.kill("SIGKILL"); } catch { /* already gone */ }
-      done({ ok: false, reason: `${command} exceeded ${timeoutMs}ms (killed)` });
+      done({ ok: false, reason: `${command} exceeded ${timeoutMs}ms (killed)${formatTail(tail)}` });
     }, timeoutMs);
     child.on("error", (e) => done({ ok: false, reason: e.message }));
-    child.on("exit", (code) => done(code === 0 ? { ok: true } : { ok: false, reason: `${command} exited ${code ?? "null"}` }));
+    child.on("exit", (code) => done(code === 0 ? { ok: true } : { ok: false, reason: `${command} exited ${code ?? "null"}${formatTail(tail)}` }));
   });
 }
 
@@ -222,10 +279,51 @@ function detectPackageManager(worktreePath: string): PackageManager | null {
 }
 
 /**
- * Make a freshly-created worktree BUILD-READY by populating node_modules at creation, so the spawned
- * worker doesn't pay a full `pnpm install` before it can build — and a worker whose install would
- * fail/time out is caught HERE (bounded) instead of wedging the worker mid-task. (node_modules is
- * gitignored, so `git worktree add` checks out the tree WITHOUT it.)
+ * Is `worktreePath` the root of a JS WORKSPACE MONOREPO (as opposed to a single-package repo) for
+ * `manager`? A plain install never builds workspace packages, so a monorepo worktree needs an
+ * ADDITIONAL build step (see {@link provisionWorktreeDeps}) before sibling packages' `dist` output
+ * exists — without it a fresh worktree hits `ERR_MODULE_NOT_FOUND … <pkg>/dist/…` on the worker's first
+ * gate run, forcing a manual shared→dependent build before anything else can proceed.
+ *
+ * Detected via each tool's OWN standard workspace marker, matching {@link detectPackageManager}'s
+ * marker-in-the-tree style: pnpm uses a `pnpm-workspace.yaml` file at the root; npm and yarn both use a
+ * `"workspaces"` field in the root `package.json` (array form, or yarn's `{packages: [...]}` object
+ * form). Fails CLOSED (returns false) on any read/parse error — a missing/malformed `package.json` is
+ * simply not a detectable workspace root, never a reason to throw past provisioning.
+ */
+function isWorkspaceMonorepo(worktreePath: string, manager: PackageManager): boolean {
+  if (manager === "pnpm") return fs.existsSync(path.join(worktreePath, "pnpm-workspace.yaml"));
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(worktreePath, "package.json"), "utf8")) as { workspaces?: unknown };
+    return Array.isArray(pkg.workspaces) || (typeof pkg.workspaces === "object" && pkg.workspaces !== null);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * HARDCODED, best-effort monorepo BUILD command per package manager — run AFTER a successful install so
+ * sibling workspace packages' `dist` output exists before a worker's gate runs. `pnpm build` is the exact
+ * top-level command this repo's own CLAUDE.md documents (turbo's `^build` dependency order builds
+ * `shared` first); `npm run build --if-present` and `yarn build` invoke the SAME root `package.json`
+ * "build" script for their respective tools — `--if-present` keeps npm from hard-failing when a repo has
+ * no root build script, while a missing script under yarn/pnpm degrades the same way through
+ * {@link provisionWorktreeDeps}'s existing best-effort catch. ALWAYS a hardcoded constant, keyed only by
+ * the DETECTED manager — never agent input.
+ */
+const WORKSPACE_BUILD_COMMANDS: Record<PackageManager, string> = {
+  pnpm: "pnpm build",
+  npm: "npm run build --if-present",
+  yarn: "yarn build",
+};
+
+/**
+ * Make a freshly-created worktree BUILD-READY: populate node_modules at creation (so the spawned worker
+ * doesn't pay a full install before it can build), and — when the worktree root is a JS WORKSPACE
+ * MONOREPO ({@link isWorkspaceMonorepo}) — additionally run a top-level build so sibling packages' `dist`
+ * output exists too (e.g. this repo's own `shared` must build before `daemon`/`web` can import it). A
+ * worker whose install/build would fail/time out is caught HERE (bounded) instead of wedging the worker
+ * mid-task. (node_modules is gitignored, so `git worktree add` checks out the tree WITHOUT it.)
  *
  * SAFE-BY-CONSTRUCTION removal: every supported install (pnpm/npm/yarn) gives the worktree its OWN
  * independent node_modules WITHIN the worktree — pnpm hardlinks into the shared content-addressable store
@@ -236,28 +334,63 @@ function detectPackageManager(worktreePath: string): PackageManager | null {
  * share/symlink/junction node_modules across worktrees — native modules + concurrent install-state across
  * parallel workers would break, and it reintroduces the landmine. This is load-bearing.
  *
- * BEST-EFFORT + BOUNDED: acts only when a recognized JS lockfile marks the worktree root
- * ({@link detectPackageManager} — pnpm-lock.yaml / package-lock.json / yarn.lock, in that deterministic
- * precedence; a non-JS repo, incl. the bare temp repos in tests, is skipped silently). Any failure/timeout
- * is logged and SWALLOWED — the worker simply falls back to installing itself, exactly as before this
- * change. It MUST NEVER throw past createWorktree or wedge the spawn path.
+ * BEST-EFFORT + BOUNDED, in TWO independently-bounded phases:
+ *   1. INSTALL — acts only when a recognized JS lockfile marks the worktree root ({@link
+ *      detectPackageManager} — pnpm-lock.yaml / package-lock.json / yarn.lock, in that deterministic
+ *      precedence; a non-JS repo, incl. the bare temp repos in tests, is skipped silently).
+ *   2. BUILD — only attempted after a SUCCESSFUL install (a build over incomplete/missing deps is
+ *      pointless) AND only when {@link isWorkspaceMonorepo} detects a workspace root; a single-package
+ *      repo skips this phase entirely, byte-identical to before this change. Runs on its OWN budget
+ *      ({@link PROVISION_BUILD_TIMEOUT_MS}), independent of the install's.
+ * Either phase's failure/timeout is CLASSIFIED and logged LOUDLY (see {@link logProvisionFailure} — the
+ * specific reason plus a captured output tail, not a silent `console.warn`) and then SWALLOWED — the
+ * worker simply falls back to installing/building itself. This function MUST NEVER throw past
+ * createWorktree or wedge the spawn path.
  */
 export async function provisionWorktreeDeps(worktreePath: string, deps: ProvisionDeps = {}): Promise<void> {
   const manager = detectPackageManager(worktreePath);
   if (!manager) return; // no recognized JS lockfile → nothing to provision
   const timeoutMs = deps.timeoutMs ?? PROVISION_TIMEOUT_MS;
   const run = deps.provision ?? INSTALLERS[manager];
+  let installOk = false;
   try {
     const res = await run(worktreePath, timeoutMs, manager);
-    if (!res.ok) {
-      // eslint-disable-next-line no-console
-      console.warn(`[worktree] dep provisioning (${manager}) for ${worktreePath} did not complete (${res.reason}); the worker will install on its own.`);
-    }
+    installOk = res.ok;
+    if (!res.ok) logProvisionFailure("install", manager, worktreePath, res.reason ?? "unknown reason");
   } catch (e) {
     // A provisioner should never throw, but belt-and-suspenders: a throw here must NOT abort createWorktree.
-    // eslint-disable-next-line no-console
-    console.warn(`[worktree] dep provisioning (${manager}) for ${worktreePath} threw (${(e as Error).message}); the worker will install on its own.`);
+    logProvisionFailure("install", manager, worktreePath, (e as Error).message);
   }
+
+  if (!installOk || !isWorkspaceMonorepo(worktreePath, manager)) return;
+
+  const buildTimeoutMs = deps.buildTimeoutMs ?? PROVISION_BUILD_TIMEOUT_MS;
+  const runBuild = deps.build ?? ((wt: string, ms: number, mgr: PackageManager) => runBoundedInstall(WORKSPACE_BUILD_COMMANDS[mgr], wt, ms));
+  try {
+    const res = await runBuild(worktreePath, buildTimeoutMs, manager);
+    if (!res.ok) logProvisionFailure("build", manager, worktreePath, res.reason ?? "unknown reason");
+  } catch (e) {
+    // A builder should never throw, but belt-and-suspenders: a throw here must NOT abort createWorktree.
+    logProvisionFailure("build", manager, worktreePath, (e as Error).message);
+  }
+}
+
+/**
+ * CLASSIFIED, LOUD failure log for one provisioning phase (install or the monorepo build step) — the fix
+ * for the old silent `console.warn`, which gave no signal that a worktree shipped un-build-ready. Names
+ * the exact phase + detected package manager + worktree path, the worker-facing consequence, and the
+ * underlying reason — which for a real command failure already carries a captured stdout+stderr TAIL
+ * (see {@link appendTail}/{@link formatTail}), mirroring the markitdown provisioning-status pattern: a
+ * specific classified reason plus enough context to diagnose without re-running the command by hand.
+ * `console.error` (not `.warn`) so it isn't lost among the daemon's routine warnings. Still purely a log
+ * — this never throws or blocks {@link provisionWorktreeDeps}/createWorktree.
+ */
+function logProvisionFailure(stage: "install" | "build", manager: PackageManager, worktreePath: string, reason: string): void {
+  const consequence = stage === "install"
+    ? "the worker will install its own dependencies before it can build"
+    : "the worker will build sibling workspace packages (e.g. a monorepo's shared package) itself before its gate can pass";
+  // eslint-disable-next-line no-console
+  console.error(`[worktree:provision:FAILED] ${manager} ${stage} for ${worktreePath} did not complete — ${consequence}.\nReason: ${reason}`);
 }
 
 /**
