@@ -34,8 +34,23 @@ export const LOGS_DIR = path.join(LOOM_HOME, "logs");
 export function sessionScratchDir(sessionId: string): string {
   return path.join(LOOM_HOME, "tmp", "scratch", sessionId);
 }
-/** Per-worker git worktrees live outside the repo (share its object store; don't clutter it). */
-export const WORKTREES_DIR = path.join(LOOM_HOME, "worktrees");
+/**
+ * Per-worker git worktrees live outside the PROJECT repo (share its object store; don't clutter it) —
+ * AND outside LOOM_HOME itself. `LOOM_HOME` (`~/.loom`) is a plain state dir for most users, but in the
+ * self-hosting setup it IS a git repo of its own (cross-agent state: skill sources, resume docs,
+ * `restart-intent.json`, …). Nesting `worktrees/` inside it (the pre-2026-07-07 layout) meant a worker
+ * whose Bash cwd sits under its worktree could `cd ..` up into that repo and a stray `git` command there
+ * would mutate the daemon home's live working tree — this actually happened (a worker's `cd .. && git
+ * stash` swept up another agent's uncommitted WIP). So the base is a SIBLING of LOOM_HOME —
+ * `<LOOM_HOME>-worktrees` — derived from it (still isolated per-LOOM_HOME, so side-by-side daemons with
+ * different LOOM_HOME stay isolated) but with no `.git` ancestor of its own between it and the
+ * filesystem root (LOOM_HOME's parent — the user's home dir — is not a git repo). `path.dirname`/
+ * `path.basename` (not string concatenation) so a trailing separator on LOOM_HOME can't produce a
+ * malformed sibling path. Existing worktrees created under the OLD `LOOM_HOME/worktrees` layout keep
+ * working (tracked by absolute path in the DB) until they're individually removed — going-forward
+ * relocation only, no migration.
+ */
+export const WORKTREES_DIR = path.join(path.dirname(LOOM_HOME), `${path.basename(LOOM_HOME)}-worktrees`);
 /**
  * Agent Runs (R2): each ephemeral `run` session gets a disposable, read-only snapshot of the project's
  * HEAD as its cwd under `runs/<sessionId>/`. NOT a git worktree (no .git, no branch, no admin record —
