@@ -11,7 +11,7 @@ import type { SessionService } from "../sessions/service.js";
 import { readTranscript } from "../sessions/transcript.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { reminderNextFireAt } from "../companion/reminders.js";
+import { reminderNextFireAt, reminderNextFireAtBySession } from "../companion/reminders.js";
 import type { CompanionReminder, CompanionRoute } from "../companion/types.js";
 import { resolveIdPrefix } from "../id-prefix.js";
 import { resolveWebDistDir } from "../paths.js";
@@ -386,10 +386,15 @@ export class OrchestrationMcpRouter {
           "nextFireAt}.",
         inputSchema: {},
       },
-      async () => ok(db.listCompanionRemindersForSession(sessionId).map((r) => ({
-        id: r.id, cron: r.cron, prompt: r.prompt, label: r.label, enabled: r.enabled,
-        nextFireAt: reminderNextFireAt(db, r),
-      }))),
+      async () => {
+        const reminders = db.listCompanionRemindersForSession(sessionId);
+        // Single shared event-log scan for the whole list (CR#3 L3) instead of one scan per reminder.
+        const nextFireById = reminderNextFireAtBySession(db, reminders);
+        return ok(reminders.map((r) => ({
+          id: r.id, cron: r.cron, prompt: r.prompt, label: r.label, enabled: r.enabled,
+          nextFireAt: nextFireById.get(r.id) ?? null,
+        })));
+      },
     );
 
     server.registerTool(

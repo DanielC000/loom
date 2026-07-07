@@ -202,10 +202,10 @@ try {
     check("group /voice on: still intercepted as a command (not a turn)", rOn.accepted === false && rOn.reason === "command" && rOn.command === "voice");
     check("group /voice on: does NOT claim success — acks the DM-only limitation instead", sent.length === 1 && !/turned on/.test(sent[0].text) && /group chats/i.test(sent[0].text));
 
-    // Belt-and-suspenders: even though /voice on wrote a per-sender pref row, the outbound reply-to-the-
-    // whole-chat path resolves with senderId:null, so it NEVER finds that row — a group reply stays
-    // text-only regardless of what /voice acked (proven end-to-end in companion-voice-tts.mjs case 10).
-    check("group /voice on wrote a per-sender pref row (for whenever group voice is real)", prefs.resolve(groupRoute).voiceReplies === "on");
+    // CR#2 N3 fix: /voice on|auto in a group is refused BEFORE writing anything — the outbound reply-to-
+    // the-whole-chat path resolves with senderId:null and could never honor a per-sender row anyway, so
+    // persisting one would just be a dead write the user was simultaneously told didn't take effect.
+    check("group /voice on does NOT persist a pref (the write the ack just said wouldn't work never happens)", prefs.resolve(groupRoute).voiceReplies === "off");
 
     sent.length = 0;
     await gw.handleInbound({ channel: "telegram", chatId: "888", body: "/voice off", sender: { id: "member-1" } });

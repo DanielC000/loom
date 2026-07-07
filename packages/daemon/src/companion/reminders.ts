@@ -64,6 +64,44 @@ export function reminderNextFireAt(db: Db, reminder: Pick<CompanionReminder, "id
   }
 }
 
+/**
+ * Bulk variant of {@link reminderNextFireAt}: ONE scan of the session's durable event log, reused across
+ * every reminder in `reminders` (CR#3 L3) — `reminder_list` (mcp/orchestration.ts) previously called
+ * `reminderNextFireAt` once per reminder, each re-scanning the FULL event log, i.e. O(reminders ×
+ * allEvents) for a long-lived companion. Every reminder in `reminders` MUST belong to the SAME session
+ * (reminder_list's use: one session's own reminders) — the scan is keyed off the first reminder's
+ * sessionId. Same anchor semantics as the per-reminder function: the most recent
+ * `companion_reminder_fired` event for that reminder id, or its `createdAt` when it has never fired.
+ */
+export function reminderNextFireAtBySession(
+  db: Db,
+  reminders: Pick<CompanionReminder, "id" | "sessionId" | "cron" | "createdAt">[],
+): Map<string, string | null> {
+  const result = new Map<string, string | null>();
+  const sessionId = reminders[0]?.sessionId;
+  if (sessionId === undefined) return result;
+  const lastFiredMs = new Map<string, number>();
+  for (const e of db.listEvents(sessionId)) {
+    if (e.kind !== "companion_reminder_fired") continue;
+    const reminderId = (e.detail as { reminderId?: string } | undefined)?.reminderId;
+    if (!reminderId) continue;
+    const ms = new Date(e.ts).getTime();
+    if (Number.isNaN(ms)) continue;
+    const prev = lastFiredMs.get(reminderId);
+    if (prev === undefined || ms > prev) lastFiredMs.set(reminderId, ms);
+  }
+  for (const reminder of reminders) {
+    const lastMs = lastFiredMs.get(reminder.id);
+    const from = lastMs != null ? new Date(lastMs) : new Date(reminder.createdAt);
+    try {
+      result.set(reminder.id, nextFireAt(reminder.cron, from));
+    } catch {
+      result.set(reminder.id, null);
+    }
+  }
+  return result;
+}
+
 export interface ReminderWatcherDeps {
   db: Db;
   pty: HeartbeatPty;

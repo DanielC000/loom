@@ -583,9 +583,10 @@ CREATE TABLE IF NOT EXISTS companion_reminders (
 -- voice_replies started as an INTEGER 0/1 boolean (VOICE-P1); VOICE-P4 (card edd11203) extended it to a
 -- tri-state 'on'|'off'|'auto' WITHOUT an ALTER — kept as INTEGER (not retyped to TEXT) deliberately: SQLite
 -- affinity is a CONVERSION rule, not a passive label, so a TEXT-declared column would actively reformat an
--- inserted INTEGER (e.g. the JS number 1 becomes the text "1.0"), which would corrupt a genuinely-legacy
--- row on write. INTEGER affinity has the opposite (safe) behavior: it only converts a TEXT value when that
--- text IS a well-formed number; 'on'/'off'/'auto' aren't, so they're stored verbatim, while a legacy 0/1
+-- inserted INTEGER (e.g. the JS number 1 becomes the TEXT value "1", not the INTEGER 1 SQLite stores today),
+-- which would corrupt a genuinely-legacy row on write. INTEGER affinity has the opposite (safe) behavior: it
+-- only converts a TEXT value when that text IS a well-formed number; 'on'/'off'/'auto' aren't, so they're
+-- stored verbatim, while a legacy 0/1
 -- stays a real INTEGER untouched. A legacy row's stored 0/1 and a fresh row's 'on'/'off'/'auto' therefore
 -- coexist in the SAME column, on the SAME declared type, with no ALTER; toVoiceMode() (db.ts) is the one
 -- place that normalizes both shapes on read.
@@ -3558,14 +3559,18 @@ export class Db {
         .get(sessionId, open.seq) as { n: number };
       if (n === 0) return; // reuse the still-empty open conversation — nothing to archive
     }
-    const now = new Date().toISOString();
-    this.db.prepare("UPDATE companion_conversations SET ended_at = ? WHERE session_id = ? AND ended_at IS NULL")
-      .run(now, sessionId);
-    const max = (this.db.prepare("SELECT MAX(seq) AS m FROM companion_conversations WHERE session_id = ?")
-      .get(sessionId) as { m: number | null }).m;
-    this.db.prepare("INSERT INTO companion_conversations (session_id, seq, started_at, ended_at) VALUES (?, ?, ?, NULL)")
-      .run(sessionId, (max ?? 0) + 1, now);
-    this.pruneOldConversations(sessionId);
+    // Defensive: close→SELECT max→open→prune is multi-statement; wrap it so the sequence is explicitly
+    // atomic (better-sqlite3 is sync so behavior is unchanged — this just makes the invariant explicit).
+    this.db.transaction(() => {
+      const now = new Date().toISOString();
+      this.db.prepare("UPDATE companion_conversations SET ended_at = ? WHERE session_id = ? AND ended_at IS NULL")
+        .run(now, sessionId);
+      const max = (this.db.prepare("SELECT MAX(seq) AS m FROM companion_conversations WHERE session_id = ?")
+        .get(sessionId) as { m: number | null }).m;
+      this.db.prepare("INSERT INTO companion_conversations (session_id, seq, started_at, ended_at) VALUES (?, ?, ?, NULL)")
+        .run(sessionId, (max ?? 0) + 1, now);
+      this.pruneOldConversations(sessionId);
+    })();
   }
   /** Record ONE chat turn, tagged with the session's CURRENT (open) conversation, then prune to the most
    *  recent {@link MAX_COMPANION_MESSAGES} rows for its (session, channel, conversation) — a ring buffer
@@ -3576,16 +3581,20 @@ export class Db {
    *  the reply/inbound path it's mirroring — a dropped history row is acceptable, a dropped reply or a
    *  crashed inbound is not. */
   insertCompanionMessage(m: { id: string; sessionId: string; channel: string; chatId: string; author: "user" | "companion"; text: string; createdAt: string; viaVoice?: boolean }): void {
-    const conversationSeq = this.currentConversationSeq(m.sessionId);
-    this.db.prepare(
-      `INSERT INTO companion_messages (id, session_id, channel, chat_id, author, text, created_at, via_voice, conversation_seq)
-       VALUES (@id, @sessionId, @channel, @chatId, @author, @text, @createdAt, @viaVoice, @conversationSeq)`,
-    ).run({ ...m, viaVoice: m.viaVoice ? 1 : 0, conversationSeq });
-    this.db.prepare(
-      `DELETE FROM companion_messages WHERE session_id = ? AND channel = ? AND conversation_seq = ? AND id NOT IN (
-         SELECT id FROM companion_messages WHERE session_id = ? AND channel = ? AND conversation_seq = ? ORDER BY created_at DESC, rowid DESC LIMIT ?
-       )`,
-    ).run(m.sessionId, m.channel, conversationSeq, m.sessionId, m.channel, conversationSeq, MAX_COMPANION_MESSAGES);
+    // Defensive: open-seq→insert→prune is multi-statement; wrap it so the sequence is explicitly atomic
+    // (better-sqlite3 is sync so behavior is unchanged — this just makes the invariant explicit).
+    this.db.transaction(() => {
+      const conversationSeq = this.currentConversationSeq(m.sessionId);
+      this.db.prepare(
+        `INSERT INTO companion_messages (id, session_id, channel, chat_id, author, text, created_at, via_voice, conversation_seq)
+         VALUES (@id, @sessionId, @channel, @chatId, @author, @text, @createdAt, @viaVoice, @conversationSeq)`,
+      ).run({ ...m, viaVoice: m.viaVoice ? 1 : 0, conversationSeq });
+      this.db.prepare(
+        `DELETE FROM companion_messages WHERE session_id = ? AND channel = ? AND conversation_seq = ? AND id NOT IN (
+           SELECT id FROM companion_messages WHERE session_id = ? AND channel = ? AND conversation_seq = ? ORDER BY created_at DESC, rowid DESC LIMIT ?
+         )`,
+      ).run(m.sessionId, m.channel, conversationSeq, m.sessionId, m.channel, conversationSeq, MAX_COMPANION_MESSAGES);
+    })();
   }
   /** A session's stored chat history for ONE channel, chronological, across EVERY conversation (not scoped to
    *  current) — the "/new"/"/reset" command's history-clear half reads no history, but a test/future caller

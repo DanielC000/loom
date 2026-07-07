@@ -15,10 +15,12 @@ import { ChatGateway, chunkText } from "../dist/companion/chat-gateway.js";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-// A conformant fake ChannelAdapter: records sends + lifecycle calls; can be told to FAIL its send.
-function makeAdapter(name, { maxMessageLength = 4096, fail = false } = {}) {
+// A conformant fake ChannelAdapter: records sends + lifecycle calls; can be told to FAIL its send, either
+// on every call (`fail`) or only from the (1-indexed) `failAfter`+1'th call onward — simulating a chunked
+// reply whose first `failAfter` chunks reach the transport before it dies mid-stream.
+function makeAdapter(name, { maxMessageLength = 4096, fail = false, failAfter = null } = {}) {
   const sent = [];
-  let started = 0, stopped = 0;
+  let started = 0, stopped = 0, calls = 0;
   return {
     sent,
     get started() { return started; },
@@ -28,7 +30,11 @@ function makeAdapter(name, { maxMessageLength = 4096, fail = false } = {}) {
       maxMessageLength,
       start() { started++; },
       async stop() { stopped++; },
-      async send(chatId, text) { if (fail) throw new Error("simulated transport failure"); sent.push({ chatId, text }); },
+      async send(chatId, text) {
+        calls++;
+        if (fail || (failAfter != null && calls > failAfter)) throw new Error("simulated transport failure");
+        sent.push({ chatId, text });
+      },
     },
   };
 }
@@ -179,6 +185,49 @@ const originOf = (map) => (sid) => map[sid] ?? null;
   check("transport-failure: structured { delivered:false, reason:'send-failed' }", res && res.delivered === false && res.reason === "send-failed");
 }
 
+// --- Partial chunked send failure → chunks 1..k-1 that already reached the chat ARE recorded (CR#2 L1) ---
+{
+  const withBreaks = ("word ".repeat(20)).trim(); // same 99-char, boundary-splitting text as the unit test below
+  const allParts = chunkText(withBreaks, 30);
+  check("partial-send setup: the test text chunks into >2 parts (so a 3rd-chunk failure is genuinely PARTIAL)", allParts.length > 2);
+
+  const tg = makeAdapter("telegram", { maxMessageLength: 30, failAfter: 2 }); // chunks 1-2 succeed, chunk 3 throws
+  const recorded = [];
+  const recorder = { record(sessionId, channel, chatId, author, text) { recorded.push({ sessionId, channel, chatId, author, text }); } };
+  const gw = new ChatGateway(
+    () => ({ delivered: true }),
+    [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }],
+    undefined, undefined,
+    originOf({ "sess-A": { channel: "telegram", chatId: "111" } }),
+    undefined, undefined, undefined, undefined,
+    recorder,
+  );
+  gw.registerAdapter(tg.adapter);
+
+  const res = await gw.deliverReply("sess-A", withBreaks);
+  check("partial-send: deliverReply still reports the failure", res.delivered === false && res.reason === "send-failed");
+  check("partial-send: exactly the first 2 chunks reached the transport", tg.sent.length === 2);
+  check("partial-send: the chunks that DID reach Telegram are NOT silently dropped from history", recorded.length === 1);
+  check("partial-send: recorded as a companion outbound row on the right session/route", recorded[0]?.sessionId === "sess-A" && recorded[0]?.channel === "telegram" && recorded[0]?.chatId === "111" && recorded[0]?.author === "companion");
+  check("partial-send: recorded text is EXACTLY the sent prefix (join of the successful chunks)", recorded[0]?.text === tg.sent.map((s) => s.text).join(""));
+}
+
+// --- A fully-failed send (chunk 1 itself throws) records NOTHING — no partial reached the chat ----------
+{
+  const tg = makeAdapter("telegram", { fail: true });
+  const recorded = [];
+  const recorder = { record(sessionId, channel, chatId, author, text) { recorded.push({ sessionId, channel, chatId, author, text }); } };
+  const gw = new ChatGateway(
+    () => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }],
+    undefined, undefined, originOf({ "sess-A": { channel: "telegram", chatId: "111" } }),
+    undefined, undefined, undefined, undefined, recorder,
+  );
+  gw.registerAdapter(tg.adapter);
+  const res = await gw.deliverReply("sess-A", "will fail entirely");
+  check("total-failure: still reports send-failed", res.delivered === false && res.reason === "send-failed");
+  check("total-failure: nothing reached the chat, so nothing is recorded", recorded.length === 0);
+}
+
 // --- chunkText unit edges -----------------------------------------------------------------------
 {
   check("chunkText: under limit → single chunk", chunkText("hello", 4096).length === 1);
@@ -188,6 +237,28 @@ const originOf = (map) => (sid) => map[sid] ?? null;
   check("chunkText: splits on whitespace, every chunk ≤ max", parts.every((p) => p.length <= 30) && parts.length > 1);
   check("chunkText: boundary split is byte-lossless (join === original)", parts.join("") === withBreaks);
   check("chunkText: max<=0 is a no-op single chunk", chunkText("abc", 0).length === 1);
+}
+
+// --- chunkText hard-cut does NOT split an astral emoji's UTF-16 surrogate pair (CR#2 N2) ------------------
+{
+  // "a".repeat(9) + an astral emoji (U+1F600, 2 UTF-16 code units) — with max=10 a naive hard cut at code
+  // UNIT 10 lands exactly between the emoji's leading/trailing surrogate.
+  const emoji = "\u{1F600}"; // 😀 — 2 code units
+  const text = "a".repeat(9) + emoji + "a".repeat(9) + emoji; // no whitespace/newline boundary anywhere
+  const parts = chunkText(text, 10);
+  check("chunkText(surrogate): every chunk ≤ max", parts.every((p) => p.length <= 10));
+  check("chunkText(surrogate): reassembly is lossless", parts.join("") === text);
+  check("chunkText(surrogate): no chunk contains a lone (unpaired) surrogate", parts.every((p) => {
+    // Scan at the UTF-16 code-UNIT level (the actual hazard): a leading surrogate whose next unit isn't
+    // its trailing pair, or a trailing surrogate with no preceding leading pair, means the chunk boundary
+    // split an astral character in two.
+    for (let i = 0; i < p.length; i++) {
+      const c = p.charCodeAt(i);
+      if (c >= 0xd800 && c <= 0xdbff) { if (p.charCodeAt(i + 1) < 0xdc00 || p.charCodeAt(i + 1) > 0xdfff) return false; }
+      else if (c >= 0xdc00 && c <= 0xdfff) { if (i === 0 || p.charCodeAt(i - 1) < 0xd800 || p.charCodeAt(i - 1) > 0xdbff) return false; }
+    }
+    return true;
+  }));
 }
 
 console.log(failures === 0

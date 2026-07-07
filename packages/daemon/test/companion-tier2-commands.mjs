@@ -12,6 +12,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      conversation-boundary marker — their ack is transport chrome and is NEVER persisted as history
 //      (cross-channel ack-recording asymmetry fix).
 //   5. An unrecognized "/word" is still NOT swallowed (falls through to the normal pipeline byte-identical).
+//   6. "/voice on|auto" in a GROUP refuses ("not available in group chats yet") WITHOUT persisting a pref
+//      the outbound path (always senderId:null) can never honor — "off" and a DM's "on" still persist,
+//      unchanged (CR#2 N3).
 // Run: 1) build (turbo builds shared first), 2) node test/companion-tier2-commands.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -145,12 +148,43 @@ try {
     const r = await controller.handleInAppInbound(sessionId, "/totallyunknown some args");
     check("an unrecognized '/word' is submitted as a normal turn (byte-identical fallthrough)", r.accepted === true && submitted.some((s) => s.text === "/totallyunknown some args"));
   }
+
+  // ============ 6 — '/voice' GROUP path does NOT persist a dead pref before refusing (CR#2 N3) ============
+  {
+    // The outbound reply always resolves senderId:null (VOICE-P3 fork #3), so a per-sender GROUP row
+    // (senderId set) is a write the outbound path can NEVER read back — a dead write. "on"/"auto" in a
+    // group refuse with an ack saying so; that refusal must not be preceded by exactly the write it just
+    // told the user didn't happen. "off" is unaffected (existing, unchanged behavior).
+    let writes = 0;
+    const base = inMemoryVoicePrefs();
+    const spyPrefs = {
+      resolve: (r) => base.resolve(r),
+      setLang: (r, c) => base.setLang(r, c),
+      setVoiceReplies: (r, m) => { writes++; return base.setVoiceReplies(r, m); },
+    };
+    const groupRoute = { sessionId: "s", channel: "c", chatId: "c", senderId: "user-1" }; // group: senderId set
+    const dmRoute = { sessionId: "s", channel: "c", chatId: "c", senderId: null };
+
+    const onResult = commandHandler("voice")("on", groupRoute, spyPrefs, {});
+    check("/voice on (group): refused with the group-unavailable ack", /available in group chats/i.test(onResult.ack));
+    check("/voice on (group): the dead pref write is skipped", writes === 0);
+
+    const autoResult = commandHandler("voice")("auto", groupRoute, spyPrefs, {});
+    check("/voice auto (group): also refused", /available in group chats/i.test(autoResult.ack));
+    check("/voice auto (group): still no write", writes === 0);
+
+    const offResult = commandHandler("voice")("off", groupRoute, spyPrefs, {});
+    check("/voice off (group): unaffected by the fix — still persists as before", offResult.ack.includes("turned off") && writes === 1);
+
+    const dmResult = commandHandler("voice")("on", dmRoute, spyPrefs, {});
+    check("/voice on (DM): unaffected by the fix — still persists as before", dmResult.ack.includes("turned on") && writes === 2);
+  }
 } finally {
   try { db.close(); } catch { /* ignore */ }
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — '/status' reads voice-replies + language from the injected CompanionVoicePrefs, '/start' acks a fixed greeting with no deps, both are swallowed end-to-end (never a turn), and an unrecognized '/word' still falls through unchanged."
+  ? "\n✅ ALL PASS — '/status' reads voice-replies + language from the injected CompanionVoicePrefs, '/start' acks a fixed greeting with no deps, both are swallowed end-to-end (never a turn), an unrecognized '/word' still falls through unchanged, and '/voice on|auto' in a group refuses WITHOUT persisting a dead pref."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

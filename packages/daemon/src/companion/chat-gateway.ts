@@ -60,8 +60,16 @@ export function chunkText(text: string, max: number): string[] {
       if (space >= max * 0.5) cut = space;
     }
     if (cut <= 0) {
-      chunks.push(rest.slice(0, max)); // no usable boundary → hard cut, keep every char
-      rest = rest.slice(max);
+      // No usable boundary → hard cut at `max` code UNITS. A hard cut lands mid-string arbitrarily, so it
+      // can split a surrogate pair (an astral emoji/char is two UTF-16 code units) into a lone leading
+      // surrogate + a lone trailing surrogate in the NEXT chunk — each renders as U+FFFD (�). Back off one
+      // unit so the pair stays intact and moves to the next chunk together (max > 1 always holds here:
+      // chunkText's caller passes a real maxMessageLength, and max <= 0 already returned above).
+      let hardCut = max;
+      const leading = rest.charCodeAt(hardCut - 1);
+      if (hardCut > 1 && leading >= 0xd800 && leading <= 0xdbff) hardCut -= 1;
+      chunks.push(rest.slice(0, hardCut));
+      rest = rest.slice(hardCut);
     } else {
       // Split AFTER the boundary char (keep it at the end of this chunk) so reassembly is byte-lossless —
       // a companion sends code/JSON/base64 where a dropped space or newline would silently corrupt output.
@@ -405,7 +413,7 @@ export class ChatGateway {
    *       e.g. a non-assistant gateway, or a test that doesn't inject one). Enqueued via a RAW pty primitive
    *       immediately after (a)'s `/clear` enqueue, in the SAME synchronous flow — both ride the same
    *       per-session pty FIFO queue, so `/clear`'s queue slot always precedes this one (FIFO), and `/clear`
-   *       submits as turn-kind "agent" while this reinjects as the default "warning" kind, so a drain can
+   *       submits as turn-kind "agent" while this reinjects as the "system" kind, so a drain can
    *       never mash the two into one turn (kinds never coalesce together — see pty/host.ts). Without this,
    *       `/clear` wipes the companion's ONE persona turn (baked in only at fresh spawn) along with the rest
    *       of the conversation, leaving a blank, identity-less agent — see composeCompanionReinjectPrompt.
@@ -558,7 +566,16 @@ export class ChatGateway {
       }
     }
     const result = await this.sendVia(target.channel, target.chatId, text);
-    if (!result.delivered) return result.reason === "no-adapter" ? { delivered: false, reason: "no-adapter" } : { delivered: false, reason: "send-failed" };
+    if (!result.delivered) {
+      // PARTIAL SEND (CR#2 L1): a chunked reply that fails on chunk k>1 has already reached the chat with
+      // chunks 1..k-1 — recording NOTHING here would leave Loom history/the web panel with zero trace of a
+      // reply the user actually received. Record exactly the prefix that was actually sent (chunkText's
+      // splits are byte-lossless, so joining the sent chunks reconstructs that prefix exactly).
+      if (result.reason === "send-failed" && result.sentChunks > 0) {
+        this.recordOutboundSafely(sessionId, target.channel, target.chatId, result.sentText);
+      }
+      return result.reason === "no-adapter" ? { delivered: false, reason: "no-adapter" } : { delivered: false, reason: "send-failed" };
+    }
     // CHAT HISTORY record (unified cross-channel chat, card 7d63e200): recorded ONCE per logical reply,
     // AFTER every chunk has succeeded — a long Telegram reply may take several `adapter.send` calls under
     // its maxMessageLength, but this fires once, mirroring in-app.ts's own "never >1 send call per logical
@@ -631,17 +648,27 @@ export class ChatGateway {
 
   /** Shared outbound send: chunk to the adapter's max length and send every part, in order. Contains a
    *  throw (never propagates) — the only failure modes are "no adapter registered for this channel" and
-   *  "the adapter's send threw". Pure outbound: never calls submitTurn, never consults inbound routing. */
-  private async sendVia(channel: string, chatId: string, text: string): Promise<{ delivered: true; chunks: number } | { delivered: false; reason: "no-adapter" | "send-failed" }> {
+   *  "the adapter's send threw". Pure outbound: never calls submitTurn, never consults inbound routing.
+   *  On a mid-stream send failure, `sentChunks`/`sentText` report exactly what already reached the chat
+   *  (chunks 1..k-1) — see deliverReply's partial-send record (CR#2 L1). */
+  private async sendVia(channel: string, chatId: string, text: string): Promise<
+    | { delivered: true; chunks: number }
+    | { delivered: false; reason: "no-adapter" }
+    | { delivered: false; reason: "send-failed"; sentChunks: number; sentText: string }
+  > {
     const adapter = this.adapters.get(channel);
     if (!adapter) return { delivered: false, reason: "no-adapter" };
     const parts = adapter.maxMessageLength ? chunkText(text, adapter.maxMessageLength) : [text];
+    let sent = 0;
     try {
-      for (const part of parts) await adapter.send(chatId, part);
+      for (const part of parts) {
+        await adapter.send(chatId, part);
+        sent++;
+      }
       return { delivered: true, chunks: parts.length };
     } catch (err) {
       this.debug(`sendVia send failed for ${channel}/${chatId}: ${describeError(err)}`);
-      return { delivered: false, reason: "send-failed" };
+      return { delivered: false, reason: "send-failed", sentChunks: sent, sentText: parts.slice(0, sent).join("") };
     }
   }
 
