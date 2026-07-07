@@ -36,6 +36,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       redirect_worker recorded after the progress report), and THEN goes idle again without a fresh
 //       report is a GENUINE stall: it still gets the normal "did NOT call worker_report" nudge (no blind
 //       spot introduced by the progress-park guard).
+//   (i) QUEUED-REPORT GUARD (board card a1f06bcc, false alarm #1) — the task-column check is a PROXY for
+//       "did the worker report", which is blind whenever the task never left the active lane despite a
+//       report having genuinely fired (e.g. the report's framed message is still sitting undelivered in
+//       the manager's OWN pending FIFO — deliveryStatus "queued", manager mid-turn). notifyManagerOfIdleWorker
+//       scans the manager's pending FIFO directly for the worker's own framed [loom:worker-report] text and
+//       SUPPRESSES the nudge entirely when found (the queued report will surface on its own via the normal
+//       drain). A sibling worker with NO queued report in that same manager's FIFO still gets the normal
+//       "did NOT call worker_report" nudge (no blind spot introduced by the new guard).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -266,7 +274,39 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ============================ (i) QUEUED-REPORT GUARD (card a1f06bcc, false alarm #1) ============================
+// Simulate a worker whose done report already fired and durably enqueued its framed message into the
+// MANAGER's OWN pending FIFO (the manager was mid-turn — deliveryStatus "queued", not yet drained), while
+// the task itself is left in the default "in_progress" (active) column — exactly the state the task-column
+// proxy check alone cannot distinguish from "never reported". Seeded directly (not via workerReport()) so
+// this exercises the new guard in isolation, independent of any particular board's column-role mapping.
+{
+  const e = makeEnv();
+  seedSession(e, "mgr-i", { role: "manager", processState: "live" });
+  seedTask(e, "tk-i1"); // stays "in_progress" — matches the default active-lane key used throughout this file
+  seedSession(e, "wkr-i1", { role: "worker", processState: "live", parentSessionId: "mgr-i", taskId: "tk-i1", branch: "loom/tk-i1" });
+  // The manager's pending FIFO already carries wkr-i1's own framed report — exactly workerReport()'s enqueue shape.
+  e.pendingBySession.set("mgr-i", [{ id: "r1", text: "[loom:worker-report] worker wkr-i1 (task tk-i1) — done: shipped it", source: "system" }]);
+
+  e.sessions.notifyManagerOfIdleWorker("wkr-i1");
+  check("(i) NO [loom:worker-idle] nudge when the worker's own report is still queued in the manager's FIFO",
+    !e.enqueued.some((x) => x.id === "mgr-i" && /worker-idle/.test(x.text)));
+
+  // Positive control: a SIBLING worker under the SAME manager (same pending FIFO, which carries wkr-i1's
+  // report — not this one) genuinely never reported — still gets the normal nudge. Proves the new guard
+  // matches on the SPECIFIC worker's own report text, not "the manager's FIFO has anything queued".
+  seedTask(e, "tk-i2");
+  seedSession(e, "wkr-i2", { role: "worker", processState: "live", parentSessionId: "mgr-i", taskId: "tk-i2", branch: "loom/tk-i2" });
+
+  e.sessions.notifyManagerOfIdleWorker("wkr-i2");
+  const genuineNudge = e.enqueued.find((x) => x.id === "mgr-i" && /worker-idle/.test(x.text) && /wkr-i2/.test(x.text));
+  check("(i) a genuinely-unreported sibling worker (no queued report of ITS OWN) STILL nudges normally", !!genuineNudge);
+  check("(i) that positive-control nudge is the normal \"did NOT call worker_report\" copy",
+    !!genuineNudge && /did NOT call worker_report/.test(genuineNudge.text));
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a worker that exits without ever calling worker_report (task still in_progress) yields a DISTINCT, durable worker_exited_without_report event + a [loom:worker-exited] manager nudge; a worker that DID report (task moved) yields no duplicate; an intended stop, a recycled/superseded worker, and a non-worker/parentless exit all record nothing; notifyManagerOfIdleWorker skips the nudge when direction is genuinely queued (the redirectWorker race) but still nudges a genuine strand; a progress-parked worker gets a reworded (not falsely-alarming) nudge, and an acked-then-stalled worker still gets the normal one (no blind spot)."
+  ? "\n✅ ALL PASS — a worker that exits without ever calling worker_report (task still in_progress) yields a DISTINCT, durable worker_exited_without_report event + a [loom:worker-exited] manager nudge; a worker that DID report (task moved) yields no duplicate; an intended stop, a recycled/superseded worker, and a non-worker/parentless exit all record nothing; notifyManagerOfIdleWorker skips the nudge when direction is genuinely queued (the redirectWorker race) but still nudges a genuine strand; a progress-parked worker gets a reworded (not falsely-alarming) nudge, and an acked-then-stalled worker still gets the normal one (no blind spot); a worker whose own report is still queued in its manager's FIFO draws no false 'did NOT call worker_report' nudge, while a sibling that genuinely never reported still does."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

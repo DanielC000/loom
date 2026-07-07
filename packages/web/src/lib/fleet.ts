@@ -1,15 +1,51 @@
-import type { SessionListItem } from "@loom/shared";
+import type { OrchestrationEvent, SessionListItem } from "@loom/shared";
 import type { Tone } from "../theme";
 
 // Pure fleet roll-up math + the archived-fold policy, split out of components/fleet.tsx (which is JSX,
 // so it can't be imported by the hermetic node test). The widgets import these back; test/fleet.mjs
 // asserts on them directly (no React, no daemon). Kept free of RUNTIME relative imports (only type-only,
-// which type-stripping erases) so the node test loads it standalone — hence isRateLimited lives here too,
-// re-exported from lib/attention for its existing consumers.
+// which type-stripping erases) so the node test loads it standalone — hence isRateLimited (and the
+// STUCK-BUSY heuristic below) live here too, re-exported from lib/attention for their existing consumers.
 
 // A session parked on the account/plan rate-limit cap, with its hold not yet lapsed.
 export function isRateLimited(s: SessionListItem): boolean {
   return !!s.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > Date.now();
+}
+
+// ── STUCK-BUSY heuristic (Mission Control attention queue) ─────────────────────────────────────────────
+// A session that's been `busy` with a stale `lastActivity` this long is FLAGGED — UNLESS it's legitimately
+// parked: a manager supervising ≥1 live/pending worker between turns, or a session that told Loom it's
+// intentionally waiting (an unexpired idle_report('waiting') snooze). Both exclusions are additive —
+// narrowing the two false-positive shapes (board card a1f06bcc), not the underlying "busy a long time"
+// signal, so a genuinely stuck session (no workers, no snooze) is still caught.
+export const STUCK_BUSY_MS = 3 * 60_000; // busy with no activity this long → likely stuck (heuristic)
+
+export interface StuckBusyContext {
+  /** A manager currently supervising ≥1 live/pending worker — it's parked between turns, not stuck. */
+  hasSupervisedWorkers?: boolean;
+  /** An unexpired idle_report('waiting') snooze is in effect — the session told Loom it's intentionally parked. */
+  isWaitingSnoozed?: boolean;
+}
+
+export function isStuckBusy(s: SessionListItem, ctx: StuckBusyContext = {}): boolean {
+  if (ctx.hasSupervisedWorkers || ctx.isWaitingSnoozed) return false;
+  return s.processState === "live" && s.busy && Date.now() - new Date(s.lastActivity).getTime() > STUCK_BUSY_MS;
+}
+
+// True when `managerId` currently has ≥1 worker that's live or starting (dispatched, not yet reporting).
+// A worker's depth-1 (it never spawns workers of its own), so this is a no-op / false for a worker id.
+export function hasSupervisedWorkers(managerId: string, allSessions: readonly SessionListItem[]): boolean {
+  return allSessions.some((w) =>
+    w.role === "worker" && w.parentSessionId === managerId && (w.processState === "live" || w.processState === "starting"));
+}
+
+// True when `e` is an idle_report recording an unexpired 'waiting' snooze — the session self-reported an
+// intentional park with a window, and now is still inside that window. False for any other event kind/
+// state, a missing/expired snoozeUntil, or no event at all.
+export function isActiveWaitingSnooze(e: OrchestrationEvent | undefined, now: number = Date.now()): boolean {
+  if (!e || e.kind !== "idle_report") return false;
+  const d = (e.detail ?? {}) as { state?: string; snoozeUntil?: string };
+  return d.state === "waiting" && !!d.snoozeUntil && new Date(d.snoozeUntil).getTime() > now;
 }
 
 // A compact FleetCard folds a project's ARCHIVED (exited) sessions in alongside the running set, so the

@@ -2,22 +2,18 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "./api";
-import { isRateLimited } from "./fleet";
+import { hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
 import type { Tone } from "../theme";
 
-// isRateLimited moved to lib/fleet.ts (a JSX-free, runtime-relative-import-free module the hermetic fleet
-// test can load); re-exported here so its existing importers keep resolving it from lib/attention.
-export { isRateLimited };
+// isRateLimited / isStuckBusy (+ its exclusion helpers) moved to lib/fleet.ts (a JSX-free, runtime-
+// relative-import-free module the hermetic fleet test can load); re-exported here so their existing
+// importers keep resolving them from lib/attention.
+export { isRateLimited, isStuckBusy };
 
 // Centralized "things needing a human" derivation, shared by Mission Control's attention queue and
 // the shell bell. Built from the already-polled sessions + per-manager events (react-query dedups
 // the network calls by key), so it needs no extra backend.
 
-const STUCK_BUSY_MS = 3 * 60_000; // busy with no activity this long → likely stuck (heuristic)
-
-export function isStuckBusy(s: SessionListItem): boolean {
-  return s.processState === "live" && s.busy && Date.now() - new Date(s.lastActivity).getTime() > STUCK_BUSY_MS;
-}
 // Crash-recovery give-up: the CrashRecoveryWatcher hit its auto-resume cap (crashRecoveryMaxAttempts) for a
 // session that kept re-dying, so it STOPPED resuming and stamped this crash-loop banner on lastError. A
 // role-agnostic, session-row signal (NOT an event) so it surfaces even for a dead MANAGER, which has no
@@ -221,7 +217,14 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — resumes ${s.rateLimitedUntil ? new Date(s.rateLimitedUntil).toLocaleTimeString() : "?"}`,
     });
   }
-  for (const s of all.filter(isStuckBusy)) {
+  // STUCK-BUSY exclusions (board card a1f06bcc): a manager parked mid-orchestration between worker turns
+  // (supervising ≥1 live/pending worker) or a session that self-reported an active idle_report('waiting')
+  // snooze is legitimately parked, not stuck — `latestIdle` (built above) already carries each live
+  // manager's most recent idle disposition, so the waiting-snooze check reuses it directly.
+  for (const s of all.filter((s) => isStuckBusy(s, {
+    hasSupervisedWorkers: hasSupervisedWorkers(s.id, all),
+    isWaitingSnoozed: isActiveWaitingSnooze(latestIdle.get(s.id)),
+  }))) {
     items.push({
       key: `s-${s.id}`, tone: "amber", kind: "STUCK-BUSY", sessionId: s.id,
       dismissKey: `${s.id}:${s.lastActivity}`,

@@ -9,7 +9,10 @@
 // wired into @loom/web's `build` script (which CI runs via `pnpm build`). Run it standalone with:
 //   node --experimental-strip-types packages/web/test/fleet.mjs
 import assert from "node:assert/strict";
-import { ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets } from "../src/lib/fleet.ts";
+import {
+  ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets,
+  isStuckBusy, hasSupervisedWorkers, isActiveWaitingSnooze, STUCK_BUSY_MS,
+} from "../src/lib/fleet.ts";
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
@@ -81,6 +84,61 @@ check("an archived-only project (no live manager) rolls up to 'no live manager',
   // Sanity: if those exited rows WERE (wrongly) merged into the roll-up set, it would flip red — proving
   // the running-only feed is load-bearing.
   assert.equal(fleetRollup(archivedOnly).label, "rate-limited");
+});
+
+// ── STUCK-BUSY heuristic + its false-positive exclusions (board card a1f06bcc) ─────────────────────────
+
+const stale = () => new Date(Date.now() - (STUCK_BUSY_MS + 60_000)).toISOString();
+const fresh = () => new Date().toISOString();
+
+check("isStuckBusy flags a live+busy session with a stale lastActivity and no exclusion context (positive control)", () => {
+  const sess = { ...running({ busy: true }), lastActivity: stale() };
+  assert.equal(isStuckBusy(sess), true);
+});
+
+check("isStuckBusy does NOT flag a fresh-activity busy session (not stale long enough)", () => {
+  const sess = { ...running({ busy: true }), lastActivity: fresh() };
+  assert.equal(isStuckBusy(sess), false);
+});
+
+check("isStuckBusy does NOT flag an idle (busy:false) session regardless of staleness", () => {
+  const sess = { ...running({ busy: false }), lastActivity: stale() };
+  assert.equal(isStuckBusy(sess), false);
+});
+
+check("isStuckBusy excludes a manager supervising live/pending workers — it's parked, not stuck", () => {
+  const sess = { ...running({ busy: true }), lastActivity: stale() };
+  assert.equal(isStuckBusy(sess, { hasSupervisedWorkers: true }), false);
+});
+
+check("isStuckBusy excludes a session with an active waiting-snooze — it self-reported the park", () => {
+  const sess = { ...running({ busy: true }), lastActivity: stale() };
+  assert.equal(isStuckBusy(sess, { isWaitingSnoozed: true }), false);
+});
+
+check("hasSupervisedWorkers is true for a manager with a LIVE worker, false with only exited/other-manager workers", () => {
+  const mgr = { id: "mgr-1" };
+  const liveChild = { id: "w-1", role: "worker", parentSessionId: "mgr-1", processState: "live" };
+  const startingChild = { id: "w-2", role: "worker", parentSessionId: "mgr-1", processState: "starting" };
+  const exitedChild = { id: "w-3", role: "worker", parentSessionId: "mgr-1", processState: "exited" };
+  const otherMgrChild = { id: "w-4", role: "worker", parentSessionId: "mgr-2", processState: "live" };
+  assert.equal(hasSupervisedWorkers("mgr-1", [mgr, liveChild, otherMgrChild]), true, "a live child worker counts");
+  assert.equal(hasSupervisedWorkers("mgr-1", [mgr, startingChild]), true, "a starting (dispatched, not yet live) child counts");
+  assert.equal(hasSupervisedWorkers("mgr-1", [mgr, exitedChild, otherMgrChild]), false, "only exited/unrelated workers → false");
+  assert.equal(hasSupervisedWorkers("mgr-1", [mgr]), false, "no children at all → false");
+});
+
+check("isActiveWaitingSnooze is true only for an unexpired idle_report('waiting') snooze", () => {
+  const now = Date.now();
+  const waitingActive = { kind: "idle_report", detail: { state: "waiting", snoozeUntil: new Date(now + 60_000).toISOString() } };
+  const waitingExpired = { kind: "idle_report", detail: { state: "waiting", snoozeUntil: new Date(now - 60_000).toISOString() } };
+  const workingState = { kind: "idle_report", detail: { state: "working" } };
+  const idleEscalated = { kind: "idle_escalated", detail: { state: "waiting", snoozeUntil: new Date(now + 60_000).toISOString() } };
+  assert.equal(isActiveWaitingSnooze(waitingActive, now), true);
+  assert.equal(isActiveWaitingSnooze(waitingExpired, now), false, "a lapsed snooze no longer excludes");
+  assert.equal(isActiveWaitingSnooze(workingState, now), false, "a non-waiting state never excludes");
+  assert.equal(isActiveWaitingSnooze(idleEscalated, now), false, "only idle_report (not idle_escalated) carries a snooze");
+  assert.equal(isActiveWaitingSnooze(undefined, now), false, "no event at all → not snoozed");
 });
 
 console.log(`\n${pass} passed`);

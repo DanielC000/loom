@@ -3415,6 +3415,21 @@ export class SessionService {
       return;
     }
 
+    // QUEUED-REPORT GUARD (card a1f06bcc, false alarm #1): the task-column check above is a PROXY for
+    // "did the worker report" — reliable when the project's board has a `review`/`parked` role column
+    // (the report's task-move lands before we ever get here), but blind to two real gaps: a board
+    // missing that role mapping (workerReport's move is a no-op — "no orphaning move" — so the task
+    // never leaves `active` even though the report fired), and a report whose manager-facing framed
+    // message is still sitting UNDELIVERED in the manager's own pending FIFO (deliveryStatus "queued" —
+    // the manager was mid-turn when it landed). Either way the report is REAL; alleging "did NOT call
+    // worker_report" is simply false. Detect it directly off the manager's OWN pending queue — the exact
+    // `[loom:worker-report] worker <id> …` text workerReport() enqueues (prefixed with THIS worker's id,
+    // so it can only match its own report) — and suppress rather than reword: the queued report will
+    // surface on its own via the normal FIFO drain, so nothing more needs saying.
+    if (this.pty.getPendingEntries(w.parentSessionId).some((e) => e.text.startsWith(`[loom:worker-report] worker ${workerSessionId} `))) {
+      return;
+    }
+
     const events = this.db.listEventsForWorker(workerSessionId);
     const lastReportIdx = events.findLastIndex((e) => e.kind === "worker_report");
     const lastReport = lastReportIdx !== -1 ? events[lastReportIdx] : undefined;
