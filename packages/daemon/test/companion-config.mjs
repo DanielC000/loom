@@ -219,6 +219,129 @@ try {
     const distinctNow = resolveAllCompanionConfigs(db6, {});
     check("same-token collision: given a distinct token, BOTH sessions now arm", distinctNow.length === 2);
     db6.close();
+
+    // (2h) SAME-HOME COLLISION GUARD (f1d7a22b investigation): two ENABLED sessions on DISTINCT tokens
+    // (so the token guard above never fires) that resolve to the SAME home route must arm the HEARTBEAT on
+    // only ONE — the session with the most real activity (highest ctxTurns) — while BOTH configs still
+    // resolve (unlike the token guard, this never drops a whole config, only zeroes the loser's cadence).
+    const db7 = new Db(dbFile("p2h.db"));
+    const p2hNow = new Date().toISOString();
+    db7.insertProject({ id: "p2h-proj", name: "Home Collision", repoPath: "p2h-proj", vaultPath: "p2h-proj", config: {}, createdAt: p2hNow, archivedAt: null });
+    db7.insertAgent({ id: "p2h-agent", projectId: "p2h-proj", name: "Companion", startupPrompt: "P", position: 0, profileId: null, endpoint: false, ioSchema: null });
+    const TOKEN_HOME_A = "8200000001:home-collision-token-A-abcdefg";
+    const TOKEN_HOME_B = "8200000002:home-collision-token-B-abcdefg";
+    const SHARED_HOME = { channel: "telegram", chatId: "chat-shared-owner" };
+    // "sess-active" has real history (ctxTurns=50); "sess-quiet" is a near-empty thread (ctxTurns=1) — the
+    // active one should keep its heartbeat armed regardless of creation order.
+    db7.insertSession({ id: "sess-active", projectId: "p2h-proj", agentId: "p2h-agent", engineSessionId: "eng-sess-active", title: null, cwd: "p2h-proj", processState: "live", resumability: "resumable", busy: false, createdAt: p2hNow, lastActivity: p2hNow, lastError: null, role: "assistant" });
+    db7.insertSession({ id: "sess-quiet", projectId: "p2h-proj", agentId: "p2h-agent", engineSessionId: "eng-sess-quiet", title: null, cwd: "p2h-proj", processState: "live", resumability: "resumable", busy: false, createdAt: p2hNow, lastActivity: p2hNow, lastError: null, role: "assistant" });
+    db7.setContextCounters("sess-active", { ctxInputTokens: 10000, ctxTurns: 50 });
+    db7.setContextCounters("sess-quiet", { ctxInputTokens: 200, ctxTurns: 1 });
+    db7.upsertCompanionConfig({ sessionId: "sess-active", botTokenBlob: encryptSecret(TOKEN_HOME_A), channel: "telegram", allowedChatId: "chat-active", chatScope: "dm", heartbeatIntervalMinutes: 360, heartbeatPrompt: null, enabled: true });
+    db7.upsertCompanionConfig({ sessionId: "sess-quiet", botTokenBlob: encryptSecret(TOKEN_HOME_B), channel: "telegram", allowedChatId: "chat-quiet", chatScope: "dm", heartbeatIntervalMinutes: 360, heartbeatPrompt: null, enabled: true });
+    db7.setCompanionHome("sess-active", SHARED_HOME);
+    db7.setCompanionHome("sess-quiet", SHARED_HOME);
+    const homeWarnBefore = logSink.filter((l) => /resolves the same home/.test(l)).length;
+    const homeCollided = resolveAllCompanionConfigs(db7, {});
+    const homeWarnAfter = logSink.filter((l) => /resolves the same home/.test(l)).length;
+    check("same-home collision: BOTH configs still resolve (unlike the token guard, neither is dropped)", homeCollided.length === 2);
+    check(
+      "same-home collision: only the most-active session (sess-active) keeps its heartbeat armed",
+      homeCollided.find((c) => c.sessionId === "sess-active")?.heartbeatIntervalMinutes === 360 &&
+        homeCollided.find((c) => c.sessionId === "sess-quiet")?.heartbeatIntervalMinutes === 0,
+    );
+    check(
+      "same-home collision: emits exactly one diagnostic naming both sessions",
+      // Diagnostics log an 8-char session-id PREFIX (matching the token guard's own convention) — check
+      // against the sliced prefixes, not the full ids, so this doesn't depend on id length.
+      homeWarnAfter === homeWarnBefore + 1 &&
+        logSink.some((l) => l.includes("sess-qui") && l.includes("sess-act") && /resolves the same home/.test(l)),
+    );
+    // Distinct homes are completely unaffected — both heartbeats stay armed (no false-positive de-dup).
+    db7.setCompanionHome("sess-quiet", { channel: "telegram", chatId: "chat-not-shared" });
+    const distinctHomes = resolveAllCompanionConfigs(db7, {});
+    check(
+      "distinct homes: both heartbeats stay armed (the guard never fires on non-colliding homes)",
+      distinctHomes.every((c) => c.heartbeatIntervalMinutes === 360),
+    );
+    db7.close();
+
+    // (2i) SAME-HOME TIE-BREAK: equal ctxTurns (including both unmeasured/0) falls back to the OLDEST
+    // session (earliest createdAt) — the longest-running real thread — rather than arrival/iteration order.
+    const db8 = new Db(dbFile("p2i.db"));
+    const tOld = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const tNew = new Date().toISOString();
+    db8.insertProject({ id: "p2i-proj", name: "Home Tie-Break", repoPath: "p2i-proj", vaultPath: "p2i-proj", config: {}, createdAt: tOld, archivedAt: null });
+    db8.insertAgent({ id: "p2i-agent", projectId: "p2i-proj", name: "Companion", startupPrompt: "P", position: 0, profileId: null, endpoint: false, ioSchema: null });
+    db8.insertSession({ id: "sess-newer", projectId: "p2i-proj", agentId: "p2i-agent", engineSessionId: "eng-sess-newer", title: null, cwd: "p2i-proj", processState: "live", resumability: "resumable", busy: false, createdAt: tNew, lastActivity: tNew, lastError: null, role: "assistant" });
+    db8.insertSession({ id: "sess-older", projectId: "p2i-proj", agentId: "p2i-agent", engineSessionId: "eng-sess-older", title: null, cwd: "p2i-proj", processState: "live", resumability: "resumable", busy: false, createdAt: tOld, lastActivity: tOld, lastError: null, role: "assistant" });
+    db8.upsertCompanionConfig({ sessionId: "sess-newer", botTokenBlob: encryptSecret(TOKEN_HOME_A), channel: "telegram", allowedChatId: "chat-newer", chatScope: "dm", heartbeatIntervalMinutes: 360, heartbeatPrompt: null, enabled: true });
+    db8.upsertCompanionConfig({ sessionId: "sess-older", botTokenBlob: encryptSecret(TOKEN_HOME_B), channel: "telegram", allowedChatId: "chat-older", chatScope: "dm", heartbeatIntervalMinutes: 360, heartbeatPrompt: null, enabled: true });
+    db8.setCompanionHome("sess-newer", SHARED_HOME);
+    db8.setCompanionHome("sess-older", SHARED_HOME);
+    const tieBroken = resolveAllCompanionConfigs(db8, {});
+    check(
+      "same-home tie-break: equal (unmeasured) ctxTurns favors the OLDEST session",
+      tieBroken.find((c) => c.sessionId === "sess-older")?.heartbeatIntervalMinutes === 360 &&
+        tieBroken.find((c) => c.sessionId === "sess-newer")?.heartbeatIntervalMinutes === 0,
+    );
+    db8.close();
+
+    // (2j) LIVENESS GATE (Code Review CRITICAL fix): a companion_config row SURVIVES its session's pty
+    // death (enabled is untouched — see controller.ts's onSessionExit) — an EXITED/ARCHIVED-but-enabled
+    // session must NEVER win a same-home group nor suppress a LIVE sibling, even if it would otherwise
+    // out-rank it (higher ctxTurns, or older on an unmeasured tie). Two independent homes in one db so
+    // the two cases don't interact.
+    const db9 = new Db(dbFile("p2j.db"));
+    const p2jOld = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const p2jNow = new Date().toISOString();
+    db9.insertProject({ id: "p2j-proj", name: "Dead Winner", repoPath: "p2j-proj", vaultPath: "p2j-proj", config: {}, createdAt: p2jNow, archivedAt: null });
+    db9.insertAgent({ id: "p2j-agent", projectId: "p2j-proj", name: "Companion", startupPrompt: "P", position: 0, profileId: null, endpoint: false, ioSchema: null });
+    const TOKEN_DEAD_A1 = "8300000001:dead-winner-token-A1-abcdefg";
+    const TOKEN_DEAD_A2 = "8300000002:dead-winner-token-A2-abcdefg";
+    const TOKEN_DEAD_B1 = "8300000003:dead-winner-token-B1-abcdefg";
+    const TOKEN_DEAD_B2 = "8300000004:dead-winner-token-B2-abcdefg";
+    const HOME_CTXTURNS_CASE = { channel: "telegram", chatId: "chat-ctxturns-case" };
+    const HOME_TIEBREAK_CASE = { channel: "telegram", chatId: "chat-tiebreak-case" };
+
+    // Case A — the DEAD session has the HIGHER ctxTurns (would win on activity alone): must NOT suppress
+    // the live, lower-activity sibling.
+    db9.insertSession({ id: "sess-dead-active", projectId: "p2j-proj", agentId: "p2j-agent", engineSessionId: "eng-sess-dead-active", title: null, cwd: "p2j-proj", processState: "live", resumability: "resumable", busy: false, createdAt: p2jNow, lastActivity: p2jNow, lastError: null, role: "assistant" });
+    db9.insertSession({ id: "sess-live-quiet", projectId: "p2j-proj", agentId: "p2j-agent", engineSessionId: "eng-sess-live-quiet", title: null, cwd: "p2j-proj", processState: "live", resumability: "resumable", busy: false, createdAt: p2jNow, lastActivity: p2jNow, lastError: null, role: "assistant" });
+    db9.setContextCounters("sess-dead-active", { ctxInputTokens: 50000, ctxTurns: 99 });
+    db9.setContextCounters("sess-live-quiet", { ctxInputTokens: 200, ctxTurns: 2 });
+    db9.upsertCompanionConfig({ sessionId: "sess-dead-active", botTokenBlob: encryptSecret(TOKEN_DEAD_A1), channel: "telegram", allowedChatId: "chat-dead-active", chatScope: "dm", heartbeatIntervalMinutes: 360, heartbeatPrompt: null, enabled: true });
+    db9.upsertCompanionConfig({ sessionId: "sess-live-quiet", botTokenBlob: encryptSecret(TOKEN_DEAD_A2), channel: "telegram", allowedChatId: "chat-live-quiet", chatScope: "dm", heartbeatIntervalMinutes: 360, heartbeatPrompt: null, enabled: true });
+    db9.setCompanionHome("sess-dead-active", HOME_CTXTURNS_CASE);
+    db9.setCompanionHome("sess-live-quiet", HOME_CTXTURNS_CASE);
+    // Now kill it: exited + archived, config row's `enabled` left untouched (mirrors index.ts's onExit).
+    db9.setProcessState("sess-dead-active", "exited");
+    db9.archiveSession("sess-dead-active");
+
+    // Case B — same shape, but the DEAD session is merely the OLDER of an unmeasured (0 ctxTurns) tie:
+    // must NOT suppress the live, newer sibling on the tie-break either.
+    db9.insertSession({ id: "sess-dead-older", projectId: "p2j-proj", agentId: "p2j-agent", engineSessionId: "eng-sess-dead-older", title: null, cwd: "p2j-proj", processState: "live", resumability: "resumable", busy: false, createdAt: p2jOld, lastActivity: p2jOld, lastError: null, role: "assistant" });
+    db9.insertSession({ id: "sess-live-newer", projectId: "p2j-proj", agentId: "p2j-agent", engineSessionId: "eng-sess-live-newer", title: null, cwd: "p2j-proj", processState: "live", resumability: "resumable", busy: false, createdAt: p2jNow, lastActivity: p2jNow, lastError: null, role: "assistant" });
+    db9.upsertCompanionConfig({ sessionId: "sess-dead-older", botTokenBlob: encryptSecret(TOKEN_DEAD_B1), channel: "telegram", allowedChatId: "chat-dead-older", chatScope: "dm", heartbeatIntervalMinutes: 360, heartbeatPrompt: null, enabled: true });
+    db9.upsertCompanionConfig({ sessionId: "sess-live-newer", botTokenBlob: encryptSecret(TOKEN_DEAD_B2), channel: "telegram", allowedChatId: "chat-live-newer", chatScope: "dm", heartbeatIntervalMinutes: 360, heartbeatPrompt: null, enabled: true });
+    db9.setCompanionHome("sess-dead-older", HOME_TIEBREAK_CASE);
+    db9.setCompanionHome("sess-live-newer", HOME_TIEBREAK_CASE);
+    db9.setProcessState("sess-dead-older", "exited");
+    db9.archiveSession("sess-dead-older");
+
+    const deadWinnerResolved = resolveAllCompanionConfigs(db9, {});
+    check(
+      "liveness gate: a DEAD session with HIGHER ctxTurns does NOT suppress its live sibling",
+      deadWinnerResolved.find((c) => c.sessionId === "sess-live-quiet")?.heartbeatIntervalMinutes === 360,
+    );
+    check(
+      "liveness gate: a DEAD OLDER session on an unmeasured tie does NOT suppress its live (newer) sibling",
+      deadWinnerResolved.find((c) => c.sessionId === "sess-live-newer")?.heartbeatIntervalMinutes === 360,
+    );
+    // Both dead rows still resolve (enabled is untouched by exit — a separate, pre-existing revive concern,
+    // out of scope here) — just never as the WINNER of a live liveness comparison.
+    check("liveness gate: both dead-but-enabled configs still resolve (untouched by this guard)", deadWinnerResolved.length === 4);
+    db9.close();
   }
 
   // ============ Part 3 — the human-only REST CRUD via the REAL buildServer (app.inject) ============

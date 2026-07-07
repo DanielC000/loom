@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { resolveConfig, type CompanionConfigMasked, type CompanionBinding } from "@loom/shared";
 import { api, restartCompanionSession, type CompanionProvisionError, type CompanionSkillEntry, type CompanionMemoryEntry, type CompanionReminderEntry } from "../lib/api";
@@ -53,6 +53,9 @@ export default function Companion() {
 
   const configs = useQuery({ queryKey: ["companionConfigs"], queryFn: api.companionConfigs });
   const bindings = useQuery({ queryKey: ["companionBindings"], queryFn: api.companionBindings });
+  // Shared cache key (["allSessions"], used app-wide) — read here ONLY for each companion's ctxTurns/
+  // createdAt, to pick the history-bearing default selection below. Never used to reorder the switcher.
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 4000 });
 
   // Merge configs + bindings into companions, keyed by session id. A session may hold MANY bindings
   // (one per channel), so collect them into a list. MULTI-COMPANION (55f1b62): the daemon now arms EVERY
@@ -89,9 +92,42 @@ export default function Companion() {
     meta: { inlineError: true },
   });
 
-  // Resolve the focused companion, tolerating a stale/absent selection (e.g. the selected companion was just
-  // deleted) by falling back to the first. None yet → the create box IS the page.
-  const selected = companions.find((c) => c.sessionId === selectedId) ?? companions[0] ?? null;
+  // The history-bearing DEFAULT (in-app thread-split fix): a fresh load with no prior `selectedId` (or a
+  // stale one — e.g. the selected companion was just deleted) must NOT blindly focus companions[0] by
+  // sessionId sort — that can land on a near-empty session while a real conversation sits on another one,
+  // and a message typed there strands the real thread (handleInAppInbound routes by the FOCUSED session).
+  // Picks the most real activity by ctxTurns (from the shared ["allSessions"] cache), ties broken by the
+  // OLDEST session (earliest createdAt — the longest-running real thread). While `sessions` hasn't loaded
+  // yet every companion reads as equally (un)measured, so this reduces to the first companion — the same
+  // fallback as before, never worse. An explicit pick (`selectedId` matches) always wins over this.
+  const mostActiveCompanion = useMemo(() => {
+    if (companions.length === 0) return null;
+    const activity = new Map(sessions.data?.map((s) => [s.id, { ctxTurns: s.ctxTurns ?? 0, createdAt: s.createdAt }]) ?? []);
+    const of = (c: CompanionRow) => activity.get(c.sessionId) ?? { ctxTurns: 0, createdAt: "" };
+    return companions.reduce((best, cur) => {
+      const a = of(cur);
+      const b = of(best);
+      return a.ctxTurns > b.ctxTurns || (a.ctxTurns === b.ctxTurns && a.createdAt < b.createdAt) ? cur : best;
+    });
+  }, [companions, sessions.data]);
+
+  // COMMIT the resolved default into `selectedId` ONCE real activity data has loaded (Code Review CRITICAL
+  // fix: the default was previously left VOLATILE — recomputed fresh every render from the polled
+  // `["allSessions"]` cache — so a ctxTurns crossing on the periodic 4s refetch could flip the focused
+  // companion out from under the owner mid-session; handleInAppInbound routes by the focused session, so a
+  // flip right as they're typing strands the message on the wrong companion, the exact thread-split this
+  // fix exists to prevent). Waits for `sessions.data` to be DEFINED (not just `mostActiveCompanion`
+  // truthy) so it never locks in the pre-load "everyone tied" fallback before real ctxTurns is known. Only
+  // fires while `selectedId` is still null — an explicit pick (or a reset via onDeleted) always wins and
+  // is never overridden here.
+  useEffect(() => {
+    if (selectedId === null && sessions.data !== undefined && mostActiveCompanion) setSelectedId(mostActiveCompanion.sessionId);
+  }, [selectedId, sessions.data, mostActiveCompanion]);
+
+  // Resolve the focused companion: an explicit (or just-committed) `selectedId` sticks; otherwise fall
+  // back to the history-bearing default above (or companions[0] if that's somehow unavailable) for THIS
+  // render only, while the effect above commits it. None yet → the create box IS the page.
+  const selected = companions.find((c) => c.sessionId === selectedId) ?? mostActiveCompanion ?? companions[0] ?? null;
   const loading = configs.isLoading || bindings.isLoading;
   // Show the create form when the owner opted in (creating) OR there's simply no companion to show yet.
   const showCreate = creating || (!selected && !loading);

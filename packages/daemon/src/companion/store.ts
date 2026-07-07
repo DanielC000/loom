@@ -39,6 +39,11 @@ export interface CompanionConfigStore {
   }): CompanionConfigRow;
   getCompanionHome(sessionId: string): CompanionRoute | null;
   setCompanionHome(sessionId: string, home: CompanionRoute): void;
+  /** Narrowed session read (home-collision heartbeat de-dup, below) — most callers pass the real `Db`,
+   *  whose `getSession` returns the full `Session`; only these fields are used here. `processState` +
+   *  `archivedAt` gate LIVENESS (a dead-but-still-enabled companion must never win/suppress in the
+   *  home-collision guard — see `isLiveSession`); `ctxTurns`/`createdAt` break ties among live members. */
+  getSession(sessionId: string): { ctxTurns?: number | null; createdAt: string; processState: string; archivedAt?: string | null } | undefined;
 }
 
 /**
@@ -123,7 +128,86 @@ export function resolveAllEnabledConfigs(
     }
     configs.push(cfg);
   }
+  suppressDuplicateHomeHeartbeats(db, configs);
   return configs;
+}
+
+/**
+ * SAME-HOME COLLISION GUARD (f1d7a22b investigation — duplicate proactive messages): the per-row home
+ * resolution above is correct (each config reads its OWN session's app_meta home) — the gap is that two
+ * DIFFERENT enabled sessions can each resolve their home to the SAME route, and `CompanionHeartbeatWatcher`
+ * is armed 1-per-session with no cross-session scoping (controller.ts), so both would fire independently
+ * and the owner gets the SAME proactive message twice. Mirrors the token-fingerprint guard's shape (group
+ * by a fingerprint, keep exactly one) — but narrower: only the HEARTBEAT is suppressed on the losing
+ * session(s) (by zeroing `heartbeatIntervalMinutes`, the existing "no heartbeat" convention — see
+ * `CompanionConfig.heartbeatIntervalMinutes`), never the whole config. Its gateway/reminders/chat stay
+ * fully armed. Competition is restricted to LIVE, non-archived members (`isLiveSession`): a companion's
+ * `companion_config` row survives its session's pty death (`enabled` stays untouched — see
+ * controller.ts's `onSessionExit`), so a dead-but-still-enabled session would otherwise be able to WIN
+ * the group — or win an unmeasured tie as the "older" row — and silence a live sibling's heartbeat, the
+ * exact orphan-silence this guard exists to prevent. Among the live members, the one kept armed has the
+ * most real activity/history — highest `ctxTurns`, ties broken by the OLDEST session (earliest
+ * `createdAt`, i.e. the longest-running real thread). Mutates `heartbeatIntervalMinutes` of the losing
+ * config(s) in place.
+ *
+ * KNOWN RESIDUAL LATENCY (documented, not fixed here — reported up as a follow-up): if the winning LIVE
+ * session later exits, this guard only re-runs on the NEXT full `resolveAllEnabledConfigs` (boot, or a
+ * REST config write's `reconcile(sessionId)`). A bare pty exit alone does not trigger one —
+ * controller.ts's `onSessionExit` deliberately bypasses `reconcile()` (the config row's `enabled` stays
+ * true across a pty death, so an unscoped reconcile would try to re-START the now-dead session's gateway
+ * — see that method's own doc). And even a REST-scoped `reconcile(sessionId)` for an unrelated write only
+ * diffs that ONE session (the `onlySessionId` cross-companion-rearm-all fix), so it would not re-arm a
+ * suppressed sibling either. Net effect: a suppressed survivor can stay silently disarmed until the next
+ * boot or a config write that happens to touch it. Re-arming siblings promptly on a same-home winner's
+ * exit needs its own scoped mechanism (walk live sessions for the exited session's home, `reconcile()`
+ * each live sibling) and its own tests — left as follow-up rather than bolted on here.
+ */
+function suppressDuplicateHomeHeartbeats(db: CompanionConfigStore, configs: CompanionConfig[]): void {
+  const byHome = new Map<string, CompanionConfig[]>(); // "channel\0chatId" -> every armed config on it
+  for (const cfg of configs) {
+    if (cfg.heartbeatIntervalMinutes <= 0) continue; // already off — nothing to de-dup
+    const key = `${cfg.homeChannel}\0${cfg.homeChatId}`;
+    const group = byHome.get(key);
+    if (group) group.push(cfg);
+    else byHome.set(key, [cfg]);
+  }
+  for (const group of byHome.values()) {
+    // Only LIVE, non-archived sessions may compete for — or be silenced by — this guard (see the
+    // KNOWN RESIDUAL LATENCY note above for the reverse gap this does NOT close).
+    const liveGroup = group.filter((cfg) => isLiveSession(db, cfg.sessionId));
+    if (liveGroup.length < 2) continue;
+    const winner = mostActive(db, liveGroup);
+    for (const cfg of liveGroup) {
+      if (cfg === winner) continue;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[companion] session ${cfg.sessionId.slice(0, 8)} resolves the same home as already-armed session ${winner.sessionId.slice(0, 8)} — only one heartbeat is armed per home to avoid duplicate proactive messages.`,
+      );
+      cfg.heartbeatIntervalMinutes = 0;
+    }
+  }
+}
+
+/** True iff `sessionId` is a LIVE, non-archived session — the liveness gate for the home-collision guard
+ *  above. An unknown session (e.g. a test fixture with no session row) is never live. */
+function isLiveSession(db: CompanionConfigStore, sessionId: string): boolean {
+  const session = db.getSession(sessionId);
+  return !!session && session.processState === "live" && !session.archivedAt;
+}
+
+/** Pick the config with the most real activity in a same-home group of LIVE sessions: highest `ctxTurns`
+ *  wins; a tie (including both unmeasured) goes to the OLDEST session by `createdAt`. */
+function mostActive(db: CompanionConfigStore, group: CompanionConfig[]): CompanionConfig {
+  return group.reduce((best, cur) => {
+    const a = sessionActivity(db, cur.sessionId);
+    const b = sessionActivity(db, best.sessionId);
+    return a.ctxTurns > b.ctxTurns || (a.ctxTurns === b.ctxTurns && a.createdAt < b.createdAt) ? cur : best;
+  });
+}
+
+function sessionActivity(db: CompanionConfigStore, sessionId: string): { ctxTurns: number; createdAt: string } {
+  const session = db.getSession(sessionId);
+  return { ctxTurns: session?.ctxTurns ?? 0, createdAt: session?.createdAt ?? "" };
 }
 
 /** Non-secret grouping key for a decrypted bot token (sha256 hex) — used ONLY to detect two configs sharing
