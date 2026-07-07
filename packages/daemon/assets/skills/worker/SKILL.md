@@ -90,7 +90,16 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    point Playwright at the dev server's **actual bound URL** — read the port from the framework's startup
    line (e.g. vite's `Local: http://…:PORT`); never assume a default port. If that port is already held
    by another process, the dev server binds a different one or fails — verifying the default would
-   silently drive the wrong, *stale* server and report a false pass. And if the project has an
+   silently drive the wrong, *stale* server and report a false pass. **Stop any dev server (or other long-running process) you started BEFORE you
+   `worker_report done` — and stop it SAFELY.** Terminate it via the handle you started it with (the child
+   process YOU spawned); don't re-discover it by process name or port. A stray dev server holds OS file
+   locks on its own `node_modules` (on Windows a live Vite/esbuild binary can't be unlinked), so the merge
+   gate's install/build step — and post-merge worktree cleanup — fails with a spurious `EPERM`/lock error
+   that looks like a broken gate but is really your process. **If you must find the process to kill it,
+   scope the match STRICTLY to one whose working directory / command line is UNDER YOUR OWN WORKTREE PATH;
+   NEVER kill by bare image name (every `node`/`esbuild`) or by port alone** — that reaches the human's own
+   dev servers, unrelated projects, and even the host daemon (it has already stopped an unrelated process).
+   And if the project has an
    end-to-end / browser test suite, a **new or changed user-facing feature** ships with (or updates)
    a test in it, run green as part of the DoD — see the project's own testing docs (its `CLAUDE.md`).
    **Verifying by booting a fresh/isolated instance of the service under test** (its own throwaway data
