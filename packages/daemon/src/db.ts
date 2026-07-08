@@ -32,7 +32,7 @@ function assertNotProdDbInTest(file: string): void {
 import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, PresetPrompt, PresetPromptSuggestion,
+  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, Question, QuestionState, PresetPrompt, PresetPromptSuggestion,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
@@ -677,6 +677,31 @@ CREATE TABLE IF NOT EXISTS capability_defs (
   secret_env_var TEXT,                       -- env var name the P1 secret is injected under; NULL if N/A
   created_at TEXT NOT NULL
 );
+-- Manager→human DECISION INBOX (card 8701bdbb, daemon core / child A): a durable, answerable object
+-- for a mid-flight decision a manager/orchestrator needs the human for. Brand-new table ⇒ CREATE TABLE
+-- IF NOT EXISTS is itself the additive migration (no ALTER needed), exactly like runs/api_keys/
+-- connections/poll_jobs above — an existing DB simply gains an empty table on next boot; zero rows ⇒
+-- byte-identical to today until a manager actually asks one. options_json/recommendation are nullable
+-- (a pure-blocker ask carries neither); chosen_option/note are written by the human-only REST answer
+-- endpoint. The manager-only ask/pull MCP tools + the human-only REST answer route are the only writers
+-- — no agent MCP tool answers its own question (mirrors the human-only-write trust posture of vault/git).
+CREATE TABLE IF NOT EXISTS questions (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  options_json TEXT,
+  recommendation TEXT,
+  state TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'answered' | 'consumed'
+  chosen_option TEXT,
+  note TEXT,
+  created_at TEXT NOT NULL,
+  answered_at TEXT,
+  consumed_at TEXT
+);
+-- Serves both the manager's pull (session_id + state='answered') and a future project-scoped inbox read.
+CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id, state);
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, created_at);
@@ -3109,6 +3134,19 @@ export class Db {
     return this.db.prepare("UPDATE wakes SET session_id = ? WHERE session_id = ?")
       .run(newSessionId, oldSessionId).changes;
   }
+  /**
+   * Move a manager's decision-inbox questions (card 8701bdbb) to its recycle successor — the SAME
+   * recycle-changes-session-id class card 93609ef3 fixed for worker reads (there via lineage-walking;
+   * here, consistent with reparentWakes just above, by moving the row itself). Without this an
+   * 'answered' question asked by the predecessor is stranded: question_pull is scoped by exact
+   * session_id, so the successor (a fresh session id) could never see it. Moves EVERY state
+   * (pending/answered/consumed) unconditionally, exactly like reparentWakes — a still-'pending'
+   * question's eventual answer must also nudge the successor, not the retired predecessor's dead pty.
+   */
+  reparentQuestions(oldSessionId: string, newSessionId: string): number {
+    return this.db.prepare("UPDATE questions SET session_id = ? WHERE session_id = ?")
+      .run(newSessionId, oldSessionId).changes;
+  }
   /** True once a session has been recycled — a successor row points back at it via recycled_from.
    *  resume() uses this to refuse resurrecting a superseded session from ANY path (wake/rate-limit/boot). */
   hasSuccessor(sessionId: string): boolean {
@@ -3442,6 +3480,58 @@ export class Db {
     this.db.prepare(
       "UPDATE poll_jobs SET next_poll_at = ?, consecutive_failures = consecutive_failures + 1, last_error = ? WHERE id = ?",
     ).run(patch.nextPollAt, patch.error, id);
+  }
+
+  // --- questions (manager→human decision inbox, card 8701bdbb) ---
+  insertQuestion(q: Question): void {
+    this.db.prepare(
+      `INSERT INTO questions
+        (id,session_id,project_id,title,body,options_json,recommendation,state,chosen_option,note,created_at,answered_at,consumed_at)
+       VALUES
+        (@id,@sessionId,@projectId,@title,@body,@optionsJson,@recommendation,@state,@chosenOption,@note,@createdAt,@answeredAt,@consumedAt)`,
+    ).run({
+      id: q.id, sessionId: q.sessionId, projectId: q.projectId, title: q.title, body: q.body,
+      optionsJson: q.options ? JSON.stringify(q.options) : null, recommendation: q.recommendation ?? null,
+      state: q.state, chosenOption: q.chosenOption ?? null, note: q.note ?? null,
+      createdAt: q.createdAt, answeredAt: q.answeredAt ?? null, consumedAt: q.consumedAt ?? null,
+    });
+  }
+  getQuestion(id: string): Question | undefined {
+    const r = this.db.prepare("SELECT * FROM questions WHERE id = ?").get(id) as Row | undefined;
+    return r ? toQuestion(r) : undefined;
+  }
+  /** An asking manager's own questions (any state), newest first — for a future project/session inbox read. */
+  listQuestionsForSession(sessionId: string): Question[] {
+    return (this.db.prepare("SELECT * FROM questions WHERE session_id = ? ORDER BY created_at DESC").all(sessionId) as Row[])
+      .map(toQuestion);
+  }
+  /**
+   * The human-only REST answer write: 'pending' → 'answered', recording chosenOption/note + answeredAt.
+   * Returns the updated row, or undefined if `id` doesn't exist or isn't currently 'pending' (answering
+   * twice, or answering an already-consumed question, is a no-op rather than silently overwriting).
+   */
+  answerQuestion(id: string, patch: { chosenOption: string | null; note: string | null; answeredAt: string }): Question | undefined {
+    const existing = this.getQuestion(id);
+    if (!existing || existing.state !== "pending") return undefined;
+    this.db.prepare(
+      "UPDATE questions SET state = 'answered', chosen_option = ?, note = ?, answered_at = ? WHERE id = ?",
+    ).run(patch.chosenOption, patch.note, patch.answeredAt, id);
+    return this.getQuestion(id);
+  }
+  /**
+   * The manager-only pull/consume: atomically reads every 'answered' question for `sessionId` and flips
+   * them to 'consumed' in the SAME transaction, so a concurrent pull can never double-consume the same
+   * row. Returns the questions AS THEY WERE when answered (pre-flip) — the manager's payload.
+   */
+  pullAnsweredQuestions(sessionId: string, consumedAt: string): Question[] {
+    return this.db.transaction((): Question[] => {
+      const rows = (this.db.prepare("SELECT * FROM questions WHERE session_id = ? AND state = 'answered' ORDER BY answered_at")
+        .all(sessionId) as Row[]).map(toQuestion);
+      if (rows.length === 0) return rows;
+      const flip = this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ?");
+      for (const r of rows) flip.run(consumedAt, r.id);
+      return rows;
+    })();
   }
 
   // --- companion reminders (Companion Memory & Reminders Design, Surface 2 s3 — the recurring engine) ---
@@ -3984,6 +4074,22 @@ function toPollJob(r0: unknown): PollJob {
     agentId: (r.agent_id as string) ?? null, enabled: (r.enabled as number) === 1,
     consecutiveFailures: r.consecutive_failures as number, lastError: (r.last_error as string) ?? null,
     createdAt: r.created_at as string,
+  };
+}
+function toQuestion(r0: unknown): Question {
+  const r = r0 as Row;
+  const optionsJson = r.options_json as string | null | undefined;
+  return {
+    id: r.id as string, sessionId: r.session_id as string, projectId: r.project_id as string,
+    title: r.title as string, body: r.body as string,
+    options: optionsJson ? (JSON.parse(optionsJson) as string[]) : null,
+    recommendation: (r.recommendation as string | null) ?? null,
+    state: r.state as QuestionState,
+    chosenOption: (r.chosen_option as string | null) ?? null,
+    note: (r.note as string | null) ?? null,
+    createdAt: r.created_at as string,
+    answeredAt: (r.answered_at as string | null) ?? null,
+    consumedAt: (r.consumed_at as string | null) ?? null,
   };
 }
 function toCompanionReminder(r0: unknown): CompanionReminder {

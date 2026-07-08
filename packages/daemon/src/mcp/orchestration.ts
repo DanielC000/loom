@@ -5,7 +5,7 @@ import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { contextWindowForModel, resolveConfig, resolveProfile, type SessionRole } from "@loom/shared";
+import { contextWindowForModel, resolveConfig, resolveProfile, type SessionRole, type Question } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript } from "../sessions/transcript.js";
@@ -745,6 +745,80 @@ export class OrchestrationMcpRouter {
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
+      },
+    );
+
+    // --- Manager→human DECISION INBOX (card 8701bdbb, daemon core / child A) ----------------------
+    // ask (question_ask) is NON-BLOCKING by design: it inserts a 'pending' row and returns immediately
+    // so an autonomous manager keeps orchestrating the rest of its fleet instead of stalling on a human
+    // reply. The human answers it OUT OF BAND (the human-only REST endpoint in gateway/server.ts — the
+    // web UI for that is a separate child B), which ALSO enqueues a one-time push nudge into this
+    // manager's own pty (reusing the existing enqueueStdin(kind:"agent") rail — see gateway/server.ts).
+    // pull (question_pull) is the manager's own pickup: it atomically reads+consumes every 'answered'
+    // question so a durable answer survives a daemon restart and is still pullable after resume.
+    server.registerTool(
+      "question_ask",
+      {
+        description:
+          "Ask the HUMAN a mid-flight decision you need them for — NON-BLOCKING: creates a durable, " +
+          "answerable question and returns IMMEDIATELY, so you keep orchestrating the rest of your fleet " +
+          "instead of blocking this turn on a reply. `title`+`body` frame the decision. `options` is an " +
+          "OPTIONAL array of choices for the human to pick between — omit it for a pure blocker (the " +
+          "human replies with a free-text note only, no options to choose from). `recommendation` is an " +
+          "OPTIONAL suggested answer shown to the human as a nudge (not enforced). You'll get a one-time " +
+          "push nudge into your own session when the human answers; call question_pull (e.g. when you " +
+          "reach the decision point this was blocking) to fetch the answer. Returns {questionId}.",
+        inputSchema: {
+          title: z.string(),
+          body: z.string(),
+          options: z.array(z.string()).optional(),
+          recommendation: z.string().optional(),
+        },
+      },
+      async ({ title, body, options, recommendation }) => {
+        const projectId = db.getSession(managerSessionId)?.projectId;
+        if (!projectId) return ok({ error: "no project for this session" });
+        const question: Question = {
+          id: randomUUID(),
+          sessionId: managerSessionId,
+          projectId,
+          title,
+          body,
+          options: options && options.length > 0 ? options : null,
+          recommendation: recommendation ?? null,
+          state: "pending",
+          chosenOption: null,
+          note: null,
+          createdAt: new Date().toISOString(),
+          answeredAt: null,
+          consumedAt: null,
+        };
+        db.insertQuestion(question);
+        return ok({ questionId: question.id });
+      },
+    );
+
+    server.registerTool(
+      "question_pull",
+      {
+        description:
+          "Pull (return AND consume) every ANSWERED question you've asked via question_ask — your " +
+          "decision-inbox pickup. Each entry is {questionId, title, chosenOption, note}: chosenOption is " +
+          "one of the options you offered (or null for a pure-blocker ask, or an unanswered-options case), " +
+          "note is the human's optional free-text. Pulling consumes them in one shot (flips them to " +
+          "'consumed') so they won't be returned again — call this when you reach the decision point the " +
+          "question was blocking, or after the push nudge tells you one was answered. Returns " +
+          "{questions: [...]} (empty if none are answered yet — a still-'pending' question is NOT " +
+          "returned; keep orchestrating and check back later).",
+        inputSchema: {},
+      },
+      async () => {
+        const answered = db.pullAnsweredQuestions(managerSessionId, new Date().toISOString());
+        return ok({
+          questions: answered.map((q) => ({
+            questionId: q.id, title: q.title, chosenOption: q.chosenOption, note: q.note,
+          })),
+        });
       },
     );
 

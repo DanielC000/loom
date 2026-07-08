@@ -2893,6 +2893,49 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
   });
 
+  // --- Manager→human DECISION INBOX (card 8701bdbb, daemon core / child A) — the human-only ANSWER
+  // write. This is a TRUST-BOUNDARY surface (same posture as POST /input / the merge routes above): NOT
+  // an agent MCP tool — a manager can only ASK (question_ask) and PULL its own answered questions
+  // (question_pull); only a human, over this loopback REST route, ever writes chosenOption/note. On a
+  // successful answer, ALSO enqueue a push nudge into the asking manager's pty via the SAME existing
+  // enqueueStdin(kind:"agent") rail POST /input uses — so the manager sees a live nudge without needing
+  // to poll question_pull. The web read/answer UI (the attention item, `/question/:id` page, the global
+  // inbox) is a separate child (B); this route is the daemon-side write it will call.
+  app.post("/api/questions/:id/answer", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const question = deps.db.getQuestion(id);
+    if (!question) return reply.code(404).send({ error: "question not found" });
+    if (question.state !== "pending")
+      return reply.code(400).send({ error: `question is already ${question.state}, not pending` });
+    const body = (req.body ?? {}) as { chosenOption?: string | null; note?: string };
+    const chosenOption = body.chosenOption ?? null;
+    const note = typeof body.note === "string" ? body.note : null;
+    if (question.options && question.options.length > 0) {
+      if (chosenOption == null || !question.options.includes(chosenOption))
+        return reply.code(400).send({ error: `chosenOption must be one of: ${question.options.join(", ")}` });
+    } else if (chosenOption != null) {
+      return reply.code(400).send({ error: "this question has no options — chosenOption must be null (answer via note)" });
+    } else if (!note || !note.trim()) {
+      // A pure-blocker (no options) is asked for a REASON — an empty answer would flip it to 'answered'
+      // with zero content for the manager to act on. Require the human's note carry the actual decision
+      // (e.g. "go ahead", "hold off, do X first") rather than accepting a content-free acknowledgment.
+      return reply.code(400).send({ error: "this question has no options — a non-empty note is required to answer it" });
+    }
+    const updated = deps.db.answerQuestion(id, { chosenOption, note, answeredAt: new Date().toISOString() });
+    if (!updated) return reply.code(400).send({ error: "question was answered concurrently" });
+    // Best-effort push nudge — the answer is ALREADY durably persisted above; a torn-down asking-manager
+    // pty (hard recycle/crash racing this exact request) must never turn a successful trust-boundary
+    // write into a 500 to the human. enqueueStdin doesn't throw for a plainly dead session (it returns
+    // {delivered:false, reason:"session-dead"}), but CAN throw in the narrow pty-teardown race (the pty
+    // dying between the alive-check and submit()'s write) or trip an M1/M2 fail-loud guard — every OTHER
+    // enqueueStdin caller in the daemon wraps it best-effort; this was the one that didn't.
+    try {
+      const nudge = `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.`;
+      deps.pty.enqueueStdin(updated.sessionId, nudge, "human", undefined, undefined, "agent");
+    } catch { /* best-effort — the answer already persisted; question_pull is the durable fallback */ }
+    return reply.send(updated);
+  });
+
   // --- Per-project session Archive (HUMAN/REST only — like stop/fork/merge, NEVER an MCP tool).
   // Archiving is AUTOMATIC now (card b37750a4): a session auto-archives when its pty exits and
   // auto-restores when it resumes — there is NO manual archive endpoint. Restore brings an archived

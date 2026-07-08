@@ -1202,6 +1202,39 @@ export interface PollJob {
   createdAt: string;
 }
 
+export const QUESTION_STATES = ["pending", "answered", "consumed"] as const;
+export type QuestionState = (typeof QUESTION_STATES)[number];
+
+/**
+ * A manager→human DECISION INBOX entry (card 8701bdbb, daemon core / child A): a manager/orchestrator
+ * hits a mid-flight decision it needs the human for (approve / pick-between-approaches / unblock),
+ * asked NON-BLOCKING (the ask tool returns immediately — the manager keeps orchestrating the rest of
+ * its fleet) and answered asynchronously in the UI. Lifecycle: "pending" (waiting on the human) →
+ * "answered" (the human replied; waiting on the asking manager's pickup) → "consumed" (the manager
+ * pulled it). `options`/`recommendation` are optional — a pure-blocker ask (no options) carries only
+ * `title`+`body`, and round-trips on `note` alone (`chosenOption` stays null even once answered).
+ */
+export interface Question {
+  id: string;
+  /** The asking manager/orchestrator session id — server-derived at ask time, never agent-supplied. */
+  sessionId: string;
+  projectId: string;
+  title: string;
+  body: string;
+  /** Nullable — a pure-blocker ask carries no options. */
+  options: string[] | null;
+  /** Nullable — the asking manager's suggested answer, shown to the human as a nudge, not enforced. */
+  recommendation: string | null;
+  state: QuestionState;
+  /** Set by the human's answer; null for a pure-blocker (or before answering). */
+  chosenOption: string | null;
+  /** Optional human note, set by the answer (freeform — the pure-blocker's only payload). */
+  note: string | null;
+  createdAt: string;
+  answeredAt: string | null;
+  consumedAt: string | null;
+}
+
 /**
  * A Loom-managed skill (a SKILL.md playbook in the Loom skill store, ~/.loom/skills/<name>). These
  * are delivered to every session as project-local skills (shadowing the user's personal ones) and

@@ -3816,6 +3816,10 @@ export class SessionService {
     // old pty is still alive (its 3s deferred stop is below) so each entry's source + durable onDeliver
     // come with it; durable records are re-minted onto the successor — see carryPendingToSuccessor.
     this.db.reparentWakes(oldManagerId, fresh.id);
+    // Card 8701bdbb: move the predecessor's decision-inbox questions onto the successor too — otherwise
+    // question_pull's exact-session_id scoping strands an 'answered' (or still-'pending') question the
+    // predecessor asked, unreachable from the successor's own session id.
+    this.db.reparentQuestions(oldManagerId, fresh.id);
     const carried = this.pty.flushPending(oldManagerId);
     const carriedDurable = this.db.listUnresolvedQueuedMessagesForWorker(oldManagerId);
     this.carryPendingToSuccessor(oldManagerId, fresh.id, carried, carriedDurable);
