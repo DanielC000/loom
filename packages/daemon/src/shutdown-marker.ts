@@ -60,3 +60,38 @@ export function writeShutdownMarker(input: ShutdownMarkerInput): void {
     /* the marker write must NEVER throw — a failed write is swallowed by design, same as crashlog.ts */
   }
 }
+
+/** The record shape {@link writeShutdownMarker} persists, as read back by {@link readAndClearShutdownMarker}. */
+export interface ShutdownMarkerRecord {
+  reason: ShutdownKind;
+  detail: string;
+  signal: string | null;
+  at: string;
+  pid: number;
+}
+
+/**
+ * Read {@link LAST_SHUTDOWN_PATH} (if present) and DELETE it — consume-on-read. Boot-time crash recovery
+ * (SessionService.recoverCrashOrphanedWorkers) calls this ONCE per boot, unconditionally, so a clean-stop
+ * marker can never outlive the boot it was meant for and get misread as "clean" by a LATER, genuine crash
+ * that happens to leave no new marker of its own (a stale marker must never survive to mislabel a real
+ * crash). Never throws — mirrors the writer's swallow-all discipline; a read/delete fault just means the
+ * caller treats this boot as an unclassified (crash-shaped) stop, the safe default.
+ */
+export function readAndClearShutdownMarker(): ShutdownMarkerRecord | null {
+  try {
+    const raw = fs.readFileSync(LAST_SHUTDOWN_PATH, "utf8");
+    try { fs.unlinkSync(LAST_SHUTDOWN_PATH); } catch { /* best-effort delete — a leftover file just gets overwritten next stop */ }
+    const parsed = JSON.parse(raw) as Partial<ShutdownMarkerRecord>;
+    if (parsed.reason !== "signal" && parsed.reason !== "intentional") return null;
+    return {
+      reason: parsed.reason,
+      detail: typeof parsed.detail === "string" ? parsed.detail : "",
+      signal: typeof parsed.signal === "string" ? parsed.signal : null,
+      at: typeof parsed.at === "string" ? parsed.at : "",
+      pid: typeof parsed.pid === "number" ? parsed.pid : 0,
+    };
+  } catch {
+    return null;
+  }
+}

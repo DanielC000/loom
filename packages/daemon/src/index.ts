@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { resolveConfig } from "@loom/shared";
 import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR } from "./paths.js";
 import { installCrashHandlers } from "./crashlog.js";
-import { writeShutdownMarker } from "./shutdown-marker.js";
+import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
 import { Db } from "./db.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
@@ -355,6 +355,10 @@ async function main(): Promise<void> {
   // The actual resume happens after the server is listening (its ptys need the MCP endpoints up). null
   // on a normal boot.
   const restartIntent = readRestartIntent();
+  // Consume-on-read, ONCE per boot, unconditionally (card be79aea2) — regardless of which branch below
+  // ends up using it, so a clean-stop marker can never survive past the boot it was written for and get
+  // misread as "clean" by a LATER, genuine crash that happens to leave no marker of its own.
+  const shutdownMarker = readAndClearShutdownMarker();
   const protectedSessionIds = restartIntent ? protectedIdsFromIntent(restartIntent) : new Set<string>();
   // Crash-orphaned-worker recovery (card 9fc41af5): fold the derived candidates' worker + manager ids
   // into the SAME protected set, for the SAME reason (pass-B GC must not reclaim a worktree we're about
@@ -841,12 +845,13 @@ async function main(): Promise<void> {
     // ONLY path that brings these workers' managers (and any solo manager with no surviving worker) back.
     // Best-effort + runs once.
     const { resumed, skippedParked, failed, managersFailed } =
-      sessions.recoverCrashOrphanedWorkers(crashOrphanedWorkers, { soloManagerIds: crashOrphanedManagers });
+      sessions.recoverCrashOrphanedWorkers(crashOrphanedWorkers, { soloManagerIds: crashOrphanedManagers, shutdownMarker });
     console.log(
       `[boot] crash recovery: re-parented ${resumed.length} in-flight worker(s) to their resumed manager(s)` +
       (skippedParked.length ? `, ${skippedParked.length} resumed-but-parked (usage hold honored)` : "") +
       (failed.length ? `, ${failed.length} unresumable (skipped)` : "") +
-      (managersFailed.length ? `, ${managersFailed.length} manager(s) themselves unresumable (check [crash-recovery] logs above for why)` : ""),
+      (managersFailed.length ? `, ${managersFailed.length} manager(s) themselves unresumable (check [crash-recovery] logs above for why)` : "") +
+      (shutdownMarker ? ` (clean ${shutdownMarker.reason} stop marker found — nudges classified as a restart, not a crash)` : ""),
     );
   }
   // Durable queued-message recovery (card 2ca18433): re-drive any session_message/message_worker that was

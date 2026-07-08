@@ -36,6 +36,21 @@ if (scenario) {
     writeShutdownMarker({ kind: "signal", reason: "SIGHUP", signal: "SIGHUP" });
   } else if (scenario === "no-clobber") {
     writeShutdownMarker({ kind: "signal", reason: "SIGTERM", signal: "SIGTERM" });
+  } else if (scenario === "read-signal" || scenario === "read-intentional" || scenario === "read-missing" || scenario === "read-corrupt") {
+    // card be79aea2: readAndClearShutdownMarker also caches LAST_SHUTDOWN_PATH from LOOM_HOME at import,
+    // same as the writer — so it needs the same fresh-child-per-scenario treatment as A-F above, not a
+    // re-import in the long-lived parent process.
+    const { readAndClearShutdownMarker } = await import("../dist/shutdown-marker.js");
+    if (scenario === "read-signal") writeShutdownMarker({ kind: "signal", reason: "SIGTERM", signal: "SIGTERM" });
+    else if (scenario === "read-intentional") writeShutdownMarker({ kind: "intentional", reason: "POST /internal/shutdown", signal: null });
+    // "read-missing": nothing written. "read-corrupt": the PARENT pre-wrote a malformed last-shutdown.json
+    // into this child's LOOM_HOME before spawning it.
+    let threw = false;
+    let first;
+    try { first = readAndClearShutdownMarker(); } catch { threw = true; }
+    const stillThereAfterFirstRead = fs.existsSync(path.join(process.env.LOOM_HOME, "last-shutdown.json"));
+    const second = readAndClearShutdownMarker(); // must be null — proves consume-on-read
+    console.log(`RESULT:${JSON.stringify({ first, threw, stillThereAfterFirstRead, second })}`);
   }
   process.exit(0);
 } else {
@@ -56,7 +71,11 @@ if (scenario) {
       encoding: "utf8",
       timeout: 30_000,
     });
-    return { code: r.status, home, stderr: r.stderr || "" };
+    return { code: r.status, home, stderr: r.stderr || "", stdout: r.stdout || "" };
+  };
+  const parseResult = (stdout) => {
+    const line = stdout.split("\n").find((l) => l.startsWith("RESULT:"));
+    return line ? JSON.parse(line.slice("RESULT:".length)) : null;
   };
   const readMarker = (home) => {
     const p = path.join(home, "last-shutdown.json");
@@ -133,6 +152,49 @@ if (scenario) {
       check("no-clobber: pre-existing restart-intent.json is untouched", fs.readFileSync(path.join(home, "restart-intent.json"), "utf8") === "PRE-EXISTING-INTENT");
       check("no-clobber: the shutdown marker itself lives at last-shutdown.json", fs.existsSync(path.join(home, "last-shutdown.json")));
     }
+    // ── G: readAndClearShutdownMarker reads back a written marker, then DELETES it (consume-on-read) ──
+    // card be79aea2: boot-time crash recovery reads this ONCE per boot so a clean-stop marker can never
+    // survive to mislabel a LATER, genuine crash as clean. Run via a CHILD process (like B-F) — the
+    // reader caches LAST_SHUTDOWN_PATH from LOOM_HOME at import too, so a direct re-import in this
+    // long-lived parent would silently keep resolving section A's original temp home.
+    {
+      const { code, home, stdout } = runChild("read-consume", "read-signal");
+      const r = parseResult(stdout);
+      check("read-consume: child exited cleanly (0)", code === 0);
+      check("read-consume: first read returns the written record", r?.first?.reason === "signal" && r?.first?.signal === "SIGTERM");
+      check("read-consume: the marker file is GONE immediately after the first read", r?.stillThereAfterFirstRead === false);
+      check("read-consume: a SUBSEQUENT read (no new stop) returns null, NOT the stale record", r?.second === null);
+      check("read-consume: no marker file left behind on disk either", !fs.existsSync(path.join(home, "last-shutdown.json")));
+    }
+
+    // ── H: readAndClearShutdownMarker returns null when no marker was ever written ───────────────────
+    {
+      const { code, stdout } = runChild("read-missing", "read-missing");
+      const r = parseResult(stdout);
+      check("read-missing: child exited cleanly (0)", code === 0);
+      check("read-missing: returns null when last-shutdown.json doesn't exist", r?.first === null);
+    }
+
+    // ── I: readAndClearShutdownMarker never throws on a corrupt/unreadable marker file ────────────────
+    {
+      const home = freshHome("read-corrupt");
+      fs.writeFileSync(path.join(home, "last-shutdown.json"), "{ not valid json");
+      const { code, stdout } = runChild("read-corrupt", "read-corrupt", home);
+      const r = parseResult(stdout);
+      check("read-corrupt: child exited cleanly (0) — never throws on malformed JSON", code === 0);
+      check("read-corrupt: readAndClearShutdownMarker() itself didn't throw", r?.threw === false);
+      check("read-corrupt: degrades to null on malformed JSON", r?.first === null);
+    }
+
+    // ── J: an "intentional" marker round-trips through the reader too (not just "signal") ─────────────
+    {
+      const { code, stdout } = runChild("read-intentional", "read-intentional");
+      const r = parseResult(stdout);
+      check("read-intentional: child exited cleanly (0)", code === 0);
+      check("read-intentional: reason recorded as 'intentional'", r?.first?.reason === "intentional");
+      check("read-intentional: signal is null", r?.first?.signal === null);
+      check("read-intentional: detail carries the raw reason string", r?.first?.detail === "POST /internal/shutdown");
+    }
   } finally {
     for (const root of tmpRoots) {
       for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry (Windows WAL/handle) */ } }
@@ -140,7 +202,7 @@ if (scenario) {
   }
 
   console.log(failures === 0
-    ? "\n✅ ALL PASS — a signal/intentional stop always leaves a diagnosable shutdown marker; crash.log/restart-intent.json are untouched."
+    ? "\n✅ ALL PASS — a signal/intentional stop always leaves a diagnosable shutdown marker; crash.log/restart-intent.json are untouched; the marker is consumed (deleted) on read so it can never mislabel a later crash as clean."
     : `\n❌ ${failures} FAILURE(S).`);
   process.exit(failures === 0 ? 0 : 1);
 }

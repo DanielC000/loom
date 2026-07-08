@@ -448,6 +448,55 @@ try {
   check("(9g) a PARKED solo manager is still resumed (in the successful path, not `managersFailed`)",
     !result9g.managersFailed.includes(id9g.mgr));
   check("(9g) it receives NO summary nudge (usage hold honored)", pty.getPending(id9g.mgr).length === 0);
+
+  // ============================ (10) CLEAN-STOP MARKER — crash nudge swapped for a restart nudge ========
+  // card be79aea2: a planned/OS-signal/supervised stop reaches this SAME crash-recovery branch whenever no
+  // restart-intent was captured (a signal/service-manager stop races ahead of resumeFleetOnBoot's own
+  // planned path). Passing a fresh `shutdownMarker` must swap EVERY `[loom:crash-recovered]` nudge below
+  // for a `[loom:daemon-restarted]` clean-stop nudge, worded as a restart, never a crash.
+  const cleanMarker = { reason: "signal", detail: "SIGINT", signal: "SIGINT", at: now, pid: 1 };
+
+  // (10a) per-worker "continue your task" nudge is worded as a clean restart, not a crash.
+  const id10a = { mgr: `cow-mgr10a-${sfx}`, wkr: `cow-wkr10a-${sfx}` };
+  const t10a = mkTask(`cow-t10a-${sfx}`, P.proj);
+  mkSession({ id: id10a.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id10a.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id10a.mgr, taskId: t10a, processState: "live" });
+  const derived10a = deriveCrashOrphanedWorkers(db, [db.getSession(id10a.mgr), db.getSession(id10a.wkr)]);
+  sessions.recoverCrashOrphanedWorkers(derived10a, { resumeOne: () => true, shutdownMarker: cleanMarker });
+  check("(10a) the worker nudge uses [loom:daemon-restarted], NOT [loom:crash-recovered]",
+    pty.getPending(id10a.wkr).some((m) => m.includes("[loom:daemon-restarted]")) &&
+    !pty.getPending(id10a.wkr).some((m) => m.includes("[loom:crash-recovered]")));
+  check("(10a) the worker nudge is worded as a clean restart ('not a crash'), still tells it to continue",
+    pty.getPending(id10a.wkr).some((m) => /not a crash/i.test(m) && /continue your assigned task/i.test(m)));
+
+  // (10b) the solo-manager plain nudge (zero worker candidates) is also worded as a clean restart.
+  const id10b = { mgr: `cow-mgr10b-${sfx}` };
+  mkSession({ id: id10b.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  const soloManagers10b = deriveCrashOrphanedManagers(db, [db.getSession(id10b.mgr)], []);
+  sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers10b, shutdownMarker: cleanMarker });
+  check("(10b) the solo-manager nudge uses [loom:daemon-restarted] and 'not a crash', not 'crashed'",
+    pty.getPending(id10b.mgr).some((m) => m.includes("[loom:daemon-restarted]") && /not a crash/i.test(m) && !/crashed/i.test(m)));
+
+  // (10c) the with-workers manager summary nudge is also worded as a clean restart.
+  const id10c = { mgr: `cow-mgr10c-${sfx}`, wkr: `cow-wkr10c-${sfx}` };
+  const t10c = mkTask(`cow-t10c-${sfx}`, P.proj);
+  mkSession({ id: id10c.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id10c.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id10c.mgr, taskId: t10c, processState: "live" });
+  const derived10c = deriveCrashOrphanedWorkers(db, [db.getSession(id10c.mgr), db.getSession(id10c.wkr)]);
+  sessions.recoverCrashOrphanedWorkers(derived10c, { resumeOne: () => true, shutdownMarker: cleanMarker });
+  check("(10c) the manager summary nudge uses [loom:daemon-restarted], names the recovered count, and never says 'crashed'",
+    pty.getPending(id10c.mgr).some((m) => m.includes("[loom:daemon-restarted]") && /1 of your 1/i.test(m) && !/crashed/i.test(m)));
+
+  // (10d) no shutdownMarker (the ordinary genuine-crash path, undefined/null) is UNCHANGED — still the
+  // original crash phrasing. A regression guard alongside the sections above that already cover this.
+  const id10d = { mgr: `cow-mgr10d-${sfx}`, wkr: `cow-wkr10d-${sfx}` };
+  const t10d = mkTask(`cow-t10d-${sfx}`, P.proj);
+  mkSession({ id: id10d.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id10d.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id10d.mgr, taskId: t10d, processState: "live" });
+  const derived10d = deriveCrashOrphanedWorkers(db, [db.getSession(id10d.mgr), db.getSession(id10d.wkr)]);
+  sessions.recoverCrashOrphanedWorkers(derived10d, { resumeOne: () => true, shutdownMarker: null });
+  check("(10d) with NO shutdown marker, the worker still gets the original [loom:crash-recovered] nudge",
+    pty.getPending(id10d.wkr).some((m) => m.includes("[loom:crash-recovered]") && /The daemon crashed/i.test(m)));
 } finally {
   console.log = realLog;
   console.warn = realWarn;

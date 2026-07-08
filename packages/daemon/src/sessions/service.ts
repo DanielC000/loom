@@ -33,6 +33,7 @@ import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
 import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { RESUME_NUDGE_TAIL } from "../orchestration/resume-nudge.js";
+import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential } from "../orchestration/gate-runner.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
@@ -1517,12 +1518,21 @@ export class SessionService {
    * couldn't be resumed at all) — sent even when EVERY candidate worker failed to resume, so the manager
    * (already silently resumed with no other signal) still learns a crash happened and its workers didn't
    * come back, rather than sitting there with no orientation at all.
+   *
+   * `opts.shutdownMarker` (card be79aea2): the caller reads+consumes `last-shutdown.json` ONCE per boot,
+   * unconditionally, and passes the result here. When it's a fresh clean-stop record (an OS signal or an
+   * intentional `loom stop`), the preceding stop was NOT a crash — this boot only reached the crash branch
+   * because a signal/service-manager stop raced ahead of a graceful session snapshot, not because anything
+   * actually broke. Every `[loom:crash-recovered]` nudge below is swapped for a `[loom:daemon-restarted]`
+   * clean-stop nudge in that case; `shutdownMarker` null (no marker, or the caller determined this boot
+   * really is unclassified) leaves the original crash phrasing untouched.
    */
   recoverCrashOrphanedWorkers(
     candidates: CrashOrphanedWorker[],
-    opts: { resumeOne?: (id: string) => boolean; now?: Date; soloManagerIds?: string[] } = {},
+    opts: { resumeOne?: (id: string) => boolean; now?: Date; soloManagerIds?: string[]; shutdownMarker?: ShutdownMarkerRecord | null } = {},
   ): { resumed: string[]; skippedParked: string[]; failed: string[]; managersFailed: string[] } {
     const now = opts.now ?? new Date();
+    const cleanStop = !!opts.shutdownMarker; // fresh marker present ⇒ the preceding stop was NOT a crash
     // Default resumeOne LOGS the real thrown reason (dead transcript / gone worktree / recycled/…) on
     // failure instead of silently collapsing it to a bare boolean — a resume that doesn't happen must
     // never be a silent no-op (board evidence: a session was "marked dead-and-skipped" with nothing in
@@ -1577,19 +1587,26 @@ export class SessionService {
           try {
             this.pty.enqueueStdin(
               w.workerSessionId,
-              `[loom:crash-recovered] The daemon crashed and Loom auto-resumed you on relaunch — your ` +
-              `worktree WIP is intact. Continue your assigned task from where you left off. If you had ` +
-              `already finished, call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL,
+              cleanStop
+                ? `[loom:daemon-restarted] The daemon was stopped and restarted (not a crash) — your worktree ` +
+                  `WIP is intact. Continue your assigned task from where you left off. If you had already ` +
+                  `finished, call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL
+                : `[loom:crash-recovered] The daemon crashed and Loom auto-resumed you on relaunch — your ` +
+                  `worktree WIP is intact. Continue your assigned task from where you left off. If you had ` +
+                  `already finished, call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL,
             );
           } catch { /* not ready yet — the resume stands */ }
         }
       }
       if (managerParked) continue; // resumed live; honor the park — no summary nudge
+      const tag = cleanStop ? "[loom:daemon-restarted]" : "[loom:crash-recovered]";
+      const lead = cleanStop
+        ? "The daemon was stopped and restarted (not a crash) and Loom resumed"
+        : "The daemon crashed and Loom auto-resumed";
       // A solo manager (no candidate workers at all) gets a plain heads-up instead of the "0 of your 0
       // in-flight worker(s)" phrasing the per-worker summary below would otherwise produce.
       const note = workers.length === 0
-        ? `[loom:crash-recovered] The daemon crashed and Loom auto-resumed you — re-check your state and ` +
-          `continue orchestrating.` + RESUME_NUDGE_TAIL
+        ? `${tag} ${lead} you — re-check your state and continue orchestrating.` + RESUME_NUDGE_TAIL
         : (() => {
           const parts = [
             recoveredCount > 0
@@ -1598,8 +1615,7 @@ export class SessionService {
             awaitingReviewCount > 0 ? `${awaitingReviewCount} of those already reported done and are awaiting your review/merge` : null,
             failedCount > 0 ? `${failedCount} could not be resumed (check worker_list / logs)` : null,
           ].filter(Boolean).join("; ");
-          return `[loom:crash-recovered] The daemon crashed and Loom auto-resumed it — ${parts}. Re-check their ` +
-            `state and continue orchestrating.` + RESUME_NUDGE_TAIL;
+          return `${tag} ${lead} it — ${parts}. Re-check their state and continue orchestrating.` + RESUME_NUDGE_TAIL;
         })();
       try {
         this.pty.enqueueStdin(managerId, note);
