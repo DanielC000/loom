@@ -243,6 +243,19 @@ export interface LoomDaemon {
     workerSessionId?: string; taskId?: string; detail?: Record<string, unknown>;
   }) => Promise<string>;
   /**
+   * Seed a manager→human DECISION INBOX question (card 8701bdbb, child B e2e) via POST /internal/test/seed —
+   * the ONLY way an e2e spec can drive the decision surfaces (the attention item, the /question/:id answer
+   * page, the global inbox, the fleet affordance). Inserted straight through deps.db.insertQuestion (the
+   * same writer question_ask uses); it NEVER runs a real ask. Point `sessionId` at a seeded live manager
+   * session so the fleet affordance + "jump to live session" resolve. Returns the inserted question id.
+   */
+  seedQuestion: (q: {
+    sessionId: string; projectId: string; title?: string; body?: string;
+    options?: string[] | null; recommendation?: string | null;
+    state?: "pending" | "answered" | "consumed"; chosenOption?: string | null; note?: string | null;
+    createdAt?: string; answeredAt?: string;
+  }) => Promise<string>;
+  /**
    * Spawn ONE real, LIVE host shell via `POST /api/terminals` (card ShellTile-e2e) — the ONLY way to make a
    * live ShellTile render, since a raw shell is an ephemeral PtyHost process, not a DB Session row (so it can
    * NOT be seeded through /internal/test/seed like a live session). This logs `[pty] spawnShell …`, which the
@@ -481,6 +494,11 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       return res.orchestrationEventIds[0];
     };
 
+    const seedQuestion: LoomDaemon["seedQuestion"] = async (q) => {
+      const res = await apiPost<{ questionIds: string[] }>(baseURL, "/internal/test/seed", { questions: [q] });
+      return res.questionIds[0];
+    };
+
     const archiveSeededSessions: LoomDaemon["archiveSeededSessions"] = async () => {
       if (seededSessionIds.length === 0) return;
       const ids = seededSessionIds.splice(0); // clear as we archive — already-archived ids are no-ops
@@ -509,7 +527,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, seedOrchestrationEvent, spawnShell, killSpawnedShells, archiveSeededSessions });
+    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, seedOrchestrationEvent, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.

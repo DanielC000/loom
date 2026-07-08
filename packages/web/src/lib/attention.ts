@@ -3,6 +3,7 @@ import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "./api";
 import { hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
+import { decisionAttentionText } from "./questions";
 import type { Tone } from "../theme";
 
 // isRateLimited / isStuckBusy (+ its exclusion helpers) moved to lib/fleet.ts (a JSX-free, runtime-
@@ -101,6 +102,9 @@ export interface AttentionItem {
   // affordance deep-links to that session's view (/session/:sessionId), NOT the merge panel.
   sessionId?: string | null;
   rateLimitSessionId?: string | null; // when set, the row offers a "clear / retry now" action (POST .../rate-limit/clear)
+  // Set ONLY on the DECISION NEEDED kind (a pending manager→human question). Its "Answer →" affordance
+  // opens the answer page (/question/:id); the row also renders a PENDING state chip off this presence.
+  questionId?: string | null;
 }
 
 // The deep-link an attention item's "Open" affordance targets, or null if it has none. A MERGE REQUEST
@@ -109,12 +113,18 @@ export interface AttentionItem {
 // Overview rows, the toast, and the command palette can't drift on where "Open" goes (card a16dfafb).
 export function attentionOpenTarget(item: AttentionItem): string | null {
   if (item.kind === "MERGE REQUEST") return item.workerSessionId ? `/review/${item.workerSessionId}` : null;
+  if (item.kind === "DECISION NEEDED") return item.questionId ? `/question/${item.questionId}` : null;
   return item.sessionId ? `/session/${item.sessionId}` : null;
 }
 
 export function useAttention(): { items: AttentionItem[]; count: number } {
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
   const all = sessions.data ?? [];
+  // Manager→human DECISION INBOX (card 8701bdbb): the GLOBAL "waiting on me" queue. A PENDING question is
+  // ONE attention item (tone cyan — the signed "actionable question" color); it clears the instant the
+  // human answers it (state → 'answered', dropped server-side from the pending set). Same shared query
+  // key as the inbox page/bell, so react-query dedups the poll.
+  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions(), refetchInterval: 3000 });
   // LIVE managers only: an EXITED manager has no actionable merge/idle state (it's gone), so its
   // events (e.g. an orphaned merge_request whose merge_done was never recorded) must not surface as
   // permanent attention items. Only a live manager's pending reviews / idle states are actionable.
@@ -163,6 +173,14 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   }
 
   const items: AttentionItem[] = [];
+  // A blocked human is the wave's tightest bottleneck, so a pending DECISION reads first. Only PENDING
+  // questions surface here (an answered one is waiting on the MANAGER's pickup, not the human).
+  for (const q of (questions.data ?? []).filter((x) => x.state === "pending")) {
+    items.push({
+      key: `q-${q.id}`, tone: "cyan", kind: "DECISION NEEDED", questionId: q.id, sessionId: q.sessionId,
+      text: decisionAttentionText(q),
+    });
+  }
   // A genuinely-pending review keeps its WORKER session alive on the worktree (the worker is only
   // hard-stopped at merge-confirm time). So a merge_request whose worker is gone (exited/dead/not in
   // `all`) is NOT a live review — its merge resolved or was abandoned (e.g. a merge_done lost to a
@@ -261,6 +279,26 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
 // seen before; departed keys drop out so a re-occurrence re-fires. Defined ONCE here so the shell
 // bell (browser Notification) and the in-app toast stack run off the same new-item signal instead of
 // each re-deriving it — no surface fires for an item it already announced.
+// The fleet affordance (surface 5): a per-session map of the PENDING decisions each asking manager holds,
+// so a FleetCard/FleetRow can flag "N decision · waiting on you" and deep-link its answer page. Reads the
+// SAME shared openQuestions query (react-query dedups), so it adds no extra poll. `questionId` is the
+// FIRST (newest) pending question for that session — the "Answer →" jump target.
+export interface PendingDecision { questionId: string; count: number }
+export function usePendingDecisionsBySession(): Map<string, PendingDecision> {
+  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions(), refetchInterval: 3000 });
+  return useMemo(() => {
+    const m = new Map<string, PendingDecision>();
+    // openQuestions is newest-first, so the first pending row seen per session is the newest → the jump target.
+    for (const q of questions.data ?? []) {
+      if (q.state !== "pending") continue;
+      const cur = m.get(q.sessionId);
+      if (cur) cur.count += 1;
+      else m.set(q.sessionId, { questionId: q.id, count: 1 });
+    }
+    return m;
+  }, [questions.data]);
+}
+
 export function useNewAttention(onNew: (item: AttentionItem) => void): void {
   const { items } = useAttention();
   const seen = useRef<Set<string> | null>(null);

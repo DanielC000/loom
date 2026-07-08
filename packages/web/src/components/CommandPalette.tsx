@@ -31,7 +31,10 @@ export function CommandPalette() {
       const target = attentionOpenTarget(a);
       if (!target) return [];
       const merge = a.kind === "MERGE REQUEST";
-      return [{ label: `${merge ? "Review" : "Open"} · ${a.kind} ${a.text}`, hint: merge ? "review" : "session", run: () => navigate(target) }];
+      const decision = a.kind === "DECISION NEEDED";
+      const verb = merge ? "Review" : decision ? "Answer" : "Open";
+      const hint = merge ? "review" : decision ? "question" : "session";
+      return [{ label: `${verb} · ${a.kind} ${a.text}`, hint, run: () => navigate(target) }];
     }),
   ].filter((c) => c.label.toLowerCase().includes(q.toLowerCase()));
 

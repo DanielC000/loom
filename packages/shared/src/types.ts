@@ -1236,6 +1236,19 @@ export interface Question {
 }
 
 /**
+ * A Question enriched with the joined display fields the web decision-inbox surfaces need (card 8701bdbb,
+ * child B): the asking manager/agent's display `agentName`, the owning `projectName`, and whether that
+ * asking session is still live (`sessionLive` — gates the "jump to live session" / "nudge mgr" affordances).
+ * Returned by the human-only read routes GET /api/questions (the global "waiting on me" inbox) and
+ * GET /api/questions/:id (the answer page). The write path stays the bare Question (the answer route).
+ */
+export interface QuestionInboxItem extends Question {
+  agentName: string;
+  projectName: string;
+  sessionLive: boolean;
+}
+
+/**
  * A Loom-managed skill (a SKILL.md playbook in the Loom skill store, ~/.loom/skills/<name>). These
  * are delivered to every session as project-local skills (shadowing the user's personal ones) and
  * are editable in the UI. `bundled` = a same-named skill ships with Loom (so the UI can offer reset).

@@ -7,6 +7,7 @@ import Projects from "./pages/Projects";
 import Overview from "./pages/Overview";
 import Archive from "./pages/Archive";
 import Terminals from "./pages/Terminals";
+import DecisionInboxPage from "./pages/DecisionInboxPage";
 import Board from "./pages/Board";
 import Runs from "./pages/Runs";
 import Vault from "./pages/Vault";
@@ -73,6 +74,11 @@ export const NAV_PAGES: NavPage[] = [
   { label: "Terminals", to: "/terminals", element: <Terminals />, group: "operate", primary: true },
   { label: "Board", to: "/board", element: <Board />, group: "project", primary: true, scoped: true },
   // ── More ▾ · Operate ─────────────────────────────────────────────────────────
+  // The GLOBAL manager→human decision inbox (card 8701bdbb) — a cross-project "waiting on me" queue, a
+  // god-eye destination like Mission Control (deliberately NOT project-scoped). The bell/toast/⌘K + the
+  // Mission Control attention queue are the primary surfacing; this is the fuller "see them all, filter
+  // by project" view.
+  { label: "Decisions", to: "/inbox", element: <DecisionInboxPage />, group: "operate" },
   { label: "Runs", to: "/runs", element: <Runs />, group: "operate", scoped: true },
   { label: "Archive", to: "/archive", element: <Archive />, group: "operate" },
   // ── More ▾ · Project ─────────────────────────────────────────────────────────

@@ -1,9 +1,11 @@
+import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, UsageLimitsStatus, UsageWindow } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
-import { isRateLimited, type AttentionItem } from "../lib/attention";
+import { isRateLimited, usePendingDecisionsBySession, type AttentionItem, type PendingDecision } from "../lib/attention";
 import { fleetRollup, workerBuckets, capArchived } from "../lib/fleet";
+import { DecisionStateChip } from "./decisions";
 import { Panel, StatusPill, Chip, Meter, Button, Dot } from "./ui";
 import { color, font, radius, tone, type Tone } from "../theme";
 
@@ -120,14 +122,19 @@ export function PlanUsageStrip() {
 }
 
 export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionItem; onOpen?: () => void; onDismiss?: () => void }) {
+  // A pending DECISION reads as an actionable question: a cyan left-edge, a PENDING state chip, and an
+  // "Answer →" (not the generic "Open") — distinct from the phosphor MERGE REQUEST and the red/amber alerts.
+  const decision = item.kind === "DECISION NEEDED";
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 10px", marginBottom: 6 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${color.border}`,
+      borderLeft: decision ? `3px solid ${color.cyan}` : `1px solid ${color.border}`, borderRadius: 4, padding: "6px 10px", marginBottom: 6 }}>
       <Dot tone={item.tone} glow={item.tone === "amber"} />
       <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[item.tone], textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{item.kind}</span>
       <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis" }}>{item.text}</span>
       <span style={{ flex: 1 }} />
+      {decision && <DecisionStateChip q={{ state: "pending", answeredAt: null }} now={0} />}
       {item.rateLimitSessionId && <ClearRateLimitButton sessionId={item.rateLimitSessionId} />}
-      {onOpen && <Button onClick={onOpen}>Open</Button>}
+      {onOpen && <Button variant={decision ? "primary" : "default"} onClick={onOpen}>{decision ? "Answer →" : "Open"}</Button>}
       {/* Dismiss — STUCK-BUSY only (passed when item.dismissKey is set). The heuristic false-positives
           on a legitimately long turn; this hides THIS episode (re-appears on the next one). */}
       {onDismiss && (
@@ -160,6 +167,9 @@ function ClearRateLimitButton({ sessionId }: { sessionId: string }) {
 }
 
 export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
+  const navigate = useNavigate();
+  const decisions = usePendingDecisionsBySession();
+  const decision = decisions.get(s.id);
   const st = sessionStatus(s);
   const ctx = s.ctxInputTokens ?? 0;
   const window = contextWindowForModel(s.model);
@@ -170,6 +180,17 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
         {star ? "★ " : ""}{star ? "mgr " : "w:"}{s.id.slice(0, 8)}
       </span>
       <StatusPill tone={st.tone} label={st.label} glow={st.glow} />
+      {/* Decision affordance (surface 5): a manager holding a pending decision flags it inline + jumps
+          straight to the answer page — derived from the SAME pending-decision signal as the inbox + bell. */}
+      {decision && (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: font.mono, fontSize: 11, color: color.cyan,
+            border: `1px solid ${color.cyan}`, borderRadius: radius.sm, padding: "1px 7px" }}>
+            <Dot tone="cyan" />{decision.count} decision{decision.count === 1 ? "" : "s"} · waiting on you
+          </span>
+          <Button variant="primary" style={{ padding: "1px 8px", fontSize: 11 }} onClick={() => navigate(`/question/${decision.questionId}`)}>Answer →</Button>
+        </span>
+      )}
       {s.taskId && <Chip label="task" value={s.taskId.slice(0, 8)} />}
       {s.branch && <Chip label="branch" value={s.branch} tone="cyan" />}
       {ctx > 0 && (
@@ -268,7 +289,13 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
   // new visual language. Optional + defaulted-off, so live cards stay byte-identical.
   muted?: boolean;
 }) {
+  const navigate = useNavigate();
+  const decisions = usePendingDecisionsBySession();
   const running = [...managers, ...workers];
+  // A manager on this card holding a pending decision → the cyan card affordance (surface 5). Pick the
+  // first such manager (activity-sorted by the caller) as the "Answer →" jump target.
+  const mgrWithDecision = managers.find((m) => decisions.has(m.id));
+  const decision: PendingDecision | undefined = mgrWithDecision ? decisions.get(mgrWithDecision.id) : undefined;
   // Cap the archived rows folded into the card's buckets so a big archive can't dominate the composition
   // bar; the header below still reports the TRUE archived total. Archived rows are exited → offline bucket.
   const foldedArchived = capArchived(archived);
@@ -277,11 +304,12 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
   const buckets = workerBuckets([...workers, ...archivedWorkers]);
   const wc = worstContext(running); // ctx pressure is a live recycle signal — finished sessions excluded
   const ctxHot = wc.ratio > CONTEXT_WARN_RATIO;
-  const topMgr = managers[0];
+  const topMgr = mgrWithDecision ?? managers[0];
   const topSt = topMgr ? sessionStatus(topMgr) : null;
 
   return (
-    <Panel style={{ height: 206, display: "flex", flexDirection: "column", gap: 8, overflow: "hidden", ...(muted ? { opacity: 0.6 } : null) }}>
+    <Panel style={{ height: 206, display: "flex", flexDirection: "column", gap: 8, overflow: "hidden",
+      ...(decision ? { borderLeft: `3px solid ${color.cyan}` } : null), ...(muted ? { opacity: 0.6 } : null) }}>
       {/* header: roll-up dot + name + expand */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Dot tone={roll.tone} glow={roll.glow} />
@@ -300,6 +328,7 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
         <StatusPill tone={roll.tone} label={roll.label} glow={roll.glow} />
         <span style={{ flex: 1 }} />
+        {decision && <Chip label="decision" value={decision.count} tone="cyan" />}
         <Chip label="mgr" value={managers.length} />
         <Chip label="wkr" value={workers.length} />
         {attention > 0 && <Chip label="attn" value={attention} tone="red" />}
@@ -324,11 +353,17 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
         </span>
       </div>
 
-      {/* busiest / most-recent manager hint */}
-      <div style={{ marginTop: "auto", fontFamily: font.mono, fontSize: 11, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {topMgr && topSt
-          ? <>★ mgr {topMgr.id.slice(0, 8)} · <span style={{ color: tone[topSt.tone] }}>{topSt.label}</span></>
-          : <span style={{ color: color.textMuted }}>no live manager</span>}
+      {/* busiest / most-recent manager hint — a held decision takes over the footer with an Answer → jump */}
+      <div style={{ marginTop: "auto", display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+        <div style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: 11, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {topMgr && topSt
+            ? <>★ mgr {topMgr.id.slice(0, 8)} · <span style={{ color: decision ? color.cyan : tone[topSt.tone] }}>{decision ? "waiting on you" : topSt.label}</span></>
+            : <span style={{ color: color.textMuted }}>no live manager</span>}
+        </div>
+        {decision && (
+          <Button variant="primary" style={{ padding: "1px 8px", fontSize: 11, flexShrink: 0 }}
+            onClick={() => navigate(`/question/${decision.questionId}`)}>Answer →</Button>
+        )}
       </div>
     </Panel>
   );

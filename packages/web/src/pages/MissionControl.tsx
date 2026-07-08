@@ -17,6 +17,7 @@ import { AuditReplayPanel } from "../components/auditReplay";
 // stalled manager (red, blocking the wave) outranks the recoverable amber states (rate-limit/stuck). The
 // parallel ceiling is human review, so what needs a human first must read first.
 const ATTN_RANK: Record<string, number> = {
+  "DECISION NEEDED": -1, // a blocked human is the wave's tightest bottleneck — a pending decision reads first
   "NEEDS A HUMAN": 0,
   "MANAGER ASLEEP": 1,
   "CONTEXT OVERFLOW": 2,

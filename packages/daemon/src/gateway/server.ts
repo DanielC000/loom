@@ -1592,6 +1592,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           managerSessionId: string; kind: OrchestrationEventKind;
           workerSessionId?: string | null; taskId?: string | null; detail?: Record<string, unknown>;
         }[];
+        // A manager→human DECISION INBOX question (card 8701bdbb, child B e2e). The ONLY way an e2e spec can
+        // drive the decision surfaces: inserted via deps.db.insertQuestion (the same writer question_ask
+        // uses); NEVER spawns a real ask. `sessionId` should point at a seeded live manager session so the
+        // fleet affordance + "jump to live session" resolve. Defaults to a pending, options-less ask.
+        questions?: {
+          id?: string; sessionId: string; projectId: string; title?: string; body?: string;
+          options?: string[] | null; recommendation?: string | null;
+          state?: "pending" | "answered" | "consumed"; chosenOption?: string | null; note?: string | null;
+          // Optional instant overrides — backdate `answeredAt` to drive the client-side watchdog (an
+          // ignored `answered` re-escalating to amber) in a spec, or `createdAt` for a deterministic age.
+          createdAt?: string; answeredAt?: string;
+        }[];
       };
       const usageSampleIds: string[] = [];
       for (const s of b.usageSamples ?? []) {
@@ -1795,11 +1807,30 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         });
         orchestrationEventIds.push(id);
       }
+      const questionIds: string[] = [];
+      for (const q of b.questions ?? []) {
+        if (typeof q.sessionId !== "string" || typeof q.projectId !== "string") {
+          return reply.code(400).send({ error: "questions[].sessionId and projectId are required strings" });
+        }
+        const id = q.id ?? randomUUID();
+        const state = q.state ?? "pending";
+        const now = new Date().toISOString();
+        deps.db.insertQuestion({
+          id, sessionId: q.sessionId, projectId: q.projectId,
+          title: q.title ?? "Seeded decision", body: q.body ?? "",
+          options: q.options ?? null, recommendation: q.recommendation ?? null,
+          state, chosenOption: q.chosenOption ?? null, note: q.note ?? null,
+          createdAt: q.createdAt ?? now,
+          answeredAt: q.answeredAt ?? (state === "answered" || state === "consumed" ? now : null),
+          consumedAt: state === "consumed" ? now : null,
+        });
+        questionIds.push(id);
+      }
       return reply.code(201).send({
         ok: true, usageSampleIds, runIds,
         companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds,
         companionMessageIds,
-        liveSessionIds, wakeIds, archivedSessionIds, orchestrationEventIds,
+        liveSessionIds, wakeIds, archivedSessionIds, orchestrationEventIds, questionIds,
       });
     });
   }
@@ -2901,6 +2932,22 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // enqueueStdin(kind:"agent") rail POST /input uses — so the manager sees a live nudge without needing
   // to poll question_pull. The web read/answer UI (the attention item, `/question/:id` page, the global
   // inbox) is a separate child (B); this route is the daemon-side write it will call.
+  // The web decision-inbox READ side (card 8701bdbb, child B). Read-only, loopback, human-only (same
+  // posture as the other god-eye reads — /api/sessions, /api/archived-sessions): NOT an agent MCP tool.
+  // GET /api/questions is the GLOBAL "waiting on me" inbox — every pending+answered question across ALL
+  // projects, enriched with the asking agent/project display names + whether the session is still live,
+  // newest-first. `?includeConsumed=true` folds in the terminal history. GET /api/questions/:id is one
+  // question (same joined fields) for the answer page. The WRITE (answer) stays the human-only route below.
+  app.get("/api/questions", async (req) => {
+    const q = req.query as { includeConsumed?: string };
+    return deps.db.listOpenQuestions(q.includeConsumed === "true");
+  });
+  app.get("/api/questions/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const question = deps.db.getQuestionInboxItem(id);
+    if (!question) return reply.code(404).send({ error: "question not found" });
+    return reply.send(question);
+  });
   app.post("/api/questions/:id/answer", async (req, reply) => {
     const { id } = req.params as { id: string };
     const question = deps.db.getQuestion(id);

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReviewPanel from "./pages/ReviewPanel";
+import QuestionAnswer from "./pages/QuestionAnswer";
 import SessionView from "./pages/SessionView";
 import { NAV_PAGES, useVisibleNavPages, type NavGroup } from "./nav";
 import { NavTab, Badge, Button } from "./components/ui";
@@ -431,6 +432,7 @@ export default function App() {
             {/* /workspace was renamed + repositioned to /projects (card 274f9ba9) — redirect lingering links. */}
             <Route path="/workspace" element={<Navigate to="/projects" replace />} />
             <Route path="/review/:workerId" element={<ReviewPanel />} />
+            <Route path="/question/:id" element={<QuestionAnswer />} />
             <Route path="/session/:id" element={<SessionView />} />
           </Routes>
         </main>

@@ -32,7 +32,7 @@ function assertNotProdDbInTest(file: string): void {
 import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, Question, QuestionState, PresetPrompt, PresetPromptSuggestion,
+  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, Question, QuestionInboxItem, QuestionState, PresetPrompt, PresetPromptSuggestion,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
@@ -3533,6 +3533,38 @@ export class Db {
       return rows;
     })();
   }
+  /**
+   * The web decision-inbox's GLOBAL "waiting on me" read (card 8701bdbb, child B): every question across
+   * ALL projects/sessions, enriched with the asking agent/project display names + whether the asking
+   * session is still live (for the jump/nudge affordances). By default only the human-actionable states
+   * ('pending' + 'answered'); `includeConsumed` folds in the terminal history. Newest-first. LEFT JOINs so
+   * a question whose asking session/agent was hard-deleted still lists (name falls back to "?") rather than
+   * silently dropping — the human should still see and answer it.
+   */
+  listOpenQuestions(includeConsumed = false): QuestionInboxItem[] {
+    const rows = this.db.prepare(
+      `SELECT q.*, a.name AS agent_name, p.name AS project_name, s.process_state AS session_process_state
+       FROM questions q
+       LEFT JOIN sessions s ON q.session_id = s.id
+       LEFT JOIN agents a ON s.agent_id = a.id
+       LEFT JOIN projects p ON q.project_id = p.id
+       WHERE q.state IN (${includeConsumed ? "'pending','answered','consumed'" : "'pending','answered'"})
+       ORDER BY q.created_at DESC`,
+    ).all() as Row[];
+    return rows.map(toQuestionInboxItem);
+  }
+  /** One question enriched with the same display fields (the answer page), any state; undefined if unknown. */
+  getQuestionInboxItem(id: string): QuestionInboxItem | undefined {
+    const r = this.db.prepare(
+      `SELECT q.*, a.name AS agent_name, p.name AS project_name, s.process_state AS session_process_state
+       FROM questions q
+       LEFT JOIN sessions s ON q.session_id = s.id
+       LEFT JOIN agents a ON s.agent_id = a.id
+       LEFT JOIN projects p ON q.project_id = p.id
+       WHERE q.id = ?`,
+    ).get(id) as Row | undefined;
+    return r ? toQuestionInboxItem(r) : undefined;
+  }
 
   // --- companion reminders (Companion Memory & Reminders Design, Surface 2 s3 — the recurring engine) ---
   insertCompanionReminder(r: CompanionReminder): void {
@@ -4090,6 +4122,19 @@ function toQuestion(r0: unknown): Question {
     createdAt: r.created_at as string,
     answeredAt: (r.answered_at as string | null) ?? null,
     consumedAt: (r.consumed_at as string | null) ?? null,
+  };
+}
+// A question row already carrying the joined display columns (agent_name / project_name /
+// session_process_state) → the QuestionInboxItem the web reads. A LEFT-JOINed row with a hard-deleted
+// asking session/agent yields null names (→ "?") and a null process_state (→ not live).
+function toQuestionInboxItem(r0: unknown): QuestionInboxItem {
+  const r = r0 as Row;
+  const state = r.session_process_state as string | null | undefined;
+  return {
+    ...toQuestion(r),
+    agentName: (r.agent_name as string | null) ?? "?",
+    projectName: (r.project_name as string | null) ?? "?",
+    sessionLive: state === "live" || state === "starting",
   };
 }
 function toCompanionReminder(r0: unknown): CompanionReminder {

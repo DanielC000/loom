@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, CapabilitySummary, CapabilityProvisionKind, PollJob } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -440,6 +440,18 @@ export const api = {
   // merges (manager derived from the worker's parentSessionId server-side).
   mergeWorker: (sessionId: string) => post<{ merged: boolean; reason?: string }>(`/api/sessions/${sessionId}/merge`),
   orchestrationStatus: () => get<{ pausedScopes: string[] }>("/api/orchestration/status"),
+
+  // --- Manager→human DECISION INBOX (card 8701bdbb, child B). READ side: `openQuestions` is the GLOBAL
+  // "waiting on me" queue (pending+answered across ALL projects, enriched with the asking agent/project
+  // names + sessionLive), newest-first; `question` fetches one for the answer page (404 → readable via
+  // getErr). WRITE side: `answerQuestion` is the ONLY writer of chosenOption/note — it POSTs the existing
+  // human-only answer route (options question → a chosenOption from options; pure-blocker → note only,
+  // required). All human-only loopback REST — there is NO agent MCP path (the agent can only ask/pull). ---
+  openQuestions: (includeConsumed = false) =>
+    get<QuestionInboxItem[]>(`/api/questions${includeConsumed ? "?includeConsumed=true" : ""}`),
+  question: (id: string) => getErr<QuestionInboxItem>(`/api/questions/${encodeURIComponent(id)}`),
+  answerQuestion: (id: string, body: { chosenOption?: string | null; note?: string }) =>
+    postErr<Question>(`/api/questions/${encodeURIComponent(id)}/answer`, body),
 
   // --- Session/run AUDIT LOG (replayable timeline + run-vs-run diff). READ-ONLY, HUMAN-only loopback
   // readers over the existing `orchestration_events` record — NEVER an agent MCP tool (mirrors
