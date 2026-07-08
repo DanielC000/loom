@@ -11,6 +11,7 @@
 // RUN with an isolated LOOM_HOME (no daemon needed — writeSessionSettings just needs the settings dir):
 //   LOOM_HOME=<temp> node test/deja-capture.mjs
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -20,7 +21,7 @@ import { writeSessionSettings } from "../dist/pty/claude-settings.js";
 import { validateProjectConfigOverride, validateAgentProjectConfigOverride } from "../dist/mcp/platform.js";
 import { Db } from "../dist/db.js";
 import { buildServer } from "../dist/gateway/server.js";
-import { isCaptureCandidate, resolveOriginContext, runDejaCapture, resolveDejaBin } from "../assets/deja-capture.mjs";
+import { isCaptureCandidate, resolveOriginContext, resolveDejaDbPath, runDejaCapture, resolveDejaBin } from "../assets/deja-capture.mjs";
 
 if (!process.env.LOOM_HOME) { console.error("LOOM_HOME must be set."); process.exit(2); }
 
@@ -189,27 +190,134 @@ try {
     check("integration: resolveOriginContext against the REAL live route resolves originPrompt", liveCtx?.originPrompt === expectedOriginPrompt);
     check("integration: resolveOriginContext against the REAL live route resolves project", liveCtx?.project === "Fire Studio");
 
-    let capturedArgs = null;
-    const spyExecFile = (cmd, args, opts, cb) => { capturedArgs = { cmd, args }; cb(); };
-    await runDejaCapture("/tmp/mockup.html", liveCtx.originPrompt, liveCtx.project, spyExecFile);
-    check("integration: runDejaCapture shells out to the CONFIRMED `deja capture` args (file positional, then flag pairs)",
-      capturedArgs?.cmd === "deja" && JSON.stringify(capturedArgs.args) === JSON.stringify([
-        "capture", "/tmp/mockup.html", "--prompt", expectedOriginPrompt, "--project", "Fire Studio",
-      ]));
+    // resolveDejaDbPath (card b37efb19, RELAY-side, not daemon-side): <home>/.deja/store.sqlite —
+    // matches where `deja mcp`/`retrieve` themselves default to via os.homedir(). Pure computation, no
+    // filesystem touched, so a plain HOME/USERPROFILE save-and-restore around the call is enough.
+    const savedHome = process.env.HOME;
+    const savedUserProfile = process.env.USERPROFILE;
+    const fakeHome = path.join(__dirname, "fake-home-for-resolve-test");
+    process.env.HOME = fakeHome;
+    process.env.USERPROFILE = fakeHome;
+    const resolvedDbPath = resolveDejaDbPath();
+    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    if (savedUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedUserProfile;
+    check("resolveDejaDbPath: <home>/.deja/store.sqlite", resolvedDbPath === path.join(fakeHome, ".deja", "store.sqlite"));
 
-    // With LOOM_DEJA_BIN set, runDejaCapture execs the override (not bare "deja") — the PATH-unreliable fallback.
+    // A sample dbPath contained within this test's own LOOM_HOME (never touches the real ~/.deja) —
+    // runDejaCapture mkdir's its containing dir, so every dbPath used below must stay sandboxed.
+    const sampleDbPath = path.join(process.env.LOOM_HOME, "sample-deja-db", "store.sqlite");
+
+    let capturedArgs = null;
+    let capturedOpts = null;
+    const spyExecFile = (cmd, args, opts, cb) => { capturedArgs = { cmd, args }; capturedOpts = opts; cb(); };
+    await runDejaCapture("/tmp/mockup.html", liveCtx.originPrompt, liveCtx.project, sampleDbPath, spyExecFile);
+    check("integration: runDejaCapture shells out to the CONFIRMED `deja capture` args, including --db (file positional, then flag pairs)",
+      capturedArgs?.cmd === "deja" && JSON.stringify(capturedArgs.args) === JSON.stringify([
+        "capture", "/tmp/mockup.html", "--prompt", expectedOriginPrompt, "--project", "Fire Studio", "--db", sampleDbPath,
+      ]));
+    check("integration: a bare (non-.js) bin is exec'd with NO shell (never — args carry agent-influenced content; shelling them would be an injection surface)",
+      capturedOpts?.shell === undefined);
+    check("integration: runDejaCapture creates --db's containing directory (best-effort, so a first-ever capture can write)",
+      fs.existsSync(path.dirname(sampleDbPath)));
+
+    // Injection-safety regression (blocking fix, post-review): filePath/originPrompt/project are
+    // agent/task-influenced content, so NEITHER branch may ever shell them — a `shell:true` win32
+    // fallback (the earlier, now-reverted approach) would let shell metacharacters in any of these
+    // inject an arbitrary command. Assert no `shell` option on both the bare-command AND node-script
+    // branches, with a payload carrying real metacharacters, and that the metacharacters survive
+    // UNMANGLED as a single literal arg (proving no shell ever tokenized/interpreted them).
+    const hostileOriginPrompt = "task prompt with metachars: & | > < ^ ; $(whoami) `id` \"quoted\"";
+    const hostileProject = "proj & echo INJECTED";
+    const hostileFilePath = "/tmp/mock up & echo INJECTED.html";
+
+    let hostileBareOpts = null, hostileBareArgs = null;
+    await runDejaCapture(hostileFilePath, hostileOriginPrompt, hostileProject, undefined,
+      (cmd, args, opts, cb) => { hostileBareArgs = args; hostileBareOpts = opts; cb(); });
+    check("injection-safety: bare-command branch never sets shell, even with shell-metacharacter-laden args",
+      hostileBareOpts?.shell === undefined);
+    check("injection-safety: bare-command branch passes the hostile args through as literal, unmangled array entries",
+      hostileBareArgs?.[1] === hostileFilePath && hostileBareArgs?.[3] === hostileOriginPrompt && hostileBareArgs?.[5] === hostileProject);
+
+    process.env.LOOM_DEJA_BIN = "/opt/deja/dist/cli.js";
+    let hostileJsOpts = null, hostileJsArgs = null;
+    await runDejaCapture(hostileFilePath, hostileOriginPrompt, hostileProject, undefined,
+      (cmd, args, opts, cb) => { hostileJsArgs = args; hostileJsOpts = opts; cb(); });
+    delete process.env.LOOM_DEJA_BIN;
+    check("injection-safety: node-script branch never sets shell either", hostileJsOpts?.shell === undefined);
+    check("injection-safety: node-script branch passes the hostile args through as literal, unmangled array entries",
+      hostileJsArgs?.[2] === hostileFilePath && hostileJsArgs?.[4] === hostileOriginPrompt && hostileJsArgs?.[6] === hostileProject);
+
+    // With LOOM_DEJA_BIN set to a .js path (the realistic override — an absolute dist/cli.js), the
+    // Windows fix routes it THROUGH node (execFile(process.execPath, [bin, ...args])) instead of
+    // execing the .js directly (which throws `spawn EFTYPE` on Windows with no shell resolution).
+    process.env.LOOM_DEJA_BIN = "/opt/deja/dist/cli.js";
+    let jsArgs = null;
+    await runDejaCapture("/tmp/mockup.html", "p", "proj", undefined, (cmd, args, opts, cb) => { jsArgs = { cmd, args }; cb(); });
+    check("integration: a .js LOOM_DEJA_BIN is invoked via process.execPath (the Windows EFTYPE fix)",
+      jsArgs?.cmd === process.execPath && jsArgs.args[0] === "/opt/deja/dist/cli.js" && jsArgs.args[1] === "capture");
+    delete process.env.LOOM_DEJA_BIN;
+
+    // With LOOM_DEJA_BIN set to a non-.js path (e.g. a resolved .cmd/.exe or a bare install), runDejaCapture
+    // execs the override directly (not bare "deja") — the PATH-unreliable fallback.
     process.env.LOOM_DEJA_BIN = "/opt/deja/bin/deja";
     let overrideArgs = null;
-    await runDejaCapture("/tmp/mockup.html", "p", "proj", (cmd, args, opts, cb) => { overrideArgs = { cmd, args }; cb(); });
+    await runDejaCapture("/tmp/mockup.html", "p", "proj", undefined, (cmd, args, opts, cb) => { overrideArgs = { cmd, args }; cb(); });
     check("integration: LOOM_DEJA_BIN override is used as the exec target instead of bare \"deja\"", overrideArgs?.cmd === "/opt/deja/bin/deja");
     delete process.env.LOOM_DEJA_BIN;
 
     // ALWAYS called, even with no resolvable context (empty prompt/project) — capturing the mockup
     // source is make-or-break; a Deja-context miss must never skip the capture call.
     let emptyArgs = null;
-    await runDejaCapture("/tmp/mockup.html", undefined, undefined, (cmd, args, opts, cb) => { emptyArgs = args; cb(); });
+    await runDejaCapture("/tmp/mockup.html", undefined, undefined, undefined, (cmd, args, opts, cb) => { emptyArgs = args; cb(); });
     check("runDejaCapture: called with empty --prompt/--project when context resolution fails (never skipped)",
       JSON.stringify(emptyArgs) === JSON.stringify(["capture", "/tmp/mockup.html", "--prompt", "", "--project", ""]));
+
+    // --- REAL SPAWN integration (the load-bearing DoD, card b37efb19): every case above injects
+    // execFileImpl, so none of them ever actually spawn a process — that gap is exactly what let a
+    // Windows `spawn EFTYPE` (execFile-ing a raw .js with no shell) ship silently swallowed. This
+    // spawns the RELAY ITSELF as Claude Code would (stdin payload, argv sessionId+port), with
+    // HOME/USERPROFILE overridden to a temp dir so the relay's OWN resolveDejaDbPath() call (inside
+    // its own process) resolves under that temp dir instead of the human's real ~/.deja, and
+    // LOOM_DEJA_BIN pointed at a tiny fixture CLI (test/fixtures/fake-deja-cli.mjs) that mimics
+    // `deja capture ... --db <path>` by writing a marker into --db — no built `deja` binary needed.
+    const FIXTURE_CLI = path.join(__dirname, "fixtures", "fake-deja-cli.mjs");
+    const realSpawnHome = fs.mkdtempSync(path.join(os.tmpdir(), "loom-deja-home-"));
+    const realSpawnDb = path.join(realSpawnHome, ".deja", "store.sqlite");
+    const realSpawnHtmlFile = path.join(__dirname, "real-spawn-mockup.html");
+    const realSpawnPayload = { hook_event_name: "PostToolUse", tool_name: "Write", tool_input: { file_path: realSpawnHtmlFile }, cwd: __dirname };
+    let realSpawnResult;
+    try {
+      realSpawnResult = spawnSync(process.execPath, [DEJA_CAPTURE_SCRIPT, "sess-1", "59999"], {
+        input: JSON.stringify(realSpawnPayload),
+        encoding: "utf8",
+        timeout: 20000,
+        env: { ...process.env, LOOM_DEJA_BIN: FIXTURE_CLI, HOME: realSpawnHome, USERPROFILE: realSpawnHome },
+      });
+      check("real-spawn: the relay process itself always exits 0 (never blocks the write)", realSpawnResult.status === 0);
+      const realSpawnWritten = fs.existsSync(realSpawnDb) ? fs.readFileSync(realSpawnDb, "utf8").trim() : null;
+      check("real-spawn: the relay actually spawns the .js fixture CLI cross-platform without throwing EFTYPE/ENOENT (fails on pre-fix code)",
+        realSpawnWritten !== null);
+      if (realSpawnWritten) {
+        const record = JSON.parse(realSpawnWritten.split("\n").pop());
+        check("real-spawn: --db resolves to (and the capture lands in) resolveDejaDbPath() under the overridden HOME (proves BUG 2's fix)",
+          record.db === realSpawnDb);
+        check("real-spawn: the captured file path round-trips through the real spawn", record.file === realSpawnHtmlFile);
+      }
+    } finally {
+      fs.rmSync(realSpawnHome, { recursive: true, force: true });
+    }
+
+    // Missing-binary path: a .js LOOM_DEJA_BIN that doesn't exist still never blocks (exit-0 contract).
+    process.env.LOOM_DEJA_BIN = path.join(__dirname, "fixtures", "does-not-exist.js");
+    let missingBinThrew = false;
+    try {
+      await runDejaCapture("/tmp/x.html", "p", "proj", undefined);
+    } catch {
+      missingBinThrew = true;
+    } finally {
+      delete process.env.LOOM_DEJA_BIN;
+    }
+    check("real-spawn: a missing .js binary path never throws (non-blocking contract preserved)", !missingBinThrew);
   } finally {
     try { await app.close(); } catch { /* ignore */ }
     db.close();
