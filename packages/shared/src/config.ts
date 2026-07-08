@@ -629,6 +629,8 @@ export interface ResolvedProfile {
   browserTesting: boolean;
   /** Opt-in document-conversion: inject a per-session markitdown MCP at spawn. Backstops to false. */
   documentConversion: boolean;
+  /** Opt-in Deja mockup-corpus: inject a per-session `deja mcp` server at spawn. Backstops to false. */
+  dejaCorpus: boolean;
   /** Restricted-tools: append the curated dangerous native tools to `--disallowedTools` at spawn
    *  (blast-radius control for a chat-reachable Companion). Backstops to false. */
   restrictedTools: boolean;
@@ -649,22 +651,23 @@ export interface ResolvedProfile {
   capabilities: CapabilityGrant[];
 }
 
-/** The two permanently-reserved builtin capability slugs the legacy boolean flags bridge to (P4). */
-export const LEGACY_CAPABILITY_SLUGS = { browserTesting: "browser-testing", documentConversion: "document-conversion" } as const;
+/** The three permanently-reserved builtin capability slugs the legacy boolean flags bridge to (P4). */
+export const LEGACY_CAPABILITY_SLUGS = { browserTesting: "browser-testing", documentConversion: "document-conversion", dejaCorpus: "deja-corpus" } as const;
 
 /**
- * Bridge a profile/session's legacy `browserTesting`/`documentConversion` booleans + its `capabilities`
- * array into ONE resolved grant list (agent-tooling P4) — the back-compat seam that lets `buildMcpServers`
- * iterate a single list while every existing profile/session row (booleans set, `capabilities` unset)
- * keeps resolving to EXACTLY its pre-P4 grants, with zero data migration. Order: legacy slots first
- * (stable, matches today's browser-then-document mount order), then the array verbatim. Called EXACTLY
- * ONCE per resolution (buildMcpServers) — `capabilities` itself is never pre-bridged (see the field doc
- * above), so this is the only place legacy + new merge.
+ * Bridge a profile/session's legacy `browserTesting`/`documentConversion`/`dejaCorpus` booleans + its
+ * `capabilities` array into ONE resolved grant list (agent-tooling P4) — the back-compat seam that lets
+ * `buildMcpServers` iterate a single list while every existing profile/session row (booleans set,
+ * `capabilities` unset) keeps resolving to EXACTLY its pre-P4 grants, with zero data migration. Order:
+ * legacy slots first (stable, matches today's browser-then-document-then-deja mount order), then the
+ * array verbatim. Called EXACTLY ONCE per resolution (buildMcpServers) — `capabilities` itself is never
+ * pre-bridged (see the field doc above), so this is the only place legacy + new merge.
  */
-export function resolveProfileCapabilities(p: { browserTesting?: boolean; documentConversion?: boolean; capabilities?: CapabilityGrant[] }): CapabilityGrant[] {
+export function resolveProfileCapabilities(p: { browserTesting?: boolean; documentConversion?: boolean; dejaCorpus?: boolean; capabilities?: CapabilityGrant[] }): CapabilityGrant[] {
   const legacy: CapabilityGrant[] = [
     ...(p.browserTesting ? [{ slug: LEGACY_CAPABILITY_SLUGS.browserTesting }] : []),
     ...(p.documentConversion ? [{ slug: LEGACY_CAPABILITY_SLUGS.documentConversion }] : []),
+    ...(p.dejaCorpus ? [{ slug: LEGACY_CAPABILITY_SLUGS.dejaCorpus }] : []),
   ];
   return [...legacy, ...(p.capabilities ?? [])];
 }
@@ -687,7 +690,7 @@ export function resolveProfile(
   const startupPrompt = agent.startupPrompt ?? "";
   if (!profile) {
     // The backstop: a null/absent profile confers NO browser/document capability (false) — today's behavior.
-    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, connections: [], capabilities: [] };
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, dejaCorpus: false, restrictedTools: false, noCommit: false, connections: [], capabilities: [] };
   }
   return {
     role: profile.role ?? null,
@@ -699,6 +702,7 @@ export function resolveProfile(
     // Pass the flag through when the profile sets it; backstop false for an unset/absent flag.
     browserTesting: profile.browserTesting ?? false,
     documentConversion: profile.documentConversion ?? false,
+    dejaCorpus: profile.dejaCorpus ?? false,
     // Restricted-tools (subtractive spawn effect: dangerous native tools → --disallowedTools). Backstop false.
     restrictedTools: profile.restrictedTools ?? false,
     // Declared no-commit role (lifecycle-only; no spawn-time effect). Backstop false.

@@ -269,10 +269,10 @@ check("(db) createCapabilityDef persists + returns a REST summary (never the raw
   created.slug === "gh-mcp" && created.builtin === false && !("provision" in created) && !("provisionJson" in created));
 check("(db) createCapabilityDef's summary carries the row id (the Settings UI's DELETE target)", typeof created.id === "string" && created.id.length > 0);
 const summaries = listCapabilitySummaries(db);
-check("(db) listCapabilitySummaries returns the 2 BUILTINS first, then the owner-added row",
-  summaries.length === 3 && summaries[0].slug === "browser-testing" && summaries[1].slug === "document-conversion" && summaries[2].slug === "gh-mcp");
-check("(db) the 2 BUILTIN summaries carry NO id (they aren't capability_defs rows and can't be deleted)",
-  summaries[0].id === undefined && summaries[1].id === undefined);
+check("(db) listCapabilitySummaries returns the 3 BUILTINS first, then the owner-added row",
+  summaries.length === 4 && summaries[0].slug === "browser-testing" && summaries[1].slug === "document-conversion" && summaries[2].slug === "deja-corpus" && summaries[3].slug === "gh-mcp");
+check("(db) the 3 BUILTIN summaries carry NO id (they aren't capability_defs rows and can't be deleted)",
+  summaries[0].id === undefined && summaries[1].id === undefined && summaries[2].id === undefined);
 let dupThrew = false;
 try {
   createCapabilityDef(db, { slug: "gh-mcp", name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: process.execPath }, toolAllowlist: [] });

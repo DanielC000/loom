@@ -113,6 +113,19 @@ export interface Profile {
    */
   documentConversion?: boolean;
   /**
+   * Opt-in Deja mockup-corpus capability: when true, a session under this rig is spawned with its OWN
+   * per-session stdio `deja mcp` server (`find_mockups`/`submit_mockup`/`mark_reused`) so a mockup-
+   * generating agent can retrieve prior mockups mid-generation and submit the one it just wrote. Default
+   * OFF (absent/false) and fully additive — a rig without it spawns byte-identically to today. Builtin
+   * (not an owner-catalog `capability_defs` row), resolved like browserTesting/documentConversion via
+   * `LOOM_DEJA_BIN`, clean-skipping the mount if unresolved. HUMAN-set only (Profiles UI / REST) — NEVER
+   * exposed via an agent MCP tool: an MCP-server injection is an exfil-class grant, so unlike
+   * browserTesting/documentConversion this is rejected even on the Setup Assistant's/Platform Lead's own
+   * profile-writing MCP tools (see `profiles/validate.ts`'s `AGENT_FORBIDDEN_PROFILE_KEYS`) — the same
+   * stricter posture as `connections`/`capabilities`.
+   */
+  dejaCorpus?: boolean;
+  /**
    * Opt-in RESTRICTED-tools capability (blast-radius control for a chat-reachable Companion): when true, a
    * session under this rig is spawned with a curated, HARDCODED set of dangerous NATIVE tools (raw shell +
    * host-writes: `Bash`/`Edit`/`Write`/`NotebookEdit`/`MultiEdit`) REMOVED from the model's tool list
@@ -489,6 +502,13 @@ export interface Session {
    * Absent/false on every existing session ⇒ no markitdown MCP, byte-identical spawn.
    */
   documentConversion?: boolean;
+  /**
+   * Opt-in Deja mockup-corpus capability, resolved from the session's Profile at spawn and PINNED here
+   * (mirrors `browserTesting`): a per-session stdio `deja mcp` server is injected iff this is true.
+   * Persisted so EVERY respawn path (resume / fork / recycle) carries the capability forward unchanged.
+   * Absent/false on every existing session ⇒ no Deja MCP, byte-identical spawn.
+   */
+  dejaCorpus?: boolean;
   /**
    * Restricted-tools capability, resolved from the session's Profile at spawn and PINNED here (mirrors
    * `browserTesting`): when true, the curated dangerous NATIVE tools (Bash/Edit/Write/NotebookEdit/

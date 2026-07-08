@@ -31,6 +31,12 @@ const profileSchema = z
     // Opt-in document-conversion capability (default off). Human-gated identically to browserTesting —
     // it launches a host markitdown process, so it is never an agent MCP write surface.
     documentConversion: z.boolean().optional(),
+    // Opt-in Deja mockup-corpus capability (default off): injects a per-session `deja mcp` server so a
+    // mockup-generating rig can retrieve prior mockups + submit the one it just wrote. STRICTER than
+    // browserTesting/documentConversion — an MCP-server injection is an exfil-class grant, so this is
+    // rejected even on the elevated Setup Assistant's/Platform Lead's own profile-writing MCP tools (see
+    // AGENT_FORBIDDEN_PROFILE_KEYS below), the SAME posture as `connections`/`capabilities`.
+    dejaCorpus: z.boolean().optional(),
     // Opt-in RESTRICTED-tools (default off). Blast-radius control for a chat-reachable Companion: when on,
     // the curated dangerous native tools (Bash/Edit/Write/NotebookEdit/MultiEdit) are appended to
     // --disallowedTools at spawn. Human-gated identically to browserTesting — it is never a NEW agent MCP
@@ -69,8 +75,10 @@ const profileSchema = z
  * `capabilities` (agent-tooling P4) gets the SAME stricter posture, not the milder `browserTesting`/
  * `documentConversion` one: a capability grant launches a host process and can bind egress via a P1
  * connection, so it is owner-only end-to-end, never delegable to an elevated profile-writing agent.
+ * `dejaCorpus` gets the SAME stricter posture too: an MCP-server injection is an exfil-class grant, not
+ * the milder `browserTesting`/`documentConversion` posture.
  */
-const AGENT_FORBIDDEN_PROFILE_KEYS = ["connections", "capabilities"] as const;
+const AGENT_FORBIDDEN_PROFILE_KEYS = ["connections", "capabilities", "dejaCorpus"] as const;
 
 /**
  * Reject a RAW create/patch payload (BEFORE any merge with an existing profile) that tries to set a
@@ -112,6 +120,7 @@ export function validateProfile(
       icon: d.icon ?? null,
       browserTesting: d.browserTesting ?? false, // normalize to the stored default (off)
       documentConversion: d.documentConversion ?? false, // normalize to the stored default (off)
+      dejaCorpus: d.dejaCorpus ?? false, // normalize to the stored default (off)
       restrictedTools: d.restrictedTools ?? false, // normalize to the stored default (off)
       noCommit: d.noCommit ?? false, // normalize to the stored default (off)
       connections: d.connections ?? [], // normalize to the stored default (no access)

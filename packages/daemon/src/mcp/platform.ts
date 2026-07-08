@@ -717,7 +717,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_profiles",
       {
-        description: "List every Profile (rig) on the platform. Profiles are cross-project by nature (a rig is not bound to one project), so this is the whole set — each a FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, restrictedTools, noCommit). Read-only. Use to discover a profileId before agent_create/profile_assign/profile_update.",
+        description: "List every Profile (rig) on the platform. Profiles are cross-project by nature (a rig is not bound to one project), so this is the whole set — each a FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, dejaCorpus, restrictedTools, noCommit). Read-only. Use to discover a profileId before agent_create/profile_assign/profile_update.",
         inputSchema: {},
       },
       async () => ok(db.listProfiles()),
@@ -754,7 +754,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_get",
       {
-        description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, restrictedTools, noCommit). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
+        description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, dejaCorpus, restrictedTools, noCommit). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
         inputSchema: { profileId: z.string() },
       },
       async ({ profileId }) =>
@@ -777,7 +777,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_create",
       {
-        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). `connections` (authenticated-egress connection-id grants) is REJECTED here — human-only via the Profiles UI/REST, it grants access to real external secrets; not even the Platform Lead may set it. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
+        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). `connections`/`capabilities`/`dejaCorpus` are REJECTED here — human-only via the Profiles UI/REST: `connections` grants access to real external secrets, and `capabilities`/`dejaCorpus` can launch a host process / inject an MCP server; not even the Platform Lead may set them. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
         inputSchema: { profile: z.object({}).passthrough() },
       },
       async ({ profile }) => {
@@ -794,7 +794,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not touch `connections` (authenticated-egress grants — human-only, via the Profiles UI/REST); a profile that already has connections set keeps them across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not touch `connections`/`capabilities`/`dejaCorpus` (authenticated-egress grants / registry-capability grants / the Deja mockup-corpus MCP-injection flag — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
         inputSchema: { profileId: z.string(), patch: z.object({}).passthrough() },
       },
       async ({ profileId, patch }) => {

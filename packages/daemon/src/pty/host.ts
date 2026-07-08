@@ -597,17 +597,40 @@ export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "st
 }
 
 /**
+ * The stdio MCP-config entry for a dejaCorpus session, or null when `LOOM_DEJA_BIN` is unset or doesn't
+ * resolve to an existing absolute file — a CLEAN-SKIP (like the missing-Playwright-package / not-yet-warm
+ * markitdown-venv fallbacks above) so an unresolvable Deja install never breaks the spawn.
+ *
+ * `LOOM_DEJA_BIN` is the SAME human-only override the Deja capture relay resolves (`assets/deja-capture.mjs`
+ * `resolveDejaBin`), but here it MUST already be an ABSOLUTE path to Deja's `cli.js` — this entry launches it
+ * directly via the daemon's own absolute node binary (`process.execPath`) + `["<cli.js>", "mcp"]`, the same
+ * node-pty-can't-search-%PATH% lesson as Playwright/markitdown (never a bare `"deja"` command). No venv/
+ * provisioning step: unlike markitdown this is a synchronous existence check only — Deja is a daemon
+ * dependency the human installs and points `LOOM_DEJA_BIN` at once, not something Loom provisions.
+ *
+ * `deja mcp` (no extra flags) defaults to the global `~/.deja/store.sqlite` (`os.homedir()`) — the SAME
+ * store the dejaCapture PostToolUse hook writes into, so retrieval and capture line up with zero extra
+ * config.
+ */
+export function dejaMcpServer(): { type: "stdio"; command: string; args: string[] } | null {
+  const bin = process.env.LOOM_DEJA_BIN;
+  if (!bin || !path.isAbsolute(bin) || !fs.existsSync(bin)) return null;
+  return { type: "stdio", command: process.execPath, args: [bin, "mcp"] };
+}
+
+/**
  * Assemble the `--mcp-config` mcpServers map for a Claude spawn (extracted from createPty as the ONE
  * testable seam for the MCP surface). ALWAYS the project-scoped `loom-tasks` HTTP server; PLUS the
  * role-gated surface (manager/worker → loom-orchestration, platform → loom-platform, auditor → loom-audit,
  * workspace-auditor → loom-user-audit, setup → loom-setup);
  * PLUS — one generalized capability-registry loop (agent-tooling P4) that mounts EVERY resolved
  * registry-capability grant (`resolveProfileCapabilities(o)`, bridging the legacy `browserTesting`/
- * `documentConversion` booleans + the new `capabilities` array into ONE list). The two legacy slugs
- * ("browser-testing"/"document-conversion") are special-cased to their EXISTING, already-hardened
- * resolvers (`playwrightMcpServer`/`markitdownMcpServer`, untouched) so this generalization is
- * byte-identical for every caller that still passes the booleans directly (every existing test + call
- * site) — the mounted map keys stay "playwright"/"markitdown" exactly as before. Any OTHER slug is an
+ * `documentConversion`/`dejaCorpus` booleans + the new `capabilities` array into ONE list). The legacy
+ * slugs ("browser-testing"/"document-conversion"/"deja-corpus") are special-cased to their EXISTING,
+ * already-hardened resolvers (`playwrightMcpServer`/`markitdownMcpServer`/`dejaMcpServer`, untouched) so
+ * this generalization is byte-identical for every caller that still passes the booleans directly (every
+ * existing test + call site) — the mounted map keys stay "playwright"/"markitdown"/"deja" exactly as
+ * before. Any OTHER slug is an
  * owner-added catalog capability, resolved via the injected `o.capabilityCatalog` + the generic
  * node-package/python-venv/bundled dispatcher (`resolveCapabilityServer`), with its bound connection's
  * secret (if any) resolved via `o.resolveConnectionSecret` and injected ONLY into that server's own `env`
@@ -621,7 +644,7 @@ export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "st
  * tool world, so a prompt-injection in an audited transcript has no outward/destructive tool to reach.
  */
 export function buildMcpServers(o: {
-  sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean; documentConversion?: boolean;
+  sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean; documentConversion?: boolean; dejaCorpus?: boolean;
   /** HUMAN-only `python.interpreterPath` (carried via session env) — forwarded to the markitdown venv resolver. */
   pythonInterpreterPath?: string;
   /** Agent-tooling P4: registry-capability grants BEYOND the two legacy booleans above (raw, un-bridged —
@@ -704,6 +727,19 @@ export function buildMcpServers(o: {
       }
       continue;
     }
+    if (grant.slug === "deja-corpus") {
+      // The Deja mockup-corpus capability: a plain synchronous existence check (no venv/provisioning) — a
+      // null means LOOM_DEJA_BIN is unset or unresolvable, so THIS spawn just skips the MCP (logged, never
+      // crashes). No background kick: Deja is a daemon-side install the human points LOOM_DEJA_BIN at once.
+      const dj = dejaMcpServer();
+      if (dj) {
+        mcpServers["deja"] = dj;
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(`[pty] ${o.sessionId} dejaCorpus set but LOOM_DEJA_BIN could not be resolved — spawning WITHOUT the Deja MCP. Is LOOM_DEJA_BIN set to an absolute path to Deja's cli.js?`);
+      }
+      continue;
+    }
     // An owner-added catalog capability: look it up in the injected catalog, resolve its bound
     // connection's secret (if it requiresConnection and a connectionId was granted), and dispatch
     // through the generic node-package/python-venv/bundled resolver. Unknown slug / unresolvable
@@ -742,6 +778,7 @@ export function capabilityToolAllowlist(grants: CapabilityGrant[], catalog: Capa
   return grants.flatMap((grant) => {
     if (grant.slug === "browser-testing") return ["mcp__playwright"];
     if (grant.slug === "document-conversion") return ["mcp__markitdown__convert_to_markdown"];
+    if (grant.slug === "deja-corpus") return ["mcp__deja__find_mockups", "mcp__deja__submit_mockup", "mcp__deja__mark_reused"];
     const def = catalog.find((c) => c.slug === grant.slug);
     if (!def) return [];
     try { return JSON.parse(def.toolAllowlistJson) as string[]; } catch { return []; }
@@ -922,6 +959,13 @@ export interface SpawnOpts {
    * allowlist its tool surface. Default OFF — every existing spawn is byte-identical when unset/false.
    */
   documentConversion?: boolean;
+  /**
+   * Opt-in Deja mockup-corpus (resolved from the session's Profile, gated). When true, inject a per-session
+   * stdio `deja mcp` server so a mockup-generating agent can retrieve prior mockups (find_mockups) and
+   * submit the one it just wrote (submit_mockup/mark_reused), and allowlist its tool surface. Default OFF —
+   * every existing spawn is byte-identical when unset/false.
+   */
+  dejaCorpus?: boolean;
   /**
    * Agent-tooling P4: registry-capability grants BEYOND the two legacy booleans above (resolved from the
    * session's Profile/row, RAW — see resolveProfileCapabilities). Default [] — every existing spawn is
@@ -1904,8 +1948,8 @@ export class PtyHost {
       : [];
     // A document-conversion session ALSO needs its markitdown MCP tool allowlisted (acceptEdits doesn't
     // auto-approve MCP tools — the §9 lesson), so it layers ON TOP of the role surface like browserTesting.
-    // Agent-tooling P4: generalize the two legacy hardcoded tool-allows into ONE loop over every resolved
-    // capability grant (mirrors buildMcpServers' loop) — the two legacy slugs keep their exact hardcoded
+    // Agent-tooling P4: generalize the legacy hardcoded tool-allows into ONE loop over every resolved
+    // capability grant (mirrors buildMcpServers' loop) — the legacy slugs keep their exact hardcoded
     // allow entries; an owner-added capability contributes its own `toolAllowlist` from the catalog.
     // ACCEPTED for v1 (code review): this queries the owner-added catalog on EVERY spawn, even one with
     // zero capabilities enabled — a cheap indexed SELECT (capability_defs is expected to stay small), not
@@ -1926,7 +1970,7 @@ export class PtyHost {
     // The HUMAN-only python.interpreterPath rides the session env (config → pythonSessionEnv); read it here
     // and hand it to the shared-venv markitdown resolver (only consulted when documentConversion is on).
     const mcpServers = buildMcpServers({
-      sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,
+      sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion, dejaCorpus: opts.dejaCorpus,
       pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER,
       capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,
     });

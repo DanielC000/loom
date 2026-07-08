@@ -249,6 +249,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
   const [model, setModel] = useState(profile.model ?? "");
   const [browserTesting, setBrowserTesting] = useState(profile.browserTesting ?? false);
   const [documentConversion, setDocumentConversion] = useState(profile.documentConversion ?? false);
+  const [dejaCorpus, setDejaCorpus] = useState(profile.dejaCorpus ?? false);
   const [restrictedTools, setRestrictedTools] = useState(profile.restrictedTools ?? false);
   const [noCommit, setNoCommit] = useState(profile.noCommit ?? false);
   // Skill subset (empty = deliver ALL, the default — null and [] are equivalent, matching the daemon).
@@ -283,16 +284,19 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
 
   // The capability registry catalog (agent-tooling P4): builtins + owner-added, ONE unified list — the
   // Profile editor's picker renders every entry as a checkbox, transparently backed by browserTesting/
-  // documentConversion for the two reserved slugs and by the `capabilities` array for everything else.
+  // documentConversion/dejaCorpus for the three reserved slugs and by the `capabilities` array for
+  // everything else.
   const capabilityList = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
   const availableCapabilities = capabilityList.data ?? [];
   const isCapabilityChecked = (slug: string) =>
     slug === "browser-testing" ? browserTesting
     : slug === "document-conversion" ? documentConversion
+    : slug === "deja-corpus" ? dejaCorpus
     : capabilities.some((g) => g.slug === slug);
   const toggleCapability = (slug: string) => {
     if (slug === "browser-testing") return setBrowserTesting((v) => !v);
     if (slug === "document-conversion") return setDocumentConversion((v) => !v);
+    if (slug === "deja-corpus") return setDejaCorpus((v) => !v);
     setCapabilities((cur) => (cur.some((g) => g.slug === slug) ? cur.filter((g) => g.slug !== slug) : [...cur, { slug }]));
   };
   const capabilityConnectionId = (slug: string) => capabilities.find((g) => g.slug === slug)?.connectionId ?? "";
@@ -312,6 +316,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
     (model.trim() || null) !== profile.model ||
     browserTesting !== (profile.browserTesting ?? false) ||
     documentConversion !== (profile.documentConversion ?? false) ||
+    dejaCorpus !== (profile.dejaCorpus ?? false) ||
     restrictedTools !== (profile.restrictedTools ?? false) ||
     noCommit !== (profile.noCommit ?? false) ||
     sortedJson(skills) !== sortedJson(profile.skills ?? []) ||
@@ -324,7 +329,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
     background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
   };
 
-  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setRestrictedTools(profile.restrictedTools ?? false); setNoCommit(profile.noCommit ?? false); setSkills(profile.skills ?? []); setConnections(profile.connections ?? []); setCapabilities(profile.capabilities ?? []); };
+  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setDejaCorpus(profile.dejaCorpus ?? false); setRestrictedTools(profile.restrictedTools ?? false); setNoCommit(profile.noCommit ?? false); setSkills(profile.skills ?? []); setConnections(profile.connections ?? []); setCapabilities(profile.capabilities ?? []); };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
@@ -389,7 +394,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {availableCapabilities.map((c) => {
           const checked = isCapabilityChecked(c.slug);
-          const isLegacy = c.slug === "browser-testing" || c.slug === "document-conversion";
+          const isLegacy = c.slug === "browser-testing" || c.slug === "document-conversion" || c.slug === "deja-corpus";
           return (
             <label key={c.slug} style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
               <input type="checkbox" checked={checked} onChange={() => toggleCapability(c.slug)} style={{ marginTop: 2 }} />
@@ -522,7 +527,7 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
       <span style={{ flex: 1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || !name.trim() || saving}
-          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, restrictedTools, noCommit, skills: skills.length ? skills : null, connections, capabilities })}>
+          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, dejaCorpus, restrictedTools, noCommit, skills: skills.length ? skills : null, connections, capabilities })}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {dirty
@@ -691,6 +696,7 @@ function FieldSide({ label, tone: t, active, value, onPick }: { label: string; t
 const FIELD_DISPLAY: Record<string, string> = {
   role: "Role", description: "Description", allowDelta: "Allow delta", skills: "Skills",
   model: "Model", icon: "Icon", browserTesting: "Browser testing", documentConversion: "Document conversion",
+  dejaCorpus: "Deja mockup corpus",
   restrictedTools: "Restricted tools", noCommit: "No-commit role", connections: "Connections",
   capabilities: "Capabilities",
 };

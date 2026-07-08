@@ -8,9 +8,10 @@
  * python-venv provisioning tracker (so N owner-added python-venv capabilities provision independently,
  * never sharing one in-flight flag).
  *
- * The two BUILTIN capabilities (browser-testing/document-conversion) are NOT rows in this table — they
- * stay special-cased in `buildMcpServers` (pty/host.ts), reusing their existing, already-hardened
- * resolution code (`playwrightMcpServer`/`markitdownMcpServer`) UNTOUCHED. Their reserved slugs are
+ * The three BUILTIN capabilities (browser-testing/document-conversion/deja-corpus) are NOT rows in this
+ * table — they stay special-cased in `buildMcpServers` (pty/host.ts), reusing their existing,
+ * already-hardened resolution code (`playwrightMcpServer`/`markitdownMcpServer`/`dejaMcpServer`)
+ * UNTOUCHED. Their reserved slugs are
  * rejected here (`RESERVED_CAPABILITY_SLUGS`) so an owner can never shadow/rename over them.
  *
  * CREDENTIAL TIE (agent-tooling P4 OQ1): a capability with `requiresConnection` gets its bound P1
@@ -63,10 +64,10 @@ export type CapabilityProvision =
 const NAME_MAX = 200;
 const DESCRIPTION_MAX = 2000;
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
-/** The two legacy-bridged slugs (@loom/shared's `LEGACY_CAPABILITY_SLUGS`) — reserved so an owner-added
+/** The three legacy-bridged slugs (@loom/shared's `LEGACY_CAPABILITY_SLUGS`) — reserved so an owner-added
  *  row can never collide with or shadow a builtin. Duplicated as string literals (not imported) to keep
  *  this module's validation independent of the shared bridge helper's own location. */
-export const RESERVED_CAPABILITY_SLUGS = ["browser-testing", "document-conversion"] as const;
+export const RESERVED_CAPABILITY_SLUGS = ["browser-testing", "document-conversion", "deja-corpus"] as const;
 
 function isNonBlankStr(v: unknown, max: number): v is string {
   return typeof v === "string" && v.trim().length > 0 && v.length <= max;
@@ -181,9 +182,14 @@ export const BUILTIN_CAPABILITY_SUMMARIES: CapabilitySummary[] = [
     description: "Inject a per-session markitdown MCP so a rig can convert files (PDF / Office / images / HTML) to Markdown to save tokens.",
     transport: "stdio", kind: "python-venv", requiresConnection: false, builtin: true,
   },
+  {
+    slug: "deja-corpus", name: "Deja mockup corpus",
+    description: "Inject a per-session Deja MCP so a mockup-generating rig can retrieve prior mockups (find_mockups) and submit the one it just wrote (submit_mockup/mark_reused).",
+    transport: "stdio", kind: "bundled", requiresConnection: false, builtin: true,
+  },
 ];
 
-/** List every capability — the two builtins FIRST, then every owner-added row — as REST-facing summaries. */
+/** List every capability — the three builtins FIRST, then every owner-added row — as REST-facing summaries. */
 export function listCapabilitySummaries(db: CapabilitiesDbStore): CapabilitySummary[] {
   return [...BUILTIN_CAPABILITY_SUMMARIES, ...db.listCapabilityDefs().map(toSummary)];
 }
