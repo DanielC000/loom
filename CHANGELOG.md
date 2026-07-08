@@ -4,9 +4,49 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-07-08
+
+**Voice, integrations, and a decision inbox** — the Companion gains voice (talk to it, it talks back), grows to a multi-companion cross-channel agent, and Loom gains the plumbing to *act* on the outside world: an encrypted credential store, an authenticated-request tool, scheduled triggers, and a data-described capability registry. Managers get a first-class way to ask *you* a durable, answerable question. Plus session self-stop, Deja mockup capture, a redesigned marketing site, and a large reliability pass on crash-recovery, worktree isolation, and the merge gate.
+
 ### Added
-- **Companion voice provisioning opt-in (`companionVoiceEnabled`)** — installing faster-whisper (STT,
-  ~500MB) and kokoro-onnx (TTS, ~197MB) is now an explicit, off-by-default daemon-global toggle (Companion page → Manage → Voice provisioning) instead of firing automatically the moment a companion is configured. Off: voice notes/replies degrade to plain text exactly as before voice shipped.
+- **Companion voice.** Inbound speech-to-text (local faster-whisper) transcribes Telegram voice notes;
+  outbound text-to-speech (local Kokoro) synthesizes voice replies; the companion decides text-vs-voice per reply; a web-chat mic captures browser audio; per-route `/lang` + `/voice` preferences via a slash-command router. Voice provisioning (faster-whisper ~500MB + kokoro-onnx ~197MB) is an explicit, **off-by-default** daemon-global opt-in (`companionVoiceEnabled`) — off, voice degrades cleanly to text.
+- **Multi-companion + unified cross-channel chat.** Run more than one companion (each a distinct cloned
+  agent); Telegram and web-chat share one conversation (Telegram messages, incl. voice, live-push into the open web chat with no reload); conversation-grouped history with a browser + transcript view, where `/new` archives (never deletes) the thread; a full slash-command surface (`/status`, `/start`, `/help`, `/new`, `/export`, `/whoami`, `/voice`, `/lang`); companion lifecycle — create, clone, delete/retire, editable given-name.
+- **Agent tooling & integrations (EPIC).** An owner-controlled **encrypted credential store** (human-only
+  REST + Settings UI); an **authenticated-request MCP tool** (profile-gated, host-allowlisted, credential-injected); **poller triggers** (scheduled local poll jobs that wake/spawn a session with the event as kickoff); a **capability registry** — owner-curated, data-described per-profile capabilities generalizing the hard-coded per-session MCPs — plus an arbitrary-command capability kind and a Capabilities catalog panel.
+- **Manager→human decision inbox.** A manager can file a durable, answerable decision (`question_ask`,
+  non-blocking) with options + a recommendation; you answer it in the UI (a cyan "DECISION NEEDED" attention item → `/question/:id` page → a global "waiting on me" inbox with a per-project facet); the answer pushes back into the asking session, which pulls it (`question_pull`). Survives daemon restart and manager recycle; an answered-but-unpulled decision re-nudges the manager.
+- **Session self-stop.** An `end_me` primitive (terminal exit, no successor, gated on an empty inbound
+  queue); auditors self-stop after completing a scan; an "End Session" button on non-worker terminal cards runs `/session-end` then stops.
+- **Deja capture.** An opt-in PostToolUse relay auto-ingests agent mockups with their originating prompt;
+  a per-profile `dejaCorpus` capability and a `dejaCapture` project toggle (parity with browserTesting/documentConversion).
+- **Per-schedule prompt**, **composer presets** (a Spark popover, insert-to-edit), **batch/templated agent
+  creation** across sibling projects, resolved **capability flags surfaced** on `agent_get`/`agent_list`, a **queued-messages "Ledger Bar"** across terminal cards, and a bundled **noCommit "Docs & Vault / Analysis" rig**.
+- **Redesigned GitHub Pages landing site** with richer, accurate demo screenshots and a synced feature story.
+
+### Changed
+- **Workspace, Projects, and Overview reworks** — a redesigned project/agent management page, "New project"
+  hoisted with roomier agent fields, and the header project dropdown sorted by active session (active pinned on top).
+- **Board management moved into Settings** (column add/rename/delete off the board itself) plus a kanban
+  responsiveness + polish pass.
+
+### Fixed
+- **Crash recovery** — boot-reconcile now recovers crash-orphaned in-flight workers (re-parents resumable
+  workers to their live manager) instead of stranding them; a second crash no longer marks one project's sessions "dead" while another's auto-resume; non-JS/native daemon-death now leaves a persisted diagnostic signature.
+- **Worker isolation & provisioning** — worker worktrees no longer nest inside the live `LOOM_HOME` git tree
+  (a stray relative git op could corrupt cross-agent state); worktree dep-provisioning is more complete (sibling-dist build, base `node_modules` refreshed after a dep-adding merge).
+- **Orchestration robustness** — merge-gate hardening (validates the post-merge union in the worktree, fixes
+  a false "build gate failed" on a re-poll, worktree-scoped pre-gate cleanup, client-timeout-resilient spawn/merge), rate-limited sessions resume at the real usage-window reset (not a flat backoff), manager redirects reach in-flight workers mid-turn, watchdog false alarms (queued-report "didn't report", parked-orchestrator "stuck-busy") silenced, and `my_context` no longer returns a misleading 200k default before the first measured turn.
+- **Companion** — a TTS-synth `EPIPE` no longer crashes the daemon (P0); heartbeat/reminder watchers are
+  scoped per-session/per-home (no multi-companion cross-delivery); a live home-change reconciles the cache; `/new` re-injects the persona after clearing.
+- **pty** — `withTrustLock` no longer drops the lock on a transient `EPERM` (a `~/.claude.json` clobber risk);
+  the Deja-capture relay no longer silently no-ops on Windows (`execFile` of a node CLI threw `EFTYPE`).
+- **Cost reporting** — run-cost price data added for current Anthropic models (claude-sonnet-5 et al.) — no more $0 runs.
+
+### Internal
+- A broad end-to-end (Playwright) test harness, legacy/upgraded-DB boot regression tests (with a guard
+  against SCHEMA indexes referencing migration-added columns), fault-injection coverage for the trust-lock retry path, and a sweep of orchestration/worker/web-design doctrine + shipped-skill refinements.
 
 ## [0.15.0] — 2026-07-04
 
