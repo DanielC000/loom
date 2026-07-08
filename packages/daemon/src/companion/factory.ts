@@ -17,8 +17,8 @@ import { createDbCompanionVoicePrefs, type VoicePrefStore } from "./voice-prefs.
 import type { CompanionConfig } from "./config.js";
 import { createTelegramAdapter, TELEGRAM_CHANNEL } from "./telegram.js";
 import { IN_APP_CHANNEL, type InAppChannel } from "./in-app.js";
-import type { CompanionHistoryReset, CompanionLivePush, CompanionMessageRecorder, CompanionRoute, CompanionSynthesizer, CompanionTranscriber, SessionBinding, SubmitTurn } from "./types.js";
-import type { CompanionBinding } from "@loom/shared";
+import type { CompanionHistoryExport, CompanionHistoryReset, CompanionLivePush, CompanionMessageRecorder, CompanionRoute, CompanionSynthesizer, CompanionTranscriber, SessionBinding, SubmitTurn } from "./types.js";
+import type { CompanionBinding, CompanionMessage } from "@loom/shared";
 
 /** The narrow db surface the factory needs: the durable binding store + the allowlist reader (for authz)
  *  + the pairing-code redemption txn (for DM-pairing) + the per-route voice-pref store (VOICE-P1) + the
@@ -35,6 +35,10 @@ export interface CompanionBindingStore extends AllowlistReader, PairingStore, Vo
   /** The chat-history WRITE (unified cross-channel chat, card 7d63e200) — the gateway's injected recorder
    *  calls this for every non-in-app channel's inbound/outbound turn (see `recorder` below). */
   insertCompanionMessage(m: { id: string; sessionId: string; channel: string; chatId: string; author: "user" | "companion"; text: string; createdAt: string; viaVoice?: boolean }): void;
+  /** The "/export" command's data source (Companion Slash Commands, card 9db7d09c): the session's CURRENT
+   *  (open) conversation's stored messages across every channel, chronological — respects the "/new"
+   *  conversation boundary (mirrors the human-only chat-history REST read). */
+  listCurrentCompanionMessages(sessionId: string): CompanionMessage[];
 }
 
 /** Drop the db-only createdAt — the gateway's routing map wants just the SessionBinding shape. */
@@ -117,10 +121,18 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
       inApp?.pushCrossChannel(sessionId, msg);
     },
   };
+  // "/export" command's data source (Companion Slash Commands, card 9db7d09c): reads the session's CURRENT
+  // (open) conversation only — same scoping as the human-only chat-history REST read, so "/export" can
+  // never re-surface a conversation already closed by a prior "/new"/"/reset".
+  const historyExport: CompanionHistoryExport = {
+    read(sessionId) {
+      return db.listCurrentCompanionMessages(sessionId);
+    },
+  };
   // Per-turn ORIGIN resolver (multi-channel reply routing): deliverReply targets the in-flight turn's
   // originating route (pty.getActiveTurnOrigin, injected). NOT the old home fallback — a proactive/heartbeat
   // turn now carries the home route ON its submit, so its chat_reply flows through the SAME per-turn path.
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush);
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport);
   // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
   // arms NO Telegram long-poll: the gateway comes up with the in-app adapter alone (registered below), so no
   // external network transport is started and default-OFF stays byte-identical. The adapter normalizes each

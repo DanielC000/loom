@@ -6,8 +6,8 @@
  * RECOGNIZED command's text NEVER becomes an agent turn (mirrors the redeemed-pairing-code path). An
  * unrecognized "/word" (no handler registered) is NOT treated as a command by this router: it falls
  * through unchanged to the normal text pipeline, so only a REGISTERED command name (see COMMANDS below —
- * today "/lang", "/voice", "/new", "/reset", "/status", "/start", "/help") is ever swallowed — every other
- * message (including one that merely starts with "/") is byte-identical to today.
+ * today "/lang", "/voice", "/new", "/reset", "/status", "/whoami", "/export", "/start", "/help") is ever
+ * swallowed — every other message (including one that merely starts with "/") is byte-identical to today.
  *
  * Platform-agnostic: this sits ONE layer above the normalizer (Telegram, in-app, …), so it works the same
  * for every channel.
@@ -15,11 +15,16 @@
  * Clean-room: modeled on OpenClaw's channel-level command dispatcher (pattern, not code) — see the design
  * note `Projects/Loom/Design/Companion Voice — STT-TTS Design.md` Part 2.
  *
- * Tier-2 slash commands (card 9db7d09c, first slice — `/export`/`/whoami` are a later slice): `/status`
- * (in-chat state readout) and `/start` (Telegram's automatic first-contact message, intercepted so it
- * never leaks a raw agent turn) need no new `CommandDeps` — both read only from the existing `prefs`/
- * `route` params already threaded through every handler.
+ * Tier-2 slash commands (card 9db7d09c): `/status` (in-chat state readout) and `/start` (Telegram's
+ * automatic first-contact message, intercepted so it never leaks a raw agent turn) need no new
+ * `CommandDeps` — both read only from the existing `prefs`/`route` params already threaded through every
+ * handler. `/whoami` (a route/identity readout) likewise needs no new deps. `/export` (a markdown dump of
+ * the CURRENT conversation, replied in-chat to the SAME authenticated route — never written to disk or
+ * sent anywhere else) rides the injected `CommandDeps.exportConversation`, backed by the gateway's
+ * `CompanionHistoryExport` (types.ts) — the db-backed impl mirrors `listCurrentCompanionMessages`, so an
+ * archived (pre-"/new") conversation is never re-exported.
  */
+import type { CompanionMessage } from "@loom/shared";
 import type { CompanionVoicePrefs, VoicePrefRoute } from "./voice-prefs.js";
 
 /** Matches a leading "/command[@bot] [args]" — the WHOLE trimmed body must be command-shaped (a command
@@ -61,6 +66,11 @@ export interface CommandDeps {
    *  any persisted chat history for the route, notifying a live viewer (ChatGateway.resetConversation).
    *  Never throws. */
   resetConversation(sessionId: string): Promise<void>;
+  /** The "/export" command's data source: the session's CURRENT (open) conversation's stored messages
+   *  across every channel, chronological (ChatGateway.exportConversation → the injected
+   *  `CompanionHistoryExport`). Empty when there's nothing to export OR no exporter is configured — the
+   *  handler can't tell the two apart, which is fine: both read "nothing to export yet". Never throws. */
+  exportConversation(sessionId: string): CompanionMessage[];
 }
 
 /**
@@ -78,6 +88,16 @@ export type CommandHandler = (
   prefs: CompanionVoicePrefs,
   deps: CommandDeps,
 ) => CommandResult | Promise<CommandResult>;
+
+/** Format the "/export" command's conversation dump: one block per message, chronological, `**Bold**`
+ *  speaker label (rendered as literal asterisks — the companion never sets Telegram `parse_mode`, so this
+ *  is plain readable text on every channel, not markup that could misrender) + the ISO timestamp, then the
+ *  message text verbatim. Pure — no I/O. */
+function formatConversationExport(messages: CompanionMessage[]): string {
+  return messages
+    .map((m) => `**${m.author === "user" ? "You" : "Companion"}** (${m.createdAt}):\n${m.text}`)
+    .join("\n\n");
+}
 
 function normalizeLangCode(code: string): string {
   const dash = code.indexOf("-");
@@ -151,6 +171,30 @@ const COMMANDS: Record<string, CommandDef> = {
       const resolved = prefs.resolve(route);
       const lang = resolved.ttsLang ?? "auto-detect";
       return { ack: `🔎 Voice replies: ${resolved.voiceReplies} · Language: ${lang}` };
+    },
+  },
+  whoami: {
+    // A support/debug readout of the route this chat is bound over — which channel/chat (and, in a group,
+    // which authenticated sender) THIS message came in on. Every field is SERVER-derived (the same `route`
+    // every handler already gets — never body-supplied), so it can never be spoofed by the message text.
+    description: "Show which chat/channel you're talking to me on",
+    handler(_args, route) {
+      const senderLine = route.senderId ? `\nSender: ${route.senderId}` : "";
+      return { ack: `🪪 Channel: ${route.channel}\nChat: ${route.chatId}${senderLine}` };
+    },
+  },
+  export: {
+    description: "Export the current conversation as an in-chat markdown dump",
+    // Replies IN-CHAT to the SAME authenticated route only — never writes to disk, never sends via a
+    // separate document/file mechanism, never leaves this route. `deps.exportConversation` reads exactly
+    // the CURRENT (open) conversation (respects a prior "/new" boundary), so this can never leak an
+    // already-archived conversation.
+    handler(_args, route, _prefs, deps) {
+      const messages = deps.exportConversation(route.sessionId);
+      if (messages.length === 0) {
+        return { ack: "📤 Nothing to export yet — this conversation is empty." };
+      }
+      return { ack: `📤 Conversation export (${messages.length} message${messages.length === 1 ? "" : "s"}):\n\n${formatConversationExport(messages)}` };
     },
   },
   start: {

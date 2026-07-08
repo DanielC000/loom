@@ -22,8 +22,10 @@
  * interpreted as an instruction to the gateway.
  */
 import { randomUUID } from "node:crypto";
+import type { CompanionMessage } from "@loom/shared";
 import type {
   ChannelAdapter,
+  CompanionHistoryExport,
   CompanionHistoryReset,
   CompanionLivePush,
   CompanionMessageRecorder,
@@ -145,6 +147,10 @@ export class ChatGateway {
    *                    CompanionLivePush}. Default undefined ⇒ no live push (every existing/test construction
    *                    stays byte-identical). The daemon injects an impl that skips the in-app channel and
    *                    pushes to `deps.inApp` for every other channel (factory.ts).
+   * @param historyExport  the injected CONVERSATION READER for the "/export" command (Companion Slash
+   *                    Commands, card 9db7d09c) — see {@link CompanionHistoryExport}. Default undefined ⇒
+   *                    "/export" reports it isn't available (every existing/test construction stays
+   *                    byte-identical). The daemon injects a db-backed impl (factory.ts).
    */
   constructor(
     private readonly submitTurn: SubmitTurn,
@@ -159,6 +165,7 @@ export class ChatGateway {
     private readonly recorder: CompanionMessageRecorder | undefined = undefined,
     private readonly reinjectPersona: ((sessionId: string) => void) | undefined = undefined,
     private readonly livePush: CompanionLivePush | undefined = undefined,
+    private readonly historyExport: CompanionHistoryExport | undefined = undefined,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -338,7 +345,10 @@ export class ChatGateway {
     const handler = parsed ? commandHandler(parsed.name) : undefined;
     if (parsed && handler) {
       const route = voicePrefRoute(binding, msg.sender);
-      const { ack } = await handler(parsed.args, route, this.voicePrefs, { resetConversation: (sid) => this.resetConversation(sid) });
+      const { ack } = await handler(parsed.args, route, this.voicePrefs, {
+        resetConversation: (sid) => this.resetConversation(sid),
+        exportConversation: (sid) => this.exportConversation(sid),
+      });
       // Every command ack is transport chrome EXCEPT "/new"/"/reset" — that ack IS the intentional
       // conversation-boundary marker (resetConversation's doc), so it alone is persisted, on EVERY channel.
       const isConversationBoundary = parsed.name === "new" || parsed.name === "reset";
@@ -442,6 +452,20 @@ export class ChatGateway {
       await this.historyReset.clear(sessionId);
     } catch (err) {
       this.debug(`resetConversation: history clear failed for ${sessionId}: ${describeError(err)}`);
+    }
+  }
+
+  /** The "/export" command's data source (commands.ts's `exportConversation` dep) — the current (open)
+   *  conversation's messages, via the injected {@link historyExport}. `undefined` ⇒ no reader configured
+   *  (e.g. a test construction that doesn't inject one); a throwing reader degrades to an empty list — an
+   *  export must never crash the inbound path that's running it. */
+  private exportConversation(sessionId: string): CompanionMessage[] {
+    if (!this.historyExport) return [];
+    try {
+      return this.historyExport.read(sessionId);
+    } catch (err) {
+      this.debug(`exportConversation: history read failed for ${sessionId}: ${describeError(err)}`);
+      return [];
     }
   }
 

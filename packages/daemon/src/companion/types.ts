@@ -9,7 +9,7 @@
  * Clean-room: the adapter → normalized-message split is modelled on OpenClaw/Hermes' Channel-Adapter
  * normalization pattern (learned, not copied).
  */
-import type { CompanionRoute as SharedCompanionRoute } from "@loom/shared";
+import type { CompanionMessage, CompanionRoute as SharedCompanionRoute } from "@loom/shared";
 
 /** A non-text payload carried by an inbound update (Phase 1 carries the SHAPE; ingestion is a later card). */
 export interface InboundAttachment {
@@ -199,6 +199,19 @@ export interface CompanionSynthesizer {
  */
 export interface CompanionHistoryReset {
   clear(sessionId: string): Promise<void>;
+}
+
+/**
+ * The injected CONVERSATION READER for the "/export" command (Companion Slash Commands, card 9db7d09c).
+ * Returns the session's CURRENT (open) conversation's stored messages across every channel, chronological —
+ * mirrors db.ts's `listCurrentCompanionMessages`, so an already-archived conversation (a prior "/new"
+ * boundary) is never re-exported and "/export" always dumps exactly what a fresh reload of the chat panel
+ * would show. Optional: undefined ⇒ "/export" reports it isn't available (every existing/test bare
+ * `new ChatGateway(...)` construction stays byte-identical). The daemon injects a db-backed impl
+ * (companion/factory.ts). Never throws — a read failure degrades to an empty list, same as "no messages".
+ */
+export interface CompanionHistoryExport {
+  read(sessionId: string): CompanionMessage[];
 }
 
 /**
