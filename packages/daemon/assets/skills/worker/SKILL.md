@@ -85,7 +85,11 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    flags it) and risks an accidental commit. When unsure of that root, pass no filename/path at all and
    let the tool auto-name into it. For a NEW interactive control (toggle, button, input, menu), a render-only check is
    not enough: **EXERCISE it** and confirm an **observable state change** — DOM/network/text differs
-   before vs. after — not just that the page renders without console errors. Otherwise report the UI
+   before vs. after — not just that the page renders without console errors. `@playwright/mcp`'s
+   `browser_click` takes `{ element: "<human-readable description>", target: "<exact ref from a
+   browser_snapshot, or a unique selector>" }` — the required key is **`target`**, not `ref` (`ref` is a
+   different browser tool's arg name); if a click is rejected asking for `target`, that's the mix-up.
+   Otherwise report the UI
    work **up** for your manager to verify. When you self-verify,
    point Playwright at the dev server's **actual bound URL** — read the port from the framework's startup
    line (e.g. vite's `Local: http://…:PORT`); never assume a default port. If that port is already held
