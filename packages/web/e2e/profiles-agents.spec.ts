@@ -139,15 +139,17 @@ test.describe("profiles & agents", () => {
     await expect(select).toBeVisible();
 
     // BEFORE: no profile is assigned — the select sits on the "— none —" placeholder (empty value), and the
-    // agent row carries no role signal ("manager" comes only from an assigned profile).
+    // agent row carries no role signal ("manager" comes only from an assigned profile). The role tag now
+    // renders the centralized display label ("Manager") — case-insensitive match keeps this robust to the
+    // label vs raw-enum casing (card 04fec5be: one role display map).
     await expect(select).toHaveValue("");
-    await expect(agentRow(page, "Lead")).not.toContainText("manager");
+    await expect(agentRow(page, "Lead")).not.toContainText(/manager/i);
 
     // ACT: pick the seeded profile by its id (the option's value).
     await select.selectOption(profile.id);
 
     // AFTER (observable #1 — UI): the agent row now renders the assigned profile's role.
-    await expect(agentRow(page, "Lead")).toContainText("manager");
+    await expect(agentRow(page, "Lead")).toContainText(/manager/i);
 
     // AFTER (observable #2 — REST): the agent row's profileId flipped to the assigned profile.
     await expect

@@ -5,7 +5,8 @@ import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { Panel, Button, Input, SectionLabel, StatusPill, Chip, Badge } from "../components/ui";
-import { color, font, tone, sessionRoleTone as roleTone } from "../theme";
+import { color, font, tone } from "../theme";
+import { roleDisplay } from "../lib/roleDisplay";
 import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
 
 // Per-project Archive: every STOPPED session of the header's active project (sessions auto-archive on
@@ -201,13 +202,13 @@ function ArchiveRow({ s, selected, onSelect, onRestore, restoring, onDelete, del
   { s: ArchivedSessionListItem; selected: boolean; onSelect: () => void;
     onRestore: () => void; restoring: boolean; onDelete: () => void; deleting: boolean }) {
   const dead = s.resumability === "dead";
-  const t = s.role ? roleTone[s.role] : "muted";
+  const t = roleDisplay(s.role).tone;
   const ts = (iso?: string | null) => (iso ? new Date(iso).toLocaleString() : "—");
   return (
     <Panel selected={selected} onClick={onSelect} style={{ padding: "8px 10px" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontFamily: font.mono, fontSize: 12, color: tone[t], fontWeight: s.role === "manager" ? 700 : 400 }}>
-          {s.role === "manager" ? "★ " : ""}{s.id.slice(0, 8)} · {s.role ?? "session"}
+          {s.role === "manager" ? "★ " : ""}{s.id.slice(0, 8)} · {roleDisplay(s.role).short}
         </span>
         <span style={{ flex: 1 }} />
         {s.snapshotExists ? <Badge tone="phosphor">transcript</Badge> : <Badge tone="muted">no transcript</Badge>}

@@ -11,7 +11,6 @@
     "test:companion": "node --experimental-strip-types test/companion.mjs",
     "test:companion-chat": "node --experimental-strip-types test/companionChat.mjs",
     "test:archive-invalidate": "node --experimental-strip-types test/archive-invalidate.mjs",
-    "test:profile-roles": "node --experimental-strip-types test/profileRoles.mjs",
     "test:sessions": "node --experimental-strip-types test/sessions.mjs",
     "test:column-sort": "node --experimental-strip-types test/column-sort.mjs",
     "test:fleet": "node --experimental-strip-types test/fleet.mjs",

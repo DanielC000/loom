@@ -19,7 +19,8 @@ import {
   Stat, FleetCard, FleetRow, AttentionRow, EventRow, fleetRollup, worstContext,
 } from "../components/fleet";
 import { ReviewQueue } from "../components/reviewQueue";
-import { color, font, tone, sessionRoleTone as roleTone } from "../theme";
+import { color, font, tone } from "../theme";
+import { RoleBadge } from "../lib/roleDisplay";
 
 // PROJECT OVERVIEW — the project-scoped analog of the Platform page: one scrolling cockpit for the
 // active project (header-selected via useActiveProject). It composes the SAME fleet widgets Mission
@@ -266,7 +267,7 @@ function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRol
   return (
     <Panel style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <Badge tone={role ? roleTone[role] : "muted"}>{role ?? "plain"}</Badge>
+        <RoleBadge role={role} />
         <strong style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{agent.name}</strong>
         <span style={{ flex: 1 }} />
         {live && <StatusPill tone={session!.busy ? "amber" : "phosphor"} glow={session!.busy} label={session!.busy ? "busy" : "live"} />}

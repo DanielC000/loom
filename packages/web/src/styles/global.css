@@ -221,6 +221,38 @@ body {
   border-bottom-color: var(--loom-phosphor);
 }
 
+/* Role picker cards (Profiles editor, components/RolePicker): a selectable capability "class" card.
+   Hover brightens an unselected card's border; the selected card carries its phosphor ring inline. A
+   locked (dev-layer) card gets a not-allowed cursor + a faint diagonal-hatch overlay so it reads as
+   present-but-unavailable. Focus-visible gives Tab users a phosphor ring on every reachable card. */
+.loom-rolecard {
+  transition:
+    border-color 90ms linear,
+    box-shadow 90ms linear,
+    background 90ms linear;
+}
+.loom-rolecard:not(.is-locked):not(.is-selected):hover {
+  border-color: var(--loom-text-dim);
+}
+.loom-rolecard:focus-visible {
+  outline: 2px solid var(--loom-phosphor);
+  outline-offset: 2px;
+}
+.loom-rolecard.is-locked::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 7px,
+    rgba(255, 255, 255, 0.02) 7px,
+    rgba(255, 255, 255, 0.02) 8px
+  );
+}
+
 /* Vault file-tree rows + breadcrumb segments: a quiet hover wash, no layout shift. */
 .loom-tree-row {
   transition: background-color 80ms linear;
@@ -329,6 +361,7 @@ body {
   .loom-btn,
   .loom-navtab,
   .loom-toggle,
+  .loom-rolecard,
   .loom-fade,
   .loom-tree-row,
   .loom-crumb {

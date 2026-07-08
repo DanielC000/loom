@@ -3,13 +3,10 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, SessionRole, CapabilityGrant } from "@loom/shared";
 import { api, type ProfileFieldResolution, type PythonProvisioning, type PythonProvisioningReason } from "../lib/api";
 import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components/ui";
-import { color, font, radius, tone, sessionRoleTone as roleTone, type Tone } from "../theme";
-import { PROFILE_ROLE_OPTIONS, agentProfiles } from "../lib/profileRoles";
-
-// A profile's role, as a coloured pill. null = a plain (non-orchestration) session — today's default.
-function RoleBadge({ role }: { role: SessionRole | null }) {
-  return <Badge tone={role ? roleTone[role] : "muted"}>{role ?? "plain"}</Badge>;
-}
+import { color, font, radius, tone, type Tone } from "../theme";
+import { agentProfiles } from "../lib/profileRoles";
+import { RolePicker } from "../components/RolePicker";
+import { RoleBadge, roleDisplay, roleColor } from "../lib/roleDisplay";
 
 // Loom's Profiles — the reusable, platform-level rig (role + model + permission deltas + icon) an
 // agent runs under via its profileId. The injected prompt comes from the AGENT; a profile's
@@ -87,7 +84,7 @@ export default function Profiles() {
               {p.icon && <span>{p.icon}</span>}
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
               <StatusDots customized={!!p.customized} updateAvailable={!!p.updateAvailable} />
-              <span style={{ fontSize: 10, color: p.role ? tone[roleTone[p.role]] : color.textMuted, fontFamily: font.mono }}>{p.role ?? "plain"}</span>
+              <span style={{ fontSize: 10, color: roleColor(p.role), fontFamily: font.mono }}>{roleDisplay(p.role).short}</span>
             </Button>
           ))}
           {agentProfiles(profiles.data ?? []).length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No profiles yet.</span>}
@@ -357,21 +354,23 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
           error={(preview.error as Error | null) ?? adoptError} />
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 160px 90px", gap: 10 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 90px", gap: 10 }}>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={fieldLabel}>Name</span>
           <Input value={name} onChange={(e) => setName(e.target.value)} />
         </label>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <span style={fieldLabel}>Role</span>
-          <Select value={role} onChange={(e) => setRole(e.target.value as SessionRole | "")}>
-            {PROFILE_ROLE_OPTIONS.map((r) => <option key={r || "plain"} value={r}>{r === "" ? "— (plain)" : r}</option>)}
-          </Select>
-        </label>
-        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={fieldLabel}>Icon</span>
           <Input value={icon} onChange={(e) => setIcon(e.target.value)} placeholder="emoji" />
         </label>
+      </div>
+
+      {/* Role — the capability "class" picker (card 04fec5be). Each conferrable role is a card whose
+          powers are read from the ONE role display map (lib/roleDisplay) + verified against the real
+          daemon gates; dev-layer roles show LOCKED. Display-only: the enum passed up is unchanged. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <span style={fieldLabel}>Role · capability class</span>
+        <RolePicker value={role} onChange={setRole} />
       </div>
 
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>

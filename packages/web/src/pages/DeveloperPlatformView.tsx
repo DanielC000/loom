@@ -8,6 +8,7 @@ import { AgentPromptEditor } from "../components/AgentPromptEditor";
 import { RunHistory } from "../components/RunHistory";
 import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../components/ui";
 import { color, font } from "../theme";
+import { roleDisplay } from "../lib/roleDisplay";
 
 // Platform Manager P6 — the DEV-edition Platform surface (the "Loom Platform" home), rendered by the
 // consolidated Platform page when the reserved "Loom Platform" project exists (LOOM_DEV). SEPARATE from
@@ -158,7 +159,11 @@ function AgentControl({ agent, role, session, liveCount, missingLabel }:
     mutationFn: (id: string) => api.stopSession(id, "graceful"),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
   });
-  const roleLabel = role === "platform" ? "Lead" : "Auditor";
+  // Label + tone come from the ONE role display map (lib/roleDisplay) so this surface agrees with the
+  // picker + every badge — no page-local role→label/tone ternary. platform → "Lead" (amber), auditor →
+  // "Auditor" (muted).
+  const d = roleDisplay(role);
+  const roleLabel = d.short;
   const isPlatform = role === "platform";
 
   if (!agent) {
@@ -171,7 +176,7 @@ function AgentControl({ agent, role, session, liveCount, missingLabel }:
   return (
     <Panel style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <Badge tone={role === "platform" ? "phosphor" : "cyan"}>{roleLabel}</Badge>
+        <Badge tone={d.tone}>{roleLabel}</Badge>
         <strong style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{agent.name}</strong>
         <span style={{ flex: 1 }} />
         {isPlatform && liveCount > 0 && (

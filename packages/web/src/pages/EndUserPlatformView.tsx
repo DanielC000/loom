@@ -9,6 +9,7 @@ import { RunHistory } from "../components/RunHistory";
 import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../components/ui";
 import { looksLikeCron } from "./Schedules";
 import { color, font } from "../theme";
+import { roleDisplay } from "../lib/roleDisplay";
 
 // Setup Assistant E1-7 / End-User Platform tier B5 — the SHIPPING-edition Platform surface (the reserved
 // "Platform" home), rendered by the consolidated Platform page for shipping users (and as the
@@ -165,7 +166,9 @@ function AssistantControl({ agent, session }: { agent?: Agent; session?: Session
   return (
     <Panel style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <Badge tone="cyan">Platform</Badge>
+        {/* "Platform" is the operator's product brand (echoed in the copy + heading); its TONE reads from
+            the ONE role display map (setup → cyan) so its visual agrees with the picker + every badge. */}
+        <Badge tone={roleDisplay("setup").tone}>Platform</Badge>
         <strong style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{agent.name}</strong>
         <span style={{ flex: 1 }} />
         {live
@@ -214,7 +217,9 @@ function AuditorControl({ agent, session }: { agent?: Agent; session?: SessionLi
   return (
     <Panel style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <Badge tone="amber">Auditor</Badge>
+        {/* Tone from the ONE role display map (workspace-auditor → muted, a read-only reviewer) so it
+            agrees with the picker + every badge; "Auditor" is the agent's product-brand label. */}
+        <Badge tone={roleDisplay("workspace-auditor").tone}>Auditor</Badge>
         <strong style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{agent.name}</strong>
         <span style={{ flex: 1 }} />
         {live

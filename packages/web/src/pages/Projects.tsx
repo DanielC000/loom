@@ -4,7 +4,9 @@ import { COLUMN_PRESETS, DEFAULT_COLUMN_PRESET_ID, presetById, presetToDesired, 
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Panel, Button, Input, Select, SectionLabel, Chip, Dot, PresetAccentDots } from "../components/ui";
-import { color, font, radius, tone, sessionRoleTone as roleTone } from "../theme";
+import { color, font, radius } from "../theme";
+import { roleDisplay, roleColor } from "../lib/roleDisplay";
+import type { SessionRole } from "@loom/shared";
 
 // Starter agents seeded on project creation (editable afterward via the preset editor). Generic
 // role scaffolds — the canonical, project-specific prompts get filled in per project.
@@ -320,7 +322,7 @@ function AgentRow(
       <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
       {live > 0 && <span title={`${live} live session${live === 1 ? "" : "s"}`}><Dot tone="phosphor" glow /></span>}
       {icon && <span aria-hidden>{icon}</span>}
-      {role && <span style={{ fontSize: 10, color: tone[roleTone[role as keyof typeof roleTone] ?? "muted"], fontFamily: font.mono }}>{role}</span>}
+      {role && <span style={{ fontSize: 10, color: roleColor(role as SessionRole | null), fontFamily: font.mono }}>{roleDisplay(role as SessionRole | null).short}</span>}
     </ListRow>
   );
 }
