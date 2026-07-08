@@ -18,6 +18,21 @@ async function pinActiveProject(page: Page, projectId: string) {
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
 }
 
+// Minimal REST helpers for the worker-exclusion test below (mirrors profiles-agents.spec.ts) — seed a
+// profile with a role + an agent, and bind the profile to the agent, over the same human/loopback endpoints
+// the Projects UI drives. The shared fixture is NOT edited (it's a shared file); these live in the spec.
+async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, { ...init, headers: { "content-type": "application/json", ...(init?.headers ?? {}) } });
+  if (!res.ok) throw new Error(`${init?.method ?? "GET"} ${url} -> ${res.status}: ${await res.text()}`);
+  return (await res.json()) as T;
+}
+const seedProfile = (baseURL: string, body: { name: string; role: string; icon?: string }) =>
+  apiJson<{ id: string }>(`${baseURL}/api/profiles`, { method: "POST", body: JSON.stringify(body) });
+const seedAgent = (baseURL: string, projectId: string, name: string) =>
+  apiJson<{ id: string }>(`${baseURL}/api/projects/${projectId}/agents`, { method: "POST", body: JSON.stringify({ name }) });
+const assignProfile = (baseURL: string, agentId: string, profileId: string) =>
+  apiJson<{ id: string }>(`${baseURL}/api/agents/${agentId}`, { method: "POST", body: JSON.stringify({ profileId }) });
+
 // The vertical position of the first <main>-scoped element whose text matches — used to assert DOM order
 // (a lower `y` renders higher up the page) without depending on brittle sibling-index math.
 async function topOf(page: Page, matcher: RegExp): Promise<number> {
@@ -70,5 +85,44 @@ test.describe("project Overview layout (card 12204d22)", () => {
     expect(yTerminals).toBeLessThan(yBoard);       // Terminals still above Board (unchanged)
     // (1) Fleet moved BELOW Board.
     expect(yBoard).toBeLessThan(yFleet);
+  });
+});
+
+// Worker-role agents are EXCLUDED from the Overview "Agents" spawn grid (owner intake 2026-07-08): workers
+// are Loom-DRIVEN — a manager dispatches them via worker_spawn onto isolated worktree branches, never a
+// human manual spawn — so a worker spawn card is clutter + a footgun. A non-worker (manager / null-role)
+// agent still gets a card. The grid filter is on the agent's PROFILE role; the SESSION-derived "active
+// workers" header stat is a SEPARATE code path (session.role) and must still count live workers.
+test.describe("project Overview — Agents spawn grid excludes worker-role agents", () => {
+  test("a worker-profiled agent gets no spawn card, but a manager agent does and the 'active workers' stat still counts", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`ov-worker-exclude-${Date.now()}`);
+
+    // A manager-role profile + a worker-role profile (the global profiles store), one agent bound to each.
+    const mgrProfile = await seedProfile(loomDaemon.baseURL, { name: `OvMgrProfile ${Date.now()}`, role: "manager", icon: "🧭" });
+    const wkrProfile = await seedProfile(loomDaemon.baseURL, { name: `OvWkrProfile ${Date.now()}`, role: "worker", icon: "🔧" });
+    const mgrName = `OvMgrAgent-${Date.now()}`;
+    const wkrName = `OvWorkerRig-${Date.now()}`;
+    const mgrAgent = await seedAgent(loomDaemon.baseURL, project.id, mgrName);
+    const wkrAgent = await seedAgent(loomDaemon.baseURL, project.id, wkrName);
+    await assignProfile(loomDaemon.baseURL, mgrAgent.id, mgrProfile.id);
+    await assignProfile(loomDaemon.baseURL, wkrAgent.id, wkrProfile.id);
+
+    // A live worker SESSION in this project so the SESSION-derived "active workers" stat is > 0 — proving
+    // the header roll-up (session.role, not the agent's profile) is untouched by the grid filter.
+    await loomDaemon.seedLiveSession({ project, role: "worker", agentName: "OvLiveWorker" });
+
+    await pinActiveProject(page, project.id);
+    await page.goto(`${loomDaemon.baseURL}/overview`);
+
+    // The Agents section renders; the manager agent gets a spawn card, the worker-profiled agent does NOT
+    // (its name appears nowhere on the page — it has no live session either).
+    await expect(page.locator("main").getByText("Agents", { exact: true })).toBeVisible();
+    await expect(page.locator("main").getByText(mgrName)).toBeVisible();
+    await expect(page.locator("main").getByText(wkrName)).toHaveCount(0);
+
+    // The SESSION-derived "active workers" header stat still counts the live worker (grid filter didn't
+    // regress it). The Stat renders the value + label as sibling spans in one container.
+    const workersStat = page.locator("main").getByText("active workers", { exact: true }).locator("..");
+    await expect(workersStat).toContainText("1");
   });
 });

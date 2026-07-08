@@ -112,9 +112,11 @@ export default function Overview() {
   if (!projectId) return <p style={{ color: color.textMuted, fontFamily: font.mono }}>No project selected — pick a project in the header.</p>;
 
   const roleOf = (a: Agent) => profiles.data?.find((p) => p.id === a.profileId)?.role ?? null;
-  // ALL the project's agents get a spawn card (mirroring Workspace, which offers spawn for any agent —
-  // not just managers). Each card resolves its agent's profile role for the badge + the spawn default.
-  const projectAgents = agents.data ?? [];
+  // Worker-role agents are EXCLUDED from the spawn grid: workers are Loom-DRIVEN — a manager dispatches
+  // them via worker_spawn onto isolated worktree branches — and a human never manually spawns one, so a
+  // worker spawn card is clutter + a footgun. Every other agent (managers, plus null/unknown-role agents)
+  // still gets a card; each resolves its agent's profile role for the badge + the spawn default.
+  const projectAgents = (agents.data ?? []).filter((a) => roleOf(a) !== "worker");
   // Any live session for this agent — drives the live-status pill and the manager go-live guard below.
   const liveSessionFor = (agentId: string) =>
     all.find((s) => s.agentId === agentId && s.processState === "live");
@@ -149,13 +151,13 @@ export default function Overview() {
         </div>
       </div>
 
-      {/* --- Agents spawn (every project agent — spawn from profile or override the role) --- */}
+      {/* --- Agents spawn (every non-worker project agent — spawn from profile or override the role) --- */}
       <section>
         <SectionLabel>Agents</SectionLabel>
         {projectAgents.length === 0 ? (
           <Panel style={{ padding: 12 }}>
             <span style={{ color: color.amber, fontFamily: font.mono, fontSize: 12 }}>
-              No agents in this project — create one on the Projects page.
+              No manually-spawnable agents — workers are dispatched by a manager, not spawned here. Create one on the Projects page.
             </span>
           </Panel>
         ) : (
@@ -237,8 +239,9 @@ export default function Overview() {
   );
 }
 
-// One agent's spawn card — the Overview analog of Workspace's Sessions-header spawn, brought to EVERY
-// project agent (not just managers). It shows the agent's profile-role badge, its name, a live pill if
+// One agent's spawn card — the Overview analog of the old Workspace Sessions-header spawn, brought to
+// every non-worker project agent (workers are manager-dispatched, so they're filtered out upstream — see
+// projectAgents). It shows the agent's profile-role badge, its name, a live pill if
 // the agent has a live session, and the SHARED SpawnControls split-button (spawn from profile, or
 // override the role → manager/plain) wired to api.startSession(agent.id, role).
 //
