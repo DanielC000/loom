@@ -20,9 +20,18 @@ function claudeJsonPath(): string {
 // release-delete of that lockfile is completing. It clears in milliseconds, so both writeJsonAtomic's
 // rename retry and withTrustLock's lock-acquire retry treat it as transient and retry it with this
 // SAME bounded count + backoff, rather than inventing separate numbers that could drift apart.
-const TRANSIENT_FS_RETRY_LIMIT = 12; // worst case (1,2,4,8,16,32,50,50,…ms backoff) well under 1s
+export const TRANSIENT_FS_RETRY_LIMIT = 12; // worst case (1,2,4,8,16,32,50,50,…ms backoff) well under 1s
 const isTransientFsError = (code: string): boolean =>
   code === "EPERM" || code === "EACCES" || code === "EBUSY";
+
+/** TEST SEAM: swap the fs.openSync used by withTrustLock's lock-acquire — fs's ESM namespace import
+ *  is immutable and can't be monkeypatched directly, mirroring companion/tts.ts's spawnImpl seam. Lets
+ *  a hermetic test fault-inject transient EPERM/EACCES/EBUSY on the lock-acquire open, deterministically
+ *  exercising the retry-then-degrade branch on every platform (the real race is Windows-only). Defaults
+ *  to the real fs.openSync; production code never calls the setter. */
+type OpenSyncFn = typeof fs.openSync;
+let openSyncImpl: OpenSyncFn = fs.openSync;
+export function __setOpenSyncForTest(fn?: OpenSyncFn): void { openSyncImpl = fn ?? fs.openSync; }
 
 /**
  * Atomically write `value` as pretty JSON to `filePath`: a uniquely-named temp file in the
@@ -168,7 +177,7 @@ function withTrustLock(lockPath: string, fn: () => void): void {
   try { fs.mkdirSync(path.dirname(lockPath), { recursive: true }); } catch { /* best-effort */ }
   while (true) {
     try {
-      fs.closeSync(fs.openSync(lockPath, "wx"));
+      fs.closeSync(openSyncImpl(lockPath, "wx"));
       held = true;
       break;
     } catch (err) {
