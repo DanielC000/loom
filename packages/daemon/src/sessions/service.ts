@@ -4386,26 +4386,47 @@ export class SessionService {
     const gate = orchestration.gateCommand;
     const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
 
-    // EARLY IDEMPOTENCY (finding 864e79fe — false-negative "build gate failed" after a SUCCESSFUL merge):
-    // a stale confirm retry (e.g. a client-timeout on the FIRST call — see confirmWorkerMergeTracked —
-    // followed by a re-call that lands after the pending-op entry already settled+evicted) re-invokes this
-    // method for real, but a PRIOR call may have already merged + finalized this exact worker: worktree
-    // removed, branch deleted. Running the gate below against that now-gone worktreePath used to make the
-    // gate fail (its cwd doesn't exist) and falsely report a build-gate failure for a merge that had
-    // already SUCCEEDED. Gated on BOTH signals, not just one:
-    //  - worktreePath is GONE from disk — cheap, checked first, and is what actually breaks the gate; a
-    //    branch that's landed but whose worktree is still genuinely present (e.g. merge-reject-notify-
-    //    suppress.mjs scenario B: an out-of-band manual squash-merge racing a daemon confirm whose gate is
-    //    STILL failing for its own real reason) must keep running the gate/report the real failure — only
-    //    the manager-facing NOTIFY is reconciled away there (shouldSuppressMergeReject), never the return
-    //    value or the gate itself skipped.
+    // EARLY IDEMPOTENCY (finding 864e79fe — false-negative "build gate failed" after a SUCCESSFUL merge;
+    // widened by the re-poll terminal-result-read fix below): a stale confirm retry (e.g. a client-timeout
+    // on the FIRST call — see confirmWorkerMergeTracked — followed by a re-call that lands after the
+    // pending-op entry already settled+evicted) re-invokes this method for real, but a PRIOR call may have
+    // already merged + finalized this exact worker: worktree removed, branch deleted, task moved to done.
+    // Running the gate below against that now-gone worktreePath used to make the gate fail (its cwd doesn't
+    // exist) and falsely report a build-gate failure for a merge that had already SUCCEEDED.
+    //
+    // WORKTREE-GONE is not the only proof of "this daemon already finished." removeWorktree's dir removal
+    // is best-effort (a Windows handle-release race — see its doc — can outlast its own bounded retries),
+    // so finalizeMerge can complete the ENTIRE merge (branch deleted, task moved to done) while the worktree
+    // DIRECTORY itself lingers on disk, leaked for a later GC pass. A stale retry landing in exactly that
+    // window used to see `fs.existsSync(worktreePath) === true`, skip this whole idempotency block, and
+    // re-run the gate against that leaked/de-registered worktree — which can genuinely fail (broken git
+    // state) and misreport "build gate failed" for a worker that had already merged successfully. So the
+    // worktree-existence check is widened with an OR: the task ALREADY being in its terminal (done) lane is
+    // an equally authoritative "this daemon's own finalizeMerge already ran for this worker" signal.
+    //
+    // Gated on BOTH signals, not just one — worktree gone (or task done) AND the branch's landing itself
+    // independently proven:
+    //  - worktreePath is GONE from disk, OR the task is already in its terminal lane — cheap, checked
+    //    first; a branch that's landed but whose worktree is still genuinely present AND whose task is NOT
+    //    yet terminal (e.g. merge-reject-notify-suppress.mjs scenario B: an out-of-band manual squash-merge
+    //    racing a daemon confirm whose gate is STILL failing for its own real reason) must keep running the
+    //    gate/report the real failure — only the manager-facing NOTIFY is reconciled away there
+    //    (shouldSuppressMergeReject), never the return value or the gate itself skipped.
     //  - the branch's work is reachable from main via the deterministic `Loom-Worker-Branch` trailer
     //    (findLandedSquashCommit — same signal mergeBranch's own ALREADY_MERGED classification uses, incl.
     //    its re-task guard: a branch RE-CUT onto a prior squash with genuine NEW work returns null, so a
-    //    live re-task is never short-circuited here).
-    // Only when the worktree is gone AND the landing is proven do we finish idempotently without touching
-    // the gate or any git state that's already been retired.
-    if (!fs.existsSync(worktreePath)) {
+    //    live re-task is never short-circuited here). This is what keeps merge-reject-notify-suppress.mjs
+    //    scenario C (task already Done for an UNRELATED reason, gate genuinely still fails, branch never
+    //    actually merged) reporting the real failure: task-done alone never short-circuits without this
+    //    independent landing proof.
+    // Only when (the worktree is gone OR the task is already done) AND the landing is proven do we finish
+    // idempotently without touching the gate or any git state that's already been retired.
+    const taskAlreadyTerminal = taskId != null && (() => {
+      const task = this.db.getTask(taskId);
+      const terminalKey = task ? this.columnKeyForProjectRole(task.projectId, "terminal") : undefined;
+      return !!task && !!terminalKey && task.columnKey === terminalKey;
+    })();
+    if (!fs.existsSync(worktreePath) || taskAlreadyTerminal) {
       const alreadyLanded = await findLandedSquashCommit(project.repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
       if (alreadyLanded) {
         return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath });
