@@ -840,7 +840,15 @@ export type TurnRoute = CompanionRoute;
  * one-per-turn is merely a few extra benign turns.
  */
 export type QueuedMessageKind = "warning" | "agent";
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind };
+/**
+ * `questionId` OPTIONALLY tags a queued entry as a decision-inbox answer-push-nudge (card bbc46336
+ * follow-up) for the question it announces. Only the answer route sets it; every other caller leaves it
+ * undefined. It exists solely so `purgeQueuedByQuestionIds` can find and drop a nudge that's gone stale —
+ * `question_pull` consumes ALL of a session's answered questions atomically, so a batch of N answers
+ * produces N queued nudges but only the FIRST pull is productive; the rest would otherwise drain as
+ * separate turns and each find nothing left to pull.
+ */
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string };
 /**
  * Distinguishes `enqueueStdin`'s two `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -2164,8 +2172,12 @@ export class PtyHost {
    * `kind` defaults to `"warning"` (see QueuedMessageKind) so every caller this change didn't touch
    * keeps today's full-coalesce behavior byte-identical; every production call site that enqueues an
    * agent/human-authored message passes `"agent"` explicitly.
+   *
+   * `questionId` is an OPTIONAL tail tag (see QueuedMessage.questionId) — undefined for every caller this
+   * change didn't touch. Only the decision-inbox answer route sets it, so `purgeQueuedByQuestionIds` can
+   * later drop this exact nudge if it goes stale before it drains.
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning"): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason } {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason } {
     const live = this.live.get(sessionId);
     if (!live?.alive) return { delivered: false, reason: "session-dead" };
     this.healIfStuck(live, sessionId);
@@ -2196,7 +2208,7 @@ export class PtyHost {
     // Held (busy / not-ready / composer-dirty / rate-limit parked). Carry the optional delivery callback so that when this
     // entry is finally handed to the recipient (drainPending or consumePending), the durable queued
     // message can be marked delivered. Undefined for every existing (non-messaging) caller → a no-op.
-    live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind });
+    live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind, questionId });
     return { delivered: false, position: live.pending.length, reason: "held" };
   }
 
@@ -2301,6 +2313,39 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live?.alive) return [];
     return live.pending.splice(0); // empty the queue in place AND hand the removed entries (with onDeliver) back
+  }
+
+  /**
+   * Drop still-queued entries TAGGED to any of the given `questionIds` (see QueuedMessage.questionId) —
+   * the decision-inbox's OWN targeted purge (card bbc46336 follow-up), called from `question_pull` right
+   * after it atomically consumes those questions: any OTHER queued answer-nudge for a question that same
+   * batch just consumed is now obsolete — left queued, it would drain as its own turn and trigger a
+   * wasted empty `question_pull`. UNLIKE flushPending (which empties the WHOLE queue for a supersede), this
+   * is a SELECTIVE filter: every entry whose `questionId` is not in the set — including unrelated nudges
+   * and manager direction — keeps its slot and relative order untouched, exactly like deleteQueued leaves
+   * every entry but the one it targets alone.
+   *
+   * SYNCHRONOUS BY CONSTRUCTION — only splices `live.pending` (no `await`, no submit(), no pty write), so
+   * it never enters deliverHook's M2 lower-busy→drain window and can never observe or touch a message
+   * that's already mid-drain: drainPending splices its own delivered run OUT of `live.pending` before this
+   * could ever run concurrently (there is no interleaving point between them), so an entry is either still
+   * here to be purged or already gone to delivery — never both. Returns the removed entries (onDeliver
+   * included, mirroring flushPending) so the caller can resolve them; [] for a dead/unknown session, an
+   * empty `questionIds`, or when nothing matched.
+   */
+  purgeQueuedByQuestionIds(sessionId: string, questionIds: readonly string[]): QueuedMessage[] {
+    const live = this.live.get(sessionId);
+    if (!live?.alive || questionIds.length === 0) return [];
+    const ids = new Set(questionIds);
+    const removed: QueuedMessage[] = [];
+    for (let i = live.pending.length - 1; i >= 0; i--) {
+      const m = live.pending[i]!;
+      if (m.questionId != null && ids.has(m.questionId)) {
+        removed.push(m);
+        live.pending.splice(i, 1);
+      }
+    }
+    return removed.reverse(); // restore original FIFO order (the scan walked back-to-front)
   }
 
   /**

@@ -97,7 +97,7 @@ try {
   }
 
   // --- (3) the successor's question_pull (the REAL tool handler) sees the now-answered question ---
-  const routerPost = new OrchestrationMcpRouter(db, {});
+  const routerPost = new OrchestrationMcpRouter(db, { purgeAnsweredQuestionNudges() {} }); // question_pull's post-consume purge call needs this stubbed
   const successorServer = routerPost.buildServer(fresh.id, "manager");
   const pulled = JSON.parse((await successorServer._registeredTools["question_pull"].handler({})).content[0].text);
   check("(3) the SUCCESSOR's question_pull returns the reparented, now-answered question", pulled.questions.length === 1 && pulled.questions[0].questionId === qid);

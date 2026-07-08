@@ -2978,7 +2978,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // enqueueStdin caller in the daemon wraps it best-effort; this was the one that didn't.
     try {
       const nudge = `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.`;
-      deps.pty.enqueueStdin(updated.sessionId, nudge, "human", undefined, undefined, "agent");
+      // Tagged with the question id (questionId) so a LATER question_pull that consumes this question in
+      // the same batch as others can purge this exact nudge if it's still queued when it goes stale
+      // (card bbc46336 follow-up — see SessionService.purgeAnsweredQuestionNudges).
+      deps.pty.enqueueStdin(updated.sessionId, nudge, "human", undefined, undefined, "agent", updated.id);
     } catch { /* best-effort — the answer already persisted; question_pull is the durable fallback */ }
     return reply.send(updated);
   });

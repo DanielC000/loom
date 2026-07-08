@@ -102,7 +102,9 @@ function cleanup(e) {
 // ============================ (T) TOOL SURFACE + real handler behavior ============================
 {
   const e = mkDb("tool");
-  const router = new OrchestrationMcpRouter(e.db, {}); // sessions is only captured into unrelated closures
+  // sessions only needs purgeAnsweredQuestionNudges (question_pull's post-consume queue-cleanup call);
+  // every other closure captured off it is unrelated to this section.
+  const router = new OrchestrationMcpRouter(e.db, { purgeAnsweredQuestionNudges() {} });
 
   const toolsFor = (role) => router.buildServer("sid-unused", role)._registeredTools;
   const managerTools = toolsFor("manager");

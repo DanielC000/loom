@@ -2564,6 +2564,24 @@ export class SessionService {
   }
 
   /**
+   * Purge now-stale decision-inbox answer-nudges from a session's OWN pty queue (card bbc46336 follow-up
+   * to the decision inbox). `question_pull` calls this right after `db.pullAnsweredQuestions` atomically
+   * consumes a batch of answered questions — every OTHER queued push-nudge tagged to one of those same
+   * question ids is now obsolete (the manager already has the answer via this very pull), so left queued
+   * it would drain as its own turn and find nothing left to pull. Thin wrapper over
+   * `pty.purgeQueuedByQuestionIds` (see there for the selective-splice contract); the only caller today,
+   * the answer route (gateway/server.ts), never attaches an `onDeliver` to these nudges, so there is
+   * nothing to resolve — but any future durable-tracked entry sharing a `questionId` would still need
+   * resolving, so resolve defensively (mirrors redirectWorker's flushed-entry loop above).
+   */
+  purgeAnsweredQuestionNudges(sessionId: string, questionIds: readonly string[]): void {
+    const removed = this.pty.purgeQueuedByQuestionIds(sessionId, questionIds);
+    for (const m of removed) {
+      if (m.onDeliver) { try { m.onDeliver("obsolete"); } catch { /* purge must never fail the pull */ } }
+    }
+  }
+
+  /**
    * Manager-driven ABSOLUTE permission-mode override (worker_set_mode, card 610abe29) — the manual
    * recovery affordance for a worker landed in (or pushed into) a bad mode: a worker can never change its
    * own mode (Shift+Tab is a human TUI keystroke; ExitPlanMode/EnterPlanMode are disallowed for a worker —

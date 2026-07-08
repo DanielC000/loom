@@ -814,6 +814,13 @@ export class OrchestrationMcpRouter {
       },
       async () => {
         const answered = db.pullAnsweredQuestions(managerSessionId, new Date().toISOString());
+        // Purge any OTHER still-queued answer-nudge for a question this same pull just consumed — a
+        // multi-answer batch enqueues one nudge per answer, but this pull drains them all atomically, so
+        // every nudge past the first is now stale (card bbc46336 follow-up). Does not touch the nudge for
+        // whichever question drained AS this turn (it already delivered — never queued).
+        if (answered.length > 0) {
+          sessions.purgeAnsweredQuestionNudges(managerSessionId, answered.map((q) => q.id));
+        }
         return ok({
           questions: answered.map((q) => ({
             questionId: q.id, title: q.title, chosenOption: q.chosenOption, note: q.note,
