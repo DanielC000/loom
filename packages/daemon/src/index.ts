@@ -13,6 +13,7 @@ import { snapshotAndArchiveRecovered } from "./sessions/boot-backstop.js";
 import { deriveCrashOrphanedWorkers, deriveCrashOrphanedManagers } from "./orchestration/crash-orphaned-workers.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
+import { seedDefaultCapabilities } from "./capabilities/seed.js";
 import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
 import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
@@ -82,6 +83,16 @@ async function main(): Promise<void> {
   // and the field-level adopt-update merge has a common ancestor — the profiles analog of seedBaseSnapshots.
   const seededBases = seedProfileBaseSnapshots(db);
   if (seededBases.length) console.log(`[boot] seeded profile base snapshot(s): ${seededBases.join(", ")}`);
+  // Agent-tooling P4 follow-on (3b0c4aef): seed Loom's bundled registry-capability catalog rows
+  // (currently just "github", the first real credential-tied capability) into `capability_defs`,
+  // seed-if-absent by slug — additive, idempotent, CORE product (ungated). Best-effort: a throw here
+  // (e.g. an unexpected DB error) must never gate boot — the catalog just stays without it this boot.
+  try {
+    const seededCapabilities = seedDefaultCapabilities(db);
+    if (seededCapabilities.length) console.log(`[boot] seeded capability catalog row(s): ${seededCapabilities.join(", ")}`);
+  } catch (err) {
+    console.warn(`[boot] capability catalog seed failed (continuing boot): ${(err as Error).message}`);
+  }
   // "Getting Started" → "Platform" home rename backfill — rename an EXISTING install's reserved setup-home
   // ROW before seedSetupHome runs. seedSetupHome is seed-if-absent keyed on the NEW name, so if it ran first
   // on a pre-rename install it would mint a SECOND, empty "Platform" home beside the old "Getting Started"

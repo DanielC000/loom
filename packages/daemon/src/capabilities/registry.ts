@@ -337,14 +337,22 @@ export function resolveCapabilityServer(row: CapabilityDefRow, ctx: ResolveCapab
     const bin = resolvePythonVenv(row.slug, provision, ctx.pythonInterpreterPath);
     if (bin) server = { command: bin, args: [] };
   } else if (provision.kind === "bundled" || provision.kind === "command") {
-    // bundled: a fixed absolute command Loom ships. command: an owner-typed executable, already resolved
-    // to an absolute path at catalog-save time (validateCapabilityDefInput). Either way, no install/resolve
-    // step here — just an existence check. NO SHELL: this {command, args} entry is mounted as a "stdio" MCP
+    // bundled: a Loom-curated recipe — `command` may be an ALREADY-ABSOLUTE path, or a BARE PATH-searched
+    // name (e.g. "npx", the github capability seed) that must self-heal like the three hardcoded builtins
+    // (Playwright/markitdown/deja) already do, each re-resolving live at every spawn. CODE-REVIEW FIX: a
+    // bare command must NOT be resolved once and frozen (a stripped-PATH boot would never mount it again
+    // even after the real binary becomes installed; a moved fnm/nvm/volta shim would 404 silently forever;
+    // a DB restored on another machine would carry a dead path) — so re-run `resolveExecutable` EVERY
+    // spawn, not just once at catalog-save time. command (owner-typed, "command" kind): already resolved to
+    // an absolute path at catalog-save time (validateCapabilityDefInput) — `resolveExecutable` on an
+    // already-absolute path is a no-op passthrough (see resolve-bin.ts), so this is BEHAVIOR-PRESERVING for
+    // every existing "command" row. NO SHELL: this {command, args} entry is mounted as a "stdio" MCP
     // server, launched by the CLAUDE ENGINE's own MCP stdio client as an argv-array subprocess — never
     // through node-pty and never through `/bin/sh -c` — so there is no metachar-injection surface even
     // though `command`'s two strings are owner-controlled end to end (the containment posture here is
     // who-can-set, not sandboxing what's set).
-    if (fs.existsSync(provision.command)) server = { command: provision.command, args: provision.args ?? [] };
+    const resolvedCommand = resolveExecutable(provision.command);
+    if (fs.existsSync(resolvedCommand)) server = { command: resolvedCommand, args: provision.args ?? [] };
   }
   if (!server) return null;
   const env = row.requiresConnection && ctx.connectionSecret
