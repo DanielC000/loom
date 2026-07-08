@@ -22,6 +22,24 @@ export interface IdleWatcherDeps {
    * project; 0 = no override, so tick() falls back to THIS project's own resolved recycleAtContextRatio.
    */
   recycleRatio: number;
+  /**
+   * Idle-WORKER coverage (board card b9d479b0): re-fires the SAME reconciled worker→manager nudge
+   * SessionService.notifyManagerOfIdleWorker already fires ONCE on a worker's busy→false edge — injected
+   * so the periodic idle-worker loop below (tickIdleWorkers) never RE-IMPLEMENTS its queued-report /
+   * parked-awaiting-ack / broken-spawn reconciliation. A second, drifted copy of that logic would
+   * reintroduce board card 99efaab3's exact false alarm ("did NOT call worker_report" for a worker whose
+   * report is merely queued) — this keeps it single-sourced.
+   */
+  notifyIdleWorker: (workerSessionId: string) => void;
+  /**
+   * SessionService.isWorkerGenuinelyStranded (CR blocker #2 fold-in) — single-sources the SAME
+   * reconciliation `notifyIdleWorker` uses, exposed as a pure predicate so the manager loop's OWN idle
+   * message can narrow "live worker(s)" to genuinely-unreported ones before asserting "unreported —
+   * nobody else watches this". Without this, the message would fire that claim for a worker that's
+   * actually rate-limited, already reported (awaiting merge), or parked awaiting an ack — exactly the
+   * misleading shape board card 99efaab3 exists to prevent.
+   */
+  isWorkerStranded: (workerSessionId: string) => boolean;
   /** Tick cadence; defaults to 60s. Injectable so a test drives tick() directly. */
   intervalMs?: number;
 }
@@ -55,9 +73,20 @@ const ORCH_ACTIVITY_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<Orchest
  * so a snooze/cap/escalation is honored across a daemon restart.
  *
  * Skips silently when: snoozed/suppressed (policy ≠ watching, or an active snooze window); the manager
- * has a live worker (legitimately waiting on a building worker); human-paused; a context-recycle nudge
- * is pending (recycle takes precedence); or the project disabled it (`idleNudgeMinutes === 0`).
+ * has a live BUSY worker (legitimately waiting on a building worker); human-paused; a context-recycle
+ * nudge is pending (recycle takes precedence); or the project disabled it (`idleNudgeMinutes === 0`).
  * Reset-on-activity re-arms a manager that returned to real work.
+ *
+ * IDLE-WORKER coverage (board card b9d479b0, `tickIdleWorkers` below): the manager loop above and
+ * BusyWorkerWatcher (which only covers `busy=true` workers) left a two-path asymmetry — a live worker
+ * that went idle (`busy=false`) WITHOUT calling worker_report was watched by NOBODY, and the manager
+ * loop used to skip its own idle-manager nudge for ANY live worker (busy or idle), suppressing exactly
+ * the nudge that would have caught it. Each tick, for every LIVE worker that's idle with its task still
+ * unreported and stale beyond `idleWorkerMinutes`, we RE-fire the same reconciled worker→manager nudge
+ * SessionService.notifyManagerOfIdleWorker already fires once on the busy→false edge (injected as
+ * `notifyIdleWorker`, never re-implemented here) on the same persisted once-per-window cadence as the
+ * manager loop (the session's own `idle_nudge_state` columns — workers never call idle_report, so only
+ * `last_idle_nudge_at` paces them; policy/snooze stay at the 'watching' default).
  */
 export class IdleWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -106,9 +135,15 @@ export class IdleWatcher {
       // idle≥window-since-last-nudge, alive — so a human/recycle-owned manager is never escalated).
       if (control.isPaused(m.id)) continue;                              // human-paused
 
-      // No live workers — a manager waiting on a building worker is legitimately idle (don't nudge).
-      const liveWorkers = db.listWorkers(m.id).filter((w) => w.processState === "live").length;
-      if (liveWorkers > 0) continue;
+      // Live BUSY worker — a manager waiting on a building/turning worker is legitimately idle (don't
+      // nudge). Board card b9d479b0 (two-path asymmetry): this used to skip on ANY live worker, busy OR
+      // idle — silencing the manager exactly when its worker was idle-and-stranded and needed it most.
+      // An idle (busy=false) live worker is NOT a reason to skip: tickIdleWorkers below covers it on its
+      // own cadence, but the manager itself should also be nudged to go check on a stranded worker rather
+      // than sit idle waiting on nothing.
+      const liveWorkers = db.listWorkers(m.id).filter((w) => w.processState === "live");
+      const liveBusyWorkers = liveWorkers.filter((w) => w.busy).length;
+      if (liveBusyWorkers > 0) continue;
 
       // Competing recycle nudge: a near-full manager should recycle, not spawn. Mirror ContextWatcher's
       // own per-project threshold (env force override, else THIS project's resolved recycleAtContextRatio,
@@ -162,22 +197,92 @@ export class IdleWatcher {
       const terminalKey = columnKeyForRole(cols, "terminal");
       const nonTerminal = db.listTasks(m.projectId).filter((t) => t.columnKey !== terminalKey);
       const openCards = nonTerminal.filter((t) => t.held !== true && t.deferred !== true);
-      // If EVERY non-terminal card is held/deferred (≥1 exists, 0 genuinely-actionable), the manager has
-      // nothing it can action and no way to clear the gate → skip silently instead of deadlock-nudging. A
-      // truly empty board (no cards at all) still nudges — the manager should `idle_report 'done'`.
-      if (nonTerminal.length > 0 && openCards.length === 0) continue;
+      // Narrow liveWorkers (all idle at this point — a live BUSY one would have skipped above) to
+      // GENUINELY STRANDED ones (CR blocker #2): a live worker that's rate-limited, already reported
+      // (awaiting merge), or parked awaiting an ack is NOT "unreported" and nobody needs to check on it
+      // — asserting otherwise is exactly board card 99efaab3's false-alarm shape. Single-sources the SAME
+      // reconciliation `notifyIdleWorker`/tickIdleWorkers use via the injected isWorkerStranded.
+      const strandedWorkers = liveWorkers.filter((w) => this.deps.isWorkerStranded(w.id));
+      // If EVERY non-terminal card is held/deferred (≥1 exists, 0 genuinely-actionable) AND there's no
+      // genuinely-stranded worker to check on either, the manager has nothing it can action and no way
+      // to clear the gate → skip silently instead of deadlock-nudging. A truly empty board (no cards at
+      // all) still nudges — the manager should `idle_report 'done'`. But board card b9d479b0: a live
+      // STRANDED worker is independently actionable (check on it / worker_message it) even when every
+      // OTHER card is deliberately held/deferred — don't let this skip re-silence exactly the manager
+      // that should be checking on its stranded worker.
+      if (strandedWorkers.length === 0 && nonTerminal.length > 0 && openCards.length === 0) continue;
       const openTodos = openCards.length;
       const n = Math.round((nowMs - lastActivityMs) / 60_000);
-      const msg =
-        `[loom:idle] You've been idle ~${n} min with no live workers and ${openTodos} actionable task(s). ` +
-        `Why are you idle? If you simply dropped the orchestration loop, pick up the next task NOW. ` +
-        `Then call idle_report with your state: 'working' (back at it), 'waiting' (on a long worker or ` +
-        `external thing — optionally pass minutes), 'blocked_human' (need a human decision/credential/access), ` +
-        `or 'done' (the queue is genuinely drained). Resume the loop if appropriate.`;
+      // Three honest cases: a genuinely-stranded live worker (say so specifically); a live worker that's
+      // NOT stranded (rate-limited/reported/parked — say nothing false about it either way); or no live
+      // workers at all. Never assert "unreported" or "no live workers" when it isn't true (99efaab3).
+      const msg = strandedWorkers.length > 0
+        ? `[loom:idle] You've been idle ~${n} min and your ${strandedWorkers.length} live worker(s) are ALSO idle and unreported — ` +
+          `nobody else watches this. Check on them first: worker_transcript / worker_status, then worker_message or ` +
+          `worker_merge as appropriate. ${openTodos} other actionable task(s) pending. Then call idle_report with your ` +
+          `state: 'working' (back at it), 'waiting' (on a long worker or external thing — optionally pass minutes), ` +
+          `'blocked_human' (need a human decision/credential/access), or 'done' (the queue is genuinely drained).`
+        : liveWorkers.length > 0
+        ? `[loom:idle] You've been idle ~${n} min with ${openTodos} actionable task(s) pending. ` +
+          `Why are you idle? If you simply dropped the orchestration loop, pick up the next task NOW. ` +
+          `Then call idle_report with your state: 'working' (back at it), 'waiting' (on a long worker or ` +
+          `external thing — optionally pass minutes), 'blocked_human' (need a human decision/credential/access), ` +
+          `or 'done' (the queue is genuinely drained). Resume the loop if appropriate.`
+        : `[loom:idle] You've been idle ~${n} min with no live workers and ${openTodos} actionable task(s). ` +
+          `Why are you idle? If you simply dropped the orchestration loop, pick up the next task NOW. ` +
+          `Then call idle_report with your state: 'working' (back at it), 'waiting' (on a long worker or ` +
+          `external thing — optionally pass minutes), 'blocked_human' (need a human decision/credential/access), ` +
+          `or 'done' (the queue is genuinely drained). Resume the loop if appropriate.`;
       try { pty.enqueueStdin(m.id, msg); } catch { /* manager not live */ }
       db.recordIdleNudge(m.id, nowIso); // stamp last_idle_nudge_at + increment idle_nudge_unanswered
       // eslint-disable-next-line no-console
       console.log(`[idle-watcher] nudged idle manager ${m.id} (~${n}m idle, ${openTodos} actionable, unanswered→${state.unanswered + 1})`);
+    }
+
+    this.tickIdleWorkers(nowMs, nowIso);
+  }
+
+  /**
+   * Idle-WORKER coverage (board card b9d479b0 primary fix) — see the class doc above. Skips silently
+   * when: the worker is busy (BusyWorkerWatcher's concern), parentless/taskless, already reported/merged
+   * (its task left the active lane — the SAME proxy notifyManagerOfIdleWorker itself re-checks, so this
+   * is just a cheap pre-filter that avoids touching idle_nudge_state for an obviously-done worker), the
+   * worker or its owning manager is human-paused, the worker isn't actually alive, or the project
+   * disabled it (`idleWorkerMinutes === 0`). Otherwise re-nudges once per `idleWorkerMinutes` window via
+   * `notifyIdleWorker` — never re-implementing its reconciliation (board card 99efaab3 requirement).
+   */
+  private tickIdleWorkers(nowMs: number, nowIso: string): void {
+    const { db, pty, control } = this.deps;
+    for (const w of db.listLiveWorkers()) {
+      if (w.busy) continue;                                    // BusyWorkerWatcher's concern
+      if (!w.parentSessionId || !w.taskId) continue;            // no owning manager/task to nudge
+
+      const project = db.getProject(w.projectId);
+      if (!project) continue;
+      const resolved = resolveConfig(project.config);
+      const idleWorkerMin = resolved.orchestration.idleWorkerMinutes;
+      if (idleWorkerMin === 0) continue;                        // disabled for this project
+
+      // Already reported/merged? Task left the active lane → nothing to nudge.
+      const activeKey = columnKeyForRole(resolved.kanbanColumns, "active");
+      const task = db.getTask(w.taskId);
+      if (!task || task.columnKey !== activeKey) continue;
+
+      if (control.isPaused(w.id) || control.isPaused(w.parentSessionId)) continue; // human-paused
+      if (!pty.isAlive(w.id)) continue;
+
+      const state = db.getIdleNudgeState(w.id);
+      if (!state) continue;
+      const lastActivityMs = Date.parse(w.lastActivity);
+      const lastNudgeMs = state.lastIdleNudgeAt ? Date.parse(state.lastIdleNudgeAt) : 0;
+      const idleSinceMs = Math.max(lastActivityMs, lastNudgeMs);
+      const idleForMin = (nowMs - idleSinceMs) / 60_000;
+      if (idleForMin < idleWorkerMin) continue;
+
+      this.deps.notifyIdleWorker(w.id);
+      db.recordIdleNudge(w.id, nowIso); // stamp last_idle_nudge_at (paces the re-nudge; unanswered unused for workers)
+      // eslint-disable-next-line no-console
+      console.log(`[idle-watcher] re-nudged idle-unreported worker ${w.id} (~${Math.round(idleForMin)}m idle)`);
     }
   }
 

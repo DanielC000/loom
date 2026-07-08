@@ -715,7 +715,14 @@ async function main(): Promise<void> {
   // loop (idle, no live workers, backlog open) to report why and resume. Per-project leash via
   // resolveConfig (idleNudgeMinutes; 0 disables); recycle takes precedence (shares recycleRatio).
   const idleWatchMs = watchers.idleWatchMs;
-  const idleWatcher = new IdleWatcher({ db, pty, control, recycleRatio, intervalMs: idleWatchMs });
+  const idleWatcher = new IdleWatcher({
+    db, pty, control, recycleRatio, intervalMs: idleWatchMs,
+    // Idle-WORKER coverage (board card b9d479b0): re-fire the SAME reconciled edge nudge periodically —
+    // never a second, drifted reconciliation (board card 99efaab3 requirement).
+    notifyIdleWorker: (workerSessionId) => sessions.notifyManagerOfIdleWorker(workerSessionId),
+    // Single-sources the SAME reconciliation for the manager loop's own idle message (CR blocker #2).
+    isWorkerStranded: (workerSessionId) => sessions.isWorkerGenuinelyStranded(workerSessionId),
+  });
   idleWatcher.start();
   console.log(`[boot] idle-manager watcher on (tick ${idleWatchMs}ms)`);
 

@@ -3421,79 +3421,111 @@ export class SessionService {
   }
 
   /**
-   * Stranded-worker guard. A worker only reaches its manager via worker_report's push; a worker
-   * that ends its turn WITHOUT reporting goes idle silently and the manager — which has no
-   * idle/exit signal for its children — waits forever. Called on every session's busy->false edge:
-   * if this is a worker still sitting in `in_progress` (worker_report would have moved it to
-   * review/waiting), push a [loom:worker-idle] nudge to its manager via the same enqueue channel.
-   * No-op for non-workers, parentless sessions, or workers that already reported/merged.
+   * SINGLE-SOURCED idle-worker classification (CR fold-in on board card b9d479b0/99efaab3): both
+   * notifyManagerOfIdleWorker (the busy→false edge nudge) AND IdleWatcher's periodic caller +
+   * manager-loop message (via isWorkerGenuinelyStranded below) key off this ONE reconciliation — a
+   * second, drifted copy is exactly how 99efaab3's false-alarm class reappears (a rate-limited worker
+   * re-nagged for the length of its cap; a message asserting "unreported" for a worker that's actually
+   * done-awaiting-merge or parked awaiting an ack).
    *
-   * SPURIOUS-NUDGE GUARD (card 6101d7f7): `redirectWorker` on a BUSY worker enqueues its redirect into
-   * `live.pending` FIRST, then — in the SAME tick — clears busy and drains it. That clear fires this
-   * method synchronously, BEFORE the drain hands the redirect over, so at this instant the worker looks
-   * stranded even though it has authoritative direction about to land as its very next turn. If the
-   * worker still has queued direction sitting in its pending FIFO, it is not stranded — skip the nudge.
-   *
-   * PROGRESS-PARK GUARD (card 492a0a17): a `worker_report(status=progress)` does NOT move the task out
-   * of the `active` lane, so an approach-first worker that reported progress and parked awaiting the
-   * manager's reply satisfies both checks above — yet it DID call worker_report, so "did NOT call
-   * worker_report" would be false. Distinguish that healthy park from a genuine stall by looking at this
-   * worker's most recent recorded events: if the LATEST `worker_report` is a `progress` report AND no
-   * `message_worker`/`redirect_worker` event has landed since (i.e. the manager hasn't replied yet),
-   * this is the await-ack park — reword instead of alarming. Once the manager DOES reply (a
-   * message_worker/redirect_worker event appears after that progress report) and the worker goes idle
-   * again without a fresh report, the condition no longer holds — that's a real stall and gets the
-   * normal nudge, so an acked-then-stalled worker is never silently missed.
-   *
-   * BROKEN-SPAWN BRANCH: `busy` can fall to false WITHOUT the worker ever having run a turn — the
-   * fresh-spawn kickoff race (host.ts's scheduleKickoffGuarantee / the short pre-first-turn healIfStuck
-   * window; see both) can still leave a worker that never got a real engine session. That worker never
-   * called worker_report, sits in `active`, and would otherwise get the generic "finished a turn and is
-   * idle" nudge below — which is FALSE (it never finished a turn) and misleads the manager into treating
-   * a broken spawn as a normal, benign park. `engineSessionId` is captured ONLY on the engine's own
-   * SessionStart hook (host.ts), so `null` here is definitive proof no turn — not even the kickoff —
-   * ever started. Branch to a DISTINCT signal so the manager re-drives (worker_message / recycle /
-   * respawn) instead of waiting on a "did not call worker_report" nudge that will never resolve itself.
+   * - `not-evaluable` — SPURIOUS-NUDGE GUARD (card 6101d7f7): `redirectWorker` on a BUSY worker enqueues
+   *   its redirect into `live.pending` FIRST, then — in the SAME tick — clears busy and drains it. That
+   *   clear fires the caller synchronously, BEFORE the drain hands the redirect over, so at this instant
+   *   the worker looks stranded even though it has authoritative direction about to land as its very
+   *   next turn. Also covers a non-worker/parentless/taskless session (nothing to classify).
+   * - `not-stranded` — legitimately NOT a strand:
+   *     • RATE-LIMIT GUARD (CR blocker) — a usage-capped worker goes `busy=false` (setBusy(false) fires
+   *       BEFORE the rate-limit park) with its task still active; it never failed to report, it's
+   *       waiting out the cap and will auto-resume itself. Without this, a PERIODIC caller would re-nag
+   *       for the entire cap window (up to a week on the weekly cap).
+   *     • already reported/merged — its task left the `active` lane.
+   *     • QUEUED-REPORT GUARD (card a1f06bcc) — the task-column check above is a PROXY for "did the
+   *       worker report", blind to two real gaps: a board missing the active/review role mapping
+   *       (workerReport's move is a no-op, so the task never leaves `active` even though the report
+   *       fired), and a report whose manager-facing framed message is still sitting UNDELIVERED in the
+   *       manager's own pending FIFO (deliveryStatus "queued", manager mid-turn). Either way the report
+   *       is REAL. Detected directly off the manager's OWN pending queue — the exact
+   *       `[loom:worker-report] worker <id> …` text workerReport() enqueues (prefixed with THIS worker's
+   *       id, so it can only match its own report).
+   * - `broken-spawn` — `busy` fell to false WITHOUT the worker ever running a turn (the fresh-spawn
+   *   kickoff race — host.ts's scheduleKickoffGuarantee / the short pre-first-turn healIfStuck window).
+   *   `engineSessionId` is captured ONLY on the engine's own SessionStart hook, so `null` here is
+   *   definitive proof no turn — not even the kickoff — ever started. A DISTINCT failure, not a "did not
+   *   report" stall.
+   * - `parked-ack` — its LATEST `worker_report` (status `progress` OR `done` — CR fold-in: a `done`
+   *   report on a board with no review-role column never moves the task off `active`, so it looks
+   *   identical to a progress-park) has had no `message_worker`/`redirect_worker` event land since (the
+   *   manager hasn't replied yet) — a healthy await-ack park, not a stall. Once the manager DOES reply
+   *   and the worker goes idle again without a fresh report, this no longer holds — a real stall still
+   *   classifies `stranded`, so an acked-then-stalled worker is never silently missed.
+   * - `stranded` — genuinely finished a turn, never (usefully) reported, and none of the above apply.
    */
-  notifyManagerOfIdleWorker(workerSessionId: string): void {
+  private classifyIdleWorker(workerSessionId: string):
+    | { kind: "not-evaluable" | "not-stranded" | "broken-spawn" | "stranded" }
+    | { kind: "parked-ack"; status: string } {
     const w = this.db.getSession(workerSessionId);
-    if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return;
-    if (this.pty.getPendingEntries(workerSessionId).length > 0) return; // direction queued, about to drain
+    if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return { kind: "not-evaluable" };
+    if (this.pty.getPendingEntries(workerSessionId).length > 0) return { kind: "not-evaluable" }; // direction queued, about to drain
+
+    if (w.rateLimitedUntil && Date.parse(w.rateLimitedUntil) > Date.now()) return { kind: "not-stranded" };
+
     const task = this.db.getTask(w.taskId);
-    // Still sitting in the `active` lane ⇒ hasn't reported (worker_report would have moved it out).
     const activeKey = this.columnKeyForProjectRole(w.projectId, "active");
-    if (!task || task.columnKey !== activeKey) return; // reported done/blocked, already merged, or no active lane
+    if (!task || task.columnKey !== activeKey) return { kind: "not-stranded" }; // reported/merged, or no active lane
 
-    if (!w.engineSessionId) {
-      const msg = `[loom:worker-spawn-broken] worker ${workerSessionId} (task ${w.taskId}) went idle WITHOUT ever starting a turn — its spawn kickoff never ran (no engine session was ever established). This is NOT a benign idle park; it will not resolve on its own. Re-drive it: worker_message it with the task direction, or worker_recycle/re-spawn if it stays stuck.`;
-      try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
-      return;
-    }
+    if (!w.engineSessionId) return { kind: "broken-spawn" };
 
-    // QUEUED-REPORT GUARD (card a1f06bcc, false alarm #1): the task-column check above is a PROXY for
-    // "did the worker report" — reliable when the project's board has a `review`/`parked` role column
-    // (the report's task-move lands before we ever get here), but blind to two real gaps: a board
-    // missing that role mapping (workerReport's move is a no-op — "no orphaning move" — so the task
-    // never leaves `active` even though the report fired), and a report whose manager-facing framed
-    // message is still sitting UNDELIVERED in the manager's own pending FIFO (deliveryStatus "queued" —
-    // the manager was mid-turn when it landed). Either way the report is REAL; alleging "did NOT call
-    // worker_report" is simply false. Detect it directly off the manager's OWN pending queue — the exact
-    // `[loom:worker-report] worker <id> …` text workerReport() enqueues (prefixed with THIS worker's id,
-    // so it can only match its own report) — and suppress rather than reword: the queued report will
-    // surface on its own via the normal FIFO drain, so nothing more needs saying.
     if (this.pty.getPendingEntries(w.parentSessionId).some((e) => e.text.startsWith(`[loom:worker-report] worker ${workerSessionId} `))) {
-      return;
+      return { kind: "not-stranded" };
     }
 
     const events = this.db.listEventsForWorker(workerSessionId);
     const lastReportIdx = events.findLastIndex((e) => e.kind === "worker_report");
     const lastReport = lastReportIdx !== -1 ? events[lastReportIdx] : undefined;
-    const parkedAwaitingAck = !!lastReport
-      && lastReport.detail?.status === "progress"
-      && !events.slice(lastReportIdx + 1).some((e) => e.kind === "message_worker" || e.kind === "redirect_worker");
+    const status = lastReport?.detail?.status as string | undefined;
+    const ackedSince = !!lastReport && events.slice(lastReportIdx + 1).some((e) => e.kind === "message_worker" || e.kind === "redirect_worker");
+    if (lastReport && (status === "progress" || status === "done") && !ackedSince) {
+      return { kind: "parked-ack", status: status! };
+    }
+    return { kind: "stranded" };
+  }
 
-    const msg = parkedAwaitingAck
-      ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) is idle after calling worker_report(progress) — it IS parked awaiting your reply, not stalled. If you haven't replied yet, worker_message it with direction; if it looks stuck anyway, pull it first: worker_transcript ${workerSessionId}.`
+  /**
+   * True when a live, idle worker is GENUINELY stranded (unreported and not legitimately parked). Exposes
+   * classifyIdleWorker's reconciliation as a pure predicate so a caller that only needs "is this worker
+   * worth calling unreported" (IdleWatcher's manager-loop message) single-sources the SAME check instead
+   * of re-deriving a narrower/drifted copy — see classifyIdleWorker's doc for the false-alarm history
+   * that guards against. A broken-spawn worker counts as stranded too (it genuinely never reported, just
+   * for a distinct reason).
+   */
+  isWorkerGenuinelyStranded(workerSessionId: string): boolean {
+    const cls = this.classifyIdleWorker(workerSessionId);
+    return cls.kind === "stranded" || cls.kind === "broken-spawn";
+  }
+
+  /**
+   * Stranded-worker guard. A worker only reaches its manager via worker_report's push; a worker
+   * that ends its turn WITHOUT reporting goes idle silently and the manager — which has no
+   * idle/exit signal for its children — waits forever. Called on every session's busy->false edge (and,
+   * periodically, by IdleWatcher's tickIdleWorkers for a worker that's still idle later): classifies via
+   * classifyIdleWorker and pushes the matching [loom:worker-idle] (or [loom:worker-spawn-broken]) nudge
+   * to its manager. No-op for a non-strand (already reported/merged, rate-limited, queued report, or
+   * legitimately parked awaiting an ack).
+   */
+  notifyManagerOfIdleWorker(workerSessionId: string): void {
+    const w = this.db.getSession(workerSessionId);
+    if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return;
+    const cls = this.classifyIdleWorker(workerSessionId);
+    if (cls.kind === "not-evaluable" || cls.kind === "not-stranded") return;
+
+    if (cls.kind === "broken-spawn") {
+      const msg = `[loom:worker-spawn-broken] worker ${workerSessionId} (task ${w.taskId}) went idle WITHOUT ever starting a turn — its spawn kickoff never ran (no engine session was ever established). This is NOT a benign idle park; it will not resolve on its own. Re-drive it: worker_message it with the task direction, or worker_recycle/re-spawn if it stays stuck.`;
+      try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
+      return;
+    }
+
+    const msg = cls.kind === "parked-ack"
+      ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) is idle after calling worker_report(${cls.status}) — it IS parked awaiting your reply, not stalled. If you haven't replied yet, worker_message it with direction; if it looks stuck anyway, pull it first: worker_transcript ${workerSessionId}.`
       : `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review, or worker_message it.`;
     try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
   }

@@ -236,6 +236,15 @@ export interface OrchestrationConfig {
    */
   idleDefaultSnoozeMinutes: number;
   /**
+   * Idle-WORKER coverage (board card b9d479b0): minutes a LIVE worker may sit idle (`busy=false`) with
+   * its task still unreported before IdleWatcher RE-nudges its manager (reusing the same reconciled
+   * notifyManagerOfIdleWorker nudge the worker's own busy→false edge already fires once). Closes the
+   * two-path asymmetry where an idle, unreported worker was watched by NOBODY — BusyWorkerWatcher only
+   * covers `busy=true` workers, and a manager whose only live worker was idle used to be silently skipped
+   * by the idle-manager predicate too. Sibling of `idleNudgeMinutes`; default 45 (same default); 0 disables.
+   */
+  idleWorkerMinutes: number;
+  /**
    * Busy-worker LONG-TURN advisory: minutes a LIVE worker may sit `busy` in a SINGLE uninterrupted turn
    * (no turn boundary → `lastActivity` not advancing, since `setBusy` re-stamps it on every turn edge)
    * before the BusyWorkerWatcher surfaces it to the OWNING MANAGER as an informational heads-up (a
@@ -548,7 +557,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3 },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -892,6 +901,8 @@ export function resolveConfig(
       idleNudgeMinutes: override.orchestration?.idleNudgeMinutes ?? envIdle ?? d.orchestration.idleNudgeMinutes,
       maxUnansweredNudges: override.orchestration?.maxUnansweredNudges ?? d.orchestration.maxUnansweredNudges,
       idleDefaultSnoozeMinutes: override.orchestration?.idleDefaultSnoozeMinutes ?? d.orchestration.idleDefaultSnoozeMinutes,
+      // `??` (not `||`) so an explicit 0 (disables the idle-worker watcher) survives the merge.
+      idleWorkerMinutes: override.orchestration?.idleWorkerMinutes ?? d.orchestration.idleWorkerMinutes,
       // `??` (not `||`) so an explicit 0 (disables the watcher) survives the merge.
       stuckWorkerMinutes: override.orchestration?.stuckWorkerMinutes ?? d.orchestration.stuckWorkerMinutes,
       // Crash-recovery auto-resume cap (0 disables the watcher). `??` so an explicit 0 survives.

@@ -114,6 +114,8 @@ const orchestrationOverride = z.object({
   idleNudgeMinutes: z.number().int().min(0).optional(),
   maxUnansweredNudges: z.number().int().min(0).optional(),
   idleDefaultSnoozeMinutes: z.number().int().min(0).optional(),
+  // Idle-WORKER re-nudge window (whole minutes; 0 disables). Same 0-floor rationale as above.
+  idleWorkerMinutes: z.number().int().min(0).optional(),
   // Busy-worker stuck window (whole minutes; 0 disables the watcher). Same 0-floor rationale as above.
   stuckWorkerMinutes: z.number().int().min(0).optional(),
   // Crash-recovery auto-resume cap (whole number; 0 disables the watcher, serves as enable + cap). A

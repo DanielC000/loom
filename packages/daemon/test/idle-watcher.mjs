@@ -22,7 +22,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const NOW = new Date("2026-06-03T12:00:00.000Z");
 const minutesAgo = (m) => new Date(NOW.getTime() - m * 60_000).toISOString();
 
-function makeEnv({ recycleRatio = 0.8, projectConfig = {} } = {}) {
+function makeEnv({ recycleRatio = 0.8, projectConfig = {}, isWorkerStranded = () => true } = {}) {
   const dbFile = path.join(os.tmpdir(), `loom-idle-w-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const projId = `ip-${Math.random().toString(36).slice(2, 8)}`;
@@ -37,8 +37,17 @@ function makeEnv({ recycleRatio = 0.8, projectConfig = {} } = {}) {
     enqueueStdin: (id, text) => { enqueued.push({ id, text }); return { delivered: true }; },
   };
   const control = new OrchestrationControl();
-  const watcher = new IdleWatcher({ db, pty, control, recycleRatio });
-  return { dbFile, db, projId, agentId, alive, enqueued, control, watcher };
+  // Recording stub for the idle-WORKER coverage (board card b9d479b0) — a unit-level double, NOT the real
+  // SessionService.notifyManagerOfIdleWorker reconciliation (that integration is covered end-to-end in
+  // idle-worker-watcher.mjs). Here we only assert the WATCHER's own gating (staleness/cadence/disable/pause).
+  const idleWorkerNudges = [];
+  const notifyIdleWorker = (id) => { idleWorkerNudges.push(id); };
+  // CR blocker #2 fold-in: isWorkerStranded single-sources SessionService.isWorkerGenuinelyStranded for the
+  // manager-loop message. Defaults to `true` (every live idle worker counts as stranded) so pre-existing
+  // tests that don't care about this narrowing are unaffected; per-test overrides exercise the narrowing
+  // itself (see (5d)/(5e) below) — the REAL predicate is exercised end-to-end in idle-worker-watcher.mjs.
+  const watcher = new IdleWatcher({ db, pty, control, recycleRatio, notifyIdleWorker, isWorkerStranded });
+  return { dbFile, db, projId, agentId, alive, enqueued, control, watcher, idleWorkerNudges };
 }
 
 // Seed a manager. Defaults make it eligible to nudge (idle 60m, not busy, no ctx pressure, live).
@@ -51,14 +60,18 @@ function seedManager(e, id, { idleMin = 60, busy = false, model = null, ctx = nu
   });
   if (live) e.alive.add(id);
 }
-function seedWorker(e, id, parentId, { live = true } = {}) {
-  const now = NOW.toISOString();
+function seedWorker(e, id, parentId, { live = true, busy = false, idleMin = 0 } = {}) {
   e.db.insertSession({
     id, projectId: e.projId, agentId: e.agentId, engineSessionId: "eng-" + id, title: null, cwd: e.projId,
-    processState: live ? "live" : "exited", resumability: "resumable", busy: false,
-    createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: parentId, taskId: "tk-" + id,
+    processState: live ? "live" : "exited", resumability: "resumable", busy,
+    createdAt: minutesAgo(idleMin), lastActivity: minutesAgo(idleMin), lastError: null, role: "worker", parentSessionId: parentId, taskId: "tk-" + id,
   });
   if (live) e.alive.add(id);
+}
+// The active-lane task a worker's idle-nudge pre-filter checks (tickIdleWorkers / notifyManagerOfIdleWorker
+// both proxy "did it report" off the task's column). columnKey defaults to the board's active lane.
+function seedWorkerTask(e, workerId, columnKey = "in_progress") {
+  e.db.insertTask({ id: "tk-" + workerId, projectId: e.projId, title: "t-" + workerId, body: "", columnKey, position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
 }
 function seedTodo(e, n) {
   for (let i = 0; i < n; i++) {
@@ -281,13 +294,13 @@ function cleanup(e) {
   cleanup(e);
 }
 
-// ============================ (5) SILENT — has a live worker ============================
+// ============================ (5) SILENT — has a live BUSY worker ============================
 {
   const e = makeEnv();
   seedManager(e, "mgr-with-worker");
-  seedWorker(e, "wkr-live", "mgr-with-worker", { live: true });
+  seedWorker(e, "wkr-live", "mgr-with-worker", { live: true, busy: true });
   e.watcher.tick(NOW);
-  check("(5) manager WITH a live worker is NOT nudged (legitimately waiting)", e.enqueued.length === 0);
+  check("(5) manager WITH a live BUSY worker is NOT nudged (legitimately waiting)", e.enqueued.length === 0);
   cleanup(e);
 }
 // ...but an EXITED worker doesn't shield it.
@@ -297,6 +310,55 @@ function cleanup(e) {
   seedWorker(e, "wkr-dead", "mgr-dead-worker", { live: false });
   e.watcher.tick(NOW);
   check("(5b) manager whose only worker EXITED is nudged (no live workers)", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-dead-worker");
+  cleanup(e);
+}
+// ============ (5c) board card b9d479b0 — a live IDLE worker no longer shields the manager ============
+// The two-path asymmetry this card fixes: an idle (busy=false), unreported live worker used to silence
+// the manager's OWN idle nudge (it looked "legitimately waiting"), even though nobody else was watching
+// that worker either — a silent deadlock. Now the manager is still nudged, and — since it genuinely does
+// have a live worker — the message must say so (not falsely claim "no live workers", the exact
+// misleading shape board card 99efaab3 flags).
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-idle-stale-worker");
+  seedWorker(e, "wkr-idle-stale", "mgr-idle-stale-worker", { live: true, busy: false });
+  e.watcher.tick(NOW);
+  check("(5c) manager WITH only an IDLE live worker IS still nudged (nobody else is watching it)",
+    e.enqueued.some((x) => x.id === "mgr-idle-stale-worker"));
+  const msg = e.enqueued.find((x) => x.id === "mgr-idle-stale-worker")?.text ?? "";
+  check("(5c) the nudge says its live worker(s) are ALSO idle — does NOT falsely claim 'no live workers'",
+    /live worker\(s\) are ALSO idle/.test(msg) && !/no live workers/.test(msg));
+  cleanup(e);
+}
+// ======== (5d) CR blocker #2 — a live but NON-stranded worker draws NO "unreported" claim ========
+// A live idle worker that's rate-limited / already reported / parked-ack is NOT stranded — the manager
+// still gets its OWN idle nudge (genuine open cards exist), but the message must not allege "unreported —
+// nobody else watches this" (board card 99efaab3's exact false-alarm shape) NOR falsely say "no live
+// workers" (it has one, just not a stranded one).
+{
+  const e = makeEnv({ isWorkerStranded: () => false });
+  seedManager(e, "mgr-not-stranded");
+  seedWorker(e, "wkr-not-stranded", "mgr-not-stranded", { live: true, busy: false });
+  seedTodo(e, 1); // a genuine open card → nudged regardless of the worker's stranded-ness
+  e.watcher.tick(NOW);
+  const msg = e.enqueued.find((x) => x.id === "mgr-not-stranded")?.text ?? "";
+  check("(5d) manager IS still nudged (genuine open card)", msg.length > 0);
+  check("(5d) the message does NOT claim the worker is 'unreported'/'nobody else watches'", !/unreported/.test(msg) && !/nobody else watches/.test(msg));
+  check("(5d) the message does NOT falsely claim 'no live workers' either (it has one, just not stranded)", !/no live workers/.test(msg));
+  cleanup(e);
+}
+// ======== (5e) CR blocker #2 — a live NON-stranded worker does NOT bypass the held/deferred skip ========
+// board card b9d479b0's held/deferred-skip bypass exists ONLY because a stranded worker is independently
+// actionable. A live worker that ISN'T stranded gives the manager nothing new to act on, so an
+// all-held/deferred board (0 genuinely-actionable cards) must still skip silently, exactly as it would
+// with no live worker at all.
+{
+  const e = makeEnv({ isWorkerStranded: () => false });
+  seedManager(e, "mgr-not-stranded-held-board");
+  seedWorker(e, "wkr-not-stranded-2", "mgr-not-stranded-held-board", { live: true, busy: false });
+  seedTitled(e, "todo", "a held-only card", true, false); // held=true → 0 genuinely-actionable cards
+  e.watcher.tick(NOW);
+  check("(5e) a live NON-stranded worker does NOT bypass the all-held/deferred skip", e.enqueued.length === 0);
   cleanup(e);
 }
 
@@ -352,16 +414,16 @@ function cleanup(e) {
   check("(7b) capped + human-paused → policy unchanged ('watching')", e.db.getIdleNudgeState("mgr-capped-paused")?.policy === "watching");
   cleanup(e);
 }
-// ...and a capped manager with a LIVE worker is NOT escalated (legitimately waiting on the worker).
+// ...and a capped manager with a LIVE BUSY worker is NOT escalated (legitimately waiting on the worker).
 {
   const e = makeEnv();
   seedManager(e, "mgr-capped-worker");
-  seedWorker(e, "wkr-live-2", "mgr-capped-worker", { live: true });
+  seedWorker(e, "wkr-live-2", "mgr-capped-worker", { live: true, busy: true });
   e.db.recordIdleNudge("mgr-capped-worker", minutesAgo(120));
   e.db.recordIdleNudge("mgr-capped-worker", minutesAgo(60)); // at cap (2)
   e.watcher.tick(NOW);
-  check("(7c) capped + live worker → NOT escalated (no idle_escalated event)", e.db.listEvents("mgr-capped-worker").filter((ev) => ev.kind === "idle_escalated").length === 0);
-  check("(7c) capped + live worker → policy unchanged ('watching')", e.db.getIdleNudgeState("mgr-capped-worker")?.policy === "watching");
+  check("(7c) capped + live BUSY worker → NOT escalated (no idle_escalated event)", e.db.listEvents("mgr-capped-worker").filter((ev) => ev.kind === "idle_escalated").length === 0);
+  check("(7c) capped + live BUSY worker → policy unchanged ('watching')", e.db.getIdleNudgeState("mgr-capped-worker")?.policy === "watching");
   cleanup(e);
 }
 
@@ -487,20 +549,90 @@ function cleanup(e) {
   cleanup(e);
 }
 
-// ============================ (14) zod orchestrationOverride accepts the three idle keys ============================
+// ============================ (14) zod orchestrationOverride accepts the four idle keys ============================
 {
-  const full = validateProjectConfigOverride({ orchestration: { idleNudgeMinutes: 10, maxUnansweredNudges: 5, idleDefaultSnoozeMinutes: 90 } });
-  check("(14) REST validator accepts idleNudgeMinutes/maxUnansweredNudges/idleDefaultSnoozeMinutes", full.ok === true);
-  const agent = validateAgentProjectConfigOverride({ orchestration: { idleNudgeMinutes: 10, maxUnansweredNudges: 5, idleDefaultSnoozeMinutes: 90 } });
-  check("(14) agent (loom-platform MCP) validator accepts the three idle keys", agent.ok === true);
+  const full = validateProjectConfigOverride({ orchestration: { idleNudgeMinutes: 10, maxUnansweredNudges: 5, idleDefaultSnoozeMinutes: 90, idleWorkerMinutes: 20 } });
+  check("(14) REST validator accepts idleNudgeMinutes/maxUnansweredNudges/idleDefaultSnoozeMinutes/idleWorkerMinutes", full.ok === true);
+  const agent = validateAgentProjectConfigOverride({ orchestration: { idleNudgeMinutes: 10, maxUnansweredNudges: 5, idleDefaultSnoozeMinutes: 90, idleWorkerMinutes: 20 } });
+  check("(14) agent (loom-platform MCP) validator accepts the four idle keys", agent.ok === true);
   // strictness still intact: an unknown orchestration key is rejected.
   const bad = validateProjectConfigOverride({ orchestration: { bogusKey: 1 } });
   check("(14) .strict() still rejects an unknown orchestration key", bad.ok === false);
   // values flow through unchanged.
-  check("(14) accepted values round-trip on the parsed value", full.ok && full.value.orchestration?.idleNudgeMinutes === 10 && full.value.orchestration?.maxUnansweredNudges === 5);
+  check("(14) accepted values round-trip on the parsed value", full.ok && full.value.orchestration?.idleNudgeMinutes === 10 && full.value.orchestration?.maxUnansweredNudges === 5 && full.value.orchestration?.idleWorkerMinutes === 20);
+}
+
+// ============================ (15) idle-WORKER periodic coverage (board card b9d479b0) ============================
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-15", { busy: true }); // busy manager: isolate assertions to the worker-nudge path
+  seedWorker(e, "wkr-15", "mgr-15", { live: true, busy: false, idleMin: 50 }); // stale 50m > default 45m window
+  seedWorkerTask(e, "wkr-15"); // task tk-wkr-15 stays in the active lane ("in_progress") → unreported
+  e.watcher.tick(NOW);
+  check("(15) a live, idle, unreported worker stale beyond idleWorkerMinutes IS re-nudged", e.idleWorkerNudges.includes("wkr-15"));
+  const s = e.db.getIdleNudgeState("wkr-15");
+  check("(15) the nudge stamps last_idle_nudge_at on the WORKER's own row (paces the re-nudge cadence)", s?.lastIdleNudgeAt === NOW.toISOString());
+  cleanup(e);
+}
+// ...not yet — under the window.
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-15b", { busy: true });
+  seedWorker(e, "wkr-15b", "mgr-15b", { live: true, busy: false, idleMin: 10 }); // 10m < 45m default
+  seedWorkerTask(e, "wkr-15b");
+  e.watcher.tick(NOW);
+  check("(15b) NOT yet — idle for less than idleWorkerMinutes", e.idleWorkerNudges.length === 0);
+  cleanup(e);
+}
+// ...disabled per project.
+{
+  const e = makeEnv({ projectConfig: { orchestration: { idleWorkerMinutes: 0 } } });
+  seedManager(e, "mgr-15c", { busy: true });
+  seedWorker(e, "wkr-15c", "mgr-15c", { live: true, busy: false, idleMin: 999 });
+  seedWorkerTask(e, "wkr-15c");
+  e.watcher.tick(NOW);
+  check("(15c) idleWorkerMinutes=0 disables the idle-worker watcher for that project", e.idleWorkerNudges.length === 0);
+  cleanup(e);
+}
+// ...already reported (task left the active lane) → nothing to nudge.
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-15d", { busy: true });
+  seedWorker(e, "wkr-15d", "mgr-15d", { live: true, busy: false, idleMin: 999 });
+  seedWorkerTask(e, "wkr-15d", "review"); // already moved off the active lane
+  e.watcher.tick(NOW);
+  check("(15d) a worker whose task already left the active lane (reported/merged) is NOT re-nudged", e.idleWorkerNudges.length === 0);
+  cleanup(e);
+}
+// ...human-paused (worker's own scope, or its manager's) → not nudged.
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-15e1", { busy: true });
+  seedWorker(e, "wkr-15e1", "mgr-15e1", { live: true, busy: false, idleMin: 999 });
+  seedWorkerTask(e, "wkr-15e1");
+  e.control.pause("wkr-15e1");
+  seedManager(e, "mgr-15e2", { busy: true });
+  seedWorker(e, "wkr-15e2", "mgr-15e2", { live: true, busy: false, idleMin: 999 });
+  seedWorkerTask(e, "wkr-15e2");
+  e.control.pause("mgr-15e2");
+  e.watcher.tick(NOW);
+  check("(15e) a worker paused in its OWN scope is not re-nudged", !e.idleWorkerNudges.includes("wkr-15e1"));
+  check("(15e) a worker whose MANAGER is paused is not re-nudged either", !e.idleWorkerNudges.includes("wkr-15e2"));
+  cleanup(e);
+}
+// ...cadence: a worker already re-nudged recently doesn't fire again until another full window.
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-15f", { busy: true });
+  seedWorker(e, "wkr-15f", "mgr-15f", { live: true, busy: false, idleMin: 999 }); // long-idle originally
+  seedWorkerTask(e, "wkr-15f");
+  e.db.recordIdleNudge("wkr-15f", minutesAgo(10)); // re-nudged 10m ago (< 45m window)
+  e.watcher.tick(NOW);
+  check("(15f) a worker re-nudged 10m ago is NOT re-nudged again within the leash window", e.idleWorkerNudges.length === 0);
+  cleanup(e);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, worker-free, watching, unpaused, under-cap, context-roomy MANAGER exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); and the zod orchestrationOverride now accepts the three idle config keys (strictness intact)."
+  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, watching, unpaused, under-cap, context-roomy MANAGER (with no live BUSY worker) exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-BUSY-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; a live IDLE worker no longer shields the manager (board card b9d479b0) and the nudge copy reflects that honestly; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); the zod orchestrationOverride now accepts the four idle config keys (strictness intact); and the NEW idle-WORKER periodic coverage re-nudges a live/idle/unreported/stale worker on its own cadence while staying silent when disabled, under the window, already-reported, human-paused, or recently re-nudged."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
