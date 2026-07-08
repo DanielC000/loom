@@ -3470,12 +3470,13 @@ export class SessionService {
    *   `engineSessionId` is captured ONLY on the engine's own SessionStart hook, so `null` here is
    *   definitive proof no turn — not even the kickoff — ever started. A DISTINCT failure, not a "did not
    *   report" stall.
-   * - `parked-ack` — its LATEST `worker_report` (status `progress` OR `done` — CR fold-in: a `done`
-   *   report on a board with no review-role column never moves the task off `active`, so it looks
-   *   identical to a progress-park) has had no `message_worker`/`redirect_worker` event land since (the
-   *   manager hasn't replied yet) — a healthy await-ack park, not a stall. Once the manager DOES reply
-   *   and the worker goes idle again without a fresh report, this no longer holds — a real stall still
-   *   classifies `stranded`, so an acked-then-stalled worker is never silently missed.
+   * - `parked-ack` — its LATEST `worker_report` (status `progress`, `done`, OR `blocked` — CR fold-in: a
+   *   `done` report on a board with no review-role column never moves the task off `active`, so it looks
+   *   identical to a progress-park; a `blocked` report is the same shape — the worker correctly stopped
+   *   and is waiting on its manager, not stalled) has had no `message_worker`/`redirect_worker` event
+   *   land since (the manager hasn't replied yet) — a healthy await-ack park, not a stall. Once the
+   *   manager DOES reply and the worker goes idle again without a fresh report, this no longer holds — a
+   *   real stall still classifies `stranded`, so an acked-then-stalled worker is never silently missed.
    * - `stranded` — genuinely finished a turn, never (usefully) reported, and none of the above apply.
    */
   private classifyIdleWorker(workerSessionId: string):
@@ -3502,7 +3503,7 @@ export class SessionService {
     const lastReport = lastReportIdx !== -1 ? events[lastReportIdx] : undefined;
     const status = lastReport?.detail?.status as string | undefined;
     const ackedSince = !!lastReport && events.slice(lastReportIdx + 1).some((e) => e.kind === "message_worker" || e.kind === "redirect_worker");
-    if (lastReport && (status === "progress" || status === "done") && !ackedSince) {
+    if (lastReport && (status === "progress" || status === "done" || status === "blocked") && !ackedSince) {
       return { kind: "parked-ack", status: status! };
     }
     return { kind: "stranded" };

@@ -190,6 +190,44 @@ function cleanup(e) {
   cleanup(e2);
 }
 
+// ============ (e) blocked-and-parked worker → NO false 'did NOT call worker_report' nudge ============
+// Sibling of (d2)/(d1): a worker that correctly reported `blocked` and is parked awaiting its manager's
+// reply must be suppressed by classifyIdleWorker's parked-ack branch exactly like progress/done, not
+// treated as a silent stall (the bug this task fixes). Board has NO parked-role column so the blocked
+// report's task move is a no-op and the task stays in the active lane — mirroring the existing
+// done+no-review-lane precedent in classifyIdleWorker's doc comment, but for blocked+no-parked-lane.
+{
+  const e = makeEnv();
+  e.db.setProjectConfig(e.projId, { kanbanColumns: [
+    { key: "todo", label: "To Do", role: "workReady" },
+    { key: "in_progress", label: "In Progress", role: "active" },
+    { key: "done", label: "Done", role: "terminal" },
+  ] });
+  seedManager(e, "mgr-e", { busy: false, idleMin: 60 });
+  seedTask(e, "tk-e", "in_progress");
+  seedWorker(e, "wkr-e", "mgr-e", "tk-e", { idleMin: 60 });
+  await e.sessions.workerReport("wkr-e", { status: "blocked", summary: "need a decision", needs: "manager input" });
+  e.enqueued.length = 0; // isolate to the idle-tick assertions below
+  e.watcher.tick(NOW);
+
+  check("(e) NO false 'did NOT call worker_report' periodic nudge for the blocked-and-parked worker",
+    !e.enqueued.some((x) => x.id === "mgr-e" && /did NOT call worker_report/.test(x.text)));
+  const parkedAckNudge = e.enqueued.find((x) => x.id === "mgr-e" && /worker-idle/.test(x.text) && /parked awaiting your reply/.test(x.text));
+  check("(e) the periodic path instead sends the parked-awaiting-reply nudge (classified parked-ack)", !!parkedAckNudge);
+  const managerMsg = e.enqueued.find((x) => x.id === "mgr-e" && x.text.startsWith("[loom:idle]"))?.text ?? "";
+  check("(e) precondition: the manager's OWN idle nudge DOES fire (a message was actually queued)", managerMsg.length > 0);
+  check("(e) manager idle message does NOT claim 'unreported'/'nobody else watches' for the blocked worker",
+    !/unreported/.test(managerMsg) && !/nobody else watches/.test(managerMsg));
+
+  // Positive control: a genuinely-unreported SIBLING worker (same manager, same board) still nudges normally.
+  seedTask(e, "tk-e2", "in_progress");
+  seedWorker(e, "wkr-e2", "mgr-e", "tk-e2", { idleMin: 60 });
+  e.watcher.tick(NOW);
+  const genuineNudge = e.enqueued.find((x) => x.id === "mgr-e" && /did NOT call worker_report/.test(x.text) && /wkr-e2/.test(x.text));
+  check("(e) a sibling genuinely-unreported worker still nudges normally (no regression)", !!genuineNudge);
+  cleanup(e);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — an idle manager with a sole idle/stale/unreported live worker gets nudged from BOTH sides (its own idle nudge no longer silenced by a live-but-idle worker, plus the new periodic idle-worker nudge); and the periodic idle-worker path, wired to the REAL SessionService.notifyManagerOfIdleWorker, respects the queued-report guard exactly like the busy→false edge nudge does — no re-implemented reconciliation, no reintroduced false alarm."
   : `\n❌ ${failures} FAILURE(S).`);
