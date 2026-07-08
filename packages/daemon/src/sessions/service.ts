@@ -3359,7 +3359,14 @@ export class SessionService {
           managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "stop_worker",
           detail: { reason: "no-commit-auto-retire" },
         });
-        this.pty.stop(workerSessionId, "graceful");
+        // Deferred so THIS tool call's own MCP response (worker_report's reply, still in flight over the
+        // MCP transport back to the worker's CLI) flushes BEFORE the pty's Ctrl-C×2 lands — mirrors
+        // endMe's / recycleManager's close-after-delay (:4285 / :3765). Undeferred, the graceful-stop's
+        // immediate \x03 raced the in-flight tool response and could interrupt the worker's OWN
+        // worker_report turn, surfacing a false "[Request interrupted]" on a report that already
+        // succeeded (card f46f4b0d). The DB retire above stays synchronous — the concurrency slot still
+        // frees deterministically; only the pty write is delayed.
+        setTimeout(() => { try { this.pty.stop(workerSessionId, "graceful"); } catch { /* already gone */ } }, 3000);
       } catch { /* never let auto-retire disturb the already-recorded report */ }
     }
 

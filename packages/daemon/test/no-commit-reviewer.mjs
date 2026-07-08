@@ -19,6 +19,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (C) NORMAL worker WITH a real commit: clean done — no warning, not auto-retired, stays live (the
 //       normal merge path owns retirement) — proving auto-retire keys off noCommit AND 0-ahead, never
 //       "0 commits" or name-matching alone.
+//   (D) DEFERRED pty.stop (card f46f4b0d): the auto-retire's graceful pty.stop must NOT fire in the same
+//       tick as workerReport()'s return — an immediate Ctrl-C races the worker_report tool call's own
+//       MCP response still flushing back to the worker's CLI and can surface a false "[Request
+//       interrupted]" on a report that already succeeded. Proves pty.stop is un-called immediately after
+//       workerReport() resolves, then IS called (graceful, this worker's id) once the defer window
+//       elapses — mirroring endMe's / recycleManager's already-established close-after-delay pattern.
 // Run: 1) build daemon (pnpm build), 2) node test/no-commit-reviewer.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -41,8 +47,10 @@ const now = new Date().toISOString();
 const db = new Db();
 // workerReport touches pty.enqueueStdin (manager notification) and, on the auto-retire path, pty.stop.
 // A stub keeps it hermetic; the DETERMINISTIC slot-free is db.setProcessState (auto-retire does it
-// itself), so the live-worker count is observable from the Db with no real pty.
-const ptyStub = { enqueueStdin() { return { delivered: true }; }, stop() { /* no live pty in-process */ } };
+// itself), so the live-worker count is observable from the Db with no real pty. Records each stop()
+// call (id/mode/timestamp) so (D) below can prove it's DEFERRED, not fired synchronously.
+const ptyStopCalls = [];
+const ptyStub = { enqueueStdin() { return { delivered: true }; }, stop(id, mode) { ptyStopCalls.push({ id, mode, at: Date.now() }); } };
 const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
 
 // EXACTLY what spawnWorker's maxConcurrentWorkers cap check counts (live workers under the manager).
@@ -92,6 +100,9 @@ try {
   await build(R, { noCommit: true, commit: false });
   check("(R setup) reviewer is at cap (1 live worker = maxConcurrentWorkers)", liveWorkerCount(R.mgrId) === 1);
   const rR = await sessions.workerReport(R.workerId, { status: "done", summary: "review complete — no findings" });
+  // (D) pty.stop must not have fired yet — it's deferred so this call's own MCP response (rR) flushes
+  // back to the worker's CLI first, instead of racing an immediate Ctrl-C against the in-flight reply.
+  check("(D) no-commit reviewer done: pty.stop NOT called synchronously (deferred, not immediate)", ptyStopCalls.length === 0);
   check("(R) no-commit reviewer done: reported:true, NOT refused", rR.reported === true && !rR.refused);
   check("(R) no-commit reviewer done: 'forgot to commit' warning SUPPRESSED (absent)", rR.warning === undefined);
   check("(R) no-commit reviewer done: flagged autoRetired:true", rR.autoRetired === true);
@@ -105,6 +116,10 @@ try {
     const ev = db.listEvents(R.mgrId).find((e) => e.kind === "worker_report");
     return ev && ev.detail && ev.detail.warning === undefined;
   })());
+  // (D) now wait past the defer window and confirm the graceful stop DOES land — deferred, not skipped.
+  await new Promise((resolve) => setTimeout(resolve, 3300));
+  check("(D) no-commit reviewer done: pty.stop DOES fire once the defer window elapses (graceful, this worker)",
+    ptyStopCalls.length === 1 && ptyStopCalls[0].id === R.workerId && ptyStopCalls[0].mode === "graceful");
 
   // ── (N) NORMAL worker, 0-ahead: warning STILL emitted + NOT auto-retired (THE REGRESSION GUARD) ───
   await build(N, { noCommit: false, commit: false });
@@ -132,6 +147,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a declared no-commit worker auto-retires (cap slot freed, no worker_stop) + the warning is suppressed; a NORMAL 0-commit worker still warns + stays live (safety net intact)."
+  ? "\n✅ ALL PASS — a declared no-commit worker auto-retires (cap slot freed, no worker_stop) + the warning is suppressed; a NORMAL 0-commit worker still warns + stays live (safety net intact); the graceful pty.stop is deferred so the worker's own report reply flushes before its Ctrl-C lands."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
