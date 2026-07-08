@@ -3,12 +3,17 @@ import { resolveConfig, contextWindowForModel, columnKeyForRole } from "@loom/sh
 import type { OrchestrationEventKind } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
+import type { QueueSource, TurnRoute, QueuedMessageKind } from "../pty/host.js";
 
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
 export interface IdlePty {
   isAlive(sessionId: string): boolean;
-  /** Nudge text into the session's busy-gated queue (waits if the manager is mid-turn). */
-  enqueueStdin(sessionId: string, text: string): { delivered: boolean; position?: number };
+  /**
+   * Nudge text into the session's busy-gated queue (waits if the target is mid-turn). `source`/`route`/
+   * `kind` mirror PtyHost.enqueueStdin's own optional tail — the answered-stuck watchdog passes
+   * `kind:"agent"` so its re-nudge drains as a distinct one-per-turn message, not a coalesced warning.
+   */
+  enqueueStdin(sessionId: string, text: string, source?: QueueSource, onDeliver?: () => void, route?: TurnRoute, kind?: QueuedMessageKind): { delivered: boolean; position?: number };
 }
 
 export interface IdleWatcherDeps {
@@ -58,6 +63,18 @@ const ORCH_ACTIVITY_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<Orchest
 ]);
 
 /**
+ * Answered-stuck-question re-nudge window (manager→human decision inbox, follow-up to card 8701bdbb):
+ * a `questions` row the human answered but the asking manager never `question_pull`ed past this many
+ * minutes gets ONE re-nudge (see tickAnsweredStuckQuestions below). A clear new constant rather than a
+ * per-project config key — the human has ALREADY acted here; this only paces how long we wait before
+ * nagging the manager to go check its own inbox, so it doesn't need the same per-project tuning surface
+ * as idleNudgeMinutes/idleWorkerMinutes. Shorter than the 45min idle-manager default: the human is the
+ * one left waiting on an answer it already gave, so this should nag sooner than a manager that's merely
+ * idle with no one waiting on it.
+ */
+const ANSWERED_QUESTION_STUCK_MINUTES = 15;
+
+/**
  * Asleep-at-the-Wheel watcher (idle-manager watchdog). Structural twin of ContextWatcher: each tick,
  * for every LIVE manager that is idle (`busy=false` + `lastActivity` older than the project's
  * `idleNudgeMinutes`) with NO live workers, it injects a ONE-TIME-per-episode busy-gated nudge asking
@@ -90,6 +107,12 @@ const ORCH_ACTIVITY_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<Orchest
  */
 export class IdleWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Answered-stuck-question storm guard: tracks question ids already re-nudged this answered→still-
+   * answered window (no schema change — see tickAnsweredStuckQuestions). A daemon restart clears this,
+   * re-nudging once more; benign, since that's rare and one extra manager nudge is harmless.
+   */
+  private nudgedAnsweredQuestions = new Set<string>();
   constructor(private deps: IdleWatcherDeps) {}
 
   tick(now: Date = new Date()): void {
@@ -240,6 +263,48 @@ export class IdleWatcher {
     }
 
     this.tickIdleWorkers(nowMs, nowIso);
+    this.tickAnsweredStuckQuestions(nowMs);
+  }
+
+  /**
+   * Answered-stuck-question watchdog (follow-up to card 8701bdbb): a `questions` row the human answered
+   * (`POST /api/questions/:id/answer`) but the asking manager never `question_pull`ed, stuck past
+   * ANSWERED_QUESTION_STUCK_MINUTES, re-nudges that MANAGER — never the human, who already answered and
+   * would only see noise. Skips silently when the asking session isn't a live manager, is human-paused,
+   * is rate-limited/parked (it'll auto-resume on its own), or has itself flagged non-'watching' via
+   * idle_report (waiting/blocked_human/escalated) — reusing the SAME idle-nudge-state policy the manager
+   * idle loop above reads, so a manager legitimately not watching its inbox right now isn't nagged twice.
+   * Nudged EXACTLY ONCE per answered→still-answered window via the in-memory `nudgedAnsweredQuestions`
+   * Set (no schema change): pruned the moment a question leaves 'answered' (pulled/consumed), so the Set
+   * stays bounded and a hypothetical future re-answer of the same id isn't silenced by a stale entry.
+   */
+  private tickAnsweredStuckQuestions(nowMs: number): void {
+    const { db, pty, control } = this.deps;
+
+    for (const id of this.nudgedAnsweredQuestions) {
+      const q = db.getQuestion(id);
+      if (!q || q.state !== "answered") this.nudgedAnsweredQuestions.delete(id);
+    }
+
+    const beforeIso = new Date(nowMs - ANSWERED_QUESTION_STUCK_MINUTES * 60_000).toISOString();
+    for (const q of db.listAnsweredStuckQuestions(beforeIso)) {
+      if (this.nudgedAnsweredQuestions.has(q.id)) continue; // already nudged this window
+
+      const m = db.getSession(q.sessionId);
+      if (!m || m.role !== "manager" || m.processState !== "live") continue; // asking session isn't a live manager
+      if (!pty.isAlive(m.id)) continue;
+      if (control.isPaused(m.id)) continue; // human-paused (own scope or global)
+      if (m.rateLimitedUntil && Date.parse(m.rateLimitedUntil) > nowMs) continue; // rate-limited/parked
+
+      const state = db.getIdleNudgeState(m.id);
+      if (state && state.policy !== "watching") continue; // manager itself flagged waiting/suppressed
+
+      const msg = `[loom:answered-stuck] Your decision "${q.title}" was answered a while ago but you haven't pulled it — call question_pull to fetch it.`;
+      try { pty.enqueueStdin(m.id, msg, "system", undefined, undefined, "agent"); } catch { /* manager not live */ }
+      this.nudgedAnsweredQuestions.add(q.id);
+      // eslint-disable-next-line no-console
+      console.log(`[idle-watcher] re-nudged manager ${m.id} for answered-but-unpulled question ${q.id}`);
+    }
   }
 
   /**

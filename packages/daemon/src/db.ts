@@ -3519,6 +3519,15 @@ export class Db {
     return this.getQuestion(id);
   }
   /**
+   * Every 'answered' question stuck (not yet `question_pull`ed) with `answeredAt <= beforeIso` — the
+   * answered-stuck watchdog's (IdleWatcher.tickAnsweredStuckQuestions) work set: the human already
+   * answered, but the asking manager hasn't pulled it. Oldest-first.
+   */
+  listAnsweredStuckQuestions(beforeIso: string): Question[] {
+    return (this.db.prepare("SELECT * FROM questions WHERE state = 'answered' AND answered_at <= ? ORDER BY answered_at")
+      .all(beforeIso) as Row[]).map(toQuestion);
+  }
+  /**
    * The manager-only pull/consume: atomically reads every 'answered' question for `sessionId` and flips
    * them to 'consumed' in the SAME transaction, so a concurrent pull can never double-consume the same
    * row. Returns the questions AS THEY WERE when answered (pre-flip) — the manager's payload.
