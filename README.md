@@ -10,7 +10,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/images/hero.png" alt="Loom's Mission Control: a lead agent and three worker sessions on isolated git branches with live context meters, an attention queue with a merge awaiting review, and a real-time activity feed — one phosphor-on-dark cockpit." width="100%" /> </p>
+  <img src="docs/images/hero.png" alt="Loom's Mission Control: live agent fleets across two projects on isolated git branches with context meters, a review queue holding a merge awaiting approval, and a real-time activity feed — one phosphor-on-dark cockpit." width="100%" /> </p>
 
 Loom orchestrates the **real interactive `claude`** — the same terminal session you'd run by hand, driven over a PTY, never a headless `claude -p` one-shot or an API-key agent loop. Because every agent is a genuine `claude` session, a whole fleet of them runs on your **existing Claude subscription (Pro/Max)** — there's no separate per-token API bill for the orchestration the way there is with tools that drive the Anthropic API directly. (To be precise: the agents still consume your subscription's usage and live within its rate limits — Loom rides the plan you already pay for, it doesn't make Claude free.)
 
@@ -40,6 +40,11 @@ Those sessions are durable: they're owned by a daemon on your machine, so closin
   first run and stays one click away (the **Platform** page). It helps you create, configure, and archive your projects, agents, and profiles, pick your skills and workflow, and can set them up on your behalf — confirming the big moves first, on a deliberately narrow, safe tool surface.
 - **🔎 Suggest-only Workspace Auditor.** A read-only reviewer scans your own recent sessions for vague or
   ambiguous instructions in *your* agent prompts and skills, and for prompts you type repeatedly that are worth saving as one-click presets — then files improvement suggestions as cards on your board. It never changes anything itself. Run it on demand ("Review my workspace" on the Platform page) or on a schedule.
+- **🧩 Editable skills, injected per session.** Loom ships a curated set of skills and mirrors them into every session as project-local skills that **shadow your personal `~/.claude/skills`**. A built-in editor lets you read, edit, create, reset, and three-way-merge Loom's shipped updates into your own edits — changes take effect on the next session spawn.
+- **🛰️ Agents as authenticated API endpoints (Agent Runs).** Flag a project agent as an endpoint, mint a scoped API key with concurrency, token, and spend caps, then trigger structured async runs over `POST /api/runs`. The Runs page shows every run's input, result, usage, and retained transcript, with a per-key kill-switch that cancels in-flight runs.
+- **🔑 Connections — bound credentials the agent never sees.** Store a credential once (say a GitHub token), encrypted at rest; a session's profile allowlists which connections it may use, and the agent reaches the API through Loom without the secret ever entering its context. Write-only and human-managed — there is no agent path to read, create, or bind one.
+- **⏱️ A built-in cron scheduler.** Run a manager — or the Workspace Auditor — on a cron cadence; each fire boots a real interactive session against the agent you pick, behind concurrency and usage-limit gates. Off by default; enable it in Settings.
+- **📄 Opt-in document conversion.** Grant a worker profile a markitdown MCP and its sessions can convert PDFs, Office files, images, and HTML to Markdown — useful for research and document-heavy work. Off by default, human-enabled per profile.
 
 ## Quick start
 
@@ -149,6 +154,16 @@ A single local **daemon** owns everything durable — the sessions, the PTY host
 
 Give a **lead** agent a goal and it decomposes the goal into tasks, spawns **workers** — each on its own worktree branch, each driving a real Claude Code session — then reviews each diff, merges what passes, and keeps the vault and board versioned alongside the code. Plan, delegate, review, merge.
 
+A run, end to end:
+
+1. **You hand a lead a goal** — say *"add rate-limit middleware and cover it with tests."*
+2. **It decomposes the goal** into cards on the project board and **delegates** each to a worker spawned on its own git worktree branch.
+3. **Workers build in parallel** — each drives a real `claude` session, commits to its branch, and reports back up when it's done or blocked.
+4. **The lead reviews each diff** and merges what passes through a build gate; a failing gate bounces the card back to the worker instead of merging.
+5. **The board and vault stay versioned** with the code, so the whole run stays legible after the fact.
+
+You watch it live in **Mission Control** — the fleet, context meters, an activity feed, and an attention queue that surfaces a merge the moment it needs your review.
+
 <p align="center">
   <img src="docs/images/architecture.svg" alt="Loom architecture: a loopback daemon owning SQLite, the PTY host, the HTTP/WS gateway, git, and the vault, with a stateless web viewport attaching over WebSockets and a lead agent orchestrating worker sessions on isolated branches." width="100%" /> </p>
 
@@ -175,6 +190,18 @@ You set it up and run it from a single **Companion** page: chat on one side; con
 
 <p align="center">
   <img src="docs/images/screenshot-terminal.png" alt="A live Loom session terminal: the real interactive claude running in a daemon-owned PTY, attached over a WebSocket." width="100%" /> <br /> <em>A live session terminal — the real interactive <code>claude</code>, attached over a WebSocket.</em> </p>
+
+<p align="center">
+  <img src="docs/images/screenshot-companion.png" alt="Loom's Companion page: a chat with a long-lived personal agent, on the same daemon-owned real-claude runtime, reachable over Telegram or in-app web chat." width="100%" /> <br /> <em>The Companion — chat with a long-lived personal agent over Telegram or in-app web chat, on the same durable runtime.</em> </p>
+
+<p align="center">
+  <img src="docs/images/screenshot-skills.png" alt="Loom's Skills page: the editable skill store, showing a SKILL.md open in the editor with save, reset, and adopt-update controls." width="100%" /> <br /> <em>The editable skill store — read, edit, and three-way-merge Loom's shipped skills; changes apply on the next session spawn.</em> </p>
+
+<p align="center">
+  <img src="docs/images/screenshot-platform.png" alt="Loom's Platform page: the standing Platform operator and the suggest-only Workspace Auditor, with the auditor's run-on-a-schedule control." width="100%" /> <br /> <em>The Platform operator and suggest-only Workspace Auditor — set up your workspace and review your own sessions, on a deliberately narrow tool surface.</em> </p>
+
+<p align="center">
+  <img src="docs/images/screenshot-projects.png" alt="Loom's Projects page: the list of projects with live-session dots, a selected project's repo and vault, its agents, and an agent's editable startup prompt." width="100%" /> <br /> <em>The Projects page — create and manage projects and their agents, each agent carrying an editable startup prompt injected as its first turn.</em> </p>
 
 ## Docs & links
 
