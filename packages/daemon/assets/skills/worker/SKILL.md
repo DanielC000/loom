@@ -166,7 +166,13 @@ tool you call); board reads are `mcp__loom-tasks__tasks_get` / `tasks_list`. Loa
   even worse — the assigned branch stays empty so the gate has nothing to merge, and a later main sync can
   **orphan that commit and lose it for good**. Uncommitted work is just as invisible — the gate sees
   `filesChanged:0` and bounces the task back, wasting a round-trip. So: commit to the assigned branch
-  and report the SHA before you report `done`. Don't merge — your manager reviews the branch and
+  and report the SHA before you report `done`. **The exception is a legitimately no-op task** — a
+  verification-only assignment, or one whose correct outcome is that nothing needed changing. There,
+  report `done` with **no commit** and say so plainly (what you verified, and that the right result is
+  zero files changed); **don't fabricate an empty or throwaway commit just to satisfy the gate**. A real
+  no-op `done` is valid — your manager handles a `filesChanged:0` report. This is distinct from the trap
+  above: a no-op is *you confirmed there was nothing to change*, not *you did work and forgot to commit
+  it* — make which one it is unmistakable in your report. Don't merge — your manager reviews the branch and
   merges through the gate. **Write any commit you author in Conventional Commits form** —
   `type(scope): summary` (lowercase type, imperative, no trailing period). Allowed types: `feat, fix,
   docs, style, refactor, perf, test, build, ci, chore, revert`. **The scope is REQUIRED** — use one from
@@ -174,7 +180,13 @@ tool you call); board reads are `mcp__loom-tasks__tasks_get` / `tasks_list`. Loa
   scopeless is fine only for a project with no meaningful code subdivisions. (Your branch is
   squash-merged under the card title, but keep your own commits conventional + scoped too.)
 - **`blocked`** — with `needs`: the specific decision, access, or information you're waiting on.
-- **`progress`** — an optional checkpoint on a long task.
+- **`progress`** — an optional checkpoint on a long task. **Also use it when your own turn is done but a
+  background child you spawned is still outstanding.** A worker that kicks off a background sub-agent (or
+  any task that re-invokes you on completion) and then goes silently idle — a bare `ScheduleWakeup`, no
+  report — is **indistinguishable from a wedge** to your manager. So don't idle silently on a pending
+  child: `worker_report progress` naming what you're waiting on and that you're parked awaiting it, so
+  your idle reads as *waiting*, not *stalled*. Then let the child's completion re-invoke you, read its
+  result, and report `done` (or `blocked`).
 
 You **receive** direction via `worker_message`. Act on it, then report again. There is **no mid-turn way
 to check for newer direction** — `my_context` returns only your context `pct`, and a message queued while
