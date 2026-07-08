@@ -195,6 +195,10 @@ function ConfigEditor({ project }: { project: Project }) {
   const [idleSnooze, setIdleSnooze] = useState(numStr(ov.orchestration?.idleDefaultSnoozeMinutes));
   const [scheduler, setScheduler] = useState(triStr(ov.orchestration?.schedulerEnabled));
   const [docLint, setDocLint] = useState(triStr(ov.docLint));
+  // Opt-in Deja capture hook (card b3bd4841) — a per-project HUMAN-ONLY toggle (dropped from the agent
+  // config schema, like sessionEnv), so it round-trips ONLY through this REST PATCH (the full validator),
+  // never an agent write. Sibling of docLint: another PostToolUse(Write|Edit) hook, off by default.
+  const [dejaCapture, setDejaCapture] = useState(triStr(ov.dejaCapture));
   // Human-only base-Python override for the shared venv (document conversion). Like gateCommand it points
   // at a host executable, so the AGENT config validator rejects it — only this REST path accepts it. Blank
   // inherits PATH discovery (python3 → python → py -3).
@@ -239,6 +243,7 @@ function ConfigEditor({ project }: { project: Project }) {
     if (Object.keys(orch).length) o.orchestration = orch; else delete o.orchestration;
 
     if (docLint !== "inherit") o.docLint = docLint === "true"; else delete o.docLint;
+    if (dejaCapture !== "inherit") o.dejaCapture = dejaCapture === "true"; else delete o.dejaCapture;
 
     // python.interpreterPath: set when non-blank, else drop the key (and the now-empty python block) so a
     // blank field inherits PATH discovery rather than persisting an empty override.
@@ -336,6 +341,15 @@ function ConfigEditor({ project }: { project: Project }) {
         <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 280 }}>
           <span style={fieldLabel}>Vault-lint hook on .md writes</span>
           <TriSelect value={docLint} set={setDocLint} def={defaults.docLint} />
+        </label>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Deja Capture</SectionLabel>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 280 }}>
+          <span style={fieldLabel}>Ingest agent-written mockups into Deja</span>
+          <TriSelect value={dejaCapture} set={setDejaCapture} def={defaults.dejaCapture} />
+          <Hint>opt-in: a PostToolUse hook auto-ingests an agent-authored .html mockup into Deja with the driving prompt as origin_prompt · off by default</Hint>
         </label>
       </Panel>
 
