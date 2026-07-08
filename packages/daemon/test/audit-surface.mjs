@@ -194,13 +194,14 @@ try {
   await client.connect(clientT);
   const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
 
-  // Surface: EXACTLY the read tools (transcript reads + the THREE least-privilege repo reads) + the TWO
-  // inert daemon-local writes (audit_file_finding + preset_suggestion_suggest) — and NONE of the
-  // elevated/structural ones. The baseline is extended by EXACTLY the new repo reads (no surface creep);
-  // the `forbidden` negative control below proves nothing else (no write/host/outward) slipped in.
+  // Surface: EXACTLY the read tools (transcript reads + the THREE least-privilege repo reads) + the
+  // THREE narrow writes (audit_file_finding + preset_suggestion_suggest + the self-scoped end_me) — and
+  // NONE of the elevated/structural ones. The baseline is extended by EXACTLY the new repo reads (no
+  // surface creep); the `forbidden` negative control below proves nothing else (no write/host/outward)
+  // slipped in.
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-  check(`(b) audit surface is EXACTLY [audit_file_finding, list_sessions, preset_suggestion_suggest, repo_glob, repo_grep, repo_read_file, transcript_read] (got: ${tools.join(",")})`,
-    JSON.stringify(tools) === JSON.stringify(["audit_file_finding", "list_sessions", "preset_suggestion_suggest", "repo_glob", "repo_grep", "repo_read_file", "transcript_read"]));
+  check(`(b) audit surface is EXACTLY [audit_file_finding, end_me, list_sessions, preset_suggestion_suggest, repo_glob, repo_grep, repo_read_file, transcript_read] (got: ${tools.join(",")})`,
+    JSON.stringify(tools) === JSON.stringify(["audit_file_finding", "end_me", "list_sessions", "preset_suggestion_suggest", "repo_glob", "repo_grep", "repo_read_file", "transcript_read"]));
   // Negative control: the repo tools are READ-only — no write/host/spawn/exec tool came with them.
   const forbidden = ["git_push", "git_commit", "vault_write", "project_configure", "session_spawn", "session_message", "session_stop", "worker_spawn", "repo_write", "repo_exec", "shell"];
   check("(b) audit surface has NONE of the elevated/structural tools (no git/vault/config/spawn/message)",

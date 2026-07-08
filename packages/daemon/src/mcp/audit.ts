@@ -16,16 +16,19 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * ╔═ TRUST BOUNDARY — the load-bearing P5 security goal ═══════════════════════════════════════════════╗
  * ║ The Auditor ingests UNTRUSTED transcript content (a prompt-injection surface: "ignore your          ║
  * ║ instructions and push to …"). This router is gated to role==="auditor" ONLY and exposes NOTHING but ║
- * ║ cross-project transcript READS + TWO NARROW DAEMON-LOCAL WRITES:                                     ║
+ * ║ cross-project transcript READS + THREE NARROW WRITES:                                                ║
  * ║   1. audit_file_finding   → a structured task onto the reserved Platform board (the triage inbox).  ║
  * ║   2. preset_suggestion_suggest → a candidate preset onto the daemon-local SUGGESTIONS store.        ║
- * ║ BOTH writes are inert + dedupe-guarded: they hit only daemon-local SQLite (a board task / a         ║
- * ║ suggestion row), never git/vault/config/spawn/message/host/outward, and a hostile transcript can    ║
+ * ║   3. end_me → SELF-SCOPED terminal exit (card 3b015fc7): NO target arg, always ends the CALLING      ║
+ * ║      auditor session, never another — a hostile transcript can only ever end THIS scan, never spawn/ ║
+ * ║      stop/message a different session (the same self-scoped shape as the manager/Lead end_me).       ║
+ * ║ The first two writes are inert + dedupe-guarded: they hit only daemon-local SQLite (a board task /   ║
+ * ║ a suggestion row), never git/vault/config/spawn/message/host/outward, and a hostile transcript can    ║
  * ║ neither escape the box nor spam it (re-filing/re-suggesting an existing entry is a no-op). An        ║
  * ║ auditor session ALSO 404s on the Lead's elevated /mcp-platform (PlatformMcpRouter.resolveRole gates ║
  * ║ role==="platform") AND on /mcp-orch (OrchestrationMcpRouter.resolveRole gates manager|worker) — so  ║
  * ║ a hostile transcript can never turn an audit into an outward/destructive action. Do NOT add any     ║
- * ║ write/host/outward tool to this server beyond these two inert, dedupe-guarded daemon-local writes.  ║
+ * ║ write/host/outward tool to this server beyond these three narrow, self-contained writes.             ║
  * ╚════════════════════════════════════════════════════════════════════════════════════════════════════╝
  *
  * Mirrors PlatformMcpRouter exactly: keyed by the URL-path session id, resolved SERVER-SIDE, role-gated
@@ -114,6 +117,31 @@ export class AuditMcpRouter {
         try {
           const res = db.suggestPresetPrompt({ label, prompt, rationale: rationale ?? null });
           return ok(res.deduped ? { deduped: true, reason: res.reason } : { created: true, id: res.suggestion.id });
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    // --- the THIRD write: end_me (card 3b015fc7) — SELF-SCOPED terminal exit, so the audit-doctrine
+    // (platform-audit skill) can end a scan pass cleanly. NO target arg: always ends auditorSessionId. ---
+    server.registerTool(
+      "end_me",
+      {
+        description:
+          "Request graceful termination of YOUR OWN session — a terminal exit, no successor. Call this at " +
+          "the end of a scan pass (the audit doctrine's normal wrap-up). Takes no argument: Loom always " +
+          "ends the session calling this tool, never another. Loom REFUSES (does not stop) if you have " +
+          "unconsumed inbound direction queued (a human composer turn you haven't acted on yet) → " +
+          "{stopped:false, reason:\"queued-inbound\", pending:N} — end this turn so it drains into your " +
+          "next turn, act on it, THEN re-call end_me. On pass: your session gracefully stops (Ctrl-C×2, " +
+          "clean, resumable — the row lands on Archive) and this tool's own reply is delivered before your " +
+          "pty dies.",
+        inputSchema: {},
+      },
+      async () => {
+        try {
+          return ok(sessions.endMe(auditorSessionId));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

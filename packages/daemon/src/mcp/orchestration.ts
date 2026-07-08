@@ -888,6 +888,34 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    // end_me — the no-successor sibling of recycle_me (card 3b015fc7). Self-scoped: NO target arg, always
+    // ends managerSessionId (the URL-path session), never another. Two gates (queued inbound / live
+    // workers) may REFUSE — see SessionService.endMe's doc for the full contract.
+    server.registerTool(
+      "end_me",
+      {
+        description:
+          "Request graceful termination of YOUR OWN session — a terminal exit, NO successor (unlike " +
+          "recycle_me, which hands off to a fresh one). Takes no argument: Loom always ends the session " +
+          "calling this tool, never another. Loom runs two safety checks first and REFUSES (does not stop) " +
+          "if either trips: (1) you have unconsumed inbound direction queued (manager redirect/message, a " +
+          "human composer turn, companion inbound you haven't acted on yet) → {stopped:false, " +
+          "reason:\"queued-inbound\", pending:N} — end this turn so it drains into your next turn, act on " +
+          "it, THEN re-call end_me; (2) you have ≥1 LIVE worker → {stopped:false, reason:\"live-workers\", " +
+          "count:N} — recycle_me or worker_stop them first, then re-call end_me. On pass: your session " +
+          "gracefully stops (Ctrl-C×2, clean, resumable — the row lands on Archive) and this tool's own " +
+          "reply is delivered before your pty dies.",
+        inputSchema: {},
+      },
+      async () => {
+        try {
+          return ok(sessions.endMe(managerSessionId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     server.registerTool(
       "idle_report",
       {

@@ -56,7 +56,9 @@ export function setupRoleError(role: string | null | undefined): string | null {
  * ║               project_update / agent_create                                                            ║
  * ║   rigs       — profile_create / profile_update / profile_assign                                       ║
  * ║   lifecycle  — session_spawn (manager|plain ONLY — never platform/auditor/worker/setup);              ║
- * ║                project_archive (SOFT, reversible — REFUSES a reserved/system home; rows retained)      ║
+ * ║                project_archive (SOFT, reversible — REFUSES a reserved/system home; rows retained);     ║
+ * ║                end_me (SELF-SCOPED terminal exit, no target arg — always ends the CALLING setup        ║
+ * ║                session, never another; card 3b015fc7)                                                 ║
  * ║   skills     — skill_list (read) / skill_write (USER skills ONLY, confirm-first — never bundled/dev)   ║
  * ║                                                                                                       ║
  * ║ EVERY config-setting path (create/configure/update) routes through validateAgentProjectConfigOverride ║
@@ -100,7 +102,7 @@ export class SetupMcpRouter {
     return this.db.getSession(sessionId)?.role === "setup" ? { id: sessionId } : null;
   }
 
-  buildServer(): McpServer {
+  buildServer(callerSessionId?: string): McpServer {
     const db = this.db;
     const sessions = this.sessions;
     const server = new McpServer({ name: "loom-setup", version: "0.1.0" });
@@ -539,6 +541,32 @@ export class SetupMcpRouter {
       },
     );
 
+    // end_me (card 3b015fc7) — SELF-SCOPED terminal exit: NO target arg, always ends callerSessionId (the
+    // URL-path setup session), never another. Mirrors the manager/Lead end_me; the live-workers gate never
+    // applies to a setup session (it has no parented children).
+    server.registerTool(
+      "end_me",
+      {
+        description:
+          "Request graceful termination of YOUR OWN session — a terminal exit, no successor. Takes no " +
+          "argument: Loom always ends the session calling this tool, never another. Loom REFUSES (does not " +
+          "stop) if you have unconsumed inbound direction queued (a human composer turn you haven't acted " +
+          "on yet) → {stopped:false, reason:\"queued-inbound\", pending:N} — end this turn so it drains " +
+          "into your next turn, act on it, THEN re-call end_me. On pass: your session gracefully stops " +
+          "(Ctrl-C×2, clean, resumable — the row lands on Archive) and this tool's own reply is delivered " +
+          "before your pty dies.",
+        inputSchema: {},
+      },
+      async () => {
+        if (!callerSessionId) return ok({ error: "no caller session" });
+        try {
+          return ok(sessions.endMe(callerSessionId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     // === skills (the user's skill store — USER skills ONLY; never the bundled/dev set) ===
     // The assistant can read + write the user's ~/.loom/skills store directly in-chat (v1 only pointed
     // the user at the Skills UI). BOUNDED STRICTLY to USER skills: skill_write REJECTS any bundled/shipped
@@ -589,7 +617,7 @@ export class SetupMcpRouter {
       return;
     }
     // Stateless per request (see PlatformMcpRouter): no cached transport to be wedged by a dropped stream.
-    const server = this.buildServer();
+    const server = this.buildServer(sessionId);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => { void transport.close(); void server.close(); });
     await server.connect(transport);

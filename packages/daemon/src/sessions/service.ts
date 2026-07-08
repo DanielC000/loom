@@ -4228,6 +4228,65 @@ export class SessionService {
   }
 
   /**
+   * Self-scoped terminal exit (agent MCP `end_me`, card 3b015fc7) — the no-successor sibling of
+   * recycle_me. NO target arg: every registered surface binds this to the URL-path/caller session id,
+   * so a session can end ONLY itself (least-privilege — the whole safety story). Two gates; either
+   * REFUSES (does not stop, does not throw — a structured result the agent can act on):
+   *   1. INBOUND QUEUE — unconsumed `kind:"agent"` messages still queued (manager direction, a human
+   *      composer turn, companion inbound; see pty/host.ts QueuedMessageKind). Mirrors the intent of the
+   *      worker_report(done) pending-direction guard above (generalized to every agent-kind sender, not
+   *      just manager-origin). Operational `kind:"warning"` nudges (idle/context/usage watchdogs,
+   *      memory-recall) do NOT block — they coalesce, they aren't direction.
+   *   2. LIVE WORKERS — a manager (or platform Lead) caller with ≥1 LIVE worker/child session, so a
+   *      self-end can't strand a live fleet under a dead parent. Non-manager/non-platform roles skip
+   *      this gate. (A platform Lead's spawned sessions are never parented to it — recyclePlatformLead's
+   *      doc above — so listWorkers is naturally empty for a Lead and this gate is a structural no-op
+   *      for that role; the SAME check still runs, it just never trips, matching the architecture.)
+   * On pass: graceful-stops the caller's OWN pty (same path as stopSession(id,"graceful") — Ctrl-C×2,
+   * clean, resumable — the row lands on Archive), DEFERRED so this tool call's own MCP response flushes
+   * before the pty dies (mirrors recycleManager's close-after-delay above).
+   */
+  endMe(sessionId: string): { stopped: boolean; reason?: "queued-inbound" | "live-workers"; pending?: number; count?: number; message?: string } {
+    const session = this.db.getSession(sessionId);
+    if (!session) throw new Error("session not found");
+
+    const pending = this.pty.pendingAgentCount(sessionId);
+    if (pending > 0) {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: sessionId, kind: "end_me_refused", detail: { reason: "queued-inbound", pending },
+      });
+      return {
+        stopped: false, reason: "queued-inbound", pending,
+        message: `end_me REFUSED — you have ${pending} unconsumed inbound message(s) queued (manager direction / a human turn / companion inbound). End this turn so they drain into your next turn, act on them, THEN re-call end_me.`,
+      };
+    }
+
+    if (session.role === "manager" || session.role === "platform") {
+      const count = this.db.listWorkers(sessionId).filter((w) => w.processState === "live").length;
+      if (count > 0) {
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          managerSessionId: sessionId, kind: "end_me_refused", detail: { reason: "live-workers", count },
+        });
+        return {
+          stopped: false, reason: "live-workers", count,
+          message: `end_me REFUSED — you have ${count} live worker(s)/child session(s). Recycle or stop the wave first, then re-call end_me.`,
+        };
+      }
+    }
+
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: sessionId, kind: "end_me_complete", detail: {},
+    });
+    // Deferred so THIS tool call's own MCP response flushes before the pty dies (mirrors recycleManager's
+    // close-after-delay at :3765 / recyclePlatformLead's below).
+    setTimeout(() => { try { this.pty.stop(sessionId, "graceful"); } catch { /* already gone */ } }, 3000);
+    return { stopped: true };
+  }
+
+  /**
    * Step 1 of the two-step merge gate (#16): show the manager a worker's branch diff. NO merge
    * happens — this is the review the manager cannot skip (there is no worker-side merge tool).
    */

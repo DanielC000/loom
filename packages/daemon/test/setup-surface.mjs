@@ -12,9 +12,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       Symmetrically, the setup router returns NULL for every NON-setup role (manager/worker/plain/
 //       platform/auditor) — an agent/non-setup session can never reach /mcp-setup. buildMcpServers(setup)
 //       mounts loom-setup ONLY (+loom-tasks), never platform/orch/audit, with a ["mcp__loom-setup"] allow.
-//   (b) the surface is EXACTLY the curated subset of 19 (incl. project_init, project_archive, agent_update,
-//       and the agent_get/profile_get/project_get reads) — and NONE of the elevated/outward/self-improvement
-//       tools (no git/vault/message/stop/schedule/escalate/audit).
+//   (b) the surface is EXACTLY the curated subset of 20 (incl. project_init, project_archive, agent_update,
+//       the agent_get/profile_get/project_get reads, and the self-scoped end_me terminal exit) — and NONE
+//       of the elevated/outward/self-improvement tools (no git/vault/message/stop/schedule/escalate/audit).
 //   (c) the curated tools work end-to-end: project_create (real git repo), project_configure,
 //       project_update, project_archive (soft + reserved-guarded), agent_create,
 //       profile_create/update/assign, list_all_*, session_spawn(manager|plain).
@@ -153,7 +153,7 @@ try {
   check("(a) buildMcpServers(setup): does NOT mount loom-audit", !setupMcpMap["loom-audit"]);
 
   // ============ (b) THE CURATED SURFACE — exactly the subset, none of the elevated tools ============
-  const server = setupRouter.buildServer();
+  const server = setupRouter.buildServer("SETUP");
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
   await server.connect(serverT);
   const client = new Client({ name: "setup-e1-3-test", version: "0" });
@@ -162,12 +162,12 @@ try {
 
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
   const expected = [
-    "agent_create", "agent_get", "agent_update", "list_all_agents", "list_all_projects", "list_all_sessions",
+    "agent_create", "agent_get", "agent_update", "end_me", "list_all_agents", "list_all_projects", "list_all_sessions",
     "profile_assign", "profile_create", "profile_get", "profile_update",
     "project_archive", "project_configure", "project_create", "project_get", "project_init", "project_update", "session_spawn",
     "skill_list", "skill_write",
   ];
-  check(`(b) setup surface is EXACTLY the curated subset of 19 (got ${tools.length}: ${tools.join(",")})`,
+  check(`(b) setup surface is EXACTLY the curated subset of 20 (got ${tools.length}: ${tools.join(",")})`,
     JSON.stringify(tools) === JSON.stringify(expected));
   // The still-ABSENT trust boundary — project_archive is now INCLUDED (the ONE v1 widen), but the
   // outward/host/elevated/self-improvement set must stay unreachable.

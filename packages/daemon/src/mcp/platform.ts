@@ -927,6 +927,36 @@ export class PlatformMcpRouter {
       },
     );
 
+    // end_me — the no-successor sibling of the Lead's recycle_me above (card 3b015fc7). Self-scoped: NO
+    // target arg, always ends callerSessionId (the URL-path session), never another live Lead's lineage.
+    // Two gates (queued inbound / live child sessions) may REFUSE — see SessionService.endMe's doc. A
+    // Lead's spawned sessions are never parented to it (see recyclePlatformLead's doc above), so the
+    // live-workers gate is a structural no-op here — it still runs, it just never trips.
+    server.registerTool(
+      "end_me",
+      {
+        description:
+          "Request graceful termination of YOUR OWN session (this Lead lineage) — a terminal exit, NO " +
+          "successor (unlike recycle_me, which hands off to a fresh Lead). Takes no argument: Loom always " +
+          "ends the session calling this tool, never another live Lead. Loom runs a safety check first and " +
+          "REFUSES (does not stop) if you have unconsumed inbound direction queued (a human composer turn, " +
+          "a cross-project session_message you haven't acted on yet) → {stopped:false, " +
+          "reason:\"queued-inbound\", pending:N} — end this turn so it drains into your next turn, act on " +
+          "it, THEN re-call end_me. On pass: your session gracefully stops (Ctrl-C×2, clean, resumable — " +
+          "the row lands on Archive) and this tool's own reply is delivered before your pty dies. Other " +
+          "live Leads, if any, are unaffected.",
+        inputSchema: {},
+      },
+      async () => {
+        if (!callerSessionId) return ok({ error: "no caller session" });
+        try {
+          return ok(sessions.endMe(callerSessionId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     // --- projects (cross-project structural edits; config changes go through project_configure) ---
     server.registerTool(
       "project_update",

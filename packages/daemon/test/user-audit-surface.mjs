@@ -148,8 +148,8 @@ try {
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
   // The read+suggest+handoff surface (card 5eb8438a added the agent-prompt/skill READS + the confined
   // home-operator handoff to the original 4 read+suggest tools).
-  check(`(b) user-audit surface is EXACTLY [agent_prompt_read, audit_handoff, audit_suggest_improvement, list_sessions, preset_suggestion_suggest, skill_list, skill_read, transcript_read] (got: ${tools.join(",")})`,
-    JSON.stringify(tools) === JSON.stringify(["agent_prompt_read", "audit_handoff", "audit_suggest_improvement", "list_sessions", "preset_suggestion_suggest", "skill_list", "skill_read", "transcript_read"]));
+  check(`(b) user-audit surface is EXACTLY [agent_prompt_read, audit_handoff, audit_suggest_improvement, end_me, list_sessions, preset_suggestion_suggest, skill_list, skill_read, transcript_read] (got: ${tools.join(",")})`,
+    JSON.stringify(tools) === JSON.stringify(["agent_prompt_read", "audit_handoff", "audit_suggest_improvement", "end_me", "list_sessions", "preset_suggestion_suggest", "skill_list", "skill_read", "transcript_read"]));
   // The repo_* reads are the DEV Auditor's code-awareness over the LOOM SOURCE — the end-user Workspace
   // Auditor must NOT have them (it audits the user's WORKSPACE, never Loom's own dev: the dev↔user split).
   const forbidden = ["audit_file_finding", "git_push", "git_commit", "vault_write", "project_configure", "project_archive", "session_spawn", "session_message", "session_stop", "worker_spawn", "platform_escalate", "skill_write", "repo_read_file", "repo_grep", "repo_glob"];

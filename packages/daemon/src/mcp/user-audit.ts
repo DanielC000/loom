@@ -35,6 +35,9 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * ║      resolved; the caller names NO target and supplies NO free-form payload — the note is framed      ║
  * ║      server-side). This is NOT the generic harness SendMessage (no Loom routing) and is NOT arbitrary ║
  * ║      cross-session messaging — it can reach ONLY the home operator. Inert if no operator is live.     ║
+ * ║   4. end_me                     → SELF-SCOPED terminal exit (card 3b015fc7): NO target arg, always    ║
+ * ║      ends the CALLING workspace-auditor session, never another — a hostile transcript can only ever   ║
+ * ║      end THIS scan, never spawn/stop/message a different session.                                     ║
  * ║ The READS (transcript / agent-prompt / skill-text) are pure reads; NO write reaches git/vault/config/ ║
  * ║ spawn/host/escalation/archive/audit_file_finding, the nudge can target NOTHING but the home operator, ║
  * ║ and a hostile transcript can neither escape the box nor spam it. A workspace-auditor session ALSO     ║
@@ -216,6 +219,31 @@ export class WorkspaceAuditMcpRouter {
       async ({ count }) => {
         try {
           return ok(sessions.workspaceAuditHandoff(auditorSessionId, { count }));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    // --- WRITE D: end_me (card 3b015fc7) — SELF-SCOPED terminal exit, so the audit doctrine can end a
+    // scan pass cleanly. NO target arg: always ends auditorSessionId. ---
+    server.registerTool(
+      "end_me",
+      {
+        description:
+          "Request graceful termination of YOUR OWN session — a terminal exit, no successor. Call this at " +
+          "the end of a scan pass (the audit doctrine's normal wrap-up). Takes no argument: Loom always " +
+          "ends the session calling this tool, never another. Loom REFUSES (does not stop) if you have " +
+          "unconsumed inbound direction queued (a human composer turn you haven't acted on yet) → " +
+          "{stopped:false, reason:\"queued-inbound\", pending:N} — end this turn so it drains into your " +
+          "next turn, act on it, THEN re-call end_me. On pass: your session gracefully stops (Ctrl-C×2, " +
+          "clean, resumable — the row lands on Archive) and this tool's own reply is delivered before your " +
+          "pty dies.",
+        inputSchema: {},
+      },
+      async () => {
+        try {
+          return ok(sessions.endMe(auditorSessionId));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

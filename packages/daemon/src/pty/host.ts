@@ -2202,6 +2202,19 @@ export class PtyHost {
   }
 
   /**
+   * Count of currently-queued `kind:"agent"` messages (see QueuedMessageKind) — UNCONSUMED direction
+   * (manager redirect/message, a human composer turn, companion inbound), as opposed to `kind:"warning"`
+   * operational nudges (idle/context/usage watchdogs, memory-recall), which coalesce and are NOT direction.
+   * end_me's inbound-queue safety gate (card 3b015fc7) reads this to REFUSE a self-stop while the caller
+   * still holds unconsumed direction — mirrors the worker_report(done) pending-direction guard's intent,
+   * generalized from manager-origin-only to every agent-kind sender. Non-mutating (unlike flushPending/
+   * consumePending) — a peek, not a drain. Returns 0 for a dead/unknown session.
+   */
+  pendingAgentCount(sessionId: string): number {
+    return (this.live.get(sessionId)?.pending ?? []).filter((m) => m.kind === "agent").length;
+  }
+
+  /**
    * CONSUME a session's queued (not-yet-delivered) inbound messages: return them in FIFO order AND
    * CLEAR the queue, so they will NOT also drain later as injected turns. This is the manager's
    * pull-its-own-inbox path (the inbox_pull tool) — strictly better than waiting for drainPending,

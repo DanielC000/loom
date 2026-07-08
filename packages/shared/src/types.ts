@@ -735,7 +735,16 @@ export type OrchestrationEventKind =
   // tick forever (no id ⇒ no stable diff). This event marks the poll as SKIPPED (not advanced past
   // baseline) so the misconfiguration is visible instead of silently spamming; `detail` carries
   // { pollJobId, itemCount, withIdCount }. Session-less.
-  | "poll_id_guard_tripped";
+  | "poll_id_guard_tripped"
+  // ── Self-stop (agent MCP `end_me`, card 3b015fc7) — the no-successor sibling of recycle_me ──────────
+  // A self-scoped session called end_me but one of its two safety gates tripped, so Loom REFUSED (did
+  // NOT stop it). `detail.reason` discriminates: "queued-inbound" (unconsumed AGENT-kind direction still
+  // queued — `detail.pending` is the count) or "live-workers" (a manager/Lead caller with ≥1 live worker/
+  // child session — `detail.count` is the count). Filed under the CALLER (managerSessionId = its own id).
+  | "end_me_refused"
+  // end_me's two gates were both clear: the caller's own session was graceful-stopped (Ctrl-C×2, resumable,
+  // no successor). Filed under the CALLER (managerSessionId = its own id) BEFORE the deferred pty.stop.
+  | "end_me_complete";
 
 export interface OrchestrationEvent {
   id: string;

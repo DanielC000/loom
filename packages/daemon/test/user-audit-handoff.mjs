@@ -144,10 +144,10 @@ try {
   await client.connect(clientT);
   const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
 
-  // 8-tool surface — the read+suggest+handoff set, no elevated/host tool.
+  // 9-tool surface — the read+suggest+handoff+end_me set, no elevated/host tool.
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-  const EXPECTED = ["agent_prompt_read", "audit_handoff", "audit_suggest_improvement", "list_sessions", "preset_suggestion_suggest", "skill_list", "skill_read", "transcript_read"];
-  check(`(surface) EXACTLY the 8-tool surface (got: ${tools.join(",")})`, JSON.stringify(tools) === JSON.stringify(EXPECTED));
+  const EXPECTED = ["agent_prompt_read", "audit_handoff", "audit_suggest_improvement", "end_me", "list_sessions", "preset_suggestion_suggest", "skill_list", "skill_read", "transcript_read"];
+  check(`(surface) EXACTLY the 9-tool surface (got: ${tools.join(",")})`, JSON.stringify(tools) === JSON.stringify(EXPECTED));
   const forbidden = ["session_message", "session_spawn", "git_push", "vault_write", "platform_escalate", "audit_file_finding", "skill_write", "agent_update"];
   check("(surface) NONE of the elevated/host/write tools leaked", forbidden.every((t) => !tools.includes(t)));
 
