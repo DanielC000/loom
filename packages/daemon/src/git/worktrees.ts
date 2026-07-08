@@ -1266,6 +1266,91 @@ export function toConventionalSubject(raw: string): string {
  */
 export type MergeEmptyKind = "ALREADY_MERGED" | "STAGE_EMPTY_RETRY";
 
+/**
+ * Merge canonical main's CURRENT tip (`repoPath`'s HEAD) INTO the worker's worktree, IN the worktree —
+ * a REAL (non-squash) merge, run BEFORE the build/DoD gate and the squash-merge below (card c0aeb5b2).
+ *
+ * THE HOLE THIS CLOSES: the gate used to run against the worktree's PRE-merge state — the branch as it
+ * was cut, with no knowledge of anything that landed on main afterward — so it validated a union that was
+ * never actually tested. A branch cut before a main-side change that the branch's code now conflicts
+ * with (textually) or is incompatible with (semantically, e.g. main removed a symbol the branch now
+ * depends on) could sail through a green gate and land a broken union. Merging main's tip into the
+ * worktree FIRST means the gate (run by the caller immediately afterward, in the same worktree) sees the
+ * actual post-merge union, and a hard textual conflict is caught right here, fail-closed.
+ *
+ * Deliberately a MERGE, not a rebase or squash: the resulting worktree tip has `mainSha` as a direct
+ * ancestor, so `merge-base(repoPath HEAD, branch)` — the base {@link mergeBranch}'s own `--squash` diffs
+ * against — becomes `mainSha` itself. The squash below therefore still lands ONLY the branch's own net
+ * changes; main's content is common ancestor, not re-applied.
+ *
+ * FAIL-CLOSED, mirroring `mergeBranch`'s own conflict handling: a real merge sets `MERGE_HEAD` (unlike
+ * `--squash`), so a conflict is cleaned up with `git merge --abort` (equivalent to `mergeBranch`'s
+ * `reset --hard HEAD`, but the more idiomatic call for a non-squash merge) — leaving the worktree exactly
+ * as it was before this call. Any other failure (unresolvable main tip, a merge command error with no
+ * conflict, a failed inspection of the merge state) also returns `ok:false` rather than assuming success —
+ * this function is itself a gate, not a best-effort probe like {@link detectStrandedWork}, so an
+ * inconclusive result must block, not wave through.
+ *
+ * A worktree that already contains `mainSha` (the common case for a freshly-cut, not-yet-drifted branch)
+ * short-circuits to a no-op success (`merged:false`) without spawning a merge child at all.
+ */
+export async function mergeMainIntoWorktree(
+  repoPath: string, worktreePath: string, deps: BoundedGitDeps = {},
+): Promise<{ ok: boolean; conflict?: boolean; reason?: string; merged?: boolean }> {
+  const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
+  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  const repoGit = makeGit(repoPath, timeoutMs);
+  const wtGit = makeGit(worktreePath, timeoutMs);
+
+  let mainSha: string;
+  try {
+    mainSha = (await withTimeout(repoGit.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (main)")).trim();
+  } catch (e) {
+    return { ok: false, reason: `failed to resolve main tip: ${(e as Error).message}` };
+  }
+
+  // Already caught up? (worktree HEAD already has mainSha as an ancestor — the common case for a
+  // freshly-cut branch.) A merge-base probe failure isn't fatal — fall through and let the merge attempt
+  // below settle it either way.
+  try {
+    const mergeBase = (await withTimeout(wtGit.raw(["merge-base", "HEAD", mainSha]), timeoutMs, "git merge-base (worktree)")).trim();
+    if (mergeBase === mainSha) return { ok: true, merged: false };
+  } catch { /* fall through to attempt the merge */ }
+
+  let mergeThrew = false;
+  try {
+    await withTimeout(wtGit.raw(["merge", "--no-edit", mainSha]), timeoutMs, "git merge main into worktree");
+  } catch {
+    mergeThrew = true; // a conflict OR a real failure — the explicit checks below decide which
+  }
+
+  let conflicted: boolean;
+  try {
+    conflicted = (await withTimeout(wtGit.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (worktree)")).trim() !== "";
+  } catch (e) {
+    // Can't even determine the merge state — fail closed rather than assert a false "clean".
+    return { ok: false, reason: `failed to inspect worktree merge state: ${(e as Error).message}` };
+  }
+
+  if (conflicted) {
+    try {
+      await withTimeout(wtGit.raw(["merge", "--abort"]), timeoutMs, "git merge --abort (worktree)");
+    } catch (e) {
+      return { ok: false, conflict: true, reason: `conflict cleanup (merge --abort) failed — worktree may have unmerged residue: ${(e as Error).message}` };
+    }
+    return { ok: false, conflict: true };
+  }
+  if (mergeThrew) {
+    // Symmetric with the conflict cleanup above: `merge --abort` also resets the working tree, and
+    // additionally clears a stale MERGE_HEAD if the errored merge happened to leave one (a plain
+    // `reset --hard HEAD` would not) — `git merge --abort` is a no-op error when there's nothing to
+    // abort, so its failure here is swallowed exactly like the conflict path's own best-effort intent.
+    try { await withTimeout(wtGit.raw(["merge", "--abort"]), timeoutMs, "git merge --abort (worktree)"); } catch { /* best-effort cleanup */ }
+    return { ok: false, reason: "git merge main into worktree failed" };
+  }
+  return { ok: true, merged: true };
+}
+
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string,
 ): Promise<{ ok: boolean; conflict?: boolean; sha?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind }> {

@@ -11,7 +11,7 @@ import {
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree } from "../pty/host.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
 import { sessionScratchDir } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
@@ -4459,6 +4459,12 @@ export class SessionService {
       // to clear (that's always an escaped/detached build child, e.g. vite/esbuild) — so excluding it costs
       // nothing. Do NOT instead hard-stop the worker before this sweep: that would break the fail-closed
       // retain-for-re-task contract on a genuine gate failure.
+      //
+      // RUNS BEFORE THE UNION-MERGE TOO (Code Review finding on card c0aeb5b2): the union-merge below
+      // WRITES tracked files in the worktree, so it is at least as lock-sensitive as the gate this reap
+      // was built for — an escaped watcher holding a handle on a tracked file main also touched would
+      // make the merge's file-write fail with a spurious EPERM, misreported as `union_merge_failed`
+      // rather than the lock issue it actually is. Reaping first clears that before either step runs.
       const workerPid = this.pty.getPid?.(workerSessionId);
       const reap = this.reapWorktreeProcesses ?? ((p: string, o?: { excludePids?: number[] }) => reapProcessesRootedInWorktree(p, { excludePids: o?.excludePids }));
       try {
@@ -4467,6 +4473,40 @@ export class SessionService {
         // Best-effort by construction, mirroring gcWorktreeDir's identical guard: an injected/broken seam
         // must never abort the gate/merge it's only meant to help along.
       }
+
+      // UNION-MERGE (card c0aeb5b2 — the post-merge union hole): merge canonical main's CURRENT tip INTO
+      // the worktree, IN the worktree, IMMEDIATELY BEFORE the gate below — so the gate validates the
+      // actual POST-MERGE union rather than the branch's stale pre-merge state, and a hard textual
+      // conflict against a main that advanced since the branch was cut is caught HERE, fail-closed,
+      // before any squash is attempted (worktree retained, canonical repo untouched — see
+      // mergeMainIntoWorktree's doc for why the later squash still lands only the branch's own net
+      // changes after this). Scoped to `if (gate)`: with no gate configured, nothing downstream reads the
+      // worktree's content before the squash below (which operates on `repoPath`, not `worktreePath`),
+      // so union-merging into a worktree with no gate to validate it would only add risk (and touch
+      // `worktreePath` as a git cwd) for zero benefit — the existing "unverified: no gateCommand" warning
+      // already flags that case as unchecked.
+      //
+      // SKIPPED when this exact branch has ALREADY landed on main (a stale confirm racing a prior —
+      // possibly out-of-band — merge; see the early-idempotency doc above, and
+      // merge-reject-notify-suppress.mjs scenario B: worktree still present, branch already squashed into
+      // main). Merging main's own landed squash back into such a worktree would make the branch descend
+      // from its own `Loom-Worker-Branch` trailer commit — indistinguishable from a RE-CUT branch carrying
+      // genuinely new work, which is exactly what `findLandedSquashCommit`'s re-task guard (below, via
+      // `mergeBranch`'s own noop classification) exists to detect. That would misclassify a legitimate
+      // ALREADY_MERGED re-confirm as STAGE_EMPTY_RETRY. `mergeBranch`'s own noop/ALREADY_MERGED handling
+      // already covers this case correctly, untouched.
+      const preLanded = await findLandedSquashCommit(project.repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
+      if (!preLanded) {
+        const union = await mergeMainIntoWorktree(project.repoPath, worktreePath, { timeoutMs: this.gitOpMs });
+        if (!union.ok) {
+          const why = union.conflict ? "branch conflicts with current main — rebase/resolve before merge" : (union.reason ?? "union merge failed");
+          const failReason = union.conflict ? "union_conflict" : "union_merge_failed";
+          const suppressed = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — ${why}; canonical repo untouched, worktree retained.`);
+          evt("merge_rejected", { reason: failReason, ...(suppressed ? { suppressed: true } : {}) });
+          return { merged: false, reason: why };
+        }
+      }
+
       const gateResult = await runGateSequential(gate, worktreePath, gateTimeoutMs);
       evt("build_gate", { passed: gateResult.passed });
       if (!gateResult.passed) {

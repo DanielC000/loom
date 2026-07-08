@@ -17,6 +17,7 @@
     "test:worker-report": "node test/worker-report.mjs",
     "test:recycle": "node test/recycle.mjs",
     "test:merge-gate": "node test/merge-gate.mjs",
+    "test:merge-union-gate": "node test/merge-union-gate.mjs",
     "test:merge-confirm-idempotent": "node test/merge-confirm-idempotent.mjs",
     "test:autonomy-rails": "node test/autonomy-rails.mjs",
     "test:orchestration-e2e": "node test/orchestration-e2e.mjs",
