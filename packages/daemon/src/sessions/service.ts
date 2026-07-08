@@ -600,6 +600,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
       startupPrompt: composedStartupPrompt,
       role,
       browserTesting,
@@ -660,6 +661,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
       // PL Auditor finding #8: MANAGERS ONLY get a "Where things live" pre-block (absolute repo+vault
       // roots) so a cold-boot orchestrator reads its resume doc by absolute path instead of Globbing.
       // vaultPath is passed here UNGATED by docLint — the orchestrator needs the location regardless of
@@ -744,6 +746,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
       startupPrompt: composePlatformLeadStartupPrompt(startupPrompt, leadResumeDocPath),
       role,
       browserTesting,
@@ -810,6 +813,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
       startupPrompt,
       role,
       browserTesting,
@@ -882,6 +886,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
       startupPrompt,
       role,
       browserTesting,
@@ -960,6 +965,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
       startupPrompt,
       role,
       browserTesting,
@@ -1049,6 +1055,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
       resumeId: session.engineSessionId,
       // Carry the role across resume so a manager/worker/platform session is re-spawned WITH its
       // role-gated MCP surface (loom-orchestration / loom-platform) + allowlist. Without this a
@@ -1763,6 +1770,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
       resumeId: src.engineSessionId, // resume the SOURCE conversation...
       fork: true,                    // ...but fork it (--fork-session)...
       forkSessionId: forkEngineId,   // ...into this pre-assigned id (--session-id).
@@ -1871,6 +1879,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
       startupPrompt,
       role: "run", // buildMcpServers mounts ONLY loom-run; createPty allowlists mcp__loom-run
       browserTesting: false,
@@ -2357,6 +2366,7 @@ export class SessionService {
         geometry: config.pty,
         sessionEnv: config.sessionEnv,
         vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
         // Compose the worker's opening: a worktree LOCATION block first (names this worktree as the edit
         // dir so the worker can't leak edits into the main checkout), then its agent BASE BRIEF (Dev/Bugfix/
         // etc. doctrine — run `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief
@@ -3600,6 +3610,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
       // Lead with the worktree LOCATION block (same worktree — a recycled worker is equally at risk of
       // leaking edits to the main checkout), then the worker's agent base brief, then the handoff
       // (mirrors spawnWorker + the manager recycle warm-up). Empty brief ⇒ the block + handoff.
@@ -3703,6 +3714,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
       startupPrompt,
       role: "manager", // successor keeps the orchestration surface
       browserTesting: old.browserTesting ?? false,
@@ -3848,6 +3860,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
       startupPrompt,
       role: "platform", // successor keeps the platform surface
       browserTesting: old.browserTesting ?? false,

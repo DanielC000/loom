@@ -143,6 +143,11 @@ const projectConfigOverrideSchema = z.object({
   sessionEnv: z.record(z.string(), z.string()).optional(),
   orchestration: orchestrationOverride.optional(),
   docLint: z.boolean().optional(),
+  // Opt-in Deja capture hook (card b3bd4841). HUMAN-only (dropped from the agent shape below) — see
+  // the rejection-site comment on agentProjectConfigOverrideSchema's `.omit()` for the full rationale:
+  // its hook shells out to an external host binary that receives file content + the driving prompt, a
+  // host-process + data-exfiltration surface, NOT the benign docLint precedent it might look like.
+  dejaCapture: z.boolean().optional(),
   obsidian: obsidianOverride.optional(),
   python: pythonOverride.optional(),
 }).strict();
@@ -178,8 +183,16 @@ const agentPythonOverride = pythonOverride.omit({ interpreterPath: true }).stric
 // and the default merge (config.ts) lets an agent-set raw value survive. Allowing raw `sessionEnv` would
 // re-open exactly the host-exec/exfil capability those field rejections close (NODE_OPTIONS=--require,
 // PATH, etc.). Agents have no business setting raw session env; the human/REST path keeps it.
+// `dejaCapture` is HUMAN-only too and DROPPED from the agent shape (card b3bd4841, Lead-confirmed
+// FINAL — not a placeholder pending review). docLint is NOT a valid precedent for treating this as a
+// benign toggle: docLint's hook runs a Loom-BUNDLED PURE-NODE relay (vault-lint.mjs) with no external
+// process. dejaCapture's hook instead SHELLS OUT to an EXTERNAL host binary (`deja`) that RECEIVES the
+// written mockup's file content plus the driving prompt — a HOST-PROCESS-EXECUTION surface (like
+// gateCommand/obsidian.path/python.interpreterPath) that is ALSO a DATA-EXFILTRATION vector (like
+// alertWebhook): an agent that could self-enable it would pipe file contents + prompts into an
+// out-of-Loom process of its own choosing. Only the human enables capture, per project.
 const agentProjectConfigOverrideSchema = projectConfigOverrideSchema
-  .omit({ sessionEnv: true })
+  .omit({ sessionEnv: true, dejaCapture: true })
   .extend({ orchestration: agentOrchestrationOverride.optional(), obsidian: agentObsidianOverride.optional(), python: agentPythonOverride.optional() })
   .strict();
 

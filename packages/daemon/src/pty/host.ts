@@ -907,6 +907,9 @@ export interface SpawnOpts {
   model?: string;
   /** When set (docLint on), wires the vault-lint PostToolUse hook scoped to this vault (Pillar D). */
   vaultPath?: string;
+  /** When true (dejaCapture on, card b3bd4841), wires a second opt-in PostToolUse hook that
+   *  auto-ingests an agent-written .html mockup into Deja. Default OFF — byte-identical when unset. */
+  dejaCapture?: boolean;
   /**
    * Opt-in browser-automation (resolved from the session's Profile, gated). When true, inject a
    * per-session stdio Playwright MCP (@playwright/mcp) so the agent can drive a headless browser, and
@@ -1916,7 +1919,7 @@ export class PtyHost {
     const permission = extraAllow.length
       ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
       : opts.permission;
-    const settingsPath = writeSessionSettings(opts.sessionId, permission, opts.vaultPath);
+    const settingsPath = writeSessionSettings(opts.sessionId, permission, opts.vaultPath, opts.dejaCapture);
 
     // §6 scoping: route by session id in the URL path; daemon derives the project server-side. The
     // mcpServers map (loom-tasks + role surface + opt-in Playwright) is assembled by the testable seam.

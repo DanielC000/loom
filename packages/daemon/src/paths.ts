@@ -143,6 +143,8 @@ export function resolveWebDistDir(): string {
 export const RELAY_SCRIPT = path.join(__dirname, "..", "assets", "hook-relay.mjs");
 /** vault-lint.mjs (Pillar D PostToolUse hook) ships as an asset too. */
 export const VAULT_LINT_SCRIPT = path.join(__dirname, "..", "assets", "vault-lint.mjs");
+/** deja-capture.mjs (opt-in Deja capture PostToolUse hook, card b3bd4841) ships as an asset too. */
+export const DEJA_CAPTURE_SCRIPT = path.join(__dirname, "..", "assets", "deja-capture.mjs");
 /**
  * ensure-obsidian.mjs (Obsidian auto-start vault preflight) ships as an asset too. Injected into a
  * session's env as LOOM_OBSIDIAN_PREFLIGHT only when obsidian.autoStart is on, so a vault skill can run

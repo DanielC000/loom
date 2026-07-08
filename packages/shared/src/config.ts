@@ -449,6 +449,14 @@ export interface ResolvedConfig {
    * (flags doc-hygiene anti-patterns on .md vault writes). Default true; set false to disable.
    */
   docLint: boolean;
+  /**
+   * Opt-in Deja capture hook (card b3bd4841): wire a SECOND PostToolUse(Write|Edit) hook —
+   * sibling of the docLint vault-lint hook above — that auto-ingests an agent-written .html
+   * mockup into Deja with the driving prompt as `origin_prompt`. Default false (opt-in): the
+   * relay resolves origin_prompt + project DAEMON-SIDE (sessionId → task), never widening the
+   * agent-facing config surface beyond a benign on/off boolean, mirroring docLint.
+   */
+  dejaCapture: boolean;
   /** Obsidian auto-start (self-healing vault tooling). Default OFF — see ObsidianConfig. */
   obsidian: ObsidianConfig;
   /** Python tooling (shared Loom-managed venv). Only `interpreterPath` is configurable — see PythonConfig. */
@@ -481,6 +489,8 @@ export interface ProjectConfigOverride {
   // NOTE: no `platform` key either — platform tuning is daemon-GLOBAL (one shared daemon), supplied as
   // resolveConfig's SEPARATE 2nd arg (PlatformConfigOverride), never nested in a per-project override.
   docLint?: boolean;
+  /** See ResolvedConfig.dejaCapture. */
+  dejaCapture?: boolean;
   obsidian?: Partial<ObsidianConfig>;
   python?: Partial<PythonConfig>;
 }
@@ -556,6 +566,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     companionVoiceEnabled: COMPANION_VOICE_ENABLED_DEFAULT,
   },
   docLint: true, // Pillar D vault-lint hook on by default
+  dejaCapture: false, // opt-in Deja capture hook (card b3bd4841) — off by default
   // Obsidian auto-start OFF by default: opt-in per project (a daemon-launched GUI process is deliberate).
   obsidian: { autoStart: false },
   // Python: no base-interpreter override by default — the daemon discovers python3/python/`py -3` on PATH.
@@ -892,6 +903,7 @@ export function resolveConfig(
     // Daemon-global (no per-project layer): global override (2nd arg) ?? LOOM_* watcher env ?? default.
     platform: resolvePlatform(platformOverride),
     docLint: override.docLint ?? d.docLint,
+    dejaCapture: override.dejaCapture ?? d.dejaCapture,
     obsidian,
     python,
     // Daemon-global (no per-project layer): the session-usage sampler cadence + retention. Always the
