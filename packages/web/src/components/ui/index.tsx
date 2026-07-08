@@ -156,9 +156,9 @@ export function PresetAccentDots({ accents, title }: { accents: (string | undefi
 // Inline metadata, e.g. `branch loom/8f3a`, `ctx 56,200`.
 export function Chip({ label, value, tone: t }: { label?: string; value: ReactNode; tone?: Tone }) {
   return (
-    <span style={{ display: "inline-flex", gap: 4, alignItems: "baseline", fontFamily: font.mono, fontSize: 11, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "1px 6px" }}>
-      {label && <span style={{ color: color.textMuted }}>{label}</span>}
-      <span style={{ color: t ? tone[t] : color.text }}>{value}</span>
+    <span style={{ display: "inline-flex", gap: 4, alignItems: "baseline", fontFamily: font.mono, fontSize: 11, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "1px 6px", minWidth: 0, maxWidth: "100%" }}>
+      {label && <span style={{ color: color.textMuted, flexShrink: 0 }}>{label}</span>}
+      <span style={{ color: t ? tone[t] : color.text, minWidth: 0, overflowWrap: "anywhere" }}>{value}</span>
     </span>
   );
 }

@@ -358,7 +358,7 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
         <span {...listeners} {...attributes} title="Drag to move"
           style={{ cursor: "grab", color: color.textMuted, lineHeight: "16px", touchAction: "none", userSelect: "none" }}>⠿</span>
         <div onClick={onOpen} title="Open task" style={{ flex: 1, cursor: "pointer", minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 6, minWidth: 0 }}>
             <PriorityChip priority={prio(task)} />
             {task.held && (
               <span title="Held — won't be worked or nagged (the owner's brake)"
@@ -374,7 +374,7 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
                 deferred
               </span>
             )}
-            <span style={{ flex: 1 }}>{task.title}</span>
+            <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{task.title}</span>
             {hasBody && <span title="has a description" style={{ color: color.textMuted, flexShrink: 0 }}>≣</span>}
           </div>
           {worker && st && (
