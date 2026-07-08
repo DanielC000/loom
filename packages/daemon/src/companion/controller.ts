@@ -403,6 +403,14 @@ export class CompanionController implements CompanionControl {
     return [...this.gateways.keys()];
   }
 
+  /** Read-only introspection (tests + potential status surface): the live cached `CompanionConfig` for one
+   *  session — the exact `cfgs` entry `startOne`/`updateOne` populate (includes `homeChannel`/`homeChatId`),
+   *  or undefined when that session isn't live. Lets a test assert a home write's scoped `reconcile()`
+   *  actually refreshed the cache, without exposing the internal map itself. */
+  configFor(sessionId: string): CompanionConfig | undefined {
+    return this.cfgs.get(sessionId);
+  }
+
   // ---- internals -------------------------------------------------------------------------------
 
   /** Append an op to the serialized reconcile chain; a failed op is caught + logged (never rejects the

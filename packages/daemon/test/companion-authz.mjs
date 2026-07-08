@@ -217,9 +217,11 @@ try {
   // endpoint REQUIRES an explicit scope (a group chat bound without scope would silently admit everyone).
   {
     const db = new Db(dbFile("p5.db"));
-    const bound = [], unbound = [];
+    const bound = [], unbound = [], reconciled = [];
     const stub = {};
-    const companion = { bind: (b) => bound.push(b), unbind: (id, channel) => unbound.push({ sessionId: id, channel }) };
+    // `reconcile` mirrors the scoped no-op every REST config/home writer now calls post-write (card af12f808)
+    // — a real CompanionController would refresh its live cfgs cache here; this stub just records the call.
+    const companion = { bind: (b) => bound.push(b), unbind: (id, channel) => unbound.push({ sessionId: id, channel }), reconcile: async (sessionId) => { reconciled.push(sessionId); } };
     const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub, companion });
 
     // Real assistant-role sessions backing every sessionId this part POSTs to a write route (the
@@ -268,11 +270,15 @@ try {
     check("REST home: PUT missing sessionId → 400", putMissingSid.statusCode === 400);
     const putHome = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "s1", channel: "telegram", chatId: "home-9" } });
     check("REST home: PUT sets + echoes", putHome.statusCode === 200 && JSON.parse(putHome.payload).chatId === "home-9");
+    // card af12f808: a home write must reconcile the controller LIVE (scoped to the ONE session that changed)
+    // so its cfgs cache never goes stale — see companion-home-cache.mjs for the full cache-refresh proof.
+    check("REST home: PUT reconciles the controller, scoped to s1", reconciled[reconciled.length - 1] === "s1");
     check("REST home: PUT missing chatId → 400", (await app.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "s1", channel: "telegram" } })).statusCode === 400);
     check("REST home: a DIFFERENT session's home is untouched by s1's PUT", JSON.parse((await app.inject({ method: "GET", url: "/api/companion/home?sessionId=s2" })).payload ?? "null") === null);
     check("REST home: DELETE without sessionId → 400", (await app.inject({ method: "DELETE", url: "/api/companion/home" })).statusCode === 400);
     const delHome = await app.inject({ method: "DELETE", url: "/api/companion/home?sessionId=s1" });
     check("REST home: DELETE clears it (proactive heartbeat turns OFF for that session)", delHome.statusCode === 200 && db.getCompanionHome("s1") === null);
+    check("REST home: DELETE reconciles the controller, scoped to s1", reconciled[reconciled.length - 1] === "s1");
 
     // DELETE a binding (no channel) → the live map is unbound too (channel undefined ⇒ omit path).
     await app.inject({ method: "DELETE", url: "/api/companion/bindings/s1" });

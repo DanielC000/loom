@@ -669,12 +669,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!isNonBlankStr(b.chatId)) return reply.code(400).send({ error: "chatId must be a non-empty string" });
     const sessionId = b.sessionId.trim();
     deps.db.setCompanionHome(sessionId, { channel: b.channel.trim(), chatId: b.chatId.trim() });
+    // Refresh the controller's live `cfgs` cache (homeChannel/homeChatId) so no cfgs.home reader goes
+    // stale — scoped to this one session, same pattern as the config POST/PUT/DELETE routes above.
+    await deps.companion?.reconcile(sessionId);
     return deps.db.getCompanionHome(sessionId);
   });
   app.delete("/api/companion/home", async (req, reply) => {
     const q = req.query as { sessionId?: unknown };
     if (!isNonBlankStr(q.sessionId)) return reply.code(400).send({ error: "sessionId query param is required" });
-    deps.db.clearCompanionHome(q.sessionId.trim()); // that session's proactive heartbeat turns OFF until a home is set again
+    const sessionId = q.sessionId.trim();
+    deps.db.clearCompanionHome(sessionId); // that session's proactive heartbeat turns OFF until a home is set again
+    // Refresh the controller's live `cfgs` cache so a subsequent same-home match doesn't see the cleared
+    // session's stale (now-wrong) home — scoped to this one session.
+    await deps.companion?.reconcile(sessionId);
     return { ok: true };
   });
 
