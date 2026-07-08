@@ -21,6 +21,7 @@ import { writeSessionSettings } from "../dist/pty/claude-settings.js";
 import { validateProjectConfigOverride, validateAgentProjectConfigOverride } from "../dist/mcp/platform.js";
 import { Db } from "../dist/db.js";
 import { buildServer } from "../dist/gateway/server.js";
+import { PtyHost } from "../dist/pty/host.js";
 import { isCaptureCandidate, resolveOriginContext, resolveDejaDbPath, runDejaCapture, resolveDejaBin } from "../assets/deja-capture.mjs";
 
 if (!process.env.LOOM_HOME) { console.error("LOOM_HOME must be set."); process.exit(2); }
@@ -149,6 +150,55 @@ try {
   check("agent-facing validator: docLint:true still ACCEPTED alongside the dejaCapture rejection",
     validateAgentProjectConfigOverride({ docLint: true }).ok === true);
 
+  // --- origin_prompt v2 (card d4b48f31): PtyHost retains the triggering UserPromptSubmit turn, IN
+  // MEMORY, MOST-RECENT-ONLY, and ONLY when dejaCapture is on for the session. Hermetic against a FAKE
+  // pty (mirrors worker-kickoff-guarantee.mjs's TestPtyHost) — no real claude involved.
+  {
+    const fakes = [];
+    function makeFakePty() {
+      const fake = { pid: 1234, write: () => {}, onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {} };
+      fakes.push(fake);
+      return fake;
+    }
+    class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
+    const events = { onEngineSessionId() {}, onContextStats() {}, onRateLimited() {}, onExit() {}, onBusy() {} };
+    const host = new TestPtyHost(events);
+    const spawnOpts = (id, dejaCapture) => ({
+      sessionId: id, cwd: process.env.LOOM_HOME, dejaCapture,
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    });
+
+    // dejaCapture ON: the FIRST UserPromptSubmit's `prompt` text is retained.
+    host.spawn(spawnOpts("deja-on", true));
+    check("getLastPromptText: null before any turn has started", host.getLastPromptText("deja-on") === null);
+    host.deliverHook("deja-on", { hook_event_name: "UserPromptSubmit", prompt: "make it blue" });
+    check("getLastPromptText: dejaCapture ON -> retains the FIRST turn's literal prompt text", host.getLastPromptText("deja-on") === "make it blue");
+
+    // A SECOND turn OVERWRITES — most-recent-only, never an append/log.
+    host.deliverHook("deja-on", { hook_event_name: "UserPromptSubmit", prompt: "now make it red instead" });
+    check("getLastPromptText: a second turn OVERWRITES the first (most-recent-only, not an append log)",
+      host.getLastPromptText("deja-on") === "now make it red instead");
+
+    // dejaCapture OFF (the default/unset case): the same hook payload is NEVER retained.
+    host.spawn(spawnOpts("deja-off", false));
+    host.deliverHook("deja-off", { hook_event_name: "UserPromptSubmit", prompt: "this must never be retained" });
+    check("getLastPromptText: dejaCapture OFF -> the prompt text is never retained", host.getLastPromptText("deja-off") === null);
+
+    // Unset dejaCapture (omitted, mirrors every pre-v2 spawn call site) -> byte-identical to OFF.
+    host.spawn({ sessionId: "deja-unset", cwd: process.env.LOOM_HOME, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 }, sessionEnv: {} });
+    host.deliverHook("deja-unset", { hook_event_name: "UserPromptSubmit", prompt: "also must never be retained" });
+    check("getLastPromptText: dejaCapture omitted from SpawnOpts -> never retained (default OFF)", host.getLastPromptText("deja-unset") === null);
+
+    // A hook payload with no `prompt` field (defensive — the relay forwards whatever the engine sends)
+    // never throws and leaves the prior value untouched.
+    host.deliverHook("deja-on", { hook_event_name: "UserPromptSubmit" });
+    check("getLastPromptText: a UserPromptSubmit with no `prompt` field never throws and leaves the retained value untouched",
+      host.getLastPromptText("deja-on") === "now make it red instead");
+
+    check("getLastPromptText: an unknown/dead sessionId resolves to null", host.getLastPromptText("does-not-exist") === null);
+  }
+
   // --- GET /internal/deja-context/:sessionId (the daemon-side resolution route) ---
 
   const dbFile = path.join(process.env.LOOM_HOME, "deja-capture-test.db");
@@ -161,15 +211,30 @@ try {
   db.insertSession({ id: "sDeja", projectId: "pDeja", agentId: "agentDeja", engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId: "tDeja" });
   db.insertSession({ id: "sNoTask", projectId: "pDeja", agentId: "agentDeja", engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker" });
 
-  const stub = {};
+  // origin_prompt v2 (card d4b48f31): a stub PtyHost.getLastPromptText — null for every session except
+  // sDeja, which stands in for a dejaCapture-on session that has a retained UserPromptSubmit turn.
+  const RETAINED_TURN = "Build variant B with a darker hero section";
+  const stub = { getLastPromptText: (sessionId) => (sessionId === "sDeja" ? RETAINED_TURN : null) };
   const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, runMcp: stub, control: stub, usageStatus: stub });
-  const expectedOriginPrompt = "feat: build the landing mockup\n\nDesign a landing page mockup for the new pricing tier.";
+  const expectedOriginPromptBase = "feat: build the landing mockup\n\nDesign a landing page mockup for the new pricing tier.";
+  const expectedOriginPromptEnriched = `${expectedOriginPromptBase}\n\n---\nTriggering prompt:\n${RETAINED_TURN}`;
   try {
+    // WITH-TURN case: PtyHost holds a retained turn for this session -> origin_prompt is ENRICHED,
+    // appended after (never replacing) the title+body base.
     const ok = await app.inject({ method: "GET", url: "/internal/deja-context/sDeja", remoteAddress: "127.0.0.1" });
     check("route: loopback + a session with a task -> 200", ok.statusCode === 200);
     const okBody = ok.json();
-    check("route: originPrompt = task title+body", okBody.originPrompt === expectedOriginPrompt);
+    check("route: with-turn -> originPrompt = task title+body APPENDED with the retained turn", okBody.originPrompt === expectedOriginPromptEnriched);
     check("route: project = the project's name", okBody.project === "Fire Studio");
+
+    // NO-TURN case: PtyHost holds nothing for this session (dejaCapture off, or no turn yet) ->
+    // origin_prompt falls back CLEANLY to title+body alone — the pre-v2 shape, byte-identical.
+    db.insertTask({ id: "tNoTurn", projectId: "pDeja", title: "feat: build a second mockup", body: "Another mockup body.", columnKey: "in_progress", position: 2, priority: "p2", createdAt: now, updatedAt: now });
+    db.insertSession({ id: "sNoTurn", projectId: "pDeja", agentId: "agentDeja", engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId: "tNoTurn" });
+    const noTurnOk = await app.inject({ method: "GET", url: "/internal/deja-context/sNoTurn", remoteAddress: "127.0.0.1" });
+    check("route: no-turn -> 200", noTurnOk.statusCode === 200);
+    check("route: no-turn -> originPrompt falls back cleanly to task title+body alone (no trailing enrichment)",
+      noTurnOk.json().originPrompt === "feat: build a second mockup\n\nAnother mockup body.");
 
     const forbidden = await app.inject({ method: "GET", url: "/internal/deja-context/sDeja", remoteAddress: "203.0.113.7" });
     check("route: NON-loopback caller -> 403 (same trust posture as /internal/hook)", forbidden.statusCode === 403);
@@ -187,7 +252,7 @@ try {
     await app.listen({ port: 0, host: "127.0.0.1" });
     const livePort = app.server.address().port;
     const liveCtx = await resolveOriginContext("sDeja", livePort);
-    check("integration: resolveOriginContext against the REAL live route resolves originPrompt", liveCtx?.originPrompt === expectedOriginPrompt);
+    check("integration: resolveOriginContext against the REAL live route resolves originPrompt (enriched)", liveCtx?.originPrompt === expectedOriginPromptEnriched);
     check("integration: resolveOriginContext against the REAL live route resolves project", liveCtx?.project === "Fire Studio");
 
     // resolveDejaDbPath (card b37efb19, RELAY-side, not daemon-side): <home>/.deja/store.sqlite —
@@ -213,7 +278,7 @@ try {
     await runDejaCapture("/tmp/mockup.html", liveCtx.originPrompt, liveCtx.project, sampleDbPath, spyExecFile);
     check("integration: runDejaCapture shells out to the CONFIRMED `deja capture` args, including --db (file positional, then flag pairs)",
       capturedArgs?.cmd === "deja" && JSON.stringify(capturedArgs.args) === JSON.stringify([
-        "capture", "/tmp/mockup.html", "--prompt", expectedOriginPrompt, "--project", "Fire Studio", "--db", sampleDbPath,
+        "capture", "/tmp/mockup.html", "--prompt", expectedOriginPromptEnriched, "--project", "Fire Studio", "--db", sampleDbPath,
       ]));
     check("integration: a bare (non-.js) bin is exec'd with NO shell (never — args carry agent-influenced content; shelling them would be an injection surface)",
       capturedOpts?.shell === undefined);

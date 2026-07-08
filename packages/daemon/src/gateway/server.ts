@@ -1459,14 +1459,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // injectable `resolveOriginContext(sessionId, port, fetchImpl)` seam). Trust posture mirrors
   // /internal/hook EXACTLY: loopback-gated, NOT an agent MCP tool, unreachable by any agent session.
   // Resolves sessionId -> the worker session's taskId -> the persisted task's title+body as the
-  // origin_prompt (v1, Deja-mgr confirmed), plus the project name. 404s (never throws) on anything
-  // unresolvable so the relay's best-effort caller degrades to a null context — never blocks the
-  // write either way. PENDING ENRICHMENT (card b3bd4841, flagged for Lead scoping): the Deja mgr
-  // wants origin_prompt to APPEND the triggering UserPromptSubmit turn when present (to differentiate
-  // sibling A/B/C variants from one task) — but that turn is NOT persisted anywhere today (PtyHost.
-  // deliverHook's UserPromptSubmit case only flips firstTurnStarted/busy; it never stores the prompt
-  // text). Title+body is the durable v1 base either way; enrichment is a daemon-side-only addition to
-  // THIS handler once persistence lands — the relay's `resolveOriginContext` needs no change.
+  // origin_prompt base (404s — never throws — on anything unresolvable so the relay's best-effort
+  // caller degrades to a null context, never blocking the write). origin_prompt v2 (card d4b48f31):
+  // when PtyHost holds a retained UserPromptSubmit turn for this session (dejaCapture-gated, in-memory,
+  // most-recent-only — see PtyHost.getLastPromptText/Live.lastPromptText), APPEND it after the
+  // title+body base so a Deja-captured mockup's origin_prompt differentiates sibling A/B/C variants
+  // generated from one task. Falls back CLEANLY to title+body alone when no turn is retained yet (a
+  // fresh session, or dejaCapture off) — the always-call guarantee (relay's `resolveOriginContext`)
+  // is unaffected either way; the relay itself needs no change.
   app.get("/internal/deja-context/:sessionId", async (req, reply) => {
     if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
     const { sessionId } = req.params as { sessionId: string };
@@ -1476,7 +1476,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!task) return reply.code(404).send({ error: "task not found" });
     const project = deps.db.getProject(session.projectId);
     if (!project) return reply.code(404).send({ error: "project not found" });
-    return reply.send({ originPrompt: `${task.title}\n\n${task.body}`, project: project.name });
+    const triggeringTurn = deps.pty.getLastPromptText(sessionId);
+    const originPrompt = triggeringTurn
+      ? `${task.title}\n\n${task.body}\n\n---\nTriggering prompt:\n${triggeringTurn}`
+      : `${task.title}\n\n${task.body}`;
+    return reply.send({ originPrompt, project: project.name });
   });
 
   // --- Graceful shutdown control hook (loopback only) — the cross-platform stop path for `loom stop`.

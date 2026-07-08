@@ -924,6 +924,18 @@ interface Live {
   // The session's role — used ONLY by logLandedMode's auto-heal to know whether ExitPlanMode is
   // disallowed for this session (see disallowedToolsForRole). null for a shell / a role-less spawn.
   role: SessionRole | null;
+  // Deja origin_prompt v2 (card d4b48f31): whether THIS session opted into dejaCapture (pinned from
+  // SpawnOpts.dejaCapture at spawn) — gates whether the UserPromptSubmit hook case below retains
+  // `lastPromptText` at all. False for every session that never set dejaCapture — byte-identical to
+  // before this card (lastPromptText stays null forever, nothing is retained).
+  dejaCapture: boolean;
+  // IN-MEMORY ONLY, MOST-RECENT-TURN ONLY — deliberately NOT a log/array and NEVER persisted to the DB
+  // (privacy constraint: Loom is a public product and must not grow an at-rest raw-prompt store).
+  // Overwritten on every UserPromptSubmit while dejaCapture is on; null otherwise or before the first
+  // turn. Read by getLastPromptText for the /internal/deja-context/:sessionId enrichment (server.ts) —
+  // capturing the literal triggering human/agent turn text, distinct from `lastPrompt` above (which is
+  // Loom's OWN submitted-turn cache for usage-cap replay, not necessarily what the hook itself reports).
+  lastPromptText: string | null;
 }
 
 export interface SpawnOpts {
@@ -1652,6 +1664,8 @@ export class PtyHost {
       modeLogged: false,
       resumeModeTarget: opts.resumeModeTarget ?? null,
       role: opts.role ?? null,
+      dejaCapture: !!opts.dejaCapture,
+      lastPromptText: null,
     };
     this.live.set(opts.sessionId, live);
 
@@ -1774,6 +1788,7 @@ export class PtyHost {
       isResume: false, modeLogged: true, // a shell has no claude footer/permission mode to read
       resumeModeTarget: null, // a shell never cycles a permission mode
       role: null, // a shell has no role; unreachable anyway (modeLogged:true skips the auto-heal read)
+      dejaCapture: false, lastPromptText: null, // a shell never fires UserPromptSubmit — inert
     };
     this.live.set(opts.id, live);
     // Shell onData is minimal: NO boot-prompt / resume-gate scanning (those are Claude-TUI artifacts).
@@ -1835,6 +1850,7 @@ export class PtyHost {
       resumeGateHandled: true, resumeGateScan: "",
       isResume: false, modeLogged: true,
       resumeModeTarget: null,
+      dejaCapture: false, lastPromptText: null, // a canned entry never fires UserPromptSubmit — inert
     };
     if (opts.bytes.length) this.appendRing(live, opts.bytes);
     this.live.set(opts.id, live);
@@ -2031,7 +2047,9 @@ export class PtyHost {
     sessionId: string,
     // StopFailure also carries error/error_details (and a future claude may carry resetsAt) — the
     // relay + /internal/hook forward the whole hook object; we read them for §19c usage-limit detect.
-    hook: { hook_event_name?: string; session_id?: string; error?: string; error_details?: unknown; resetsAt?: number },
+    // UserPromptSubmit carries `prompt` (the literal triggering turn text) — read ONLY when
+    // dejaCapture is on (see the UserPromptSubmit case / Live.lastPromptText).
+    hook: { hook_event_name?: string; session_id?: string; error?: string; error_details?: unknown; resetsAt?: number; prompt?: string },
   ): void {
     const live = this.live.get(sessionId);
     if (!live) return;
@@ -2083,6 +2101,10 @@ export class PtyHost {
         // short pre-first-turn stale window (see both). Idempotent after the first.
         live.firstTurnStarted = true;
         this.setBusy(sessionId, true); // rising edge — fires for the startup-prompt arg and injected prompts alike
+        // Deja origin_prompt v2 (card d4b48f31): retain ONLY the most-recent turn's literal text, and
+        // ONLY when this session opted into dejaCapture — overwritten every turn, never appended, never
+        // persisted (see Live.lastPromptText for the privacy rationale).
+        if (live.dejaCapture && typeof hook.prompt === "string") live.lastPromptText = hook.prompt;
         break;
       case "Stop":
       case "StopFailure": {
@@ -2220,6 +2242,16 @@ export class PtyHost {
    */
   getPending(sessionId: string): string[] {
     return (this.live.get(sessionId)?.pending ?? []).map((m) => m.text);
+  }
+
+  /**
+   * Deja origin_prompt v2 (card d4b48f31): the most-recent UserPromptSubmit turn's literal text for a
+   * dejaCapture-on session, or null when dejaCapture is off, no turn has landed yet, or the session is
+   * unknown/dead. IN-MEMORY, MOST-RECENT-ONLY — see Live.lastPromptText. Read by
+   * GET /internal/deja-context/:sessionId (server.ts) to enrich origin_prompt beyond task title+body.
+   */
+  getLastPromptText(sessionId: string): string | null {
+    return this.live.get(sessionId)?.lastPromptText ?? null;
   }
 
   /**

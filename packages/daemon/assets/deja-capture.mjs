@@ -20,14 +20,11 @@
 //     then flag pairs), 15s timeout. Deja's own `capture` no-ops on non-.html, handles empty
 //     --prompt/--project itself (empty prompt -> origin_prompt=null, empty project -> "default"),
 //     and always exits 0.
-//   - `/internal/deja-context/:sessionId` origin_prompt content is task title+body for v1 — the
-//     Deja-confirmed ENRICHMENT (append the triggering UserPromptSubmit turn, to differentiate
-//     sibling A/B/C variants generated from one task) needs the daemon to PERSIST that turn per
-//     session first, which it does NOT today (hook-relay.mjs relays UserPromptSubmit, but
-//     PtyHost.deliverHook's UserPromptSubmit case only flips firstTurnStarted/busy — it never
-//     stores the prompt text). Flagged up for Lead scoping; the route's response shape already
-//     carries a single `originPrompt` string, so enrichment is a DAEMON-side-only change (this
-//     relay needs no update) once that persistence lands.
+//   - `/internal/deja-context/:sessionId` origin_prompt content is task title+body, APPENDED (card
+//     d4b48f31) with the triggering UserPromptSubmit turn when PtyHost has one retained for the
+//     session — an in-memory, most-recent-turn-only field, dejaCapture-gated, never persisted (see
+//     Live.lastPromptText/getLastPromptText in pty/host.ts). Entirely a daemon-side change — the
+//     route's response shape is still a single `originPrompt` string, so this relay needed no update.
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -46,7 +43,7 @@ export function isCaptureCandidate(payload) {
 
 /**
  * Daemon-side resolution: sessionId -> the worker session's taskId -> the persisted task's
- * title+body (the origin_prompt default, v1 — see header for the pending enrichment) + the
+ * title+body (optionally enriched with the triggering turn — see header) + the
  * project name. Never throws — a daemon-side miss (no such session, no daemon listening, a network
  * hiccup) resolves to null so the caller degrades gracefully. `fetchImpl` is injected so this is
  * testable against a session->task fixture, or against a real live route, with no daemon required.
