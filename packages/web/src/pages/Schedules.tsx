@@ -55,11 +55,11 @@ export default function Schedules() {
   const projectAgents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
 
   const create = useMutation({
-    mutationFn: (b: { agentId: string; cron: string; enabled: boolean }) => api.createSchedule(b),
+    mutationFn: (b: { agentId: string; cron: string; enabled: boolean; prompt?: string }) => api.createSchedule(b),
     onSuccess: (s) => { qc.invalidateQueries({ queryKey: ["schedules"] }); setSelected(s.id); setCreating(false); },
   });
   const save = useMutation({
-    mutationFn: (v: { id: string; patch: { cron?: string; enabled?: boolean } }) => api.updateSchedule(v.id, v.patch),
+    mutationFn: (v: { id: string; patch: { cron?: string; enabled?: boolean; prompt?: string | null } }) => api.updateSchedule(v.id, v.patch),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["schedules"] }); },
   });
   const remove = useMutation({
@@ -75,7 +75,8 @@ export default function Schedules() {
         <SectionLabel>Schedules</SectionLabel>
         <p style={{ color: color.textMuted, fontSize: 11, margin: "0 0 10px", fontFamily: font.mono, lineHeight: 1.5 }}>
           Cron triggers. On each due boundary the daemon boots a manager session in the target agent —
-          the agent's startup prompt is the kickoff. Human-managed; changes apply on the next tick.
+          the agent's startup prompt is the kickoff, optionally followed by this schedule's own task
+          prompt. Human-managed; changes apply on the next tick.
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {schedules.data?.map((s) => (
@@ -118,10 +119,11 @@ const fieldLabel = { fontFamily: font.head as string, fontSize: 11, fontWeight: 
 // plain agent names — no "Project /" prefix since there's only one project in play); the parent keys
 // this component on the active project so a project switch remounts it and clears any stale agentId.
 function ScheduleCreate({ agents, loading, onCreate, creating, error, onCancel }:
-  { agents: { id: string; label: string }[]; loading: boolean; onCreate: (b: { agentId: string; cron: string; enabled: boolean }) => void; creating: boolean; error: Error | null; onCancel: () => void }) {
+  { agents: { id: string; label: string }[]; loading: boolean; onCreate: (b: { agentId: string; cron: string; enabled: boolean; prompt?: string }) => void; creating: boolean; error: Error | null; onCancel: () => void }) {
   const [agentId, setAgentId] = useState("");
   const [cron, setCron] = useState("0 * * * *");
   const [enabled, setEnabled] = useState(true);
+  const [prompt, setPrompt] = useState("");
 
   const noAgents = !loading && agents.length === 0;
   const cronValid = looksLikeCron(cron);
@@ -153,10 +155,18 @@ function ScheduleCreate({ agents, loading, onCreate, creating, error, onCancel }
         Enabled
       </label>
 
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Task prompt <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>· optional, appended after the agent's own startup prompt</span></span>
+        <textarea
+          style={{ minHeight: 80, width: "100%", boxSizing: "border-box", resize: "vertical", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: 8, fontFamily: font.mono, fontSize: 13, lineHeight: 1.5 }}
+          placeholder="e.g. Review the open PRs and merge anything green."
+          value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+      </label>
+
       {error && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{error.message.includes("400") ? "Daemon rejected the cron expression." : error.message}</span>}
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
-        <Button variant="primary" disabled={!valid || creating} onClick={() => onCreate({ agentId, cron: cron.trim(), enabled })}>{creating ? "Creating…" : "Create"}</Button>
+        <Button variant="primary" disabled={!valid || creating} onClick={() => onCreate({ agentId, cron: cron.trim(), enabled, prompt: prompt.trim() || undefined })}>{creating ? "Creating…" : "Create"}</Button>
         <Button onClick={onCancel}>Cancel</Button>
       </div>
     </div>
@@ -166,12 +176,13 @@ function ScheduleCreate({ agents, loading, onCreate, creating, error, onCancel }
 // Remounted per schedule (key=id) so fields reset on switch. The update endpoint patches cron/enabled
 // only (agentId is fixed), so the target agent is shown read-only; the enable toggle saves instantly.
 function ScheduleEditor({ schedule, agentLabel, onSave, saving, saveError, onDelete, deleting }:
-  { schedule: Schedule; agentLabel: string; onSave: (patch: { cron?: string; enabled?: boolean }) => void; saving: boolean; saveError: Error | null; onDelete: () => void; deleting: boolean }) {
+  { schedule: Schedule; agentLabel: string; onSave: (patch: { cron?: string; enabled?: boolean; prompt?: string | null }) => void; saving: boolean; saveError: Error | null; onDelete: () => void; deleting: boolean }) {
   const [cron, setCron] = useState(schedule.cron);
+  const [prompt, setPrompt] = useState(schedule.prompt ?? "");
   const [confirmDel, setConfirmDel] = useState(false);
 
   const cronValid = looksLikeCron(cron);
-  const dirty = cron.trim() !== schedule.cron;
+  const dirty = cron.trim() !== schedule.cron || prompt !== (schedule.prompt ?? "");
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
@@ -199,6 +210,14 @@ function ScheduleEditor({ schedule, agentLabel, onSave, saving, saveError, onDel
         {!cronValid && cron.trim().length > 0 && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>Expected 5 whitespace-separated fields.</span>}
       </label>
 
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Task prompt <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>· optional, appended after the agent's own startup prompt</span></span>
+        <textarea
+          style={{ minHeight: 80, width: "100%", boxSizing: "border-box", resize: "vertical", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: 8, fontFamily: font.mono, fontSize: 13, lineHeight: 1.5 }}
+          placeholder="e.g. Review the open PRs and merge anything green."
+          value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+      </label>
+
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
         <span>Next fire · <span style={{ color: color.text }}>{fmt(schedule.nextFireAt)}</span></span>
         <span>Last fired · <span style={{ color: color.text }}>{fmt(schedule.lastFiredAt)}</span></span>
@@ -208,9 +227,15 @@ function ScheduleEditor({ schedule, agentLabel, onSave, saving, saveError, onDel
 
       <span style={{ flex: 1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <Button variant="primary" disabled={!dirty || !cronValid || saving} onClick={() => onSave({ cron: cron.trim() })}>{saving ? "Saving…" : "Save"}</Button>
+        <Button variant="primary" disabled={!dirty || !cronValid || saving} onClick={() => onSave({
+          // Only send a field that actually changed — sending an UNCHANGED cron would still recompute
+          // nextFireAt server-side (any string cron does), silently pushing the next fire forward on a
+          // prompt-only edit.
+          ...(cron.trim() !== schedule.cron ? { cron: cron.trim() } : {}),
+          ...(prompt !== (schedule.prompt ?? "") ? { prompt: prompt.trim() || null } : {}),
+        })}>{saving ? "Saving…" : "Save"}</Button>
         {dirty
-          ? <Button onClick={() => setCron(schedule.cron)}>Reset</Button>
+          ? <Button onClick={() => { setCron(schedule.cron); setPrompt(schedule.prompt ?? ""); }}>Reset</Button>
           : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
         <span style={{ flex: 1 }} />
         <Button disabled={saving} onClick={() => onSave({ enabled: !schedule.enabled })}

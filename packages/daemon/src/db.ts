@@ -860,7 +860,26 @@ const SCHEDULE_ADDED_COLUMNS: Record<string, string> = {
   // Platform Manager P5: what a fired schedule spawns. NOT NULL + constant DEFAULT 'manager' is legal
   // on ALTER TABLE ADD COLUMN, so every legacy schedule row backfills to 'manager' (today's behavior).
   kind: "TEXT NOT NULL DEFAULT 'manager'",
+  // Optional per-schedule custom prompt, appended to the agent's own startupPrompt on fire. Nullable;
+  // legacy rows backfill to NULL, so an unset schedule composes byte-identical to today.
+  prompt: "TEXT",
 };
+
+/**
+ * Normalize a schedule prompt at the single shared DB write path (insertSchedule/updateSchedule), so
+ * EVERY surface (MCP schedule_create/update — Zod's `z.string().optional()` can't carry `null`, so a
+ * clear arrives as `""` — as well as REST/web, which clear via explicit `null`) stores + reads back
+ * IDENTICALLY: `undefined` stays `undefined` (the omit signal — updateSchedule's caller filters
+ * undefined columns out of the patch, so this must NOT collapse it to null or an omitted prompt would
+ * wrongly get cleared), `null` or a blank/whitespace-only string both normalize to `null` (mirrors
+ * appendScheduledPrompt's own `.trim()` — a whitespace-only prompt already composes as "unset"), and any
+ * other non-empty string is stored VERBATIM (not trimmed — only full-blank collapses).
+ */
+function normalizeSchedulePrompt(prompt: string | null | undefined): string | null | undefined {
+  if (prompt === undefined) return undefined;
+  if (prompt === null) return null;
+  return prompt.trim().length === 0 ? null : prompt;
+}
 
 /** Columns added to `runs` after R2; applied to existing DBs by migrateRuns() (Agent Runs R3). */
 const RUN_ADDED_COLUMNS: Record<string, string> = {
@@ -3286,9 +3305,9 @@ export class Db {
   // --- schedules (phase-2 Pillar B) ---
   insertSchedule(s: Schedule): void {
     this.db.prepare(
-      `INSERT INTO schedules (id,agent_id,cron,enabled,next_fire_at,last_fired_at,created_at,kind)
-       VALUES (@id,@agentId,@cron,@enabled,@nextFireAt,@lastFiredAt,@createdAt,@kind)`,
-    ).run({ ...s, enabled: s.enabled ? 1 : 0, lastFiredAt: s.lastFiredAt ?? null, kind: s.kind ?? "manager" });
+      `INSERT INTO schedules (id,agent_id,cron,enabled,next_fire_at,last_fired_at,created_at,kind,prompt)
+       VALUES (@id,@agentId,@cron,@enabled,@nextFireAt,@lastFiredAt,@createdAt,@kind,@prompt)`,
+    ).run({ ...s, enabled: s.enabled ? 1 : 0, lastFiredAt: s.lastFiredAt ?? null, kind: s.kind ?? "manager", prompt: normalizeSchedulePrompt(s.prompt) ?? null });
   }
   listSchedules(): Schedule[] {
     return (this.db.prepare("SELECT * FROM schedules ORDER BY created_at").all() as Row[]).map(toSchedule);
@@ -3298,13 +3317,14 @@ export class Db {
     return r ? toSchedule(r) : undefined;
   }
   /** Partial edit (REST): any provided field is written; omitted fields are left as-is. */
-  updateSchedule(id: string, patch: { cron?: string; enabled?: boolean; nextFireAt?: string; lastFiredAt?: string | null; kind?: "manager" | "auditor" | "workspace-auditor" }): void {
+  updateSchedule(id: string, patch: { cron?: string; enabled?: boolean; nextFireAt?: string; lastFiredAt?: string | null; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null }): void {
     const cols: Record<string, unknown> = {
       cron: patch.cron,
       enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
       next_fire_at: patch.nextFireAt,
       last_fired_at: patch.lastFiredAt,
       kind: patch.kind,
+      prompt: normalizeSchedulePrompt(patch.prompt),
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
@@ -3931,6 +3951,7 @@ function toSchedule(r0: unknown): Schedule {
     nextFireAt: r.next_fire_at as string, lastFiredAt: (r.last_fired_at as string) ?? null,
     createdAt: r.created_at as string,
     kind: (r.kind as Schedule["kind"]) ?? "manager", // legacy rows (pre-P5) → manager
+    prompt: (r.prompt as string | null) ?? null,
   };
 }
 function toWake(r0: unknown): Wake {

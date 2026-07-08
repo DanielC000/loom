@@ -37,3 +37,22 @@ export function composeManagerStartupPrompt(
   const own = startupPrompt?.trim();
   return own ? `${block}\n\n${own}` : block;
 }
+
+/**
+ * Append an OPTIONAL per-schedule custom prompt to a session's already-composed startupPrompt, as a
+ * clearly-delimited trailing block — never precedes or clobbers the agent's own identity/doctrine (or,
+ * for a manager, the "Where things live" pre-block above). Applies uniformly to every schedule kind
+ * (manager/auditor/workspace-auditor) — callers pass whatever startupPrompt they'd otherwise spawn with.
+ * `prompt` unset/blank ⇒ returns `startupPrompt` untouched, so a schedule with no custom prompt composes
+ * BYTE-IDENTICAL to today. PURE + exported so the hermetic test can assert both branches.
+ */
+export function appendScheduledPrompt(
+  startupPrompt: string | undefined,
+  prompt: string | null | undefined,
+): string | undefined {
+  const custom = prompt?.trim();
+  if (!custom) return startupPrompt;
+  const base = startupPrompt?.trim();
+  const block = `Scheduled task:\n${custom}`;
+  return base ? `${base}\n\n---\n${block}` : block;
+}

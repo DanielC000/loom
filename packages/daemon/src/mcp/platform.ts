@@ -726,7 +726,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_schedules",
       {
-        description: "List cron schedules across the platform (each {id, agentId, cron, enabled, nextFireAt, lastFiredAt, kind}). Optional projectId narrows to schedules whose agent lives in that project (unknown id => []). With no filter, returns every schedule. Read-only. Use to discover a scheduleId before schedule_update/schedule_delete.",
+        description: "List cron schedules across the platform (each {id, agentId, cron, enabled, nextFireAt, lastFiredAt, kind, prompt}). Optional projectId narrows to schedules whose agent lives in that project (unknown id => []). With no filter, returns every schedule. Read-only. Use to discover a scheduleId before schedule_update/schedule_delete.",
         inputSchema: { projectId: z.string().optional() },
       },
       async ({ projectId }) => {
@@ -1107,10 +1107,10 @@ export class PlatformMcpRouter {
     server.registerTool(
       "schedule_create",
       {
-        description: "Create a cron schedule that boots a session in an agent (explicit cross-project agentId) on each tick (5-field cron). kind selects WHAT it spawns: \"manager\" (default — a manager session that runs the orchestration loop), \"auditor\" (the read-and-file-only Platform Auditor, spawned with a locked auditor role), or \"workspace-auditor\" (the suggest-only end-user Workspace Auditor, spawned with a locked workspace-auditor role). enabled defaults to true. An unknown agent or an invalid cron is rejected. next_fire_at is computed here.",
-        inputSchema: { agentId: z.string(), cron: z.string(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional() },
+        description: "Create a cron schedule that boots a session in an agent (explicit cross-project agentId) on each tick (5-field cron). kind selects WHAT it spawns: \"manager\" (default — a manager session that runs the orchestration loop), \"auditor\" (the read-and-file-only Platform Auditor, spawned with a locked auditor role), or \"workspace-auditor\" (the suggest-only end-user Workspace Auditor, spawned with a locked workspace-auditor role). enabled defaults to true. An unknown agent or an invalid cron is rejected. next_fire_at is computed here. Optional `prompt` is a custom task description, APPENDED to the agent's own startupPrompt (agent prompt first, then this as a clearly-delimited block) when the schedule fires — omit for today's behavior (agent prompt only).",
+        inputSchema: { agentId: z.string(), cron: z.string(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional(), prompt: z.string().optional() },
       },
-      async ({ agentId, cron, enabled, kind }) => {
+      async ({ agentId, cron, enabled, kind, prompt }) => {
         if (!db.getAgent(agentId)) return ok({ error: "agent not found" });
         let next: string;
         try { next = nextFireAt(cron, new Date()); } catch { return ok({ error: "invalid cron expression" }); }
@@ -1118,6 +1118,7 @@ export class PlatformMcpRouter {
           id: randomUUID(), agentId, cron, enabled: enabled ?? true,
           nextFireAt: next, lastFiredAt: null, createdAt: new Date().toISOString(),
           kind: kind ?? "manager",
+          prompt: prompt ?? null,
         };
         db.insertSchedule(schedule);
         return ok(schedule);
@@ -1127,14 +1128,15 @@ export class PlatformMcpRouter {
     server.registerTool(
       "schedule_update",
       {
-        description: "Update a schedule's cron, enabled flag, and/or kind (\"manager\"|\"auditor\"|\"workspace-auditor\") by id. A changed cron recomputes next_fire_at (rejected if invalid); enabled toggles the Scheduler for this row; kind changes what a fire spawns. Omitted fields are left as-is. 404 if the schedule is unknown.",
-        inputSchema: { scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional() },
+        description: "Update a schedule's cron, enabled flag, kind (\"manager\"|\"auditor\"|\"workspace-auditor\"), and/or custom prompt by id. A changed cron recomputes next_fire_at (rejected if invalid); enabled toggles the Scheduler for this row; kind changes what a fire spawns; prompt is appended to the agent's own startupPrompt on fire (pass an empty string to clear it). Omitted fields are left as-is. 404 if the schedule is unknown.",
+        inputSchema: { scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional(), prompt: z.string().optional() },
       },
-      async ({ scheduleId, cron, enabled, kind }) => {
+      async ({ scheduleId, cron, enabled, kind, prompt }) => {
         if (!db.getSchedule(scheduleId)) return ok({ error: "schedule not found" });
-        const patch: { cron?: string; enabled?: boolean; nextFireAt?: string; kind?: "manager" | "auditor" | "workspace-auditor" } = {};
+        const patch: { cron?: string; enabled?: boolean; nextFireAt?: string; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null } = {};
         if (typeof enabled === "boolean") patch.enabled = enabled;
         if (kind !== undefined) patch.kind = kind;
+        if (prompt !== undefined) patch.prompt = prompt;
         if (typeof cron === "string") {
           try { patch.nextFireAt = nextFireAt(cron, new Date()); } catch { return ok({ error: "invalid cron expression" }); }
           patch.cron = cron;
@@ -1147,7 +1149,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "schedule_get",
       {
-        description: "Read ONE schedule by id — the FULL record ({id, agentId, cron, enabled, nextFireAt, lastFiredAt, kind}). Read-only. Error if the id is unknown.",
+        description: "Read ONE schedule by id — the FULL record ({id, agentId, cron, enabled, nextFireAt, lastFiredAt, kind, prompt}). Read-only. Error if the id is unknown.",
         inputSchema: { scheduleId: z.string() },
       },
       async ({ scheduleId }) => ok(db.getSchedule(scheduleId) ?? { error: "schedule not found" }),

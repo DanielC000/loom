@@ -19,7 +19,7 @@ import { readRunUsage, readRunUsageFromFile } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
-import { composeManagerStartupPrompt } from "./manager-prompt.js";
+import { composeManagerStartupPrompt, appendScheduledPrompt } from "./manager-prompt.js";
 import { composePlatformLeadStartupPrompt, lineageRootId, liveLineageSuccessor, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
 import { composeWorkerStartupPrompt } from "./worker-prompt.js";
 import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
@@ -617,8 +617,13 @@ export class SessionService {
    * Start a NEW MANAGER session in an agent (phase-2 §A2). Mirrors startNew, but marks the
    * session role 'manager' (so it gets the loom-orchestration MCP + allowlist at spawn) and
    * runs in the project repo, NOT a worktree (managers coordinate; workers get the worktrees).
+   *
+   * `prompt` is an OPTIONAL per-schedule custom task description (the Scheduler passes a fired
+   * schedule's own `prompt` here) — appended via `appendScheduledPrompt` AFTER the composed manager
+   * prompt (identity/doctrine + "Where things live" block). Undefined/null (every non-scheduled caller,
+   * and every schedule with no prompt set) ⇒ byte-identical to today.
    */
-  startManager(agentId: string): Session {
+  startManager(agentId: string, prompt?: string | null): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -667,7 +672,10 @@ export class SessionService {
       // vaultPath is passed here UNGATED by docLint — the orchestrator needs the location regardless of
       // whether the vault-lint hook is on. Additive to the manager prompt only; every other spawn path
       // is untouched (byte-identical).
-      startupPrompt: composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name }),
+      startupPrompt: appendScheduledPrompt(
+        composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name }),
+        prompt,
+      ),
       role,
       browserTesting,
       documentConversion,
@@ -769,8 +777,11 @@ export class SessionService {
    * /mcp-platform (resolveRole gates role==="platform") AND /mcp-orch (gates manager|worker), so a hostile
    * transcript can never turn an audit into an outward/destructive action. Human-REST/scheduler-only
    * (POST /api/agents/:id/sessions {role:"auditor"} + the Scheduler) — no agent/MCP path mints one.
+   *
+   * `prompt` is an OPTIONAL per-schedule custom task description (mirrors startManager) — appended via
+   * `appendScheduledPrompt` AFTER the agent's own startupPrompt. Undefined/null ⇒ byte-identical to today.
    */
-  startAuditor(agentId: string): Session {
+  startAuditor(agentId: string, prompt?: string | null): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -814,7 +825,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
-      startupPrompt,
+      startupPrompt: appendScheduledPrompt(startupPrompt, prompt),
       role,
       browserTesting,
       documentConversion,
@@ -842,8 +853,12 @@ export class SessionService {
    * HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"workspace-auditor"}) — no agent/MCP path
    * mints one (session_spawn refuses everything but manager|plain; the role is absent from the mintable
    * profile enum + setupRoleError). The Workspace Auditor agent lives in the reserved "Getting Started" home (B4).
+   *
+   * `prompt` is an OPTIONAL per-schedule custom task description (mirrors startManager/startAuditor) —
+   * appended via `appendScheduledPrompt` AFTER the agent's own startupPrompt. Undefined/null ⇒
+   * byte-identical to today.
    */
-  startWorkspaceAuditor(agentId: string): Session {
+  startWorkspaceAuditor(agentId: string, prompt?: string | null): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -887,7 +902,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
-      startupPrompt,
+      startupPrompt: appendScheduledPrompt(startupPrompt, prompt),
       role,
       browserTesting,
       documentConversion,
@@ -4133,7 +4148,7 @@ export class SessionService {
    * an invalid cron expression is rejected.
    */
   createSchedule(
-    managerSessionId: string, input: { agentId: string; cron: string; enabled?: boolean },
+    managerSessionId: string, input: { agentId: string; cron: string; enabled?: boolean; prompt?: string | null },
   ): Schedule {
     this.requireManager(managerSessionId, "schedule_create");
     const targetAgent = this.db.getAgent(input.agentId);
@@ -4147,6 +4162,7 @@ export class SessionService {
       // A manager's self-service schedule always boots a manager (P5 'auditor' schedules are a
       // platform/human concern — created via the platform tool or REST, never this surface).
       kind: "manager",
+      prompt: input.prompt ?? null,
     };
     this.db.insertSchedule(schedule);
     this.auditManage(managerSessionId, "schedule_create", { scheduleId: schedule.id, agentId: input.agentId, cron: input.cron });
@@ -4154,11 +4170,11 @@ export class SessionService {
   }
 
   /**
-   * Update a schedule's cron and/or enabled flag. A changed cron recomputes next_fire_at (rejected if
-   * invalid); enabled toggles the Scheduler on/off for this row.
+   * Update a schedule's cron, enabled flag, and/or custom prompt. A changed cron recomputes
+   * next_fire_at (rejected if invalid); enabled toggles the Scheduler on/off for this row.
    */
   updateScheduleAsManager(
-    managerSessionId: string, scheduleId: string, patch: { cron?: string; enabled?: boolean },
+    managerSessionId: string, scheduleId: string, patch: { cron?: string; enabled?: boolean; prompt?: string | null },
   ): Schedule {
     this.requireManager(managerSessionId, "schedule_update");
     const schedule = this.db.getSchedule(scheduleId);
@@ -4166,8 +4182,9 @@ export class SessionService {
     // Resolve the schedule → its agent → that agent's project; reject a schedule outside the caller's
     // project (a missing agent can never match own, so it's rejected too).
     this.requireOwnProject(managerSessionId, this.db.getAgent(schedule.agentId)?.projectId, "schedule_update");
-    const dbPatch: { cron?: string; enabled?: boolean; nextFireAt?: string } = {};
+    const dbPatch: { cron?: string; enabled?: boolean; nextFireAt?: string; prompt?: string | null } = {};
     if (typeof patch.enabled === "boolean") dbPatch.enabled = patch.enabled;
+    if (patch.prompt !== undefined) dbPatch.prompt = patch.prompt;
     if (typeof patch.cron === "string") {
       try { dbPatch.nextFireAt = nextFireAt(patch.cron, new Date()); } catch { throw new Error("invalid cron expression"); }
       dbPatch.cron = patch.cron;

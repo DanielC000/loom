@@ -458,7 +458,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // create/update (the Scheduler advances it after each fire). ---
   app.get("/api/schedules", async () => deps.db.listSchedules());
   app.post("/api/schedules", async (req, reply) => {
-    const b = (req.body ?? {}) as { agentId?: string; cron?: string; enabled?: boolean; kind?: string };
+    const b = (req.body ?? {}) as { agentId?: string; cron?: string; enabled?: boolean; kind?: string; prompt?: string | null };
     if (!b.agentId || !b.cron) return reply.code(400).send({ error: "agentId and cron required" });
     if (!deps.db.getAgent(b.agentId)) return reply.code(404).send({ error: "agent not found" });
     // P5/B6: kind selects what a fire spawns — "manager" (default), "auditor" (the dev read-and-file-only
@@ -473,6 +473,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       id: randomUUID(), agentId: b.agentId, cron: b.cron,
       enabled: b.enabled ?? true, nextFireAt: next, lastFiredAt: null, createdAt: new Date().toISOString(),
       kind: (b.kind as Schedule["kind"]) ?? "manager",
+      // Optional per-schedule custom prompt, appended to the agent's own startupPrompt on fire.
+      prompt: b.prompt ?? null,
     };
     deps.db.insertSchedule(schedule);
     return reply.code(201).send(schedule);
@@ -480,13 +482,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/schedules/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getSchedule(id)) return reply.code(404).send({ error: "schedule not found" });
-    const b = (req.body ?? {}) as { cron?: string; enabled?: boolean; kind?: string };
+    const b = (req.body ?? {}) as { cron?: string; enabled?: boolean; kind?: string; prompt?: string | null };
     if (b.kind !== undefined && !isScheduleKind(b.kind)) {
       return reply.code(400).send({ error: 'kind must be "manager", "auditor", or "workspace-auditor"' });
     }
-    const patch: { cron?: string; enabled?: boolean; nextFireAt?: string; kind?: Schedule["kind"] } = {};
+    const patch: { cron?: string; enabled?: boolean; nextFireAt?: string; kind?: Schedule["kind"]; prompt?: string | null } = {};
     if (typeof b.enabled === "boolean") patch.enabled = b.enabled;
     if (isScheduleKind(b.kind)) patch.kind = b.kind;
+    if (b.prompt !== undefined) patch.prompt = b.prompt;
     if (typeof b.cron === "string") {
       try { patch.nextFireAt = nextFireAt(b.cron, new Date()); } catch { return reply.code(400).send({ error: "invalid cron expression" }); }
       patch.cron = b.cron;

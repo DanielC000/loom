@@ -11,22 +11,24 @@ export interface SchedulerDeps {
   /**
    * Boots a manager session in the agent and returns its id. Prod-wired to
    * SessionService.startManager; the test injects a recording stub (keeps this PR claude-free).
+   * The optional 2nd arg is the schedule's own `prompt` (appended to the agent's startupPrompt) —
+   * undefined/null when unset, so an unset schedule composes byte-identical to today.
    */
-  startManager: (agentId: string) => { id: string };
+  startManager: (agentId: string, prompt?: string | null) => { id: string };
   /**
    * Boots the read-and-file-only Platform Auditor session (P5) — the spawn for a schedule whose
    * `kind` is "auditor". Prod-wired to SessionService.startAuditor; a test injects a recording stub.
    * Optional: a schedule defaults to kind "manager", so a wiring that omits this still drives every
    * legacy (manager) schedule correctly — an auditor schedule then falls back to startManager.
    */
-  startAuditor?: (agentId: string) => { id: string };
+  startAuditor?: (agentId: string, prompt?: string | null) => { id: string };
   /**
    * Boots the suggest-only END-USER Workspace Auditor session (B6) — the spawn for a schedule whose
    * `kind` is "workspace-auditor". Prod-wired to SessionService.startWorkspaceAuditor; a test injects a
    * recording stub. Optional, exactly like startAuditor: a wiring that omits it falls back to
    * startManager (so the manager path stays unchanged when the workspace-auditor spawn isn't wired).
    */
-  startWorkspaceAuditor?: (agentId: string) => { id: string };
+  startWorkspaceAuditor?: (agentId: string, prompt?: string | null) => { id: string };
   /** Tick cadence; defaults to 60s. Injectable so a test can drive tick() directly instead. */
   intervalMs?: number;
   /**
@@ -131,7 +133,7 @@ export class Scheduler {
           s.kind === "workspace-auditor" && this.deps.startWorkspaceAuditor ? this.deps.startWorkspaceAuditor
           : s.kind === "auditor" && this.deps.startAuditor ? this.deps.startAuditor
           : this.deps.startManager;
-        const spawned = startFn(s.agentId);
+        const spawned = startFn(s.agentId, s.prompt);
         this.deps.db.appendEvent({
           id: randomUUID(), ts: now.toISOString(),
           managerSessionId: spawned.id, kind: "schedule_fired",

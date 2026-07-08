@@ -1098,6 +1098,13 @@ export interface Schedule {
    * schedule keeps spawning a manager exactly as before.
    */
   kind: "manager" | "auditor" | "workspace-auditor";
+  /**
+   * Optional per-schedule task description, APPENDED to the agent's own startupPrompt when this
+   * schedule fires (agent prompt first, then this as a clearly-delimited block — never clobbers or
+   * precedes the agent's identity/doctrine). Settable by humans (Schedules UI/REST) and agents
+   * (schedule_create/update MCP tools). Unset ⇒ composition is byte-identical to today.
+   */
+  prompt?: string | null;
 }
 
 /**

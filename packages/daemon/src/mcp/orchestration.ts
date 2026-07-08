@@ -1157,12 +1157,14 @@ export class OrchestrationMcpRouter {
           "Create a cron schedule that autonomously boots a manager session in an agent on each tick (5-field " +
           "cron). enabled defaults to true. An invalid cron expression is rejected. Low-risk autonomous wake — " +
           "the same kind of self-scheduling agents already do via wake_me. The target agent must be in YOUR " +
-          "project (an agent outside it is REJECTED).",
-        inputSchema: { agentId: z.string(), cron: z.string(), enabled: z.boolean().optional() },
+          "project (an agent outside it is REJECTED). Optional `prompt` is a custom task description, APPENDED " +
+          "to the agent's own startupPrompt (agent prompt first, then this as a clearly-delimited block) when " +
+          "the schedule fires — omit for today's behavior (agent prompt only).",
+        inputSchema: { agentId: z.string(), cron: z.string(), enabled: z.boolean().optional(), prompt: z.string().optional() },
       },
-      async ({ agentId, cron, enabled }) => {
+      async ({ agentId, cron, enabled, prompt }) => {
         try {
-          return ok(sessions.createSchedule(managerSessionId, { agentId, cron, enabled }));
+          return ok(sessions.createSchedule(managerSessionId, { agentId, cron, enabled, prompt }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
@@ -1173,14 +1175,15 @@ export class OrchestrationMcpRouter {
       "schedule_update",
       {
         description:
-          "Update a schedule's cron and/or enabled flag. A changed cron recomputes the next fire (rejected if " +
-          "invalid); enabled toggles the Scheduler on/off for this row. The schedule's agent must be in YOUR " +
-          "project (a schedule outside it is REJECTED). Omitted fields are left as-is.",
-        inputSchema: { scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional() },
+          "Update a schedule's cron, enabled flag, and/or custom prompt. A changed cron recomputes the next " +
+          "fire (rejected if invalid); enabled toggles the Scheduler on/off for this row; prompt is appended to " +
+          "the agent's own startupPrompt on fire (pass an empty string to clear it). The schedule's agent must " +
+          "be in YOUR project (a schedule outside it is REJECTED). Omitted fields are left as-is.",
+        inputSchema: { scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), prompt: z.string().optional() },
       },
-      async ({ scheduleId, cron, enabled }) => {
+      async ({ scheduleId, cron, enabled, prompt }) => {
         try {
-          return ok(sessions.updateScheduleAsManager(managerSessionId, scheduleId, { cron, enabled }));
+          return ok(sessions.updateScheduleAsManager(managerSessionId, scheduleId, { cron, enabled, prompt }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
