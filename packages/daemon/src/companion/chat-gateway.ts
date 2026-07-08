@@ -528,12 +528,20 @@ export class ChatGateway {
    * companion chat history (matches Telegram's `send`, which never records; see the ChannelAdapter.send
    * doc). Pass `{ record: true }` only for the "/new"/"/reset" conversation-boundary marker (handleInbound's
    * command branch), which IS an intentional history row.
+   *
+   * Chunks a long ack to the adapter's max length exactly like `sendVia` (a slash-command ack — e.g.
+   * `/export`/`/help` — can exceed a platform cap like Telegram's 4096 chars just as easily as a real
+   * reply). No `maxMessageLength` (in-app) ⇒ `chunkText` is never invoked, so this is byte-identical for
+   * in-app and for any ack that already fits in one chunk.
    */
   private async tryAck(binding: SessionBinding, text: string, opts?: { record?: boolean }): Promise<boolean> {
     const adapter = this.adapters.get(binding.channel);
     if (!adapter) return false;
+    const parts = adapter.maxMessageLength ? chunkText(text, adapter.maxMessageLength) : [text];
     try {
-      await adapter.send(binding.chatId, text, { record: opts?.record === true });
+      for (const part of parts) {
+        await adapter.send(binding.chatId, part, { record: opts?.record === true });
+      }
       return true;
     } catch (err) {
       this.debug(`ack send failed: ${describeError(err)}`);

@@ -173,6 +173,58 @@ const originOf = (map) => (sid) => map[sid] ?? null;
   check("chunking(boundary): reassembly is byte-LOSSLESS (boundary chars kept)", tg.sent.map((s) => s.text).join("") === withBreaks);
 }
 
+// --- tryAck (slash-command ack) chunks a long ack to the adapter's max length (bugfix: a long /export
+// or /help ack could exceed Telegram's 4096-char cap in one send call — tryAck now reuses chunkText
+// exactly like sendVia) -------------------------------------------------------------------------
+{
+  const longText = "word ".repeat(20).trim(); // 99 chars, boundary-splitting (same shape as the sendVia tests)
+  const messages = [{ id: "1", sessionId: "sess-A", channel: "telegram", chatId: "111", author: "user", text: longText, createdAt: "2026-01-01T00:00:00.000Z" }];
+  const expectedAck = `📤 Conversation export (1 message):\n\n**You** (2026-01-01T00:00:00.000Z):\n${longText}`;
+
+  const tg = makeAdapter("telegram", { maxMessageLength: 30 });
+  const gw = new ChatGateway(
+    () => ({ delivered: true }),
+    [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }],
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    { read: () => messages },
+  );
+  gw.registerAdapter(tg.adapter);
+  const r = await gw.handleInbound(inbound("telegram", "111", "/export"));
+  check("tryAck chunking: /export recognized as a command, not submitted as a turn", r.accepted === false && r.reason === "command" && r.command === "export");
+  check("tryAck chunking: ack reported delivered", r.acked === true);
+  check("tryAck chunking: a long ack is split into MULTIPLE sends", tg.sent.length > 1);
+  check("tryAck chunking: every chunk ≤ the adapter's max", tg.sent.every((s) => s.text.length <= 30));
+  check("tryAck chunking: every chunk lands on the SAME chat, IN ORDER", tg.sent.every((s) => s.chatId === "111"));
+  check("tryAck chunking: reassembly is byte-lossless (matches sendVia's own contract)", tg.sent.map((s) => s.text).join("") === expectedAck);
+}
+
+// --- tryAck: a SHORT ack (fits in one chunk) is still a single send — additive/byte-identical ---------
+{
+  const tg = makeAdapter("telegram", { maxMessageLength: 4096 });
+  const gw = new ChatGateway(() => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }]);
+  gw.registerAdapter(tg.adapter);
+  const r = await gw.handleInbound(inbound("telegram", "111", "/whoami"));
+  check("tryAck chunking: a short ack is still a single send", tg.sent.length === 1);
+  check("tryAck chunking: short ack text unaffected", tg.sent[0].text.includes("Channel: telegram"));
+}
+
+// --- tryAck: the IN-APP adapter (no maxMessageLength) is unaffected — never chunked -------------------
+{
+  const longText = "word ".repeat(20).trim();
+  const messages = [{ id: "1", sessionId: "sess-A", channel: "in-app", chatId: "sess-A", author: "user", text: longText, createdAt: "2026-01-01T00:00:00.000Z" }];
+  const expectedAck = `📤 Conversation export (1 message):\n\n**You** (2026-01-01T00:00:00.000Z):\n${longText}`;
+  const app = makeAdapter("in-app", { maxMessageLength: 0 }); // 0 ⇒ falsy, mirrors a real adapter with no maxMessageLength
+  const gw = new ChatGateway(
+    () => ({ delivered: true }),
+    [{ sessionId: "sess-A", channel: "in-app", chatId: "sess-A" }],
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    { read: () => messages },
+  );
+  gw.registerAdapter(app.adapter);
+  await gw.handleInbound(inbound("in-app", "sess-A", "/export"));
+  check("tryAck chunking: in-app (no maxMessageLength) delivers a long ack as ONE send, untruncated", app.sent.length === 1 && app.sent[0].text === expectedAck);
+}
+
 // --- Transport failure → structured result, NEVER throws ----------------------------------------
 {
   const tg = makeAdapter("telegram", { fail: true });
