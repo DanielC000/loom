@@ -52,7 +52,9 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    surrounding code is NOT — escalate that.
 3. **Escalate up, never sideways.** On a decision, ambiguity, or blocker beyond the task's clear scope,
    STOP and `worker_report` (`status=blocked`, with `needs`) — do not guess, do not expand scope, and
-   **never address the human**. Your manager makes the call and `worker_message`s you back down. And
+   **never address the human**. Your manager makes the call and `worker_message`s you back down — and if
+   it genuinely needs the human, your manager (not you) escalates it via Loom's decision inbox, so your
+   escalation can still reach a person while your own channel stays `worker_report` up. And
    fail fast: if your DoD mandates a check you **cannot** perform — a capability not provisioned to
    your session, or an external dependency (a live browser/service) unreachable — `worker_report
    blocked` *immediately*, before doing the full implementation, so the human fix can happen in

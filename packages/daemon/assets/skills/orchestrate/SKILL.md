@@ -122,7 +122,13 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   vault + repo do not resolve. Bundle such asks into one; don't trickle them. **Your own uncertainty
   about an invariant is NOT a blocker** — a doubt the repo / `CLAUDE.md` / vault can settle is one you
   resolve by reading them and then *proceeding*, not a reason to STOP or escalate up. Escalating on
-  self-doubt you could have checked just burns a no-op round-trip.
+  self-doubt you could have checked just burns a no-op round-trip. **When you DO surface such a decision,
+  file it as a first-class `question_ask`** (manager-only: `{title, body, options?, recommendation?}`)
+  rather than only an ephemeral `idle_report('blocked_human')` free-text note — it's durable, the human
+  answers it in the UI, and Loom pushes the answer back into your session. Give `options` + a
+  `recommendation` when the choice is between concrete alternatives; a pure blocker is title+body only.
+  It's NON-BLOCKING: keep orchestrating your other tracks, but don't guess past *this* decision point —
+  `question_pull` the answer (which consumes it) when you reach it, or when the push nudge says it's answered.
 - When the explicit backlog empties, distinguish **drained-for-now** from **converged**. *Drained*
   means no actionable card sits on the board *right now* but the project's planned work (per the vault)
   isn't finished — so don't idle: identify the highest-value next step toward the standing goal and do
