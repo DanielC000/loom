@@ -3655,11 +3655,18 @@ export class SessionService {
     });
 
     const warmup = agent?.startupPrompt?.trim();
-    const startupPrompt =
+    // PL Auditor finding #8 parity: a recycle-successor manager is a "fresh boot" exactly like
+    // startManager's first spawn — it needs the SAME "Where things live" pre-block (absolute repo+vault
+    // roots + the resolved resume-doc path), or it cold-boots into the same Glob-timeout trap a fresh
+    // manager used to hit. Without this, the successor only ever saw the continuation handoff text and
+    // had to guess/reconstruct its own resume-doc path.
+    const startupPrompt = composeManagerStartupPrompt(
       (warmup ? warmup + "\n\n---\n" : "") +
-      `[loom:continuation] You are the successor to a previous manager session that recycled as it neared its ` +
-      `context limit. Continue its work from this handoff — your predecessor's live workers have been re-parented ` +
-      `to you (run worker_list to see them). Predecessor's handoff:\n\n${continuationPrompt}`;
+        `[loom:continuation] You are the successor to a previous manager session that recycled as it neared its ` +
+        `context limit. Continue its work from this handoff — your predecessor's live workers have been re-parented ` +
+        `to you (run worker_list to see them). Predecessor's handoff:\n\n${continuationPrompt}`,
+      { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name },
+    );
 
     const now = new Date().toISOString();
     const fresh: Session = {

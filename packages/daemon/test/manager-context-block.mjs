@@ -7,6 +7,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Proves the DoD:
 //   (1) a spawned MANAGER session's composed startupPrompt CONTAINS the project's absolute repoPath
 //       AND vaultPath (the "Where things live" pre-block), with the agent's OWN prompt preserved after;
+//   (1b) a RECYCLE-SUCCESSOR manager (recycleManager) gets the SAME block — it used to build its
+//        startupPrompt directly (warmup + continuation only), skipping composeManagerStartupPrompt, so
+//        a fresh successor manager had no absolute resume-doc path and Globbed for it on boot;
 //   (2) a WORKER spawn does NOT get the MANAGER block (its opening is its agent brief + the kickoff — card af902717);
 //   (3) the pure composeManagerStartupPrompt wraps/derives correctly (incl. the no-own-prompt case);
 //   (4) the pickup + orchestrate skill ASSETS instruct reading the resume doc by ABSOLUTE path.
@@ -115,6 +118,18 @@ try {
   check("(1) manager spawn opts.startupPrompt carries the resolved resume-doc path (vaultPath is already the project's vault dir — not doubled)", oM?.startupPrompt?.includes(path.join(vault, "Orchestrator Log.md")));
   check("(1) manager spawn preserves the agent's OWN doctrine after the block", oM?.startupPrompt?.includes("AGENT_MGR_DOCTRINE"));
   check("(1) manager session is live + role manager", db.getSession(sM.id).processState === "live" && oM?.role === "manager");
+
+  // ===================== (1b) MANAGER RECYCLE (successor spawn) also gets the block — the fix: a =====
+  // recycle-successor manager is a fresh boot exactly like startManager's first spawn, and used to
+  // build its startupPrompt directly (warmup + continuation only) WITHOUT composeManagerStartupPrompt —
+  // so a successor manager had no absolute resume-doc path and Globbed for it (the boot-stall bug).
+  const sMR = await svc.recycleManager("mgr1", "successor: pick up the fleet from here.");
+  const oMR = optsFor(sMR.id);
+  check("(1b) recycle-successor manager opts.startupPrompt carries the 'Where things live' block", oMR?.startupPrompt?.includes("## Where things live"));
+  check("(1b) recycle-successor manager opts.startupPrompt carries the resolved ABSOLUTE resume-doc path (not vault-relative)", oMR?.startupPrompt?.includes(path.join(vault, "Orchestrator Log.md")));
+  check("(1b) recycle-successor manager opts.startupPrompt still carries the continuation handoff text", oMR?.startupPrompt?.includes("successor: pick up the fleet from here."));
+  check("(1b) recycle-successor manager opts.startupPrompt still carries the agent's warm-up doctrine", oMR?.startupPrompt?.includes("AGENT_MGR_DOCTRINE"));
+  check("(1b) recycle-successor manager session is live + role manager", db.getSession(sMR.id).processState === "live" && oMR?.role === "manager");
 
   // ===================== (2) WORKER spawn does NOT get the MANAGER block (card af902717: it DOES now carry its agent brief) =====================
   const w = await svc.spawnWorker("mgr1", { taskId: taskW, agentId: "agentWorker", kickoffPrompt: "WORKER_KICKOFF" });
