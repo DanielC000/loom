@@ -24,3 +24,16 @@ export function useForkSession() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
   });
 }
+
+// One-click graceful wrap-up (card f55bd338): inject a turn telling the session to run /session-end
+// (log progress, leave it resumable) and then call the `end_me` self-stop tool. The mutation only
+// enqueues the turn — the session stays live until the agent runs the skill and self-stops (or end_me
+// refuses and it just stays up). Non-worker only — the route (and the button) gate that. Idle-gated
+// by callers (disabled while busy), like Fork.
+export function useEndSession() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.endSession(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
+  });
+}

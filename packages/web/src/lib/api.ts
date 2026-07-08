@@ -305,6 +305,10 @@ export const api = {
   forkSession: (id: string) => post<Session>(`/api/sessions/${id}/fork`),
   sendInput: (id: string, text: string) =>
     post<{ delivered: boolean; position?: number }>(`/api/sessions/${id}/input`, { text }),
+  // One-click graceful wrap-up (HUMAN-only; non-worker only — mirrors stop/input, no agent MCP surface):
+  // injects a /session-end + end_me turn so the session logs progress, stays resumable, then self-stops.
+  endSession: (id: string) =>
+    post<{ delivered: boolean; position?: number }>(`/api/sessions/${id}/end`),
   stopSession: (id: string, mode: "graceful" | "hard") =>
     post<{ ok: boolean }>(`/api/sessions/${id}/stop`, { mode }),
   // Manual per-session rate-limit override + retry-now (HUMAN-only; mirrors stop — no agent MCP

@@ -2851,6 +2851,26 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // kind:"agent" — a human composer message is the human's own directive; it must land as its own turn.
     return reply.send(deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent"));
   });
+  // One-click graceful wrap-up (card f55bd338). Injects ONE wrap-up turn that tells the session to run
+  // the /session-end skill (log progress to the board, leave it resumable) and then call the `end_me`
+  // self-stop tool (card 3b015fc7) — so the human doesn't have to watch for the skill to finish and hit
+  // Stop. HUMAN/REST only — NOT an agent MCP tool (same trust posture as stop/input). Role-gated to
+  // NON-worker: a worker wraps up via worker_report → its manager gates/merges, so a human must never
+  // end a worker out from under its manager (mirrors end_me being absent on the worker surface). This
+  // route only ENQUEUES the turn; the safety check (no queued agent-inbound / no live workers) is
+  // end_me's — if it refuses, the session simply stays live and the agent surfaces the reason.
+  app.post("/api/sessions/:id/end", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = deps.db.getSession(id);
+    if (!session) return reply.code(404).send({ error: "session not found" });
+    if (session.role === "worker")
+      return reply.code(403).send({ error: "cannot end a worker session; a worker wraps up via its manager" });
+    const text =
+      "Run the /session-end skill to wrap up (update the board task, leave it resumable), then call `end_me` to close this session.";
+    // 'human' source + kind:"agent" — mirrors the composer input route exactly: a human directive that
+    // must land as its own turn (not coalesced with a Loom operational nudge).
+    return reply.send(deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent"));
+  });
   // Human-initiated merge of a worker's branch (the Review panel / #18c). Runs the daemon's
   // fail-closed build gate then squash-merges (one clean commit); manager is derived from the worker's
   // parent so the existing ownership check holds. Returns { merged } or { merged:false, reason }.

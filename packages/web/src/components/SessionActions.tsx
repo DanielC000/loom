@@ -25,12 +25,13 @@ import { canResumeSession } from "../lib/sessions";
 // click-to-select row, so the click must not bubble to the row's onSelect. Resume keeps no
 // stopPropagation, matching the original SessionRow exactly.
 export function SessionActions({
-  s, onResume, resuming, onStop, stopping, onFork, forking, onClearRateLimit, clearingRateLimit,
+  s, onResume, resuming, onStop, stopping, onFork, forking, onEnd, ending, onClearRateLimit, clearingRateLimit,
 }: {
   s: Session;
   onResume: () => void; resuming: boolean;
   onStop: () => void; stopping: boolean;
   onFork: () => void; forking: boolean;
+  onEnd: () => void; ending: boolean;
   onClearRateLimit: () => void; clearingRateLimit: boolean;
 }) {
   const canResume = canResumeSession(s);
@@ -40,6 +41,13 @@ export function SessionActions({
     <>
       {rateLimited && <Button disabled={clearingRateLimit} title="Clear the rate-limit hold + the global usage latch and re-submit the held turn now (mirrors the auto-resume path)"
         onClick={(ev) => { ev.stopPropagation(); onClearRateLimit(); }}>Clear rate limit &amp; retry now</Button>}
+      {/* End Session — one-click graceful wrap-up (card f55bd338): injects a /session-end + end_me turn.
+          Sits LEFT of Fork. NON-worker only — a human must never end a worker out from under its manager
+          (the terminal-card cluster renders for manager/platform/setup/auditor; the role guard is the
+          explicit backstop). Idle-gated like Fork (disabled while busy). */}
+      {live && s.role !== "worker" && <Button disabled={ending || s.busy}
+        title="Run /session-end to log progress + leave it resumable, then stop this session (graceful, resumable — lives on Archive)."
+        onClick={(ev) => { ev.stopPropagation(); onEnd(); }}>End Session</Button>}
       {live && <Button disabled={forking || s.busy} onClick={(ev) => { ev.stopPropagation(); onFork(); }}
         title={s.busy ? "Fork is available when the session is idle" : "Fork — branch this conversation into a new divergent session"}>Fork</Button>}
       {live && <Button disabled={stopping} title="Stop this session — graceful Ctrl-C, clean and resumable"

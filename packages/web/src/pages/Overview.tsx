@@ -7,7 +7,7 @@ import { useActiveProject } from "../lib/activeProject";
 import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/attention";
 import { bySessionActivity, byCreatedStable, byManagerThenCreated, dedupeSessionsById } from "../lib/sessions";
 import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
-import { useStopSession, useForkSession } from "../lib/useSessionActions";
+import { useStopSession, useForkSession, useEndSession } from "../lib/useSessionActions";
 import Board from "./Board";
 import { TerminalTile } from "../components/TerminalTile";
 import { TerminalCard, type TerminalTabs } from "../components/TerminalCard";
@@ -326,6 +326,9 @@ function FleetAccordion({ managers, workers, looseWorkers }: {
   const resume = useMutation({ mutationFn: (id: string) => api.resumeSession(id), onSuccess: invalidate });
   const stop = useMutation({ mutationFn: (id: string) => api.stopSession(id, "graceful"), onSuccess: invalidate });
   const fork = useMutation({ mutationFn: (id: string) => api.forkSession(id), onSuccess: invalidate });
+  // End Session (card f55bd338): the shared hook (invalidates allSessions). It only enqueues the
+  // wrap-up turn — the session self-stops later via end_me — so the archive-key invalidate isn't needed.
+  const end = useEndSession();
   const clearRl = useMutation({
     mutationFn: (id: string) => api.clearSessionRateLimit(id),
     onSuccess: invalidate, onError: (e) => window.alert((e as Error).message),
@@ -337,6 +340,7 @@ function FleetAccordion({ managers, workers, looseWorkers }: {
     onResume: () => resume.mutate(s.id), resuming: resume.isPending,
     onStop: () => stop.mutate(s.id), stopping: stop.isPending,
     onFork: () => fork.mutate(s.id), forking: fork.isPending,
+    onEnd: () => end.mutate(s.id), ending: end.isPending,
     onClearRateLimit: () => clearRl.mutate(s.id), clearingRateLimit: clearRl.isPending,
   });
 
