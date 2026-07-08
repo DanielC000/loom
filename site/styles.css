@@ -763,6 +763,8 @@ a:focus-visible,
   .card { grid-column: span 2; }
   .card-wide { grid-column: span 4; }
   .card-full { grid-column: span 4; }
+  /* Odd trailing card would sit alone at 4 cols; let it fill its row. */
+  .card-tab-wide { grid-column: span 4; }
   .flow { grid-template-columns: repeat(2, 1fr); gap: 34px 26px; }
   .flow::before { display: none; }
   .quickstart-inner { grid-template-columns: 1fr; gap: 32px; }
@@ -775,7 +777,8 @@ a:focus-visible,
   .bento { grid-template-columns: 1fr; }
   .card,
   .card-wide,
-  .card-full { grid-column: span 1; }
+  .card-full,
+  .card-tab-wide { grid-column: span 1; }
   .card-wide { flex-direction: column; gap: 0; }
   .card-wide .card-glyph { margin-bottom: 18px; }
   .card-full { flex-direction: column; align-items: flex-start; gap: 24px; }

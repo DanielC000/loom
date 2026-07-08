@@ -348,6 +348,170 @@
                 </span>
               </span>
             </li>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M5 11a3 3 0 013-3h16a3 3 0 013 3v7.5a3 3 0 01-3 3H13l-5 4v-4a3 3 0 01-3-3z" />
+                  <path d="M11 13h9 M11 16.5h6" />
+                  <path d="M31 16a3 3 0 013 3v6a3 3 0 01-3 3h-1v3l-3.5-3H24" />
+                </svg>
+              </span>
+              <h3 class="card-title">A chat-native companion</h3>
+              <p class="card-body">
+                Spin up a long-lived companion agent you chat with over
+                <strong>Telegram</strong> or an in-app web chat, on the same
+                durable real-<code>claude</code> runtime. It keeps a durable
+                memory recalled at the start of each chat, sets one-shot and
+                recurring reminders, writes its own private skills, and can
+                proactively check in, behind a fail-closed, human-only security
+                model.
+              </p>
+            </li>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="7" y="7" width="12" height="12" rx="2.2" />
+                  <rect x="21" y="7" width="12" height="12" rx="2.2" />
+                  <rect x="7" y="21" width="12" height="12" rx="2.2" />
+                  <path d="M27 22v10 M22 27h10" />
+                </svg>
+              </span>
+              <h3 class="card-title">Editable skills, injected per session</h3>
+              <p class="card-body">
+                Loom ships a curated skill set and mirrors it into every session,
+                shadowing your personal <code>~/.claude/skills</code>. A built-in
+                editor lets you read, edit, create, reset, and three-way-merge
+                Loom's shipped updates into your own edits; changes take effect on
+                the next session spawn.
+              </p>
+            </li>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="5" y="8" width="30" height="24" rx="2.5" />
+                  <path d="M5 14.5h30" />
+                  <path d="M8.5 11.2h.01 M11.5 11.2h.01" />
+                  <path d="M15 23.5l3.2 3.2L26 19" />
+                </svg>
+              </span>
+              <h3 class="card-title">Opt-in per-worker browser testing</h3>
+              <p class="card-body">
+                A worker profile can be granted its own isolated headless
+                Playwright browser, so QA-style sessions can drive a running app
+                and verify UI before reporting back. Off by default, enabled per
+                profile.
+              </p>
+            </li>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="6" y="7" width="28" height="26" rx="4" />
+                  <path d="M6 14h28" />
+                  <path d="M9.5 10.8h.01 M12.5 10.8h.01" />
+                  <path d="M20 18l1.8 4.2 4.2 1.8-4.2 1.8L20 30l-1.8-4.4-4.2-1.8 4.2-1.8z" />
+                </svg>
+              </span>
+              <h3 class="card-title">Guided setup + a Platform operator</h3>
+              <p class="card-body">
+                A built-in <strong>Platform</strong> operator greets you on first
+                run and stays one click away. It helps you create, configure, and
+                archive projects, agents, and profiles, and can set them up on
+                your behalf, confirming the big moves first, on a deliberately
+                narrow, safe tool surface.
+              </p>
+            </li>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M8 11h15 M8 16h10 M8 21h6" />
+                  <circle cx="25" cy="24.5" r="6.5" />
+                  <path d="M29.8 29.3 L35 34" />
+                </svg>
+              </span>
+              <h3 class="card-title">Suggest-only Workspace Auditor</h3>
+              <p class="card-body">
+                A read-only reviewer scans your own recent sessions for vague
+                instructions in your agent prompts and skills, and for prompts you
+                type repeatedly worth saving as one-click presets, then files
+                improvement suggestions as cards. It never changes anything itself.
+                Run it on demand or on a schedule.
+              </p>
+            </li>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="20" cy="22" r="11" />
+                  <path d="M20 22V15 M20 22l5 3" />
+                  <path d="M16 6h8 M20 6v5" />
+                  <path d="M30.5 9l2.4 2.4" />
+                </svg>
+              </span>
+              <h3 class="card-title">A built-in cron scheduler</h3>
+              <p class="card-body">
+                Run a manager, or the Workspace Auditor, on a cron cadence; each
+                fire boots a real interactive session against the agent you pick,
+                behind concurrency and usage-limit gates. Off by default; enable it
+                in Settings.
+              </p>
+            </li>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="20" cy="20" r="3.5" />
+                  <path d="M26.5 13.5a9 9 0 010 13 M30.5 9.5a15 15 0 010 21" />
+                  <path d="M13.5 13.5a9 9 0 000 13 M9.5 9.5a15 15 0 000 21" />
+                </svg>
+              </span>
+              <h3 class="card-title">Agents as authenticated API endpoints</h3>
+              <p class="card-body">
+                Flag a project agent as an endpoint, mint a scoped API key with
+                concurrency, token, and spend caps, then trigger structured async
+                runs over <code>POST /api/runs</code>. The Runs page shows every
+                run's input, result, usage, and transcript, with a per-key
+                kill-switch.
+              </p>
+            </li>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="13" cy="20" r="6" />
+                  <path d="M19 20h15 M28 20v4.5 M33 20v3.5" />
+                </svg>
+              </span>
+              <h3 class="card-title">Connections the agent never sees</h3>
+              <p class="card-body">
+                Store a credential once, say a GitHub token, encrypted at rest. A
+                session's profile allowlists which connections it may use, and the
+                agent reaches the API through Loom without the secret ever entering
+                its context. Write-only and human-managed.
+              </p>
+            </li>
+
+            <li class="card card-tab-wide reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M9 8h9l4 4v15a1.6 1.6 0 01-1.6 1.6H9A1.6 1.6 0 017.4 27V9.6A1.6 1.6 0 019 8z" />
+                  <path d="M18 8v4h4" />
+                  <path d="M11.5 18h6 M11.5 22h4" />
+                  <path d="M25 24h8 M30 21l3.2 3-3.2 3" />
+                </svg>
+              </span>
+              <h3 class="card-title">Opt-in document conversion</h3>
+              <p class="card-body">
+                Grant a worker profile a markitdown MCP and its sessions can
+                convert PDFs, Office files, images, and HTML to Markdown, useful
+                for research and document-heavy work. Off by default, human-enabled
+                per profile.
+              </p>
+            </li>
           </ul>
         </div>
       </section>
