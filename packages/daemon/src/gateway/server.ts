@@ -33,6 +33,7 @@ import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
 import { COMPANION_CAPABILITY_SLUGS } from "../companion/capabilities.js";
+import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
 import { listConnections, createConnection, deleteConnection } from "../connections/store.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
@@ -1239,11 +1240,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // data model every opt-in Companion lever (session-status, decisions-relay, …) is gated on. HUMAN-ONLY
   // loopback REST — there is INTENTIONALLY NO MCP path (of ANY router: orchestration/platform/setup/audit),
   // same trust posture as the bindings/allowlist/config writers above: an injection-exposed companion agent
-  // must never widen its own capability. A grant write takes effect on the companion's NEXT respawn (the
-  // MCP tool surface is fixed at OS-process-start — Framework §6's conversation-preserving respawn, a later
-  // card, is the live-apply mechanism; this card does not add one). Grants are keyed on the natural key
-  // (sessionId, capability, projectId) — POST/PUT both upsert; POST additionally 201s a fresh grant while
-  // PUT 404s when there's nothing existing to update (so a client can tell "created" from "must exist").
+  // must never widen its own capability. For every MCP-TOOL lever (session-status, decisions-relay, …) a
+  // grant write takes effect on the companion's NEXT respawn (the MCP tool surface is fixed at
+  // OS-process-start — Framework §6's conversation-preserving respawn, a later card, is the live-apply
+  // mechanism; this card does not add one). `attention-push` is the ONE exception: it's a daemon-owned
+  // WATCHER, not an MCP tool (companion/attention-push.ts), so `deps.companion?.reconcile(sessionId)` below
+  // arms/disarms it LIVE, no respawn needed — see CompanionController.rearmAttentionPushFor. Grants are
+  // keyed on the natural key (sessionId, capability, projectId) — POST/PUT both upsert; POST additionally
+  // 201s a fresh grant while PUT 404s when there's nothing existing to update (so a client can tell
+  // "created" from "must exist").
   const GRANT_CONFIG_MAX_BYTES = 4096;
   const isValidGrantMode = (v: unknown): v is "read" | "act" => v === "read" || v === "act";
   // Buffer.byteLength (UTF-8 bytes), NOT .length (UTF-16 code units) — a multibyte config (e.g. non-ASCII
@@ -1251,6 +1256,22 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // bound, making "_BYTES" a lie for exactly the inputs where it matters most.
   const isValidGrantConfig = (v: unknown): v is Record<string, unknown> | undefined =>
     v === undefined || (typeof v === "object" && v !== null && !Array.isArray(v) && Buffer.byteLength(JSON.stringify(v), "utf8") <= GRANT_CONFIG_MAX_BYTES);
+  // `attention-push`'s own config shape (Lead fork 4/5: {alertClasses:string[], digestMinutes?:number}) —
+  // checked ON TOP of isValidGrantConfig's generic plain-object/byte-bound floor, only when
+  // capability === "attention-push" (every other lever's config stays validated by the generic check
+  // alone). Both fields are optional (an absent alertClasses means "nothing subscribed yet" — the watcher's
+  // own no-op fast path, see attention-push.ts); when present each element/value must be well-formed.
+  const isValidAttentionPushConfig = (v: Record<string, unknown> | undefined): v is Record<string, unknown> | undefined => {
+    if (v === undefined) return true;
+    if (v.alertClasses !== undefined) {
+      if (!Array.isArray(v.alertClasses)) return false;
+      if (!v.alertClasses.every((c) => typeof c === "string" && (ATTENTION_ALERT_CLASSES as readonly string[]).includes(c))) return false;
+    }
+    if (v.digestMinutes !== undefined) {
+      if (typeof v.digestMinutes !== "number" || !Number.isFinite(v.digestMinutes) || v.digestMinutes < 0) return false;
+    }
+    return true;
+  };
   const parseGrantBody = (body: unknown):
     | { ok: true; capability: string; projectId: string | null; mode?: "read" | "act"; config?: Record<string, unknown> }
     | { ok: false; code: number; error: string } => {
@@ -1266,6 +1287,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     if (b.mode !== undefined && !isValidGrantMode(b.mode)) return { ok: false, code: 400, error: "mode must be 'read' or 'act'" };
     if (!isValidGrantConfig(b.config)) return { ok: false, code: 400, error: `config must be a plain JSON object of at most ${GRANT_CONFIG_MAX_BYTES} bytes` };
+    if (b.capability === "attention-push" && !isValidAttentionPushConfig(b.config as Record<string, unknown> | undefined)) {
+      return {
+        ok: false, code: 400,
+        error: `attention-push config.alertClasses must be an array drawn from: ${ATTENTION_ALERT_CLASSES.join(", ")}; ` +
+          "config.digestMinutes (if set) must be a non-negative finite number",
+      };
+    }
     return { ok: true, capability: b.capability, projectId, mode: b.mode as "read" | "act" | undefined, config: b.config as Record<string, unknown> | undefined };
   };
   app.get("/api/companion/:sessionId/grants", async (req, reply) => {
@@ -1285,6 +1313,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // from "already existed, now updated" instead of every POST reading as a fresh creation.
     const existedBefore = !!deps.db.getCompanionCapabilityGrant(sessionId, parsed.capability, parsed.projectId);
     const grant = deps.db.upsertCompanionCapabilityGrant({ sessionId, capability: parsed.capability, projectId: parsed.projectId, mode: parsed.mode, config: parsed.config });
+    // Live re-arm (best-effort — see reconcile()'s own error-swallowing): today only attention-push has a
+    // WATCHER that reconcile() can arm/disarm without a respawn (every other lever's MCP tool surface is
+    // fixed at OS-process-start, per this route's own header comment) — a no-op for those, cheap either way.
+    await deps.companion?.reconcile(sessionId);
     return reply.code(existedBefore ? 200 : 201).send(grant);
   });
   app.put("/api/companion/:sessionId/grants", async (req, reply) => {
@@ -1296,6 +1328,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const existing = deps.db.getCompanionCapabilityGrant(sessionId, parsed.capability, parsed.projectId);
     if (!existing) return reply.code(404).send({ error: "no existing grant for that (capability, projectId) — POST to create one" });
     const grant = deps.db.upsertCompanionCapabilityGrant({ sessionId, capability: parsed.capability, projectId: parsed.projectId, mode: parsed.mode, config: parsed.config });
+    await deps.companion?.reconcile(sessionId); // live re-arm — see the POST handler's comment above
     return grant;
   });
   app.delete("/api/companion/:sessionId/grants", async (req, reply) => {
@@ -1308,6 +1341,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     const projectId = isNonBlankStr(q.projectId) ? q.projectId.trim() : null;
     deps.db.deleteCompanionCapabilityGrant(sessionId, q.capability, projectId);
+    await deps.companion?.reconcile(sessionId); // live disarm — see the POST handler's comment above
     return { ok: true, grants: deps.db.listCompanionCapabilityGrantsForSession(sessionId) };
   });
 

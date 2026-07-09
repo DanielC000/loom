@@ -764,7 +764,38 @@ export type OrchestrationEventKind =
   | "end_me_refused"
   // end_me's two gates were both clear: the caller's own session was graceful-stopped (Ctrl-C×2, resumable,
   // no successor). Filed under the CALLER (managerSessionId = its own id) BEFORE the deferred pty.stop.
-  | "end_me_complete";
+  | "end_me_complete"
+  // ── attention-push signal-source prereqs (Companion attention-push lever, Lead fork 2b) ─────────────
+  // A manager asked the human a decision (mcp/orchestration.ts `question_ask`, at its `db.insertQuestion`
+  // chokepoint) — the durable, event-emit twin of the question row itself, so a tail-poll watcher (unlike
+  // the alert-webhook's single-slot `Db.setEventListener`) can subscribe to "a decision is now pending"
+  // without re-deriving it from `listOpenQuestions`. Filed under the ASKING MANAGER (managerSessionId);
+  // `detail` carries { questionId, title }.
+  | "question_asked"
+  // A session's usage-limit PARK was just stamped (index.ts's `onRateLimited` hook, alongside the existing
+  // `db.setRateLimitedUntil`/`armRateLimitDeadline` writes) — the event-emit twin of the rate-limit park,
+  // for the same tail-poll reason as `question_asked` above (a global `rateLimitedUntil` column change has
+  // no event of its own today). Filed under the PARKED session (managerSessionId = its id, worker or
+  // manager); `detail` carries { until, deadline } (the resume-at ISO timestamp and the episode give-up
+  // deadline, mirroring the two values the session row itself just received).
+  | "session_rate_limited"
+  // ── Companion attention-push (daemon-owned per-companion watcher — NOT a capability-registry lever;
+  // see companion/attention-push.ts) — the push twin of companion_reminder_fired/companion_heartbeat_fired:
+  // a subscribed fleet signal (see attention-push.ts's classify()) was pushed to the companion as a framed
+  // `[loom:alert]` turn (immediate mode: one per source event; digest mode: one bundled turn covering many
+  // sources, but still one `companion_alert_pushed` row PER underlying source event — see its doc). Filed
+  // under the companion session (managerSessionId = sessionId); `detail` carries { sourceSeq, alertClass,
+  // sourceKind } — sourceSeq is the source event's `orchestration_events.seq` (a never-reused monotonic
+  // column, NOT sqlite's own reusable rowid — see db.ts's SCHEMA doc), and is ALSO the watcher's own
+  // restart-reseed anchor (seedWatermark reads the max sourceSeq across a session's own
+  // companion_alert_pushed events), mirroring companion_reminder_fired's seedLastFired role.
+  | "companion_alert_pushed"
+  // The push twin of companion_heartbeat_deferred/companion_reminder_deferred: a tick found the companion
+  // rate-limit-parked or already carrying an unconsumed `[loom:alert]` turn, so nothing was pushed this
+  // tick (the tail-poll watermark does NOT advance — the next non-deferred tick re-scans from the same
+  // point). `detail.reason` is "rate-limited" or "pending". Emitted at most once per defer streak (bounded
+  // log growth, mirroring the sibling watchers).
+  | "companion_alert_deferred";
 
 export interface OrchestrationEvent {
   id: string;

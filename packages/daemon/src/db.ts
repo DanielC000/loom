@@ -311,6 +311,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   archived_at TEXT
 );
 -- Append-only orchestration audit trail (manager↔worker timeline; UI timeline in #18).
+-- seq (attention-push watcher fix, CR-caught): the sqlite rowid is NOT a safe tail-poll cursor for this
+-- table — rows ARE hard-deleted (deleteProject/deleteSession cascade), and sqlite REUSES rowids once the
+-- row holding the current table-max is gone, which would silently drop an in-flight watcher's cursor past a
+-- reused id and skip real alerts forever. seq is stamped from orchestration_event_seq below (an
+-- AUTOINCREMENT counter table that NEVER reuses a value even across deletes) and is the ONLY column any
+-- tail-poll cursor (Db.listEventsSince/getMaxEventSeq) may key off. Existing DBs get it via
+-- migrateOrchestrationEvents() below (ADD COLUMN + backfill from the pre-migration rowid order, which is
+-- still monotonic at that point — no reuse has happened yet).
 CREATE TABLE IF NOT EXISTS orchestration_events (
   id TEXT PRIMARY KEY,
   ts TEXT NOT NULL,
@@ -318,7 +326,15 @@ CREATE TABLE IF NOT EXISTS orchestration_events (
   worker_session_id TEXT,
   task_id TEXT,
   kind TEXT NOT NULL,
-  detail_json TEXT
+  detail_json TEXT,
+  seq INTEGER
+);
+-- The never-reused monotonic sequence source for orchestration_events.seq (see its doc above). Kept as a
+-- SINGLE-ROW counter (nextEventSeq trims older rows after every insert) — its own AUTOINCREMENT high-water
+-- mark lives in sqlite's sqlite_sequence table and is NEVER lowered by deleting rows from THIS table, which
+-- is exactly the never-reused guarantee seq needs.
+CREATE TABLE IF NOT EXISTS orchestration_event_seq (
+  n INTEGER PRIMARY KEY AUTOINCREMENT
 );
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
@@ -1066,6 +1082,7 @@ export class Db {
     this.migrateWakes();
     this.migrateCompanionMessages();
     this.migrateCompanionConversations();
+    this.migrateOrchestrationEvents();
   }
 
   /**
@@ -1335,6 +1352,39 @@ export class Db {
       "INSERT INTO companion_conversations (session_id, seq, started_at, ended_at) VALUES (?, 1, ?, NULL)",
     );
     for (const row of missing) insert.run(row.sessionId, row.startedAt);
+  }
+
+  /**
+   * Idempotent additive migration for `orchestration_events.seq` (attention-push watermark fix, CR-caught —
+   * see the column's doc in SCHEMA): ADD COLUMN seq (fresh installs already have it via SCHEMA — the ALTER
+   * is skipped there), BACKFILL every pre-existing NULL row from its rowid (still monotonic and
+   * never-reused AT THIS POINT — no delete has happened under the new `seq` regime yet, so rowid order IS
+   * the correct historical seq order), then raise `orchestration_event_seq`'s AUTOINCREMENT high-water mark
+   * to at least the backfilled max so the FIRST post-migration `nextEventSeq()` call returns a value
+   * strictly greater than every existing row (never a collision/regression with pre-migration history).
+   * Idempotent + cheap on a warm DB: the backfill only touches `seq IS NULL` rows (0 rows after the first
+   * boot), and the counter-seed short-circuits entirely once the high-water mark is already at/above the
+   * backfilled max — so a repeat boot never burns an extra sequence number.
+   */
+  private migrateOrchestrationEvents(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(orchestration_events)").all() as { name: string }[]).map((c) => c.name),
+    );
+    if (!have.has("seq")) this.db.exec("ALTER TABLE orchestration_events ADD COLUMN seq INTEGER");
+    this.db.exec("UPDATE orchestration_events SET seq = rowid WHERE seq IS NULL");
+    const maxRow = this.db.prepare("SELECT COALESCE(MAX(seq), 0) AS m FROM orchestration_events").get() as { m: number };
+    const maxSeq = maxRow.m;
+    if (maxSeq === 0) return; // nothing to backfill (empty table) — the counter self-seeds on the first real append.
+    const current = this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'orchestration_event_seq'").get() as { seq: number } | undefined;
+    if (current && current.seq >= maxSeq) return; // already seeded at/above the backfilled max — idempotent no-op.
+    this.db.transaction(() => {
+      // A fresh AUTOINCREMENT table has NO sqlite_sequence row until its first INSERT — this dummy insert
+      // creates one (n=1) so the UPDATE below has a row to raise; the row itself is discarded immediately
+      // after (the counter table stays a tiny, effectively-empty single-purpose sequence source).
+      this.db.prepare("INSERT INTO orchestration_event_seq DEFAULT VALUES").run();
+      this.db.exec(`UPDATE sqlite_sequence SET seq = MAX(seq, ${maxSeq}) WHERE name = 'orchestration_event_seq'`);
+      this.db.exec("DELETE FROM orchestration_event_seq");
+    })();
   }
 
   /**
@@ -3220,19 +3270,54 @@ export class Db {
   }
   /** Append an orchestration audit record (detail serialized to JSON). */
   appendEvent(evt: OrchestrationEvent): void {
+    const seq = this.nextEventSeq();
     this.db.prepare(
-      `INSERT INTO orchestration_events (id,ts,manager_session_id,worker_session_id,task_id,kind,detail_json)
-       VALUES (@id,@ts,@managerSessionId,@workerSessionId,@taskId,@kind,@detailJson)`,
+      `INSERT INTO orchestration_events (id,ts,manager_session_id,worker_session_id,task_id,kind,detail_json,seq)
+       VALUES (@id,@ts,@managerSessionId,@workerSessionId,@taskId,@kind,@detailJson,@seq)`,
     ).run({
       id: evt.id, ts: evt.ts, managerSessionId: evt.managerSessionId,
       workerSessionId: evt.workerSessionId ?? null, taskId: evt.taskId ?? null,
-      kind: evt.kind, detailJson: evt.detail === undefined ? null : JSON.stringify(evt.detail),
+      kind: evt.kind, detailJson: evt.detail === undefined ? null : JSON.stringify(evt.detail), seq,
     });
     // Notify the (optional) listener AFTER the row is committed. Best-effort: a listener fault must
     // never propagate into the orchestration event path, so swallow it.
     if (this.eventListener) {
       try { this.eventListener(evt); } catch { /* listener faults never break the audit write */ }
     }
+  }
+  /**
+   * The next value from the never-reused `orchestration_event_seq` AUTOINCREMENT counter — see the
+   * `orchestration_events.seq` doc in SCHEMA for WHY this exists (rowid is unsafe: deletes reuse it).
+   * `INSERT ... DEFAULT VALUES` + `lastInsertRowid` is the standard AUTOINCREMENT next-value idiom; the
+   * immediate DELETE keeps the counter table itself at ~0-1 rows forever (its sqlite_sequence high-water
+   * mark is untouched by deleting FROM the table — that's the whole point of AUTOINCREMENT here).
+   */
+  private nextEventSeq(): number {
+    const seq = Number(this.db.prepare("INSERT INTO orchestration_event_seq DEFAULT VALUES").run().lastInsertRowid);
+    this.db.prepare("DELETE FROM orchestration_event_seq WHERE n < ?").run(seq);
+    return seq;
+  }
+  /**
+   * Every orchestration event with `seq` STRICTLY GREATER than `afterSeq`, GLOBAL (all sessions/projects)
+   * — the attention-push watcher's tail-poll cursor (companion/attention-push.ts). Unlike every other event
+   * read above (all scoped to one session/worker), this scans the whole table; `limit` bounds one tick's
+   * read so a long-idle watermark can't pull an unbounded backlog into memory in one pass. Ordered by `seq`
+   * alone (the never-reused monotonic cursor this method's caller advances its watermark against — NOT the
+   * ts+rowid tie-break the per-session reads use). `seq` is a genuine column (not sqlite's reusable rowid —
+   * see SCHEMA's doc on `orchestration_events.seq` for why rowid was unsafe here), so it's already present
+   * on every `toOrchestrationEvent`-mapped row; this just widens the return type to expose it to the caller
+   * so it can advance past exactly what it consumed.
+   */
+  listEventsSince(afterSeq: number, limit: number): (OrchestrationEvent & { seq: number })[] {
+    return (this.db.prepare("SELECT * FROM orchestration_events WHERE seq > ? ORDER BY seq LIMIT ?")
+      .all(afterSeq, limit) as Row[]).map((r) => ({ ...toOrchestrationEvent(r), seq: r.seq as number }));
+  }
+  /** The current maximum `orchestration_events.seq` (0 if the table is empty) — the attention-push
+   *  watcher's baseline-seed anchor: a companion session that has never pushed an alert seeds its tail-poll
+   *  watermark HERE at start() time, so it never replays pre-existing history as a fresh alert. */
+  getMaxEventSeq(): number {
+    const r = this.db.prepare("SELECT MAX(seq) AS m FROM orchestration_events").get() as { m: number | null };
+    return r.m ?? 0;
   }
   /** The workers a manager spawned (its direct children). Archived workers are excluded (rail feed). */
   listWorkers(managerSessionId: string): Session[] {

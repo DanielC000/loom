@@ -57,6 +57,8 @@ import type { ChatGateway } from "./chat-gateway.js";
 import { createCompanionGateway } from "./factory.js";
 import { CompanionHeartbeatWatcher, type HeartbeatPty } from "./heartbeat.js";
 import { CompanionReminderWatcher } from "./reminders.js";
+import { AttentionPushWatcher } from "./attention-push.js";
+import { resolveCompanionGrant } from "./capabilities.js";
 import { resolveAllEnabledConfigs } from "./store.js";
 import { IN_APP_CHANNEL, normalizeInAppMessage, type InAppChannel } from "./in-app.js";
 import type { CompanionConfig } from "./config.js";
@@ -72,6 +74,13 @@ export interface HeartbeatHandle {
 /** The minimal lifecycle handle the controller needs from a reminder watcher (satisfied by
  *  CompanionReminderWatcher; narrowed so a test can inject a spy) — same shape as HeartbeatHandle. */
 export interface ReminderHandle {
+  start(): void;
+  stop(): void;
+}
+
+/** The minimal lifecycle handle the controller needs from an attention-push watcher (satisfied by
+ *  AttentionPushWatcher; narrowed so a test can inject a spy) — same shape as HeartbeatHandle/ReminderHandle. */
+export interface AttentionPushHandle {
   start(): void;
   stop(): void;
 }
@@ -201,6 +210,9 @@ export interface CompanionControllerDeps {
   /** Build the reminder watcher for a companion session id (test seam — defaults to a
    *  CompanionReminderWatcher over db+pty). Returns it NOT started; the controller calls start(). */
   buildReminders?: (sessionId: string) => ReminderHandle;
+  /** Build the attention-push watcher for a companion session id (test seam — defaults to an
+   *  AttentionPushWatcher over db+pty). Returns it NOT started; the controller calls start(). */
+  buildAttentionPush?: (sessionId: string) => AttentionPushHandle;
   /** Resolve the FULL desired config SET from db+env (test seam — defaults to resolveAllEnabledConfigs).
    *  Every entry is a distinct session id to arm; an empty array ⇒ OFF (no companion enabled). */
   resolveEffective?: (db: Db, env: NodeJS.ProcessEnv, keyPath?: string) => CompanionConfig[];
@@ -212,6 +224,7 @@ export class CompanionController implements CompanionControl {
   private gateways = new Map<string, ChatGateway>();
   private heartbeats = new Map<string, HeartbeatHandle>();
   private reminders = new Map<string, ReminderHandle>();
+  private attentionPush = new Map<string, AttentionPushHandle>();
   private cfgs = new Map<string, CompanionConfig>();
   /** Serializes reconciles so a burst of REST writes can't interleave a teardown with a start. */
   private chain: Promise<void> = Promise.resolve();
@@ -469,6 +482,7 @@ export class CompanionController implements CompanionControl {
     this.startGatewayFor(desired);
     this.rearmHeartbeatFor(desired);
     this.rearmRemindersFor(desired.sessionId);
+    this.rearmAttentionPushFor(desired.sessionId);
     this.cfgs.set(desired.sessionId, desired);
     this.deps.hooks.companionSessionIds.add(desired.sessionId);
   }
@@ -509,6 +523,11 @@ export class CompanionController implements CompanionControl {
     // ever runs for the session a caller told us actually changed; every OTHER live session's watcher is
     // never touched by this call (see applyDesired's doc + the cross-companion fix it describes).
     this.rearmRemindersFor(desired.sessionId);
+    // Attention-push grants live in their OWN table too (companion_capability_grants), independent of
+    // CompanionConfig — same reasoning as rearmRemindersFor's unconditional call just above: this is the
+    // only reconcile point a grants CRUD write (gateway/server.ts's three /grants writers) has to pick up
+    // a new/changed/removed attention-push grant for THIS session.
+    this.rearmAttentionPushFor(desired.sessionId);
     this.cfgs.set(desired.sessionId, desired);
     this.deps.hooks.companionSessionIds.add(desired.sessionId); // already present — idempotent
   }
@@ -604,12 +623,37 @@ export class CompanionController implements CompanionControl {
     }
   }
 
+  /** Disarm `sessionId`'s existing attention-push watcher and (re-)arm a fresh one, but ONLY when
+   *  `resolveCompanionGrant` resolves a non-null `attention-push` scope for it — the grant-existence analog
+   *  of rearmRemindersFor's row-existence gate (a session with no grant never builds/starts a watcher, so
+   *  DEFAULT-OFF stays byte-identical: this is a single cheap grant lookup and nothing else). Called
+   *  unconditionally on every live reconcile of that session (same UNGATED posture as rearmRemindersFor —
+   *  see its doc for the accepted tick-phase-jitter trade-off, which applies here identically). NEVER
+   *  touches another session's attention-push watcher. */
+  private rearmAttentionPushFor(sessionId: string): void {
+    this.stopAttentionPushFor(sessionId);
+    if (!resolveCompanionGrant(this.deps.db, sessionId, "attention-push")) return;
+    const build = this.deps.buildAttentionPush ?? ((sid: string) => new AttentionPushWatcher({ db: this.deps.db, pty: this.deps.pty, sessionId: sid }));
+    const attentionPush = build(sessionId);
+    this.attentionPush.set(sessionId, attentionPush);
+    attentionPush.start();
+  }
+
+  private stopAttentionPushFor(sessionId: string): void {
+    const attentionPush = this.attentionPush.get(sessionId);
+    if (attentionPush) {
+      attentionPush.stop();
+      this.attentionPush.delete(sessionId);
+    }
+  }
+
   /** Tear down ONE session → the OFF state for it: stop its adapter long-poll, disarm its heartbeat +
    *  reminders, drop it from the chat_reply gate. Every OTHER live session is untouched. */
   private async teardownOne(sessionId: string): Promise<void> {
     await this.stopGatewayFor(sessionId);
     this.stopHeartbeatFor(sessionId);
     this.stopRemindersFor(sessionId);
+    this.stopAttentionPushFor(sessionId);
     this.cfgs.delete(sessionId);
     this.deps.hooks.companionSessionIds.delete(sessionId);
   }

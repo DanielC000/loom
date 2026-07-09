@@ -263,8 +263,15 @@ async function main(): Promise<void> {
       // nothing-exhausted status ⇒ undefined ⇒ byte-identical to today's default-backoff behavior.
       const resetsAtSeconds = detail.resetsAtSeconds ?? resumeResetFromUsageStatus(usageStatus.getStatus(), now, rl);
       const until = rateLimitedUntil(resetsAtSeconds, now, rl);
+      const deadline = rateLimitDeadline(resetsAtSeconds, now, rl);
       db.setRateLimitedUntil(sessionId, until, `usage limit — resumes ${until}`);
-      db.armRateLimitDeadline(sessionId, rateLimitDeadline(resetsAtSeconds, now, rl));
+      db.armRateLimitDeadline(sessionId, deadline);
+      // Event-emit twin (attention-push signal source, Lead fork 2b) — additive, no existing consumer
+      // (alert-webhook's events[] allowlist, web attention) lists this new kind, so this is inert for them.
+      db.appendEvent({
+        id: randomUUID(), ts: now.toISOString(), managerSessionId: sessionId,
+        kind: "session_rate_limited", detail: { until, deadline },
+      });
       // Feed the SAME derived reset into GLOBAL awareness (not just this session's park) — otherwise
       // the Scheduler/worker_spawn gate (isLikelyNearClaudeUsageLimit) falls back to its own ~6h
       // recency heuristic and can fire fresh work into a still-capped account hours before a real

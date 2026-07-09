@@ -928,6 +928,12 @@ export class OrchestrationMcpRouter {
           consumedAt: null,
         };
         db.insertQuestion(question);
+        // Event-emit twin (attention-push signal source, Lead fork 2b) — additive, no existing consumer
+        // (alert-webhook's events[] allowlist, web attention) lists this new kind, so this is inert for them.
+        db.appendEvent({
+          id: randomUUID(), ts: question.createdAt, managerSessionId,
+          kind: "question_asked", detail: { questionId: question.id, title },
+        });
         return ok({ questionId: question.id });
       },
     );
