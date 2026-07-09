@@ -13,7 +13,7 @@ import { expect, test } from "./fixtures/daemon";
 const CAPTION = /sends when the turn ends/;
 
 test("a queued composer send shows NO 'queued … sends when the turn ends' caption — the ledger bar carries it", async ({ page, loomDaemon }) => {
-  // Resolve the reserved Platform home + its operator agent exactly as EndUserPlatformView does.
+  // Resolve the reserved Platform home + its operator agent exactly as the PlatformView end-user edition does.
   const home = await (await fetch(`${loomDaemon.baseURL}/api/setup/home`)).json();
   const profiles = await (await fetch(`${loomDaemon.baseURL}/api/profiles`)).json();
   const roleOf = (a: { profileId?: string | null }) =>

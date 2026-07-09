@@ -21,7 +21,7 @@ import { expect, test } from "./fixtures/daemon";
 // ── PlatformSessionTile (via the End-User Platform Operator session) ─────────────────────────────────
 test.describe("PlatformSessionTile (Operator session)", () => {
   test("carries the sub-panels + composer but WITHHOLDS Fork", async ({ page, loomDaemon }) => {
-    // Resolve the reserved "Platform" home + its operator agent exactly the way EndUserPlatformView does
+    // Resolve the reserved "Platform" home + its operator agent exactly the way the PlatformView end-user edition does
     // (role "setup", falling back to the seeded name "Platform"), then seed a LIVE setup-role session bound
     // to it + a pending wake. A wake (DB-backed) makes the SessionWakes sub-panel render; a bound task is
     // deliberately NOT seeded here (the reserved home's board columns differ from a normal project, so a

@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { DeveloperPlatformView } from "./DeveloperPlatformView";
-import { EndUserPlatformView } from "./EndUserPlatformView";
+import { PlatformView } from "./PlatformView";
+import { developerEdition, endUserEdition } from "./platformEdition";
 import { color, font, radius } from "../theme";
 
 // The single consolidated Platform page — ONE nav tab → one /platform route. It renders ONE of two
@@ -37,13 +37,24 @@ export default function Platform() {
   if (home.isLoading) return <p style={{ color: color.textMuted }}>Loading the Platform home…</p>;
 
   // Shipping edition: the end-user surface only — no "View as" toggle (a shipping user never sees "Developer").
-  if (!isDev) return <EndUserPlatformView />;
+  // The edition is a STATIC config passed to the shared PlatformView shell; `viewAs` is not consulted here.
+  if (!isDev) return <PlatformView key={endUserEdition.kind} edition={endUserEdition} />;
 
-  // Dev edition: default the Developer surface + a client-only "View as" preview toggle.
+  // Dev edition: default the Developer surface + a client-only "View as" preview toggle. `viewAs` ONLY
+  // selects WHICH static edition config mounts — it is never read by / passed to a spawn/role/stop call
+  // (the shell receives the edition prop and never sees `viewAs`). This is the pure-view-switch invariant.
+  //
+  // KEYED BY edition.kind so a toggle REMOUNTS the shell (a fresh fiber tree) instead of React reusing the
+  // same shell fiber across editions. The two ORIGINAL view files were distinct component types, so a
+  // toggle fully remounted and reset all transient mutation state (an inline spawn error, a stuck
+  // "Starting…"); without the key the unified shell would carry that stale state across a toggle onto the
+  // other edition's cards. The key restores the originals' remount-on-toggle behavior.
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <ViewAsToggle value={viewAs} onChange={setView} />
-      {viewAs === "developer" ? <DeveloperPlatformView /> : <EndUserPlatformView />}
+      {viewAs === "developer"
+        ? <PlatformView key={developerEdition.kind} edition={developerEdition} />
+        : <PlatformView key={endUserEdition.kind} edition={endUserEdition} />}
     </div>
   );
 }

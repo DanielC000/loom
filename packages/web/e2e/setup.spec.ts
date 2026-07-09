@@ -1,8 +1,9 @@
 // Setup / onboarding spec (card 784d9b43) — proves the SETUP / ONBOARDING surface renders and is
 // reachable in the seeded, isolated daemon, WITHOUT ever spawning a real claude. The onboarding surface is
 // the reserved "Platform" home: one primary nav tab → /platform (App.tsx routes the legacy /setup there),
-// which in the SHIPPING edition (the isolated daemon boots LOOM_DEV=0) renders EndUserPlatformView — the
-// user-facing "Platform" operator + Workspace Auditor go-live surface. Coverage:
+// which in the SHIPPING edition (the isolated daemon boots LOOM_DEV=0) renders the unified PlatformView
+// shell's end-user edition — the user-facing "Platform" operator + Workspace Auditor go-live surface.
+// Coverage:
 //   1. The onboarding ENTRY is discoverable: the "Platform" header tab navigates to /platform and the
 //      shipping surface renders (and, being shipping, NOT the dev "View as" preview toggle).
 //   2. The surface's ONBOARDING AFFORDANCES render — the operator go-live ("Start Platform", the way a new
@@ -37,8 +38,8 @@ test("the Platform nav tab reaches the shipping onboarding surface", async ({ pa
   await expect(page).toHaveURL(/\/platform$/);
 
   // Shipping edition (the isolated daemon boots LOOM_DEV=0, so the dev "Loom Platform" home never seeds and
-  // GET /api/platform/home 404s): the page mounts EndUserPlatformView, NOT the Developer view — so the
-  // dev-only "View as" preview toggle is absent.
+  // GET /api/platform/home 404s): the PlatformView shell mounts its end-user edition, NOT the developer
+  // edition — so the dev-only "View as" preview toggle is absent.
   await expect(page.getByRole("group", { name: "Preview edition" })).toHaveCount(0);
 
   // The reserved "Platform" home header + its explainer copy (a substring unique to this surface).

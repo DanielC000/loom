@@ -32,7 +32,7 @@ const paneHeight = (page: import("@playwright/test").Page) =>
   });
 
 test("a HUG tile's terminal height stays fixed when the queue ledger appears, expands, and drains", async ({ page, loomDaemon }) => {
-  // Resolve the reserved Platform home + its operator agent exactly as EndUserPlatformView does.
+  // Resolve the reserved Platform home + its operator agent exactly as the PlatformView end-user edition does.
   const home = await (await fetch(`${loomDaemon.baseURL}/api/setup/home`)).json();
   const profiles = await (await fetch(`${loomDaemon.baseURL}/api/profiles`)).json();
   const roleOf = (a: { profileId?: string | null }) =>

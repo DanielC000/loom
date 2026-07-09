@@ -6,17 +6,18 @@
 // Platform.tsx picks the edition from GET /api/platform/home (the reserved "Loom Platform" dev home).
 // That home only seeds under LOOM_DEV=1; the fixture boots the daemon with LOOM_DEV=0 (see
 // fixtures/daemon.ts), so /api/platform/home 404s and the page renders the SHIPPING End-User surface
-// (EndUserPlatformView) — the "Platform" operator + Workspace Auditor, no "View as" toggle.
+// (the unified PlatformView shell driven by the end-user edition config) — the "Platform" operator +
+// Workspace Auditor, no "View as" toggle.
 //
 // The reserved "Platform" home + its operator + Workspace Auditor agents are seeded on the CORE boot
 // path (seedSetupHome / seedSetupAuditorAgent in daemon index.ts) regardless of LOOM_DEV, so the
 // End-User surface renders with real data even in this isolated boot — no extra seeding needed here.
 //
-// MODE-GATING NOTE (reported up): the DeveloperPlatformView (Lead/Auditor go-live grid, Sessions,
-// Auditor schedules) AND the client-only "View as: Developer | End-user" toggle are only reachable
-// when the daemon runs LOOM_DEV=1 (so the reserved "Loom Platform" home exists). The current fixture is
-// LOOM_DEV=0-only, so those dev-edition surfaces are out of reach for this spec; covering them would
-// need a LOOM_DEV=1 daemon variant in the shared fixture.
+// MODE-GATING NOTE (reported up): the PlatformView developer edition (Lead/Auditor go-live grid,
+// Sessions, Auditor schedules) AND the client-only "View as: Developer | End-user" toggle are only
+// reachable when the daemon runs LOOM_DEV=1 (so the reserved "Loom Platform" home exists). The current
+// fixture is LOOM_DEV=0-only, so those dev-edition surfaces are out of reach for this spec; covering them
+// would need a LOOM_DEV=1 daemon variant in the shared fixture.
 //
 // Kept LIGHT + non-terminal: no session is spawned, so the page mounts no live PTY tiles — the spec
 // asserts on the page's sections/controls and an in-page sub-surface toggle, never a terminal stream.

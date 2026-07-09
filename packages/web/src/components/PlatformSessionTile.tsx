@@ -18,9 +18,10 @@ import { TerminalCard } from "./TerminalCard";
 // never an incidental Fork — a fresh Lead is spawned from the Agents controls, not forked from a tile.
 //
 // The stop MUTATION stays internal here (both call sites pass only session/height/maxWidth/stopTitle),
-// so the DeveloperPlatformView + EndUserPlatformView call sites are unchanged. The per-spot differences
-// remain props: tile `height`, an optional `maxWidth` (the single-session end-user tiles cap their
-// width), and the Stop button's `title` (the Auditor names "this Auditor run").
+// so the unified PlatformView shell's call sites (the dev grid + the end-user single-session wrappers)
+// stay unchanged. The per-spot differences remain props: tile `height`, an optional `maxWidth` (the
+// single-session end-user tiles cap their width), and the Stop button's `title` (the Auditor names
+// "this Auditor run").
 export function PlatformSessionTile({
   session, height, maxWidth, stopTitle = "Stop this session — graceful Ctrl-C, clean and resumable",
 }: {

@@ -20,7 +20,7 @@ test("clicking a preset INSERTS its prompt into the composer (Send enables, popo
   })).json();
   expect(created.id, "the preset should be created").toBeTruthy();
 
-  // Resolve the reserved Platform home + its operator agent exactly as EndUserPlatformView does.
+  // Resolve the reserved Platform home + its operator agent exactly as the PlatformView end-user edition does.
   const home = await (await fetch(`${loomDaemon.baseURL}/api/setup/home`)).json();
   const profiles = await (await fetch(`${loomDaemon.baseURL}/api/profiles`)).json();
   const roleOf = (a: { profileId?: string | null }) =>
