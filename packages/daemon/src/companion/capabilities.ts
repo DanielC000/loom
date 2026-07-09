@@ -152,9 +152,51 @@ const SESSION_STATUS: CompanionCapability = {
   },
 };
 
-/** The full lever registry (Framework §2). Only `session-status` is built by this card — the sensitive ACT
- *  levers (later cards) append here behind their own injection-guard primitives. */
-export const COMPANION_CAPABILITIES: readonly CompanionCapability[] = [SESSION_STATUS];
+/**
+ * `decisions-relay` READ half (Framework §4) — a read-only `decisions_list` tool reporting PENDING
+ * decision-inbox questions (Framework's manager→human `Question`/`QuestionInboxItem`, db.ts) across the
+ * granted projects. Mirrors `SESSION_STATUS` exactly. This card builds ONLY the read tool — the ACT half
+ * (`decision_resolve`, letting the companion answer a question) is a LATER card gated on injection-guard
+ * primitives + owner sign-off: a companion surface is the most injection-exposed one in Loom, so a
+ * write/resolve path must not ship ahead of its guard.
+ */
+const DECISIONS_RELAY: CompanionCapability = {
+  slug: "decisions-relay",
+  supportsMode: ["read", "act"],
+  register(server, ctx, db) {
+    server.registerTool(
+      "decisions_list",
+      {
+        description:
+          "Read-only view of PENDING decision-inbox questions (manager asks awaiting a human answer) in " +
+          "your granted project(s). Optionally pass `project` (a project id) to narrow to ONE of your " +
+          "granted projects — passing a project you were NOT granted is rejected with an {error}; " +
+          "omitting it returns every granted project's pending decisions.",
+        inputSchema: { project: z.string().optional() },
+      },
+      async ({ project }) => {
+        // Belt-and-suspenders re-check (Framework §2): a `project` selector must be one of THIS grant's
+        // scoped projects — it can only ever NAME a project already granted, never widen scope.
+        if (project !== undefined && !ctx.scope.projectIds.has(project)) {
+          return ok({ error: `project "${project}" is not in your granted scope` });
+        }
+        const targetProjects = project !== undefined ? new Set([project]) : ctx.scope.projectIds;
+        const decisions = db.listOpenQuestions()
+          .filter((q) => targetProjects.has(q.projectId))
+          .map((q) => ({
+            questionId: q.id, projectId: q.projectId, projectName: q.projectName,
+            sessionId: q.sessionId, title: q.title, body: q.body, options: q.options,
+            recommendation: q.recommendation, state: q.state, createdAt: q.createdAt,
+          }));
+        return ok({ decisions });
+      },
+    );
+  },
+};
+
+/** The full lever registry (Framework §2). `session-status` + `decisions-relay`'s READ half are built —
+ *  the sensitive ACT levers (later cards) append here behind their own injection-guard primitives. */
+export const COMPANION_CAPABILITIES: readonly CompanionCapability[] = [SESSION_STATUS, DECISIONS_RELAY];
 
 /**
  * The single chokepoint (Framework §2): called ONCE per `buildServer`, right after the existing companion
