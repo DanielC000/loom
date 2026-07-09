@@ -15,6 +15,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       spawn opts + the persisted session row; a plain agent stays false (byte-identical); RESUME
 //       re-passes it (a resumed browser-worker keeps its browser); spawnWorker resolves it from the
 //       worker agent's profile.
+//   plus (vault) the project's vaultPath, when set, becomes the Playwright MCP's --output-dir (the one
+//       write root @playwright/mcp's own checkFile guard enforces for an explicit absolute path) instead
+//       of the scratch dir — so a vault-targeted screenshot is no longer denied; a no-vault project's
+//       config stays byte-identical (still the scratch dir).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/browser-testing-spawn.mjs
 import fs from "node:fs";
@@ -108,6 +112,36 @@ check("(out) playwrightMcpServer() with no dir omits --output-dir (additive)",
 const plainBrowser = buildMcpServers({ sessionId: "s2", port: 4317, browserTesting: true });
 check("(a) browserTesting works for a role-null session too (orthogonal to role)",
   "playwright" in plainBrowser && !("loom-orchestration" in plainBrowser));
+
+// ===================== vaultPath write root (symptom: a vault-targeted screenshot is DENIED) =====================
+// @playwright/mcp's OWN file-write guard (checkFile, in the pinned playwright-core) recognizes exactly
+// TWO roots for an explicit absolute path: --output-dir and the subprocess's inherited OS cwd (which is
+// NOT independently settable per MCP server — no third "extra roots" list exists in this pinned version).
+// So the only way to grant an explicit vault-path screenshot is to make vaultPath itself the --output-dir
+// when the project has one; a no-vault project must stay byte-identical to the scratch-dir default.
+const vault = path.join(tmpHome, "the-vault");
+const withVault = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", browserTesting: true, vaultPath: vault });
+const vaultOutDir = withVault.playwright.args[withVault.playwright.args.indexOf("--output-dir") + 1];
+check("(vault) a vault-bearing session's --output-dir IS the project vaultPath (not the scratch dir)",
+  vaultOutDir === vault);
+check("(vault) the vault write root is an ABSOLUTE path", path.isAbsolute(vaultOutDir));
+// no vaultPath ⇒ unchanged from today (still the scratch dir) — the additive/byte-identical DoD guarantee.
+const noVault = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", browserTesting: true });
+check("(vault) omitting vaultPath keeps --output-dir as the scratch dir (byte-identical to before this param)",
+  noVault.playwright.args[noVault.playwright.args.indexOf("--output-dir") + 1] === sessionScratchDir("s1"));
+// with vs without vaultPath: ONLY the playwright --output-dir arg differs — every other server/arg is untouched.
+const stripOutputDir = (m) => {
+  const args = m.playwright.args.slice();
+  const i = args.indexOf("--output-dir");
+  if (i !== -1) args.splice(i, 2);
+  return { ...m, playwright: { ...m.playwright, args } };
+};
+check("(vault) vaultPath changes NOTHING else in the mcp-config (only --output-dir's value)",
+  JSON.stringify(stripOutputDir(withVault)) === JSON.stringify(stripOutputDir(noVault)));
+// vaultPath is ignored entirely when browserTesting is off (no playwright entry to root at all).
+const vaultNoBrowser = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", browserTesting: false, vaultPath: vault });
+check("(vault) vaultPath with browserTesting=false ⇒ still no playwright entry (byte-identical to the OFF map)",
+  !("playwright" in vaultNoBrowser) && JSON.stringify(vaultNoBrowser) === JSON.stringify(off));
 
 // ===================== end-to-end threading through SessionService (seam-captured opts) =====================
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off ---

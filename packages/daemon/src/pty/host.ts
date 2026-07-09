@@ -350,12 +350,21 @@ const REDIRECT_SETTLE_MS = Number(process.env.LOOM_REDIRECT_SETTLE_MS) || 1_500;
  *
  * `--output-dir <outputDir>` (when supplied) sets where the MCP writes capture artifacts —
  * `browser_take_screenshot`, traces, downloads. Loom passes a repo-EXTERNAL per-session scratch dir
- * (`sessionScratchDir`) so a screenshot taken with NO explicit path can NEVER land inside the project
- * working tree: without it the MCP defaults output to `<cwd>/.playwright-mcp`, and cwd IS the project
- * repo root — a stray-PNG-commit footgun in a self-hosting repo. An explicit (absolute) caller filename
- * is unaffected (playwright-core resolves it with `path.resolve(outputDir, fileName)`, so an absolute
- * path bypasses the base). Omit `outputDir` and the flag is absent (byte-identical to the pre-output-dir
- * spawn) — the caller (`buildMcpServers`) always supplies the per-session dir.
+ * (`sessionScratchDir`) by default so a screenshot taken with NO explicit path can NEVER land inside the
+ * project working tree: without it the MCP defaults output to `<cwd>/.playwright-mcp`, and cwd IS the
+ * project repo root — a stray-PNG-commit footgun in a self-hosting repo.
+ * `outputDir` is ALSO the enforced write boundary, not just the default: an explicit (absolute) caller
+ * filename bypasses the JOIN (playwright-core resolves it with `path.resolve(outputDir, fileName)`, which
+ * returns the absolute path verbatim) but is then checked by playwright-core's OWN `checkFile` guard,
+ * which allows a write only inside `outputDir` OR the MCP subprocess's inherited OS cwd — TWO fixed
+ * roots, no configurable extra-roots list in this pinned version, and that cwd is NOT independently
+ * settable per MCP server (a `"cwd"` field on the stdio server entry is silently ignored — verified by
+ * spawning a real `claude` and observing the child still inherit claude's own cwd). So a caller-absolute
+ * path OUTSIDE both roots is DENIED, not just "unaffected" — which is why `buildMcpServers` swaps
+ * `outputDir` to the project's `vaultPath` (when set) instead of the scratch dir: that's the only way to
+ * grant vault writes without opening `--allow-unrestricted-file-access` (which removes the boundary
+ * entirely, including the file:// navigation block). Omit `outputDir` and the flag is absent
+ * (byte-identical to the pre-output-dir spawn) — the caller (`buildMcpServers`) always supplies a dir.
  *
  * Returns null if the package can't be resolved (it's a pinned daemon dependency, so this is a
  * should-never-happen guard) — the caller then simply omits the server, leaving the spawn otherwise
@@ -645,6 +654,12 @@ export function dejaMcpServer(): { type: "stdio"; command: string; args: string[
  */
 export function buildMcpServers(o: {
   sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean; documentConversion?: boolean; dejaCorpus?: boolean;
+  /**
+   * The project's vault path, when it has one — consulted ONLY by the browserTesting/Playwright grant
+   * (see the "browser-testing" branch below). Undefined/omitted ⇒ byte-identical to before this param
+   * existed (still just the scratch dir).
+   */
+  vaultPath?: string;
   /** HUMAN-only `python.interpreterPath` (carried via session env) — forwarded to the markitdown venv resolver. */
   pythonInterpreterPath?: string;
   /** Agent-tooling P4: registry-capability grants BEYOND the two legacy booleans above (raw, un-bridged —
@@ -700,11 +715,19 @@ export function buildMcpServers(o: {
   const catalog = o.capabilityCatalog ?? [];
   for (const grant of resolveProfileCapabilities(o)) {
     if (grant.slug === "browser-testing") {
-      // The legacy Playwright capability, UNCHANGED resolution: default capture output to a
-      // repo-EXTERNAL per-session scratch dir, so a screenshot taken with no explicit path can never
-      // land inside the project working tree (an absolute caller path still wins). A null (unresolvable
+      // The legacy Playwright capability: default capture output to a repo-EXTERNAL per-session scratch
+      // dir, so a screenshot taken with no explicit path can never land inside the project working tree.
+      // `@playwright/mcp`'s own file-write guard (`checkFile` in playwright-core) recognizes EXACTLY TWO
+      // allowed roots for an LLM-targeted absolute path: `--output-dir` and the subprocess's OS cwd (which
+      // is NOT independently configurable per MCP server — confirmed by spawning a real `claude` with a
+      // `"cwd"` field on a stdio server entry and observing the child inherit claude's own cwd regardless;
+      // there is no third "extra roots" list in this pinned version). So an explicit absolute vaultPath
+      // target can only be granted by making vaultPath itself the one `--output-dir` root — that's the
+      // trade-off here: a vault-bearing session's screenshot root is `vaultPath` (so a milestone shot can
+      // land directly in the vault, and a bare filename lands in the vault rather than the repo); a
+      // no-vault session is byte-identical to before (still the scratch dir). A null (unresolvable
       // package) is logged + skipped rather than crashing the spawn.
-      const pw = playwrightMcpServer(sessionScratchDir(o.sessionId));
+      const pw = playwrightMcpServer(o.vaultPath ?? sessionScratchDir(o.sessionId));
       if (pw) {
         mcpServers["playwright"] = pw;
       } else {
@@ -1995,6 +2018,7 @@ export class PtyHost {
     // and hand it to the shared-venv markitdown resolver (only consulted when documentConversion is on).
     const mcpServers = buildMcpServers({
       sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion, dejaCorpus: opts.dejaCorpus,
+      vaultPath: opts.vaultPath,
       pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER,
       capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,
     });
