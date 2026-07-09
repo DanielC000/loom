@@ -113,7 +113,7 @@ export interface AttentionItem {
 // Overview rows, the toast, and the command palette can't drift on where "Open" goes (card a16dfafb).
 export function attentionOpenTarget(item: AttentionItem): string | null {
   if (item.kind === "MERGE REQUEST") return item.workerSessionId ? `/review/${item.workerSessionId}` : null;
-  if (item.kind === "DECISION NEEDED") return item.questionId ? `/question/${item.questionId}` : null;
+  if (item.kind === "DECISION NEEDED" || item.kind === "DECISION ORPHANED") return item.questionId ? `/question/${item.questionId}` : null;
   return item.sessionId ? `/session/${item.sessionId}` : null;
 }
 
@@ -175,11 +175,21 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   const items: AttentionItem[] = [];
   // A blocked human is the wave's tightest bottleneck, so a pending DECISION reads first. Only PENDING
   // questions surface here (an answered one is waiting on the MANAGER's pickup, not the human).
+  // A question whose asker is `sessionOrphaned` (row hard-deleted, or resume already proved it dead) can
+  // never be consumed no matter how long it sits 'pending' — answering it would be a silent no-op. Surface
+  // it as a DISTINCT kind (amber, not the actionable cyan) rather than either hiding it (the human would
+  // never learn the manager needs attention) or leaving it indistinguishable from a live, answerable
+  // decision (misleading — see the residual-gap investigation, card 8701bdbb follow-up).
   for (const q of (questions.data ?? []).filter((x) => x.state === "pending")) {
-    items.push({
-      key: `q-${q.id}`, tone: "cyan", kind: "DECISION NEEDED", questionId: q.id, sessionId: q.sessionId,
-      text: decisionAttentionText(q),
-    });
+    items.push(q.sessionOrphaned
+      ? {
+          key: `q-${q.id}`, tone: "amber", kind: "DECISION ORPHANED", questionId: q.id, sessionId: q.sessionId,
+          text: `${decisionAttentionText(q)} — asking session is gone; may never be consumed`,
+        }
+      : {
+          key: `q-${q.id}`, tone: "cyan", kind: "DECISION NEEDED", questionId: q.id, sessionId: q.sessionId,
+          text: decisionAttentionText(q),
+        });
   }
   // A genuinely-pending review keeps its WORKER session alive on the worktree (the worker is only
   // hard-stopped at merge-confirm time). So a merge_request whose worker is gone (exited/dead/not in

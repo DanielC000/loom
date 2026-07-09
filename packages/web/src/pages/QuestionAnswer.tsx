@@ -73,6 +73,17 @@ function QuestionAnswerInner({ id }: { id: string }) {
 
       {question && (
         <>
+          {/* The asking session is confirmed gone for good (hard-deleted, or a resume already proved it
+              unresumable) — submitting an answer here still records it, but no manager will ever pull it.
+              Say so up front rather than letting the human submit into a silent no-op. */}
+          {question.sessionOrphaned && (
+            <Panel style={{ borderLeft: `3px solid ${color.amber}` }}>
+              <span style={{ fontFamily: font.mono, fontSize: 12, color: color.amber }}>
+                The asking session is gone for good and can never come back to pull an answer — submitting
+                below will record your note, but nothing will ever act on it automatically.
+              </span>
+            </Panel>
+          )}
           {/* THE ASK */}
           <Panel style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: `2px solid ${color.cyan}` }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>

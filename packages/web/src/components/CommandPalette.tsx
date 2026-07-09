@@ -31,7 +31,7 @@ export function CommandPalette() {
       const target = attentionOpenTarget(a);
       if (!target) return [];
       const merge = a.kind === "MERGE REQUEST";
-      const decision = a.kind === "DECISION NEEDED";
+      const decision = a.kind === "DECISION NEEDED" || a.kind === "DECISION ORPHANED";
       const verb = merge ? "Review" : decision ? "Answer" : "Open";
       const hint = merge ? "review" : decision ? "question" : "session";
       return [{ label: `${verb} · ${a.kind} ${a.text}`, hint, run: () => navigate(target) }];

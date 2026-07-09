@@ -122,9 +122,11 @@ export function PlanUsageStrip() {
 }
 
 export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionItem; onOpen?: () => void; onDismiss?: () => void }) {
-  // A pending DECISION reads as an actionable question: a cyan left-edge, a PENDING state chip, and an
-  // "Answer →" (not the generic "Open") — distinct from the phosphor MERGE REQUEST and the red/amber alerts.
-  const decision = item.kind === "DECISION NEEDED";
+  // A pending DECISION (live or orphaned) reads as an answerable question: a cyan left-edge, a PENDING
+  // state chip, and an "Answer →" (not the generic "Open") — distinct from the phosphor MERGE REQUEST and
+  // the red/amber alerts. DECISION ORPHANED still routes to the same answer page (its own amber tone/text
+  // already flags the asker is gone), just via item.tone rather than a hardcoded second border color.
+  const decision = item.kind === "DECISION NEEDED" || item.kind === "DECISION ORPHANED";
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${color.border}`,
       borderLeft: decision ? `3px solid ${color.cyan}` : `1px solid ${color.border}`, borderRadius: 4, padding: "6px 10px", marginBottom: 6 }}>

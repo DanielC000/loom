@@ -1246,6 +1246,15 @@ export interface QuestionInboxItem extends Question {
   agentName: string;
   projectName: string;
   sessionLive: boolean;
+  /**
+   * The asking session is CONFIRMED gone for good — no resume will ever bring it back to consume an
+   * answer. True when its row was hard-deleted (a permanent-delete of an archived session) or a resume
+   * attempt already proved it unresumable (`resumability === 'dead'`: the engine transcript or worktree
+   * is gone). Distinct from merely `!sessionLive`: a stopped/archived/parked/rate-limited session recovers
+   * fine on a later resume (the answered-stuck watchdog + question_pull pick it up once it's live again) —
+   * only THIS flag means the normal pending→answered→consumed lifecycle can structurally never complete.
+   */
+  sessionOrphaned: boolean;
 }
 
 /**

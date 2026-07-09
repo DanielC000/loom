@@ -1436,8 +1436,10 @@ export class Db {
    * session's pending wakes), tasks, the agents' schedules, plus the project-scoped api_keys / runs /
    * run_events so no orphan rows survive — INCLUDING the orchestration_events audit rows keyed by this
    * project's session ids (they surface in the cross-project Activity feed, so a permanent delete must
-   * clear them). SQLite FKs are not enforced (no PRAGMA foreign_keys=ON), so order is for clarity, not
-   * constraint-safety. Owns ROWS ONLY — on-disk transcript snapshots are the caller's job (gateway),
+   * clear them) — AND the project's decision-inbox `questions` (a NOT NULL FK to sessions.id; better-sqlite3
+   * enforces foreign keys by default, so leaving these behind would abort the whole transaction instead of
+   * silently orphaning them — order here is genuine constraint-safety, not just clarity).
+   * Owns ROWS ONLY — on-disk transcript snapshots are the caller's job (gateway),
    * mirroring deleteSession; returns the deleted session ids so the caller can drop their snapshots.
    * Does NOT guard reserved/live — the REST layer enforces those FIRST.
    */
@@ -1448,6 +1450,7 @@ export class Db {
       for (const sid of sessionIds) {
         this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(sid);
         // orchestration_events is session-keyed (manager OR worker) with no project_id — drop per session id.
         this.db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ?").run(sid, sid);
       }
@@ -2095,9 +2098,10 @@ export class Db {
     this.db.prepare(`UPDATE agents SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
   }
   /**
-   * PERMANENTLY delete an agent and CASCADE its sessions (+ each session's pending wakes + the
-   * session-keyed orchestration_events), the agent's schedules, and the runs that referenced it (+ the
-   * run-keyed run_events for those runs) — in ONE transaction, so no orphan rows survive. Owns ROWS
+   * PERMANENTLY delete an agent and CASCADE its sessions (+ each session's pending wakes + decision-inbox
+   * questions + the session-keyed orchestration_events), the agent's schedules, and the runs that
+   * referenced it (+ the run-keyed run_events for those runs) — in ONE transaction, so no orphan rows
+   * survive (questions.session_id is a NOT NULL FK, enforced — see deleteSession). Owns ROWS
    * ONLY; the caller drops the deleted sessions' on-disk transcript snapshots (mirrors deleteSession),
    * so returns the deleted session ids. Does NOT guard live sessions — the REST layer blocks that FIRST
    * ("stop the fleet first").
@@ -2109,6 +2113,7 @@ export class Db {
       for (const sid of sessionIds) {
         this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ?").run(sid, sid);
       }
       // run_events is project/run-keyed (not agent-keyed) — drop only the rows for THIS agent's runs.
@@ -2832,10 +2837,17 @@ export class Db {
     this.setMeta(HELD_BACKFILL_KEY, new Date().toISOString()); // stamp last — the one-shot guarantee
     return changed;
   }
-  /** Permanently delete a session row (the Archive tab's Delete). Also drops its pending wakes + reminders. */
+  /**
+   * Permanently delete a session row (the Archive tab's Delete). Also drops its pending wakes + reminders
+   * + any decision-inbox questions it asked (any state — pending/answered/consumed). `questions.session_id`
+   * is a NOT NULL FK and better-sqlite3 enforces foreign keys by default (verified — the stale claim
+   * elsewhere in this file that FKs aren't enforced is wrong): without this, deleting a session that ever
+   * asked a question (even a long-consumed one) threw SQLITE_CONSTRAINT_FOREIGNKEY instead of succeeding.
+   */
   deleteSession(id: string): void {
     this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(id);
+    this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
   }
   insertSession(s: Session): void {
@@ -3563,7 +3575,8 @@ export class Db {
    */
   listOpenQuestions(includeConsumed = false): QuestionInboxItem[] {
     const rows = this.db.prepare(
-      `SELECT q.*, a.name AS agent_name, p.name AS project_name, s.process_state AS session_process_state
+      `SELECT q.*, a.name AS agent_name, p.name AS project_name, s.process_state AS session_process_state,
+              s.resumability AS session_resumability
        FROM questions q
        LEFT JOIN sessions s ON q.session_id = s.id
        LEFT JOIN agents a ON s.agent_id = a.id
@@ -3576,7 +3589,8 @@ export class Db {
   /** One question enriched with the same display fields (the answer page), any state; undefined if unknown. */
   getQuestionInboxItem(id: string): QuestionInboxItem | undefined {
     const r = this.db.prepare(
-      `SELECT q.*, a.name AS agent_name, p.name AS project_name, s.process_state AS session_process_state
+      `SELECT q.*, a.name AS agent_name, p.name AS project_name, s.process_state AS session_process_state,
+              s.resumability AS session_resumability
        FROM questions q
        LEFT JOIN sessions s ON q.session_id = s.id
        LEFT JOIN agents a ON s.agent_id = a.id
@@ -4145,16 +4159,22 @@ function toQuestion(r0: unknown): Question {
   };
 }
 // A question row already carrying the joined display columns (agent_name / project_name /
-// session_process_state) → the QuestionInboxItem the web reads. A LEFT-JOINed row with a hard-deleted
-// asking session/agent yields null names (→ "?") and a null process_state (→ not live).
+// session_process_state / session_resumability) → the QuestionInboxItem the web reads. A LEFT-JOINed row
+// with a hard-deleted asking session/agent yields null names (→ "?") and a null process_state (→ not live).
 function toQuestionInboxItem(r0: unknown): QuestionInboxItem {
   const r = r0 as Row;
   const state = r.session_process_state as string | null | undefined;
+  const resumability = r.session_resumability as string | null | undefined;
   return {
     ...toQuestion(r),
     agentName: (r.agent_name as string | null) ?? "?",
     projectName: (r.project_name as string | null) ?? "?",
     sessionLive: state === "live" || state === "starting",
+    // Confirmed gone for good: the row was hard-deleted (state is null — the LEFT JOIN found nothing) or
+    // a resume attempt already proved this session's engine transcript/worktree missing (resumability
+    // flips to 'dead' in resume(), see sessions/service.ts). A merely stopped/archived/parked session
+    // (state exited, resumability 'unknown'/'resumable') is NOT orphaned — it recovers on a later resume.
+    sessionOrphaned: state == null || resumability === "dead",
   };
 }
 function toCompanionReminder(r0: unknown): CompanionReminder {
