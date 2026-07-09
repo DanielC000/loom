@@ -510,7 +510,11 @@ async function main(): Promise<void> {
 
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after. The
   // companion hooks gate chat_reply to the single bound session (additive; every other spawn unchanged).
-  const orchMcp = new OrchestrationMcpRouter(db, sessions, companionHooks);
+  // `pty` is threaded directly (not via SessionService) so worker_list/worker_status can read the live
+  // in-memory `lastOutputAt` intra-turn liveness signal (pty/host.ts) without adding a passthrough to
+  // SessionService. It's the constructor's optional trailing param (added after companion) so every
+  // other (non-index.ts) call site stays byte-identical.
+  const orchMcp = new OrchestrationMcpRouter(db, sessions, companionHooks, pty);
   // Platform MCP (Pillar C / P2) needs the registry (project/agent/profile/schedule + config) AND
   // SessionService (the cross-project session_spawn/session_stop lifecycle ops). P3 also threads the
   // BOOT-BOUND git-write timeouts so the Lead's elevated git tools (git_checkout/commit/push) bound a

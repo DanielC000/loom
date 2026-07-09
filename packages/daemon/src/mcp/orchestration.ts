@@ -7,6 +7,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { contextWindowForModel, resolveConfig, resolveProfile, type SessionRole, type Question } from "@loom/shared";
 import type { Db } from "../db.js";
+import type { PtyHost } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript, pageTranscript } from "../sessions/transcript.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
@@ -78,7 +79,16 @@ export interface CompanionHooks {
 }
 
 export class OrchestrationMcpRouter {
-  constructor(private db: Db, private sessions: SessionService, private companion: CompanionHooks = {}) {}
+  // `pty` is OPTIONAL and LAST — added after the constructor's existing (db, sessions, companion) shape
+  // was already load-bearing across every test call site (many positional, some omitting `companion`
+  // entirely). Appending it here keeps every existing call site byte-identical; a caller that doesn't
+  // pass it just gets `lastEngineOutputAt: null` on every row (see fleetView/worker_status below).
+  constructor(
+    private db: Db,
+    private sessions: SessionService,
+    private companion: CompanionHooks = {},
+    private pty?: PtyHost,
+  ) {}
 
   /** Role gate: returns the session's id + orchestration role, or null (→ 404) for plain/unknown.
    *  Admits the Companion (assistant) too — it reaches this surface for its MINIMAL toolset (my_context +
@@ -433,6 +443,7 @@ export class OrchestrationMcpRouter {
   private buildServer(sessionId: string, role: SessionRole): McpServer {
     const db = this.db;
     const sessions = this.sessions;
+    const pty = this.pty;
     const server = new McpServer({ name: "loom-orchestration", version: "0.1.0" });
 
     // Companion spike: additive, single-session-gated chat_reply (see registerChatReplyIfCompanion).
@@ -578,6 +589,15 @@ export class OrchestrationMcpRouter {
     // manager had to worker_status(id) — or read the transcript — to discover the park. worker_status(id)
     // already surfaced both fields (it returns the full session record), so this closes the SAME gap for
     // the fleet view without adding a new field/scanner.
+    //
+    // `lastEngineOutputAt`: an INTRA-TURN liveness signal, additive alongside the DB-persisted
+    // `lastActivity` (which only moves at turn boundaries — hook events). Reads pty/host.ts's in-memory
+    // `Live.lastOutputAt`, stamped on EVERY engine-output chunk (already fed to the busy-stale self-heal —
+    // see healIfStuck) — so it keeps advancing THROUGH a single long turn and only goes stale once the
+    // engine truly stops producing. Lets a manager tell "busy + progressing" (recent) from "possibly
+    // wedged" (stale) at a glance, without spending a worker_transcript pull. `undefined` (session not
+    // live in this process, e.g. exited/never spawned here) reads as `null`, same as every other
+    // optional field on this row.
     const fleetView = () => {
       const workers = db.listWorkers(managerSessionId).map((w) => ({
         workerSessionId: w.id,
@@ -588,6 +608,7 @@ export class OrchestrationMcpRouter {
         ctxInputTokens: w.ctxInputTokens ?? null,
         model: w.model ?? null,
         lastActivity: w.lastActivity,
+        lastEngineOutputAt: pty?.getLastOutputAt(w.id) ?? null,
         pendingMerge: sessions.peekPendingMerge(w.id) ?? null,
         rateLimitedUntil: w.rateLimitedUntil ?? null,
         rateLimitDeadline: w.rateLimitDeadline ?? null,
@@ -602,6 +623,7 @@ export class OrchestrationMcpRouter {
         ctxInputTokens: null,
         model: null,
         lastActivity: op.startedAt,
+        lastEngineOutputAt: null,
         pendingMerge: null,
         rateLimitedUntil: null,
         rateLimitDeadline: null,
@@ -614,14 +636,14 @@ export class OrchestrationMcpRouter {
 
     server.registerTool(
       "worker_list",
-      { description: "List the workers you (this manager) have spawned — your direct children. `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is still running its gate in the background — poll here or re-call worker_merge_confirm to fetch the result once ready. `rateLimitedUntil`/`rateLimitDeadline` (non-null) mean the worker is PARKED ON A USAGE CAP — busy will read false but this is NOT a healthy idle worker; it resumes on its own once `rateLimitedUntil` passes (`rateLimitDeadline` is the give-up horizon). A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result.", inputSchema: {} },
+      { description: "List the workers you (this manager) have spawned — your direct children. `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is still running its gate in the background — poll here or re-call worker_merge_confirm to fetch the result once ready. `rateLimitedUntil`/`rateLimitDeadline` (non-null) mean the worker is PARKED ON A USAGE CAP — busy will read false but this is NOT a healthy idle worker; it resumes on its own once `rateLimitedUntil` passes (`rateLimitDeadline` is the give-up horizon). `lastEngineOutputAt` is an INTRA-TURN liveness signal, distinct from `lastActivity` (which only moves at turn boundaries): it advances on every chunk of engine output, so it keeps moving THROUGH a single long turn — a recent `lastEngineOutputAt` on a `busy:true` row means the engine is actively producing (busy + progressing); a stale one means it may be wedged. Cheaper than a worker_transcript pull just to check liveness. `null` means the session isn't live in this daemon process. A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result.", inputSchema: {} },
       async () => ok(fleetView()),
     );
 
     server.registerTool(
       "worker_status",
       {
-        description: "Get the full session record for one of your workers, by workerSessionId. Includes the derived `reportedState` (done|blocked|null) + `awaitingReview` flag — set when the worker has called worker_report and is idle awaiting your review, cleared once it resumes a turn / is merged. Called with NO workerSessionId, it returns the fleet view (same as worker_list) so a reflexive no-arg call just works.",
+        description: "Get the full session record for one of your workers, by workerSessionId. Includes the derived `reportedState` (done|blocked|null) + `awaitingReview` flag — set when the worker has called worker_report and is idle awaiting your review, cleared once it resumes a turn / is merged. Also includes `lastEngineOutputAt`, the intra-turn liveness signal (see worker_list) — recent vs. `lastActivity` tells you whether a busy worker is actively progressing or possibly wedged. Called with NO workerSessionId, it returns the fleet view (same as worker_list) so a reflexive no-arg call just works.",
         inputSchema: { workerSessionId: z.string().optional() },
       },
       async ({ workerSessionId }) => {
@@ -629,7 +651,12 @@ export class OrchestrationMcpRouter {
         if (!workerSessionId) return ok(fleetView());
         const w = ensureWorkerLinked(workerSessionId, "worker_status");
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
-        return ok({ ...w, pendingMerge: sessions.peekPendingMerge(w.id) ?? null, ...reportedProjection(w.id) });
+        return ok({
+          ...w,
+          lastEngineOutputAt: pty?.getLastOutputAt(w.id) ?? null,
+          pendingMerge: sessions.peekPendingMerge(w.id) ?? null,
+          ...reportedProjection(w.id),
+        });
       },
     );
 

@@ -3032,6 +3032,17 @@ export class PtyHost {
     return this.live.get(sessionId)?.pid;
   }
 
+  /** Epoch ms of this session's last pty OUTPUT chunk (`Live.lastOutputAt`), or undefined if it isn't
+   *  live. Distinct from the DB-persisted `lastActivity` (which only moves at turn boundaries — hook
+   *  events): this advances on EVERY engine-output chunk, so it keeps moving THROUGH a single long turn
+   *  and only goes stale once the engine truly stops producing — already fed to the busy-stale self-heal
+   *  (see `healIfStuck`'s use of `lastOutputAt`); this getter just surfaces the same signal to a reader
+   *  (worker_list/worker_status) so a manager can tell "busy + progressing" from "possibly wedged" without
+   *  spending a worker_transcript pull. */
+  getLastOutputAt(sessionId: string): number | undefined {
+    return this.live.get(sessionId)?.lastOutputAt;
+  }
+
   private appendRing(live: Live, buf: Buffer): void {
     live.ring.chunks.push(buf);
     live.ring.bytes += buf.length;
