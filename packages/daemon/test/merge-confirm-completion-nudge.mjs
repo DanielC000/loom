@@ -12,8 +12,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // any public getPending*/worker_list surface, only at the enqueueStdin call boundary itself).
 //
 // NOT tunable-fast: SYNC_ATTACH_BUDGET_MS (12s) is not injectable, so proving the REAL async/pending path
-// through the REAL confirmWorkerMergeTracked needs a gate that outlives it — ~13-16s wall-clock per
-// scenario. Still fully hermetic (in-process, no daemon, no network).
+// through the REAL confirmWorkerMergeTracked needs a gate that outlives it — at least ~13s wall-clock per
+// scenario, longer under CPU contention (the post-budget wait polls for the completion nudge instead of
+// sleeping a fixed duration — see waitUntil below). Still fully hermetic (in-process, no daemon, no network).
 //
 // Proves:
 //   (1) MERGED, async: the completion nudge fires exactly once, kind:"warning", naming the worker + "merged".
@@ -32,6 +33,22 @@ import { execSync } from "node:child_process";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Slack for the bounded-op LOWER-bound timing assertion below. Durations are measured with the MONOTONIC
+// performance.now() (not Date.now()), so a wall-clock NTP/virtualization backward step can't make elapsed
+// read under the budget; this slack additionally absorbs libuv's sub-ms early timer fire. Mirrors
+// worktrees.mjs's TIMER_SLACK_MS (same fix class as the v0.3.0 release CI Date.now() flake).
+const TIMER_SLACK_MS = 50;
+// Poll for the async completion nudge instead of a fixed sleep — under CPU contention the 13s gate
+// process (spawn + setTimeout) and the terminal callback can land well past any hardcoded wait; polling
+// with a generous ceiling waits exactly as long as actually needed instead of gambling on a fixed delay.
+async function waitUntil(predicate, timeoutMs, intervalMs = 200) {
+  const start = performance.now();
+  while (performance.now() - start < timeoutMs) {
+    if (predicate()) return true;
+    await sleep(intervalMs);
+  }
+  return predicate();
+}
 
 const tmpHome = path.join(os.tmpdir(), `loom-mcn-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -101,13 +118,15 @@ try {
     db.insertTask({ id: "t1", projectId: P, title: "t1", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: "t1", worktreePath, branch });
 
-    const t0 = Date.now();
+    const t0 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
     const first = await svc.confirmWorkerMergeTracked(mgrId, workerId);
-    const elapsed = Date.now() - t0;
-    check(`(1) degrades to pending past the sync-wait budget (elapsed=${elapsed}ms)`, first.settled === false && elapsed >= 9_000);
+    const elapsed = performance.now() - t0;
+    check(`(1) degrades to pending past the sync-wait budget (elapsed=${Math.round(elapsed)}ms)`, first.settled === false && elapsed >= 9_000 - TIMER_SLACK_MS);
     check("(1) NO completion nudge yet — the op is still running in the background", !host.enqueueCalls.some((c) => c.sessionId === mgrId && /\[loom:merge-(done|failed)\]/.test(c.text)));
 
-    await sleep(5_000); // let the 13s gate actually finish + the terminal callback fire
+    // Let the 13s gate actually finish + the terminal callback fire — poll (generous ceiling) rather
+    // than a fixed sleep, so contention that slows the gate/callback doesn't false-RED this check.
+    await waitUntil(() => host.enqueueCalls.some((c) => c.sessionId === mgrId && /\[loom:merge-(done|failed)\]/.test(c.text)), 20_000);
     const nudges = host.enqueueCalls.filter((c) => c.sessionId === mgrId && /\[loom:merge-(done|failed)\]/.test(c.text));
     check("(1) exactly ONE completion nudge landed for this worker", nudges.length === 1);
     check("(1) it's the MERGED/success nudge, naming the worker", nudges[0] && /\[loom:merge-done\]/.test(nudges[0].text) && nudges[0].text.includes(workerId));
@@ -131,7 +150,9 @@ try {
     const first = await svc.confirmWorkerMergeTracked(mgrId, workerId);
     check("(2) degrades to pending past the sync-wait budget", first.settled === false);
 
-    await sleep(5_000); // let the 13s gate actually finish (non-zero) + the terminal callback fire
+    // Let the 13s gate actually finish (non-zero) + the terminal callback fire — poll (generous
+    // ceiling) rather than a fixed sleep, so contention doesn't false-RED this check.
+    await waitUntil(() => host.enqueueCalls.some((c) => c.sessionId === mgrId && /\[loom:merge-(done|failed)\]/.test(c.text)), 20_000);
     const nudges = host.enqueueCalls.filter((c) => c.sessionId === mgrId && /\[loom:merge-(done|failed)\]/.test(c.text));
     check("(2) exactly ONE completion nudge landed for this worker", nudges.length === 1);
     check("(2) it's the FAILED nudge, naming the worker + the gate-failure reason", nudges[0] && /\[loom:merge-failed\]/.test(nudges[0].text) && nudges[0].text.includes(workerId) && /build gate failed/.test(nudges[0].text));
