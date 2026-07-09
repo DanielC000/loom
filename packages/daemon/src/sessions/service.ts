@@ -1286,7 +1286,7 @@ export class SessionService {
         // The pty is STILL alive — push everything we drained OUT of its FIFO back onto it before aborting
         // (nothing else will redeliver them; resume() below never runs on this path). The capability re-pin
         // above already landed durably — a later manual restart/resume picks it up.
-        for (const msg of carried) this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId);
+        for (const msg of carried) this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText);
         throw new Error("companion process did not stop in time — upgrade aborted (capability changes are saved and will apply on the next successful resume)");
       }
     }
@@ -1297,7 +1297,7 @@ export class SessionService {
     // redelivering it here too would double it.
     for (const msg of carried) {
       if (msg.onDeliver) continue;
-      this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId);
+      this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText);
     }
     return resumed;
   }

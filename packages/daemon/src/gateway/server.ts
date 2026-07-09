@@ -32,7 +32,7 @@ import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
-import { COMPANION_CAPABILITY_SLUGS } from "../companion/capabilities.js";
+import { COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
 import { listConnections, createConnection, deleteConnection } from "../connections/store.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef } from "../capabilities/registry.js";
@@ -1273,6 +1273,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     return true;
   };
+  // `decisions-relay`'s own config shape (card a8ddd6d2: `{decisionClasses:string[]}`) — checked ON TOP
+  // of isValidGrantConfig's generic floor, only when capability === "decisions-relay". Absent is valid
+  // (the lever's own conservative default: nothing in the allowlist ⇒ decision_resolve admits no class
+  // until the owner explicitly opts one in — mirrors attention-push's absent-alertClasses default).
+  const isValidDecisionsRelayConfig = (v: Record<string, unknown> | undefined): v is Record<string, unknown> | undefined => {
+    if (v === undefined) return true;
+    if (v.decisionClasses !== undefined) {
+      if (!Array.isArray(v.decisionClasses)) return false;
+      if (!v.decisionClasses.every((c) => typeof c === "string" && (DECISION_CLASSES as readonly string[]).includes(c))) return false;
+    }
+    return true;
+  };
   const parseGrantBody = (body: unknown):
     | { ok: true; capability: string; projectId: string | null; mode?: "read" | "act"; config?: Record<string, unknown> }
     | { ok: false; code: number; error: string } => {
@@ -1293,6 +1305,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         ok: false, code: 400,
         error: `attention-push config.alertClasses must be an array drawn from: ${ATTENTION_ALERT_CLASSES.join(", ")}; ` +
           "config.digestMinutes (if set) must be a non-negative finite number",
+      };
+    }
+    if (b.capability === "decisions-relay" && !isValidDecisionsRelayConfig(b.config as Record<string, unknown> | undefined)) {
+      return {
+        ok: false, code: 400,
+        error: `decisions-relay config.decisionClasses must be an array drawn from: ${DECISION_CLASSES.join(", ")}`,
       };
     }
     return { ok: true, capability: b.capability, projectId, mode: b.mode as "read" | "act" | undefined, config: b.config as Record<string, unknown> | undefined };

@@ -14,7 +14,7 @@
 import path from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { SessionRole } from "@loom/shared";
+import type { CompanionRoute, Question, SessionRole } from "@loom/shared";
 import type { Db } from "../db.js";
 import { listProjectTasks, type TaskSummary } from "../mcp/tasks.js";
 import { listVaultTree, readVaultFile, statVaultFile } from "../vault/browser.js";
@@ -101,15 +101,53 @@ export function resolveCompanionGrant(db: Db, sessionId: string, capability: str
   };
 }
 
-/** Per-lever registration context — `sessionId`/`scope`/`attest` are SERVER-DERIVED (never agent-passed);
- *  a lever's `register()` closes over these to pre-scope every tool it adds. `attest` (Companion injection-
- *  guard primitives, card 8e511951) is the ONLY surface an ACT lever may use to verify a privileged action
- *  traces back to the owner's own literal words — no lever consumes it yet (this card just threads it
- *  through), but every future ACT lever's `register()` reaches it here rather than re-deriving its own. */
+/** The slice of `PtyHost` a sensitive ACT lever needs to (a) scope Primitive C's propose/confirm round-trip
+ *  to the CURRENT turn's reply-to route and (b) push a best-effort nudge once a privileged action commits —
+ *  mirrors the minimal `HeartbeatPty` seam (companion/heartbeat.ts) rather than importing the full
+ *  `PtyHost` class, so a lever's tests can pass a plain stub. */
+export interface GrantPty {
+  getActiveTurnOrigin(sessionId: string): CompanionRoute | null;
+  enqueueStdin(
+    sessionId: string,
+    text: string,
+    source?: "human" | "system",
+    onDeliver?: () => void,
+    route?: CompanionRoute,
+    kind?: "warning" | "agent",
+    questionId?: string,
+  ): { delivered: boolean; position?: number; reason?: string };
+}
+
+/**
+ * The OUTBOUND seam a Primitive-C lever uses to surface its confirm prompt to the OWNER directly — never
+ * through the companion (CR hardening, card a8ddd6d2's review). Wraps the SAME rail `chat_reply` uses
+ * (`CompanionHooks.deliverReply` → `ChatGateway.deliverReply`, companion/chat-gateway.ts), which resolves
+ * the delivery route from the ACTIVE TURN's own origin — a lever never supplies or guesses a route, so it
+ * cannot be tricked into "confirming" toward an attacker-chosen destination. This is DELIBERATELY separate
+ * from `GrantPty` (which is INBOUND — it feeds text back into the companion's OWN pty — the wrong direction
+ * for a message that must reach the human, not the untrusted LLM that originated the request).
+ */
+export interface GrantOutbound {
+  /** Deliver `text` OUT to the owner's chat for `sessionId`. Returns true iff the daemon believes the send
+   *  succeeded (false on no-target/no-adapter/send-failure) — a caller MUST fail closed on false, since a
+   *  false return means there is no verified trusted channel the owner actually saw the prompt on. */
+  deliverToOwner(sessionId: string, text: string): Promise<boolean>;
+}
+
+/** Per-lever registration context — `sessionId`/`scope`/`attest`/`pty`/`outbound` are SERVER-DERIVED (never
+ *  agent-passed); a lever's `register()` closes over these to pre-scope every tool it adds. `attest`
+ *  (Companion injection-guard primitives, card 8e511951) is the ONLY surface an ACT lever may use to verify
+ *  a privileged action traces back to the owner's own literal words. `pty` (card a8ddd6d2) lets a lever
+ *  scope Primitive C to the active turn's route and push a post-commit nudge into an ASKING MANAGER's
+ *  session (never the owner). `outbound` (same card, CR hardening) is the ONLY way a lever may put text in
+ *  front of the OWNER directly — every lever that doesn't need one of these (every read-only lever today)
+ *  simply never touches it. */
 export interface GrantContext {
   sessionId: string;
   scope: ResolvedGrantScope;
   attest: OwnerAttestation;
+  pty: GrantPty;
+  outbound: GrantOutbound;
 }
 
 /** One pluggable lever descriptor (Framework §2). `register` adds THIS lever's tools to `server`, already
@@ -160,13 +198,98 @@ const SESSION_STATUS: CompanionCapability = {
   },
 };
 
+/** `decision_resolve`'s decision-class vocabulary (Framework §4 config schema: `{decisionClasses:[...]}`).
+ *  Exported so the grants config validator (gateway/server.ts) can reject an unknown/typo'd class at
+ *  write time, mirroring `ATTENTION_ALERT_CLASSES` (attention-push.ts). A `Question` carries no explicit
+ *  class column (the decision-inbox schema predates this lever), so `classifyDecisionClass` below is the
+ *  ONE place a class is DERIVED from a question's own title/body — a coarse, conservative keyword
+ *  heuristic, not a stored fact. `general` is the fallback for everything that doesn't match a narrower,
+ *  higher-risk class. */
+export const DECISION_CLASSES = ["general", "deploy", "irreversible"] as const;
+export type DecisionClass = (typeof DECISION_CLASSES)[number];
+
+/** Keyword heuristics for the two higher-risk classes — deliberately narrow (a false negative just falls
+ *  back to "general", which is itself only eligible once the owner explicitly allowlists it; a false
+ *  positive over-classifies as riskier, never under). Checked against `title + body`, case-insensitive. */
+const IRREVERSIBLE_DECISION_KEYWORDS = /\b(delete|destroy|drop|wipe|purge|revoke|force[- ]?push|irreversible)\b/i;
+const DEPLOY_DECISION_KEYWORDS = /\b(deploy|release|rollout|ship\s+to\s+prod(?:uction)?)\b/i;
+
+/** classify() (Framework §4, this lever's single source of truth — mirrors attention-push.ts's classify()
+ *  doc). Order matters: "irreversible" is checked first since a question can plausibly match both (e.g.
+ *  "deploy the DB migration that drops the old column"), and the higher-risk class must win. Exported so
+ *  its keyword logic is directly unit-testable (rather than only indirectly, through a full decision_resolve
+ *  round-trip) — a broken regex here should fail a test that reads it, not stay silently green. */
+export function classifyDecisionClass(question: Pick<Question, "title" | "body">): DecisionClass {
+  const text = `${question.title} ${question.body}`;
+  if (IRREVERSIBLE_DECISION_KEYWORDS.test(text)) return "irreversible";
+  if (DEPLOY_DECISION_KEYWORDS.test(text)) return "deploy";
+  return "general";
+}
+
+/** This lever's own capability slug, reused as Primitive C's namespace (see `ProposeConfirmationInput.
+ *  capability`) so a second sensitive lever (e.g. a future `board-write`) proposing on the SAME
+ *  (session, route) can never clobber THIS lever's pending token. */
+const DECISIONS_RELAY_SLUG = "decisions-relay";
+
+/** A validated, NOT-YET-CONFIRMED `decision_resolve` proposal, keyed by (sessionId, route) — see
+ *  `pendingResolveKey`. IN-MEMORY (mirrors `OwnerConfirmStore`'s own in-memory pending-proposal store;
+ *  lost on a daemon restart, which is fine — a lost proposal just needs a fresh `decision_resolve` call to
+ *  re-propose). Module-scoped: `DECISIONS_RELAY` is built once and shared by every companion session, so
+ *  this map is the lever's own durable-for-the-process-lifetime state, the same lifetime as the router's
+ *  `OwnerConfirmStore` instance it is paired with. */
+const pendingDecisionResolves = new Map<string, { questionId: string; chosenOption: string; note: string | null }>();
+
+/** Mirrors `OwnerConfirmStore`'s own `proposalKey` (attestation.ts) — a proposal (and therefore this
+ *  lever's own remembered payload) is keyed to session + owner ROUTE, never session alone, so a confirm
+ *  from a different chat/channel can never commit a DIFFERENT route's pending resolve. Also namespaced by
+ *  `DECISIONS_RELAY_SLUG` — this map is lever-specific anyway (only decision_resolve writes to it), but
+ *  keeping the SAME key shape as `OwnerConfirmStore`'s own (session, route, capability) key avoids a
+ *  silent drift between the two if a future refactor merges them. */
+function pendingResolveKey(sessionId: string, route: CompanionRoute | null): string {
+  return `${sessionId}::${route ? `${route.channel}:${route.chatId}` : ""}::${DECISIONS_RELAY_SLUG}`;
+}
+
 /**
- * `decisions-relay` READ half (Framework §4) — a read-only `decisions_list` tool reporting PENDING
+ * `decisions-relay` (Framework §4) — `decisions_list` is the READ half: a read-only tool reporting PENDING
  * decision-inbox questions (Framework's manager→human `Question`/`QuestionInboxItem`, db.ts) across the
- * granted projects. Mirrors `SESSION_STATUS` exactly. This card builds ONLY the read tool — the ACT half
- * (`decision_resolve`, letting the companion answer a question) is a LATER card gated on injection-guard
- * primitives + owner sign-off: a companion surface is the most injection-exposed one in Loom, so a
- * write/resolve path must not ship ahead of its guard.
+ * granted projects. Mirrors `SESSION_STATUS` exactly.
+ *
+ * `decision_resolve` is the ACT half (card a8ddd6d2) — THE highest-risk lever in the whole catalog:
+ * resolving a decision can approve owner-gated / irreversible work. It is registered ONLY when at least
+ * one of this grant's projects is act-mode (`hasActGrant` below) — a read-only grant's tool surface stays
+ * byte-identical to before this card. Guards, in order: (1) the question's project ∈ scope.projectIds AND
+ * `mayAct` for it (belt-and-suspenders, per-project — never a collapsed scope check); (2) the question is
+ * `pending` and OFFERS options (a pure-blocker ask has none — that stays human-only, free-text-note
+ * answers are out of scope for this lever); (3) `chosenOption` is one of those offered options; (4) a
+ * `decisionClasses` allowlist in this project's grant config — CONSERVATIVE DEFAULT (owner sign-off
+ * 1039e892): an absent/empty allowlist admits NOTHING, mirroring `attention-push`'s own "absent config ⇒
+ * nothing subscribed" default, so deploy/irreversible (and even `general`) decisions all require the
+ * owner to explicitly opt in; (5) Primitive A — the call must be on an owner-authored turn at all
+ * (`attest.getActiveTurnOwnerText` non-null); (6) a reply-to ROUTE must exist for the current turn — with
+ * no route there is no verified channel back to the owner, so the propose is refused outright (CR
+ * hardening — see below); (7) Primitive C — the call never resolves on its own: it PROPOSES (mints a
+ * confirm token via `attest.proposeConfirmation`, remembers the validated payload in
+ * `pendingDecisionResolves`) and only a LATER `decision_resolve` call, on the owner's own next turn whose
+ * text contains that token (`attest.confirmPending`), actually calls `db.answerQuestion` — reusing the
+ * exact write the human decision-inbox UI and `question_pull` rely on, never a reimplementation. A
+ * free-text `note` is only checked against Primitive B (verbatim owner substring) at PROPOSE time — the
+ * CONFIRMING turn's owner text is just "CONFIRM <token>", not the original note, so re-checking B there
+ * would always fail; the validated note is instead carried in the pending-proposal payload and used
+ * verbatim on commit.
+ *
+ * CR HARDENING (post-review fix): the confirm prompt is delivered DIRECTLY to the owner's chat via
+ * `ctx.outbound.deliverToOwner` — the SAME outbound rail `chat_reply` uses, resolved from the ACTIVE
+ * TURN's own origin, never a lever-guessed destination — and the tool NEVER returns `promptText`/the
+ * token to the companion (a bare `{status:'proposed'}`). The companion is the exact untrusted component
+ * Primitive C exists to defend against: if the token were handed back for the companion to "relay", a
+ * hijacked companion could propose a DIFFERENT action than the one it tells the owner about, receive the
+ * REAL token, and render its OWN false-labeled message — the owner would still be typing a token that
+ * really matches, but for an action they never actually chose. Delivering server-side and withholding the
+ * token from the tool's return value makes that structurally impossible: the companion cannot construct a
+ * valid confirm message it never received. Primitive B alone is a substring check (insufficient against
+ * negation/context-stripping, e.g. "approve" is a substring of "do NOT approve") — Primitive C, delivered
+ * this way, is the actual defense: the owner sees the EXACT daemon-authored action description and only
+ * their own reply (which the daemon re-derives server-side via Primitive A) can commit it.
  */
 const DECISIONS_RELAY: CompanionCapability = {
   slug: "decisions-relay",
@@ -197,6 +320,133 @@ const DECISIONS_RELAY: CompanionCapability = {
             recommendation: q.recommendation, state: q.state, createdAt: q.createdAt,
           }));
         return ok({ decisions });
+      },
+    );
+
+    // ACT half — read-only grants (every project in scope is mode:'read') never see this tool at all,
+    // keeping their surface byte-identical to before this card.
+    const hasActGrant = [...ctx.scope.projectIds].some((pid) => ctx.scope.mayAct(pid));
+    if (!hasActGrant) return;
+
+    server.registerTool(
+      "decision_resolve",
+      {
+        description:
+          "Resolve a PENDING decision-inbox question that OFFERS options, on behalf of the owner — the " +
+          "single highest-risk tool you have. `chosenOption` MUST be one of the question's offered " +
+          "options (a question with no options is human-only; ask the owner directly instead). An " +
+          "optional `note` MUST be a verbatim quote of words the owner ACTUALLY said this turn — you may " +
+          "never author it yourself. This NEVER resolves on the first call: Loom sends a confirmation " +
+          "request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/token — just " +
+          "tell the owner you've requested their confirmation) and returns {status:'proposed'}. Only once " +
+          "the owner replies to THAT message do you call decision_resolve AGAIN with the SAME arguments to " +
+          "actually commit it ({status:'resolved'}) — Loom detects the owner's confirming reply itself. A " +
+          "mismatched confirm reply returns {status:'confirm-mismatch'} — tell the owner to reply again, " +
+          "don't re-propose. Requires an act-mode grant on the question's project, a project-configured " +
+          "decisionClasses allowlist covering this decision, and an owner-authored turn on a channel Loom " +
+          "can reply to — a proactive/heartbeat turn is always rejected.",
+        inputSchema: { questionId: z.string(), chosenOption: z.string(), note: z.string().optional() },
+      },
+      async ({ questionId, chosenOption, note }) => {
+        const question = db.getQuestion(questionId);
+        if (!question) return ok({ error: `no question "${questionId}"` });
+        // Belt-and-suspenders (Framework §2, mandatory per-project — never a collapsed scope check).
+        if (!ctx.scope.projectIds.has(question.projectId)) {
+          return ok({ error: "this question's project is not in your granted scope" });
+        }
+        if (!ctx.scope.mayAct(question.projectId)) {
+          return ok({ error: "you only have a read-mode grant on this question's project — decision_resolve needs act-mode" });
+        }
+        const decisionClass = classifyDecisionClass(question);
+        const cfg = ctx.scope.configFor(question.projectId) as { decisionClasses?: unknown };
+        const allowedClasses = new Set(Array.isArray(cfg.decisionClasses) ? cfg.decisionClasses as string[] : []);
+        if (!allowedClasses.has(decisionClass)) {
+          return ok({
+            error: `this decision is classified "${decisionClass}", which is not in this project's decisionClasses ` +
+              `allowlist — an owner must add it to the grant config before you may resolve it`,
+          });
+        }
+        if (question.state !== "pending") {
+          return ok({ error: `question is already ${question.state}, not pending` });
+        }
+        if (!question.options || question.options.length === 0) {
+          return ok({ error: "this question has no offered options — decision_resolve can only pick an offered option; ask the owner directly for a free-text answer" });
+        }
+        if (!question.options.includes(chosenOption)) {
+          return ok({ error: `chosenOption must be one of: ${question.options.join(", ")}` });
+        }
+        // Primitive A — every call (propose OR confirm) must be on an owner-authored turn; a proactive/
+        // heartbeat/reminder turn has nothing to attest and is refused outright.
+        const ownerText = ctx.attest.getActiveTurnOwnerText(ctx.sessionId);
+        if (ownerText === null) {
+          return ok({ error: "no owner text this turn — decision_resolve can only act on an owner-authored turn" });
+        }
+        // CR hardening: a reply-to route is REQUIRED — with none, there is no verified channel to deliver
+        // the confirm prompt to the owner on, so FAIL CLOSED rather than silently proceed (which would
+        // leave no trusted surface for the owner to ever see or decline the proposed action).
+        const route = ctx.pty.getActiveTurnOrigin(ctx.sessionId);
+        if (route === null) {
+          return ok({ error: "no reply-to route for this turn — Loom has no verified channel to confirm this with the owner" });
+        }
+        const key = pendingResolveKey(ctx.sessionId, route);
+        // Fold #2 (whitespace-note bypass): a whitespace-only note is NOT a meaningful note — treat it as
+        // absent (store null) so Primitive B owns the empty/whitespace decision uniformly, rather than
+        // slipping past the `hasNote` gate below unchecked.
+        const hasNote = note !== undefined && note.trim() !== "";
+        const normalizedNote = hasNote ? (note as string) : null;
+
+        // Primitive C — try to COMMIT a pending proposal for this exact (route, capability) first.
+        const confirmOutcome = ctx.attest.confirmPending(ctx.sessionId, route, DECISIONS_RELAY_SLUG);
+        if (confirmOutcome.committed) {
+          const pending = pendingDecisionResolves.get(key);
+          pendingDecisionResolves.delete(key); // single-use, whether or not it still matches below.
+          if (!pending || pending.questionId !== questionId || pending.chosenOption !== chosenOption || pending.note !== normalizedNote) {
+            return ok({ error: "the confirmed action no longer matches what was proposed — call decision_resolve again to re-propose" });
+          }
+          const updated = db.answerQuestion(questionId, { chosenOption, note: normalizedNote, answeredAt: new Date().toISOString() });
+          if (!updated) return ok({ error: "question was answered or changed concurrently — nothing to resolve" });
+          try {
+            const nudge = `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.`;
+            ctx.pty.enqueueStdin(updated.sessionId, nudge, "human", undefined, undefined, "agent", updated.id);
+          } catch { /* best-effort — the answer already persisted; question_pull is the durable fallback */ }
+          return ok({ status: "resolved", questionId, chosenOption, note: normalizedNote });
+        }
+        if (confirmOutcome.reason === "token-mismatch") {
+          // Leave the pending proposal standing (OwnerConfirmStore itself preserves it) — a typo'd confirm
+          // reply should be retry-able within the TTL, not force a fresh proposal (and a fresh token).
+          // Deliberately NOT evicting `pendingDecisionResolves` here (unlike the `expired` fallthrough
+          // below): the payload is still exactly what a CORRECT retry within the TTL needs to resolve
+          // against — evicting it would silently discard a legitimate confirm the instant it lands.
+          return ok({ status: "confirm-mismatch", error: "that doesn't contain the exact confirm token — ask the owner to reply again with it verbatim" });
+        }
+        // Fold #4: an EXPIRED (or never-existed, "no-pending") proposal's payload is dead weight — the
+        // fresh propose below unconditionally overwrites this key anyway, but evict explicitly first so a
+        // reader never sees a stale entry between the two statements (and so the intent is obvious rather
+        // than relying on the overwrite as an implicit side effect).
+        pendingDecisionResolves.delete(key);
+
+        // No (or expired) pending confirmation for this route — this is a fresh PROPOSE. Primitive B only
+        // applies here: the confirming turn's own text is just "CONFIRM <token>", never the original note.
+        if (hasNote && !ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedNote as string)) {
+          return ok({ error: "note must be a verbatim quote of what the owner said this turn — you may not author it" });
+        }
+        const proposal = ctx.attest.proposeConfirmation({
+          sessionId: ctx.sessionId,
+          route,
+          capability: DECISIONS_RELAY_SLUG,
+          summary: `Resolve decision "${question.title}" as "${chosenOption}"${normalizedNote ? ` — note: "${normalizedNote}"` : ""}?`,
+        });
+        // CR hardening — THE fix: deliver the confirm prompt DIRECTLY to the owner (never hand promptText
+        // or the token back to the companion to "relay"). Fail closed on a delivery failure — an
+        // undelivered prompt means the owner never saw what they'd be confirming, so nothing may be left
+        // pending for them to stumble into confirming blind (the stray OwnerConfirmStore token is harmless
+        // — it just expires unused, and `pendingDecisionResolves` was never set for it below).
+        const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
+        if (!delivered) {
+          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
+        }
+        pendingDecisionResolves.set(key, { questionId, chosenOption, note: normalizedNote });
+        return ok({ status: "proposed" });
       },
     );
   },
@@ -419,15 +669,15 @@ export const COMPANION_CAPABILITIES: readonly CompanionCapability[] =
  * staying correct forever — a future bug that leaves a stale grant row on a non-assistant session id must
  * not be enough, by itself, to light up a capability tool there.
  *
- * `attest` (Companion injection-guard primitives, card 8e511951) is injected from the router exactly like
- * a lever's other server-derived reads — additive: NO lever in {@link COMPANION_CAPABILITIES} reads it yet,
- * so this parameter changes nothing about what any existing session sees.
+ * `attest` (Companion injection-guard primitives, card 8e511951), `pty`, and `outbound` (both card
+ * a8ddd6d2) are injected from the router exactly like a lever's other server-derived reads — additive:
+ * every lever that doesn't read them (every lever except `decision_resolve` today) sees nothing different.
  */
-export function registerCompanionCapabilities(server: McpServer, sessionId: string, role: SessionRole, db: Db, attest: OwnerAttestation): void {
+export function registerCompanionCapabilities(server: McpServer, sessionId: string, role: SessionRole, db: Db, attest: OwnerAttestation, pty: GrantPty, outbound: GrantOutbound): void {
   if (role !== "assistant") return;
   for (const cap of COMPANION_CAPABILITIES) {
     const scope = resolveCompanionGrant(db, sessionId, cap.slug);
     if (!scope) continue;
-    cap.register(server, { sessionId, scope, attest }, db);
+    cap.register(server, { sessionId, scope, attest, pty, outbound }, db);
   }
 }

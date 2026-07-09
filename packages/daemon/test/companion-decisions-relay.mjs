@@ -1,8 +1,9 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Companion Capability & Permission-Lever Framework — `decisions-relay` READ half (a `decisions_list`
+// Companion Capability & Permission-Lever Framework — `decisions-relay`'s READ half (a `decisions_list`
 // tool reporting PENDING decision-inbox questions across the companion's granted projects). Mirrors
-// companion-capability-grants.mjs's session-status coverage shape. READ HALF ONLY — this card does not
-// build decision_resolve (the ACT/write half); that is a later card gated on injection-guard primitives.
+// companion-capability-grants.mjs's session-status coverage shape. READ HALF ONLY — the ACT half
+// (decision_resolve, card a8ddd6d2) has its own dedicated coverage in companion-decision-resolve.mjs;
+// this file only proves decision_resolve's REGISTRATION-gating (present under act, absent under read).
 // Fully hermetic: a REAL Db on a temp LOOM_HOME + the REAL OrchestrationMcpRouter over an in-memory MCP
 // transport. NO network, NO real claude, NO daemon.
 //
@@ -12,7 +13,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (b) a `project` selector naming an ungranted project is rejected with {error}.
 //   (c) no grant ⇒ decisions_list is NOT registered (inert + invisible; byte-identical tool surface).
 //   (d) a grant row on a non-assistant-role session registers nothing (role gate).
-//   (e) decision_resolve (or any write tool) is never registered by this lever.
+//   (e) a mode:'read' grant never registers decision_resolve (byte-identical read-only surface); a
+//       mode:'act' grant DOES register it (card a8ddd6d2 — the ACT half's own guards are tested
+//       separately in companion-decision-resolve.mjs).
 // Run: 1) build (turbo builds shared first), 2) node test/companion-decisions-relay.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -147,7 +150,7 @@ try {
     const orch = new OrchestrationMcpRouter(db, {});
     const tools = await listOf(orch.buildServer(companionSess, "assistant"));
     check("(c) an ungranted companion does NOT have decisions_list", !tools.includes("decisions_list"));
-    check("(e) decision_resolve is never registered by this lever (no ACT half yet)", !tools.includes("decision_resolve"));
+    check("(c) no grant at all ⇒ decision_resolve is not registered either", !tools.includes("decision_resolve"));
     db.close();
   }
 
@@ -168,20 +171,35 @@ try {
     db.close();
   }
 
-  // ============ (e) decision_resolve absent even for a companion granted mode 'act' ============
+  // ============ (e) decision_resolve is registered ONLY under a mode:'act' grant ============
   {
     const db = tmpDb();
     const proj = "proj-act-mode";
     seedProject(db, proj, "Act mode");
     const companionSess = "companion-act-mode";
     seedSession(db, companionSess, proj, "assistant");
-    // Even a mode:'act' grant must not light up a resolve/write tool — this card builds ONLY the read half.
     db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "decisions-relay", projectId: proj, mode: "act" });
 
     const orch = new OrchestrationMcpRouter(db, {});
     const tools = await listOf(orch.buildServer(companionSess, "assistant"));
     check("(e) decisions_list is still registered under an 'act' grant", tools.includes("decisions_list"));
-    check("(e) decision_resolve is NOT registered even under an 'act' grant (read-half-only card)", !tools.includes("decision_resolve"));
+    check("(e) decision_resolve IS registered under a mode:'act' grant (card a8ddd6d2)", tools.includes("decision_resolve"));
+    db.close();
+  }
+
+  // ============ (e) a mode:'read' grant NEVER registers decision_resolve (byte-identical read surface) ============
+  {
+    const db = tmpDb();
+    const proj = "proj-read-mode";
+    seedProject(db, proj, "Read mode");
+    const companionSess = "companion-read-mode";
+    seedSession(db, companionSess, proj, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "decisions-relay", projectId: proj, mode: "read" });
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const tools = await listOf(orch.buildServer(companionSess, "assistant"));
+    check("(e) decisions_list is registered under a 'read' grant", tools.includes("decisions_list"));
+    check("(e) decision_resolve is NOT registered under a mode:'read' grant (byte-identical to before card a8ddd6d2)", !tools.includes("decision_resolve"));
     db.close();
   }
 } finally {
@@ -189,6 +207,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — decisions_list registers ONLY behind a decisions-relay grant and reports ONLY that grant's PENDING (pending+answered, never consumed) decisions scoped to the granted project(s); a project selector can never widen scope; an ungranted/non-assistant session gets nothing; and decision_resolve (the ACT half) is never registered by this read-only card, even under a mode:'act' grant."
+  ? "\n✅ ALL PASS — decisions_list registers ONLY behind a decisions-relay grant and reports ONLY that grant's PENDING (pending+answered, never consumed) decisions scoped to the granted project(s); a project selector can never widen scope; an ungranted/non-assistant session gets nothing; decision_resolve is registered ONLY under a mode:'act' grant and stays absent under 'read' (byte-identical)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

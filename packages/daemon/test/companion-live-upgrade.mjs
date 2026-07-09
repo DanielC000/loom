@@ -185,8 +185,22 @@ try {
     const upgradePromise = svc.upgradeCompanionCapabilities(sessionId);
     const midGap = host.enqueueStdin(sessionId, "URGENT: hi during the gap", "system", undefined, undefined, "agent");
     check("mid-gap: the inbound message is HELD (not treated as session-dead) while the old pty is stopping", midGap.delivered === false && midGap.reason === "held");
+    // CR follow-up carried into card a8ddd6d2 (decision_resolve, the first `attest`/ownerText consumer):
+    // an owner-attested message (Companion injection-guard Primitive A) queued during the gap must keep
+    // its `ownerText` across this SAME carry-forward, or a decision_resolve confirm surviving a capability-
+    // upgrade respawn would silently lose its attestation and refuse a legitimate owner confirm.
+    const ownerGap = host.enqueueStdin(sessionId, "CONFIRM ABC123", "human", undefined, undefined, "agent", undefined, "CONFIRM ABC123");
+    check("mid-gap: the owner-attested message is also HELD", ownerGap.delivered === false && ownerGap.reason === "held");
     await upgradePromise;
     check("mid-gap: the message was captured and redelivered onto the FRESH pty (not lost to the old pty's FIFO wipe on exit)", host.getPending(sessionId).includes("URGENT: hi during the gap"));
+    check("mid-gap: the owner-attested message was also redelivered", host.getPending(sessionId).includes("CONFIRM ABC123"));
+    // flushPending exposes the FULL QueuedMessage (incl. ownerText) — getPending/getPendingEntries both
+    // strip it, so this is the one public seam that can prove the field actually survived the carry.
+    const freshPending = host.flushPending(sessionId);
+    const preserved = freshPending.find((m) => m.text === "CONFIRM ABC123");
+    const plain = freshPending.find((m) => m.text === "URGENT: hi during the gap");
+    check("(CR follow-up) ownerText SURVIVES the capability-upgrade carry-forward (was silently dropped before this fix)", preserved?.ownerText === "CONFIRM ABC123");
+    check("(CR follow-up, refuse-path) a message with no ownerText still carries none through the SAME carry-forward — the fix doesn't fabricate attestation", plain !== undefined && plain.ownerText === undefined);
   }
 
   // ===================== SELF-HEAL RACE (CR fix): the wait loop must LATCH death, never re-read =====================

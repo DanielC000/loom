@@ -1,8 +1,9 @@
 /**
  * Companion injection-guard PRIMITIVES (Companion Capability & Permission-Lever Framework §3) — the
  * REUSABLE module every sensitive ACT lever (decision_resolve, session-steer, board-write, …) imports
- * the subset it needs from. NO lever consumes this module yet (card 8e511951 ships the primitives +
- * their tests + threads `attest` into `GrantContext` — the levers are later cards).
+ * the subset it needs from. `decision_resolve` (card a8ddd6d2, companion/capabilities.ts) is the FIRST
+ * consumer, using all three primitives — later levers (session-steer, board-write, …) reuse the SAME
+ * `OwnerConfirmStore`, namespacing their own proposals by their own capability slug (see `proposalKey`).
  *
  * WHY: the Companion forms turns from inbound chat — it is Loom's most prompt-injection-exposed agent. An
  * ACT lever may NEVER let the Companion ORIGINATE a privileged action — only RELAY the owner's literal
@@ -58,6 +59,10 @@ export interface ProposeConfirmationInput {
   sessionId: string;
   /** Scopes the proposal to the owner's OWN route — a confirm from a different chat/session never matches. */
   route?: CompanionRoute | null;
+  /** The proposing LEVER's slug (e.g. "decisions-relay") — namespaces the confirm key (see `proposalKey`)
+   *  so two DIFFERENT sensitive levers proposing on the SAME (session, route) at once can never clobber
+   *  each other's pending token. */
+  capability: string;
   /** Human-readable description of the pending action, rendered back to the owner's chat. */
   summary: string;
   /** Defaults to {@link DEFAULT_CONFIRM_TTL_MS} (5 min). */
@@ -75,6 +80,10 @@ export interface ProposedConfirmation {
 export interface ConfirmInput {
   sessionId: string;
   route?: CompanionRoute | null;
+  /** MUST match the `capability` the pending proposal was minted under (see `ProposeConfirmationInput`) —
+   *  a confirm attempt under a DIFFERENT lever's slug is `"no-pending"` even if some OTHER capability has
+   *  a live proposal for this exact (session, route). */
+  capability: string;
   /** The confirming turn's literal owner text (Primitive A) — the caller attests this, this store never re-derives it. */
   ownerText: string;
 }
@@ -91,9 +100,12 @@ interface PendingProposal {
 
 /** `sessionId` alone is NOT the key — a proposal must be confirmed from the SAME owner route it was
  *  proposed to (Framework §3: "keyed to session + owner route"), mirroring `companion_pairing_codes`'
- *  (channel, chatId) scoping. */
-function proposalKey(sessionId: string, route?: CompanionRoute | null): string {
-  return `${sessionId}::${route ? `${route.channel}:${route.chatId}` : ""}`;
+ *  (channel, chatId) scoping. `capability` NAMESPACES the key too (CR hardening, card a8ddd6d2): two
+ *  different sensitive ACT levers (e.g. `decisions-relay` and a future `board-write`) proposing on the
+ *  SAME (session, route) concurrently must never clobber each other's pending token — without this, the
+ *  second lever's `propose` would silently overwrite the first's entry in this single shared Map. */
+function proposalKey(sessionId: string, route: CompanionRoute | null | undefined, capability: string): string {
+  return `${sessionId}::${route ? `${route.channel}:${route.chatId}` : ""}::${capability}`;
 }
 
 function mintToken(random: () => number): string {
@@ -128,12 +140,12 @@ export class OwnerConfirmStore {
   propose(input: ProposeConfirmationInput): ProposedConfirmation {
     const token = mintToken(this.random);
     const expiresAt = this.now() + (input.ttlMs ?? DEFAULT_CONFIRM_TTL_MS);
-    this.pending.set(proposalKey(input.sessionId, input.route), { token, summary: input.summary, expiresAt });
+    this.pending.set(proposalKey(input.sessionId, input.route, input.capability), { token, summary: input.summary, expiresAt });
     return { token, promptText: `${input.summary} Reply CONFIRM ${token} to proceed.`, expiresAt };
   }
 
   confirm(input: ConfirmInput): ConfirmOutcome {
-    const key = proposalKey(input.sessionId, input.route);
+    const key = proposalKey(input.sessionId, input.route, input.capability);
     const proposal = this.pending.get(key);
     if (!proposal) return { committed: false, reason: "no-pending" };
     if (this.now() > proposal.expiresAt) {
@@ -168,11 +180,12 @@ export interface OwnerAttestation {
   proposeConfirmation(input: ProposeConfirmationInput): ProposedConfirmation;
   /**
    * Primitive C confirm — reads the CURRENT turn's owner text via Primitive A itself (a lever never
-   * supplies `ownerText` directly, so it can't forge an attestation). `"no-owner-text"` (widening
-   * {@link ConfirmOutcome}) covers the structural case where this fires on a turn that isn't owner-
-   * authored at all (nothing to attest).
+   * supplies `ownerText` directly, so it can't forge an attestation). `capability` MUST match the slug the
+   * pending proposal was minted under (see `ProposeConfirmationInput.capability`). `"no-owner-text"`
+   * (widening {@link ConfirmOutcome}) covers the structural case where this fires on a turn that isn't
+   * owner-authored at all (nothing to attest).
    */
-  confirmPending(sessionId: string, route?: CompanionRoute | null): ConfirmOutcome | { committed: false; reason: "no-owner-text" };
+  confirmPending(sessionId: string, route: CompanionRoute | null | undefined, capability: string): ConfirmOutcome | { committed: false; reason: "no-owner-text" };
 }
 
 export function createOwnerAttestation(
@@ -184,10 +197,10 @@ export function createOwnerAttestation(
     isVerbatimOwnerText: (sessionId, candidate) =>
       isVerbatimOwnerSubstring(candidate, deps.getActiveTurnOwnerText(sessionId)),
     proposeConfirmation: (input) => store.propose(input),
-    confirmPending: (sessionId, route) => {
+    confirmPending: (sessionId, route, capability) => {
       const ownerText = deps.getActiveTurnOwnerText(sessionId);
       if (ownerText === null) return { committed: false, reason: "no-owner-text" };
-      return store.confirm({ sessionId, route, ownerText });
+      return store.confirm({ sessionId, route, capability, ownerText });
     },
   };
 }

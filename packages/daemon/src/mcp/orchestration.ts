@@ -472,7 +472,26 @@ export class OrchestrationMcpRouter {
       { getActiveTurnOwnerText: (sid) => pty?.getActiveTurnOwnerText(sid) ?? null },
       this.ownerConfirmStore,
     );
-    registerCompanionCapabilities(server, sessionId, role, db, attest);
+    // `pty` is optional on this router (see the constructor's own doc) — every method below degrades to a
+    // harmless no-op/null when it's absent, exactly like the `attest` wiring just above. `outbound` wraps
+    // `this.companion.deliverReply` — the SAME rail `chat_reply` uses (CompanionHooks.deliverReply →
+    // ChatGateway.deliverReply), which resolves the delivery target from the CURRENT turn's own origin —
+    // a lever never supplies/guesses a route. Missing/failed delivery degrades to `false` (fail closed);
+    // never throws.
+    registerCompanionCapabilities(server, sessionId, role, db, attest, {
+      getActiveTurnOrigin: (sid) => pty?.getActiveTurnOrigin(sid) ?? null,
+      enqueueStdin: (sid, text, source, onDeliver, route, kind, questionId) =>
+        pty?.enqueueStdin(sid, text, source, onDeliver, route, kind, questionId) ?? { delivered: false, reason: "session-dead" },
+    }, {
+      deliverToOwner: async (sid, text) => {
+        try {
+          const result = await this.companion.deliverReply?.(sid, text);
+          return result?.delivered === true;
+        } catch {
+          return false; // fail closed — a throwing delivery path must never look like a successful send.
+        }
+      },
+    });
 
     // Companion (epic Phase 1): the long-lived `assistant` role gets a MINIMAL surface — the read-only
     // my_context PLUS (only when this IS the bound companion session) the chat_reply registered just above.
