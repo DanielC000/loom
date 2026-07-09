@@ -11,7 +11,8 @@ import {
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree } from "../pty/host.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, toConventionalSubject, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
+import { GitReader } from "../git/reader.js";
 import { sessionScratchDir } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
@@ -211,6 +212,46 @@ function withBaselineAllow(permission: PermissionPolicy): PermissionPolicy {
   const missing = BASELINE_SESSION_ALLOW.filter((t) => !permission.allow.includes(t));
   if (!missing.length) return permission;
   return { ...permission, allow: [...permission.allow, ...missing] };
+}
+
+/** A tasked worker_spawn's advisory "already shipped?" match — the card's title, normalized the SAME
+ *  way the squash-merge path normalizes a commit subject ({@link toConventionalSubject}), already
+ *  appears verbatim as a commit subject on the project's mainline. */
+export interface ShippedCardMatch {
+  sha: string;
+  subject: string;
+  mainBranch: string;
+}
+
+/** Bounded scan window for {@link findShippedCardMatch} — recent mainline history only, not a full-repo
+ *  grep. 200 commits comfortably covers "did this land recently" without an unbounded git log read. */
+const SHIPPED_MATCH_SCAN_LIMIT = 200;
+
+/**
+ * worker_spawn wasted-dispatch guard (Platform card 7b5944fc): before dispatching a TASKED worker, check
+ * whether the card's title already shipped — i.e. its title, coerced to a commit subject the same way a
+ * squash-merge coerces a card title ({@link toConventionalSubject}), already appears EXACTLY as a commit
+ * subject within the last {@link SHIPPED_MATCH_SCAN_LIMIT} commits on the project's mainline (the
+ * canonical repo's currently-checked-out branch — workers never check main out anywhere else). Advisory
+ * ONLY: flags a likely-already-done dispatch for the manager to verify, never auto-closes the card and
+ * never blocks/fails the spawn. Read-only (GitReader) — no shell-out, no git write. Exact-match only (no
+ * fuzzy title matching — fuzzy would produce false warnings); best-effort (any git-read failure yields no
+ * match rather than surfacing an error to a spawn that would otherwise succeed).
+ */
+async function findShippedCardMatch(repoPath: string, cardTitle: string): Promise<ShippedCardMatch | null> {
+  try {
+    const reader = new GitReader(repoPath);
+    const normalizedTitle = toConventionalSubject(cardTitle);
+    const [log, branches] = await Promise.all([reader.log(SHIPPED_MATCH_SCAN_LIMIT), reader.branches()]);
+    for (const commit of log) {
+      if (toConventionalSubject(commit.message) === normalizedTitle) {
+        return { sha: commit.hash, subject: commit.message, mainBranch: branches.current ?? "" };
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /** Agent Runs R2: defer a completed run's graceful-stop this long so the `submit_result` {ok:true} tool
@@ -2218,7 +2259,7 @@ export class SessionService {
   async spawnWorker(
     managerSessionId: string,
     opts: { taskId?: string; agentId?: string; kickoffPrompt: string },
-  ): Promise<Session> {
+  ): Promise<Session & { shippedMatch: ShippedCardMatch | null }> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
     const project = this.db.getProject(manager.projectId);
@@ -2276,6 +2317,7 @@ export class SessionService {
     // own taskless special-case beyond the `if (taskId)` guards already in place.
     const taskRef = (opts.taskId ?? "").trim();
     let taskId: string | null = null;
+    let taskTitle: string | null = null; // captured for the shipped-card advisory check below (tasked spawns only)
     if (taskRef) {
       if (/\s/.test(taskRef)) throw new Error(`worker_spawn taskId '${opts.taskId}' is not a valid task id`);
       const exactTask = this.db.getTask(taskRef);
@@ -2289,6 +2331,7 @@ export class SessionService {
       }
       if (!task) throw new Error(`worker_spawn taskId '${taskRef}' does not resolve to an existing task in this project`);
       taskId = task.id;
+      taskTitle = task.title;
       const terminalKey = columnKeyForRole(config.kanbanColumns, "terminal");
       if (task.columnKey === terminalKey) throw new Error(`worker_spawn taskId '${taskId}' is in the terminal column ('${task.columnKey}') — pick a non-terminal task`);
       // OWNER-BRAKE (structural): refuse to dispatch onto a HELD card — the owner's SOLE brake, a per-card
@@ -2486,7 +2529,11 @@ export class SessionService {
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId, workerSessionId: worker.id, taskId, kind: "spawn_worker",
       });
-      return { ...worker, processState: "live" };
+      // Wasted-dispatch advisory (card 7b5944fc): runs AFTER pty.spawn so it never delays the worker's
+      // actual start — only the point at which this call's result resolves. Tasked spawns only; taskless
+      // has no card title to check against.
+      const shippedMatch = taskId && taskTitle ? await findShippedCardMatch(project.repoPath, taskTitle) : null;
+      return { ...worker, processState: "live", shippedMatch };
     } finally {
       // Release the per-taskId (or taskless per-call) claim. By here the row is either live (liveHolder now
       // rejects re-spawns for a real task) or the spawn threw before any persistent state — either way the
@@ -2518,10 +2565,10 @@ export class SessionService {
   async spawnWorkerTracked(
     managerSessionId: string,
     opts: { taskId?: string; agentId?: string; kickoffPrompt: string },
-  ): Promise<AttachResult<Session>> {
+  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null }>> {
     const taskRef = (opts.taskId ?? "").trim();
     const key = taskRef ? `spawn:${taskRef}` : `spawn:taskless:${randomUUID()}`;
-    return this.pendingOps.attach<Session>(
+    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null }>(
       key, "spawn", managerSessionId, SYNC_ATTACH_BUDGET_MS,
       () => this.spawnWorker(managerSessionId, opts),
     );
