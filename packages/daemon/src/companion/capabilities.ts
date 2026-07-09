@@ -11,11 +11,13 @@
  * at call time (belt-and-suspenders — mirrors why companion/factory.ts re-scopes bindings even though the
  * controller already dispatches by session id): a bug in registration-gating alone must not open the door.
  */
+import path from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SessionRole } from "@loom/shared";
 import type { Db } from "../db.js";
 import { listProjectTasks, type TaskSummary } from "../mcp/tasks.js";
+import { listVaultTree, readVaultFile, statVaultFile } from "../vault/browser.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -238,10 +240,165 @@ const BOARD_REACH: CompanionCapability = {
   },
 };
 
-/** The full lever registry (Framework §2). `session-status`, `decisions-relay`'s READ half, and
- *  `board-reach`'s READ half are built — the sensitive ACT levers (later cards) append here behind
- *  their own injection-guard primitives. */
-export const COMPANION_CAPABILITIES: readonly CompanionCapability[] = [SESSION_STATUS, DECISIONS_RELAY, BOARD_REACH];
+// --- `vault-read` (Framework §4) — bounds + the security exclusion ------------------------------------
+
+/** Note extensions `vault_lookup` will ever read. Never a binary (image/pdf/etc.) — the vault browser's
+ *  content-type map exists for the raw-serving route, not for a text-search tool. */
+const VAULT_SEARCH_EXTENSIONS = new Set([".md", ".markdown", ".txt"]);
+
+/** Path SEGMENTS that are NEVER searched/read, regardless of extension — a security FLOOR (err toward
+ *  excluding). Checked against every segment of the vault-relative path (case-insensitive), so a note
+ *  living at ANY depth under one of these folder names is excluded, not just at the top level. */
+const VAULT_DENIED_SEGMENTS = new Set([
+  "secrets", ".secrets", "private", "credentials", ".ssh", ".aws", ".gnupg", ".gpg", "keys", "passwords", "password",
+]);
+
+/** Basename patterns that are NEVER searched/read, regardless of the extension allow-list above —
+ *  belt-and-suspenders (a `.env`/`.pem`/`.key` is excluded BOTH by extension and by this deny-list). */
+const VAULT_DENIED_BASENAMES: readonly RegExp[] = [
+  /^\.env(\..+)?$/i, // .env, .env.local, .env.production, ...
+  /\.pem$/i,
+  /\.key$/i,
+  /\.pfx$/i,
+  /\.p12$/i,
+  /\.keystore$/i,
+  /^id_rsa/i,
+  /^id_ed25519/i,
+];
+
+/**
+ * The mandatory security exclusion (Framework §4 `vault-read` DoD): denies any candidate note whose
+ * basename or ANY path segment looks like a secret/credential, BEFORE `readVaultFile` is ever called on
+ * it. This is a FLOOR, not a substitute for the extension allow-list above — both must agree a note is
+ * safe. Checked on the vault-relative path (forward-slash, per `VaultEntry`), never a resolved absolute
+ * path (`readVaultFile`'s own traversal/symlink-escape guard is untouched and still runs on top of this).
+ */
+function isDeniedVaultPath(relPath: string): boolean {
+  const segments = relPath.split("/");
+  if (segments.some((seg) => VAULT_DENIED_SEGMENTS.has(seg.toLowerCase()))) return true;
+  const basename = segments[segments.length - 1] ?? "";
+  return VAULT_DENIED_BASENAMES.some((rx) => rx.test(basename));
+}
+
+/**
+ * Per-note opt-out: a leading `---\n…\n---` frontmatter block setting `companion-read: false` (or
+ * `no`/`off`, quoted or bare, case-insensitive) excludes that note from `vault_lookup` even though it
+ * isn't otherwise secret-shaped. NOTE: no existing vault sensitivity/exclusion marker was found in
+ * `vault-lint.mjs` or `vault/browser.ts` (checked before building this) — `companion-read: false` is the
+ * convention THIS lever introduces; a future vault sensitivity feature should adopt/rename this rather
+ * than add a second, competing marker. Deliberately narrow (a falsy-literal match, not a full YAML
+ * parse) — this tool has no other use for frontmatter.
+ *
+ * CR fix: `readVaultFile` reads utf8 WITHOUT stripping a leading BOM (`﻿`), which is realistic on
+ * this Windows-primary host (VSCode/PowerShell commonly write one) — an un-stripped BOM sits before the
+ * `---` and silently defeats the `^---` anchor, so a BOM-prefixed opt-out note would get searched anyway.
+ * Strip a single leading BOM before matching, here (the only place this content is inspected for
+ * frontmatter) rather than at the shared `readVaultFile` reader, which has other callers.
+ */
+function hasCompanionReadOptOut(content: string): boolean {
+  const unbommed = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(unbommed);
+  if (!fm) return false;
+  return /^\s*companion-read\s*:\s*["']?(false|no|off)["']?\s*$/im.test(fm[1] ?? "");
+}
+
+const VAULT_LOOKUP_MAX_RESULTS = 15; // bounded result list — this is an injection-exposed surface
+const VAULT_LOOKUP_MAX_SCANNED = 500; // total notes read across ALL target projects, one `vault_lookup` call
+const VAULT_LOOKUP_EXCERPT_RADIUS = 130; // chars either side of the match (~260 char excerpt window)
+// CR fix: a per-file byte cap, checked via `statVaultFile` BEFORE the full synchronous `readFileSync` +
+// `.toLowerCase()` that `readVaultFile`/the match below perform — without this, one pathological huge
+// note (a pasted multi-hundred-MB log) read + lowercased synchronously on the event loop can spike
+// memory and freeze the daemon (the sync-hot-path hazard this repo's CLAUDE.md flags elsewhere, e.g.
+// worktree provisioning). An oversize note is skipped, never read.
+const VAULT_LOOKUP_MAX_FILE_BYTES = 512 * 1024;
+
+/**
+ * `vault-read` READ lever (Framework §4) — a read-only `vault_lookup` tool letting the companion search a
+ * granted project's Obsidian vault notes and answer from real docs, citing a path + excerpt. Read-only —
+ * there is no act half for this lever. Mirrors SESSION_STATUS/DECISIONS_RELAY/BOARD_REACH's grant-scoping
+ * shape exactly; the part unique to this lever is the mandatory security exclusion above, applied to every
+ * candidate note BEFORE it is ever read, on top of `readVaultFile`'s own traversal/symlink guard.
+ *
+ * RESIDUAL RISK (documented, not fixed here — owner-escalated separately): the deny-list + extension
+ * floor above guard secret-SHAPED files (`.env`, keys/certs, a `secrets/`-named folder, …), NOT secret
+ * CONTENT — a credential pasted into an ordinary `.md` note is still searchable and returnable in an
+ * excerpt. That is an inherent tradeoff of "let the companion read your notes," bounded by three things:
+ * this lever is granted per-project (opt-in, default OFF), the whole tool is read-only, and any individual
+ * note can opt out via `companion-read: false` frontmatter. This is NOT a content-redaction/secret-
+ * scanning heuristic — building one is a deliberate, separate decision, not assumed here.
+ */
+const VAULT_READ: CompanionCapability = {
+  slug: "vault-read",
+  supportsMode: ["read"],
+  register(server, ctx, db) {
+    server.registerTool(
+      "vault_lookup",
+      {
+        description:
+          "Search your granted project(s)' Obsidian vault notes for `query` (case-insensitive, matched " +
+          "against note text and its path/title) and return matching notes as {projectId, projectName, " +
+          "path, excerpt} — `path` is a citable vault-relative note path, `excerpt` a short window around " +
+          "the match. Optionally pass `project` (a project id) to narrow to ONE of your granted projects — " +
+          "passing a project you were NOT granted is rejected with an {error}; omitting it searches every " +
+          `granted project's vault. Read-only, bounded to at most ${VAULT_LOOKUP_MAX_RESULTS} results ` +
+          `(oversize notes over ${VAULT_LOOKUP_MAX_FILE_BYTES / 1024} KiB are skipped). Secret/credential-` +
+          "shaped notes (.env files, key/cert files, anything under a secrets/private/credentials/keys/" +
+          "passwords/.ssh/.aws/.gnupg folder) and any note opting out via a `companion-read: false` " +
+          "frontmatter flag are never searched or returned.",
+        inputSchema: { query: z.string(), project: z.string().optional() },
+      },
+      async ({ query, project }) => {
+        // Belt-and-suspenders re-check (Framework §2): a `project` selector must be one of THIS grant's
+        // scoped projects — it can only ever NAME a project already granted, never widen scope.
+        if (project !== undefined && !ctx.scope.projectIds.has(project)) {
+          return ok({ error: `project "${project}" is not in your granted scope` });
+        }
+        const q = query.trim().toLowerCase();
+        if (!q) return ok({ error: "query must not be empty" });
+        const targetProjects = project !== undefined ? new Set([project]) : ctx.scope.projectIds;
+
+        const results: Array<{ projectId: string; projectName: string | null; path: string; excerpt: string }> = [];
+        let scanned = 0;
+        search: for (const pid of targetProjects) {
+          const proj = db.getProject(pid);
+          if (!proj?.vaultPath) continue; // no vault bound to this project — skip gracefully, no throw
+          const projectName = proj.name ?? null;
+          for (const entry of listVaultTree(proj.vaultPath)) {
+            if (entry.type !== "file") continue;
+            const ext = path.extname(entry.path).toLowerCase();
+            if (!VAULT_SEARCH_EXTENSIONS.has(ext)) continue; // never read a binary/non-note file
+            if (isDeniedVaultPath(entry.path)) continue; // security floor — checked BEFORE any read
+            if (scanned >= VAULT_LOOKUP_MAX_SCANNED) break search;
+            const stat = statVaultFile(proj.vaultPath, entry.path); // same guard, size WITHOUT a full read
+            if (stat === null) continue;
+            if (stat.size > VAULT_LOOKUP_MAX_FILE_BYTES) continue; // oversize note — skip, never read
+            scanned++;
+            const content = readVaultFile(proj.vaultPath, entry.path); // guarded traversal/symlink read
+            if (content === null) continue;
+            if (hasCompanionReadOptOut(content)) continue; // per-note companion-read:false opt-out
+            const matchIdx = content.toLowerCase().indexOf(q);
+            const titleMatch = entry.path.toLowerCase().includes(q);
+            if (matchIdx === -1 && !titleMatch) continue;
+            const start = matchIdx === -1 ? 0 : Math.max(0, matchIdx - VAULT_LOOKUP_EXCERPT_RADIUS);
+            const end = matchIdx === -1
+              ? Math.min(content.length, VAULT_LOOKUP_EXCERPT_RADIUS * 2)
+              : Math.min(content.length, matchIdx + q.length + VAULT_LOOKUP_EXCERPT_RADIUS);
+            const excerpt = content.slice(start, end).trim();
+            results.push({ projectId: pid, projectName, path: entry.path, excerpt });
+            if (results.length >= VAULT_LOOKUP_MAX_RESULTS) break search;
+          }
+        }
+        return ok({ results });
+      },
+    );
+  },
+};
+
+/** The full lever registry (Framework §2). `session-status`, `decisions-relay`'s READ half,
+ *  `board-reach`'s READ half, and `vault-read` (read-only, no act half) are built — the sensitive ACT
+ *  levers (later cards) append here behind their own injection-guard primitives. */
+export const COMPANION_CAPABILITIES: readonly CompanionCapability[] =
+  [SESSION_STATUS, DECISIONS_RELAY, BOARD_REACH, VAULT_READ];
 
 /**
  * The single chokepoint (Framework §2): called ONCE per `buildServer`, right after the existing companion
