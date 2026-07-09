@@ -2973,16 +2973,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const body = (req.body ?? {}) as { chosenOption?: string | null; note?: string };
     const chosenOption = body.chosenOption ?? null;
     const note = typeof body.note === "string" ? body.note : null;
-    if (question.options && question.options.length > 0) {
-      if (chosenOption == null || !question.options.includes(chosenOption))
-        return reply.code(400).send({ error: `chosenOption must be one of: ${question.options.join(", ")}` });
-    } else if (chosenOption != null) {
-      return reply.code(400).send({ error: "this question has no options — chosenOption must be null (answer via note)" });
-    } else if (!note || !note.trim()) {
-      // A pure-blocker (no options) is asked for a REASON — an empty answer would flip it to 'answered'
-      // with zero content for the manager to act on. Require the human's note carry the actual decision
-      // (e.g. "go ahead", "hold off, do X first") rather than accepting a content-free acknowledgment.
-      return reply.code(400).send({ error: "this question has no options — a non-empty note is required to answer it" });
+    const hasOptions = !!(question.options && question.options.length > 0);
+    const hasNote = !!(note && note.trim());
+    // Selecting an offered option is a CONVENIENCE, never a requirement: a human may answer any question
+    // — even one WITH options — by free-text note alone (owner request, card f4bb2f6f). So we validate
+    // shape, not force a pick. (1) A chosenOption, when present, must actually be offered by this
+    // question. (2) Otherwise the note carries the answer — reject ONLY a fully-empty answer (no option
+    // AND no non-empty note), which would flip the question to 'answered' with nothing for the manager
+    // to act on. question_pull already surfaces {chosenOption: null, note} for a note-only answer.
+    if (chosenOption != null) {
+      if (!hasOptions)
+        return reply.code(400).send({ error: "this question has no options — chosenOption must be null (answer via note)" });
+      if (!question.options!.includes(chosenOption))
+        return reply.code(400).send({ error: `chosenOption must be one of: ${question.options!.join(", ")}` });
+    } else if (!hasNote) {
+      return reply.code(400).send({ error: "an answer is required — pick an option or type a note" });
     }
     const updated = deps.db.answerQuestion(id, { chosenOption, note, answeredAt: new Date().toISOString() });
     if (!updated) return reply.code(400).send({ error: "question was answered concurrently" });

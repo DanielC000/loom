@@ -29,12 +29,14 @@ function QuestionAnswerInner({ id }: { id: string }) {
   const question = q.data;
   const hasOptions = !!question?.options && question.options.length > 0;
   const pending = question?.state === "pending";
-  // Mirror the answer route's validation: options question → a choice is required; pure-blocker → a
-  // non-empty note is required. The button is gated on the same rule so the human never round-trips a 400.
-  const canSubmit = pending && (hasOptions ? choice != null : note.trim().length > 0);
+  // Mirror the answer route's validation: picking an offered option is optional even when options exist —
+  // the human may answer by free-text note alone. Submit is enabled when EITHER an option is selected OR
+  // the note is non-empty; only a fully-empty answer is rejected. Gated on the same rule as the route so
+  // the human never round-trips a 400.
+  const canSubmit = pending && (choice != null || note.trim().length > 0);
 
   const answer = useMutation({
-    mutationFn: () => api.answerQuestion(id, { chosenOption: hasOptions ? choice : null, note: note.trim() || undefined }),
+    mutationFn: () => api.answerQuestion(id, { chosenOption: choice, note: note.trim() || undefined }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["question", id] });
       qc.invalidateQueries({ queryKey: ["openQuestions"] });
@@ -89,7 +91,7 @@ function QuestionAnswerInner({ id }: { id: string }) {
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <SectionLabel style={{ margin: 0 }}>The ask</SectionLabel>
               <span style={{ flex: 1 }} />
-              <Badge tone="cyan">{hasOptions ? "pick one + note" : "note only"}</Badge>
+              <Badge tone="cyan">{hasOptions ? "pick one or write a note" : "note only"}</Badge>
             </div>
             <div style={{ fontFamily: font.mono, fontSize: 15, color: color.text, lineHeight: 1.45 }}>{question.title}</div>
             {question.body && <div style={{ fontFamily: font.mono, fontSize: 13, color: color.textDim, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{question.body}</div>}
@@ -108,7 +110,7 @@ function QuestionAnswerInner({ id }: { id: string }) {
           {/* PICK ONE — the options as selectable choices, recommendation flagged. */}
           {pending && hasOptions && (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <SectionLabel>Options — pick one</SectionLabel>
+              <SectionLabel>Options — pick one (optional)</SectionLabel>
               {question.options!.map((opt, i) => {
                 const selected = choice === opt;
                 const recommended = question.recommendation === opt;
@@ -130,7 +132,7 @@ function QuestionAnswerInner({ id }: { id: string }) {
           {pending && (
             <Panel style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <SectionLabel style={{ margin: 0 }}>
-                Note {hasOptions ? "(optional — sent back with your pick)" : "(required — this is your answer)"}
+                Note {hasOptions ? "(type your answer here, or add context for your pick)" : "(required — this is your answer)"}
               </SectionLabel>
               <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3}
                 placeholder={hasOptions ? "add context for the manager…" : "your decision — e.g. “go ahead”, “hold off, do X first”…"}
@@ -141,7 +143,7 @@ function QuestionAnswerInner({ id }: { id: string }) {
                   {answer.isPending ? "Submitting…" : "Submit answer"}
                 </Button>
                 <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
-                  Sends your {hasOptions ? "pick + note" : "note"} to mgr {question.sessionId.slice(0, 8)} and marks this decision answered.
+                  Sends your {hasOptions ? "answer" : "note"} to mgr {question.sessionId.slice(0, 8)} and marks this decision answered.
                 </span>
               </div>
               {answer.isSuccess && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.phosphor }}>✓ answered — the manager was nudged to pull it.</span>}

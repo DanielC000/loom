@@ -93,4 +93,29 @@ test.describe("decision inbox (card 8701bdbb, child B)", () => {
     await expect(page.locator("main").getByText("ANSWERED", { exact: true })).toBeVisible();
     await expect(page.locator("main").getByText(/Open a PR from the release branch/)).toBeVisible();
   });
+
+  test("an options question can be answered by free-text note alone, with no option picked (owner request, card f4bb2f6f)", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "NoteOnlyMgr" });
+    const title = `None of these fit ${Date.now()}`;
+    const id = await loomDaemon.seedQuestion({
+      sessionId: mgr.sessionId, projectId: mgr.projectId, title,
+      body: "Which of these rollout plans?",
+      options: ["Ship all at once", "Phase by cohort", "Dark-launch behind a flag"],
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/question/${id}`);
+    await expect(page.locator("main").getByText(title)).toBeVisible();
+
+    // Selecting an option is OPTIONAL: with NO pick, typing a note alone enables Submit.
+    const submit = page.getByRole("button", { name: "Submit answer" });
+    await expect(submit).toBeDisabled();
+    await page.getByPlaceholder(/add context for the manager/).fill("None of these — hold off and let's talk first.");
+    await expect(submit).toBeEnabled();
+    await submit.click();
+
+    // OBSERVABLE change: the pending form unmounts; the answered readout shows the note but NO chosen option.
+    await expect(page.locator("main").getByText("ANSWERED", { exact: true })).toBeVisible();
+    await expect(page.locator("main").getByText(/None of these — hold off/)).toBeVisible();
+    await expect(page.locator("main").getByText(/Chose:/)).toHaveCount(0);
+  });
 });

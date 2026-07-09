@@ -11,8 +11,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (R) REST  — the human-only POST /api/questions/:id/answer route: 404 unknown id, 400 on a bad
 //               chosenOption (not in options[], or non-null on a pure-blocker), 400 re-answering a
 //               non-pending question, 200 on a valid answer (persists chosenOption/note/answeredAt) —
-//               AND the push-on-answer nudge is enqueued into the asking manager's pty via the SAME
-//               enqueueStdin(kind:"agent") rail POST /input uses.
+//               AND an options-question may be answered by free-text note ALONE (no pick; owner request,
+//               card f4bb2f6f), while a fully-empty answer stays a 400 — AND the push-on-answer nudge is
+//               enqueued into the asking manager's pty via the SAME enqueueStdin(kind:"agent") rail POST /input uses.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/question-inbox.mjs
 import fs from "node:fs";
@@ -158,6 +159,20 @@ function cleanup(e) {
     createdAt: now, answeredAt: null, consumedAt: null,
   };
   e.db.insertQuestion(blocker);
+  // Two more options-questions for the RELAXATION cases (owner request, card f4bb2f6f): a WITH-options
+  // question may now be answered by free-text note alone (no pick), but a fully-empty answer is still rejected.
+  const optsNote = {
+    id: "r-opts-note", sessionId: e.mgrId, projectId: e.projId, title: "Note only?", body: "pick one",
+    options: ["stable", "beta"], recommendation: null, state: "pending", chosenOption: null, note: null,
+    createdAt: now, answeredAt: null, consumedAt: null,
+  };
+  e.db.insertQuestion(optsNote);
+  const optsEmpty = {
+    id: "r-opts-empty", sessionId: e.mgrId, projectId: e.projId, title: "Empty?", body: "pick one",
+    options: ["stable", "beta"], recommendation: null, state: "pending", chosenOption: null, note: null,
+    createdAt: now, answeredAt: null, consumedAt: null,
+  };
+  e.db.insertQuestion(optsEmpty);
 
   const enqueued = []; // { sessionId, text, source, route, kind }
   const stubPty = {
@@ -180,9 +195,6 @@ function cleanup(e) {
     const badOption = await inject({ method: "POST", url: "/api/questions/r-opts/answer", payload: { chosenOption: "nightly" } });
     check("(R) chosenOption not in options[] -> 400", badOption.statusCode === 400);
     check("(R) the rejected answer left the row 'pending'", e.db.getQuestion("r-opts").state === "pending");
-
-    const missingOption = await inject({ method: "POST", url: "/api/questions/r-opts/answer", payload: { note: "no option supplied" } });
-    check("(R) an options-question answered with NO chosenOption -> 400", missingOption.statusCode === 400);
 
     const good = await inject({ method: "POST", url: "/api/questions/r-opts/answer", payload: { chosenOption: "beta", note: "ship beta" } });
     check("(R) a valid answer -> 200", good.statusCode === 200);
@@ -214,6 +226,22 @@ function cleanup(e) {
     const blockerUpdated = JSON.parse(blockerGood.payload);
     check("(R) the pure-blocker's chosenOption stays null", blockerUpdated.chosenOption === null && blockerUpdated.note === "go ahead, it's fine");
     check("(R) a second nudge was enqueued for the blocker's own answer", enqueued.length === 2 && enqueued[1].sessionId === e.mgrId);
+
+    // RELAXATION (owner request, card f4bb2f6f): selecting an offered option is a CONVENIENCE, not a
+    // requirement — a WITH-options question may be answered by free-text note ALONE. chosenOption stays
+    // null; question_pull surfaces {chosenOption: null, note}. This reverses the old forced-pick 400.
+    const noteOnlyWithOptions = await inject({ method: "POST", url: "/api/questions/r-opts-note/answer", payload: { note: "none of these — do X instead" } });
+    check("(R) an options-question answered with note-only (no chosenOption) -> 200", noteOnlyWithOptions.statusCode === 200);
+    const noteOnlyUpdated = JSON.parse(noteOnlyWithOptions.payload);
+    check("(R) the note-only answer on an options-question persists chosenOption:null + the note", noteOnlyUpdated.chosenOption === null && noteOnlyUpdated.note === "none of these — do X instead" && noteOnlyUpdated.state === "answered");
+    check("(R) a note-only answer still nudges the asking manager", enqueued.length === 3 && enqueued[2].sessionId === e.mgrId);
+
+    // But a FULLY-EMPTY answer (no chosenOption AND no note) is STILL rejected, even when options exist —
+    // it would flip the question to 'answered' with zero content for the manager to act on.
+    const emptyWithOptions = await inject({ method: "POST", url: "/api/questions/r-opts-empty/answer", payload: {} });
+    check("(R) an options-question answered with NOTHING (no option, no note) -> 400", emptyWithOptions.statusCode === 400);
+    check("(R) the fully-empty rejection left the options-question 'pending'", e.db.getQuestion("r-opts-empty").state === "pending");
+    check("(R) the rejected empty answer enqueued no further nudge", enqueued.length === 3);
   } finally {
     await app.close();
     cleanup(e);
@@ -257,6 +285,6 @@ function cleanup(e) {
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — questions go pending -> answered -> consumed (a pure-blocker requires a non-empty note and round-trips on it alone, a non-pending re-answer/re-pull is a safe no-op); question_ask/question_pull are MANAGER-only and behave against the real DB; the human-only REST answer route validates chosenOption against options[], rejects a non-pending re-answer, pushes the SAME enqueueStdin(kind:\"agent\") nudge rail POST /input uses into the asking manager's own session, and treats that nudge as BEST-EFFORT — a THROWING enqueueStdin (the pty-teardown race) never turns a persisted answer into a 500."
+  ? "\n✅ ALL PASS — questions go pending -> answered -> consumed (a pure-blocker requires a non-empty note and round-trips on it alone, a non-pending re-answer/re-pull is a safe no-op); question_ask/question_pull are MANAGER-only and behave against the real DB; the human-only REST answer route validates chosenOption against options[], now ACCEPTS a note-only answer even when options exist (selecting an offered option is optional; a fully-empty answer is still rejected), rejects a non-pending re-answer, pushes the SAME enqueueStdin(kind:\"agent\") nudge rail POST /input uses into the asking manager's own session, and treats that nudge as BEST-EFFORT — a THROWING enqueueStdin (the pty-teardown race) never turns a persisted answer into a 500."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
