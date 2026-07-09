@@ -4,7 +4,7 @@ import { useQuery, useQueries, useMutation, useQueryClient, keepPreviousData } f
 import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/attention";
+import { useAttention, attentionOpenTarget, dismissAttention, type AttentionItem } from "../lib/attention";
 import { bySessionActivity, byCreatedStable, byManagerThenCreated, dedupeSessionsById } from "../lib/sessions";
 import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
 import { useStopSession, useForkSession, useEndSession } from "../lib/useSessionActions";
@@ -29,7 +29,6 @@ import { RoleBadge } from "../lib/roleDisplay";
 // board, schedules, attention, activity, and archive count. Pure web composition off existing
 // endpoints — no new daemon/REST surface. Switching the active project rescopes every section.
 export default function Overview() {
-  const navigate = useNavigate();
   const { projectId, projects } = useActiveProject();
   const project = projects.find((p) => p.id === projectId) ?? null;
 
@@ -179,11 +178,7 @@ export default function Overview() {
             <ReviewQueue workerIds={reviewWorkerIds} showLabel={false} />
           </div>
         )}
-        {otherAttention.map((item) => (
-          <AttentionRow key={item.key} item={item}
-            onOpen={(() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()}
-            onDismiss={item.dismissKey ? () => dismissAttention(item.dismissKey!) : undefined} />
-        ))}
+        <OtherAttentionList items={otherAttention} />
       </section>
 
       {/* --- Live terminals (the project's live sessions) --- */}
@@ -237,6 +232,40 @@ export default function Overview() {
         </Panel>
       </section>
     </div>
+  );
+}
+
+// The compact attention rows (everything except the rich merge-review cards) are CAPPED to the first N
+// so a project with many open alerts can't grow the Attention list unbounded and push Fleet/Activity/
+// Schedules below the fold. Past the cap a local "Show M more"/"Collapse" toggle reveals the full list
+// on demand. This is PURELY render-side: the useAttention hook still returns every item, and the header
+// count + the "attention" Stat tile above stay wired to the true total (projAttention.length), never
+// this capped-visible slice — so the count is honest in both the collapsed and expanded states.
+const ATTENTION_COLLAPSED_COUNT = 5;
+
+function OtherAttentionList({ items }: { items: AttentionItem[] }) {
+  const navigate = useNavigate();
+  const [expanded, setExpanded] = useState(false);
+  const overflow = items.length - ATTENTION_COLLAPSED_COUNT;
+  // ≤N items ⇒ overflow ≤ 0 ⇒ render every row and NO toggle (byte-identical to the pre-cap output).
+  const visible = overflow > 0 && !expanded ? items.slice(0, ATTENTION_COLLAPSED_COUNT) : items;
+  return (
+    <>
+      {visible.map((item) => (
+        <AttentionRow key={item.key} item={item}
+          onOpen={(() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()}
+          onDismiss={item.dismissKey ? () => dismissAttention(item.dismissKey!) : undefined} />
+      ))}
+      {overflow > 0 && (
+        <div style={{ marginTop: 2 }}>
+          <Button variant="ghost" onClick={() => setExpanded((v) => !v)}
+            title={expanded ? "Collapse to the first few alerts" : "Show every alert in this project"}
+            style={{ padding: "2px 8px", fontFamily: font.mono, fontSize: 11 }}>
+            {expanded ? "Collapse" : `Show ${overflow} more`}
+          </Button>
+        </div>
+      )}
+    </>
   );
 }
 

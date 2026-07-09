@@ -88,6 +88,61 @@ test.describe("project Overview layout (card 12204d22)", () => {
   });
 });
 
+// The compact Attention list (every non-merge AttentionRow) is CAPPED to the first N=5 (card: cap +
+// collapse the Overview Attention list) so a project with many open alerts can't grow it unbounded and
+// push Fleet/Activity/Schedules below the fold. Past the cap a local "Show M more"/"Collapse" toggle
+// reveals the full list. The HEADER count (`Attention (N)`) and the `attention` Stat tile must ALWAYS
+// show the true total (projAttention.length), never the capped-visible slice, in BOTH states.
+//
+// Seeding: one live manager + eight PENDING manager→human questions on it — each is a "DECISION NEEDED"
+// attention item (a non-merge AttentionRow, so it lands in the capped list). No real ask runs (seedQuestion
+// inserts straight through deps.db.insertQuestion), no `[pty] spawn`.
+const ATTENTION_CAP = 5;
+
+test.describe("project Overview — Attention list caps + collapses (unbounded-growth guard)", () => {
+  test("caps to 5 rows with a 'Show 3 more' toggle; header count + Stat tile always show the true total (8)", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "AttnMgr" });
+    const total = 8;
+    for (let i = 0; i < total; i++) {
+      await loomDaemon.seedQuestion({
+        sessionId: mgr.sessionId, projectId: mgr.projectId, state: "pending",
+        title: `attn-decision-${i}-${Date.now()}`, body: `seeded decision #${i} for the Attention-cap e2e`,
+      });
+    }
+
+    await pinActiveProject(page, mgr.projectId);
+    await page.goto(`${loomDaemon.baseURL}/overview`);
+
+    // Each DECISION NEEDED item renders its kind label uppercase in its row — count visible rows by it.
+    const rows = page.locator("main").getByText("DECISION NEEDED", { exact: true });
+    const header = page.locator("main").getByText(/^Attention \(/);
+    const statTile = page.locator("main").getByText("attention", { exact: true }).locator("..");
+    const showMore = page.getByRole("button", { name: `Show ${total - ATTENTION_CAP} more` });
+    const collapse = page.getByRole("button", { name: "Collapse" });
+
+    // Collapsed (default): exactly N rows, the "Show 3 more" affordance, and the TRUE total in the header + tile.
+    await expect(header).toHaveText(`Attention (${total})`);
+    await expect(rows).toHaveCount(ATTENTION_CAP);
+    await expect(showMore).toBeVisible();
+    await expect(collapse).toHaveCount(0);
+    await expect(statTile).toContainText(String(total));
+
+    // Expand: every row shows, the toggle flips to "Collapse", and the header/tile total is UNCHANGED.
+    await showMore.click();
+    await expect(rows).toHaveCount(total);
+    await expect(collapse).toBeVisible();
+    await expect(showMore).toHaveCount(0);
+    await expect(header).toHaveText(`Attention (${total})`);
+    await expect(statTile).toContainText(String(total));
+
+    // Collapse: back to exactly N rows + the "Show 3 more" affordance, total still honest.
+    await collapse.click();
+    await expect(rows).toHaveCount(ATTENTION_CAP);
+    await expect(showMore).toBeVisible();
+    await expect(header).toHaveText(`Attention (${total})`);
+  });
+});
+
 // Worker-role agents are EXCLUDED from the Overview "Agents" spawn grid (owner intake 2026-07-08): workers
 // are Loom-DRIVEN — a manager dispatches them via worker_spawn onto isolated worktree branches, never a
 // human manual spawn — so a worker spawn card is clutter + a footgun. A non-worker (manager / null-role)
