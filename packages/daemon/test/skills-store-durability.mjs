@@ -61,6 +61,26 @@ try {
   // workspace-audit skill (the de-Loom-ified cousin of dev platform-audit) must reach every user's store.
   check("clean store: workspace-audit copied by seedGlobalSkills", seeded.includes("workspace-audit"));
   check("clean store: workspace-audit SKILL.md present after seed", fs.existsSync(path.join(skillsDir, "workspace-audit", "SKILL.md")));
+
+  // (d) Card 7f73979f regression guard: a bundled skill seeded BEFORE the real asset shipped a new
+  // supporting file (e.g. orchestrate's scripts/serve-static.mjs, added after the skill's SKILL.md was
+  // already in the store) must still receive that file on a LATER boot — seedGlobalSkills is dir-keyed
+  // on SKILL.md presence, so a naive "skip if SKILL.md exists" would leave the store permanently missing
+  // it. The earlier seedGlobalSkills() call above already fully seeded orchestrate (a fresh store gets
+  // every bundled skill in full) — simulate the STALE-store state that predates the scripts/ addition by
+  // deleting it back out, and edit SKILL.md too so the backfill's "never touches existing content" half
+  // of the guarantee is also exercised.
+  const orchestrateStore = path.join(skillsDir, "orchestrate");
+  fs.rmSync(path.join(orchestrateStore, "scripts"), { recursive: true, force: true });
+  const ORCHESTRATE_EDIT = "---\nname: orchestrate\ndescription: edited\n---\nMY LOCAL EDIT";
+  fs.writeFileSync(path.join(orchestrateStore, "SKILL.md"), ORCHESTRATE_EDIT);
+  check("precondition: orchestrate store has no scripts/ dir yet", !fs.existsSync(path.join(orchestrateStore, "scripts")));
+
+  const reseeded = seedGlobalSkills();
+
+  check("stale-store orchestrate backfilled with scripts/serve-static.mjs", fs.existsSync(path.join(orchestrateStore, "scripts", "serve-static.mjs")));
+  check("backfill never overwrites an existing (edited) SKILL.md", fs.readFileSync(path.join(orchestrateStore, "SKILL.md"), "utf8") === ORCHESTRATE_EDIT);
+  check("backfill-only pass is not reported as a fresh seed", !reseeded.includes("orchestrate"));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
