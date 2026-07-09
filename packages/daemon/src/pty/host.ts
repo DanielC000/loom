@@ -13,7 +13,7 @@ import { ensureTrusted } from "./claude-config.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
-import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir } from "../paths.js";
+import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
@@ -608,7 +608,9 @@ export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "st
 /**
  * The stdio MCP-config entry for a dejaCorpus session, or null when `LOOM_DEJA_BIN` is unset or doesn't
  * resolve to an existing absolute file — a CLEAN-SKIP (like the missing-Playwright-package / not-yet-warm
- * markitdown-venv fallbacks above) so an unresolvable Deja install never breaks the spawn.
+ * markitdown-venv fallbacks above) so an unresolvable Deja install never breaks the spawn. Callers MUST
+ * also gate on `isLoomDev()` (see the "deja-corpus" branch in `buildMcpServers` below) — Deja is a
+ * PRIVATE product and this resolver alone doesn't know about that gate.
  *
  * `LOOM_DEJA_BIN` is the SAME human-only override the Deja capture relay resolves (`assets/deja-capture.mjs`
  * `resolveDejaBin`), but here it MUST already be an ABSOLUTE path to Deja's `cli.js` — this entry launches it
@@ -751,6 +753,11 @@ export function buildMcpServers(o: {
       continue;
     }
     if (grant.slug === "deja-corpus") {
+      // Deja is a PRIVATE product (Loom itself is public on npm) — never wire its MCP on a non-dev build,
+      // even when a profile carries a stored dejaCorpus:true (e.g. from before this gate existed). Same
+      // gate as the Platform layer (paths.ts isLoomDev). Silent skip: no warn, since the "missing" reason
+      // here is the gate itself, not a misconfigured LOOM_DEJA_BIN.
+      if (!isLoomDev()) continue;
       // The Deja mockup-corpus capability: a plain synchronous existence check (no venv/provisioning) — a
       // null means LOOM_DEJA_BIN is unset or unresolvable, so THIS spawn just skips the MCP (logged, never
       // crashes). No background kick: Deja is a daemon-side install the human points LOOM_DEJA_BIN at once.

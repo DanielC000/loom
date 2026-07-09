@@ -175,6 +175,13 @@ function ConfigEditor({ project }: { project: Project }) {
   const qc = useQueryClient();
   const ov = project.config; // the stored override
   const resolved = resolveConfig(ov); // effective values, shown as hints
+  // Deja is a PRIVATE product (Loom is public on npm) — the Deja Capture panel is hidden unless this is a
+  // LOOM_DEV build. Same isDev signal Platform.tsx/Skills.tsx derive from the reserved "Loom Platform"
+  // home's existence (GET /api/platform/home only 200s under LOOM_DEV=1). A project that already has an
+  // explicit dejaCapture override just loses its visible control here — the daemon-side hook is ALSO
+  // gated (writeSessionSettings), so it never wires regardless.
+  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
+  const isDev = platformHome.isSuccess && !!platformHome.data?.project;
   // The true PLATFORM default (resolveConfig with NO override) — what blanking/inheriting a field
   // reverts to. Inherit/default hints must show THIS, not the current override-effective value, or
   // they'd misrepresent the revert target. (CLAUDE.md: defaults come only from resolveConfig.)
@@ -344,14 +351,16 @@ function ConfigEditor({ project }: { project: Project }) {
         </label>
       </Panel>
 
-      <Panel>
-        <SectionLabel>Deja Capture</SectionLabel>
-        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 280 }}>
-          <span style={fieldLabel}>Ingest agent-written mockups into Deja</span>
-          <TriSelect value={dejaCapture} set={setDejaCapture} def={defaults.dejaCapture} />
-          <Hint>opt-in: a PostToolUse hook auto-ingests an agent-authored .html mockup into Deja with the driving prompt as origin_prompt · off by default</Hint>
-        </label>
-      </Panel>
+      {isDev && (
+        <Panel>
+          <SectionLabel>Deja Capture</SectionLabel>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 280 }}>
+            <span style={fieldLabel}>Ingest agent-written mockups into Deja</span>
+            <TriSelect value={dejaCapture} set={setDejaCapture} def={defaults.dejaCapture} />
+            <Hint>opt-in: a PostToolUse hook auto-ingests an agent-authored .html mockup into Deja with the driving prompt as origin_prompt · off by default</Hint>
+          </label>
+        </Panel>
+      )}
 
       <Panel>
         <SectionLabel>Python</SectionLabel>

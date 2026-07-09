@@ -284,7 +284,14 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
   // documentConversion/dejaCorpus for the three reserved slugs and by the `capabilities` array for
   // everything else.
   const capabilityList = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
-  const availableCapabilities = capabilityList.data ?? [];
+  // Deja is a PRIVATE product (Loom is public on npm) — its capability entry is hidden from the picker
+  // unless this is a LOOM_DEV build. Same isDev signal Platform.tsx/Skills.tsx derive from the reserved
+  // "Loom Platform" home's existence (GET /api/platform/home only 200s under LOOM_DEV=1). A profile that
+  // already has dejaCorpus:true stored just loses its visible toggle here — the daemon-side grant is
+  // ALSO gated (buildMcpServers), so it never wires regardless.
+  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
+  const isDev = platformHome.isSuccess && !!platformHome.data?.project;
+  const availableCapabilities = (capabilityList.data ?? []).filter((c) => isDev || c.slug !== "deja-corpus");
   const isCapabilityChecked = (slug: string) =>
     slug === "browser-testing" ? browserTesting
     : slug === "document-conversion" ? documentConversion

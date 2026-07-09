@@ -27,6 +27,7 @@ import type { CapabilityProvisionKind, CapabilitySummary } from "@loom/shared";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveExecutable } from "../pty/resolve-bin.js";
+import { isLoomDev } from "../paths.js";
 
 /** One owner-added catalog row as stored/read at the DB layer (mirrors ConnectionRow's shape). */
 export interface CapabilityDefRow {
@@ -189,9 +190,15 @@ export const BUILTIN_CAPABILITY_SUMMARIES: CapabilitySummary[] = [
   },
 ];
 
-/** List every capability — the three builtins FIRST, then every owner-added row — as REST-facing summaries. */
+/**
+ * List every capability — the builtins FIRST, then every owner-added row — as REST-facing summaries.
+ * "deja-corpus" is dropped on a non-`LOOM_DEV` build: Deja is a PRIVATE product (Loom is public on npm),
+ * so a regular `loomctl` user's GET /api/capabilities must never even NAME it, independent of the two
+ * UI-level toggle hides in Profiles.tsx/Settings.tsx (same isLoomDev() gate as the Platform layer).
+ */
 export function listCapabilitySummaries(db: CapabilitiesDbStore): CapabilitySummary[] {
-  return [...BUILTIN_CAPABILITY_SUMMARIES, ...db.listCapabilityDefs().map(toSummary)];
+  const builtins = isLoomDev() ? BUILTIN_CAPABILITY_SUMMARIES : BUILTIN_CAPABILITY_SUMMARIES.filter((c) => c.slug !== "deja-corpus");
+  return [...builtins, ...db.listCapabilityDefs().map(toSummary)];
 }
 
 /** Create an owner-added capability def. Throws a descriptive Error on invalid/duplicate input. */

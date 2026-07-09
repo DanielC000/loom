@@ -177,6 +177,11 @@ test.describe("profiles & agents", () => {
     await expect(docConvToggle).not.toBeChecked();
     await expect(page.getByTestId("markitdown-provisioning")).toHaveCount(0);
 
+    // Deja is a PRIVATE product (Loom is public on npm) — its capability entry must be ABSENT from the
+    // picker under this fixture's default LOOM_DEV=0 boot (mirrors platform.spec.ts's dev-surface-absent
+    // assertion). Not just unchecked — not rendered at all.
+    await expect(page.getByText("Deja mockup corpus", { exact: true })).toHaveCount(0);
+
     // ACT + AFTER (observable #1 — interactive reveal): turning documentConversion on mounts the shared-venv
     // provisioning status panel. This is driven off the toggle's local state, so it needs no Save.
     await docConvToggle.check();

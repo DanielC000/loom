@@ -4,9 +4,10 @@
 // resolution against a session->task fixture, both mocked AND against the real GET
 // /internal/deja-context/:sessionId route), as a spawned CLI (the non-blocking exit-0 contract), and
 // asserts writeSessionSettings wires the opt-in PostToolUse Write|Edit hook ADDITIVELY alongside (never
-// instead of) the existing docLint vault-lint hook. Also asserts dejaCapture is HUMAN-only on the
-// agent-facing config validator (card b3bd4841 direction: it shells out to an external host binary,
-// unlike docLint's bundled pure-node relay).
+// instead of) the existing docLint vault-lint hook — and ONLY on a LOOM_DEV build (Deja is a PRIVATE
+// product; the hook is a no-op on a non-dev build even with dejaCapture:true stored). Also asserts
+// dejaCapture is HUMAN-only on the agent-facing config validator (card b3bd4841 direction: it shells out
+// to an external host binary, unlike docLint's bundled pure-node relay).
 //
 // RUN with an isolated LOOM_HOME (no daemon needed — writeSessionSettings just needs the settings dir):
 //   LOOM_HOME=<temp> node test/deja-capture.mjs
@@ -16,7 +17,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolveConfig } from "@loom/shared";
-import { DEJA_CAPTURE_SCRIPT, SETTINGS_DIR, ensureDirs } from "../dist/paths.js";
+import { DEJA_CAPTURE_SCRIPT, SETTINGS_DIR, ensureDirs, isLoomDev } from "../dist/paths.js";
 import { writeSessionSettings } from "../dist/pty/claude-settings.js";
 import { validateProjectConfigOverride, validateAgentProjectConfigOverride } from "../dist/mcp/platform.js";
 import { Db } from "../dist/db.js";
@@ -25,6 +26,9 @@ import { PtyHost } from "../dist/pty/host.js";
 import { isCaptureCandidate, resolveOriginContext, resolveDejaDbPath, runDejaCapture, resolveDejaBin } from "../assets/deja-capture.mjs";
 
 if (!process.env.LOOM_HOME) { console.error("LOOM_HOME must be set."); process.exit(2); }
+// The isLoomDev() gate check below needs the TRUE default-off state — delete any inherited LOOM_DEV=1
+// (e.g. this test running inside a LOOM_DEV=1 self-hosting/orchestration shell; mirrors platform-dev-flag.mjs).
+delete process.env.LOOM_DEV;
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -100,9 +104,20 @@ try {
   const missingArgs = spawnSync(process.execPath, [DEJA_CAPTURE_SCRIPT], { input: "{}", encoding: "utf8", timeout: 20000 });
   check("CLI: missing sessionId/port args exits 0 (never blocks)", missingArgs.status === 0);
 
-  // --- writeSessionSettings wiring (DoD a) ---
+  // --- isLoomDev() gate: Deja is a PRIVATE product (Loom is public on npm) — the dejaCapture hook must
+  // be a NO-OP on a non-dev build even when dejaCapture:true is stored on a project. Proven BEFORE
+  // flipping LOOM_DEV=1, at which point the writeSessionSettings wiring below holds exactly as before
+  // this gate existed. ---
   ensureDirs();
   const perm = { mode: "acceptEdits", allow: [], deny: [] };
+  check("(gate) isLoomDev() is FALSE by default (LOOM_DEV unset)", isLoomDev() === false);
+  const nonDevOn = JSON.parse(fs.readFileSync(writeSessionSettings("dc-nondev-on", perm, undefined, true), "utf8"));
+  check("(gate) non-dev build: dejaCapture=true STILL wires NO PostToolUse hook (private product, gated)",
+    nonDevOn.hooks.PostToolUse === undefined);
+  process.env.LOOM_DEV = "1";
+  check("(gate) isLoomDev() is TRUE once LOOM_DEV=1", isLoomDev() === true);
+
+  // --- writeSessionSettings wiring (DoD a), now under LOOM_DEV=1 ---
 
   // dejaCapture ON, no vaultPath -> exactly the deja-capture hook group.
   const dejaOnly = JSON.parse(fs.readFileSync(writeSessionSettings("dc-on", perm, undefined, true), "utf8"));
@@ -388,9 +403,10 @@ try {
     db.close();
   }
 } finally {
-  for (const s of ["dc-on", "dc-off", "dc-off-explicit", "dc-both", "dc-vault-only"]) {
+  for (const s of ["dc-nondev-on", "dc-on", "dc-off", "dc-off-explicit", "dc-both", "dc-vault-only"]) {
     try { fs.rmSync(path.join(SETTINGS_DIR, `${s}.json`), { force: true }); } catch { /* ignore */ }
   }
+  delete process.env.LOOM_DEV;
 }
 
 console.log(failures === 0

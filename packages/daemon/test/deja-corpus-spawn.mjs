@@ -7,9 +7,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // check passes without a real `deja` install).
 //
 // Proves the DoD point + the load-bearing threading:
+//   (gate) Deja is a PRIVATE product (Loom is public on npm): buildMcpServers' "deja-corpus" grant is a
+//       NO-OP on a non-dev build (LOOM_DEV unset) even with dejaCorpus=true AND a resolvable LOOM_DEJA_BIN
+//       — proven BEFORE flipping LOOM_DEV=1, at which point every check below holds exactly as documented.
 //   (a) the spawn mcp-config (buildMcpServers) INCLUDES the per-session deja stdio server when
 //       dejaCorpus=true and LOOM_DEJA_BIN resolves, and OMITS it when dejaCorpus=false (byte-identical
-//       to a no-flag spawn) OR when LOOM_DEJA_BIN is unset/unresolvable (clean-skip, never throws);
+//       to a no-flag spawn) OR when LOOM_DEJA_BIN is unset/unresolvable (clean-skip, never throws) —
+//       all under LOOM_DEV=1;
 //   (b) resolveProfile backstops dejaCorpus to FALSE for a null/absent profile and for a profile that
 //       doesn't set it, and PASSES IT THROUGH when set;
 //   (c) capabilityToolAllowlist contributes the three mcp__deja__* tool names iff dejaCorpus is granted;
@@ -36,6 +40,9 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// The isLoomDev() gate check below needs the TRUE default-off state — delete any inherited LOOM_DEV=1
+// (e.g. this test running inside a LOOM_DEV=1 self-hosting/orchestration shell; mirrors platform-dev-flag.mjs).
+delete process.env.LOOM_DEV;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, buildMcpServers, dejaMcpServer, capabilityToolAllowlist } = await import("../dist/pty/host.js");
@@ -44,6 +51,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { resolveProfile, resolveProfileCapabilities } = await import("@loom/shared");
 const { agentProfileKeyError, validateProfile } = await import("../dist/profiles/validate.js");
+const { isLoomDev } = await import("../dist/paths.js");
 
 const AGENT = { startupPrompt: "agent own prompt" };
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -72,7 +80,18 @@ check("(resolver) LOOM_DEJA_BIN absolute + existing ⇒ a stdio entry", resolved
 check("(resolver) command is process.execPath (absolute node)", resolved?.command === process.execPath);
 check("(resolver) args are [cli.js, 'mcp']", JSON.stringify(resolved?.args) === JSON.stringify([fakeCli, "mcp"]));
 
-// ===================== (a) buildMcpServers includes/omits the deja stdio server =====================
+// ===================== isLoomDev() gate: Deja is a PRIVATE product, never wired on a public build =====
+// Loom itself is public on npm; Deja is a private product. Prove the grant is a no-op by default even
+// with a RESOLVABLE LOOM_DEJA_BIN (isolates the gate from the pre-existing missing-binary clean-skip
+// already covered above), then flip LOOM_DEV=1 and re-run (a) below to prove the dev path is unchanged.
+check("(gate) isLoomDev() is FALSE by default (LOOM_DEV unset)", isLoomDev() === false);
+const nonDevOn = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", dejaCorpus: true });
+check("(gate) non-dev build: dejaCorpus=true + LOOM_DEJA_BIN resolvable ⇒ still NO 'deja' server (private product, gated)",
+  !("deja" in nonDevOn));
+process.env.LOOM_DEV = "1";
+check("(gate) isLoomDev() is TRUE once LOOM_DEV=1", isLoomDev() === true);
+
+// ===================== (a) buildMcpServers includes/omits the deja stdio server (LOOM_DEV=1) =====================
 const off = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", dejaCorpus: false });
 const on = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", dejaCorpus: true });
 check("(a) dejaCorpus=false ⇒ NO 'deja' server in the mcp-config", !("deja" in off));
@@ -196,6 +215,7 @@ try {
   } catch { /* best-effort */ }
   db.close();
   if (origDejaBin === undefined) delete process.env.LOOM_DEJA_BIN; else process.env.LOOM_DEJA_BIN = origDejaBin;
+  delete process.env.LOOM_DEV;
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
 }

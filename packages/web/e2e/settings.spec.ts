@@ -84,50 +84,20 @@ test("editing the project gate command persists (REST read-back + reload)", asyn
   await expect(field(page, "Gate command")).toHaveValue("pnpm build");
 });
 
-test("toggling dejaCapture persists through the human/REST config path (REST read-back + reload)", async ({ page, loomDaemon }) => {
-  // dejaCapture is a HUMAN-ONLY per-project toggle — dropped from the agent config schema, settable ONLY on
-  // this REST PATCH path (mirrors gateCommand above). Proves the new TriSelect round-trips on/off.
+test("Deja Capture panel is absent under this fixture's default LOOM_DEV=0 boot", async ({ page, loomDaemon }) => {
+  // Deja is a PRIVATE product (Loom is public on npm) — its per-project capture toggle is a HUMAN-ONLY
+  // field dropped from the agent config schema, but it must also be HIDDEN from the web UI entirely
+  // unless this is a LOOM_DEV build (mirrors platform.spec.ts's dev-surface-absent assertion). The fixture
+  // boots LOOM_DEV=0 (fixtures/daemon.ts), so /api/platform/home 404s and the panel never mounts — the
+  // daemon-side hook (writeSessionSettings) is ALSO gated, covered by the hermetic deja-capture.mjs test.
   const project = await loomDaemon.createProject(`settings-deja-${Date.now()}`);
   await pinActiveProject(page, project.id);
 
   await page.goto(`${loomDaemon.baseURL}/settings`);
+  await expect(page.getByText("Project Settings", { exact: true })).toBeVisible();
 
-  const deja = field(page, "Ingest agent-written mockups into Deja");
-  // BEFORE: a freshly seeded project has no dejaCapture override, so the TriSelect sits on "inherit".
-  await expect(deja).toHaveValue("inherit");
-
-  await deja.selectOption("true");
-  const projectSave = page.getByRole("button", { name: "Save", exact: true }).first();
-  await expect(projectSave).toBeEnabled();
-  await projectSave.click();
-
-  // AFTER (observable #1): the human/REST config path persisted dejaCapture=true — read it straight off the
-  // store the UI shares.
-  await expect
-    .poll(async () => {
-      const res = await fetch(`${loomDaemon.baseURL}/api/projects`);
-      const projects = (await res.json()) as Array<{ id: string; config?: { dejaCapture?: boolean } }>;
-      return projects.find((p) => p.id === project.id)?.config?.dejaCapture ?? null;
-    })
-    .toBe(true);
-
-  // AFTER (observable #2): a full reload re-seeds the TriSelect from the persisted override.
-  await page.reload();
-  await expect(field(page, "Ingest agent-written mockups into Deja")).toHaveValue("true");
-
-  // ROUND-TRIP OFF: flip it to "false" and confirm the override persists the explicit off (not merely
-  // dropped) — the observable inverse of the on-toggle above.
-  const dejaAfter = field(page, "Ingest agent-written mockups into Deja");
-  await dejaAfter.selectOption("false");
-  await expect(projectSave).toBeEnabled();
-  await projectSave.click();
-  await expect
-    .poll(async () => {
-      const res = await fetch(`${loomDaemon.baseURL}/api/projects`);
-      const projects = (await res.json()) as Array<{ id: string; config?: { dejaCapture?: boolean } }>;
-      return projects.find((p) => p.id === project.id)?.config?.dejaCapture ?? null;
-    })
-    .toBe(false);
+  await expect(page.getByText("Deja Capture", { exact: true })).toHaveCount(0);
+  await expect(field(page, "Ingest agent-written mockups into Deja")).toHaveCount(0);
 });
 
 test("editing a daemon-global setting persists to the platform override", async ({ page, loomDaemon }) => {
