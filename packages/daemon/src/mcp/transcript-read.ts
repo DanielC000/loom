@@ -11,8 +11,12 @@ import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP 
  */
 const MIN_ID_PREFIX_LEN = 8;
 
-/** The distinct error for a too-short or multi-match id-prefix — NOT the generic "session not found". */
-const AMBIGUOUS_ID_ERROR = "ambiguous or too-short session id-prefix — pass the full session UUID";
+/**
+ * The distinct error for a too-short or multi-match id-prefix — NOT the generic "session not found".
+ * Exported so the platform Lead's `session_transcript` (mcp/platform.ts) reuses the SAME id-prefix
+ * resolution + error text instead of drifting from this surface's.
+ */
+export const AMBIGUOUS_ID_ERROR = "ambiguous or too-short session id-prefix — pass the full session UUID";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
