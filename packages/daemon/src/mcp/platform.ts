@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import type { Project, ProjectConfigOverride, PlatformConfigOverride, Profile, Schedule, Task } from "@loom/shared";
+import type { Project, ProjectConfigOverride, PlatformConfigOverride, Profile, Schedule, Task, Question } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo } from "../git/reader.js";
@@ -1229,6 +1229,90 @@ export class PlatformMcpRouter {
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
+      },
+    );
+
+    // --- Lead→human DECISION INBOX (ports question_ask/question_pull from the manager surface,
+    // mcp/orchestration.ts, so the Lead has a native structured decision channel instead of Claude Code's
+    // own AskUserQuestion chat prompt, which the owner does not want used for decisions). REUSES
+    // db.insertQuestion / db.pullAnsweredQuestions VERBATIM (no schema change). Keyed on the Lead's OWN
+    // platform session id (callerSessionId, the URL-path caller) — exactly like recycle_me/end_me/
+    // session_message above — with projectId derived SERVER-SIDE from that session (the reserved Platform
+    // home), never passed by the caller. The human answers via the SAME REST path (POST
+    // /api/questions/:id/answer) and push nudge (pty.enqueueStdin) as a manager's question: both are keyed
+    // purely on Question.sessionId with no role filtering, and the read APIs (GET /api/questions,
+    // db.listOpenQuestions) carry no reserved/project filtering either — so a platform-role question is
+    // delivered and surfaced exactly like a manager's, with no separate fix needed on that path. ---
+    server.registerTool(
+      "question_ask",
+      {
+        description:
+          "Ask the HUMAN a mid-flight decision you need them for — NON-BLOCKING: creates a durable, " +
+          "answerable question and returns IMMEDIATELY, so you keep working instead of blocking this turn " +
+          "on a reply. `title`+`body` frame the decision. `options` is an OPTIONAL array of choices for the " +
+          "human to pick between — omit it for a pure blocker (the human replies with a free-text note " +
+          "only, no options to choose from). `recommendation` is an OPTIONAL suggested answer shown to the " +
+          "human as a nudge (not enforced). You'll get a one-time push nudge into your own session when the " +
+          "human answers; call question_pull (e.g. when you reach the decision point this was blocking) to " +
+          "fetch the answer. Returns {questionId}.",
+        inputSchema: {
+          title: z.string(),
+          body: z.string(),
+          options: z.array(z.string()).optional(),
+          recommendation: z.string().optional(),
+        },
+      },
+      async ({ title, body, options, recommendation }) => {
+        if (!callerSessionId) return ok({ error: "no caller session" });
+        const projectId = db.getSession(callerSessionId)?.projectId;
+        if (!projectId) return ok({ error: "no project for this session" });
+        const question: Question = {
+          id: randomUUID(),
+          sessionId: callerSessionId,
+          projectId,
+          title,
+          body,
+          options: options && options.length > 0 ? options : null,
+          recommendation: recommendation ?? null,
+          state: "pending",
+          chosenOption: null,
+          note: null,
+          createdAt: new Date().toISOString(),
+          answeredAt: null,
+          consumedAt: null,
+        };
+        db.insertQuestion(question);
+        return ok({ questionId: question.id });
+      },
+    );
+
+    server.registerTool(
+      "question_pull",
+      {
+        description:
+          "Pull (return AND consume) every ANSWERED question you've asked via question_ask — your " +
+          "decision-inbox pickup. Each entry is {questionId, title, chosenOption, note}: chosenOption is " +
+          "one of the options you offered (or null for a pure-blocker ask, or an unanswered-options case), " +
+          "note is the human's optional free-text. Pulling consumes them in one shot (flips them to " +
+          "'consumed') so they won't be returned again — call this when you reach the decision point the " +
+          "question was blocking, or after the push nudge tells you one was answered. Returns " +
+          "{questions: [...]} (empty if none are answered yet — a still-'pending' question is NOT " +
+          "returned; keep working and check back later).",
+        inputSchema: {},
+      },
+      async () => {
+        if (!callerSessionId) return ok({ error: "no caller session" });
+        const answered = db.pullAnsweredQuestions(callerSessionId, new Date().toISOString());
+        // Purge any OTHER still-queued answer-nudge for a question this same pull just consumed — mirrors
+        // the manager path's card bbc46336 follow-up (see orchestration.ts question_pull).
+        if (answered.length > 0) {
+          sessions.purgeAnsweredQuestionNudges(callerSessionId, answered.map((q) => q.id));
+        }
+        return ok({
+          questions: answered.map((q) => ({
+            questionId: q.id, title: q.title, chosenOption: q.chosenOption, note: q.note,
+          })),
+        });
       },
     );
 
