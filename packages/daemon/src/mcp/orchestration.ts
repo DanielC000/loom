@@ -8,7 +8,7 @@ import { z } from "zod";
 import { contextWindowForModel, resolveConfig, resolveProfile, type SessionRole, type Question } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
-import { readTranscript } from "../sessions/transcript.js";
+import { readTranscript, pageTranscript } from "../sessions/transcript.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { reminderNextFireAt, reminderNextFireAtBySession } from "../companion/reminders.js";
@@ -636,14 +636,33 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_transcript",
       {
-        description: "Read one of your workers' transcript as clean ordered turns; optionally just the last N.",
-        inputSchema: { workerSessionId: z.string(), lastN: z.number().optional() },
+        description:
+          "Read one of your workers' transcript as clean ordered turns. PAGINATION: a large transcript " +
+          "would overflow the tool-result cap (and spill to an unreadable 1-line temp file), so reads are " +
+          "bounded to ONE page — the SAME envelope the auditor's transcript_read uses. With NO paging arg " +
+          "a transcript that fits one page returns the bare turns array (as before); otherwise — or " +
+          "whenever you pass offset/limit/turnRange — it returns a page envelope {turns, totalTurns, " +
+          "offset, returned, nextOffset}. Page deterministically by calling again with offset:nextOffset " +
+          "until nextOffset is null (covers the whole transcript, no gaps/overlaps). `lastN` is a SEPARATE " +
+          "backward-compat shortcut for 'just the last N turns': it takes PRECEDENCE over offset/limit/ " +
+          "turnRange (pass one style or the other, not both) and always returns the bare last-N array, " +
+          "never a page envelope.",
+        inputSchema: {
+          workerSessionId: z.string(),
+          lastN: z.number().optional(),
+          offset: z.number().int().nonnegative().optional(),
+          limit: z.number().int().positive().optional(),
+          turnRange: z.tuple([z.number().int().nonnegative(), z.number().int().nonnegative()]).optional(),
+        },
       },
-      async ({ workerSessionId, lastN }) => {
+      async ({ workerSessionId, lastN, offset, limit, turnRange }) => {
         const w = ensureWorkerLinked(workerSessionId, "worker_transcript");
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
         const turns = w.engineSessionId ? readTranscript(w.cwd, w.engineSessionId) : [];
-        return ok(typeof lastN === "number" && lastN > 0 ? turns.slice(-lastN) : turns);
+        if (typeof lastN === "number" && lastN > 0) return ok(turns.slice(-lastN));
+        const page = pageTranscript(turns, { offset, limit, turnRange });
+        const explicit = offset !== undefined || limit !== undefined || turnRange !== undefined;
+        return ok(!explicit && page.offset === 0 && page.nextOffset === null ? page.turns : page);
       },
     );
 
