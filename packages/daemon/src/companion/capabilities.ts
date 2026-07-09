@@ -139,9 +139,10 @@ export interface GrantOutbound {
    * document — the `media-out` lever's (card 3a81b0f2) own outbound seam, resolved from the ACTIVE TURN's
    * origin exactly like `deliverToOwner` (never a lever-guessed destination). Unlike `deliverToOwner`'s
    * collapsed boolean, this returns a reason so the lever can tell a channel that simply doesn't support
-   * media (`reason:"unsupported-channel"`, e.g. the in-app companion — Telegram-first v1) apart from a
-   * genuine send failure — the former degrades gracefully (the lever tells the owner where the file is),
-   * the latter fails closed exactly like `deliverToOwner`.
+   * media at all (`reason:"unsupported-channel"` — every channel today, Telegram and in-app (card
+   * 9ec79b52), implements delivery; this is future-proofing for one that doesn't) apart from a genuine send
+   * failure — the former degrades gracefully (the lever tells the owner where the file is), the latter
+   * fails closed exactly like `deliverToOwner`.
    */
   deliverMediaToOwner(sessionId: string, filePath: string): Promise<{ delivered: boolean; reason?: string }>;
 }
@@ -956,11 +957,14 @@ const VAULT_READ: CompanionCapability = {
  * dir, the deja store — but this lever's own code applies no implicit fallback: an empty configured
  * allowlist delivers nothing, exactly like an empty `decisionClasses`.)
  *
- * DELIVERY is TELEGRAM-FIRST v1 (owner decision 2026-07-09): `ctx.outbound.deliverMediaToOwner` resolves
+ * DELIVERY was TELEGRAM-FIRST v1 (owner decision 2026-07-09): `ctx.outbound.deliverMediaToOwner` resolves
  * the active turn's own route + adapter SERVER-SIDE (never a lever-guessed destination — mirrors
- * `deliverToOwner`). A channel with no media support (in-app, today — a fast-follow card, not built here)
- * degrades GRACEFULLY (`status:"unsupported-channel"`, naming the resolved path) rather than erroring, so
- * the companion can still tell the owner where the file lives instead of the call just failing.
+ * `deliverToOwner`). The in-app fast-follow (card 9ec79b52) closed the gap — the in-app channel now
+ * delivers too (`InAppChannel.adapter.sendMedia`, companion/in-app.ts: a base64-inlined WS frame the web
+ * chat renders inline). A channel with no media support at all still degrades GRACEFULLY
+ * (`status:"unsupported-channel"`, naming the resolved path) rather than erroring, so the companion can
+ * still tell the owner where the file lives instead of the call just failing — this is now future-proofing
+ * for a channel that doesn't implement `sendMedia`, not the expected in-app path.
  */
 const MEDIA_OUT: CompanionCapability = {
   slug: "media-out",
@@ -978,10 +982,11 @@ const MEDIA_OUT: CompanionCapability = {
           "Deliver a file (a mockup, a vault Assets screenshot, a Playwright shot, …) from your " +
           "ALLOWLISTED source roots to the owner's chat, by path or filename. Only a path that resolves " +
           "INSIDE one of your configured roots is ever readable — a `../` traversal, an absolute path " +
-          "outside every root, or a symlink escaping a root are all rejected with an {error}. Delivery is " +
-          "TELEGRAM-FIRST: on a channel that doesn't support media yet (e.g. the in-app companion), this " +
-          "returns {status:'unsupported-channel', note} naming the resolved path instead of failing — tell " +
-          "the owner where the file is rather than treating it as an error.",
+          "outside every root, or a symlink escaping a root are all rejected with an {error}. Works on " +
+          "both Telegram and the in-app companion chat (images render inline, other files as a download); " +
+          "on a channel that doesn't support media at all, this returns {status:'unsupported-channel', " +
+          "note} naming the resolved path instead of failing — tell the owner where the file is rather " +
+          "than treating it as an error.",
         inputSchema: { pathOrName: z.string() },
       },
       async ({ pathOrName }) => {

@@ -14,8 +14,8 @@
 //   node --experimental-strip-types packages/web/test/companionChat.mjs
 import assert from "node:assert/strict";
 import {
-  IN_APP_CHANNEL, companionMessage, crossChannelMessage, historyMessage, isArmedInApp, parseCrossChannel, parseInbound,
-  parseTranscript, prepareSend, prepareSendAudio, youMessage,
+  IN_APP_CHANNEL, companionMessage, crossChannelMessage, historyMessage, isArmedInApp, mediaMessage, parseCrossChannel,
+  parseInbound, parseMedia, parseTranscript, prepareSend, prepareSendAudio, youMessage,
 } from "../src/lib/companionChat.ts";
 
 let pass = 0;
@@ -238,6 +238,35 @@ check("crossChannelMessage: viaVoice:true tags the bubble voice:true; a companio
     crossChannelMessage({ id: "r2", channel: "telegram", author: "companion", text: "reply", viaVoice: false }),
     { id: "r2", author: "companion", text: "reply", channel: "telegram" },
   );
+});
+
+// ── parseMedia / mediaMessage: the `media-out` lever's in-app delivery (card 9ec79b52) ──────────────────
+check("parseMedia: a well-formed {type:\"media\"} frame parses every field", () => {
+  assert.deepEqual(
+    parseMedia(JSON.stringify({ type: "media", chatId: "sess-1", data: "QUJD", mimeType: "image/png", fileName: "mockup.png" })),
+    { chatId: "sess-1", data: "QUJD", mimeType: "image/png", fileName: "mockup.png" },
+  );
+});
+check("parseMedia: a missing chatId defaults to \"\"", () => {
+  const parsed = parseMedia(JSON.stringify({ type: "media", data: "QUJD", mimeType: "application/pdf", fileName: "report.pdf" }));
+  assert.equal(parsed.chatId, "");
+});
+check("parseMedia: any other frame type / malformed shape returns null (never rendered)", () => {
+  assert.equal(parseMedia(JSON.stringify({ type: "chat", chatId: "s", text: "t" })), null, "a plain chat frame is not a media frame");
+  assert.equal(parseMedia(JSON.stringify({ type: "media", chatId: "s", mimeType: "image/png", fileName: "x.png" })), null, "missing data");
+  assert.equal(parseMedia(JSON.stringify({ type: "media", chatId: "s", data: "", mimeType: "image/png", fileName: "x.png" })), null, "empty data");
+  assert.equal(parseMedia(JSON.stringify({ type: "media", chatId: "s", data: "QUJD", fileName: "x.png" })), null, "missing mimeType");
+  assert.equal(parseMedia(JSON.stringify({ type: "media", chatId: "s", data: "QUJD", mimeType: "image/png" })), null, "missing fileName");
+  assert.equal(parseMedia(JSON.stringify({ type: "media", chatId: "s", data: "QUJD", mimeType: "image/png", fileName: "" })), null, "empty fileName");
+  assert.equal(parseMedia("not json {"), null);
+  assert.equal(parseMedia(JSON.stringify(null)), null);
+});
+check("parseInbound never mistakes a media frame for a companion text reply (the two frame types are disjoint)", () => {
+  assert.equal(parseInbound(JSON.stringify({ type: "media", chatId: "s", data: "QUJD", mimeType: "image/png", fileName: "x.png" })), null);
+});
+check("mediaMessage: builds a companion bubble with empty text, carrying the media payload", () => {
+  const media = { data: "QUJD", mimeType: "image/png", fileName: "mockup.png" };
+  assert.deepEqual(mediaMessage(media, "1"), { id: "1", author: "companion", text: "", channel: "in-app", media });
 });
 
 console.log(`\n${pass} passed`);

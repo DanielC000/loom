@@ -26,6 +26,13 @@
 //     Telegram), pushed the moment the daemon persists it. `id` is the companion_messages row id — the
 //     SAME id a later history reload (GET /api/companion/messages/:sessionId) returns for this row, so the
 //     panel can dedup a live-pushed row against its own reload instead of rendering it twice.
+//
+// MEDIA-OUT IN-APP DELIVERY (the `media-out` lever's in-app fast-follow, card 9ec79b52):
+//   • INBOUND (we receive): {"type":"media","chatId":"…","data":"<base64>","mimeType":"…","fileName":"…"} —
+//     a file the companion delivered via `send_media` (a mockup, a screenshot, …). Base64-inlined (mirrors
+//     the VOICE-P4 outbound `audio` field) since the in-app transport has no separate file-serving route.
+//     NEVER persisted to chat history (mirrors the daemon's own `ChatGateway.deliverMedia` doc) — a reload
+//     will not show it again; it exists only for this live session.
 
 // The in-app channel name — mirrors IN_APP_CHANNEL in the daemon's companion/in-app.ts. Used to decide
 // whether a companion is reachable in-app (its binding must be on THIS channel to get a reply frame).
@@ -61,6 +68,9 @@ export interface ChatMessage {
   /** Present only on a voiced companion reply (Companion Voice epic, VOICE-P4 outbound) — never persisted,
    *  never on a "you"/history bubble (audio is live-transport-only; text is what's stored/shown). */
   audio?: InboundAudio;
+  /** Present only on a `send_media` delivery (the `media-out` lever's in-app fast-follow, card 9ec79b52) —
+   *  never persisted, never on a "you"/history bubble (media is live-transport-only, exactly like `audio`). */
+  media?: InboundMedia;
 }
 
 // Validate + frame an outbound send. Returns null for an empty/whitespace-only draft (nothing to send —
@@ -211,6 +221,38 @@ export interface CompanionHistoryRow {
 export function historyMessage(row: CompanionHistoryRow): ChatMessage {
   const base: ChatMessage = { id: row.id, author: row.author === "user" ? "you" : "companion", text: row.text, channel: row.channel };
   return row.viaVoice ? { ...base, voice: true } : base;
+}
+
+// A file delivered via `send_media` (the `media-out` lever's in-app fast-follow, card 9ec79b52) — base64
+// bytes + enough metadata for the panel to decide image-inline vs. attachment-card rendering.
+export interface InboundMedia {
+  data: string;
+  mimeType: string;
+  fileName: string;
+}
+
+// Parse an inbound {type:"media"} frame. Returns null for malformed JSON, a non-object, a non-media frame,
+// or a malformed shape (missing/empty/wrong-typed data/mimeType/fileName) — defensive by construction, like
+// every other frame parser here.
+export function parseMedia(raw: string): { chatId: string; data: string; mimeType: string; fileName: string } | null {
+  let msg: unknown;
+  try {
+    msg = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof msg !== "object" || msg === null) return null;
+  const m = msg as { type?: unknown; chatId?: unknown; data?: unknown; mimeType?: unknown; fileName?: unknown };
+  if (m.type !== "media" || typeof m.data !== "string" || m.data.length === 0) return null;
+  if (typeof m.mimeType !== "string" || typeof m.fileName !== "string" || m.fileName.length === 0) return null;
+  return { chatId: typeof m.chatId === "string" ? m.chatId : "", data: m.data, mimeType: m.mimeType, fileName: m.fileName };
+}
+
+// Build a "companion" bubble from a parsed {type:"media"} delivery — no text (the file IS the message,
+// mirrors a voice-only reply having empty accompanying prose in practice, though `audio` always rides
+// alongside reply text; media never does).
+export function mediaMessage(media: InboundMedia, id: string): ChatMessage {
+  return { id, author: "companion", text: "", channel: IN_APP_CHANNEL, media };
 }
 
 // Build a rendered bubble from a parsed {type:"cross-channel"} live push (live-push card) — the SAME shape

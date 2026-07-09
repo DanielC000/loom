@@ -1,7 +1,10 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Companion Capability & Permission-Lever Framework — `media-out` (`send_media`, card 3a81b0f2): deliver
 // an ALLOWLISTED file (a mockup, a vault Assets screenshot, a Playwright shot) to the owner's chat.
-// TELEGRAM-FIRST v1 (owner decision 2026-07-09) — in-app has no `sendMedia`, so it degrades gracefully.
+// Delivery was TELEGRAM-FIRST v1 (owner decision 2026-07-09); the in-app fast-follow (card 9ec79b52) closed
+// the gap — the real in-app delivery is covered by companion-media-out-inapp.mjs. THIS file drives the
+// lever with a FAKE `companion` (see makeFakeCompanion below), so its "unsupported-channel" case (g) below
+// now models a hypothetical channel with no `sendMedia` at all, not in-app specifically.
 //
 // NO Primitive A/B/C here (design note, confirmed): there is no owner-composed content to attest and the
 // roots aren't a project-decision — the ENTIRE security model is the path allowlist (the SAME

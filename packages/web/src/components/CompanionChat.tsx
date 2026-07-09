@@ -2,9 +2,9 @@ import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } f
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { CompanionConversationSummary } from "@loom/shared";
 import {
-  companionMessage, crossChannelMessage, historyMessage, parseCleared, parseCrossChannel, parseInbound, parseTranscript,
-  prepareSend, prepareSendAudio, youMessage,
-  type ChatConnState, type ChatMessage,
+  companionMessage, crossChannelMessage, historyMessage, mediaMessage, parseCleared, parseCrossChannel, parseInbound,
+  parseMedia, parseTranscript, prepareSend, prepareSendAudio, youMessage,
+  type ChatConnState, type ChatMessage, type InboundMedia,
 } from "../lib/companionChat";
 import { channelBadgeLabel } from "../lib/companion";
 import { api } from "../lib/api";
@@ -40,7 +40,9 @@ function blobToBase64(blob: Blob): Promise<string> {
  * {type:"chat",text}; the companion's reply arrives as a {type:"chat",chatId,text} frame and renders as a
  * companion bubble. A turn that happened on a NON-in-app channel (e.g. Telegram) arrives as a
  * {type:"cross-channel",...} frame (live-push card) and renders with the same badge/mic treatment a
- * reload's history seed would give it. All wire framing + parsing lives in the pure, unit-tested
+ * reload's history seed would give it. A `send_media` delivery (the `media-out` lever's in-app fast-follow,
+ * card 9ec79b52) arrives as a {type:"media",...} frame and renders as its own bubble — an image inline, any
+ * other file as a downloadable attachment card. All wire framing + parsing lives in the pure, unit-tested
  * lib/companionChat.
  *
  * Connection lifecycle mirrors Terminal.tsx's discipline (open/close/reconnect, and the CONNECTING-state
@@ -138,6 +140,18 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
               void audio.play().catch(() => { /* autoplay blocked — the bubble's own <audio controls> still lets the user play it */ });
             } catch { /* never let a playback attempt break the chat */ }
           }
+          return;
+        }
+        // A `send_media` delivery (the `media-out` lever's in-app fast-follow, card 9ec79b52) — a file the
+        // companion pushed live, never persisted to history (mirrors the daemon's own `deliverMedia` doc:
+        // media isn't part of the text conversation log). Resets the reply-await state exactly like a text
+        // reply, since a media send is itself the companion's response to the owner's request.
+        const media = parseMedia(e.data);
+        if (media) {
+          clearReplyTimer();
+          setAwaitingReply(false);
+          setReplyTimedOut(false);
+          setMessages((m) => [...m, mediaMessage({ data: media.data, mimeType: media.mimeType, fileName: media.fileName }, nextId())]);
           return;
         }
         // The daemon's live echo of OUR OWN web-mic recording once STT completes (Companion Voice epic,
@@ -431,6 +445,7 @@ function Bubble({ msg, title, grouped }: { msg: ChatMessage; title: string; grou
       >
         {msg.voice && <span aria-label="Voice message" title="Voice message">🎤 </span>}
         {msg.text}
+        {msg.media && <MediaAttachment media={msg.media} spaced={msg.text.length > 0} />}
         {msg.audio && (
           // Companion Voice epic, VOICE-P4 outbound — the manual play/pause/replay affordance (the ws
           // handler already attempted a one-shot autoplay on arrival; this stays regardless of whether
@@ -443,6 +458,41 @@ function Bubble({ msg, title, grouped }: { msg: ChatMessage; title: string; grou
         )}
       </div>
     </div>
+  );
+}
+
+// ── A `send_media` delivery (the `media-out` lever's in-app fast-follow, card 9ec79b52) ───────────────
+// An image renders inline (capped so a large screenshot doesn't blow out the bubble width); any other file
+// renders as a small downloadable attachment card naming the file — the browser's own data-URI download
+// (no daemon round trip needed; the bytes already arrived on the WS frame). `spaced` adds top margin only
+// when this follows visible text in the SAME bubble (a bare media message has none).
+function MediaAttachment({ media, spaced }: { media: InboundMedia; spaced: boolean }) {
+  const src = `data:${media.mimeType};base64,${media.data}`;
+  const marginTop = spaced ? 8 : 0;
+  if (media.mimeType.startsWith("image/")) {
+    return (
+      <a href={src} download={media.fileName} title={`Download ${media.fileName}`} style={{ display: "block", marginTop }}>
+        <img
+          src={src}
+          alt={media.fileName}
+          style={{ display: "block", maxWidth: "100%", maxHeight: 320, borderRadius: 8, border: `1px solid ${color.border}` }}
+        />
+      </a>
+    );
+  }
+  return (
+    <a
+      href={src}
+      download={media.fileName}
+      style={{
+        display: "flex", alignItems: "center", gap: 8, marginTop, padding: "8px 10px", borderRadius: 8,
+        border: `1px solid ${color.border}`, background: color.panel2, color: color.text, textDecoration: "none",
+        fontFamily: font.mono, fontSize: 12,
+      }}
+    >
+      <span aria-hidden style={{ opacity: 0.7 }}>📎</span>
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{media.fileName}</span>
+    </a>
   );
 }
 

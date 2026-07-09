@@ -694,15 +694,16 @@ export class ChatGateway {
   }
 
   /**
-   * OUTBOUND MEDIA — the `media-out` lever's delivery seam (card 3a81b0f2, "show me the latest mockup").
-   * Resolves the target EXACTLY like `deliverReply` (the ORIGINATING route of `sessionId`'s in-flight turn,
-   * via `replyTarget` — no binding/home fallback, no broadcast), then sends `filePath` through the target
-   * adapter's OPTIONAL `sendMedia` instead of `send`. An adapter with no `sendMedia` (in-app, today —
-   * Telegram-first v1) degrades to `{delivered:false, reason:"unsupported-channel"}` rather than throwing,
-   * so the lever can tell the owner where the file is instead of failing outright. No chunking (a file is
-   * one unit, unlike a long text reply) and no chat-history record (media isn't part of the text
-   * conversation log `companion_messages.text` models). Never throws — a throwing `sendMedia` is contained
-   * and reported as `{delivered:false, reason:"send-failed"}`.
+   * OUTBOUND MEDIA — the `media-out` lever's delivery seam (card 3a81b0f2, "show me the latest mockup";
+   * in-app delivery added by card 9ec79b52). Resolves the target EXACTLY like `deliverReply` (the
+   * ORIGINATING route of `sessionId`'s in-flight turn, via `replyTarget` — no binding/home fallback, no
+   * broadcast), then sends `filePath` through the target adapter's OPTIONAL `sendMedia` instead of `send`.
+   * An adapter with no `sendMedia` at all (every channel today implements it — Telegram and in-app — this
+   * is future-proofing for one that doesn't) degrades to `{delivered:false, reason:"unsupported-channel"}`
+   * rather than throwing, so the lever can tell the owner where the file is instead of failing outright. No
+   * chunking (a file is one unit, unlike a long text reply) and no chat-history record (media isn't part of
+   * the text conversation log `companion_messages.text` models). Never throws — a throwing `sendMedia` is
+   * contained and reported as `{delivered:false, reason:"send-failed"}`.
    */
   async deliverMedia(sessionId: string, filePath: string): Promise<{ delivered: boolean; reason?: string }> {
     const target = this.replyTarget(sessionId);

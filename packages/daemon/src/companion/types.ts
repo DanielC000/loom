@@ -99,11 +99,11 @@ export interface ChannelAdapter {
   /**
    * OPTIONAL: send a local file to `chatId` as a native image/document message (the `media-out` Companion
    * lever, card 3a81b0f2 — "show me the latest mockup"). Only implemented by adapters whose platform can
-   * push an inline file (Telegram: `sendPhoto` for an image extension, `sendDocument` otherwise). Absent ⇒
-   * the outbound media seam (`ChatGateway.deliverMedia`) reports `{delivered:false,
-   * reason:"unsupported-channel"}` and never attempts a send on this channel — the in-app adapter
-   * deliberately does NOT implement this (Telegram-first v1; in-app media is a separate fast-follow), so a
-   * companion reachable only in-app degrades gracefully instead of erroring. May throw — the caller
+   * push an inline file (Telegram: `sendPhoto` for an image extension, `sendDocument` otherwise; in-app,
+   * card 9ec79b52: a base64-inlined `{type:"media"}` WS frame to every attached web client, mirroring
+   * `sendVoice`'s own transport). Absent ⇒ the outbound media seam (`ChatGateway.deliverMedia`) reports
+   * `{delivered:false, reason:"unsupported-channel"}` and never attempts a send on this channel — a future
+   * channel with no file-push capability degrades gracefully instead of erroring. May throw — the caller
    * contains it and reports a failed delivery, exactly like `sendVoice`.
    */
   sendMedia?(chatId: string, filePath: string, opts?: { fileName?: string }): Promise<void>;

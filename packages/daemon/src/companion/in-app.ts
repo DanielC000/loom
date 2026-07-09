@@ -37,6 +37,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { LOOM_HOME } from "../paths.js";
+import { vaultFileContentType } from "../vault/browser.js";
 import type { ChannelAdapter, InboundMessage } from "./types.js";
 
 /** The stable channel name — the key in the gateway registry and the `channel` on every in-app binding. */
@@ -70,6 +71,16 @@ export interface InAppServerAudio {
  * moment chat-gateway.ts's generic recorder path persists it, so an already-OPEN CompanionChat panel sees it
  * appear without a reload. `id` is the SAME id the row was persisted under (companion_messages.id) — the
  * stable identity a client dedups on against the same row's later history-reload.
+ *
+ * `type:"media"` (the `media-out` lever's in-app delivery, card 9ec79b52 — fast-follow to the Telegram-first
+ * v1) — a local file delivered via `send_media`, pushed to every attached web client as an inline base64
+ * payload (mirrors `sendVoice`'s own base64-audio transport; the in-app channel has no separate file-serving
+ * route, so the bytes ride the same WS the chat frames use). `mimeType` is resolved by extension
+ * (`vaultFileContentType`, vault/browser.ts) so the panel can decide image-inline vs. attachment-card
+ * rendering. NEVER recorded to chat history (mirrors `ChatGateway.deliverMedia`'s own doc: media isn't part
+ * of the `companion_messages.text` conversation log) — purely a live push, dropped silently if nobody is
+ * attached right now (exactly like a text reply's live push with zero clients, except there is no
+ * store-and-forward fallback for media).
  */
 export type InAppServerFrame =
   | {
@@ -101,6 +112,14 @@ export type InAppServerFrame =
       author: "user" | "companion";
       text: string;
       viaVoice: boolean;
+    }
+  | {
+      type: "media";
+      chatId: string;
+      /** Base64-encoded file bytes. */
+      data: string;
+      mimeType: string;
+      fileName: string;
     };
 
 /** The minimal surface of a connected web client the hub pushes outbound frames to. The WS route wraps the
@@ -138,6 +157,13 @@ export function normalizeInAppMessage(chatId: string, body: unknown): InboundMes
  *  length on its own, so this caps the DECODED byte count generously above a normal few-minutes clip while
  *  still bounding the in-memory Buffer this allocates. */
 export const IN_APP_AUDIO_MAX_BYTES = 15 * 1024 * 1024;
+
+/** OUTBOUND media size cap (`send_media`'s in-app delivery) — mirrors Telegram's own `MAX_AUDIO_BYTES`
+ *  (telegram.ts): the in-app transport has no streaming upload, only one base64-inlined WS frame, so an
+ *  oversized file would bloat every attached client's memory rather than failing cleanly. An over-cap file
+ *  makes `sendMedia` throw (caught by `ChatGateway.deliverMedia`, reported as `send-failed`) instead of
+ *  ever being read/encoded. */
+export const IN_APP_MEDIA_MAX_BYTES = 20 * 1024 * 1024;
 
 /** Where an in-app inbound audio clip's decoded temp file lands — the SAME dir Telegram's downloaded voice
  *  notes and Kokoro's synthesized replies use (companion-audio), so there is exactly one temp-audio
@@ -259,6 +285,24 @@ export class InAppChannel {
       const data = await fs.promises.readFile(audioFilePath, { encoding: "base64" });
       this.recordSafely(chatId, "companion", text);
       this.deliver(chatId, text, { data, mimeType: "audio/ogg" });
+    },
+    // OUTBOUND MEDIA (the `media-out` lever's in-app delivery, card 9ec79b52). `filePath` was already
+    // resolved + allowlist-checked by the send_media tool (capabilities.ts) — this is transport only, never
+    // a second security gate. No chat-history record and no store-and-forward: with no attached client the
+    // push is simply dropped (mirrors `deliver`'s own doc for a text reply with zero clients, except media
+    // has no durable fallback — `ChatGateway.deliverMedia` deliberately never persists it). Throws on an
+    // oversize file or any read failure — the caller (`ChatGateway.deliverMedia`) contains it and reports
+    // `{delivered:false, reason:"send-failed"}`, exactly like a throwing `sendVoice`.
+    sendMedia: async (chatId: string, filePath: string, opts?: { fileName?: string }) => {
+      const stat = await fs.promises.stat(filePath);
+      if (!stat.isFile()) throw new Error("not a regular file");
+      if (stat.size > IN_APP_MEDIA_MAX_BYTES) {
+        throw new Error(`file too large for in-app delivery (${stat.size} bytes, cap ${IN_APP_MEDIA_MAX_BYTES})`);
+      }
+      const fileName = opts?.fileName ?? path.basename(filePath);
+      const data = await fs.promises.readFile(filePath, { encoding: "base64" });
+      const mimeType = vaultFileContentType(fileName);
+      this.pushFrame(chatId, { type: "media", chatId, data, mimeType, fileName });
     },
   };
 
