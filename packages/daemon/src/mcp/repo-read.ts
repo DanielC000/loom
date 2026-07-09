@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import vm from "node:vm";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { loomRepoRoot } from "../paths.js";
@@ -8,27 +9,28 @@ import { loomRepoRoot } from "../paths.js";
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
 /**
- * The DEV Platform Auditor's LEAST-PRIVILEGE, READ-ONLY repo surface — `repo_read_file` / `repo_grep` /
- * `repo_glob` over the Loom SOURCE tree (`paths.ts > loomRepoRoot`). It exists so the Auditor — otherwise
- * transcript-only and STRUCTURALLY BLIND to silent code gaps (a doctrine-less worker, a dropped attr, a
- * dead-code watcher emit no transcript error) — can run a code-structure gap-hunt (see the 7 lenses in the
- * platform-audit skill).
+ * Least-privilege, READ-ONLY source-tree reads — `repo_read_file` / `repo_grep` / `repo_glob` — confined to
+ * ONE root directory and hard-bounded, with NO host-process spawn. Two registration entry points share this
+ * module's confinement/bound core:
+ *   - `registerRepoReadTools` — the DEV Platform Auditor's fixed-root surface over the Loom SOURCE tree
+ *     (`paths.ts > loomRepoRoot`), so the Auditor — otherwise transcript-only and STRUCTURALLY BLIND to
+ *     silent code gaps — can run a code-structure gap-hunt (see the 7 lenses in the platform-audit skill).
+ *   - `registerScopedRepoReadTools` — the END-USER Workspace Auditor's PER-CALL, `projectId`-scoped surface
+ *     over the CALLER'S OWN project repo (root resolved by the caller-supplied `resolveRoot`, e.g. from
+ *     `db.getProject(projectId).repoPath`), for the same structural gap-hunt over the user's own source.
  *
  * == STAYS INSIDE THE TRUST BOUNDARY ==================================================================
- * These are PURE READS, hard-confined to the repo tree and hard-bounded, with NO host-process spawn:
- *   - Every path is CONFINED to `loomRepoRoot()` — a relative path that escapes the root (via `..`, an
- *     absolute path, or a symlink pointing outside) is REFUSED, so the Auditor can never read an
- *     arbitrary host file (e.g. `~/.ssh/id_rsa`, the prod DB, another project's secrets).
- *   - grep/glob are pure in-process `fs` reads + a translated RegExp — NEVER `git grep` / `rg` / any
- *     child process. There is no shell, no exec, nothing outward. (The "no host/spawn" half of the
- *     auditor posture: it ingests UNTRUSTED transcripts, so granting it process-exec would be the one
- *     dangerous combination.)
+ * These are PURE READS, hard-confined to their resolved root and hard-bounded, with NO host-process spawn:
+ *   - Every path is CONFINED to the resolved root — a relative path that escapes it (via `..`, an absolute
+ *     path, or a symlink pointing outside) is REFUSED, so a caller can never read an arbitrary host file
+ *     (e.g. `~/.ssh/id_rsa`, the prod DB, another project's source).
+ *   - grep/glob are pure in-process `fs` reads + a translated RegExp — NEVER `git grep` / `rg` / any child
+ *     process. There is no shell, no exec, nothing outward.
  *   - Hard bounds cap every read (file bytes, returned lines, match count, files walked) so a huge or
  *     hostile tree can't blow the tool-result budget or wedge the daemon.
- * NO WRITE lives here — this module only ADDS reads to the audit surface; the two narrow daemon-local
- * writes (audit_file_finding / preset_suggestion_suggest) stay in audit.ts. This is registered ONLY on
- * the dev AuditMcpRouter — NOT in the shared transcript-read helper and NOT on the end-user Auditor
- * (loom-user-audit), which audits the user's WORKSPACE, never Loom's own source (the dev<->user split).
+ * NO WRITE lives here — this module only ADDS reads. `registerRepoReadTools` is registered ONLY on the dev
+ * AuditMcpRouter; `registerScopedRepoReadTools` is registered ONLY on the end-user WorkspaceAuditMcpRouter,
+ * confined to the CALLING project's own repo root — never another project's root — the dev<->user split.
  * ====================================================================================================
  */
 
@@ -39,6 +41,22 @@ const MAX_GLOB_RESULTS = 500; // repo_glob caps its match list
 const MAX_GREP_MATCHES = 200; // repo_grep caps its match list
 const MAX_WALK_FILES = 20_000; // never traverse an unbounded tree
 const MAX_LINE_LEN = 500; // truncate a single very long matched/returned line
+// ReDoS defense for repo_grep (`pattern` is caller-controlled — an injection-exposed value, see the
+// trust-boundary banner above). A length clamp on the match input alone does NOT defuse a catastrophic
+// (exponential) backtracking pattern like /(a+)+$/: empirically, even a ~25-30 char adversarial input
+// already takes multiple SECONDS and scales exponentially from there, so even a 500-char (MAX_LINE_LEN)
+// clamp never returns unguarded — and normal source lines (~30-120 chars) sit exactly in that danger zone,
+// so there is no length threshold that's both safe and useful. The real boundary is a hard wall-clock
+// ceiling via V8 isolate termination (`vm.runInContext(..., {timeout})`, confirmed by direct testing to
+// interrupt mid-backtrack — unlike a plain synchronous `.test()`, which cannot be preempted once started).
+// That vm crossing is paid ONCE PER FILE, not once per line (a per-line crossing measured ~0.3ms/call —
+// an always-paid tax that would make a broad grep itself slow): `GREP_FILE_TIMEOUT_MS` bounds ONE
+// vm.runInContext call that runs the WHOLE per-file match loop (every clamped line probe against `rx`);
+// `GREP_TOTAL_BUDGET_MS` is a plain Date.now() check BETWEEN files (a cheap yield point, no vm involved)
+// bounding the WHOLE grep so a repo full of pathological files can't chain per-file timeouts into an
+// effectively unbounded call.
+const GREP_FILE_TIMEOUT_MS = 250; // generous for a legit native grep over a 512 KiB file (<~50ms observed)
+const GREP_TOTAL_BUDGET_MS = 4000;
 
 /** Directories never worth auditing — build output, deps, VCS internals, Loom's own runtime state. */
 const SKIP_DIRS = new Set([
@@ -56,15 +74,47 @@ function clampLine(s: string): string {
   return s.length > MAX_LINE_LEN ? s.slice(0, MAX_LINE_LEN) + " ...[truncated]" : s;
 }
 
-/** The realpath'd repo root (so a symlinked checkout still confines correctly); falls back to a resolve. */
-function repoRootReal(): string {
-  const root = loomRepoRoot();
+// The match-loop script that runs INSIDE the vm sandbox — fixed daemon code, never the caller's pattern
+// (the pattern is DATA, already compiled to a RegExp with `new RegExp` in the MAIN context below; the
+// sandbox only ever runs THIS string). Tests every clamped probe in `__probes` against `__rx`, returning
+// the indices that matched, capped at `__cap`. `vm.createContext()` with no sandbox object starts EMPTY —
+// no `fs`, no `require`, nothing exposed but the three bindings `timedFileGrep` assigns below.
+const GREP_MATCH_LOOP_SRC =
+  "(function(){var out=[];for(var i=0;i<__probes.length;i++){" +
+  "if(__rx.test(__probes[i])){out.push(i);if(out.length>=__cap)break;}}return out;})()";
+
+/**
+ * Run one FILE's worth of clamped match probes through `rx.test` INSIDE a single `vm.runInContext` call
+ * bounded by `GREP_FILE_TIMEOUT_MS` — ONE vm crossing per FILE (not per line), so the common case pays
+ * ~0.3ms per FILE rather than per line. `context` is created ONCE per `doGrep` call and reused across every
+ * file (fresh per call would itself be needless overhead) — reuse is safe: each call only ever reads back
+ * an array, never carrying state between calls. A pathological line inside THIS file trips the per-file
+ * timeout — V8 terminates the whole `runInContext` call, caught below — and the file is treated as fully
+ * unmatched (partial results for that one file, never a hang): the same accepted trade-off `clampLine`/the
+ * per-line length clamp already make, just scoped to a file instead of a line.
+ */
+function timedFileGrep(context: vm.Context, rx: RegExp, probes: string[], cap: number): number[] {
+  if (cap <= 0) return [];
+  context.__rx = rx;
+  context.__probes = probes;
+  context.__cap = cap;
+  try {
+    const result: unknown = vm.runInContext(GREP_MATCH_LOOP_SRC, context, { timeout: GREP_FILE_TIMEOUT_MS });
+    return Array.isArray(result) ? (result as number[]) : [];
+  } catch {
+    return []; // per-file timeout (or any other vm error) — never propagate, never hang
+  }
+}
+
+/** The realpath'd root (so a symlinked checkout still confines correctly); falls back to a plain resolve. */
+function realRoot(root: string): string {
   try { return fs.realpathSync(root); } catch { return path.resolve(root); }
 }
 
 /**
- * Resolve a caller-supplied RELATIVE path against the repo root, REFUSING anything that escapes it (an
- * absolute path, a `..` traversal, or a symlink that resolves outside). This is the confinement gate.
+ * Resolve a caller-supplied RELATIVE path against `root`, REFUSING anything that escapes it (an absolute
+ * path, a `..` traversal, or a symlink that resolves outside). THE confinement gate — reused, unmodified,
+ * by both registration entry points below (never hand-rolled twice).
  */
 function resolveWithin(root: string, rel: string): string {
   if (typeof rel !== "string" || rel.trim().length === 0) throw new Error("path required");
@@ -129,11 +179,87 @@ function* walkFiles(root: string): Generator<string> {
   }
 }
 
-/** Repo-relative POSIX path (the stable, host-path-free form returned to the auditor). */
+/** Repo-relative POSIX path (the stable, host-path-free form returned to the caller). */
 function relPosix(root: string, full: string): string {
   return path.relative(root, full).split(path.sep).join("/");
 }
 
+/** Core of `repo_read_file` — confined + bounded; throws on an escape (caller wraps in try/catch). */
+function doReadFile(root: string, rel: string, offset?: number, limit?: number) {
+  const abs = resolveWithin(root, rel);
+  let stat: fs.Stats;
+  try { stat = fs.statSync(abs); } catch { return { error: "file not found" }; }
+  if (!stat.isFile()) return { error: "not a file" };
+  if (stat.size > MAX_FILE_BYTES) return { error: `file too large (${stat.size} bytes > ${MAX_FILE_BYTES} cap)` };
+  const content = fs.readFileSync(abs, "utf8");
+  if (containsNul(content)) return { error: "binary file (not text)" };
+  const all = content.split(/\r?\n/);
+  const start = Math.min(Math.max(0, offset ?? 0), all.length);
+  const count = Math.min(limit ?? MAX_READ_LINES, MAX_READ_LINES);
+  const lines = all.slice(start, start + count).map(clampLine);
+  const nextOffset = start + lines.length < all.length ? start + lines.length : null;
+  return { path: relPosix(root, abs), totalLines: all.length, offset: start, lines, nextOffset };
+}
+
+/** Core of `repo_grep` — confined + bounded; throws only on a bad regex (caller wraps in try/catch). */
+function doGrep(root: string, pattern: string, glob?: string, ignoreCase?: boolean, maxResults?: number) {
+  let rx: RegExp;
+  try { rx = new RegExp(pattern, ignoreCase ? "i" : ""); }
+  catch (e) { throw new Error(`invalid regex: ${(e as Error).message}`); }
+  const fileFilter = glob ? globToRegExp(glob) : null;
+  const cap = Math.min(maxResults ?? MAX_GREP_MATCHES, MAX_GREP_MATCHES);
+  const matches: Array<{ file: string; line: number; text: string }> = [];
+  const vmContext = vm.createContext(); // one reused, fs/require-free sandbox for every timedFileGrep call
+  const grepStart = Date.now();
+  let timedOut = false;
+  for (const full of walkFiles(root)) {
+    if (matches.length >= cap) break;
+    // TOTAL budget — a plain Date.now() check BETWEEN files (cheap; not itself a vm crossing), so a repo
+    // full of individually-timed-out pathological files can't chain per-file timeouts unboundedly.
+    if (Date.now() - grepStart > GREP_TOTAL_BUDGET_MS) { timedOut = true; break; }
+    const rel = relPosix(root, full);
+    if (fileFilter && !fileFilter.test(rel)) continue;
+    let stat: fs.Stats;
+    try { stat = fs.statSync(full); } catch { continue; }
+    if (stat.size > MAX_FILE_BYTES) continue;
+    let content: string;
+    try { content = fs.readFileSync(full, "utf8"); } catch { continue; }
+    if (containsNul(content)) continue; // binary
+    const lines = content.split(/\r?\n/);
+    // The MATCH INPUT is clamped to MAX_LINE_LEN per line — a raw slice, NOT clampLine's suffixed form, so
+    // it doesn't alter match semantics near the boundary. The STORED `text` below stays clampLine(line)
+    // exactly as before. The clamp alone is NOT a full ReDoS defense (see the constants above) — it just
+    // keeps the common case cheap; the whole probe array for this file runs through ONE timedFileGrep call.
+    const probes = lines.map((line) => (line.length > MAX_LINE_LEN ? line.slice(0, MAX_LINE_LEN) : line));
+    const hitIndices = timedFileGrep(vmContext, rx, probes, cap - matches.length);
+    for (const i of hitIndices) {
+      matches.push({ file: rel, line: i + 1, text: clampLine(lines[i]!) });
+    }
+  }
+  return { matches, capped: matches.length >= cap, timedOut };
+}
+
+/** Core of `repo_glob` — confined + bounded. */
+function doGlob(root: string, pattern: string, limit?: number) {
+  const rx = globToRegExp(pattern);
+  const cap = Math.min(limit ?? MAX_GLOB_RESULTS, MAX_GLOB_RESULTS);
+  const matches: string[] = [];
+  for (const full of walkFiles(root)) {
+    const rel = relPosix(root, full);
+    if (rx.test(rel)) {
+      matches.push(rel);
+      if (matches.length >= cap) break;
+    }
+  }
+  return { matches, capped: matches.length >= cap };
+}
+
+/**
+ * The DEV Platform Auditor's fixed-root surface over the Loom SOURCE tree (unchanged from before this
+ * module gained a second, `projectId`-scoped entry point — same tool names, schemas, descriptions, and
+ * byte-identical behavior). `loomRepoRoot()` is re-read on EVERY call (not cached at registration), which
+ * is also this module's test seam (`LOOM_REPO_ROOT`).
+ */
 export function registerRepoReadTools(server: McpServer): void {
   server.registerTool(
     "repo_read_file",
@@ -153,24 +279,8 @@ export function registerRepoReadTools(server: McpServer): void {
       },
     },
     async ({ path: rel, offset, limit }) => {
-      try {
-        const root = repoRootReal();
-        const abs = resolveWithin(root, rel);
-        let stat: fs.Stats;
-        try { stat = fs.statSync(abs); } catch { return ok({ error: "file not found" }); }
-        if (!stat.isFile()) return ok({ error: "not a file" });
-        if (stat.size > MAX_FILE_BYTES) return ok({ error: `file too large (${stat.size} bytes > ${MAX_FILE_BYTES} cap)` });
-        const content = fs.readFileSync(abs, "utf8");
-        if (containsNul(content)) return ok({ error: "binary file (not text)" });
-        const all = content.split(/\r?\n/);
-        const start = Math.min(Math.max(0, offset ?? 0), all.length);
-        const count = Math.min(limit ?? MAX_READ_LINES, MAX_READ_LINES);
-        const lines = all.slice(start, start + count).map(clampLine);
-        const nextOffset = start + lines.length < all.length ? start + lines.length : null;
-        return ok({ path: relPosix(root, abs), totalLines: all.length, offset: start, lines, nextOffset });
-      } catch (e) {
-        return ok({ error: (e as Error).message });
-      }
+      try { return ok(doReadFile(realRoot(loomRepoRoot()), rel, offset, limit)); }
+      catch (e) { return ok({ error: (e as Error).message }); }
     },
   );
 
@@ -183,7 +293,11 @@ export function registerRepoReadTools(server: McpServer): void {
         "optional `glob` (e.g. \"packages/daemon/src/**/*.ts\") matched against the repo-relative path; " +
         "`ignoreCase` for a case-insensitive search. Skips node_modules/.git/dist and binary/oversized " +
         `files. Capped at ${MAX_GREP_MATCHES} matches (\`capped:true\` when it hit the cap — tighten the ` +
-        "pattern/glob). Returns {matches, capped} or {error} on a bad regex.",
+        "pattern/glob). A pathological line (or a hostile pattern) can never hang the search — a single " +
+        "such file is silently skipped (absorbed, like an oversized/binary file) and the search continues; " +
+        "if enough of them chain to blow the OVERALL time budget, the search stops early and returns " +
+        "`timedOut:true` with whatever partial matches it found so far — narrow the glob if you see it. " +
+        "Returns {matches, capped, timedOut} or {error} on a bad regex.",
       inputSchema: {
         pattern: z.string(),
         glob: z.string().optional(),
@@ -192,35 +306,8 @@ export function registerRepoReadTools(server: McpServer): void {
       },
     },
     async ({ pattern, glob, ignoreCase, maxResults }) => {
-      let rx: RegExp;
-      try { rx = new RegExp(pattern, ignoreCase ? "i" : ""); } catch (e) { return ok({ error: `invalid regex: ${(e as Error).message}` }); }
-      try {
-        const root = repoRootReal();
-        const fileFilter = glob ? globToRegExp(glob) : null;
-        const cap = Math.min(maxResults ?? MAX_GREP_MATCHES, MAX_GREP_MATCHES);
-        const matches: Array<{ file: string; line: number; text: string }> = [];
-        outer: for (const full of walkFiles(root)) {
-          const rel = relPosix(root, full);
-          if (fileFilter && !fileFilter.test(rel)) continue;
-          let stat: fs.Stats;
-          try { stat = fs.statSync(full); } catch { continue; }
-          if (stat.size > MAX_FILE_BYTES) continue;
-          let content: string;
-          try { content = fs.readFileSync(full, "utf8"); } catch { continue; }
-          if (containsNul(content)) continue; // binary
-          const lines = content.split(/\r?\n/);
-          for (let i = 0; i < lines.length; i++) {
-            const line = lines[i]!; // split always yields strings (noUncheckedIndexedAccess)
-            if (rx.test(line)) {
-              matches.push({ file: rel, line: i + 1, text: clampLine(line) });
-              if (matches.length >= cap) break outer;
-            }
-          }
-        }
-        return ok({ matches, capped: matches.length >= cap });
-      } catch (e) {
-        return ok({ error: (e as Error).message });
-      }
+      try { return ok(doGrep(realRoot(loomRepoRoot()), pattern, glob, ignoreCase, maxResults)); }
+      catch (e) { return ok({ error: (e as Error).message }); }
     },
   );
 
@@ -239,22 +326,111 @@ export function registerRepoReadTools(server: McpServer): void {
       },
     },
     async ({ pattern, limit }) => {
-      try {
-        const root = repoRootReal();
-        const rx = globToRegExp(pattern);
-        const cap = Math.min(limit ?? MAX_GLOB_RESULTS, MAX_GLOB_RESULTS);
-        const matches: string[] = [];
-        for (const full of walkFiles(root)) {
-          const rel = relPosix(root, full);
-          if (rx.test(rel)) {
-            matches.push(rel);
-            if (matches.length >= cap) break;
-          }
-        }
-        return ok({ matches, capped: matches.length >= cap });
-      } catch (e) {
-        return ok({ error: (e as Error).message });
-      }
+      try { return ok(doGlob(realRoot(loomRepoRoot()), pattern, limit)); }
+      catch (e) { return ok({ error: (e as Error).message }); }
+    },
+  );
+}
+
+/** A resolved read root, or a clean {error} (unknown project / no repoPath) — never a throw. */
+export type ScopedRootResolution = { root: string } | { error: string };
+
+/**
+ * Resolve the tools' root PER CALL from the caller-supplied `projectId` (own-project confinement — the
+ * caller can never name another project's root). `resolveRoot` typically wraps `db.getProject(projectId)`.
+ */
+export type ScopedRootResolver = (projectId: string) => ScopedRootResolution;
+
+/**
+ * The END-USER Workspace Auditor's `projectId`-scoped surface — the SAME confined + bounded
+ * repo_read_file/repo_grep/repo_glob reads as `registerRepoReadTools`, reusing the identical
+ * `resolveWithin` confinement gate and bound constants, but resolving the root PER CALL from a caller
+ * -supplied `projectId` instead of a fixed Loom-source root. `resolveRoot` errors (unknown project, no
+ * repoPath) surface as a clean {error} — never a throw, never a silent empty result.
+ */
+export function registerScopedRepoReadTools(server: McpServer, resolveRoot: ScopedRootResolver): void {
+  server.registerTool(
+    "repo_read_file",
+    {
+      description:
+        "Read ONE text file from YOUR OWN project's source tree (read-only, code-awareness for the " +
+        "structural gap-hunt). `projectId` names the project (from list_sessions); `path` is RELATIVE to " +
+        "that project's repo root — an absolute path or a `..` escape is refused (you can only read inside " +
+        "the named project's own repo root, never another project's root or an arbitrary host file). " +
+        "Returns {path, totalLines, offset, lines, nextOffset}: `lines` is a 0-based window (`offset`, up to " +
+        `${MAX_READ_LINES} lines), and \`nextOffset\` is the next index to page from (null when the file is ` +
+        "exhausted). Binary or oversized (>512 KiB) files are refused with {error}, as is an unknown " +
+        "projectId or a project with no readable repo root. Use repo_glob to find a path and repo_grep to " +
+        "find a line first.",
+      inputSchema: {
+        projectId: z.string(),
+        path: z.string(),
+        offset: z.number().int().nonnegative().optional(),
+        limit: z.number().int().positive().optional(),
+      },
+    },
+    async ({ projectId, path: rel, offset, limit }) => {
+      const resolved = resolveRoot(projectId);
+      if ("error" in resolved) return ok({ error: resolved.error });
+      try { return ok(doReadFile(realRoot(resolved.root), rel, offset, limit)); }
+      catch (e) { return ok({ error: (e as Error).message }); }
+    },
+  );
+
+  server.registerTool(
+    "repo_grep",
+    {
+      description:
+        "Search YOUR OWN project's source tree for a JS RegExp `pattern`, returning matching lines as " +
+        "{file, line, text} (read-only; in-process — NEVER shells out to git grep / rg). `projectId` names " +
+        "the project (from list_sessions). Narrow with an optional `glob` (e.g. \"src/**/*.ts\") matched " +
+        "against the project-relative path; `ignoreCase` for a case-insensitive search. Skips " +
+        "node_modules/.git/dist and binary/oversized files. Capped at " +
+        `${MAX_GREP_MATCHES} matches (\`capped:true\` when it hit the cap — tighten the pattern/glob). ` +
+        "A pathological line (or a hostile pattern, e.g. from an untrusted transcript) can never hang the " +
+        "search — a single such file is silently skipped (absorbed, like an oversized/binary file) and the " +
+        "search continues; if enough of them chain to blow the OVERALL time budget, the search stops early " +
+        "and returns `timedOut:true` with whatever partial matches it found so far — narrow the glob if you " +
+        "see it. Returns {matches, capped, timedOut} or {error} on a bad regex, an unknown projectId, or a " +
+        "project with no readable repo root.",
+      inputSchema: {
+        projectId: z.string(),
+        pattern: z.string(),
+        glob: z.string().optional(),
+        ignoreCase: z.boolean().optional(),
+        maxResults: z.number().int().positive().optional(),
+      },
+    },
+    async ({ projectId, pattern, glob, ignoreCase, maxResults }) => {
+      const resolved = resolveRoot(projectId);
+      if ("error" in resolved) return ok({ error: resolved.error });
+      try { return ok(doGrep(realRoot(resolved.root), pattern, glob, ignoreCase, maxResults)); }
+      catch (e) { return ok({ error: (e as Error).message }); }
+    },
+  );
+
+  server.registerTool(
+    "repo_glob",
+    {
+      description:
+        "List files in YOUR OWN project's source tree whose project-relative POSIX path matches a " +
+        "`pattern` (read-only). `projectId` names the project (from list_sessions). Supports `**` " +
+        "(cross-directory), `*`, `?` — e.g. \"src/mcp/*.ts\" or \"**/*.test.mjs\". Skips " +
+        "node_modules/.git/dist. Discovery order is not guaranteed; capped at " +
+        `${MAX_GLOB_RESULTS} paths (\`capped:true\` when it hit the cap). Returns {matches, capped} of ` +
+        "project-relative paths to feed into repo_read_file / repo_grep, or {error} for an unknown " +
+        "projectId or a project with no readable repo root.",
+      inputSchema: {
+        projectId: z.string(),
+        pattern: z.string(),
+        limit: z.number().int().positive().optional(),
+      },
+    },
+    async ({ projectId, pattern, limit }) => {
+      const resolved = resolveRoot(projectId);
+      if ("error" in resolved) return ok({ error: resolved.error });
+      try { return ok(doGlob(realRoot(resolved.root), pattern, limit)); }
+      catch (e) { return ok({ error: (e as Error).message }); }
     },
   );
 }

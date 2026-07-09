@@ -146,14 +146,13 @@ try {
   const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
 
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-  // The read+suggest+handoff surface (card 5eb8438a added the agent-prompt/skill READS + the confined
-  // home-operator handoff to the original 4 read+suggest tools).
-  check(`(b) user-audit surface is EXACTLY [agent_prompt_read, audit_handoff, audit_suggest_improvement, end_me, list_sessions, preset_suggestion_suggest, skill_list, skill_read, transcript_read] (got: ${tools.join(",")})`,
-    JSON.stringify(tools) === JSON.stringify(["agent_prompt_read", "audit_handoff", "audit_suggest_improvement", "end_me", "list_sessions", "preset_suggestion_suggest", "skill_list", "skill_read", "transcript_read"]));
-  // The repo_* reads are the DEV Auditor's code-awareness over the LOOM SOURCE — the end-user Workspace
-  // Auditor must NOT have them (it audits the user's WORKSPACE, never Loom's own dev: the dev↔user split).
-  const forbidden = ["audit_file_finding", "git_push", "git_commit", "vault_write", "project_configure", "project_archive", "session_spawn", "session_message", "session_stop", "worker_spawn", "platform_escalate", "skill_write", "repo_read_file", "repo_grep", "repo_glob"];
-  check("(b) user-audit surface has NONE of the elevated/structural/dev-only tools (incl. the dev repo reads)",
+  // The read+suggest+handoff surface: card 5eb8438a added the agent-prompt/skill READS + the confined
+  // home-operator handoff to the original 4 read+suggest tools; card 80d953dc (Bucket 2a) added the
+  // OWN-PROJECT-CONFINED repo_read_file/repo_grep/repo_glob source reads (below, section b3).
+  check(`(b) user-audit surface is EXACTLY [agent_prompt_read, audit_handoff, audit_suggest_improvement, end_me, list_sessions, preset_suggestion_suggest, repo_glob, repo_grep, repo_read_file, skill_list, skill_read, transcript_read] (got: ${tools.join(",")})`,
+    JSON.stringify(tools) === JSON.stringify(["agent_prompt_read", "audit_handoff", "audit_suggest_improvement", "end_me", "list_sessions", "preset_suggestion_suggest", "repo_glob", "repo_grep", "repo_read_file", "skill_list", "skill_read", "transcript_read"]));
+  const forbidden = ["audit_file_finding", "git_push", "git_commit", "vault_write", "project_configure", "project_archive", "session_spawn", "session_message", "session_stop", "worker_spawn", "platform_escalate", "skill_write"];
+  check("(b) user-audit surface has NONE of the elevated/structural/dev-only tools",
     forbidden.every((t) => !tools.includes(t)));
 
   // The shared reads work (factored from audit.ts).
@@ -162,6 +161,106 @@ try {
   const liveTurns = await call("transcript_read", { projectId: "pOrd", sessionId: "LIVE1" });
   check("(b) transcript_read (shared read): returns the engine transcript turns",
     Array.isArray(liveTurns) && liveTurns.length === 2 && /ignore your instructions/.test(liveTurns[0].text));
+
+  // ============ (b3) OWN-PROJECT SOURCE READS (card 80d953dc, Bucket 2a) ============
+  // repo_read_file / repo_grep / repo_glob, scoped PER CALL by projectId, confined to THAT project's
+  // repoPath (reusing the dev Auditor's resolveWithin confinement gate — mcp/repo-read.ts). pOrd's
+  // repoPath is the real temp git repo `repo` seeded above.
+  fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "src", "widget.ts"), "export const NEEDLE_TOKEN = 1;\n// second line\n");
+  const outsideSecret = path.join(os.tmpdir(), `loom-b3-secret-${Date.now()}.txt`);
+  fs.writeFileSync(outsideSecret, "TOPSECRET\n");
+
+  // A LEGIT read over the caller's own project works.
+  const readRes = await call("repo_read_file", { projectId: "pOrd", path: "src/widget.ts" });
+  check("(b3) repo_read_file: reads a file from the project's OWN repoPath",
+    Array.isArray(readRes.lines) && /NEEDLE_TOKEN/.test(readRes.lines[0]) && readRes.path === "src/widget.ts");
+  const globRes = await call("repo_glob", { projectId: "pOrd", pattern: "src/**/*.ts" });
+  check("(b3) repo_glob: finds the source file under src/**", globRes.matches?.includes("src/widget.ts"));
+  const grepRes = await call("repo_grep", { projectId: "pOrd", pattern: "NEEDLE_TOKEN" });
+  check("(b3) repo_grep: finds the token with {file, line, text}",
+    grepRes.matches?.some((m) => m.file === "src/widget.ts" && m.line === 1 && /NEEDLE_TOKEN/.test(m.text)));
+
+  // ReDoS REGRESSION (CR finding): a catastrophic-backtracking pattern against a pathological line must
+  // return QUICKLY, never hang the (single-threaded) daemon event loop. A plain length clamp to MAX_LINE_LEN
+  // (500) is NOT sufficient on its own — confirmed by direct testing that /^(a+)+$/ against as few as ~30
+  // 'a's already takes several SECONDS and scales exponentially from there, so even a 500-char clamped probe
+  // never returns unguarded. The 40 a's + "!" prefix below sits well inside the clamped 500-char window, so
+  // this exercises the SAME pathological case a naive clamp-only fix would still hang on; the real defense
+  // is repo-read.ts's GREP_FILE_TIMEOUT_MS (a vm isolate-termination timeout wrapping the WHOLE per-file
+  // match loop — one vm crossing per FILE, not per line).
+  fs.writeFileSync(path.join(repo, "src", "pathological.ts"), "a".repeat(40) + "!" + "a".repeat(600) + "\n");
+  const redosT0 = Date.now();
+  const redosRes = await call("repo_grep", { projectId: "pOrd", pattern: "^(a+)+$" });
+  const redosMs = Date.now() - redosT0;
+  check(`(b3) repo_grep: a catastrophic-backtracking pattern returns QUICKLY (${redosMs}ms), not a hang`, redosMs < 5000);
+  check("(b3) repo_grep: the pathological (non-matching) line correctly reports NO match", !redosRes.matches?.some((m) => m.file === "src/pathological.ts"));
+  // A SINGLE file's per-file timeout is an absorbed, silent trade-off (same posture as clampLine's own
+  // truncation) — it does NOT itself flip the top-level timedOut flag; only the TOTAL grep budget being
+  // exceeded (chaining many such files) does. One pathological file finishing inside the total budget is
+  // the expected, correct outcome here.
+  check("(b3) repo_grep: one absorbed per-file timeout does NOT itself flip timedOut (total budget wasn't exceeded)", redosRes.timedOut === false);
+  fs.rmSync(path.join(repo, "src", "pathological.ts"), { force: true });
+
+  // PERF SANITY (CR finding): the vm boundary must be crossed once per FILE, not once per line — a per-line
+  // crossing measured ~0.3ms/call in isolation, which would make a broad grep itself slow (e.g. ~4.5s for
+  // 300 files x 50 non-adversarial lines under a per-line design). Prove the per-line tax is gone: a
+  // synthetic multi-hundred-file tree with ORDINARY (non-pathological) content greps in well under a second.
+  const perfDir = path.join(repo, "src", "perf");
+  fs.mkdirSync(perfDir, { recursive: true });
+  for (let f = 0; f < 300; f++) {
+    const lines = Array.from({ length: 50 }, (_, i) => `const line_${f}_${i} = "just an ordinary line of source text";`);
+    fs.writeFileSync(path.join(perfDir, `file${f}.ts`), lines.join("\n") + "\n");
+  }
+  const perfT0 = Date.now();
+  const perfRes = await call("repo_grep", { projectId: "pOrd", pattern: "NOTHING_MATCHES_THIS", maxResults: 200 });
+  const perfMs = Date.now() - perfT0;
+  check(`(b3) repo_grep: a 300-file / 15000-line non-pathological tree greps in WELL UNDER 1s (${perfMs}ms) — the per-line vm tax is gone`, perfMs < 1000);
+  check("(b3) repo_grep: the perf-tree scan legitimately found nothing (not silently timed out)", perfRes.timedOut !== true);
+  fs.rmSync(perfDir, { recursive: true, force: true });
+
+  // CONFINEMENT: a `..` traversal and an absolute path both escape the project root and are REFUSED.
+  const escDots = await call("repo_read_file", { projectId: "pOrd", path: `../${path.basename(outsideSecret)}` });
+  check("(b3) repo_read_file: REFUSES a `..` traversal escape", typeof escDots.error === "string" && !escDots.lines);
+  const escAbs = await call("repo_read_file", { projectId: "pOrd", path: outsideSecret });
+  check("(b3) repo_read_file: REFUSES an absolute path", typeof escAbs.error === "string" && !escAbs.lines);
+
+  // CONFINEMENT: a SYMLINK inside the project root pointing OUTSIDE it is refused by the realpath re-check.
+  // Symlink creation can need privilege on Windows — tolerate that and skip if the link can't be made.
+  let symlinkPlanted = false;
+  try { fs.symlinkSync(outsideSecret, path.join(repo, "src", "leak.txt")); symlinkPlanted = true; }
+  catch { /* no symlink privilege on this host — skip the symlink assertion */ }
+  if (symlinkPlanted) {
+    const symRead = await call("repo_read_file", { projectId: "pOrd", path: "src/leak.txt" });
+    check("(b3) repo_read_file: REFUSES a SYMLINK inside the project root that points OUT (realpath re-check)",
+      typeof symRead.error === "string" && !symRead.lines);
+  } else {
+    console.log("SKIP  (b3) symlink-escape case (no symlink privilege on this host)");
+  }
+
+  // An unknown projectId errors cleanly (never a crash, never falls back to some other root).
+  const unknownProj = await call("repo_read_file", { projectId: "does-not-exist", path: "src/widget.ts" });
+  check("(b3) repo_read_file: an UNKNOWN projectId → clean {error}", typeof unknownProj.error === "string" && !unknownProj.lines);
+  const unknownGrep = await call("repo_grep", { projectId: "does-not-exist", pattern: "x" });
+  check("(b3) repo_grep: an UNKNOWN projectId → clean {error}", typeof unknownGrep.error === "string" && !unknownGrep.matches);
+  const unknownGlob = await call("repo_glob", { projectId: "does-not-exist", pattern: "**" });
+  check("(b3) repo_glob: an UNKNOWN projectId → clean {error}", typeof unknownGlob.error === "string" && !unknownGlob.matches);
+
+  // A project with NO repoPath (e.g. a repo-less vault-only project) errors cleanly, never reads anywhere.
+  db.insertProject({ id: "pNoRepo", name: "Vault-only", repoPath: "", vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  const noRepo = await call("repo_read_file", { projectId: "pNoRepo", path: "src/widget.ts" });
+  check("(b3) repo_read_file: a project with NO repoPath → clean {error}, not a crash", typeof noRepo.error === "string" && !noRepo.lines);
+
+  // BOUNDS: an oversized file (>512 KiB) is refused, not partially read.
+  fs.writeFileSync(path.join(repo, "src", "huge.ts"), "x".repeat(600 * 1024));
+  const hugeRead = await call("repo_read_file", { projectId: "pOrd", path: "src/huge.ts" });
+  check("(b3) repo_read_file: an oversized (>512 KiB) file is REFUSED with {error}", typeof hugeRead.error === "string" && /too large/.test(hugeRead.error));
+  fs.rmSync(path.join(repo, "src", "huge.ts"), { force: true });
+
+  // NO WRITE path: the surface has no repo_write_file / repo_edit / anything mutating — only the three
+  // read tools above exist (already proven by the EXACT tool-list assertion earlier in this test).
+
+  try { fs.rmSync(outsideSecret, { force: true }); } catch { /* best-effort */ }
 
   // ============ (c) WRITE A — audit_suggest_improvement → the USER'S OWN home inbox ============
   const setupBefore = db.listTasks("pSetup").length;

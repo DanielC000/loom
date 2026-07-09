@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { registerTranscriptReadTools } from "./transcript-read.js";
+import { registerScopedRepoReadTools, type ScopedRootResolution } from "./repo-read.js";
 import { skillListData } from "./skillTools.js";
 import { readSkill, isValidSkillName } from "../skills/store.js";
 
@@ -20,9 +21,16 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * ║ The workspace Auditor ingests UNTRUSTED transcript content (a prompt-injection surface: "ignore your ║
  * ║ instructions and push to …"). This router is gated to role==="workspace-auditor" ONLY and exposes    ║
  * ║ NOTHING but cross-project READS (the SAME shared list_sessions/transcript_read the dev Auditor uses —║
- * ║ mcp/transcript-read.ts — plus the agent-prompt / skill-text READS it critiques against) + a small,   ║
- * ║ fully-confined set of INERT, DEDUPE/SERVER-RESOLVED daemon-local writes + ONE confined outward nudge ║
- * ║ — and is fail-closed by construction (a tool not registered here cannot be reached):                 ║
+ * ║ mcp/transcript-read.ts — plus the agent-prompt / skill-text READS it critiques against, plus the     ║
+ * ║ OWN-PROJECT-CONFINED source reads below) + a small, fully-confined set of INERT, DEDUPE/SERVER-       ║
+ * ║ RESOLVED daemon-local writes + ONE confined outward nudge — and is fail-closed by construction (a     ║
+ * ║ tool not registered here cannot be reached):                                                          ║
+ * ║   0. repo_read_file / repo_grep / repo_glob → READ-ONLY reads over ONE project's source tree, scoped  ║
+ * ║      PER CALL by a caller-supplied `projectId` resolved SERVER-SIDE to that project's OWN `repoPath`   ║
+ * ║      (never another project's root — reuses `registerScopedRepoReadTools`, mcp/repo-read.ts, the SAME  ║
+ * ║      confinement gate + bound constants as the dev Auditor's fixed-root repo_* tools). An unknown      ║
+ * ║      projectId or a project with no readable repo root is a clean {error}, never a crash or an         ║
+ * ║      arbitrary-host-file read. Pure reads: no write, no exec/shell, no git mutation.                   ║
  * ║   1. audit_suggest_improvement   → a board card onto the USER'S OWN reserved "Platform" home         ║
  * ║      `inbox` (target resolved SERVER-SIDE; the caller passes NO projectId — NEVER the dev "Loom       ║
  * ║      Platform" home, NEVER an arbitrary id). A suggestion to the user, never an auto-applied change.  ║
@@ -74,6 +82,19 @@ export class WorkspaceAuditMcpRouter {
     // --- cross-project reads (the audit input). The SHARED helper — byte-identical to the dev Auditor's
     // list_sessions/transcript_read (mcp/transcript-read.ts), reused, not copy-pasted. ---
     registerTranscriptReadTools(server, db);
+
+    // --- READ: own-project source (repo_read_file / repo_grep / repo_glob), scoped PER CALL by a
+    // caller-supplied projectId resolved SERVER-SIDE to that project's OWN repoPath — never another
+    // project's root. Reuses the dev Auditor's confinement gate + bound constants (mcp/repo-read.ts; see
+    // the trust-boundary banner above, item 0) rather than hand-rolling a new path guard. ---
+    registerScopedRepoReadTools(server, (projectId): ScopedRootResolution => {
+      const project = db.getProject(projectId);
+      if (!project) return { error: "unknown project" };
+      if (!project.repoPath || project.repoPath.trim() === "") {
+        return { error: "project has no repoPath to read source from (e.g. a repo-less vault-only project)" };
+      }
+      return { root: project.repoPath };
+    });
 
     // --- READ: the CURRENT agent prompt the auditor is critiquing. Reading the live startupPrompt (instead
     // of reverse-engineering it from transcripts) lets a suggestion verify against what the agent ACTUALLY
