@@ -832,12 +832,14 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_recycle",
       {
-        description: "Recycle a worker whose context has grown too large: closes it and spawns a FRESH worker in the SAME git worktree (code state kept) seeded with your handoff summary (intent kept). Same task + branch; gen+1. Read worker_transcript first and write the summary.",
-        inputSchema: { workerSessionId: z.string(), handoffSummary: z.string() },
+        description: "Recycle a worker whose context has grown too large: closes it and spawns a FRESH worker in the SAME git worktree (code state kept) seeded with your handoff summary (intent kept). Same task + branch; gen+1. Read worker_transcript first and write the summary. `handoffSummary` is the canonical param; `continuationPrompt` (the sibling recycle_me tool's name for the same concept) is accepted as an ALIAS — pass either one (if both are given, handoffSummary wins).",
+        inputSchema: { workerSessionId: z.string(), handoffSummary: z.string().optional(), continuationPrompt: z.string().optional() },
       },
-      async ({ workerSessionId, handoffSummary }) => {
+      async ({ workerSessionId, handoffSummary, continuationPrompt }) => {
+        const summary = handoffSummary ?? continuationPrompt;
+        if (!summary) return ok({ error: "handoffSummary (or continuationPrompt) is required" });
         try {
-          const fresh = await sessions.recycleWorker(managerSessionId, workerSessionId, handoffSummary);
+          const fresh = await sessions.recycleWorker(managerSessionId, workerSessionId, summary);
           return ok({ newWorkerSessionId: fresh.id, gen: fresh.gen, recycledFrom: fresh.recycledFrom });
         } catch (e) {
           return ok({ error: (e as Error).message });
@@ -956,12 +958,16 @@ export class OrchestrationMcpRouter {
           "(log progress to the vault) and take stock, THEN call this with a self-contained continuationPrompt " +
           "for your successor — current goal, what's done, your in-flight workers and their tasks/status, the " +
           "next steps, and key decisions. Loom boots a fresh manager seeded with this agent's warm-up + your " +
-          "continuationPrompt, re-parents your live workers onto it, and then closes you.",
-        inputSchema: { continuationPrompt: z.string() },
+          "continuationPrompt, re-parents your live workers onto it, and then closes you. `continuationPrompt` " +
+          "is the canonical param; `handoffSummary` (the sibling worker_recycle tool's name for the same " +
+          "concept) is accepted as an ALIAS — pass either one (if both are given, continuationPrompt wins).",
+        inputSchema: { continuationPrompt: z.string().optional(), handoffSummary: z.string().optional() },
       },
-      async ({ continuationPrompt }) => {
+      async ({ continuationPrompt, handoffSummary }) => {
+        const prompt = continuationPrompt ?? handoffSummary;
+        if (!prompt) return ok({ error: "continuationPrompt (or handoffSummary) is required" });
         try {
-          const fresh = await sessions.recycleManager(managerSessionId, continuationPrompt);
+          const fresh = await sessions.recycleManager(managerSessionId, prompt);
           return ok({ newManagerSessionId: fresh.id, gen: fresh.gen });
         } catch (e) {
           return ok({ error: (e as Error).message });

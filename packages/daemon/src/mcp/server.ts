@@ -71,10 +71,14 @@ export class TaskMcpRouter {
     server.registerTool(
       "tasks_get",
       {
-        description: "Read ONE full task (title + body) by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get).",
-        inputSchema: { id: z.string() },
+        description: "Read ONE full task (title + body) by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool uses) — pass either one (if both, id wins). An optional `projectId` is tolerated but ignored — this tool is already scoped to the caller's own project.",
+        inputSchema: { id: z.string().optional(), taskId: z.string().optional(), projectId: z.string().optional() },
       },
-      async ({ id }) => ok(getProjectTask(db, projectId, id)),
+      async ({ id, taskId }) => {
+        const resolvedId = id ?? taskId;
+        if (!resolvedId) return ok({ error: "id (or taskId) is required" });
+        return ok(getProjectTask(db, projectId, resolvedId));
+      },
     );
     server.registerTool(
       "tasks_create",
