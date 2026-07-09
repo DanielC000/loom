@@ -80,6 +80,33 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
   cleanupEnv(e);
 }
 
+// minutes/reason aliases (card: wake_me should accept the intuitive minutes/reason args).
+{
+  const e = makeEnv();
+  const now = new Date();
+  const threw = (fn) => { try { fn(); return false; } catch { return true; } };
+
+  const viaMinutes = e.wakes.schedule(e.sessId, { minutes: 2, reason: "check the render" }, now);
+  const viaDelay = e.wakes.schedule(e.sessId, { delaySeconds: 120, note: "check the render" }, now);
+  check("minutes: schedules the SAME fire instant as the equivalent delaySeconds", viaMinutes.wakeAt === viaDelay.wakeAt);
+  e.wakes.cancel(e.sessId, viaMinutes.wakeId);
+  e.wakes.cancel(e.sessId, viaDelay.wakeId);
+
+  const viaReason = e.wakes.schedule(e.sessId, { delaySeconds: 60, reason: "reason maps to note" }, now);
+  check("reason: maps onto note", e.db.getWake(viaReason.wakeId).note === "reason maps to note");
+  e.wakes.cancel(e.sessId, viaReason.wakeId);
+
+  const both = e.wakes.schedule(e.sessId, { delaySeconds: 90, minutes: 2, note: "explicit wins" }, now);
+  check("minutes+delaySeconds together: the explicit delaySeconds wins", new Date(both.wakeAt).getTime() === now.getTime() + 90_000);
+  e.wakes.cancel(e.sessId, both.wakeId);
+
+  check("existing {delaySeconds, note} path still works unchanged", e.wakes.schedule(e.sessId, { delaySeconds: 60, note: "still works" }, now).wakeId !== undefined);
+
+  check("minutes + wakeAt together is rejected (still exactly-one)", threw(() => e.wakes.schedule(e.sessId, { minutes: 2, wakeAt: now.toISOString(), note: "x" }, now)));
+  check("neither note nor reason is rejected", threw(() => e.wakes.schedule(e.sessId, { delaySeconds: 60 }, now)));
+  cleanupEnv(e);
+}
+
 // Cap: an 11th pending wake is rejected (max 10/session).
 {
   const e = makeEnv();

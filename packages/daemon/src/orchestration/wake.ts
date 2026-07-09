@@ -61,8 +61,14 @@ const MAX_PENDING_PER_SESSION = 10;
 
 export interface ScheduleWakeInput {
   delaySeconds?: number;
+  /** Sugar for delaySeconds (×60) — the more intuitive unit for a self-scheduled wake. If BOTH
+   *  delaySeconds and minutes are given, the explicit delaySeconds wins. */
+  minutes?: number;
   wakeAt?: string;
-  note: string;
+  note?: string;
+  /** Alias for `note` (matches the `handoffSummary`/`continuationPrompt` and `tasks_get`
+   *  `id`/`taskId` sibling-alias pattern). If both are given, `note` wins. */
+  reason?: string;
 }
 
 /**
@@ -80,23 +86,26 @@ export class WakeService {
   constructor(private deps: WakeServiceDeps) {}
 
   /**
-   * Schedule a one-shot wake. Validates: exactly one of delaySeconds/wakeAt; a non-empty note; the
-   * [floor, horizon] window; the per-session cap. Throws (surfaced as `{ error }` by the MCP tool)
-   * on any violation — no row is written. Returns the new wake's id + resolved fire instant.
+   * Schedule a one-shot wake. Validates: exactly one of {delaySeconds/minutes}/wakeAt; a non-empty
+   * note (or its `reason` alias); the [floor, horizon] window; the per-session cap. Throws (surfaced
+   * as `{ error }` by the MCP tool) on any violation — no row is written. Returns the new wake's id +
+   * resolved fire instant.
    */
   schedule(sessionId: string, input: ScheduleWakeInput, now: Date = new Date()): { wakeId: string; wakeAt: string } {
     if (!this.deps.db.getSession(sessionId)) throw new Error("session not found");
-    const note = (input.note ?? "").trim();
-    if (!note) throw new Error("note is required (it's the message you'll be re-prompted with on wake)");
+    const note = (input.note ?? input.reason ?? "").trim();
+    if (!note) throw new Error("note (or reason) is required (it's the message you'll be re-prompted with on wake)");
 
-    const hasDelay = input.delaySeconds !== undefined;
+    const hasDelaySeconds = input.delaySeconds !== undefined;
+    const hasMinutes = input.minutes !== undefined;
     const hasAt = input.wakeAt !== undefined;
-    if (hasDelay === hasAt) throw new Error("provide exactly one of delaySeconds or wakeAt");
+    if ((hasDelaySeconds || hasMinutes) === hasAt) throw new Error("provide exactly one of delaySeconds/minutes or wakeAt");
 
     let wakeAtMs: number;
-    if (hasDelay) {
-      const d = input.delaySeconds!;
-      if (!Number.isFinite(d)) throw new Error("delaySeconds must be a number");
+    if (hasDelaySeconds || hasMinutes) {
+      // Explicit delaySeconds wins over the minutes sugar when both are given.
+      const d = hasDelaySeconds ? input.delaySeconds! : input.minutes! * 60;
+      if (!Number.isFinite(d)) throw new Error("delaySeconds/minutes must be a number");
       wakeAtMs = now.getTime() + d * 1000;
     } else {
       wakeAtMs = new Date(input.wakeAt!).getTime();

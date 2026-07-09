@@ -111,16 +111,18 @@ export class TaskMcpRouter {
       "wake_me",
       {
         description:
-          "Schedule a one-shot wake-up: end your turn and go idle; you'll be re-prompted with `note` when it fires (re-submits as a fresh turn; auto-resumed if stopped). Give exactly one of delaySeconds or wakeAt (ISO). Use to WAIT for a known external process/condition — a build, render, deploy — instead of busy-polling. Min 30s, max 24h.",
+          "Provide exactly one of `delaySeconds`/`minutes` or `wakeAt` (ISO). Schedule a one-shot wake-up: end your turn and go idle; you'll be re-prompted with `note` (or its alias `reason`) when it fires (re-submits as a fresh turn; auto-resumed if stopped). `minutes` is sugar for delaySeconds (×60) — if both are given, delaySeconds (the explicit form) wins. Use to WAIT for a known external process/condition — a build, render, deploy — instead of busy-polling. Min 30s, max 24h.",
         inputSchema: {
           delaySeconds: z.number().optional(),
+          minutes: z.number().optional(),
           wakeAt: z.string().optional(),
-          note: z.string(),
+          note: z.string().optional(),
+          reason: z.string().optional(),
         },
       },
-      async ({ delaySeconds, wakeAt, note }) => {
+      async ({ delaySeconds, minutes, wakeAt, note, reason }) => {
         try {
-          return ok(wakes.schedule(sessionId, { delaySeconds, wakeAt, note }));
+          return ok(wakes.schedule(sessionId, { delaySeconds, minutes, wakeAt, note, reason }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

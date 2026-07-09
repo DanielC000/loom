@@ -65,7 +65,7 @@ export const ASSISTANT_BASE_BRIEF =
   "\n" +
   "## Reminders\n" +
   "You can set your OWN ONE-SHOT reminders with `wake_me` — give a `note` (what to re-prompt yourself " +
-  "with) plus exactly one of `delaySeconds` or `wakeAt` (ISO); min 30s, max 24h. `wake_list` shows your " +
+  "with) plus exactly one of `delaySeconds`/`minutes` or `wakeAt` (ISO); min 30s, max 24h. `wake_list` shows your " +
   "pending reminders, `wake_cancel(wakeId)` cancels one. When a reminder fires it arrives as a " +
   "`[loom:reminder]` turn back on the SAME chat channel you set it from (you cannot target a different " +
   "one) — that is a nudge YOU intentionally set for the user, the OPPOSITE of the silent `[loom:memory]` " +
