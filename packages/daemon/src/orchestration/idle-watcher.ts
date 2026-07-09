@@ -327,6 +327,13 @@ export class IdleWatcher {
     const { db, pty, control } = this.deps;
     for (const w of db.listLiveWorkers()) {
       if (w.busy) continue;                                    // BusyWorkerWatcher's concern
+      // TASKLESS intentionally skipped here (CR-flagged asymmetry, card 2514e6e1-follow-up): this whole
+      // periodic re-nudge reconciles via board-column state (the "already reported/merged" pre-filter
+      // just below, and notifyIdleWorker's own classifyIdleWorker underneath) — meaningless for a worker
+      // with no card. Broken-spawn coverage for a taskless worker fires ONCE, on the busy→false edge, via
+      // SessionService.notifyManagerOfIdleWorker directly (index.ts's onBusy hook, not this periodic
+      // tick) — the manager that spawned a taskless worker is expected to actively await + worker_stop it
+      // directly rather than lean on this periodic safety net.
       if (!w.parentSessionId || !w.taskId) continue;            // no owning manager/task to nudge
 
       const project = db.getProject(w.projectId);

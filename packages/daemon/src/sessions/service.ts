@@ -2217,7 +2217,7 @@ export class SessionService {
    */
   async spawnWorker(
     managerSessionId: string,
-    opts: { taskId: string; agentId?: string; kickoffPrompt: string },
+    opts: { taskId?: string; agentId?: string; kickoffPrompt: string },
   ): Promise<Session> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
@@ -2258,45 +2258,61 @@ export class SessionService {
     // Validate the taskId BEFORE any side effect (worktree/session/branch) — mirror the agentId existence
     // guard above. A truncated id WITH a trailing space + a placeholder kickoff once SUCCEEDED, binding a
     // live worker to a bogus task string (a zombie) while the real task stayed in backlog. Trim first (so a
-    // pasted id with stray whitespace normalizes), reject an empty/whitespace-only or whitespace-containing
-    // id, then require the id to resolve to a REAL, NON-terminal task IN THIS PROJECT — a truncated/malformed/
-    // unknown id won't resolve and is rejected with the same "does not resolve" shape the agentId guard uses.
-    // A bad id must create NOTHING.
+    // pasted id with stray whitespace normalizes), reject a whitespace-containing id, then require the id to
+    // resolve to a REAL, NON-terminal task IN THIS PROJECT — a truncated/malformed/unknown id won't resolve
+    // and is rejected with the same "does not resolve" shape the agentId guard uses. A bad id must create
+    // NOTHING.
     // card 3e9e1d9f: taskId accepts EITHER a full id or an unambiguous 8-char id-PREFIX (resolveIdPrefix) —
     // the same UX the agentId path above already has. An exact match still wins first (the common case
     // avoids materializing the project's task list); a miss falls back to prefix-scanning THIS manager's
     // OWN project's tasks (db.listTasks(manager.projectId)), so a cross-project id can never match. An
     // ambiguous prefix names the candidate ids and spawns nothing, mirroring the agentId ambiguity error.
+    //
+    // TASKLESS SPAWN (card 2514e6e1 / 72ee0bcf): an EMPTY/omitted taskId is no longer rejected — it opts
+    // INTO a taskless worker instead (an ad-hoc spike/no-commit-review spawn with no board card to
+    // falsify or hijack). `taskId` stays `null` for the rest of this method in that case, which every
+    // downstream taskId-gated step below (terminal/held/live-holder guards, the board move, the event's
+    // taskId) already treats as "no task" — this is the ONLY branch point; nothing downstream needs its
+    // own taskless special-case beyond the `if (taskId)` guards already in place.
     const taskRef = (opts.taskId ?? "").trim();
-    if (!taskRef || /\s/.test(taskRef)) throw new Error(`worker_spawn taskId '${opts.taskId}' is not a valid task id`);
-    const exactTask = this.db.getTask(taskRef);
-    let task = exactTask && exactTask.projectId === manager.projectId ? exactTask : undefined;
-    if (!task) {
-      const resolvedTask = resolveIdPrefix(this.db.listTasks(manager.projectId), taskRef);
-      if (resolvedTask.kind === "ambiguous") {
-        throw new Error(`worker_spawn taskId '${taskRef}' is an ambiguous id-prefix — it matches ${resolvedTask.ids.join(", ")}; pass more characters or the full id`);
+    let taskId: string | null = null;
+    if (taskRef) {
+      if (/\s/.test(taskRef)) throw new Error(`worker_spawn taskId '${opts.taskId}' is not a valid task id`);
+      const exactTask = this.db.getTask(taskRef);
+      let task = exactTask && exactTask.projectId === manager.projectId ? exactTask : undefined;
+      if (!task) {
+        const resolvedTask = resolveIdPrefix(this.db.listTasks(manager.projectId), taskRef);
+        if (resolvedTask.kind === "ambiguous") {
+          throw new Error(`worker_spawn taskId '${taskRef}' is an ambiguous id-prefix — it matches ${resolvedTask.ids.join(", ")}; pass more characters or the full id`);
+        }
+        if (resolvedTask.kind === "found") task = resolvedTask.record;
       }
-      if (resolvedTask.kind === "found") task = resolvedTask.record;
-    }
-    if (!task) throw new Error(`worker_spawn taskId '${taskRef}' does not resolve to an existing task in this project`);
-    const taskId = task.id;
-    const terminalKey = columnKeyForRole(config.kanbanColumns, "terminal");
-    if (task.columnKey === terminalKey) throw new Error(`worker_spawn taskId '${taskId}' is in the terminal column ('${task.columnKey}') — pick a non-terminal task`);
-    // OWNER-BRAKE (structural): refuse to dispatch onto a HELD card — the owner's SOLE brake, a per-card
-    // flag checked in ANY column (Board Hold Model redesign; retires the column-based `blocked`/`humanHold`
-    // lane this used to key off). A one-line sibling of the terminal rail, BEFORE any worktree/pty side effect.
-    if (task.held === true) {
-      throw new Error(`worker_spawn taskId '${taskId}' is HELD (owner brake) — release the hold before dispatching a worker`);
-    }
-    // DATA-LOSS guard (structural): refuse a SECOND live worker on a task already held by a live one. The
-    // worktree path is DETERMINISTIC per task and createWorktree REUSES an existing dir, recutting a 0-ahead
-    // branch with `reset --hard mainSha` — designed for re-spawn after a REJECTED merge (a DEAD worker). With a
-    // LIVE first worker mid-edit, a second spawn would share its checkout and the reset --hard would silently
-    // DESTROY the first's uncommitted work. The lookup is BOARD-WIDE (not the manager-scoped listWorkers — a
-    // sibling manager's worker on the same task must be visible), and runs BEFORE any worktree/pty side effect.
-    const liveHolder = this.db.liveSessionIdForTask(taskId);
-    if (liveHolder) {
-      throw new Error(`worker_spawn taskId '${taskId}' already has a live worker (${liveHolder}); stop or recycle it before re-spawning`);
+      if (!task) throw new Error(`worker_spawn taskId '${taskRef}' does not resolve to an existing task in this project`);
+      taskId = task.id;
+      const terminalKey = columnKeyForRole(config.kanbanColumns, "terminal");
+      if (task.columnKey === terminalKey) throw new Error(`worker_spawn taskId '${taskId}' is in the terminal column ('${task.columnKey}') — pick a non-terminal task`);
+      // OWNER-BRAKE (structural): refuse to dispatch onto a HELD card — the owner's SOLE brake, a per-card
+      // flag checked in ANY column (Board Hold Model redesign; retires the column-based `blocked`/`humanHold`
+      // lane this used to key off). A one-line sibling of the terminal rail, BEFORE any worktree/pty side effect.
+      if (task.held === true) {
+        throw new Error(`worker_spawn taskId '${taskId}' is HELD (owner brake) — release the hold before dispatching a worker`);
+      }
+      // DATA-LOSS guard (structural): refuse a SECOND live worker on a task already held by a live one. The
+      // worktree path is DETERMINISTIC per task and createWorktree REUSES an existing dir, recutting a 0-ahead
+      // branch with `reset --hard mainSha` — designed for re-spawn after a REJECTED merge (a DEAD worker). With a
+      // LIVE first worker mid-edit, a second spawn would share its checkout and the reset --hard would silently
+      // DESTROY the first's uncommitted work. The lookup is BOARD-WIDE (not the manager-scoped listWorkers — a
+      // sibling manager's worker on the same task must be visible), and runs BEFORE any worktree/pty side effect.
+      // ONLY reached for a REAL taskId — a taskless spawn (this whole `if` skipped) never competes for this
+      // guard at all, so it can never be used to bypass it for a committing worker (the guard stays fully
+      // intact for every normal tasked spawn). A read-only reviewer that wants to look at a live author's
+      // branch spawns TASKLESS instead (its kickoff names the author's branch; it gets its OWN fresh worktree
+      // below, so it can never share/clobber the author's checkout) rather than attaching to the author's
+      // taskId, which is what used to force minting a throwaway vehicle card.
+      const liveHolder = this.db.liveSessionIdForTask(taskId);
+      if (liveHolder) {
+        throw new Error(`worker_spawn taskId '${taskId}' already has a live worker (${liveHolder}); stop or recycle it before re-spawning`);
+      }
     }
     // Resolve THAT agent's profile for its browser-automation opt-in + skill subset — a manager spawns a
     // QA worker by pointing it at a browserTesting profile (e.g. the bundled "QA Tester"). Explicit role is
@@ -2364,8 +2380,18 @@ export class SessionService {
     //
     // We claim BEFORE createWorktree, so the LOSER never creates an orphan worktree/branch at all — nothing to
     // clean up. Released in the finally once the row is live (the liveHolder guard then owns exclusion) or on failure.
-    if (this.inFlightSpawnTaskIds.has(taskId)) {
-      throw new Error(`worker_spawn taskId '${taskId}' already has a spawn in flight; wait for it to finish before re-spawning`);
+    //
+    // TASKLESS CLAIM KEY: a taskless spawn (taskId null) has no real task to claim mutual exclusion over —
+    // and shouldn't: distinct taskless spawns (two spikes, or a CR reviewing branch A while another reviews
+    // branch B) must be free to run CONCURRENTLY, each in its own worktree, never serialized against each
+    // other the way two spawns racing for the SAME task must be. So a taskless spawn claims a FRESH
+    // per-call id instead of `taskId` — `.has()` on a fresh randomUUID() is always false (never falsely
+    // rejects), while `.add()`/`.size` still reserve it for the concurrency-cap admit below, so an in-flight
+    // taskless spawn still counts against the cap exactly like a tasked one. A real taskId's claimKey is
+    // just `taskId` itself — BYTE-IDENTICAL to the pre-taskless-spawn behavior for every tasked call.
+    const claimKey = taskId ?? randomUUID();
+    if (this.inFlightSpawnTaskIds.has(claimKey)) {
+      throw new Error(`worker_spawn taskId '${claimKey}' already has a spawn in flight; wait for it to finish before re-spawning`);
     }
     // ATOMIC concurrency-cap admit — co-located with the per-taskId claim so the cap decision and the
     // reservation share ONE no-await window (same TOCTOU class as the per-taskId race above, on the cap axis).
@@ -2383,11 +2409,17 @@ export class SessionService {
     const liveWorkers = this.db.listWorkers(managerSessionId).filter((w) => w.processState === "live").length;
     const cap = config.orchestration.maxConcurrentWorkers;
     if (liveWorkers + this.inFlightSpawnTaskIds.size >= cap) throw new Error(`concurrency cap reached (${cap})`);
-    this.inFlightSpawnTaskIds.add(taskId);
+    this.inFlightSpawnTaskIds.add(claimKey);
     try {
       // A noCommit/read-only rig (Code Reviewer, Docs & Vault, …) never runs a build gate, so skip the
       // monorepo BUILD phase for it — install still runs (it still needs node_modules to run/read).
-      const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, taskId, { timeoutMs: this.provisionMs, runBuild: !noCommit });
+      // WORKTREE KEY: a tasked spawn keys its (deterministic, reused-on-re-spawn) worktree/branch off
+      // `taskId` exactly as before. A taskless spawn has no stable id to key off, and must NEVER reuse
+      // another spawn's worktree — so it keys off `claimKey` (this call's own fresh randomUUID()),
+      // guaranteeing its own ISOLATED worktree/branch that can never collide with a task's worktree or
+      // with another taskless spawn's (this is also how a read-only reviewer avoids ever sharing the
+      // author's worktree — see the guard note above).
+      const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit });
 
       const now = new Date().toISOString();
       const worker: Session = {
@@ -2444,18 +2476,22 @@ export class SessionService {
       });
       // Move the task into the `active` lane (role-resolved off the manager-project config, not the
       // hardcoded "in_progress" key). If the board has no active lane, leave the card where it is rather
-      // than inventing a key — the invariant: a move never points a task at a non-existent column.
-      const activeKey = columnKeyForRole(config.kanbanColumns, "active");
-      if (activeKey) this.db.updateTask(taskId, { columnKey: activeKey });
+      // than inventing a key — the invariant: a move never points a task at a non-existent column. A
+      // taskless spawn (taskId null) has no card to move — skip entirely, nothing to leave stale.
+      if (taskId) {
+        const activeKey = columnKeyForRole(config.kanbanColumns, "active");
+        if (activeKey) this.db.updateTask(taskId, { columnKey: activeKey });
+      }
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId, workerSessionId: worker.id, taskId, kind: "spawn_worker",
       });
       return { ...worker, processState: "live" };
     } finally {
-      // Release the per-taskId claim. By here the row is either live (liveHolder now rejects re-spawns) or
-      // the spawn threw before any persistent state — either way the next spawn must be free to proceed.
-      this.inFlightSpawnTaskIds.delete(taskId);
+      // Release the per-taskId (or taskless per-call) claim. By here the row is either live (liveHolder now
+      // rejects re-spawns for a real task) or the spawn threw before any persistent state — either way the
+      // next spawn must be free to proceed.
+      this.inFlightSpawnTaskIds.delete(claimKey);
     }
   }
 
@@ -2469,12 +2505,22 @@ export class SessionService {
    * `spawnWorker`'s own mutex still prevents a double-spawn (the second gets that mutex's existing
    * "already has a spawn in flight" error, unchanged) — no correctness regression, only a narrower
    * dedup-by-string-identity than a full task-id resolution would give.
+   *
+   * TASKLESS SPAWN (card 2514e6e1): an empty/omitted taskId gets a FRESH per-call key
+   * (`spawn:taskless:<uuid>`) instead of the degenerate `spawn:` every taskless call would otherwise
+   * share — two DISTINCT taskless spawns (two spikes, or two read-only reviewers on two different
+   * author branches) must never attach to each other's in-flight op. The cost: a client-timeout retry of
+   * a taskless spawn can't dedupe against its own prior attempt (no stable identity to key off without a
+   * real taskId) and may start a second taskless worker instead of attaching — a strictly lesser failure
+   * than the alternative (unrelated taskless spawns colliding), and one the manager can resolve with an
+   * ordinary worker_stop. A tasked spawn's key is BYTE-IDENTICAL to before.
    */
   async spawnWorkerTracked(
     managerSessionId: string,
-    opts: { taskId: string; agentId?: string; kickoffPrompt: string },
+    opts: { taskId?: string; agentId?: string; kickoffPrompt: string },
   ): Promise<AttachResult<Session>> {
-    const key = `spawn:${(opts.taskId ?? "").trim()}`;
+    const taskRef = (opts.taskId ?? "").trim();
+    const key = taskRef ? `spawn:${taskRef}` : `spawn:taskless:${randomUUID()}`;
     return this.pendingOps.attach<Session>(
       key, "spawn", managerSessionId, SYNC_ATTACH_BUDGET_MS,
       () => this.spawnWorker(managerSessionId, opts),
@@ -2489,9 +2535,14 @@ export class SessionService {
 
   /** Read-only pending-spawn listing for worker_list's placeholder rows (card fb8df559 Part 1) — a
    *  pending spawn has no worker row yet (it's inserted only once createWorktree resolves), so it's
-   *  surfaced by manager rather than hung off a per-worker `peek()`. */
-  listPendingSpawns(managerSessionId: string): Array<PendingOpView & { taskId: string }> {
-    return this.pendingOps.listByManager(managerSessionId, "spawn").map((op) => ({ ...op, taskId: op.key.slice("spawn:".length) }));
+   *  surfaced by manager rather than hung off a per-worker `peek()`. A taskless spawn's key
+   *  (`spawn:taskless:<uuid>`, see spawnWorkerTracked) decodes to `taskId: null` here — never the raw
+   *  synthetic uuid, which is an internal dedup token, not a real task id. */
+  listPendingSpawns(managerSessionId: string): Array<PendingOpView & { taskId: string | null }> {
+    return this.pendingOps.listByManager(managerSessionId, "spawn").map((op) => {
+      const raw = op.key.slice("spawn:".length);
+      return { ...op, taskId: raw.startsWith("taskless:") ? null : raw };
+    });
   }
 
   /** Stop one of a manager's workers (parent-scoped). Worktree is RETAINED (merge/recycle own it). */
@@ -3506,6 +3557,11 @@ export class SessionService {
   private classifyIdleWorker(workerSessionId: string):
     | { kind: "not-evaluable" | "not-stranded" | "broken-spawn" | "stranded" }
     | { kind: "parked-ack"; status: string } {
+    // TASKLESS is intentionally out of scope for THIS classifier (CR-flagged asymmetry, card 2514e6e1-
+    // follow-up): every kind below `broken-spawn` reconciles via BOARD-COLUMN state (a task's active/
+    // review/parked lane) — meaningless for a worker with no card. A taskless worker's OWN broken-spawn
+    // coverage (the one kind here that needs no board state at all) is handled directly in
+    // notifyManagerOfIdleWorker instead, WITHOUT routing through this classifier — see its comment.
     const w = this.db.getSession(workerSessionId);
     if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return { kind: "not-evaluable" };
     if (this.pty.getPendingEntries(workerSessionId).length > 0) return { kind: "not-evaluable" }; // direction queued, about to drain
@@ -3554,16 +3610,38 @@ export class SessionService {
    * classifyIdleWorker and pushes the matching [loom:worker-idle] (or [loom:worker-spawn-broken]) nudge
    * to its manager. No-op for a non-strand (already reported/merged, rate-limited, queued report, or
    * legitimately parked awaiting an ack).
+   *
+   * TASKLESS BROKEN-SPAWN (CR-flagged asymmetry on card 2514e6e1's taskless worker_spawn): a taskless
+   * worker (an ad-hoc spike, or a read-only Code Reviewer with no vehicle card) has no board card for
+   * classifyIdleWorker's column-based reconciliation (parked-ack/stranded/queued-report all need a task's
+   * lane) — that classifier stays entry-gated on taskId and out of scope here (see its own comment). But
+   * "did the engine ever start a turn at all" needs no board state, and is exactly as safety-critical for
+   * a taskless worker as a tasked one: before this, a taskless worker whose spawn kickoff silently never
+   * ran got NO nudge whatsoever — a real safety-net regression versus the pre-taskless world, where every
+   * worker carried a vehicle-card taskId and so was covered by the branch below. Handled directly here,
+   * BEFORE delegating to classifyIdleWorker, with the SAME pending-direction race guard that classifier
+   * applies (card 6101d7f7) and the busy-worker-watcher.ts `w.taskId ? ... : ""` taskId-optional message
+   * shape. Every OTHER idle-worker signal is intentionally NOT extended to taskless: the manager that
+   * spawned it is expected to actively await + worker_stop it directly, not rely on this board-driven
+   * safety net for anything beyond "did it even start."
    */
   notifyManagerOfIdleWorker(workerSessionId: string): void {
     const w = this.db.getSession(workerSessionId);
-    if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return;
+    if (!w || w.role !== "worker" || !w.parentSessionId) return;
+
+    const brokenSpawnMsg = `[loom:worker-spawn-broken] worker ${workerSessionId}${w.taskId ? ` (task ${w.taskId})` : ""} went idle WITHOUT ever starting a turn — its spawn kickoff never ran (no engine session was ever established). This is NOT a benign idle park; it will not resolve on its own. Re-drive it: worker_message it with the task direction, or worker_recycle/re-spawn if it stays stuck.`;
+
+    if (!w.taskId) {
+      if (this.pty.getPendingEntries(workerSessionId).length > 0) return; // direction queued, about to drain
+      if (!w.engineSessionId) { try { this.pty.enqueueStdin(w.parentSessionId, brokenSpawnMsg); } catch { /* manager not live */ } }
+      return; // nothing else to classify without a task
+    }
+
     const cls = this.classifyIdleWorker(workerSessionId);
     if (cls.kind === "not-evaluable" || cls.kind === "not-stranded") return;
 
     if (cls.kind === "broken-spawn") {
-      const msg = `[loom:worker-spawn-broken] worker ${workerSessionId} (task ${w.taskId}) went idle WITHOUT ever starting a turn — its spawn kickoff never ran (no engine session was ever established). This is NOT a benign idle park; it will not resolve on its own. Re-drive it: worker_message it with the task direction, or worker_recycle/re-spawn if it stays stuck.`;
-      try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
+      try { this.pty.enqueueStdin(w.parentSessionId, brokenSpawnMsg); } catch { /* manager not live */ }
       return;
     }
 
@@ -3604,6 +3682,13 @@ export class SessionService {
   notifyManagerOfExitedWorker(workerSessionId: string, intended: boolean): void {
     if (intended) return; // a deliberate Loom stop() (worker_stop / recycle / merge-stop) — not a strand
     const w = this.db.getSession(workerSessionId);
+    // TASKLESS intentionally skipped here (CR-flagged asymmetry, card 2514e6e1-follow-up): this whole
+    // guard's "still worth a nudge" test is "the task never left the active lane" — meaningless for a
+    // worker with no card. Unlike the broken-spawn nudge above, an EXITED taskless worker isn't a distinct
+    // hazard worth its own signal: the manager that spawned it is expected to actively await its report
+    // and worker_stop it directly (worker_list already shows it as no-longer-live), and any taskless
+    // commits worth recovering land the same way a tasked worker's do (worker_merge_confirm doesn't
+    // require a task) — so there's no silent, unrecoverable loss this watchdog needs to catch here.
     if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return;
     if (this.db.hasSuccessor(workerSessionId)) return; // recycled/superseded — its successor owns the task
     const task = this.db.getTask(w.taskId);

@@ -13,7 +13,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Proves the DoD points:
 //   (1) a truncated taskId WITH a trailing space is REJECTED (the exact repro) — no worktree/session;
 //   (2) a malformed/unknown taskId is REJECTED;
-//   (3) an empty / whitespace-only taskId is REJECTED;
+//   (3) an empty / whitespace-only taskId is a TASKLESS spawn (card 2514e6e1) — NOT rejected. Trim-to-empty
+//       is treated the same as an omitted taskId (both mean "no task"), so this now SPAWNS a taskless
+//       worker (own worktree, taskId null, no card touched) instead of erroring — see
+//       worker-spawn-taskless.mjs for the dedicated taskless-path coverage.
 //   (4) a taskId that exists but belongs to ANOTHER project is REJECTED (project-scoped);
 //   (5) a terminal (done-lane) taskId is REJECTED — pick a non-terminal task;
 //   (6) a VALID non-terminal taskId still SPAWNS (binds the worker, moves the card, creates the worktree).
@@ -58,8 +61,11 @@ execSync(`git init -q && git add . && git -c user.email=ws@loom -c user.name=ws 
 
 const now = new Date().toISOString();
 const db = new Db();
-// Two projects on default config (kanbanColumns: backlog…done; terminal role → "done").
-db.insertProject({ id: "pP", name: "P", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+// Two projects (kanbanColumns: backlog…done; terminal role → "done"). pP's cap is raised above the
+// default (3): this file now spawns FOUR live workers on pP across its scenarios — the two NEW taskless
+// spawns from (3)/(3') on top of the pre-existing (6)/(trim) tasked ones — none of which are stopped
+// mid-test, so the default cap would spuriously reject a later legitimate spawn.
+db.insertProject({ id: "pP", name: "P", repoPath: repo, vaultPath: repo, config: { orchestration: { maxConcurrentWorkers: 6 } }, createdAt: now, archivedAt: null });
 db.insertProject({ id: "pOther", name: "Other", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
 // A plain (profile-less) worker agent in pP — role resolves null ⇒ allowed as a worker.
 db.insertAgent({ id: "agentMgr", projectId: "pP", name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
@@ -104,11 +110,6 @@ try {
   // (2) a malformed / unknown id (well-formed-looking but no such task).
   await rejects("(2) malformed/unknown taskId is rejected",
     () => svc.spawnWorker("mgr1", { taskId: randomUUID(), agentId: "agentDev", kickoffPrompt: "GO" }), "does not resolve");
-  // (3) empty / whitespace-only.
-  await rejects("(3) whitespace-only taskId is rejected",
-    () => svc.spawnWorker("mgr1", { taskId: "   ", agentId: "agentDev", kickoffPrompt: "GO" }), "not a valid task id");
-  await rejects("(3') empty taskId is rejected",
-    () => svc.spawnWorker("mgr1", { taskId: "", agentId: "agentDev", kickoffPrompt: "GO" }), "not a valid task id");
   // (4) a real task, but in ANOTHER project (project-scoped existence — mirrors agentId's project scoping).
   await rejects("(4) a taskId from another project is rejected",
     () => svc.spawnWorker("mgr1", { taskId: taskOther, agentId: "agentDev", kickoffPrompt: "GO" }), "does not resolve");
@@ -116,11 +117,25 @@ try {
   await rejects("(5) a terminal/done taskId is rejected",
     () => svc.spawnWorker("mgr1", { taskId: taskDone, agentId: "agentDev", kickoffPrompt: "GO" }), "terminal");
 
-  // After every rejection: NO worktree dir was allocated AND NO worker session row was created.
+  // After every GENUINE rejection: NO worktree dir was allocated AND NO worker session row was created.
   check("(side-effects) no worktree dir allocated + no worker session created by any rejected spawn", noSideEffects());
   // The rejected ids never moved a card: the done task is still in `done`, the other-project task untouched.
   check("(side-effects) terminal task stayed in its done lane (a rejected spawn never moved it)",
     db.getTask(taskDone).columnKey === "done");
+
+  // (3) empty / whitespace-only taskId is now a TASKLESS spawn, not a rejection (card 2514e6e1) — trim-to-
+  // empty means the same "no task" as an omitted taskId. Proves it SPAWNS (taskId null, own worktree, no
+  // card touched) rather than throwing; checked AFTER the noSideEffects() assertion above since — unlike
+  // the genuine rejections (1,2,4,5) — a taskless spawn DOES have side effects (its own worktree/session),
+  // just none of them a board-card move. The dedicated worker-spawn-taskless.mjs covers this path in depth.
+  const wsWhitespace = await svc.spawnWorker("mgr1", { taskId: "   ", agentId: "agentDev", kickoffPrompt: "GO" });
+  worktrees.push(wsWhitespace.worktreePath);
+  check("(3) whitespace-only taskId spawns a TASKLESS worker (taskId null, not rejected)",
+    wsWhitespace.role === "worker" && wsWhitespace.taskId === null && !!wsWhitespace.worktreePath && fs.existsSync(wsWhitespace.worktreePath));
+  const wsEmpty = await svc.spawnWorker("mgr1", { taskId: "", agentId: "agentDev", kickoffPrompt: "GO" });
+  worktrees.push(wsEmpty.worktreePath);
+  check("(3') empty taskId spawns a TASKLESS worker (taskId null, not rejected)",
+    wsEmpty.role === "worker" && wsEmpty.taskId === null && wsEmpty.worktreePath !== wsWhitespace.worktreePath);
 
   // ===================== (6) a VALID non-terminal taskId still SPAWNS =====================
   const w = await svc.spawnWorker("mgr1", { taskId: taskGood, agentId: "agentDev", kickoffPrompt: "GO" });
@@ -150,6 +165,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker_spawn validates taskId BEFORE any side effect: a truncated/trailing-space/empty/wrong-project/terminal id is rejected with the agentId-style error and creates NO worktree or session, while a valid non-terminal id still spawns — claude-free, network-free."
+  ? "\n✅ ALL PASS — worker_spawn validates a NON-EMPTY taskId BEFORE any side effect: a truncated/trailing-space/wrong-project/terminal id is rejected with the agentId-style error and creates NO worktree or session; an empty/whitespace-only (or omitted) taskId now spawns a TASKLESS worker instead of erroring (card 2514e6e1); a valid non-terminal id still spawns exactly as before — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

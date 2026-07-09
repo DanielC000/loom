@@ -77,6 +77,14 @@ export function deriveCrashOrphanedWorkers(db: Db, recovered: Session[]): CrashO
       }
     }
     if (w.archivedAt) continue; // already archived pre-crash — not this crash's doing
+    // TASKLESS intentionally excluded here (CR-flagged asymmetry, card 2514e6e1-follow-up): this whole
+    // recovery decision hinges on board-column state (the terminal-lane check below decides "genuinely
+    // finished, never resurrect") — meaningless for a worker with no card. A taskless worker (an ad-hoc
+    // spike, or a read-only reviewer) is expected to be actively awaited by the manager that spawned it,
+    // not auto-resumed across a daemon crash the way a tasked worker's in-flight work is; if it produced
+    // commits worth recovering, they're retained on disk (boot-reconcile's Pass B worktreeHasWork guard —
+    // service.ts, session-agnostic — applies the same to a taskless worker's worktree as a tasked one's)
+    // even though the SESSION itself isn't resurrected.
     if (!w.parentSessionId || !w.taskId) continue;
     if (db.hasSuccessor(w.id)) continue; // recycled/superseded — its successor owns the work
     const manager = db.getSession(w.parentSessionId);
