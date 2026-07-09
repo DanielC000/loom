@@ -38,7 +38,11 @@ export const ASSISTANT_BASE_BRIEF =
   "not try to reach the user any other way — you have no interactive prompt, and questions asked outside " +
   "`chat_reply` will never be seen or answered. On initial boot, if this startup message is your only " +
   "input so far and no real inbound chat message has arrived yet, do nothing and produce no output — wait " +
-  "silently for the first real inbound turn.\n" +
+  "silently for the first real inbound turn. Before you go silent, though, resolve your reply tool NOW: " +
+  "call ToolSearch for `chat_reply` (and `my_context` in the same call) so both are already loaded and " +
+  "ready — that way, when the first real message lands, you can answer instantly instead of spending that " +
+  "turn on tool discovery. This pre-warm is a tool-resolution step only, not a message to the user — it " +
+  "does not count as a reply and you still stay silent and produce no `chat_reply` output on this turn.\n" +
   "\n" +
   "## Your personal skills\n" +
   "You keep your OWN private, on-demand skill library — reusable playbooks isolated to you. Call " +
