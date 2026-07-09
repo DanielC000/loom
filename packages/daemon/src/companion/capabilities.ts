@@ -15,6 +15,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SessionRole } from "@loom/shared";
 import type { Db } from "../db.js";
+import { listProjectTasks, type TaskSummary } from "../mcp/tasks.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -194,9 +195,53 @@ const DECISIONS_RELAY: CompanionCapability = {
   },
 };
 
-/** The full lever registry (Framework §2). `session-status` + `decisions-relay`'s READ half are built —
- *  the sensitive ACT levers (later cards) append here behind their own injection-guard primitives. */
-export const COMPANION_CAPABILITIES: readonly CompanionCapability[] = [SESSION_STATUS, DECISIONS_RELAY];
+/**
+ * `board-reach` READ half (Framework §4) — a read-only `board_list` tool giving the companion
+ * cross-project board visibility over its granted projects' cards. Mirrors SESSION_STATUS/
+ * DECISIONS_RELAY exactly. This card builds ONLY the read tool — the ACT half (create card, move
+ * column, set priority, set held) is a LATER card gated on injection-guard primitives + owner
+ * sign-off: a write path on the most injection-exposed surface in Loom must not ship ahead of its
+ * guard.
+ */
+const BOARD_REACH: CompanionCapability = {
+  slug: "board-reach",
+  supportsMode: ["read", "act"],
+  register(server, ctx, db) {
+    server.registerTool(
+      "board_list",
+      {
+        description:
+          "Read-only view of board cards (done/terminal cards excluded, mirroring tasks_list's default) " +
+          "in your granted project(s): id, title, column, priority, position, last-updated, and which " +
+          "project each card belongs to. Optionally pass `project` (a project id) to narrow to ONE of " +
+          "your granted projects — passing a project you were NOT granted is rejected with an {error}; " +
+          "omitting it returns every granted project's cards.",
+        inputSchema: { project: z.string().optional() },
+      },
+      async ({ project }) => {
+        // Belt-and-suspenders re-check (Framework §2): a `project` selector must be one of THIS grant's
+        // scoped projects — it can only ever NAME a project already granted, never widen scope.
+        if (project !== undefined && !ctx.scope.projectIds.has(project)) {
+          return ok({ error: `project "${project}" is not in your granted scope` });
+        }
+        const targetProjects = project !== undefined ? new Set([project]) : ctx.scope.projectIds;
+        const cards = [...targetProjects].flatMap((pid) => {
+          const projectName = db.getProject(pid)?.name ?? null;
+          return (listProjectTasks(db, pid, { excludeDone: true }) as TaskSummary[]).map((t) => ({
+            id: t.id, title: t.title, columnKey: t.columnKey, priority: t.priority,
+            position: t.position, updatedAt: t.updatedAt, projectId: pid, projectName,
+          }));
+        });
+        return ok({ cards });
+      },
+    );
+  },
+};
+
+/** The full lever registry (Framework §2). `session-status`, `decisions-relay`'s READ half, and
+ *  `board-reach`'s READ half are built — the sensitive ACT levers (later cards) append here behind
+ *  their own injection-guard primitives. */
+export const COMPANION_CAPABILITIES: readonly CompanionCapability[] = [SESSION_STATUS, DECISIONS_RELAY, BOARD_REACH];
 
 /**
  * The single chokepoint (Framework §2): called ONCE per `buildServer`, right after the existing companion
