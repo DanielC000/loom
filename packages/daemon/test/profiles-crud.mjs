@@ -122,11 +122,15 @@ try {
   check("(4) default on a manager-profile agent → role=manager (returned + DB + spawn opts)",
     sAuto.role === "manager" && db.getSession(sAuto.id).role === "manager" && oAuto?.role === "manager");
   check("(4) default layers the profile's allowDelta", oAuto?.permission.allow.includes(PROFILE_ALLOW));
-  check("(4) default injects the AGENT's own prompt (not the profile)", oAuto?.startupPrompt === "AGENT_OWN");
+  // A role="manager" spawn (explicit or, as here, profile-derived) now also carries the "Where things
+  // live" absolute-paths pre-block ahead of the agent's own prompt (the fresh-boot gap fix) — assert
+  // containment + ordering rather than exact equality.
+  check("(4) default injects the AGENT's own prompt (not the profile), after the manager 'Where things live' block",
+    oAuto?.startupPrompt?.includes("AGENT_OWN") && oAuto?.startupPrompt?.includes("## Where things live") && oAuto.startupPrompt.indexOf("Where things live") < oAuto.startupPrompt.indexOf("AGENT_OWN"));
   const sAutoBlank = svc.startNew("tMgrBlank");
   const oAutoBlank = optsFor(sAutoBlank.id);
-  check("(4) default on a BLANK manager-profile agent → role=manager + allowDelta, but NO injected prompt (no fallback)",
-    oAutoBlank?.role === "manager" && oAutoBlank?.startupPrompt === undefined && oAutoBlank?.permission.allow.includes(PROFILE_ALLOW));
+  check("(4) default on a BLANK manager-profile agent → role=manager + allowDelta, block-only prompt (no own prompt to fall back to)",
+    oAutoBlank?.role === "manager" && oAutoBlank?.startupPrompt?.includes("## Where things live") && !oAutoBlank?.startupPrompt?.includes("AGENT_OWN") && oAutoBlank?.permission.allow.includes(PROFILE_ALLOW));
 
   // --- FORCE-PLAIN → full backstop: role null, the AGENT's own prompt, NO allow delta (vanilla "+New").
   const sPlain = svc.startNew("tMgrOwn", { forcePlain: true });

@@ -133,7 +133,10 @@ try {
   check("(a) returned session.role === 'manager' (profile-conferred)", sA.role === "manager");
   check("(a) DB persists role=manager (drives the server-side role-gate)", db.getSession(sA.id).role === "manager");
   check("(a) spawn opts.role === 'manager' (the value host.ts maps to the loom-orchestration surface)", oA?.role === "manager");
-  check("(a) spawn injects the agent's OWN prompt (the profile carries no prompt)", oA?.startupPrompt === "AGENT_MGR_PROMPT");
+  // A role-omitted startNew that resolves role="manager" purely from the profile now ALSO gets the
+  // "Where things live" absolute-paths pre-block (the fresh-boot gap this DoD fixes) — the agent's own
+  // prompt is preserved AFTER the block, not replaced by it.
+  check("(a) spawn injects the agent's OWN prompt AFTER the 'Where things live' block (profile-derived manager role)", oA?.startupPrompt?.includes("AGENT_MGR_PROMPT") && oA?.startupPrompt?.includes("## Where things live") && oA.startupPrompt.indexOf("Where things live") < oA.startupPrompt.indexOf("AGENT_MGR_PROMPT"));
   check("(a) profile allowDelta is layered onto the config allow", oA?.permission.allow.includes(PROFILE_ALLOW));
   check("(a) the base config allow is preserved alongside the delta", oA?.permission.allow.includes("mcp__loom-tasks"));
   check("(a) session is live", db.getSession(sA.id).processState === "live");
@@ -146,12 +149,14 @@ try {
   check("(a'') model-pinned profile threads opts.model === the pinned id (drives --model at spawn)", oM?.model === PINNED_MODEL);
   check("(a'') model-pinned profile still injects the agent's OWN prompt", oM?.startupPrompt === "AGENT_MODEL_PROMPT");
 
-  // (a') a profile-agent with a BLANK per-agent prompt injects NO prompt — the profile carries none,
-  // so there is no fallback (the merge branch was removed). It still gets the profile's role + allow.
+  // (a') a profile-agent with a BLANK per-agent prompt injects NO own prompt — the profile carries none,
+  // so there is no fallback (the merge branch was removed). It still gets the profile's role + allow,
+  // and — because role resolves to "manager" — still gets the block-only "Where things live" pre-block
+  // (a manager boot always gets its absolute paths, even with no agent doctrine of its own).
   const sAb = svc.startNew("agentMgrBlank");
   const oAb = optsFor(sAb.id);
   check("(a') blank profile-agent spawns role=manager", oAb?.role === "manager" && db.getSession(sAb.id).role === "manager");
-  check("(a') blank profile-agent injects NO prompt (no fallback to the profile)", oAb?.startupPrompt === undefined);
+  check("(a') blank profile-agent gets the block-only 'Where things live' prompt (no own prompt to fall back to)", oAb?.startupPrompt?.includes("## Where things live") && !oAb?.startupPrompt?.includes("AGENT_MGR_PROMPT"));
   check("(a') blank profile-agent still layers the profile allowDelta", oAb?.permission.allow.includes(PROFILE_ALLOW));
 
   // ===================== (b) NO-profile agent → today's plain session, byte-identical =====================

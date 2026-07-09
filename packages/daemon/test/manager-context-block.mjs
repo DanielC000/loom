@@ -10,6 +10,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (1b) a RECYCLE-SUCCESSOR manager (recycleManager) gets the SAME block — it used to build its
 //        startupPrompt directly (warmup + continuation only), skipping composeManagerStartupPrompt, so
 //        a fresh successor manager had no absolute resume-doc path and Globbed for it on boot;
+//   (1c) a PROFILE-DERIVED manager spawn (startNew, no explicit caller role — the DEFAULT "Spawn from
+//        profile" button) ALSO gets the block — it used to resolve role==="manager" purely from the
+//        agent's profile but skip composeManagerStartupPrompt entirely (only the explicit role:"manager"
+//        path, startManager, applied it), so the most common real-world manager spawn cold-booted blind;
 //   (2) a WORKER spawn does NOT get the MANAGER block (its opening is its agent brief + the kickoff — card af902717);
 //   (3) the pure composeManagerStartupPrompt wraps/derives correctly (incl. the no-own-prompt case);
 //   (4) the pickup + orchestrate skill ASSETS instruct reading the resume doc by ABSOLUTE path.
@@ -50,6 +54,10 @@ const db = new Db();
 db.insertProject({ id: "pM", name: "MProj", repoPath: repo, vaultPath: vault, config: {}, createdAt: now, archivedAt: null });
 db.insertAgent({ id: "agentMgr", projectId: "pM", name: "Orchestrator", startupPrompt: "AGENT_MGR_DOCTRINE", position: 0, profileId: null });
 db.insertAgent({ id: "agentWorker", projectId: "pM", name: "Dev", startupPrompt: "AGENT_WORKER_PROMPT", position: 1, profileId: null });
+// a manager-ROLE PROFILE + an agent bound to it, so a role-omitted "auto" spawn (startNew, no explicit
+// caller role) resolves role==="manager" purely from the profile — the fresh-boot gap this DoD covers.
+db.insertProfile({ id: "profMgr", name: "Orchestrator Rig", role: "manager", description: "", allowDelta: [], skills: null, model: null, icon: null });
+db.insertAgent({ id: "agentMgrProfile", projectId: "pM", name: "Profile Orchestrator", startupPrompt: "AGENT_MGR_PROFILE_DOCTRINE", position: 2, profileId: "profMgr" });
 // a live manager so spawnWorker has a parent; worker_spawn validates the taskId is a real, non-terminal task
 db.insertSession({
   id: "mgr1", projectId: "pM", agentId: "agentMgr", engineSessionId: null, title: null,
@@ -130,6 +138,18 @@ try {
   check("(1b) recycle-successor manager opts.startupPrompt still carries the continuation handoff text", oMR?.startupPrompt?.includes("successor: pick up the fleet from here."));
   check("(1b) recycle-successor manager opts.startupPrompt still carries the agent's warm-up doctrine", oMR?.startupPrompt?.includes("AGENT_MGR_DOCTRINE"));
   check("(1b) recycle-successor manager session is live + role manager", db.getSession(sMR.id).processState === "live" && oMR?.role === "manager");
+
+  // ===================== (1c) PROFILE-DERIVED manager spawn via startNew (the default "Spawn from =====
+  // profile" button, role omitted) also gets the block — the gap: only the EXPLICIT role:"manager"
+  // path (startManager) applied composeManagerStartupPrompt; a role-omitted "+New"/"auto" spawn that
+  // resolves role==="manager" purely from the agent's profile used to skip it entirely, so the DEFAULT
+  // spawn button on a manager-profiled agent cold-booted with no absolute "Where things live" block.
+  const sMP = svc.startNew("agentMgrProfile");
+  const oMP = optsFor(sMP.id);
+  check("(1c) profile-derived manager spawn (startNew, role omitted) resolves role=manager", oMP?.role === "manager");
+  check("(1c) profile-derived manager spawn opts.startupPrompt carries the 'Where things live' block", oMP?.startupPrompt?.includes("## Where things live"));
+  check("(1c) profile-derived manager spawn opts.startupPrompt carries the resolved absolute resume-doc path", oMP?.startupPrompt?.includes(path.join(vault, "Orchestrator Log.md")));
+  check("(1c) profile-derived manager spawn preserves the agent's OWN doctrine after the block", oMP?.startupPrompt?.includes("AGENT_MGR_PROFILE_DOCTRINE"));
 
   // ===================== (2) WORKER spawn does NOT get the MANAGER block (card af902717: it DOES now carry its agent brief) =====================
   const w = await svc.spawnWorker("mgr1", { taskId: taskW, agentId: "agentWorker", kickoffPrompt: "WORKER_KICKOFF" });

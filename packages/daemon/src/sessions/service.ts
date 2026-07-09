@@ -588,8 +588,16 @@ export class SessionService {
     // fresh spawn — but this stays correct for any future path that seeds memory ahead of first spawn.
     // Appended via assistant-prompt.ts so the compose logic lives in one place; null (no memories) ⇒
     // startupPrompt returned byte-identical, so a fresh companion with empty memory is unchanged.
+    // PL Auditor finding #8, fresh-boot gap: a role-omitted "+New"/"Spawn from profile" call can still
+    // resolve role==="manager" (a profile confers it — see PROFILE_SPAWNABLE_ROLES), but this generic
+    // path used to skip composeManagerStartupPrompt entirely (only the EXPLICIT role:"manager" path,
+    // startManager, applied it) — so the default "Spawn from profile" button on a manager-profiled agent
+    // cold-booted with no "Where things live" block and Globbed its home dir for the resume doc. Mirror
+    // startManager/recycleManager here so every manager boot, explicit or profile-derived, gets the block.
     const finalStartupPrompt = role === "assistant"
       ? appendMemoryRecallToStartupPrompt(startupPrompt!, buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name)))
+      : role === "manager"
+      ? composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name })
       : startupPrompt;
     // Poll-triggered spawn (P3): append the untrusted-framed kickoff AFTER the agent's own resolved
     // prompt — reuses composeWorkerStartupPrompt's brief+"---"+dynamicPart shape verbatim (no new
