@@ -32,6 +32,7 @@ import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
+import { COMPANION_CAPABILITY_SLUGS } from "../companion/capabilities.js";
 import { listConnections, createConnection, deleteConnection } from "../connections/store.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
@@ -1232,6 +1233,82 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!reminder || reminder.sessionId !== sessionId) return reply.code(404).send({ error: `no reminder "${reminderId}"` });
     deps.db.deleteCompanionReminder(reminderId);
     return { ok: true, reminders: companionReminderList(sessionId) };
+  });
+
+  // --- Companion CAPABILITY GRANTS (Companion Capability & Permission-Lever Framework §1/§2): the ONE
+  // data model every opt-in Companion lever (session-status, decisions-relay, …) is gated on. HUMAN-ONLY
+  // loopback REST — there is INTENTIONALLY NO MCP path (of ANY router: orchestration/platform/setup/audit),
+  // same trust posture as the bindings/allowlist/config writers above: an injection-exposed companion agent
+  // must never widen its own capability. A grant write takes effect on the companion's NEXT respawn (the
+  // MCP tool surface is fixed at OS-process-start — Framework §6's conversation-preserving respawn, a later
+  // card, is the live-apply mechanism; this card does not add one). Grants are keyed on the natural key
+  // (sessionId, capability, projectId) — POST/PUT both upsert; POST additionally 201s a fresh grant while
+  // PUT 404s when there's nothing existing to update (so a client can tell "created" from "must exist").
+  const GRANT_CONFIG_MAX_BYTES = 4096;
+  const isValidGrantMode = (v: unknown): v is "read" | "act" => v === "read" || v === "act";
+  // Buffer.byteLength (UTF-8 bytes), NOT .length (UTF-16 code units) — a multibyte config (e.g. non-ASCII
+  // text in a decision-class label) would otherwise slip past a code-unit count well under the real byte
+  // bound, making "_BYTES" a lie for exactly the inputs where it matters most.
+  const isValidGrantConfig = (v: unknown): v is Record<string, unknown> | undefined =>
+    v === undefined || (typeof v === "object" && v !== null && !Array.isArray(v) && Buffer.byteLength(JSON.stringify(v), "utf8") <= GRANT_CONFIG_MAX_BYTES);
+  const parseGrantBody = (body: unknown):
+    | { ok: true; capability: string; projectId: string | null; mode?: "read" | "act"; config?: Record<string, unknown> }
+    | { ok: false; code: number; error: string } => {
+    const b = (body ?? {}) as { capability?: unknown; projectId?: unknown; mode?: unknown; config?: unknown };
+    if (typeof b.capability !== "string" || !(COMPANION_CAPABILITY_SLUGS as readonly string[]).includes(b.capability)) {
+      return { ok: false, code: 400, error: `capability is required and must be one of: ${COMPANION_CAPABILITY_SLUGS.join(", ")}` };
+    }
+    let projectId: string | null = null;
+    if (b.projectId !== undefined && b.projectId !== null) {
+      if (!isNonBlankStr(b.projectId)) return { ok: false, code: 400, error: "projectId must be a non-empty string, or omitted/null for the companion's own project" };
+      if (!deps.db.getProject(b.projectId.trim())) return { ok: false, code: 404, error: `no project "${b.projectId}"` };
+      projectId = b.projectId.trim();
+    }
+    if (b.mode !== undefined && !isValidGrantMode(b.mode)) return { ok: false, code: 400, error: "mode must be 'read' or 'act'" };
+    if (!isValidGrantConfig(b.config)) return { ok: false, code: 400, error: `config must be a plain JSON object of at most ${GRANT_CONFIG_MAX_BYTES} bytes` };
+    return { ok: true, capability: b.capability, projectId, mode: b.mode as "read" | "act" | undefined, config: b.config as Record<string, unknown> | undefined };
+  };
+  app.get("/api/companion/:sessionId/grants", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    return { grants: deps.db.listCompanionCapabilityGrantsForSession(sessionId) };
+  });
+  app.post("/api/companion/:sessionId/grants", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const parsed = parseGrantBody(req.body);
+    if (!parsed.ok) return reply.code(parsed.code).send({ error: parsed.error });
+    // It's an upsert (mirrors upsertCompanionBinding) — 201 only when this natural key is genuinely NEW,
+    // 200 when POST is updating an existing (capability, projectId) grant, so a client can tell "created"
+    // from "already existed, now updated" instead of every POST reading as a fresh creation.
+    const existedBefore = !!deps.db.getCompanionCapabilityGrant(sessionId, parsed.capability, parsed.projectId);
+    const grant = deps.db.upsertCompanionCapabilityGrant({ sessionId, capability: parsed.capability, projectId: parsed.projectId, mode: parsed.mode, config: parsed.config });
+    return reply.code(existedBefore ? 200 : 201).send(grant);
+  });
+  app.put("/api/companion/:sessionId/grants", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const parsed = parseGrantBody(req.body);
+    if (!parsed.ok) return reply.code(parsed.code).send({ error: parsed.error });
+    const existing = deps.db.getCompanionCapabilityGrant(sessionId, parsed.capability, parsed.projectId);
+    if (!existing) return reply.code(404).send({ error: "no existing grant for that (capability, projectId) — POST to create one" });
+    const grant = deps.db.upsertCompanionCapabilityGrant({ sessionId, capability: parsed.capability, projectId: parsed.projectId, mode: parsed.mode, config: parsed.config });
+    return grant;
+  });
+  app.delete("/api/companion/:sessionId/grants", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const q = (req.query ?? {}) as { capability?: unknown; projectId?: unknown };
+    if (typeof q.capability !== "string" || !(COMPANION_CAPABILITY_SLUGS as readonly string[]).includes(q.capability)) {
+      return reply.code(400).send({ error: `capability query param is required and must be one of: ${COMPANION_CAPABILITY_SLUGS.join(", ")}` });
+    }
+    const projectId = isNonBlankStr(q.projectId) ? q.projectId.trim() : null;
+    deps.db.deleteCompanionCapabilityGrant(sessionId, q.capability, projectId);
+    return { ok: true, grants: deps.db.listCompanionCapabilityGrantsForSession(sessionId) };
   });
 
   // --- Companion CHAT HISTORY (bug 0f01f234 — the "reload loses the whole conversation" fix; UNIFIED

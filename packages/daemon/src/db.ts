@@ -34,6 +34,7 @@ import type {
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, Question, QuestionInboxItem, QuestionState, PresetPrompt, PresetPromptSuggestion,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
+  CompanionCapabilityGrant,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
@@ -646,6 +647,43 @@ CREATE TABLE IF NOT EXISTS companion_conversations (
   PRIMARY KEY (session_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_companion_conversations_session ON companion_conversations(session_id, seq);
+-- Companion CAPABILITY GRANTS (Companion Capability & Permission-Lever Framework, §1) — the ONE data
+-- model every opt-in Companion "lever" (session-status, decisions-relay, session-steer, board-reach,
+-- vault-read, media-out, …) is gated on. A capability is enabled by the PRESENCE of a row (session_id,
+-- capability, project_id) — no row ⇒ that lever's tools are never registered (registerCompanionCapabilities
+-- below), so it stays inert + invisible, exactly like the chat_reply/skill_*/memory_*/reminder_* companion
+-- gate. Brand-new table ⇒ CREATE TABLE IF NOT EXISTS is itself the additive migration (an existing DB
+-- gains an empty table on boot; zero rows ⇒ every capability OFF, byte-identical to today).
+--   • session_id  — the companion session this grant is scoped to (like companion_bindings/reminders);
+--     grants are read PER-SESSION, never the global table (mirrors the bindings per-session read).
+--   • capability  — the lever slug ('session-status' | 'decisions-relay' | 'attention-push' |
+--     'session-steer' | 'board-reach' | 'vault-read' | 'media-out').
+--   • project_id  — the project this grant scopes to; NULL = the companion's OWN bound project (the
+--     narrow default — a grant that omits a project can never accidentally reach a project the owner
+--     didn't name). A capability that spans several projects gets one row per project.
+--   • mode        — 'read' | 'act': a read grant NEVER implies act; act is only ever the explicit
+--     stronger row (Section 1's read-vs-act granularity).
+--   • config_json — lever-specific extra scope (decision-class allowlist, alert classes, path roots, …),
+--     opaque to the framework; NEVER holds a secret. Defaults to '{}'.
+-- UNIQUE (session_id, capability, project_id) is the upsert key — SQLite treats NULL as DISTINCT in a
+-- UNIQUE index, so a project_id-NULL "own project" grant and a project_id-set grant for the SAME
+-- capability legitimately coexist as separate rows (both are meaningful, distinct scopes).
+-- HUMAN-managed only over loopback REST (POST/PUT/DELETE /api/companion/:sessionId/grants) — there is
+-- INTENTIONALLY NO MCP path, same trust posture as companion_bindings/companion_config: an
+-- injection-exposed Companion must never widen its own capability. The grants table JOINS the existing
+-- session-retire/unbind cascade (deleteCompanionBinding/deleteCompanionConfig/deleteSession/deleteProject/
+-- deleteAgent below) so a recycled session id can never inherit a stale grant.
+CREATE TABLE IF NOT EXISTS companion_capability_grants (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  capability TEXT NOT NULL,
+  project_id TEXT,
+  mode TEXT NOT NULL DEFAULT 'read',
+  config_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_grants_scope
+  ON companion_capability_grants(session_id, capability, project_id);
 -- Owner-controlled encrypted credential store (agent-tooling epic, P1 foundation). GLOBAL / daemon-wide,
 -- HUMAN-managed only over the loopback REST surface — NO MCP tool creates/reads/lists a connection or its
 -- secret. secret_blob is envelope ciphertext (v1:iv:tag:ct); the REST layer never returns it (masked read).
@@ -1450,6 +1488,7 @@ export class Db {
       for (const sid of sessionIds) {
         this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(sid);
         // orchestration_events is session-keyed (manager OR worker) with no project_id — drop per session id.
         this.db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ?").run(sid, sid);
@@ -1658,7 +1697,12 @@ export class Db {
    * the same (session, channel) must start with an EMPTY allowlist, never inherit a prior grant, and a
    * still-outstanding pairing code from before the unbind must not be able to re-populate it). Mirrors the
    * full-teardown `deleteCompanionConfig`'s cascade shape. companion_pairing_attempts is deliberately LEFT
-   * (see deleteCompanionConfig — a lockout must survive unbind/re-bind churn).
+   * (see deleteCompanionConfig — a lockout must survive unbind/re-bind churn). The delete-ALL (channel
+   * omitted) branch is a FULL unbind — it ALSO cascade-clears companion_capability_grants (Companion
+   * Capability & Permission-Lever Framework §1): a session with no bindings left on any channel can no
+   * longer be reached, so its levers go with it, and a recycled session id never inherits a stale grant.
+   * The PER-CHANNEL branch does NOT touch grants — grants are session-scoped, not channel-scoped, and the
+   * companion is still reachable (and still holds its levers) on its other channel(s).
    */
   deleteCompanionBinding(sessionId: string, channel?: string): void {
     if (channel !== undefined) {
@@ -1673,6 +1717,7 @@ export class Db {
       this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM companion_allowed_senders WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM companion_pairing_codes WHERE session_id = ?").run(sessionId);
+      this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(sessionId);
     })();
   }
   /** A session's per-binding allowlisted senders (the group-scope allowlist). Ordered for a stable list. */
@@ -1979,14 +2024,93 @@ export class Db {
   deleteCompanionConfig(sessionId: string): void {
     // Deliberately does NOT cascade companion_reminders: reminders are SESSION-scoped (not config-scoped),
     // so they survive a config disable/re-enable on the same session — only a session delete cleans them
-    // (see the session-delete cascades elsewhere in this file).
+    // (see the session-delete cascades elsewhere in this file). companion_capability_grants, by contrast,
+    // IS cascaded here: de-provisioning (retiring) a companion's run-config is the framework's "retire"
+    // event (Companion Capability & Permission-Lever Framework §1) — a recycled session id must never
+    // inherit a stale grant from a prior life of the same id.
     this.db.transaction(() => {
       this.db.prepare("DELETE FROM companion_config WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM companion_bindings WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM companion_allowed_senders WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM companion_pairing_codes WHERE session_id = ?").run(sessionId);
+      this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM app_meta WHERE key = ?").run(COMPANION_HOME_KEY_PREFIX + sessionId);
     })();
+  }
+
+  // --- companion capability grants (Companion Capability & Permission-Lever Framework §1) — the ONE
+  // enforcement gate every opt-in Companion lever is read through. HUMAN-managed only over loopback REST
+  // (gateway/server.ts POST/PUT/DELETE /api/companion/:sessionId/grants); there is INTENTIONALLY NO MCP
+  // path. Reads are ALWAYS scoped to ONE session_id — never the global table (mirrors the bindings read
+  // pattern) — so one companion's grants can never leak into another's tool surface. ---
+  /** Every grant for ONE companion session (never the global table). Ordered for a stable admin list. */
+  listCompanionCapabilityGrantsForSession(sessionId: string): CompanionCapabilityGrant[] {
+    return (this.db.prepare("SELECT * FROM companion_capability_grants WHERE session_id = ? ORDER BY created_at, rowid")
+      .all(sessionId) as Row[]).map(toCompanionCapabilityGrant);
+  }
+  /**
+   * One grant by its natural key (session_id, capability, project_id). `projectId: null` reads the
+   * "companion's own bound project" row — matched with an explicit `IS NULL`, NOT `= ?`, because SQLite's
+   * UNIQUE index treats every NULL as DISTINCT (the same trap `companion_bindings`' NOT-NULL route columns
+   * exist to avoid): a plain `= ?` against a bound `null` parameter would match NOTHING, silently missing
+   * the row `upsertCompanionCapabilityGrant`/`resolveCompanionGrant` need to find.
+   */
+  getCompanionCapabilityGrant(sessionId: string, capability: string, projectId: string | null): CompanionCapabilityGrant | undefined {
+    const row = projectId === null
+      ? this.db.prepare("SELECT * FROM companion_capability_grants WHERE session_id = ? AND capability = ? AND project_id IS NULL").get(sessionId, capability) as Row | undefined
+      : this.db.prepare("SELECT * FROM companion_capability_grants WHERE session_id = ? AND capability = ? AND project_id = ?").get(sessionId, capability, projectId) as Row | undefined;
+    return row ? toCompanionCapabilityGrant(row) : undefined;
+  }
+  /**
+   * Create-or-update the grant keyed on (sessionId, capability, projectId). Deliberately does NOT use a SQL
+   * `ON CONFLICT` upsert (unlike `upsertCompanionBinding`): this table's `project_id` is NULLABLE (NULL =
+   * "own project", by design — §1), and SQLite's `ON CONFLICT` target never fires for a UNIQUE index row
+   * whose indexed column is NULL (NULLs don't conflict with each other), so a naive upsert would INSERT a
+   * fresh duplicate row on every call instead of updating the existing NULL-project_id grant. Doing the
+   * lookup explicitly (via `getCompanionCapabilityGrant`, which special-cases `IS NULL`) sidesteps that
+   * trap for both the NULL and non-NULL cases. An omitted `mode`/`config` on an UPDATE preserves the
+   * stored value (mirrors `upsertCompanionConfig`'s preserve-on-omit convention) rather than resetting it.
+   */
+  upsertCompanionCapabilityGrant(input: {
+    sessionId: string; capability: string; projectId: string | null;
+    mode?: "read" | "act"; config?: Record<string, unknown>;
+  }): CompanionCapabilityGrant {
+    return this.db.transaction(() => {
+      const existing = this.getCompanionCapabilityGrant(input.sessionId, input.capability, input.projectId);
+      const g: CompanionCapabilityGrant = {
+        id: existing?.id ?? randomUUID(),
+        sessionId: input.sessionId,
+        capability: input.capability,
+        projectId: input.projectId,
+        mode: input.mode ?? existing?.mode ?? "read",
+        config: input.config ?? existing?.config ?? {},
+        createdAt: existing?.createdAt ?? new Date().toISOString(),
+      };
+      const configJson = JSON.stringify(g.config);
+      if (existing) {
+        this.db.prepare("UPDATE companion_capability_grants SET mode = ?, config_json = ? WHERE id = ?")
+          .run(g.mode, configJson, g.id);
+      } else {
+        this.db.prepare(
+          `INSERT INTO companion_capability_grants (id, session_id, capability, project_id, mode, config_json, created_at)
+           VALUES (@id, @sessionId, @capability, @projectId, @mode, @configJson, @createdAt)`,
+        ).run({ id: g.id, sessionId: g.sessionId, capability: g.capability, projectId: g.projectId, mode: g.mode, configJson, createdAt: g.createdAt });
+      }
+      return g;
+    })();
+  }
+  /** Delete ONE grant by its natural key (session_id, capability, project_id) — idempotent (a missing
+   *  match is a safe no-op), scoped with the same `IS NULL` care as the getter above. */
+  deleteCompanionCapabilityGrant(sessionId: string, capability: string, projectId: string | null): void {
+    if (projectId === null) {
+      this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ? AND capability = ? AND project_id IS NULL").run(sessionId, capability);
+    } else {
+      this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ? AND capability = ? AND project_id = ?").run(sessionId, capability, projectId);
+    }
+  }
+  /** Cascade-clear EVERY grant for ONE session (retire/unbind teardown) — idempotent. */
+  deleteCompanionCapabilityGrantsForSession(sessionId: string): void {
+    this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(sessionId);
   }
 
   // --- connections (owner-controlled encrypted credential store, agent-tooling epic P1) ---
@@ -2113,6 +2237,7 @@ export class Db {
       for (const sid of sessionIds) {
         this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(sid);
+        this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ?").run(sid, sid);
       }
@@ -2839,14 +2964,16 @@ export class Db {
   }
   /**
    * Permanently delete a session row (the Archive tab's Delete). Also drops its pending wakes + reminders
-   * + any decision-inbox questions it asked (any state — pending/answered/consumed). `questions.session_id`
-   * is a NOT NULL FK and better-sqlite3 enforces foreign keys by default (verified — the stale claim
-   * elsewhere in this file that FKs aren't enforced is wrong): without this, deleting a session that ever
-   * asked a question (even a long-consumed one) threw SQLITE_CONSTRAINT_FOREIGNKEY instead of succeeding.
+   * + capability grants + any decision-inbox questions it asked (any state — pending/answered/consumed).
+   * `questions.session_id` is a NOT NULL FK and better-sqlite3 enforces foreign keys by default (verified —
+   * the stale claim elsewhere in this file that FKs aren't enforced is wrong): without this, deleting a
+   * session that ever asked a question (even a long-consumed one) threw SQLITE_CONSTRAINT_FOREIGNKEY
+   * instead of succeeding.
    */
   deleteSession(id: string): void {
     this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(id);
+    this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
   }
@@ -4028,6 +4155,20 @@ function toCompanionAllowedSender(r0: unknown): CompanionAllowedSender {
     id: r.id as string, sessionId: r.session_id as string, channel: r.channel as string,
     senderId: r.sender_id as string, label: (r.label as string | null) ?? null,
     createdAt: (r.created_at as string) ?? "",
+  };
+}
+function toCompanionCapabilityGrant(r0: unknown): CompanionCapabilityGrant {
+  const r = r0 as Row;
+  let config: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse((r.config_json as string | null) ?? "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) config = parsed as Record<string, unknown>;
+  } catch { /* corrupt blob ⇒ empty config, never throws (mirrors getPlatformConfig) */ }
+  return {
+    id: r.id as string, sessionId: r.session_id as string, capability: r.capability as string,
+    projectId: (r.project_id as string | null) ?? null,
+    mode: ((r.mode as string) === "act" ? "act" : "read"),
+    config, createdAt: r.created_at as string,
   };
 }
 /** Normalize a stored `voice_replies` cell to the tri-state mode: a legacy VOICE-P1 row stores it as the

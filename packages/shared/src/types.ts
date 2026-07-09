@@ -942,6 +942,37 @@ export interface CompanionAllowedSender {
 }
 
 /**
+ * One capability GRANT (Companion Capability & Permission-Lever Framework, §1) — the durable row that
+ * enables ONE opt-in Companion "lever" (e.g. `session-status`) for ONE companion session, optionally
+ * scoped to ONE project. A capability is enabled by the PRESENCE of a row: no grant ⇒ that lever's tools
+ * are never registered on the companion's MCP surface (`resolveCompanionGrant`/`registerCompanionCapabilities`,
+ * daemon `mcp/orchestration.ts`) — inert + invisible, mirroring the `chat_reply`/`skill_*`/`memory_*`/
+ * `reminder_*` per-session companion gate. GLOBAL / daemon-wide, keyed on `sessionId` like
+ * {@link CompanionBinding}. HUMAN-managed only over the loopback REST surface (`POST`/`PUT`/
+ * `DELETE /api/companion/:sessionId/grants`) — there is INTENTIONALLY NO MCP path: an injection-exposed
+ * companion agent must never widen its own capability. See `[[Companion Capability & Permission-Lever
+ * Framework]]`.
+ */
+export interface CompanionCapabilityGrant {
+  id: string;
+  /** The companion session this grant is scoped to — grants are read PER-SESSION, never globally. */
+  sessionId: SessionId;
+  /** The lever slug, e.g. "session-status" | "decisions-relay" | "attention-push" | "session-steer" |
+   *  "board-reach" | "vault-read" | "media-out". */
+  capability: string;
+  /** The project this grant scopes to; null = the companion's OWN bound project (the narrow default). A
+   *  capability spanning several projects gets one row PER project. */
+  projectId: ProjectId | null;
+  /** The read-vs-act granularity: a `read` grant never implies `act`; `act` is only ever the explicit
+   *  stronger row for the SAME (sessionId, capability, projectId). */
+  mode: "read" | "act";
+  /** Lever-specific extra scope (decision-class allowlist, alert classes, path roots, …), opaque to the
+   *  framework — each lever validates its own shape. NEVER holds a secret. */
+  config: Record<string, unknown>;
+  createdAt: string;
+}
+
+/**
  * A per-ROUTE Companion VOICE preference (Companion Voice epic, VOICE-P1 foundation) — the language/voice
  * settings a "/lang"/"/voice" slash-command sets for ONE (session, channel, chatId[, senderId]) route.
  * Keyed like {@link CompanionBinding} but ADDITIONALLY by `senderId` for a GROUP-scoped binding (a DM's

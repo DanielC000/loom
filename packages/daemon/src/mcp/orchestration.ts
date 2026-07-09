@@ -30,6 +30,7 @@ import {
   readCompanionMemory,
   removeCompanionMemory,
 } from "../skills/companion-memory-store.js";
+import { registerCompanionCapabilities } from "../companion/capabilities.js";
 
 // Same envelope as the task MCP server (mcp/server.ts).
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -454,6 +455,13 @@ export class OrchestrationMcpRouter {
     this.registerCompanionMemoryTools(server, sessionId);
     // Companion Reminders s4: additive, single-session-gated RECURRING reminder tools (SAME gate).
     this.registerCompanionReminderTools(server, sessionId);
+    // Companion Capability & Permission-Lever Framework §2: the ONE chokepoint for every opt-in lever
+    // (session-status, …) — gated PER-CAPABILITY on a companion_capability_grants row for THIS session,
+    // not on companionSessionIds (a lever can be granted even before/without the chat_reply gate, though
+    // in practice today's only lever targets the same assistant-role companions). Zero grant rows ⇒ this
+    // is a no-op for every session (additive, byte-identical to today). ALSO role-gated to "assistant"
+    // (belt-and-suspenders — see registerCompanionCapabilities' doc).
+    registerCompanionCapabilities(server, sessionId, role, db);
 
     // Companion (epic Phase 1): the long-lived `assistant` role gets a MINIMAL surface — the read-only
     // my_context PLUS (only when this IS the bound companion session) the chat_reply registered just above.
