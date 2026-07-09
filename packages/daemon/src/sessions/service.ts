@@ -1190,6 +1190,119 @@ export class SessionService {
   }
 
   /**
+   * Companion-specific CONVERSATION-PRESERVING respawn (Companion Capability & Permission-Lever Framework
+   * §6). A running companion's MCP tool surface + allowlist are fixed at OS-process-start — the SAME
+   * invariant `resume()`'s own comment documents (`resolveAgentSpawn` runs only inside `createPty`, only
+   * from `PtyHost.spawn()`) — so a newly-granted tool-bearing lever (`sessions_status`/`decisions_list`/
+   * `board_list`/`vault_lookup`, and future ACT tools) never reaches an already-running companion process.
+   * This closes that gap WITHOUT losing the conversation: re-resolve the agent's CURRENT profile-driven
+   * capability surface (the exact shape a fresh spawn would resolve), re-pin it on the session ROW, stop
+   * the old OS process, then `resume(sessionId)` — which reads those SAME row fields (never re-resolving
+   * the Profile — see `resume()`'s own comment) and passes `--resume <engineSessionId>` to `pty.spawn`, so
+   * the SAME conversation transcript continues under the NEW tool surface.
+   *
+   * This is a DELIBERATE, human-triggered escape hatch (REST `POST /api/companion/:sessionId/upgrade`,
+   * NEVER auto-fired from a grant write) — it does NOT change `resume()`'s general pin-forward semantics:
+   * every OTHER resume/fork/recycle path still carries the row's EXISTING values forward untouched, exactly
+   * as before this method existed. Re-pinning here happens BEFORE the old pty is stopped (a pure DB write
+   * has no live effect on an already-running process — mirrors `setRestrictedTools`), so if an inbound chat
+   * message races the stop→respawn gap and trips `withCompanionSelfHeal`'s own auto-resume
+   * (companion/revive.ts, wired to this SAME `resume()`), that resume ALSO reads the already-updated row —
+   * whichever resume wins (this one or the self-heal's), the outcome is identical.
+   *
+   * AVAILABILITY-GAP MESSAGE PRESERVATION (CR fix): `pty.stop("graceful")` marks the pty `stopping` but
+   * leaves it alive for up to several seconds while it winds down — an inbound chat message that lands in
+   * that window is NOT treated as "session dead" (so `withCompanionSelfHeal` never fires), it's HELD in the
+   * pty's in-memory FIFO instead. Left alone, the old process's own exit unconditionally WIPES that FIFO
+   * (`pty/host.ts`'s `onExit`), silently losing the message — this mirrors `recycleWorker`'s own
+   * `flushPending`-before-stop pattern (same file), except the recipient session id is UNCHANGED here (a
+   * respawn, not a new session), so the captured entries are simply re-submitted onto the SAME session once
+   * it's live again. `flushPending` is drained repeatedly through the wait loop (not just once up front) so
+   * a message that arrives WHILE the pty is stopping-but-still-alive is caught too — bounding the genuinely
+   * unrecoverable loss window to under one poll tick (~100ms, immediately before the process actually
+   * exits) instead of the full multi-second graceful/hard-stop wait. A durable recipient message (one
+   * carrying `onDeliver` — e.g. a Platform Lead `session_message` mid-flight) is deliberately SKIPPED on
+   * redelivery: `resume()`'s own `redriveUndeliveredMessagesForRecipient` already re-delivers it, so
+   * redelivering it here too would double it (mirrors `getPersistablePending`'s dedup reasoning). If the pty
+   * never dies in time and this method aborts, `carried` is pushed BACK onto the still-alive old pty (every
+   * entry, durable or not — resume() never ran, so nothing else will redeliver them) rather than dropped.
+   *
+   * SELF-HEAL RACE (CR fix): `isAlive(sessionId)` is LATCHED, not re-read, once observed false. A fresh
+   * self-heal (companion/revive.ts's `withCompanionSelfHeal`, wired to this SAME `resume()`) runs OUTSIDE
+   * this controller's serialization and can respawn a NEW pty for this session the instant the OLD one dies
+   * — re-reading `isAlive()` afterward would see that fresh pty and wrongly conclude "still alive, needs a
+   * hard stop," killing it out from under an in-flight reply and respawning a THIRD time. Once `died` is
+   * latched true, every later decision (the hard-stop escalation, the "didn't stop in time" abort) is gated
+   * on that latch alone — never on another `isAlive()` call — so a concurrent self-heal is simply absorbed:
+   * our own `resume()` below short-circuits on ITS OWN isAlive check (service.ts's resume(), "already-live"
+   * guard) and returns the self-healed session as-is. That's what makes "whichever resume wins, identical
+   * outcome" (above) actually hold.
+   */
+  async upgradeCompanionCapabilities(sessionId: string): Promise<Session> {
+    const session = this.db.getSession(sessionId);
+    if (!session) throw new Error("session not found");
+    if (session.role !== "assistant") throw new Error("only a companion (assistant-role) session can be live-upgraded");
+    if (!session.engineSessionId) throw new Error("session has no engine id to resume — it has never completed a fresh spawn");
+    const project = this.db.getProject(session.projectId);
+    if (!project) throw new Error("project not found");
+    const agent = this.db.getAgent(session.agentId);
+    if (!agent) throw new Error("agent not found");
+    const config = resolveConfig(project.config);
+    // Force role "assistant" (the row's own, immutable role) rather than trusting session.role blindly —
+    // mirrors composeCompanionReinjectPrompt's explicitRole pattern. Model/prompt are discarded here (only
+    // the capability surface matters); resume() below never threads --model or injects a startup prompt.
+    // `connections` is DELIBERATELY excluded from the pin below — unlike the others, resume() never threads
+    // it to pty.spawn (mcp/server.ts's TaskMcpRouter reads a session's connections LIVE, per-request, off
+    // the row — a plain row write already takes effect on the companion's very next tool call, no respawn
+    // needed), so pinning it here would be a misleading no-op. This is a pre-existing gap in resume()
+    // itself, out of scope to fix here.
+    const { browserTesting, documentConversion, dejaCorpus, capabilities, restrictedTools, noCommit, skills } =
+      this.resolveAgentSpawn(agent, config, "assistant");
+    this.db.setSessionCapabilitySurface(sessionId, { browserTesting, documentConversion, dejaCorpus, capabilities, restrictedTools, noCommit, skills });
+    const carried: QueuedMessage[] = [];
+    const drain = (): void => { carried.push(...this.pty.flushPending(sessionId)); };
+    if (this.pty.isAlive(sessionId)) {
+      drain(); // anything already queued before we even ask the pty to stop
+      this.pty.stop(sessionId, "graceful");
+      let died = false;
+      for (let i = 0; i < 80 && !died; i++) {
+        if (!this.pty.isAlive(sessionId)) { died = true; break; } // LATCH — never re-derive from a later read
+        drain(); // anything enqueued while the pty is "stopping" (held, not treated as dead — see above)
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      drain();
+      if (!died) {
+        // eslint-disable-next-line no-console
+        console.warn(`[companion] upgrade ${sessionId}: still alive ~8s after a graceful stop — forcing a hard stop before resume`);
+        this.pty.stop(sessionId, "hard");
+        for (let i = 0; i < 20 && !died; i++) {
+          if (!this.pty.isAlive(sessionId)) { died = true; break; } // same latch, same reasoning
+          drain();
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        drain();
+      }
+      if (!died) {
+        // The pty is STILL alive — push everything we drained OUT of its FIFO back onto it before aborting
+        // (nothing else will redeliver them; resume() below never runs on this path). The capability re-pin
+        // above already landed durably — a later manual restart/resume picks it up.
+        for (const msg of carried) this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId);
+        throw new Error("companion process did not stop in time — upgrade aborted (capability changes are saved and will apply on the next successful resume)");
+      }
+    }
+    const resumed = this.resume(sessionId);
+    // Redeliver anything captured above onto the FRESH process, in order — the old process is gone and its
+    // FIFO was wiped, so without this the captured entries would simply vanish despite being "queued". A
+    // durable entry (onDeliver set) is SKIPPED — resume()'s own redrive (just above) already re-delivers it;
+    // redelivering it here too would double it.
+    for (const msg of carried) {
+      if (msg.onDeliver) continue;
+      this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId);
+    }
+    return resumed;
+  }
+
+  /**
    * Manager-triggered daemon restart (the `daemon_restart` tool) — for SELF-HOSTING (orchestrating
    * Loom WITH Loom). After a manager merges daemon-`src` worker branches, the new code isn't running
    * until the daemon is rebuilt + restarted; this does that and brings the manager (+ its live

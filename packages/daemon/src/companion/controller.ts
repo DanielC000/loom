@@ -63,6 +63,7 @@ import { resolveAllEnabledConfigs } from "./store.js";
 import { IN_APP_CHANNEL, normalizeInAppMessage, type InAppChannel } from "./in-app.js";
 import type { CompanionConfig } from "./config.js";
 import type { CompanionRoute, CompanionSynthesizer, CompanionTranscriber, DeliverResult, InboundMessage, InboundResult, SessionBinding, SubmitTurn } from "./types.js";
+import type { Session } from "@loom/shared";
 
 /** The minimal lifecycle handle the controller needs from a heartbeat watcher (satisfied by
  *  CompanionHeartbeatWatcher; narrowed so a test can inject a spy). */
@@ -134,9 +135,30 @@ export interface CompanionControl {
    * `suppressDuplicateHomeHeartbeats`): if this exited session was the WINNER of a same-home group, any
    * still-LIVE sibling(s) sharing its home are re-armed as part of this same call — see `teardownOne`'s
    * caller below — instead of staying silently suppressed until the next boot or an unrelated config write.
-   * The exited session itself is NEVER re-resolved/reconciled (that would re-START its now-dead gateway).
+   * The exited session itself is NEVER re-resolved/reconciled (that would re-START its now-dead gateway) —
+   * UNLESS it has ALREADY come back alive by the time this (serialized, possibly delayed) op actually runs,
+   * in which case it's a STALE exit event and this is a no-op (CR fix) — see the implementation's comment.
+   * That's what makes `upgrade()` below safe: its own pty.stop() triggers exactly this same exit path, but
+   * by the time it's this op's turn on the chain the fresh pty is already live again.
    */
   onSessionExit(sessionId: string): Promise<void>;
+  /**
+   * The CONVERSATION-PRESERVING respawn (Companion Capability & Permission-Lever Framework §6) — a
+   * human/REST-triggered upgrade, `POST /api/companion/:sessionId/upgrade`, NEVER auto-fired from a grant
+   * write. Delegates to the injected `upgradeCompanionSession` (SessionService.upgradeCompanionCapabilities)
+   * and is SERIALIZED on the same reconcile chain as start/update/stop/onSessionExit, so it can never
+   * interleave with a concurrent teardown/start of the SAME session's gateway (e.g. a racing token-change
+   * reconcile). Its own pty.stop() triggers index.ts's onExit → `onSessionExit` for the SAME session — see
+   * that method's stale-exit guard for why this does NOT leave the companion's gateway/heartbeat/reminders/
+   * chat_reply torn down once the fresh pty comes back up. Returns a discriminated result rather than
+   * throwing — a bad request (unknown session, wrong role, no engine id, the pty didn't stop in time) is a
+   * normal, expected outcome for a REST caller to relay, not an exceptional one.
+   *
+   * KNOWN TRADE-OFF (CR-confirmed acceptable, by design): `this.chain` is GLOBAL, not per-session — a slow
+   * upgrade (worst case ~10s if the pty won't die) briefly blocks every OTHER live companion's reconcile
+   * behind it too, not just this session's.
+   */
+  upgrade(sessionId: string): Promise<{ ok: true; session: Session } | { ok: false; error: string }>;
 }
 
 /** The mutable chat_reply gate the OrchestrationMcpRouter reads per MCP request. The controller adds/removes
@@ -199,6 +221,12 @@ export interface CompanionControllerDeps {
    *  built gateway's "/new" leaves the companion identity-less after `/clear`, and "/refresh" is a no-op,
    *  byte-identical to today. */
   reinjectPersona?: (sessionId: string) => boolean;
+  /** CONVERSATION-PRESERVING respawn primitive (Framework §6) — the daemon injects
+   *  `(sid) => sessions.upgradeCompanionCapabilities(sid)`, mirroring how `submitTurn`/`reinjectPersona`
+   *  close over SessionService rather than the controller holding a direct reference. Optional: absent ⇒
+   *  {@link CompanionControl.upgrade} resolves `{ok:false}` for every session (test seams that don't
+   *  exercise the upgrade path stay byte-identical). */
+  upgradeCompanionSession?: (sessionId: string) => Promise<Session>;
   /** Envelope key-file override (test seam only). */
   keyPath?: string;
   /** Build the gateway for an effective config (test seam — defaults to createCompanionGateway with the
@@ -275,7 +303,36 @@ export class CompanionController implements CompanionControl {
   }
 
   onSessionExit(sessionId: string): Promise<void> {
-    return this.enqueue(() => this.teardownOneAndRearmSameHomeSiblings(sessionId));
+    return this.enqueue(() => {
+      // STALE-EXIT GUARD (CR fix): by the time this enqueued op actually runs — strictly AFTER anything
+      // already ahead of it on `this.chain`, which now includes a live-upgrade's own stop→resume
+      // (`upgrade()` shares this SAME chain; see its doc) — the session may have ALREADY come back alive
+      // (a live-upgrade respawn, a fast manual restart, a self-heal resume racing a slow exit-event queue).
+      // Tearing down a companion that's alive again would silently kill its gateway/heartbeat/reminders/
+      // chat_reply gate for a process this stale exit event no longer describes — and since the exited
+      // pty's own gateway/heartbeat/reminders dispatch every turn by (pty, sessionId) rather than holding
+      // any reference to the specific OS process, none of them actually needed rebuilding across a same-
+      // session-id respawn; the ONLY bug was tearing them down and never bringing them back. This check is
+      // scoped to onSessionExit alone — `teardownOne`'s OTHER caller (applyDesired's STOP branch, a
+      // genuine disable/delete) must NOT gate on aliveness: the pty typically stays running there and the
+      // wiring must still come down regardless.
+      if (this.deps.pty.isAlive(sessionId)) return Promise.resolve();
+      return this.teardownOneAndRearmSameHomeSiblings(sessionId);
+    });
+  }
+
+  /** See {@link CompanionControl.upgrade}. Serialized via {@link enqueueResult} (NOT {@link enqueue}) — the
+   *  respawn's outcome must reach the REST caller, unlike the best-effort reconcile ops `enqueue` guards. */
+  upgrade(sessionId: string): Promise<{ ok: true; session: Session } | { ok: false; error: string }> {
+    return this.enqueueResult(async () => {
+      if (!this.deps.upgradeCompanionSession) return { ok: false, error: "companion live-upgrade is not wired on this daemon" };
+      try {
+        const session = await this.deps.upgradeCompanionSession(sessionId);
+        return { ok: true, session };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
   }
 
   /**
@@ -438,6 +495,20 @@ export class CompanionController implements CompanionControl {
       }),
     );
     return this.chain;
+  }
+
+  /** Like {@link enqueue}, but for an op whose RESULT (or rejection) the caller needs back — `upgrade`'s
+   *  REST caller must see a real error, unlike a reconcile's fire-and-forget best-effort. Still serializes
+   *  on the SAME `this.chain` (so it can't interleave with a concurrent teardown/start of this session), but
+   *  never lets this op's own rejection poison `this.chain` for whatever's enqueued after it — `this.chain`
+   *  is advanced to an always-resolving derivative, while the returned promise carries the REAL outcome. */
+  private enqueueResult<T>(op: () => Promise<T>): Promise<T> {
+    const result = this.chain.then(op);
+    this.chain = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   /**

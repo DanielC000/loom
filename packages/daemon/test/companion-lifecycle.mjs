@@ -32,6 +32,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      unlike delete, a plain reconcile() would no-op here since the row never leaves the enabled set. A
 //      later reconcile (a future config write / revive) restarts it fresh; repeat/unknown-session calls
 //      are safe no-ops.
+//   7b. onSessionExit's STALE-EXIT GUARD (companion live-upgrade CR fix): an exit event whose session has
+//      ALREADY come back alive by the time this (chain-serialized) op actually runs — e.g. a live-upgrade's
+//      own stop→resume completing first — is a no-op, not a teardown; tearing down a freshly-live companion
+//      for a stale exit would silently kill its gateway/heartbeat/chat_reply gate.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-lifecycle.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -164,10 +168,22 @@ function makeRig(db, resolveEffective) {
   const gw = makeGatewayBuilder(submitSpy);
   const hb = makeHeartbeatBuilder();
   const hooks = { companionSessionIds: new Set(), deliverReply: (sid, text) => controller.deliverReply(sid, text) };
+  // Per-session alive tracking (default alive:true, matching every OTHER test's assumption) — a plain
+  // hardcoded `isAlive: () => true` can't model onSessionExit's real precondition (it only ever fires
+  // AFTER the pty in question has actually died — see CompanionController.onSessionExit's stale-exit
+  // guard), so Part 7 below needs `pty.kill(sessionId)` to mark ONE session dead before simulating its
+  // exit, without disturbing every other rig usage that never touches aliveness at all.
+  const dead = new Set();
+  const ptyStub = {
+    isAlive: (sid) => !dead.has(sid),
+    enqueueStdin: () => ({ delivered: true }),
+    getPending: () => [],
+    kill: (sid) => dead.add(sid),
+  };
   const controller = new CompanionController({
     db,
     submitTurn: submitSpy,
-    pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
+    pty: ptyStub,
     hooks,
     env: {},
     buildGateway: gw.builder,
@@ -175,7 +191,7 @@ function makeRig(db, resolveEffective) {
     ...(resolveEffective ? { resolveEffective } : {}),
   });
   const orch = new OrchestrationMcpRouter(db, {}, hooks);
-  return { submitted, gw, hb, hooks, controller, orch };
+  return { submitted, gw, hb, hooks, controller, orch, pty: ptyStub };
 }
 
 const chatReplyOn = async (orch, sessionId) => (await listTools(orch.buildServer(sessionId, "assistant"))).includes("chat_reply");
@@ -461,6 +477,9 @@ try {
     const adapter0 = rig.gw.built[0].adapter;
     const watcher0 = rig.hb.built[0];
 
+    // onSessionExit only ever fires (in real use) AFTER the pty has actually died — mark it dead here so
+    // the stale-exit guard (below, Part 7b) has a real contrast: alive ⇒ skip, dead ⇒ tear down.
+    rig.pty.kill("assist-1");
     await rig.controller.onSessionExit("assist-1");
     check("exit: adapter stopped (long-poll released)", adapter0.stopped === 1);
     check("exit: heartbeat disarmed", watcher0.stopped === 1 && rig.controller.snapshot().heartbeatArmed === false);
@@ -479,6 +498,32 @@ try {
     await rig.controller.onSessionExit("assist-1");
     await rig.controller.onSessionExit("no-such-session");
     check("exit: repeat/unknown-session onSessionExit is a safe no-op", rig.gw.built.length === 2 && rig.gw.built[1].adapter.stopped === 1);
+    db.close();
+  }
+
+  // ============ Part 7b — onSessionExit's STALE-EXIT GUARD (companion live-upgrade CR fix) ============
+  // onSessionExit's op is SERIALIZED on the controller's chain — a live-upgrade respawn (stop→re-pin→
+  // resume, all sharing that SAME chain) can mean the session is ALREADY alive again by the time this
+  // enqueued teardown actually runs. Tearing it down anyway would silently kill a freshly-live companion's
+  // gateway/heartbeat/chat_reply gate. Prove the guard: an onSessionExit for a session the pty stub still
+  // reports ALIVE is a no-op (contrast with Part 7 above, which kills the pty first and DOES tear down).
+  {
+    const db = new Db(dbFile("p7b.db"));
+    const rig = makeRig(db);
+    writeConfig(db, { sessionId: "assist-1", cadence: 360 });
+    await rig.controller.startInitial(null);
+    await rig.controller.reconcile();
+    check("stale-exit: live before the (stale) exit event", rig.controller.snapshot().running === true && rig.controller.snapshot().heartbeatArmed === true);
+    const adapter0 = rig.gw.built[0].adapter;
+    const watcher0 = rig.hb.built[0];
+
+    // NEVER killed — the pty stub still reports this session alive, simulating a live-upgrade's own
+    // stop→resume having already completed by the time this exit event's enqueued op gets its turn.
+    await rig.controller.onSessionExit("assist-1");
+    check("stale-exit: the adapter is NOT stopped (the exit event was stale — session already alive again)", adapter0.stopped === 0);
+    check("stale-exit: the heartbeat is NOT disarmed", watcher0.stopped === 0 && rig.controller.snapshot().heartbeatArmed === true);
+    check("stale-exit: chat_reply stays ON (gate untouched)", rig.hooks.companionSessionIds.has("assist-1") && (await chatReplyOn(rig.orch, "assist-1")) === true);
+    check("stale-exit: no second gateway was built (nothing was torn down to rebuild)", rig.gw.built.length === 1);
     db.close();
   }
 } finally {

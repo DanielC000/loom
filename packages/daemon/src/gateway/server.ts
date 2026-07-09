@@ -1242,8 +1242,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // same trust posture as the bindings/allowlist/config writers above: an injection-exposed companion agent
   // must never widen its own capability. For every MCP-TOOL lever (session-status, decisions-relay, …) a
   // grant write takes effect on the companion's NEXT respawn (the MCP tool surface is fixed at
-  // OS-process-start — Framework §6's conversation-preserving respawn, a later card, is the live-apply
-  // mechanism; this card does not add one). `attention-push` is the ONE exception: it's a daemon-owned
+  // OS-process-start — see `POST /api/companion/:sessionId/upgrade` below, Framework §6's conversation-
+  // preserving respawn, for the on-demand live-apply path; this route alone does not trigger one).
+  // `attention-push` is the ONE exception: it's a daemon-owned
   // WATCHER, not an MCP tool (companion/attention-push.ts), so `deps.companion?.reconcile(sessionId)` below
   // arms/disarms it LIVE, no respawn needed — see CompanionController.rearmAttentionPushFor. Grants are
   // keyed on the natural key (sessionId, capability, projectId) — POST/PUT both upsert; POST additionally
@@ -1343,6 +1344,32 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deps.db.deleteCompanionCapabilityGrant(sessionId, q.capability, projectId);
     await deps.companion?.reconcile(sessionId); // live disarm — see the POST handler's comment above
     return { ok: true, grants: deps.db.listCompanionCapabilityGrantsForSession(sessionId) };
+  });
+
+  // --- Companion CONVERSATION-PRESERVING RESPAWN (Framework §6): a grant write above takes effect on the
+  // companion's NEXT respawn — its MCP tool surface is fixed at OS-process-start, so an already-running
+  // companion doesn't just pick up a new tool-bearing lever. This is that respawn, on demand: stop the OLD
+  // process and `--resume <engineSessionId>` a fresh one under the re-resolved capability surface, so the
+  // SAME conversation thread continues. HUMAN-ONLY loopback REST, INTENTIONALLY NO MCP path (same trust
+  // posture as every other companion writer above) — an injection-exposed companion agent must never
+  // trigger its OWN respawn. NOT auto-fired from a grant write above: a respawn has a brief availability
+  // gap (the old process stopping before the new one is ready), so the owner picks WHEN. That gap is
+  // handled gracefully: CompanionController.upgrade serializes on the SAME reconcile chain as every other
+  // companion lifecycle op (so it can't interleave with a concurrent teardown/start of this session — and,
+  // load-bearing, so the exit event the respawn itself triggers doesn't leave the companion's gateway/
+  // heartbeat/reminders/chat_reply torn down once the fresh pty comes back — see onSessionExit's stale-exit
+  // guard). An inbound chat message that lands mid-gap is captured and redelivered onto the fresh process
+  // (SessionService.upgradeCompanionCapabilities' flushPending drain), not lost to the old process's FIFO
+  // wipe on exit — bounded to well under a second of genuinely unrecoverable window, not "never," since a
+  // message could in principle land in the same instant the old process actually dies.
+  app.post("/api/companion/:sessionId/upgrade", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    if (!deps.companion) return reply.code(503).send({ error: "companion runtime is not available on this daemon" });
+    const result = await deps.companion.upgrade(sessionId);
+    if (!result.ok) return reply.code(409).send({ error: result.error });
+    return { sessionId, session: result.session };
   });
 
   // --- Companion CHAT HISTORY (bug 0f01f234 — the "reload loses the whole conversation" fix; UNIFIED

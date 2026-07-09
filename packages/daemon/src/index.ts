@@ -513,6 +513,12 @@ async function main(): Promise<void> {
       if (prompt) pty.enqueueStdin(sid, prompt, "system");
       return !!prompt;
     },
+    // CONVERSATION-PRESERVING respawn (Companion Capability & Permission-Lever Framework §6): re-resolve +
+    // re-pin the companion's CURRENT profile-driven capability surface, then stop+`--resume` the OS process
+    // so a newly-granted tool-bearing lever reaches an already-running companion without losing its
+    // conversation thread. Human/REST-triggered only (POST /api/companion/:sessionId/upgrade) — see
+    // sessions/service.ts's upgradeCompanionCapabilities for the full mechanism.
+    upgradeCompanionSession: (sid) => sessions.upgradeCompanionCapabilities(sid),
   });
 
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after. The

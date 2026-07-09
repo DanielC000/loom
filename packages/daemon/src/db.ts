@@ -3110,6 +3110,39 @@ export class Db {
       .run(restrictedTools ? 1 : 0, new Date().toISOString(), id);
   }
   /**
+   * Re-pin the FULL companion capability-shaping surface on the session ROW directly (Companion Capability
+   * & Permission-Lever Framework §6, the conversation-preserving respawn) — the generalized sibling of
+   * {@link setRestrictedTools} above, covering every field `resolveAgentSpawn` resolves that a resume/fork/
+   * recycle path reads straight off the ROW rather than re-resolving from the Profile (see that method's
+   * comment in sessions/service.ts). Same posture as {@link setRestrictedTools}: a write here has NO live
+   * effect on an already-running pty — its MCP tool surface/allowlist was fixed at ITS OWN OS-process-start
+   * — the caller (SessionService.upgradeCompanionCapabilities) is responsible for actually respawning the
+   * process for it to take effect. Partial-patch shape mirrors {@link updateProfile}: an omitted (`undefined`)
+   * field is left untouched; `skills: null` explicitly clears to "deliver all". `connections` is DELIBERATELY
+   * NOT part of this patch — resume() never threads it to pty.spawn (it's read LIVE per-request instead, see
+   * the sole caller's comment), so pinning it here would be a misleading no-op.
+   */
+  setSessionCapabilitySurface(id: string, patch: {
+    browserTesting?: boolean; documentConversion?: boolean; dejaCorpus?: boolean;
+    capabilities?: CapabilityGrant[]; restrictedTools?: boolean; noCommit?: boolean;
+    skills?: string[] | null;
+  }): void {
+    const cols: Record<string, unknown> = {
+      browser_testing: patch.browserTesting === undefined ? undefined : patch.browserTesting ? 1 : 0,
+      document_conversion: patch.documentConversion === undefined ? undefined : patch.documentConversion ? 1 : 0,
+      deja_corpus: patch.dejaCorpus === undefined ? undefined : patch.dejaCorpus ? 1 : 0,
+      restricted_tools: patch.restrictedTools === undefined ? undefined : patch.restrictedTools ? 1 : 0,
+      no_commit: patch.noCommit === undefined ? undefined : patch.noCommit ? 1 : 0,
+      skills: patch.skills === undefined ? undefined : patch.skills === null ? null : JSON.stringify(patch.skills),
+      capabilities: patch.capabilities === undefined ? undefined : JSON.stringify(patch.capabilities),
+    };
+    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
+    if (names.length === 0) return;
+    const set = names.map((c) => `${c} = ?`).join(", ");
+    this.db.prepare(`UPDATE sessions SET ${set}, last_activity = ? WHERE id = ?`)
+      .run(...names.map((c) => cols[c]), new Date().toISOString(), id);
+  }
+  /**
    * On daemon boot, no pty from a previous run survives — reconcile any session still
    * marked live/starting to exited (it stays resumable if it captured an engine id).
    * Returns the recovered rows (read BEFORE the flip) so boot can run the crash-path

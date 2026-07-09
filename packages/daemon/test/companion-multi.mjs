@@ -122,6 +122,16 @@ function makeReminderBuilder() {
   return { built, builder, forSession: (sid) => built.filter((b) => b.sessionId === sid) };
 }
 
+// A pty stub with PER-SESSION alive tracking (default alive:true, matching every plain `isAlive: () =>
+// true` construction elsewhere in this file) — onSessionExit's stale-exit guard (companion live-upgrade CR
+// fix) only tears down a session the pty reports genuinely dead, so Part 7/7c/7b below (which simulate a
+// real exit) must mark the exiting session dead via `.kill(sessionId)` first, mirroring the
+// `db.setProcessState(id, "exited")` call already sitting right next to each `onSessionExit` call.
+function makeDeadTrackingPty() {
+  const dead = new Set();
+  return { isAlive: (sid) => !dead.has(sid), enqueueStdin: () => ({ delivered: true }), getPending: () => [], kill: (sid) => dead.add(sid) };
+}
+
 function writeConfig(db, { sessionId, token = TOKEN_A, chatId = "chat-1", scope = "dm", cadence = 0, enabled = true }) {
   db.upsertCompanionConfig({
     sessionId, botTokenBlob: encryptSecret(token), channel: "telegram", allowedChatId: chatId,
@@ -454,9 +464,10 @@ try {
     const gw = makeGatewayBuilder();
     const hb = makeHeartbeatBuilder();
     const hooks = { companionSessionIds: new Set() };
+    const pty = makeDeadTrackingPty();
     const controller = new CompanionController({
       db, submitTurn: () => ({ delivered: true }),
-      pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
+      pty,
       hooks, env: {}, buildGateway: gw.builder, buildHeartbeat: hb.builder,
     });
     seedSession(db, "winner");
@@ -481,6 +492,7 @@ try {
     // archived, THEN companionController.onSessionExit) — the survivor stays live throughout.
     db.setProcessState("winner", "exited");
     db.archiveSession("winner");
+    pty.kill("winner");
     await controller.onSessionExit("winner");
 
     check("7a: winner's gateway is torn down and never re-started", gw.forSession("winner").length === 1 && gw.forSession("winner")[0].adapter.stopped === 1);
@@ -501,9 +513,10 @@ try {
     const gw = makeGatewayBuilder();
     const hb = makeHeartbeatBuilder();
     const hooks = { companionSessionIds: new Set() };
+    const pty = makeDeadTrackingPty();
     const controller = new CompanionController({
       db, submitTurn: () => ({ delivered: true }),
-      pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
+      pty,
       hooks, env: {}, buildGateway: gw.builder, buildHeartbeat: hb.builder,
     });
     seedSession(db, "winner3");
@@ -528,6 +541,7 @@ try {
     // sole NEW winner; lastPlace3 must stay suppressed (never armed).
     db.setProcessState("winner3", "exited");
     db.archiveSession("winner3");
+    pty.kill("winner3");
     await controller.onSessionExit("winner3");
 
     check("7c: winner3 is no longer live and its gateway was never re-started", controller.liveSessionIds().sort().join(",") === "lastPlace3,runnerUp3" && gw.forSession("winner3").length === 1 && gw.forSession("winner3")[0].adapter.stopped === 1);
@@ -542,9 +556,10 @@ try {
     const gw = makeGatewayBuilder();
     const hb = makeHeartbeatBuilder();
     const hooks = { companionSessionIds: new Set() };
+    const pty = makeDeadTrackingPty();
     const controller = new CompanionController({
       db, submitTurn: () => ({ delivered: true }),
-      pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
+      pty,
       hooks, env: {}, buildGateway: gw.builder, buildHeartbeat: hb.builder,
     });
     seedSession(db, "solo7b");
@@ -553,6 +568,7 @@ try {
     await controller.reconcile();
     db.setProcessState("solo7b", "exited");
     db.archiveSession("solo7b");
+    pty.kill("solo7b");
     await controller.onSessionExit("solo7b");
     check("7b: a solo exit (no same-home live sibling) tears down cleanly with no crash", controller.liveSessionIds().length === 0 && gw.forSession("solo7b")[0].adapter.stopped === 1);
 
