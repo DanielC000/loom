@@ -10,10 +10,14 @@ export interface IdlePty {
   isAlive(sessionId: string): boolean;
   /**
    * Nudge text into the session's busy-gated queue (waits if the target is mid-turn). `source`/`route`/
-   * `kind` mirror PtyHost.enqueueStdin's own optional tail — the answered-stuck watchdog passes
-   * `kind:"agent"` so its re-nudge drains as a distinct one-per-turn message, not a coalesced warning.
+   * `kind`/`questionId` mirror PtyHost.enqueueStdin's own optional tail — the answered-stuck watchdog
+   * passes `kind:"agent"` so its re-nudge drains as a distinct one-per-turn message, not a coalesced
+   * warning, and `questionId` so a LATER `question_pull` can purge this exact nudge via the SAME
+   * `purgeQueuedByQuestionIds` path the answer-route push-nudge already uses (card bbc46336) — without
+   * this tag a watchdog nudge still sitting queued when the question is pulled survives the purge and
+   * drains later as a stale "pull it" message for an already-consumed question.
    */
-  enqueueStdin(sessionId: string, text: string, source?: QueueSource, onDeliver?: () => void, route?: TurnRoute, kind?: QueuedMessageKind): { delivered: boolean; position?: number };
+  enqueueStdin(sessionId: string, text: string, source?: QueueSource, onDeliver?: () => void, route?: TurnRoute, kind?: QueuedMessageKind, questionId?: string): { delivered: boolean; position?: number };
 }
 
 export interface IdleWatcherDeps {
@@ -300,7 +304,10 @@ export class IdleWatcher {
       if (state && state.policy !== "watching") continue; // manager itself flagged waiting/suppressed
 
       const msg = `[loom:answered-stuck] Your decision "${q.title}" was answered a while ago but you haven't pulled it — call question_pull to fetch it.`;
-      try { pty.enqueueStdin(m.id, msg, "system", undefined, undefined, "agent"); } catch { /* manager not live */ }
+      // Tag with q.id (mirrors the answer-route push-nudge, card bbc46336) so a LATER question_pull that
+      // consumes this question purges this exact nudge if it's still queued when it goes stale — otherwise
+      // a manager behind on turns sees a "pull it" nudge for a question it already pulled.
+      try { pty.enqueueStdin(m.id, msg, "system", undefined, undefined, "agent", q.id); } catch { /* manager not live */ }
       this.nudgedAnsweredQuestions.add(q.id);
       // eslint-disable-next-line no-console
       console.log(`[idle-watcher] re-nudged manager ${m.id} for answered-but-unpulled question ${q.id}`);
