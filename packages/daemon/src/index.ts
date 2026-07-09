@@ -23,6 +23,7 @@ import { createFasterWhisperTranscriber, prewarmStt } from "./companion/stt.js";
 import { createKokoroSynthesizer, prewarmTts } from "./companion/tts.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
+import { CodescapeSupervisor } from "./codescape/supervisor.js";
 import { UsageSampler } from "./sessions/usage-sampler.js";
 import { TaskMcpRouter } from "./mcp/server.js";
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
@@ -351,9 +352,14 @@ async function main(): Promise<void> {
   });
 
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design
+  // Codescape fleet-daemon wiring (epic `369dde3c`), card C1 — FOUNDATION. Constructed unconditionally
+  // (byte-identical-when-disabled: the constructor spawns nothing) so SessionService always has a handle
+  // to inject for C2/C3; `.start()` below is the only call that actually does anything, and it no-ops
+  // under isCodescapeSupervisorEnabled() === false (the default for every loomctl user).
+  const codescapeSupervisor = new CodescapeSupervisor();
   // BOOT-BOUND: thread the resolved git-op / provision timeouts into the bounded-git + provision seams
   // at SessionService's call-sites (worktree create/remove/branch-delete/merge-detect during boot-reconcile).
-  const sessions = new SessionService(db, pty, control, { gitOpMs: timeouts.gitOpMs, provisionMs: timeouts.provisionMs, runTimeoutMs: timeouts.runMs });
+  const sessions = new SessionService(db, pty, control, { gitOpMs: timeouts.gitOpMs, provisionMs: timeouts.provisionMs, runTimeoutMs: timeouts.runMs, codescape: codescapeSupervisor });
   // Self-host restart recovery: a manager's `daemon_restart` left an intent naming the sessions to
   // bring back. Read it BEFORE the reconcile so the WHOLE fleet's worktrees are PROTECTED from pass-B GC
   // (recoverStaleSessions just marked every prior-run session 'exited', which would otherwise prune a
@@ -690,6 +696,16 @@ async function main(): Promise<void> {
   } else {
     console.log("[boot] scheduler disabled (set orchestration.schedulerEnabled or LOOM_SCHEDULER_ENABLED=1)");
   }
+
+  // Codescape fleet-daemon (C1): fire-and-forget, like the reconcile kick above — ingest-then-serve can
+  // take a while (a real repo's initial graph build), and nothing here should delay listen() or later
+  // boot steps. `.start()` itself logs its own "off"/"starting" state and NEVER throws past this .catch.
+  // v1 bootstrap: no repoPaths yet (C2 lands the per-project `codescape.enabled` flag this will read) —
+  // so today this only ever starts a bare `serve` with zero projects ingested, under LOOM_DEV +
+  // LOOM_CODESCAPE_ENABLED=1.
+  void codescapeSupervisor.start().catch((err) => {
+    console.warn(`[boot] codescape supervisor failed to start (continuing boot): ${(err as Error).message}`);
+  });
 
   // §19c-b usage-limit RESUME watcher — ALWAYS ON (recovery ≠ autonomy; a manually-started session
   // can hit the cap too), so it runs regardless of schedulerEnabled. LOOM_RATE_LIMIT_WATCH_INTERVAL_MS

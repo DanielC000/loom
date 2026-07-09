@@ -27,6 +27,7 @@ import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
 import { buildFramedMemoryRecall } from "../companion/memory-recall.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
+import type { CodescapeSupervisor } from "../codescape/supervisor.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
 import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, supervisorScriptChangedSince, SUPERVISOR_CHANGED_WARNING, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
@@ -427,6 +428,13 @@ export class SessionService {
    * + process-local; the durable delivered marker remains the cross-restart idempotency guard.
    */
   private readonly redriveInFlightMsgIds = new Set<string>();
+  /**
+   * Codescape fleet-daemon wiring (card C1, epic `369dde3c`): the daemon-singleton supervisor handle,
+   * injected like every other boot-owned dependency here. Accepted only — C1 wires no behavior off it;
+   * C2 (per-session MCP injection) and C3 (lifecycle hooks: worktree spawn/merge/drop) are the consumers.
+   * `undefined` in every existing test constructor (3-arg or opts-less) ⇒ byte-identical.
+   */
+  private readonly codescape: CodescapeSupervisor | undefined;
   constructor(
     private db: Db, private pty: PtyHost, private control: OrchestrationControl,
     opts?: {
@@ -434,6 +442,7 @@ export class SessionService {
       removeDir?: (target: string, timeoutMs: number) => Promise<{ removed: boolean; killed: boolean }>;
       reapWorktreeProcesses?: (worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>;
       wedgeSweepIntervalMs?: number; wedgeGiveUpAttempts?: number; wedgeGiveUpMs?: number;
+      codescape?: CodescapeSupervisor;
     },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
@@ -446,6 +455,7 @@ export class SessionService {
     this.runWebhookPost = opts?.runWebhookPost ?? defaultRunWebhookPost;
     this.runWebhookTimeoutMs = opts?.runWebhookTimeoutMs ?? RUN_WEBHOOK_TIMEOUT_MS;
     this.runTimeoutMs = opts?.runTimeoutMs ?? RUN_TIMEOUT_MS;
+    this.codescape = opts?.codescape;
   }
 
   /**

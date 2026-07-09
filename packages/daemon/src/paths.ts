@@ -2,6 +2,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { resolveExecutable } from "./pty/resolve-bin.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -214,6 +215,50 @@ export function isLoomDev(): boolean {
  */
 export function isFirstRunLaunchSuppressed(): boolean {
   return process.env.LOOM_SUPPRESS_FIRST_RUN_LAUNCH === "1";
+}
+
+/**
+ * Card C1 (Codescape fleet-daemon wiring epic `369dde3c`, LOOM_DEV-gated): the ONE shared working
+ * directory BOTH `codescape ingest` and `codescape serve` must be spawned from — both commands resolve
+ * their `.codescape` state dir relative to `process.cwd()`, so ingest and serve sharing this exact cwd is
+ * the CWD CONTRACT (see codescape/supervisor.ts) — a mismatch means serve silently never sees what
+ * ingest wrote. Deliberately NOT created here (unlike WORKTREES_DIR etc. in `ensureDirs`) — creating it
+ * unconditionally would make a disabled boot no longer "byte-identical" (the C1 negative-case DoD); the
+ * supervisor creates it lazily, only once it actually starts.
+ */
+export const CODESCAPE_HOME_DIR = path.join(LOOM_HOME, "codescape");
+
+/**
+ * Card C1: whether the Codescape fleet-daemon supervisor should start at boot. `isLoomDev()` is a HARD
+ * prerequisite — Codescape supervision lives in the same LOOM_DEV-gated layer as the Deja / Platform Lead
+ * builtins and NEVER runs for a regular `loomctl` user, flag or not. Within dev, `LOOM_CODESCAPE_ENABLED=1`
+ * narrows it further (default OFF, mirroring the scheduler's own opt-in env var `LOOM_SCHEDULER_ENABLED`,
+ * index.ts:680-681) so `LOOM_DEV=1` alone doesn't spawn an extra host process. Read at CALL time (like
+ * `isLoomDev`) so a single test process can exercise both the default-off and the enabled state.
+ */
+export function isCodescapeSupervisorEnabled(): boolean {
+  return isLoomDev() && process.env.LOOM_CODESCAPE_ENABLED === "1";
+}
+
+/**
+ * Card C1: resolve the `codescape` CLI as a `{command, args}` spawn pair (never a shell string — see
+ * codescape/supervisor.ts for why). `LOOM_CODESCAPE_BIN` is a human-only override, mirroring
+ * `LOOM_DEJA_BIN` (pty/host.ts:627) — but UNLIKE it, does not require an absolute path: the supervisor
+ * spawns via plain `child_process.spawn` (not node-pty), so a bare PATH-resolvable name is fine too
+ * (CONTRACT Q5: "PATH or absolute both acceptable"). Two forms:
+ *   - a `.js`/`.mjs`/`.cjs` path (a source-installed codescape checkout, OR the fixture CLI the C1
+ *     real-spawn test points this at) runs via node explicitly — mirrors dejaMcpServer's
+ *     `[process.execPath, cli.js]` shape (pty/host.ts:626-630) — since there's no reliable shebang/
+ *     association to exec a JS file directly cross-platform;
+ *   - anything else resolves through {@link resolveExecutable} (PATH + Windows PATHEXT, e.g. a `.cmd`
+ *     npm shim or a compiled binary), so the caller can spawn it directly with NO shell — sidesteps the
+ *     shell-quoting concerns `git/worktrees.ts:166` documents for its own `shell:true` installs (a repo
+ *     path argument here never needs quoting since spawn takes it as a real argv element).
+ */
+export function resolveCodescapeBin(): { command: string; args: string[] } {
+  const bin = process.env.LOOM_CODESCAPE_BIN?.trim() || "codescape";
+  if (/\.[mc]?js$/.test(bin)) return { command: process.execPath, args: [bin] };
+  return { command: resolveExecutable(bin), args: [] };
 }
 
 export function ensureDirs(): void {
