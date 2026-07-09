@@ -272,6 +272,21 @@ try {
   const sess = await call("list_all_sessions", {});
   check("(c) list_all_sessions: returns the live session summaries", Array.isArray(sess) && sess.some((s) => s.id === "SETUP"));
 
+  // 8-char id-PREFIX resolution for list_all_sessions (card 7097f3fb) — mirrors project_get: a full id OR
+  // an unambiguous 8-char prefix resolves the SAME rows; unknown is an EXPLICIT error, never a silent [].
+  db.insertProject({ id: "cafe1234-full-uuid-form", name: "Prefixed", repoPath: repo, vaultPath: repo, config: {}, createdAt: new Date().toISOString(), archivedAt: null, reserved: false });
+  db.insertAgent({ id: "agentPfx", projectId: "cafe1234-full-uuid-form", name: "Pfx", startupPrompt: "PFX", position: 0, profileId: null });
+  db.insertSession({
+    id: "SPFX", projectId: "cafe1234-full-uuid-form", agentId: "agentPfx", engineSessionId: null, title: null, cwd: repo,
+    processState: "live", resumability: "unknown", busy: false, createdAt: new Date().toISOString(), lastActivity: new Date().toISOString(), lastError: null,
+    role: null, parentSessionId: null,
+  });
+  const byPrefixSess = await call("list_all_sessions", { projectId: "cafe1234" });
+  check("(c) list_all_sessions (8-char prefix): resolves to the full-id project's rows", byPrefixSess.some((s) => s.id === "SPFX"));
+  const unknownPfxSess = await call("list_all_sessions", { projectId: "ffffffff" });
+  check("(c) list_all_sessions (unknown prefix): explicit error, never a silent []",
+    !Array.isArray(unknownPfxSess) && unknownPfxSess.error === "project not found");
+
   // project_archive (the ONE v1 widen) — soft, reversible, reserved-guarded.
   // A NON-reserved project archives (hidden from the active list; row retained).
   const toArchive = await call("project_create", { name: "Disposable", repoPath: repo });

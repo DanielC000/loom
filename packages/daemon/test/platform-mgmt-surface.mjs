@@ -140,6 +140,30 @@ try {
   const ordSess = await call("list_all_sessions", { projectId: "pOrd" });
   check("list_all_sessions (projectId): all rows belong to that project", ordSess.length >= 4 && ordSess.every((s) => s.projectId === "pOrd"));
 
+  // ---- 8-char id-PREFIX resolution for list_all_sessions (card 7097f3fb) — mirrors project_get/
+  // list_all_tasks: a full id OR an unambiguous 8-char prefix resolves the SAME rows; unknown/ambiguous
+  // is an EXPLICIT error, never a silent []. ----
+  db.insertProject({ id: "cafe1234-full-uuid-form", name: "Prefixed", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  db.insertAgent({ id: "agentPfx", projectId: "cafe1234-full-uuid-form", name: "Pfx", startupPrompt: "PFX", position: 0, profileId: null });
+  db.insertSession({
+    id: "SPFX", projectId: "cafe1234-full-uuid-form", agentId: "agentPfx", engineSessionId: null, title: null, cwd: repo,
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+    role: null, parentSessionId: null,
+  });
+  const fullIdSess = await call("list_all_sessions", { projectId: "cafe1234-full-uuid-form" });
+  const byPrefixSess = await call("list_all_sessions", { projectId: "cafe1234" });
+  check("list_all_sessions (8-char prefix): returns the SAME rows as the full id",
+    byPrefixSess.some((s) => s.id === "SPFX") && byPrefixSess.length === fullIdSess.length);
+  const unknownPfxSess = await call("list_all_sessions", { projectId: "ffffffff" });
+  check("list_all_sessions (unknown prefix): explicit error, never a silent []",
+    !Array.isArray(unknownPfxSess) && unknownPfxSess.error === "project not found");
+  db.insertProject({ id: "beef1234-aaaa-1111-1111-111111111111", name: "AmbigA", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  db.insertProject({ id: "beef1234-bbbb-2222-2222-222222222222", name: "AmbigB", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  const ambiguousPfxSess = await call("list_all_sessions", { projectId: "beef1234" });
+  check("list_all_sessions (ambiguous prefix): explicit error naming the candidates",
+    !Array.isArray(ambiguousPfxSess) && /ambiguous/.test(ambiguousPfxSess.error || "") &&
+    ambiguousPfxSess.error.includes("beef1234-aaaa-1111-1111-111111111111") && ambiguousPfxSess.error.includes("beef1234-bbbb-2222-2222-222222222222"));
+
   // ===================== (a) PROFILES (the human-equivalent elevation, gated to platform) =====================
   const nProfBefore = db.listProfiles().length;
   const pc = await call("profile_create", { profile: { name: "Reviewer", role: "worker", allowDelta: ["Bash(git diff:*)"] } });

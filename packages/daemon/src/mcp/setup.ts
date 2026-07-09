@@ -464,7 +464,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "list_all_sessions",
       {
-        description: "List sessions across the platform (archived excluded), each enriched with its project + agent name. state (default \"live\") filters by PROCESS lifecycle: \"live\" = non-exited sessions only (the bounded default — finished but un-archived sessions are dropped so the feed doesn't grow without limit); \"exited\" = terminated sessions only (history); \"all\" = both. Optional projectId narrows to one project. DEFAULT returns a lightweight SUMMARY per session so the list stays bounded; pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first); summary reads are capped at " + DEFAULT_SESSION_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
+        description: "List sessions across the platform (archived excluded), each enriched with its project + agent name. state (default \"live\") filters by PROCESS lifecycle: \"live\" = non-exited sessions only (the bounded default — finished but un-archived sessions are dropped so the feed doesn't grow without limit); \"exited\" = terminated sessions only (history); \"all\" = both. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. DEFAULT returns a lightweight SUMMARY per session so the list stays bounded; pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first); summary reads are capped at " + DEFAULT_SESSION_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
         inputSchema: {
           projectId: z.string().optional(),
           state: z.enum(["live", "exited", "all"]).optional(),
@@ -474,8 +474,16 @@ export class SetupMcpRouter {
         },
       },
       async ({ projectId, state, full, limit, offset }) => {
+        // projectId resolves EXACTLY like the sibling cross-project reads (project_get) — full id OR
+        // unambiguous 8-char prefix, error on unknown/ambiguous — mirrors the platform.ts fix (card 7097f3fb).
+        let resolvedProjectId: string | undefined;
+        if (projectId !== undefined) {
+          const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+          if ("error" in project) return ok(project);
+          resolvedProjectId = project.id;
+        }
         const all = filterSessionsByState(db.listAllSessions(), state ?? "live");
-        const filtered = projectId === undefined ? all : all.filter((s) => s.projectId === projectId);
+        const filtered = resolvedProjectId === undefined ? all : all.filter((s) => s.projectId === resolvedProjectId);
         const effLimit = limit ?? (full ? undefined : DEFAULT_SESSION_SUMMARY_CAP);
         return ok(projectSessionList(filtered, { full, limit: effLimit, offset }));
       },
