@@ -343,6 +343,22 @@ mid-report — before sending anything.
    ships in this skill's `scripts/` dir — point a worker producing such an artifact at it rather than
    letting them reinvent an ephemeral server.
 
+   To eyeball a **live dev server** you launch yourself against a worker's worktree (not a static
+   artifact) — never hand-hunt `netstat`/`taskkill` for the listener PID afterward: that output is
+   locale-dependent to parse (a non-English OS locale renders different column headers/states), and a
+   kill by name or port can reach a process you never spawned — another dev server, an unrelated
+   project, or even the self-hosting daemon. Launch it through the **bundled** helper instead — it
+   records the EXACT child pid it spawns and tears down only that pid (never a name/port search):
+   `node .claude/skills/orchestrate/scripts/dev-server.mjs start <worktree-dir> -- <command...>` prints
+   the pid and returns immediately (the server keeps running); eyeball via Playwright at whatever URL
+   the command itself prints, then
+   `node .claude/skills/orchestrate/scripts/dev-server.mjs stop <worktree-dir>` before requesting a
+   merge for that worktree. A dev server left running is exactly what makes `worker_merge_confirm`'s
+   `git worktree remove` fail on Windows (the live process holds the worktree dir open) — stopping it by
+   tracked handle before you request the merge avoids that. **Never kill by image name
+   (`taskkill /IM node.exe`) and never kill by port** — a host-wide by-name kill has previously taken
+   down the entire self-hosting daemon.
+
    To turn that same HTML into a **PDF** deliverable, print it headlessly — no external converter. Drive
    Playwright's Chromium to the served loopback URL and call `page.pdf`:
    `await page.pdf({ path: 'out.pdf', format: 'A4', printBackground: true })` (`page.pdf` is
