@@ -53,6 +53,7 @@ import { cloneAgentCore } from "../agents/clone-core.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
 import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge, profileUpdateDiff, adoptProfileUpdate, type ProfileFieldResolution } from "../profiles/customization.js";
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
+import { getDejaCaptureCount } from "../deja/store.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME } from "../setup/seed.js";
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
@@ -404,6 +405,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/python/provisioning/retry", async () => {
     prewarmMarkitdown(resolvePrewarmInterpreterPath(deps.db.listAllProjects()));
     return getMarkitdownProvisionStatus();
+  });
+
+  // --- Deja capture status (card 1c0c1a2c): the count of mockups ever captured into Deja's global
+  // store, read for the dejaCapture toggle's self-explaining status line (empty-state vs a heartbeat
+  // count) — see deja/store.ts for the read itself. HUMAN/REST-ONLY, READ-ONLY, no agent MCP tool.
+  // Deja is a PRIVATE, LOOM_DEV-only product (mirrors the /api/skills/:name/publish gate above) — a
+  // non-dev build 403s so this never widens the Deja surface to a regular loomctl user, even though
+  // the web toggle/section that would call this already doesn't render there either.
+  app.get("/api/deja/capture-status", async (_req, reply) => {
+    if (!isLoomDev()) return reply.code(403).send({ error: "Deja is a dev/self-host-only feature" });
+    return { count: getDejaCaptureCount() };
   });
 
   // A manager's orchestration_events timeline (chronological). READ-ONLY — emits no event.

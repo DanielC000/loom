@@ -81,6 +81,11 @@ export interface PythonProvisioning {
   lastAttemptAt?: number;
 }
 
+// Deja capture status (GET /api/deja/capture-status, card 1c0c1a2c) — the count of mockups ever
+// captured into Deja's global store, so the dejaCapture toggle can show a self-explaining status
+// line instead of silent emptiness. LOOM_DEV-only (403 otherwise, mirroring the rest of Deja).
+export interface DejaCaptureStatus { count: number; }
+
 async function get<T>(url: string): Promise<T> {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
@@ -563,6 +568,9 @@ export const api = {
   // `retryPythonProvisioning` re-kicks it off the daemon's event loop and returns the same status shape. ---
   pythonProvisioning: () => get<PythonProvisioning>("/api/python/provisioning"),
   retryPythonProvisioning: () => post<PythonProvisioning>("/api/python/provisioning/retry"),
+
+  // Deja capture status (dev-only) — the mockup count for the dejaCapture toggle's status line.
+  dejaCaptureStatus: () => get<DejaCaptureStatus>("/api/deja/capture-status"),
 
   // --- Schedules (phase-2 Pillar B): cron triggers that boot a manager in `agentId` on each due
   // boundary. HUMAN-managed (this page + REST) — there is no agent-writable MCP surface. createSchedule

@@ -358,6 +358,7 @@ function ConfigEditor({ project }: { project: Project }) {
             <span style={fieldLabel}>Ingest agent-written mockups into Deja</span>
             <TriSelect value={dejaCapture} set={setDejaCapture} def={defaults.dejaCapture} />
             <Hint>opt-in: a PostToolUse hook auto-ingests an agent-authored .html mockup into Deja with the driving prompt as origin_prompt · off by default</Hint>
+            {resolved.dejaCapture && <DejaCaptureStatusLine />}
           </label>
         </Panel>
       )}
@@ -1285,6 +1286,28 @@ function Hint({ children }: { children: ReactNode }) {
 }
 function effHint(v: unknown): string {
   return `effective: ${String(v)}`;
+}
+
+// Deja capture status line (card 1c0c1a2c) — turns a silently-empty dejaCapture toggle into a
+// self-explaining state: an empty-state line at 0 captures, a heartbeat count once there's at
+// least one. Rendered only while the effective toggle is ON (see the Deja Capture panel above).
+// Polls gently (10s) so a capture landing mid-session shows up without a manual page reload.
+function DejaCaptureStatusLine() {
+  const q = useQuery({
+    queryKey: ["dejaCaptureStatus"],
+    queryFn: api.dejaCaptureStatus,
+    retry: false,
+    refetchInterval: 10_000,
+  });
+  if (!q.data) return null;
+  const { count } = q.data;
+  return (
+    <span style={{ color: count > 0 ? color.text : color.textMuted, fontSize: 11, fontFamily: font.mono }}>
+      {count > 0
+        ? `${count} mockup${count === 1 ? "" : "s"} captured`
+        : "Capture on, 0 mockups seen yet — mockups appear once a generating agent writes one."}
+    </span>
+  );
 }
 
 // `effective` = the current resolved value (shown as the "effective:" hint); `def` = the platform
