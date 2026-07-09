@@ -3296,7 +3296,7 @@ export class SessionService {
    */
   async workerReport(
     workerSessionId: string,
-    report: { status: "done" | "blocked" | "progress"; summary: string; prUrl?: string; needs?: string },
+    report: { status: "done" | "blocked" | "progress"; summary: string; prUrl?: string; needs?: string; noChanges?: boolean },
   ): Promise<{ reported: boolean; deliveryStatus: DeliveryStatus; refused?: boolean; error?: string; uncommittedFiles?: string[]; warning?: string; autoRetired?: boolean }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker) throw new Error("unknown worker session");
@@ -3328,10 +3328,18 @@ export class SessionService {
         else if (e.kind === "worker_report" && e.taskId === taskId) { lastReport = e; break; }
       }
       if (lastReport && resumedSince && !directionSince) {
-        const d = lastReport.detail as { status?: string; summary?: string; prUrl?: string; needs?: string } | undefined;
+        const d = lastReport.detail as { status?: string; summary?: string; prUrl?: string; needs?: string; noChanges?: boolean } | undefined;
+        // noChanges is included in the identity check (card ccf0bbfe follow-up): a worker that reports
+        // done with an IDENTICAL summary but a DIFFERENT noChanges value (e.g. it crashed right after an
+        // un-flagged done, auto-resumed, and re-reports with noChanges:true this time) must NOT be
+        // collapsed as a pure re-confirmation echo — that would silently skip the auto-retire this report
+        // is trying to trigger, leaving the worker stranded live needing a manual stop. Normalize
+        // undefined/false together (both mean "no declared-intent signal") so an old pre-feature event
+        // (no noChanges key at all) still compares equal to a fresh `false`.
         const identical =
           d?.status === report.status && d?.summary === report.summary &&
-          (d?.prUrl ?? undefined) === report.prUrl && (d?.needs ?? undefined) === report.needs;
+          (d?.prUrl ?? undefined) === report.prUrl && (d?.needs ?? undefined) === report.needs &&
+          (d?.noChanges ?? false) === (report.noChanges ?? false);
         if (identical) return { reported: true, deliveryStatus: "dropped" };
       }
     }
@@ -3343,14 +3351,21 @@ export class SessionService {
     // confirmWorkerMerge). FAILS SAFE: precheckWorkerDone degrades to ALLOW on any git error, so a flaky
     // check can never wedge a legitimate done. Only the AFFIRMATIVE uncommitted signal refuses.
     let warning: string | undefined;
-    // AUTO-RETIRE a declared no-commit worker (card 14434d6b): a read-only / no-commit worker (e.g. the
-    // Code Reviewer rig, profile noCommit=true → pinned on the row) has NO merge step, so unlike a normal
-    // worker — whose concurrency slot frees via worker_merge_confirm — its slot would only free on a manual
-    // worker_stop. Set when this is a DECLARED no-commit role reporting done with 0 commits ahead (its
-    // CORRECT contract), so we free its cap slot below + suppress the forgot-to-commit warning. Keyed
-    // STRICTLY off the pinned noCommit flag (NOT name-matching, NOT "0 commits" alone): a NORMAL 0-commit
-    // worker still gets the warning and is NEVER auto-retired — the forgot-to-commit safety net is intact.
+    // AUTO-RETIRE a declared no-commit worker (card 14434d6b), GENERALIZED to a per-report declared-intent
+    // signal (card ccf0bbfe): a read-only / no-commit worker (e.g. the Code Reviewer rig, profile
+    // noCommit=true → pinned on the row) has NO merge step, so unlike a normal worker — whose concurrency
+    // slot frees via worker_merge_confirm — its slot would only free on a manual worker_stop. The SAME gap
+    // hits an ordinary worker with a legitimate one-off no-op done (a review, an investigation that found
+    // nothing to change, a mockup/report delivered outside the repo) — it isn't a noCommit ROLE, so it used
+    // to get the misleading "forgot to commit" warning and never auto-retired. `report.noChanges` (set by
+    // the worker on a `done` report) is the PER-REPORT declared-intent analog of the pinned role flag: set
+    // when EITHER trigger fires reporting done with 0 commits ahead (the CORRECT contract for both), so we
+    // free the cap slot below + suppress the forgot-to-commit warning. Keyed STRICTLY off the pinned
+    // noCommit flag OR the explicit `noChanges` signal (NOT name-matching, NOT "0 commits" alone): a NORMAL
+    // 0-commit worker that did NOT declare intent still gets the warning and is NEVER auto-retired — the
+    // forgot-to-commit safety net for the ACCIDENTAL case is intact.
     let autoRetireNoCommit = false;
+    let autoRetireTrigger: "no-commit-role" | "declared-no-op" | undefined;
     if (report.status === "done") {
       // PENDING-DIRECTION PRE-CHECK (board card dcb25bd9): REFUSE a done-report while the worker still has
       // UNRESOLVED manager direction queued. The real incident: a worker raced to `done` on a SUPERSEDED
@@ -3438,14 +3453,24 @@ export class SessionService {
             // worker_stop. Conjoined with zeroAhead on purpose: a "no-commit" worker that DID produce
             // commits is treated like any normal worker (real work to merge — never auto-retired here).
             autoRetireNoCommit = true;
+            autoRetireTrigger = "no-commit-role";
+          } else if (report.noChanges) {
+            // DECLARED no-op done (card ccf0bbfe): the worker itself is asserting — for THIS report only —
+            // that 0 commits ahead is correct, not accidental. Same treatment as the pinned-role case:
+            // suppress the warning and auto-retire so its concurrency slot frees without a manual
+            // worker_stop. A worker that DID produce commits ignores this flag entirely (zeroAhead is
+            // false, so this branch never runs) — the signal only ever matters at 0-commits-ahead.
+            autoRetireNoCommit = true;
+            autoRetireTrigger = "declared-no-op";
           } else {
-            // WARN only: a clean worktree on an assigned branch with 0 commits ahead of base. A genuine
-            // no-op task can legitimately report done, so this never refuses — it surfaces the warning in
-            // the result, the worker_report event, and the manager notification. (The forgot-to-commit
-            // safety net for a NORMAL worker — unchanged.)
+            // WARN only: a clean worktree on an assigned branch with 0 commits ahead of base, with no
+            // declared-intent signal. A genuine no-op task can legitimately report done, so this never
+            // refuses — it surfaces the warning in the result, the worker_report event, and the manager
+            // notification. (The forgot-to-commit safety net for a NORMAL worker — unchanged.)
             warning =
               `your assigned branch '${worker.branch}' is 0 commits ahead of base — nothing to merge. ` +
-              `Allowing the done (a real no-op task can legitimately report done), but if you intended to produce changes you likely forgot to commit them.`;
+              `Allowing the done (a real no-op task can legitimately report done), but if you intended to produce changes you likely forgot to commit them. ` +
+              `If a future done is a legitimate no-op (a review, an investigation with nothing to change, an out-of-repo deliverable), pass noChanges:true to suppress this warning and auto-retire cleanly.`;
           }
         }
       }
@@ -3463,7 +3488,9 @@ export class SessionService {
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report",
-      detail: { status: report.status, summary: report.summary, prUrl: report.prUrl, needs: report.needs, ...(warning ? { warning } : {}) },
+      // noChanges recorded ONLY when true (additive, forensics completeness — CR follow-up): also what the
+      // auto-recovery re-confirmation dedupe above reads back via lastReport.detail.noChanges.
+      detail: { status: report.status, summary: report.summary, prUrl: report.prUrl, needs: report.needs, ...(warning ? { warning } : {}), ...(report.noChanges ? { noChanges: true } : {}) },
     });
 
     // No parent to route to (a parentless worker — practically impossible, but if it happens the report
@@ -3475,7 +3502,10 @@ export class SessionService {
       if (report.prUrl) framed += ` | PR: ${report.prUrl}`;
       if (report.needs) framed += ` | needs: ${report.needs}`;
       if (warning) framed += ` | warning: ${warning}`;
-      if (autoRetireNoCommit) framed += ` | auto-retired (declared no-commit role, 0 commits ahead — its concurrency slot is freed, no worker_stop needed)`;
+      if (autoRetireNoCommit) {
+        const why = autoRetireTrigger === "declared-no-op" ? "declared no-op done (noChanges)" : "declared no-commit role";
+        framed += ` | auto-retired (${why}, 0 commits ahead — its concurrency slot is freed, no worker_stop needed)`;
+      }
       // kind:"agent" — a worker→manager report is a distinct directive the manager must individually
       // process, never mashed with a sibling worker's report into one wall of text.
       const r = this.pty.enqueueStdin(managerSessionId, framed, "system", undefined, undefined, "agent");
@@ -3520,7 +3550,7 @@ export class SessionService {
         this.db.appendEvent({
           id: randomUUID(), ts: new Date().toISOString(),
           managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "stop_worker",
-          detail: { reason: "no-commit-auto-retire" },
+          detail: { reason: "no-commit-auto-retire", trigger: autoRetireTrigger },
         });
         // Deferred so THIS tool call's own MCP response (worker_report's reply, still in flight over the
         // MCP transport back to the worker's CLI) flushes BEFORE the pty's Ctrl-C×2 lands — mirrors

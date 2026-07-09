@@ -470,16 +470,17 @@ export class OrchestrationMcpRouter {
       server.registerTool(
         "worker_report",
         {
-          description: "Report your status up to your manager: moves your task (done→review, blocked→waiting) and notifies the manager. Call when done, blocked, or to checkpoint progress. Returns a `deliveryStatus` (delivered-live | queued | boarded | dropped): your manager got it now, it's queued for its next turn, or it's durably boarded for a parked/offline manager (Loom auto-wakes it) — all safe; only `dropped` means it reached nobody.",
+          description: "Report your status up to your manager: moves your task (done→review, blocked→waiting) and notifies the manager. Call when done, blocked, or to checkpoint progress. Returns a `deliveryStatus` (delivered-live | queued | boarded | dropped): your manager got it now, it's queued for its next turn, or it's durably boarded for a parked/offline manager (Loom auto-wakes it) — all safe; only `dropped` means it reached nobody. `noChanges` is an OPTIONAL flag on a `done` report for a LEGITIMATE no-op — you reviewed only, investigated and found nothing to change, or your deliverable lives outside this repo (e.g. a mockup) — where the CORRECT outcome is 0 commits. Set it and a 0-commit done skips the 'you likely forgot to commit' warning and auto-retires your session cleanly (frees your manager's concurrency slot, no worker_stop needed) — the same clean exit a declared no-commit role gets. Omit it (or a done that DID commit) and behavior is unchanged; a 0-commit done without it still warns, so don't set it unless the no-op is genuinely intentional.",
           inputSchema: {
             status: z.enum(["done", "blocked", "progress"]),
             summary: z.string(),
             prUrl: z.string().optional(),
             needs: z.string().optional(),
+            noChanges: z.boolean().optional(),
           },
         },
-        async ({ status, summary, prUrl, needs }) =>
-          ok(await sessions.workerReport(sessionId, { status, summary, prUrl, needs })),
+        async ({ status, summary, prUrl, needs, noChanges }) =>
+          ok(await sessions.workerReport(sessionId, { status, summary, prUrl, needs, noChanges })),
       );
       return server;
     }

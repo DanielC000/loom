@@ -167,9 +167,14 @@ tool you call); board reads are `mcp__loom-tasks__tasks_get` / `tasks_list`. Loa
   **orphan that commit and lose it for good**. Uncommitted work is just as invisible — the gate sees
   `filesChanged:0` and bounces the task back, wasting a round-trip. So: commit to the assigned branch
   and report the SHA before you report `done`. **The exception is a legitimately no-op task** — a
-  verification-only assignment, or one whose correct outcome is that nothing needed changing. There,
-  report `done` with **no commit** and say so plainly (what you verified, and that the right result is
-  zero files changed); **don't fabricate an empty or throwaway commit just to satisfy the gate**. A real
+  review-only assignment, an investigation that found nothing needing change, or a deliverable that
+  lives outside this repo entirely (e.g. a mockup or a report). There, report `done` with **no commit**,
+  say so plainly (what you verified, and that the right result is zero files changed), and pass
+  **`noChanges: true`** on the report — this tells your manager the 0-commit result is INTENTIONAL, so
+  it skips the "you likely forgot to commit" warning and your session retires cleanly on its own
+  (freeing your manager's concurrency slot without a manual stop). Omit it (or a `done` that did commit)
+  and behavior is unchanged — a 0-commit `done` without it still warns, so only set it when the no-op is
+  genuinely intentional. **Don't fabricate an empty or throwaway commit just to satisfy the gate.** A real
   no-op `done` is valid — your manager handles a `filesChanged:0` report. This is distinct from the trap
   above: a no-op is *you confirmed there was nothing to change*, not *you did work and forgot to commit
   it* — make which one it is unmistakable in your report. Don't merge — your manager reviews the branch and
