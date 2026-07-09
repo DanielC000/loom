@@ -18,12 +18,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Proves:
 //   (1) MERGED, async: the completion nudge fires exactly once, kind:"warning", naming the worker + "merged".
-//   (2) GATE-FAILED, async: the completion nudge fires exactly once, kind:"warning", naming the worker +
-//       the gate-failure reason — DISTINCT from the pre-existing `[loom:merge-rejected]` rejectNotify
-//       (which already fires unconditionally on every gate failure, sync or async) — both may land, but
-//       only this new one carries the `[loom:merge-done]`/`[loom:merge-failed]` completion-signal tag.
+//   (2) GATE-FAILED, async, GENUINE (unresolved) rejection: the rich `[loom:merge-rejected]` (rejectNotify,
+//       kind:"agent") fires — and it is the ONLY terminal signal delivered; the generic completion-nudge
+//       `[loom:merge-failed]` echo is SUPPRESSED (card 9eea3901 — the double-notify fix: `notified:true` on
+//       the ConfirmMergeResult tells `onSettledAfterPending` the manager was already told).
 //   (3) FAST path (gate resolves well within the sync-wait budget): NO completion nudge fires at all — the
 //       synchronous caller already has the outcome inline; a push here would double-notify.
+//   (4) GATE-FAILED, async, SUPPRESSED rejection (task's card already Done — shouldSuppressMergeReject
+//       reconciles the rich notify away): the generic `[loom:merge-failed]` completion nudge is the SOLE
+//       terminal signal (`notified:false` ⇒ onSettledAfterPending must NOT skip it, or the manager would
+//       hear nothing at all about this async op).
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-confirm-completion-nudge.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -135,7 +139,7 @@ try {
     worktrees.push([repo, undefined]); // already merged/removed — no worktree left to clean up, kept for symmetry
   }
 
-  // ============================ (2) GATE-FAILED, async: completion nudge names the failure reason ============================
+  // === (2) GATE-FAILED, async, GENUINE rejection: rich merge-rejected fires, generic echo suppressed ===
   {
     const P = "mcn-gate-failed", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t2");
@@ -150,13 +154,20 @@ try {
     const first = await svc.confirmWorkerMergeTracked(mgrId, workerId);
     check("(2) degrades to pending past the sync-wait budget", first.settled === false);
 
-    // Let the 13s gate actually finish (non-zero) + the terminal callback fire — poll (generous
-    // ceiling) rather than a fixed sleep, so contention doesn't false-RED this check.
-    await waitUntil(() => host.enqueueCalls.some((c) => c.sessionId === mgrId && /\[loom:merge-(done|failed)\]/.test(c.text)), 20_000);
-    const nudges = host.enqueueCalls.filter((c) => c.sessionId === mgrId && /\[loom:merge-(done|failed)\]/.test(c.text));
-    check("(2) exactly ONE completion nudge landed for this worker", nudges.length === 1);
-    check("(2) it's the FAILED nudge, naming the worker + the gate-failure reason", nudges[0] && /\[loom:merge-failed\]/.test(nudges[0].text) && nudges[0].text.includes(workerId) && /build gate failed/.test(nudges[0].text));
-    check("(2) pushed with kind:\"warning\"", nudges[0] && nudges[0].kind === "warning");
+    // Let the 13s gate actually finish (non-zero) + rejectNotify (inside confirmWorkerMerge, fires BEFORE
+    // the outer terminal callback runs) land its rich rejection — poll rather than a fixed sleep, so
+    // contention doesn't false-RED this check.
+    await waitUntil(() => host.enqueueCalls.some((c) => c.sessionId === mgrId && /\[loom:merge-rejected\]/.test(c.text)), 20_000);
+    // Grace window for a (should-NOT-happen post-fix) trailing generic echo — the terminal callback fires
+    // as a promise continuation microtask-close to rejectNotify's own await, so a short sleep is enough to
+    // catch it if the suppression regressed.
+    await sleep(500);
+    const rejectedNudges = host.enqueueCalls.filter((c) => c.sessionId === mgrId && /\[loom:merge-rejected\]/.test(c.text));
+    const failedNudges = host.enqueueCalls.filter((c) => c.sessionId === mgrId && /\[loom:merge-failed\]/.test(c.text));
+    check("(2) exactly ONE rich merge-rejected nudge fired", rejectedNudges.length === 1);
+    check("(2) it names the worker + the gate-failure reason", rejectedNudges[0] && rejectedNudges[0].text.includes(workerId) && /build gate failed/.test(rejectedNudges[0].text));
+    check("(2) pushed with kind:\"agent\" (a specific rejection requiring manager action)", rejectedNudges[0] && rejectedNudges[0].kind === "agent");
+    check("(2) NO generic [loom:merge-failed] echo for the SAME event (card 9eea3901 double-notify fix)", failedNudges.length === 0);
     check("(2) fail-closed: worktree retained (gate failed, nothing merged)", fs.existsSync(worktreePath));
     worktrees.push([repo, worktreePath]);
   }
@@ -176,6 +187,36 @@ try {
     check("(3) settles within the sync-wait budget (fast path)", r.settled === true && r.ok === true && r.value.merged === true);
     check("(3) the fast path stays byte-identical — NO completion nudge ever fires for it", !host.enqueueCalls.some((c) => c.sessionId === mgrId && /\[loom:merge-(done|failed)\]/.test(c.text)));
   }
+
+  // === (4) GATE-FAILED, async, SUPPRESSED rejection: generic merge-failed is the SOLE terminal signal ===
+  // The task's card is already in its terminal ("done") lane BEFORE the confirm even starts — mirrors
+  // merge-reject-notify-suppress.mjs's scenario (C). shouldSuppressMergeReject reconciles the rich
+  // [loom:merge-rejected] away (notified:false); the manager must still hear SOMETHING about this async
+  // op, so onSettledAfterPending must NOT skip the generic [loom:merge-failed] echo here.
+  {
+    const P = "mcn-suppressed", repo = makeRepo();
+    const { worktreePath, branch } = await createWorktree(repo, P, "t4");
+    fs.writeFileSync(path.join(worktreePath, "feat4.txt"), "work\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m feat4`, { cwd: worktreePath });
+    seedProject(P, repo, `node -e "setTimeout(()=>process.exit(1), 13000)"`);
+    const mgrId = `${P}-mgr1`, workerId = `${P}-wkr`;
+    // "done" is the project's default terminal column key (no custom kanbanColumns configured) — same
+    // convention merge-reject-notify-suppress.mjs's scenario (C) relies on.
+    db.insertTask({ id: "t4", projectId: P, title: "t4", body: "", columnKey: "done", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: "t4", worktreePath, branch });
+
+    const first = await svc.confirmWorkerMergeTracked(mgrId, workerId);
+    check("(4) degrades to pending past the sync-wait budget", first.settled === false);
+
+    await waitUntil(() => host.enqueueCalls.some((c) => c.sessionId === mgrId && /\[loom:merge-(rejected|failed)\]/.test(c.text)), 20_000);
+    const rejectedNudges = host.enqueueCalls.filter((c) => c.sessionId === mgrId && /\[loom:merge-rejected\]/.test(c.text));
+    const failedNudges = host.enqueueCalls.filter((c) => c.sessionId === mgrId && /\[loom:merge-failed\]/.test(c.text));
+    check("(4) rich merge-rejected notify is SUPPRESSED (card already Done)", rejectedNudges.length === 0);
+    check("(4) generic [loom:merge-failed] IS the sole terminal signal — not silently dropped", failedNudges.length === 1);
+    check("(4) it names the worker + the gate-failure reason", failedNudges[0] && failedNudges[0].text.includes(workerId) && /build gate failed/.test(failedNudges[0].text));
+    check("(4) pushed with kind:\"warning\"", failedNudges[0] && failedNudges[0].kind === "warning");
+    worktrees.push([repo, worktreePath]);
+  }
 } finally {
   for (const [repo, wt] of worktrees) { if (wt) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } } }
   db.close();
@@ -183,6 +224,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — confirmWorkerMergeTracked pushes a [loom:merge-done]/[loom:merge-failed] completion nudge (kind:\"warning\") into the asking manager's session exactly once when an async gate/merge reaches a terminal state (merged, gate-failed), and never on the already-fast synchronous path."
+  ? "\n✅ ALL PASS — confirmWorkerMergeTracked pushes exactly ONE terminal signal into the asking manager's session per async op: [loom:merge-done] on success, the rich [loom:merge-rejected] alone on a genuine rejection (card 9eea3901 — the generic [loom:merge-failed] echo is suppressed), [loom:merge-failed] as the sole signal when the rich notify was itself reconciled away, and NO nudge at all on the already-fast synchronous path."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

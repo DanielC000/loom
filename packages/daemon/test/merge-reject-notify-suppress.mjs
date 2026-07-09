@@ -23,6 +23,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (C) SUPPRESSED — the task's card is already in the terminal (Done) lane: notify suppressed.
 //   (D) DE-DUPE: two confirmWorkerMerge calls reproducing the SAME rejection (a client-timeout retry
 //       re-running the whole op from scratch) notify exactly ONCE, not twice.
+//
+// Also proves the `notified` field (card 9eea3901 — the async double-notify fix) is threaded correctly
+// on EVERY rejection return: `notified: !suppressed` on each of (A)/(B)/(C)/(D) above, so
+// confirmWorkerMergeTracked's completion callback (merge-confirm-completion-nudge.mjs) can rely on it to
+// skip a redundant generic `[loom:merge-failed]` echo only when the rich notify actually fired.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-reject-notify-suppress.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -95,6 +100,7 @@ try {
     check("(A) merge_rejected event recorded, NOT marked suppressed",
       mergeRejectedEvents(A.mgrId).some((e) => e.detail?.reason === "gate" && !e.detail?.suppressed));
     check("(A) canonical repo untouched", !fs.existsSync(path.join(A.repo, A.file)));
+    check("(A) notified:true (the rich notify fired — a completion echo would be redundant)", confirmA.notified === true);
   }
 
   // ── (B) SUPPRESSED: the branch's work is already reachable from main (an out-of-band manual merge) ──
@@ -115,6 +121,7 @@ try {
     check("(B) notify SUPPRESSED (branch already reachable from main)", notifyCount(B.mgrId) === 0);
     check("(B) merge_rejected event STILL recorded, marked suppressed",
       mergeRejectedEvents(B.mgrId).some((e) => e.detail?.reason === "gate" && e.detail?.suppressed === true));
+    check("(B) notified:false (no rich notify fired — the async completion nudge must still tell the manager)", confirmB.notified === false);
   }
 
   // ── (C) SUPPRESSED: the task's card is already in the terminal (Done) lane ─────────────────────────
@@ -131,6 +138,7 @@ try {
     check("(C) notify SUPPRESSED (card already Done)", notifyCount(C.mgrId) === 0);
     check("(C) merge_rejected event STILL recorded, marked suppressed",
       mergeRejectedEvents(C.mgrId).some((e) => e.detail?.reason === "gate" && e.detail?.suppressed === true));
+    check("(C) notified:false (no rich notify fired — the async completion nudge must still tell the manager)", confirmC.notified === false);
   }
 
   // ── (D) DE-DUPE: a repeat confirm reproducing the SAME rejection notifies only ONCE ─────────────────
@@ -148,6 +156,8 @@ try {
     check("(D) notify delivered EXACTLY ONCE across both calls (not a stale-echo double-notify)", notifyCount(D.mgrId) === 1);
     check("(D) TWO merge_rejected events recorded (audit trail intact), the SECOND marked suppressed",
       mergeRejectedEvents(D.mgrId).length === 2 && mergeRejectedEvents(D.mgrId).filter((e) => e.detail?.suppressed === true).length === 1);
+    check("(D) notified:true on the FIRST call (rich notify fired), notified:false on the SECOND (de-duped)",
+      confirmD1.notified === true && confirmD2.notified === false);
   }
 } finally {
   db.close();

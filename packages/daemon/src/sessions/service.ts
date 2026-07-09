@@ -49,8 +49,14 @@ import { resolveIdPrefix, looksLikeId, MIN_ID_PREFIX_LEN } from "../id-prefix.js
 const GIT_TIMEOUT_FLOOR_MS = 1_000;
 
 /** {@link SessionService.confirmWorkerMerge}'s settled result shape — named so it can be threaded
- *  through {@link PendingOpRegistry} (card fb8df559 Part 1) without repeating the inline object type. */
-type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string };
+ *  through {@link PendingOpRegistry} (card fb8df559 Part 1) without repeating the inline object type.
+ *  `notified` (card 9eea3901): set on every REJECTION return (`merged:false`) to `!suppressed` from that
+ *  return's own `rejectNotify` call — true iff the rich `[loom:merge-rejected]` nudge actually fired for
+ *  this event. {@link confirmWorkerMergeTracked}'s completion callback reads it to skip the redundant
+ *  generic `[loom:merge-failed]` echo when the rich rejection already told the manager. Left `undefined`
+ *  on a `merged:true` return (finishAlreadyMerged / the green path) — irrelevant there, the callback only
+ *  consults it on `!merged`. */
+type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean };
 
 /**
  * worker_set_mode's mode ALLOWLIST (card 610abe29) — the security boundary for `setWorkerMode`.
@@ -5049,7 +5055,7 @@ export class SessionService {
     if (stranded.stranded) {
       const suppressed = await rejectNotify("stranded", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — STRANDED WORK: commits are on '${stranded.branch}' (tip ${stranded.commit}, ${stranded.ahead} ahead), not the assigned branch '${branch}' (empty). Refusing the empty merge so the work isn't lost; canonical repo untouched, worktree retained. Re-point '${branch}' to ${stranded.commit} (or cherry-pick it), then re-confirm.`);
       evt("merge_rejected", { reason: "stranded", strandedBranch: stranded.branch, strandedCommit: stranded.commit, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: `stranded work on '${stranded.branch}' (tip ${stranded.commit}); assigned branch '${branch}' is empty — re-point or cherry-pick before merging` };
+      return { merged: false, reason: `stranded work on '${stranded.branch}' (tip ${stranded.commit}); assigned branch '${branch}' is empty — re-point or cherry-pick before merging`, notified: !suppressed };
     }
 
     // Build/DoD gate (fail-closed): run the configured command in the WORKTREE; non-zero rejects.
@@ -5135,7 +5141,7 @@ export class SessionService {
           const failReason = union.conflict ? "union_conflict" : "union_merge_failed";
           const suppressed = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — ${why}; canonical repo untouched, worktree retained.`);
           evt("merge_rejected", { reason: failReason, ...(suppressed ? { suppressed: true } : {}) });
-          return { merged: false, reason: why };
+          return { merged: false, reason: why, notified: !suppressed };
         }
       }
 
@@ -5144,7 +5150,7 @@ export class SessionService {
       if (!gateResult.passed) {
         const suppressed = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — build gate failed; canonical repo untouched, worktree retained.`);
         evt("merge_rejected", { reason: "gate", ...(suppressed ? { suppressed: true } : {}) });
-        return { merged: false, reason: "build gate failed" };
+        return { merged: false, reason: "build gate failed", notified: !suppressed };
       }
     }
 
@@ -5157,7 +5163,7 @@ export class SessionService {
       const failReason = merge.conflict ? "conflict" : "merge_failed";
       const suppressed = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — ${why}; canonical repo untouched, worktree retained. Re-task a rebase.`);
       evt("merge_rejected", { reason: failReason, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: why };
+      return { merged: false, reason: why, notified: !suppressed };
     }
     // GENUINE no-op (nothing staged): the staged set was re-derived from a clean index, so this is NOT a
     // stale-state false negative — it is a true empty merge. Distinguish the two kinds for the manager:
@@ -5180,13 +5186,14 @@ export class SessionService {
             emptyKind: "STAGE_EMPTY_RETRY",
             hardError: true,
             reportedState: reported,
+            notified: !suppressed,
           };
         }
         // No report of work → a genuine empty no-op. Fail-closed (worktree retained so the manager can see
         // why the worker produced no change, task stays in review) but soft — no alarm.
         const suppressed = await rejectNotify("stage_empty", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — STAGE_EMPTY_RETRY: the branch has no diff to merge; canonical repo + worktree untouched. The worker committed nothing that differs from main — re-task or close the task by hand.`);
         evt("merge_rejected", { reason: "stage_empty", ...(suppressed ? { suppressed: true } : {}) });
-        return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", emptyKind: "STAGE_EMPTY_RETRY" };
+        return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", emptyKind: "STAGE_EMPTY_RETRY", notified: !suppressed };
       }
       // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the
       // bookkeeping idempotently via the SAME helper the early-idempotency check above uses.
@@ -5269,6 +5276,13 @@ export class SessionService {
       key, "merge", managerSessionId, SYNC_ATTACH_BUDGET_MS,
       () => this.confirmWorkerMerge(managerSessionId, workerSessionId),
       (outcome) => {
+        // DOUBLE-NOTIFY FIX (card 9eea3901): a rejection that already sent the rich
+        // `[loom:merge-rejected]` (outcome.value.notified) needs no generic echo here — sending both
+        // wastes a manager turn on the SAME event. Only send this generic nudge for: a success
+        // (`merge-done`), or a rejection the rich path did NOT already announce (`!notified` — either
+        // shouldSuppressMergeReject reconciled it away, or an unexpected error means rejectNotify never
+        // ran at all) — so the manager still gets exactly one terminal signal per async confirm.
+        if (outcome.ok && !outcome.value.merged && outcome.value.notified) return;
         const msg = outcome.ok
           ? (outcome.value.merged
             ? `[loom:merge-done] ${who} merged.`
