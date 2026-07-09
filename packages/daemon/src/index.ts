@@ -493,14 +493,18 @@ async function main(): Promise<void> {
     originResolver: (sid) => pty.getActiveTurnOrigin(sid),
     transcribe: sttTranscriber,
     synthesize: ttsSynthesizer,
-    // "/new" PERSONA reinject (companion-persona-after-clear card): composes THIS session's fresh-spawn-
-    // equivalent startup prompt (base brief + name + memory recall) and enqueues it via a RAW pty.enqueueStdin
-    // — deliberately bypassing submitTurn/handleInbound so it is never recorded to chat history and never
-    // pushed to a live web viewer (source:"system", kind defaults "warning" — mirrors the resume-half memory-
-    // recall reinject at sessions/service.ts). No prompt (session gone / no longer assistant) ⇒ no enqueue.
+    // PERSONA reinject (companion-persona-after-clear card, generalized by the standalone "/refresh" command
+    // to a live, non-destructive upgrade path): composes THIS session's fresh-spawn-equivalent startup prompt
+    // (base brief + name + memory recall — re-read from the agent's CURRENT row, so an edited persona/prompt
+    // is picked up) and enqueues it via a RAW pty.enqueueStdin — deliberately bypassing submitTurn/
+    // handleInbound so it is never recorded to chat history and never pushed to a live web viewer
+    // (source:"system", kind defaults "warning" — mirrors the resume-half memory-recall reinject at
+    // sessions/service.ts). No prompt (session gone / no longer assistant) ⇒ no enqueue. Returns whether a
+    // prompt was actually composed+enqueued, so "/new" and "/refresh" can both report an accurate outcome.
     reinjectPersona: (sid) => {
       const prompt = sessions.composeCompanionReinjectPrompt(sid);
       if (prompt) pty.enqueueStdin(sid, prompt, "system");
+      return !!prompt;
     },
   });
 

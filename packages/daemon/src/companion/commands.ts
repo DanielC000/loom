@@ -23,6 +23,15 @@
  * sent anywhere else) rides the injected `CommandDeps.exportConversation`, backed by the gateway's
  * `CompanionHistoryExport` (types.ts) — the db-backed impl mirrors `listCurrentCompanionMessages`, so an
  * archived (pre-"/new") conversation is never re-exported.
+ *
+ * `/refresh` (live non-destructive persona/memory upgrade) rides `CommandDeps.refreshPersona` — the SAME
+ * `reinjectPersona` side-channel `/new` already uses for its post-"/clear" persona reinject
+ * (chat-gateway.ts's `resetConversation`), called HERE on its own with no preceding "/clear" and no history
+ * reset: the companion's own DB-stored prompt + given name + current memory-recall digest are recomposed
+ * fresh (an agent-definition edit made after this companion was spawned is picked up) and re-enqueued as a
+ * live turn, while the existing conversation is untouched. This is deliberately NOT a capability/MCP-surface
+ * upgrade — a companion's mounted MCP servers/tool-allowlist are fixed in the `claude` process's argv at
+ * spawn and cannot change on a live pty (see chat-gateway.ts's `refreshPersona` doc).
  */
 import type { CompanionMessage } from "@loom/shared";
 import type { CompanionVoicePrefs, VoicePrefRoute } from "./voice-prefs.js";
@@ -71,6 +80,13 @@ export interface CommandDeps {
    *  `CompanionHistoryExport`). Empty when there's nothing to export OR no exporter is configured — the
    *  handler can't tell the two apart, which is fine: both read "nothing to export yet". Never throws. */
   exportConversation(sessionId: string): CompanionMessage[];
+  /** The "/refresh" command's live persona/memory upgrade: recompose + re-enqueue this session's
+   *  fresh-spawn-equivalent startup prompt (base brief + given name + current memory recall) into the
+   *  ALREADY-RUNNING pty — no "/clear", no history reset, the conversation is untouched
+   *  (ChatGateway.refreshPersona → the injected `reinjectPersona` side-channel). Returns whether a prompt
+   *  was actually composed+enqueued — false for a missing/non-assistant session or no injected side-channel
+   *  (e.g. a test construction that doesn't inject one). Never throws. */
+  refreshPersona(sessionId: string): boolean;
 }
 
 /**
@@ -181,6 +197,18 @@ const COMMANDS: Record<string, CommandDef> = {
     handler(_args, route) {
       const senderLine = route.senderId ? `\nSender: ${route.senderId}` : "";
       return { ack: `🪪 Channel: ${route.channel}\nChat: ${route.chatId}${senderLine}` };
+    },
+  },
+  refresh: {
+    description: "Reload my instructions and memory — keeps our conversation",
+    // Live, NON-destructive upgrade: recomposes+re-enqueues the persona/memory prompt with no "/clear" and
+    // no history reset, so an agent-definition edit (persona brief, given name, memory) lands mid-
+    // conversation. Cannot pick up an MCP-server/tool-allowlist change — those are fixed at process spawn.
+    handler(_args, route, _prefs, deps) {
+      const ok = deps.refreshPersona(route.sessionId);
+      return ok
+        ? { ack: "🔄 Reloaded my instructions and memory — our conversation continues." }
+        : { ack: "⚠️ Nothing to refresh right now." };
     },
   },
   export: {

@@ -134,15 +134,20 @@ export class ChatGateway {
    *                    see {@link CompanionMessageRecorder}. Default undefined ⇒ no recording (every
    *                    existing/test construction stays byte-identical). The daemon injects a db-backed
    *                    impl that skips the in-app channel (already recorded via its own dedicated hooks).
-   * @param reinjectPersona  the injected "/new" PERSONA reinject (companion-persona-after-clear card) — given
-   *                    a sessionId, composes+enqueues that session's fresh-spawn-equivalent startup prompt
+   * @param reinjectPersona  the injected PERSONA reinject (companion-persona-after-clear card, generalized by
+   *                    the standalone "/refresh" command to a live, NON-destructive upgrade path) — given a
+   *                    sessionId, composes+enqueues that session's fresh-spawn-equivalent startup prompt
    *                    (base brief + name + memory recall) via a RAW pty enqueue, entirely OUTSIDE
    *                    `submitTurn`/`handleInbound` — so it is never recorded to chat history and never
    *                    pushed to a live web viewer (mirrors the resume-half memory-recall reinject in
-   *                    sessions/service.ts). Default undefined ⇒ resetConversation only does the /clear +
-   *                    history-clear halves (every existing/test construction stays byte-identical). The
-   *                    daemon injects `(sid) => { const p = sessions.composeCompanionReinjectPrompt(sid); if
-   *                    (p) pty.enqueueStdin(sid, p, "system"); }` (index.ts).
+   *                    sessions/service.ts). Returns whether a prompt was actually composed+enqueued (false
+   *                    for a missing/non-assistant session) — both `resetConversation` ("/new"/"/reset") and
+   *                    the standalone `refreshPersona` ("/refresh") read this to report an accurate ack.
+   *                    Default undefined ⇒ resetConversation only does the /clear + history-clear halves, and
+   *                    "/refresh" reports nothing to refresh (every existing/test construction stays
+   *                    byte-identical). The daemon injects `(sid) => { const p =
+   *                    sessions.composeCompanionReinjectPrompt(sid); if (p) pty.enqueueStdin(sid, p, "system");
+   *                    return !!p; }` (index.ts).
    * @param livePush    the injected LIVE PUSH hook (Telegram live-chat push card) — see {@link
    *                    CompanionLivePush}. Default undefined ⇒ no live push (every existing/test construction
    *                    stays byte-identical). The daemon injects an impl that skips the in-app channel and
@@ -163,7 +168,7 @@ export class ChatGateway {
     private readonly synthesize: CompanionSynthesizer | undefined = undefined,
     private readonly historyReset: CompanionHistoryReset | undefined = undefined,
     private readonly recorder: CompanionMessageRecorder | undefined = undefined,
-    private readonly reinjectPersona: ((sessionId: string) => void) | undefined = undefined,
+    private readonly reinjectPersona: ((sessionId: string) => boolean) | undefined = undefined,
     private readonly livePush: CompanionLivePush | undefined = undefined,
     private readonly historyExport: CompanionHistoryExport | undefined = undefined,
   ) {
@@ -348,6 +353,7 @@ export class ChatGateway {
       const { ack } = await handler(parsed.args, route, this.voicePrefs, {
         resetConversation: (sid) => this.resetConversation(sid),
         exportConversation: (sid) => this.exportConversation(sid),
+        refreshPersona: (sid) => this.refreshPersona(sid),
       });
       // Every command ack is transport chrome EXCEPT "/new"/"/reset" — that ack IS the intentional
       // conversation-boundary marker (resetConversation's doc), so it alone is persisted, on EVERY channel.
@@ -440,18 +446,39 @@ export class ChatGateway {
     } catch (err) {
       this.debug(`resetConversation: /clear submit failed for ${sessionId}: ${describeError(err)}`);
     }
-    if (this.reinjectPersona) {
-      try {
-        this.reinjectPersona(sessionId);
-      } catch (err) {
-        this.debug(`resetConversation: persona reinject failed for ${sessionId}: ${describeError(err)}`);
-      }
-    }
+    this.refreshPersona(sessionId);
     if (!this.historyReset) return;
     try {
       await this.historyReset.clear(sessionId);
     } catch (err) {
       this.debug(`resetConversation: history clear failed for ${sessionId}: ${describeError(err)}`);
+    }
+  }
+
+  /**
+   * The standalone "/refresh" command's dep (commands.ts's `refreshPersona`) — a live, NON-destructive
+   * persona/memory upgrade with NO "/clear" and NO history reset: unlike `resetConversation`'s (b) half
+   * above, this is the WHOLE effect, so a companion can pick up an agent-definition edit (persona brief,
+   * given name, or its current pinned/recallable memory) mid-conversation without losing any context.
+   * Reuses the exact same injected {@link reinjectPersona} side-channel (composes the fresh-spawn-equivalent
+   * prompt off the agent's CURRENT row, never a stale cache — see composeCompanionReinjectPrompt — and
+   * raw-enqueues it as a "system"-kind turn, bypassing chat-history recording + live-viewer rendering exactly
+   * like the "/new" half does). Returns whether a prompt was actually composed+enqueued, so the caller can
+   * ack accurately: false for a missing/non-assistant session, a throwing injected impl, or no injected
+   * `reinjectPersona` at all (e.g. a test construction that doesn't inject one) — every case degrades to "no
+   * effect", never a crash. NOTE (capability/MCP-surface upgrades — persona's harder sibling): this can ONLY
+   * refresh the composed startup-prompt text (persona brief + name + memory recall); a companion's MCP
+   * server set / tool allowlist is fixed in the `claude` process's own argv at spawn and cannot be changed on
+   * a live pty — that half needs a conversation-preserving STOP + `--resume <engineSessionId>` respawn
+   * (tracked separately; not implemented here — see the design note).
+   */
+  private refreshPersona(sessionId: string): boolean {
+    if (!this.reinjectPersona) return false;
+    try {
+      return this.reinjectPersona(sessionId);
+    } catch (err) {
+      this.debug(`refreshPersona: reinject failed for ${sessionId}: ${describeError(err)}`);
+      return false;
     }
   }
 

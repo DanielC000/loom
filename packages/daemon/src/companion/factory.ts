@@ -55,11 +55,12 @@ function toSessionBinding(b: CompanionBinding): SessionBinding {
  * audio inbound is a no-op, byte-identical to today. `synthesize` (Companion Voice epic, VOICE-P3) is the
  * injected TTS synthesizer — the daemon injects the local kokoro-onnx synthesizer (companion/tts.ts);
  * undefined ⇒ deliverReply's text path is unchanged, byte-identical to today. `reinjectPersona` (the "/new"
- * persona-reinject side-channel — companion-persona-after-clear card) is a raw-pty-enqueue impl built from
- * SessionService.composeCompanionReinjectPrompt; undefined ⇒ resetConversation's persona-reinject half is a
- * no-op, byte-identical to today.
+ * persona-reinject side-channel — companion-persona-after-clear card, generalized by the standalone
+ * "/refresh" command) is a raw-pty-enqueue impl built from SessionService.composeCompanionReinjectPrompt,
+ * returning whether a prompt was actually composed+enqueued; undefined ⇒ resetConversation's persona-reinject
+ * half and "/refresh" are both no-ops, byte-identical to today.
  */
-export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitTurn, db: CompanionBindingStore, inApp?: InAppChannel, originResolver?: (sessionId: string) => CompanionRoute | null, transcribe?: CompanionTranscriber, synthesize?: CompanionSynthesizer, reinjectPersona?: (sessionId: string) => void): ChatGateway {
+export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitTurn, db: CompanionBindingStore, inApp?: InAppChannel, originResolver?: (sessionId: string) => CompanionRoute | null, transcribe?: CompanionTranscriber, synthesize?: CompanionSynthesizer, reinjectPersona?: (sessionId: string) => boolean): ChatGateway {
   // Load durable bindings SCOPED TO THIS SESSION (multi-companion runtime, SECURITY-CRITICAL): filtering to
   // cfg.sessionId — rather than the global companion_bindings table — is what guarantees a gateway's OWN
   // routing map can NEVER contain another companion's binding, even when multiple companions are armed

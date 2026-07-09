@@ -181,13 +181,15 @@ export interface CompanionControllerDeps {
    *  builder exactly like `transcribe` — STABLE across a gateway rebuild. Optional: absent ⇒ every built
    *  gateway's deliverReply is byte-identical to today (no synth attempted, default OFF). */
   synthesize?: CompanionSynthesizer;
-  /** The injected "/new" PERSONA reinject (companion-persona-after-clear card), threaded into the default
-   *  gateway builder exactly like `transcribe`/`synthesize`. The daemon injects a raw-pty-enqueue impl built
-   *  from SessionService.composeCompanionReinjectPrompt (index.ts) — deliberately NOT the narrow `submitTurn`
-   *  primitive above, since the reinject must bypass chat-history recording + live-viewer rendering entirely
-   *  (see chat-gateway.ts's resetConversation). Optional: absent ⇒ every built gateway's "/new" leaves the
-   *  companion identity-less after `/clear`, byte-identical to today. */
-  reinjectPersona?: (sessionId: string) => void;
+  /** The injected PERSONA reinject (companion-persona-after-clear card, generalized by the standalone
+   *  "/refresh" command), threaded into the default gateway builder exactly like `transcribe`/`synthesize`.
+   *  The daemon injects a raw-pty-enqueue impl built from SessionService.composeCompanionReinjectPrompt
+   *  (index.ts) — deliberately NOT the narrow `submitTurn` primitive above, since the reinject must bypass
+   *  chat-history recording + live-viewer rendering entirely (see chat-gateway.ts's resetConversation /
+   *  refreshPersona). Returns whether a prompt was actually composed+enqueued. Optional: absent ⇒ every
+   *  built gateway's "/new" leaves the companion identity-less after `/clear`, and "/refresh" is a no-op,
+   *  byte-identical to today. */
+  reinjectPersona?: (sessionId: string) => boolean;
   /** Envelope key-file override (test seam only). */
   keyPath?: string;
   /** Build the gateway for an effective config (test seam — defaults to createCompanionGateway with the
