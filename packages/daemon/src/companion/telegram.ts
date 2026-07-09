@@ -37,6 +37,10 @@ export const TELEGRAM_CHANNEL = "telegram";
 /** Telegram's hard per-message character limit — the gateway chunks outbound replies to this. */
 export const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
 
+/** Extensions sent via `sendPhoto` (renders inline) — the `media-out` lever (card 3a81b0f2). Anything else
+ *  goes through `sendDocument` (a generic file attachment) instead. */
+const TELEGRAM_PHOTO_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+
 /** The minimal grammY Bot surface the adapter uses — lets a test inject a fake (no live network). */
 export interface TelegramBotLike {
   api: {
@@ -50,6 +54,13 @@ export interface TelegramBotLike {
     /** Send a native voice message (Companion Voice epic, VOICE-P3 — outbound TTS). Optional on the seam
      *  so an existing test fake bot (no voice-reply tests) stays valid — the call site guards with `?.`. */
     sendVoice?(chatId: string | number, voice: InputFile): Promise<unknown>;
+    /** Send a native photo (renders inline) — the `media-out` lever (card 3a81b0f2). Optional on the seam
+     *  so an existing test fake bot (no media tests) stays valid — the call site guards with `?.`. */
+    sendPhoto?(chatId: string | number, photo: InputFile): Promise<unknown>;
+    /** Send a native document (generic file attachment) — the `media-out` lever (card 3a81b0f2). Optional
+     *  on the seam so an existing test fake bot (no media tests) stays valid — the call site guards with
+     *  `?.`. */
+    sendDocument?(chatId: string | number, document: InputFile): Promise<unknown>;
   };
   on(filter: "message", handler: (ctx: { update: unknown }) => void | Promise<void>): void;
   catch(handler: (err: unknown) => void): void;
@@ -200,6 +211,17 @@ export function createTelegramAdapter(
     async sendVoice(chatId, audioFilePath) {
       if (!bot.api.sendVoice) throw new Error("sendVoice not supported by this bot");
       await bot.api.sendVoice(chatId, new InputFile(audioFilePath));
+    },
+    async sendMedia(chatId, filePath, opts) {
+      const fileName = opts?.fileName ?? path.basename(filePath);
+      const input = new InputFile(filePath, fileName);
+      if (TELEGRAM_PHOTO_EXTENSIONS.has(path.extname(fileName).toLowerCase())) {
+        if (!bot.api.sendPhoto) throw new Error("sendPhoto not supported by this bot");
+        await bot.api.sendPhoto(chatId, input);
+      } else {
+        if (!bot.api.sendDocument) throw new Error("sendDocument not supported by this bot");
+        await bot.api.sendDocument(chatId, input);
+      }
     },
     async downloadAttachment(attachment) {
       if (!attachment.fileId || !bot.api.getFile) return null;

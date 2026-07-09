@@ -1285,6 +1285,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     return true;
   };
+  // `media-out`'s own config shape (card 3a81b0f2: `{roots:string[]}`) — checked ON TOP of
+  // isValidGrantConfig's generic floor, only when capability === "media-out". Absent is valid (the
+  // lever's own conservative default: an empty/absent roots allowlist delivers NOTHING until the owner
+  // explicitly configures at least one root — mirrors decisions-relay's absent-decisionClasses default).
+  // Unlike decisionClasses/alertClasses there's no fixed vocabulary to check membership against — roots are
+  // arbitrary absolute filesystem paths — so this only checks shape (an array of non-empty strings).
+  const isValidMediaOutConfig = (v: Record<string, unknown> | undefined): v is Record<string, unknown> | undefined => {
+    if (v === undefined) return true;
+    if (v.roots !== undefined) {
+      if (!Array.isArray(v.roots)) return false;
+      if (!v.roots.every((r) => typeof r === "string" && r.trim().length > 0)) return false;
+    }
+    return true;
+  };
   const parseGrantBody = (body: unknown):
     | { ok: true; capability: string; projectId: string | null; mode?: "read" | "act"; config?: Record<string, unknown> }
     | { ok: false; code: number; error: string } => {
@@ -1312,6 +1326,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         ok: false, code: 400,
         error: `decisions-relay config.decisionClasses must be an array drawn from: ${DECISION_CLASSES.join(", ")}`,
       };
+    }
+    if (b.capability === "media-out" && !isValidMediaOutConfig(b.config as Record<string, unknown> | undefined)) {
+      return { ok: false, code: 400, error: "media-out config.roots must be an array of non-empty path strings" };
     }
     return { ok: true, capability: b.capability, projectId, mode: b.mode as "read" | "act" | undefined, config: b.config as Record<string, unknown> | undefined };
   };

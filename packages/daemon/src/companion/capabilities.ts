@@ -11,6 +11,7 @@
  * at call time (belt-and-suspenders — mirrors why companion/factory.ts re-scopes bindings even though the
  * controller already dispatches by session id): a bug in registration-gating alone must not open the door.
  */
+import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -18,7 +19,7 @@ import type { CompanionRoute, Question, SessionRole, Task, TaskPriority } from "
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { createProjectTask, listProjectTasks, updateProjectTask, type TaskSummary } from "../mcp/tasks.js";
-import { listVaultTree, readVaultFile, statVaultFile } from "../vault/browser.js";
+import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } from "../vault/browser.js";
 import type { OwnerAttestation } from "./attestation.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -133,6 +134,16 @@ export interface GrantOutbound {
    *  succeeded (false on no-target/no-adapter/send-failure) — a caller MUST fail closed on false, since a
    *  false return means there is no verified trusted channel the owner actually saw the prompt on. */
   deliverToOwner(sessionId: string, text: string): Promise<boolean>;
+  /**
+   * Deliver the LOCAL file at `filePath` OUT to the owner's chat for `sessionId`, as a native image/
+   * document — the `media-out` lever's (card 3a81b0f2) own outbound seam, resolved from the ACTIVE TURN's
+   * origin exactly like `deliverToOwner` (never a lever-guessed destination). Unlike `deliverToOwner`'s
+   * collapsed boolean, this returns a reason so the lever can tell a channel that simply doesn't support
+   * media (`reason:"unsupported-channel"`, e.g. the in-app companion — Telegram-first v1) apart from a
+   * genuine send failure — the former degrades gracefully (the lever tells the owner where the file is),
+   * the latter fails closed exactly like `deliverToOwner`.
+   */
+  deliverMediaToOwner(sessionId: string, filePath: string): Promise<{ delivered: boolean; reason?: string }>;
 }
 
 /** Per-lever registration context — `sessionId`/`scope`/`attest`/`pty`/`outbound` are SERVER-DERIVED (never
@@ -907,11 +918,113 @@ const VAULT_READ: CompanionCapability = {
   },
 };
 
+/**
+ * `media-out` (Framework §4, card 3a81b0f2) — lets the owner review UI/design work from their phone ("show
+ * me the latest mockup", "send a screenshot of the running app") by delivering an ALLOWLISTED file to
+ * their chat. Registered ONLY when at least one of this grant's projects is act-mode (`hasActGrant`,
+ * mirrors decision_resolve/board_create/update's own gate) — a read-only grant never sees this tool.
+ *
+ * THE ENTIRE SECURITY MODEL IS THE PATH ALLOWLIST — deliberately NO Primitive A/B/C (design note,
+ * confirmed): there's no owner-composed content for this lever to attest, and the roots aren't a
+ * project-decision like `decisionClasses` — the sole risk is EXFILTRATION, fully handled by a
+ * realpath-guarded allowlist. `pathOrName` is resolved through the EXACT two-layer guard the vault reader
+ * uses (`resolveVaultFilePath`, vault/browser.ts: lexical containment THEN a `realpathSync`
+ * symlink-escape check), tried against EVERY root in this grant's allowlist — a `../` traversal, an
+ * absolute path outside every root, or a symlink that resolves outside its root are all rejected; only a
+ * path that resolves INSIDE some allowlisted root is ever readable/deliverable. The allowlist itself is
+ * `config_json.roots: string[]`, union-merged across every granted project's own grant row (mirrors
+ * attention-push's `alertClasses` union — see its `resolveConfig`) — an absent/empty roots list on EVERY
+ * granted project admits NOTHING (conservative default, matching decisions-relay's own absent-allowlist
+ * posture): the owner must explicitly configure at least one root before anything is deliverable. (Owner
+ * sign-off 1039e892 named the recommended defaults for that config — vault `Assets/`, the session scratch
+ * dir, the deja store — but this lever's own code applies no implicit fallback: an empty configured
+ * allowlist delivers nothing, exactly like an empty `decisionClasses`.)
+ *
+ * DELIVERY is TELEGRAM-FIRST v1 (owner decision 2026-07-09): `ctx.outbound.deliverMediaToOwner` resolves
+ * the active turn's own route + adapter SERVER-SIDE (never a lever-guessed destination — mirrors
+ * `deliverToOwner`). A channel with no media support (in-app, today — a fast-follow card, not built here)
+ * degrades GRACEFULLY (`status:"unsupported-channel"`, naming the resolved path) rather than erroring, so
+ * the companion can still tell the owner where the file lives instead of the call just failing.
+ */
+const MEDIA_OUT: CompanionCapability = {
+  slug: "media-out",
+  supportsMode: ["act"],
+  register(server, ctx) {
+    // ACT-only lever — mirrors decision_resolve/board_create/update's own hasActGrant gate. No read half:
+    // "deliver a file" IS the capability, there's no lower-risk informational query to split it from.
+    const hasActGrant = [...ctx.scope.projectIds].some((pid) => ctx.scope.mayAct(pid));
+    if (!hasActGrant) return;
+
+    server.registerTool(
+      "send_media",
+      {
+        description:
+          "Deliver a file (a mockup, a vault Assets screenshot, a Playwright shot, …) from your " +
+          "ALLOWLISTED source roots to the owner's chat, by path or filename. Only a path that resolves " +
+          "INSIDE one of your configured roots is ever readable — a `../` traversal, an absolute path " +
+          "outside every root, or a symlink escaping a root are all rejected with an {error}. Delivery is " +
+          "TELEGRAM-FIRST: on a channel that doesn't support media yet (e.g. the in-app companion), this " +
+          "returns {status:'unsupported-channel', note} naming the resolved path instead of failing — tell " +
+          "the owner where the file is rather than treating it as an error.",
+        inputSchema: { pathOrName: z.string() },
+      },
+      async ({ pathOrName }) => {
+        // Union-merge every granted project's configured roots (mirrors attention-push's alertClasses
+        // union) — deduped via a Set since the SAME absolute root configured on two granted projects must
+        // not be tried twice.
+        const roots = new Set<string>();
+        for (const pid of ctx.scope.projectIds) {
+          const cfg = ctx.scope.configFor(pid) as { roots?: unknown };
+          if (Array.isArray(cfg.roots)) {
+            for (const r of cfg.roots) if (typeof r === "string" && r.trim() !== "") roots.add(r);
+          }
+        }
+        if (roots.size === 0) {
+          return ok({ error: "no allowlisted source roots are configured — an owner must add at least one root to the media-out grant config before anything is deliverable" });
+        }
+        // THE guard: try every allowlisted root through the SAME lexical+realpath check the vault reader
+        // uses. `pathOrName` may be absolute or relative to a root — resolveVaultFilePath handles both
+        // (an absolute path is only accepted when it lands inside THIS root; see its own doc).
+        let resolved: string | null = null;
+        for (const root of roots) {
+          resolved = resolveVaultFilePath(root, pathOrName);
+          if (resolved !== null) break;
+        }
+        if (resolved === null) {
+          return ok({ error: "that path doesn't resolve inside any of your allowlisted source roots" });
+        }
+        // CR fix (isFile alignment): resolveVaultFilePath only proves containment/existence, not that the
+        // target is a REGULAR FILE — mirrors statVaultFile's own isFile() check (vault/browser.ts), which
+        // this call site otherwise skips. Without it a directory inside an allowlisted root resolves
+        // successfully and reaches the adapter, which can't stream it — a confusing "send-failed" instead
+        // of a clean rejection. No security regression either way (containment already holds); this is
+        // purely a clean-error alignment. A throwing statSync (e.g. a TOCTOU unlink) degrades to "not a
+        // file" too, never a crash.
+        let isRegularFile = false;
+        try { isRegularFile = fs.statSync(resolved).isFile(); } catch { isRegularFile = false; }
+        if (!isRegularFile) {
+          return ok({ error: "that path is not a regular file" });
+        }
+        const delivery = await ctx.outbound.deliverMediaToOwner(ctx.sessionId, resolved);
+        if (delivery.delivered) return ok({ status: "sent" });
+        if (delivery.reason === "unsupported-channel") {
+          return ok({
+            status: "unsupported-channel",
+            note: `media delivery isn't available on this channel yet — the file is at ${resolved}`,
+          });
+        }
+        return ok({ error: `couldn't deliver the file (${delivery.reason ?? "unknown reason"})` });
+      },
+    );
+  },
+};
+
 /** The full lever registry (Framework §2). `session-status`, `decisions-relay`'s READ half,
- *  `board-reach`'s READ half, and `vault-read` (read-only, no act half) are built — the sensitive ACT
- *  levers (later cards) append here behind their own injection-guard primitives. */
+ *  `board-reach`'s READ half, `vault-read` (read-only, no act half), and `media-out` (act-only, no read
+ *  half) are built — any remaining sensitive ACT levers append here behind their own injection-guard
+ *  primitives. */
 export const COMPANION_CAPABILITIES: readonly CompanionCapability[] =
-  [SESSION_STATUS, DECISIONS_RELAY, BOARD_REACH, VAULT_READ];
+  [SESSION_STATUS, DECISIONS_RELAY, BOARD_REACH, VAULT_READ, MEDIA_OUT];
 
 /**
  * The single chokepoint (Framework §2): called ONCE per `buildServer`, right after the existing companion

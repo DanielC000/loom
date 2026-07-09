@@ -100,6 +100,31 @@ try {
     });
     check("POST: a config within UTF-16 .length but OVER the real UTF-8 byte bound → 400 (byte bound, not code-unit bound)",
       multibyteOverBytes.statusCode === 400);
+
+    // media-out's own config shape (card 3a81b0f2: {roots:string[]}) — checked ON TOP of the generic floor.
+    const badMediaRootsType = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "media-out", config: { roots: "not-an-array" } } });
+    check("POST: media-out config.roots not an array → 400", badMediaRootsType.statusCode === 400);
+
+    const badMediaRootsElement = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "media-out", config: { roots: ["/ok/path", 42] } } });
+    check("POST: media-out config.roots with a non-string element → 400", badMediaRootsElement.statusCode === 400);
+
+    const badMediaRootsBlank = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "media-out", config: { roots: ["   "] } } });
+    check("POST: media-out config.roots with a blank string element → 400", badMediaRootsBlank.statusCode === 400);
+
+    const goodMediaRoots = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "media-out", config: { roots: ["/allowlisted/assets"] } } });
+    check("POST: a well-formed media-out config.roots → 201", goodMediaRoots.statusCode === 201);
+
+    // Absent/empty roots is still a VALID config (the lever's own conservative default: nothing
+    // deliverable at runtime until the owner configures a root — mirrors decisions-relay's absent
+    // decisionClasses default), so an empty-config PUT on the just-created row must succeed, not 400.
+    const emptyMediaConfig = await app.inject({ method: "PUT", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "media-out", config: {} } });
+    check("PUT: an absent media-out roots config is still valid (200)", emptyMediaConfig.statusCode === 200);
+
+    // Test isolation: the good-config POST above created a real (media-out, null) grant row for
+    // companionSessId — clean it up so the downstream session-status count/list assertions (which assume
+    // exactly the 2 session-status rows this file seeds) stay accurate.
+    const cleanupMedia = await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=media-out` });
+    check("DELETE: cleanup the media-out validation grant (test isolation)", cleanupMedia.statusCode === 200);
   }
   // ============ POST: a second, project-scoped grant for the SAME capability coexists ============
   {

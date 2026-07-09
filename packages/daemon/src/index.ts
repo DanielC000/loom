@@ -432,6 +432,7 @@ async function main(): Promise<void> {
   const companionHooks: CompanionReplyHooks = {
     companionSessionIds: new Set(companionCfgs.map((c) => c.sessionId)),
     deliverReply: (sid, text, voice) => companionController.deliverReply(sid, text, voice),
+    deliverMedia: (sid, filePath) => companionController.deliverMedia(sid, filePath),
     // reminder_create's route capture (mirrors wake_me's schedule-time getActiveTurnOrigin read).
     getActiveTurnOrigin: (sid) => pty.getActiveTurnOrigin(sid),
     // ARM-ON-CREATE: reminder_create/cancel drive a reconcile SCOPED to the reminder's own bound session, so

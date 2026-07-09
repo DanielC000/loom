@@ -64,6 +64,10 @@ export interface CompanionHooks {
    *  edd11203) — consulted ONLY when the route's pref mode is "auto"; ignored for "on"/"off". The
    *  controller dispatches this by `sessionId` to THAT session's own gateway — never cross-wired. */
   deliverReply?: (sessionId: string, text: string, voice?: boolean) => Promise<{ delivered: boolean; reason?: string }>;
+  /** Deliver a local file to the chat bound to the session, as a native image/document (the `media-out`
+   *  lever, card 3a81b0f2). Wired into `GrantOutbound.deliverMediaToOwner` exactly like `deliverReply` is
+   *  wired into `GrantOutbound.deliverToOwner`. */
+  deliverMedia?: (sessionId: string, filePath: string) => Promise<{ delivered: boolean; reason?: string }>;
   /**
    * SERVER-DERIVED route capture for reminder_create — the current turn's originating companion route (or
    * null), read at schedule time exactly like wake_me (orchestration/wake.ts). The agent never passes a
@@ -489,6 +493,18 @@ export class OrchestrationMcpRouter {
           return result?.delivered === true;
         } catch {
           return false; // fail closed — a throwing delivery path must never look like a successful send.
+        }
+      },
+      // `media-out` lever's own outbound seam (card 3a81b0f2) — mirrors `deliverToOwner` but sends a file.
+      // Unlike `deliverToOwner`'s boolean fail-closed contract, the lever needs to tell the difference
+      // between "the channel just doesn't support media" (degrade gracefully) and an actual send failure,
+      // so this returns the full `{delivered, reason?}` rather than collapsing it to a boolean.
+      deliverMediaToOwner: async (sid, filePath) => {
+        try {
+          const result = await this.companion.deliverMedia?.(sid, filePath);
+          return result ?? { delivered: false, reason: "unsupported-channel" };
+        } catch {
+          return { delivered: false, reason: "send-failed" }; // fail closed — never look like a success.
         }
       },
     });

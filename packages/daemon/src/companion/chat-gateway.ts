@@ -694,6 +694,32 @@ export class ChatGateway {
   }
 
   /**
+   * OUTBOUND MEDIA — the `media-out` lever's delivery seam (card 3a81b0f2, "show me the latest mockup").
+   * Resolves the target EXACTLY like `deliverReply` (the ORIGINATING route of `sessionId`'s in-flight turn,
+   * via `replyTarget` — no binding/home fallback, no broadcast), then sends `filePath` through the target
+   * adapter's OPTIONAL `sendMedia` instead of `send`. An adapter with no `sendMedia` (in-app, today —
+   * Telegram-first v1) degrades to `{delivered:false, reason:"unsupported-channel"}` rather than throwing,
+   * so the lever can tell the owner where the file is instead of failing outright. No chunking (a file is
+   * one unit, unlike a long text reply) and no chat-history record (media isn't part of the text
+   * conversation log `companion_messages.text` models). Never throws — a throwing `sendMedia` is contained
+   * and reported as `{delivered:false, reason:"send-failed"}`.
+   */
+  async deliverMedia(sessionId: string, filePath: string): Promise<{ delivered: boolean; reason?: string }> {
+    const target = this.replyTarget(sessionId);
+    if (!target) return { delivered: false, reason: "no-target" };
+    const adapter = this.adapters.get(target.channel);
+    if (!adapter) return { delivered: false, reason: "no-adapter" };
+    if (!adapter.sendMedia) return { delivered: false, reason: "unsupported-channel" };
+    try {
+      await adapter.sendMedia(target.chatId, filePath);
+      return { delivered: true };
+    } catch (err) {
+      this.debug(`deliverMedia send failed for ${target.channel}/${target.chatId}: ${describeError(err)}`);
+      return { delivered: false, reason: "send-failed" };
+    }
+  }
+
+  /**
    * OUTBOUND MIRROR primitive: send a plain, non-reply message to an EXPLICIT (channel, chatId) — never
    * resolved from a turn's origin (unlike deliverReply/replyTarget). Callers pass a route already known to
    * be one of a session's bound channels (see bindingsForSession) — this method does no binding lookup of

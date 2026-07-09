@@ -169,6 +169,13 @@ export interface CompanionReplyHooks {
   companionSessionIds: Set<string>;
   deliverReply?: (sessionId: string, text: string, voice?: boolean) => Promise<{ delivered: boolean; reason?: string }>;
   /**
+   * Deliver a local file to the chat bound to the session, as a native image/document (the `media-out`
+   * lever, card 3a81b0f2). Mirrors `deliverReply`'s dispatch (routes THROUGH the controller to that
+   * session's CURRENT gateway) but sends media instead of text — see `ChatGateway.deliverMedia`. Consumed
+   * by the orchestration MCP router's `GrantOutbound.deliverMediaToOwner` seam.
+   */
+  deliverMedia?: (sessionId: string, filePath: string) => Promise<{ delivered: boolean; reason?: string }>;
+  /**
    * Server-derived route capture for the reminder_create MCP tool (mirrors wake_me's getActiveTurnOrigin) —
    * consumed by the orchestration MCP router, not by this controller.
    */
@@ -354,6 +361,17 @@ export class CompanionController implements CompanionControl {
     const gateway = this.gateways.get(sessionId);
     if (!gateway) return { delivered: false, reason: "companion-off" };
     return gateway.deliverReply(sessionId, text, voice);
+  }
+
+  /**
+   * The media-delivery indirection wired into `CompanionReplyHooks.deliverMedia` (the `media-out` lever,
+   * card 3a81b0f2) — mirrors `deliverReply` exactly (dispatches to `sessionId`'s OWN current gateway, never
+   * cross-wired; "companion-off" when no gateway is live) but sends a file via `ChatGateway.deliverMedia`.
+   */
+  async deliverMedia(sessionId: string, filePath: string): Promise<{ delivered: boolean; reason?: string }> {
+    const gateway = this.gateways.get(sessionId);
+    if (!gateway) return { delivered: false, reason: "companion-off" };
+    return gateway.deliverMedia(sessionId, filePath);
   }
 
   /**
