@@ -15,7 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CompanionRoute, Question, SessionRole, Task, TaskPriority } from "@loom/shared";
+import type { CompanionRoute, Question, Session, SessionRole, Task, TaskPriority } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { createProjectTask, listProjectTasks, updateProjectTask, type TaskSummary } from "../mcp/tasks.js";
@@ -146,20 +146,36 @@ export interface GrantOutbound {
   deliverMediaToOwner(sessionId: string, filePath: string): Promise<{ delivered: boolean; reason?: string }>;
 }
 
-/** Per-lever registration context — `sessionId`/`scope`/`attest`/`pty`/`outbound` are SERVER-DERIVED (never
- *  agent-passed); a lever's `register()` closes over these to pre-scope every tool it adds. `attest`
- *  (Companion injection-guard primitives, card 8e511951) is the ONLY surface an ACT lever may use to verify
- *  a privileged action traces back to the owner's own literal words. `pty` (card a8ddd6d2) lets a lever
- *  scope Primitive C to the active turn's route and push a post-commit nudge into an ASKING MANAGER's
- *  session (never the owner). `outbound` (same card, CR hardening) is the ONLY way a lever may put text in
- *  front of the OWNER directly — every lever that doesn't need one of these (every read-only lever today)
- *  simply never touches it. */
+/** The slice of `SessionService` the `session-steer` ACT lever needs (card 305a54fb) — cross-session
+ *  message/steer/stop/resume, exposed as a SCOPED subset. Mirrors the Platform Lead's own cross-session
+ *  controls (mcp/platform.ts `session_message`/`session_stop` + SessionService's `redirectWorker`/
+ *  `resume`), narrowed to exactly what this lever calls — a lever never gets the full `SessionService`.
+ *  `senderSessionId` is threaded through by the caller (never agent-suppliable) so an undelivered dispatch
+ *  can be traced back to the originating companion session. */
+export interface GrantSessions {
+  messageSession(sessionId: string, text: string, senderSessionId: string): { deliveryStatus: string; position?: number; taskId?: string; routedTo?: string };
+  redirectSession(sessionId: string, text: string, senderSessionId: string): { delivered: boolean; position?: number };
+  stopSession(sessionId: string, mode: "graceful" | "hard"): { stopped: true; sessionId: string };
+  resumeSession(sessionId: string): { id: string };
+}
+
+/** Per-lever registration context — `sessionId`/`scope`/`attest`/`pty`/`outbound`/`sessions` are
+ *  SERVER-DERIVED (never agent-passed); a lever's `register()` closes over these to pre-scope every tool
+ *  it adds. `attest` (Companion injection-guard primitives, card 8e511951) is the ONLY surface an ACT
+ *  lever may use to verify a privileged action traces back to the owner's own literal words. `pty` (card
+ *  a8ddd6d2) lets a lever scope Primitive C to the active turn's route and push a post-commit nudge into
+ *  an ASKING MANAGER's session (never the owner). `outbound` (same card, CR hardening) is the ONLY way a
+ *  lever may put text in front of the OWNER directly. `sessions` (card 305a54fb) is the ONLY way a lever
+ *  may drive another session's lifecycle (message/steer/stop/resume) — every lever that doesn't need one
+ *  of these (every read-only lever, and `decision_resolve`/`board_create`/`board_update`/`send_media` for
+ *  `sessions`) simply never touches it. */
 export interface GrantContext {
   sessionId: string;
   scope: ResolvedGrantScope;
   attest: OwnerAttestation;
   pty: GrantPty;
   outbound: GrantOutbound;
+  sessions: GrantSessions;
 }
 
 /** One pluggable lever descriptor (Framework §2). `register` adds THIS lever's tools to `server`, already
@@ -1019,12 +1035,177 @@ const MEDIA_OUT: CompanionCapability = {
   },
 };
 
+/**
+ * `session-steer` (Framework §4, card 305a54fb) — the session-control ACT lever, REFRAMED by owner
+ * redirect (decisions `47532bd0` + `71509fd5`) from a verbatim-relay "steer" into a full OPERATOR
+ * surface: on the owner's intent, the companion messages/steers/stops/resumes sessions in granted scope
+ * — composed from owner intent, NOT a verbatim quote (Primitive B does NOT apply here, unlike
+ * `board_create`'s title/body). Decision `71509fd5` = FULLY FRICTION-FREE: all four actions commit
+ * IMMEDIATELY, on the first call — NO Primitive C propose/confirm round-trip (unlike `decision_resolve`/
+ * `board_create`/`board_update`). This is deliberate, owner-accepted residual risk on Loom's most
+ * injection-exposed surface — the safety model is NOT structural prevention of a bad action, it's:
+ *
+ *   - **Primitive A, MANDATORY, on every call**: `ctx.attest.getActiveTurnOwnerText` must be non-null —
+ *     a proactive/heartbeat/reminder-originated turn can never reach `sessions`. This is the ONE
+ *     structural backstop kept; every one of the four tools checks it before touching `ctx.sessions`.
+ *   - **Scope, re-checked on EVERY call, including stop/resume**: the target session is resolved
+ *     GLOBALLY first (`db.getSession`, exactly like `board_update` resolves a bare card id) — a bare
+ *     sessionId names no project until resolved — THEN its project must be ∈ `ctx.scope.projectIds` AND
+ *     `ctx.scope.mayAct` for it. There is no path from a granted project to an out-of-scope session: a
+ *     target whose project was never granted, or was granted read-only, is rejected before `ctx.sessions`
+ *     is ever called.
+ *   - **Optional per-project `config_json.roleFilter`** (e.g. `["manager"]`) narrowing which session
+ *     ROLES are controllable within a granted project. DEFAULT = no restriction (an absent or empty
+ *     roleFilter admits every role) — the OPPOSITE default of `decisionClasses`' conservative
+ *     admit-nothing, because the owner explicitly wants "whatever I want" here (card, decision
+ *     `71509fd5`) once scope + Primitive A already hold.
+ *
+ * `resolveControlTarget` is the ONE place all four tools run this shared validation — a lever-internal
+ * mirror of `registerCompanionCapabilities`' own "one enforcement point" discipline, so a future 5th
+ * session-control tool can't reintroduce a bespoke (and possibly weaker) check.
+ *
+ * ACT-only (mirrors `media-out`'s own `supportsMode`) — registered ONLY when at least one granted project
+ * is act-mode (`hasActGrant`); there is no lower-risk read half to split "control a session" from (session
+ * visibility is `session-status`'s own, separately-granted lever). `ctx.sessions` (card 305a54fb) is a
+ * narrow, SCOPED slice of `SessionService` — message/steer reuse the SAME durable cross-session delivery
+ * channel the Platform Lead's own `session_message`/`redirectWorker` use (framed
+ * `[loom:from-owner-via-companion]`/`[loom:from-owner-via-companion:redirect]` so a live receiver knows
+ * the source), and stop/resume reuse `SessionService.stopSession`/`resume` UNCHANGED — see their own docs.
+ */
+const SESSION_STEER: CompanionCapability = {
+  slug: "session-steer",
+  supportsMode: ["act"],
+  register(server, ctx, db) {
+    const hasActGrant = [...ctx.scope.projectIds].some((pid) => ctx.scope.mayAct(pid));
+    if (!hasActGrant) return;
+
+    // THE shared enforcement point (see this lever's own doc above) — every tool below resolves its
+    // target through this BEFORE touching `ctx.sessions`, exactly once, so a future tool can't accidentally
+    // skip a check by hand-rolling its own.
+    function resolveControlTarget(sessionId: string): { session: Session } | { error: string } {
+      const target = db.getSession(sessionId);
+      if (!target) return { error: `no session "${sessionId}"` };
+      const projectId = target.projectId;
+      if (!projectId || !ctx.scope.projectIds.has(projectId)) {
+        return { error: "this session's project is not in your granted scope" };
+      }
+      if (!ctx.scope.mayAct(projectId)) {
+        return { error: "you only have a read-mode grant on this session's project — session control needs act-mode" };
+      }
+      const cfg = ctx.scope.configFor(projectId) as { roleFilter?: unknown };
+      const roleFilter = Array.isArray(cfg.roleFilter)
+        ? cfg.roleFilter.filter((r): r is string => typeof r === "string")
+        : [];
+      if (roleFilter.length > 0 && (!target.role || !roleFilter.includes(target.role))) {
+        return { error: `this session's role (${target.role ?? "none"}) is not in this project's roleFilter allowlist (${roleFilter.join(", ")})` };
+      }
+      // Primitive A — every action, on every call, must be on an owner-authored turn. Checked LAST
+      // (after scope/roleFilter) so a scope/roleFilter rejection never leaks "this would've needed owner
+      // text too" — the caller learns exactly one reason per call, mirroring decision_resolve's ordering.
+      if (ctx.attest.getActiveTurnOwnerText(ctx.sessionId) === null) {
+        return { error: "no owner text this turn — session control can only act on an owner-authored turn" };
+      }
+      return { session: target };
+    }
+
+    server.registerTool(
+      "session_message",
+      {
+        description:
+          "Message a session in your granted scope, on the owner's behalf — composed from the owner's " +
+          "intent (you are the OPERATOR here, not a verbatim relay). Delivered immediately, framed " +
+          "[loom:from-owner-via-companion] so the receiver knows the source. Returns a deliveryStatus: " +
+          "delivered-live (submitted as a turn now), queued (the target is busy — held FIFO, delivered on " +
+          "its next turn boundary), or boarded (the target isn't live and has no live successor — filed as " +
+          "a durable board card instead of lost). Requires an act-mode grant on the target session's " +
+          "project and an owner-authored turn — a proactive/heartbeat turn is always rejected.",
+        inputSchema: { target: z.string(), message: z.string() },
+      },
+      async ({ target, message }) => {
+        const resolved = resolveControlTarget(target);
+        if ("error" in resolved) return ok({ error: resolved.error });
+        try {
+          return ok(ctx.sessions.messageSession(target, message, ctx.sessionId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
+      "session_steer",
+      {
+        description:
+          "Interrupt + redirect a session in your granted scope, on the owner's behalf — the " +
+          "worker_redirect equivalent: flushes any queued-but-undelivered direction, delivers your " +
+          "instruction as the new authoritative direction (framed [loom:from-owner-via-companion:redirect]), " +
+          "and interrupts the target's in-flight turn if it was busy (an idle target simply receives it as " +
+          "its next turn — nothing to interrupt). Requires an act-mode grant on the target session's " +
+          "project and an owner-authored turn — a proactive/heartbeat turn is always rejected.",
+        inputSchema: { target: z.string(), message: z.string() },
+      },
+      async ({ target, message }) => {
+        const resolved = resolveControlTarget(target);
+        if ("error" in resolved) return ok({ error: resolved.error });
+        try {
+          return ok(ctx.sessions.redirectSession(target, message, ctx.sessionId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
+      "session_stop",
+      {
+        description:
+          "Stop a session in your granted scope, on the owner's behalf. mode \"graceful\" (default — clean " +
+          "Ctrl-C x2, resumable) or \"hard\" (kill escalation); both orphan-free and resumable via " +
+          "session_resume. Requires an act-mode grant on the target session's project and an " +
+          "owner-authored turn — a proactive/heartbeat turn is always rejected.",
+        inputSchema: { target: z.string(), mode: z.enum(["graceful", "hard"]).optional() },
+      },
+      async ({ target, mode }) => {
+        const resolved = resolveControlTarget(target);
+        if ("error" in resolved) return ok({ error: resolved.error });
+        try {
+          return ok(ctx.sessions.stopSession(target, mode ?? "graceful"));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
+      "session_resume",
+      {
+        description:
+          "Resume a STOPPED session in your granted scope, on the owner's behalf — no prompt is injected, " +
+          "it simply comes back live. Requires an act-mode grant on the target session's project and an " +
+          "owner-authored turn — a proactive/heartbeat turn is always rejected. A session that was " +
+          "recycled (a successor exists) or is otherwise unresumable is rejected with an {error}.",
+        inputSchema: { target: z.string() },
+      },
+      async ({ target }) => {
+        const resolved = resolveControlTarget(target);
+        if ("error" in resolved) return ok({ error: resolved.error });
+        try {
+          return ok(ctx.sessions.resumeSession(target));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+  },
+};
+
 /** The full lever registry (Framework §2). `session-status`, `decisions-relay`'s READ half,
- *  `board-reach`'s READ half, `vault-read` (read-only, no act half), and `media-out` (act-only, no read
- *  half) are built — any remaining sensitive ACT levers append here behind their own injection-guard
- *  primitives. */
+ *  `board-reach`'s READ half, `vault-read` (read-only, no act half), `media-out` (act-only, no read
+ *  half), and `session-steer` (act-only, no read half — session VISIBILITY is `session-status`'s own
+ *  separately-granted lever) are built — any remaining sensitive ACT levers append here behind their own
+ *  injection-guard primitives. */
 export const COMPANION_CAPABILITIES: readonly CompanionCapability[] =
-  [SESSION_STATUS, DECISIONS_RELAY, BOARD_REACH, VAULT_READ, MEDIA_OUT];
+  [SESSION_STATUS, DECISIONS_RELAY, BOARD_REACH, VAULT_READ, MEDIA_OUT, SESSION_STEER];
 
 /**
  * The single chokepoint (Framework §2): called ONCE per `buildServer`, right after the existing companion
@@ -1040,15 +1221,16 @@ export const COMPANION_CAPABILITIES: readonly CompanionCapability[] =
  * staying correct forever — a future bug that leaves a stale grant row on a non-assistant session id must
  * not be enough, by itself, to light up a capability tool there.
  *
- * `attest` (Companion injection-guard primitives, card 8e511951), `pty`, and `outbound` (both card
- * a8ddd6d2) are injected from the router exactly like a lever's other server-derived reads — additive:
- * every lever that doesn't read them (every lever except `decision_resolve` today) sees nothing different.
+ * `attest` (Companion injection-guard primitives, card 8e511951), `pty`, `outbound` (both card a8ddd6d2),
+ * and `sessions` (card 305a54fb) are injected from the router exactly like a lever's other server-derived
+ * reads — additive: every lever that doesn't read them (every lever except `decision_resolve`/
+ * `board_create`/`board_update`/`send_media`/`session-steer` today) sees nothing different.
  */
-export function registerCompanionCapabilities(server: McpServer, sessionId: string, role: SessionRole, db: Db, attest: OwnerAttestation, pty: GrantPty, outbound: GrantOutbound): void {
+export function registerCompanionCapabilities(server: McpServer, sessionId: string, role: SessionRole, db: Db, attest: OwnerAttestation, pty: GrantPty, outbound: GrantOutbound, sessions: GrantSessions): void {
   if (role !== "assistant") return;
   for (const cap of COMPANION_CAPABILITIES) {
     const scope = resolveCompanionGrant(db, sessionId, cap.slug);
     if (!scope) continue;
-    cap.register(server, { sessionId, scope, attest, pty, outbound }, db);
+    cap.register(server, { sessionId, scope, attest, pty, outbound, sessions }, db);
   }
 }

@@ -1057,7 +1057,11 @@ export class SessionService {
     return { ...session, processState: "live" };
   }
 
-  /** Resume an existing session — NO prompt injection. */
+  /** Resume an existing session — NO prompt injection. Also reused, unmodified, as the RESUME half of
+   *  the companion session-control ACT lever (card 305a54fb, `session_resume`) — called with default opts
+   *  (`allowSuperseded` stays false), matching every other AUTOMATIC resume caller: a companion-triggered
+   *  resume never force-resurrects a recycled session out from under its live successor. Scope/roleFilter/
+   *  Primitive-A enforcement live entirely in the lever (companion/capabilities.ts). */
   resume(sessionId: string, opts: { allowSuperseded?: boolean } = {}): Session {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
@@ -2799,6 +2803,37 @@ export class SessionService {
   }
 
   /**
+   * Companion session-control ACT lever's STEER half (card 305a54fb, `session_steer`) — interrupt +
+   * redirect ANY session in scope; the SCOPED analogue of {@link redirectWorker} minus its
+   * parentSessionId gate (a companion is never the target's manager). Mirrors `redirectWorker`'s exact
+   * mechanics: flush + supersede any queued direction first, enqueue the authoritative redirect as a
+   * durable cross-session message (framed `[loom:from-owner-via-companion:redirect]` so the receiver
+   * knows this replaced its pending direction and may have interrupted it mid-turn), then interrupt ONLY
+   * when it was held (the target was busy) — an idle target already received it as a fresh turn, so an
+   * Esc would wrongly cancel that very turn. Scope/roleFilter/Primitive-A enforcement all live in the
+   * lever (companion/capabilities.ts) — this method assumes the caller already validated them, exactly
+   * like `stopSession`/`resume` are thin mechanical wrappers for the stop/resume halves of the same lever.
+   * Throws ONLY if the target session is UNKNOWN.
+   */
+  redirectSessionAsCompanion(sessionId: string, text: string, senderSessionId?: string): { delivered: boolean; position?: number } {
+    const target = this.db.getSession(sessionId);
+    if (!target) throw new Error("session not found");
+    const flushed = this.pty.flushPending(sessionId);
+    for (const m of flushed) {
+      if (m.onDeliver) { try { m.onDeliver("superseded"); } catch { /* a resolution fault must never block the redirect */ } }
+    }
+    const framed = `[loom:from-owner-via-companion:redirect]\n${text}`;
+    const r = this.enqueueDurableMessage(sessionId, framed, { sender: senderSessionId ?? "companion", taskId: target.taskId ?? null });
+    if (!r.delivered) this.pty.interruptForRedirect(sessionId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: senderSessionId ?? "", workerSessionId: sessionId, taskId: target.taskId ?? null, kind: "redirect_worker",
+      detail: { delivered: r.delivered, superseded: flushed.length, via: "companion" },
+    });
+    return r;
+  }
+
+  /**
    * Purge now-stale decision-inbox answer-nudges from a session's OWN pty queue (card bbc46336 follow-up
    * to the decision inbox). `question_pull` calls this right after `db.pullAnsweredQuestions` atomically
    * consumes a batch of answered questions — every OTHER queued push-nudge tagged to one of those same
@@ -2948,40 +2983,60 @@ export class SessionService {
     }
   }
 
+  /** Per-caller framing for {@link deliverSessionMessage} — the ONLY thing that differs between the
+   *  Platform Lead's `session_message` and the Companion session-control lever's own `session_message`
+   *  (card 305a54fb): the `[loom:from-…]` tag a live receiver sees, the sentinel sender fallback, and the
+   *  board note's wording when the target isn't live. Everything else (durable delivery, recycle-lineage
+   *  routing, board fallback) is shared. */
+  private static readonly PLATFORM_MESSAGE_FRAMING = {
+    tag: "loom:from-platform",
+    senderFallback: "platform",
+    boardHeading: "**Message from the Platform Lead** (boarded because the target session was not live).",
+    boardFromLine: (s?: string) => (s ? `- **From (Lead session):** \`${s}\`` : "- **From:** Platform Lead"),
+    boardTitlePrefix: "[Platform message]",
+  };
+  private static readonly COMPANION_MESSAGE_FRAMING = {
+    tag: "loom:from-owner-via-companion",
+    senderFallback: "companion",
+    boardHeading: "**Message from the owner** (relayed via companion; boarded because the target session was not live).",
+    boardFromLine: (s?: string) => (s ? `- **From (companion session):** \`${s}\`` : "- **From:** the owner (via companion)"),
+    boardTitlePrefix: "[Companion message]",
+  };
+
   /**
-   * Platform-Lead cross-project message delivery (loom-platform `session_message`, P4). UN-scoped: where
-   * messageWorker is parent/child-gated, the Lead stands ABOVE the whole manager/worker tree and may
-   * message ANY session in ANY project — no parentSessionId check. Reuses the SAME stdin-enqueue channel
-   * (submitted as a turn when idle, queued FIFO and drained on the next turn boundary when busy). Framed
-   * `[loom:from-platform]` so the receiver knows the source is the platform operator, not its own manager.
-   * DELIVERY ONLY — it never spawns anything. Throws (→ the router's error envelope) ONLY if the target
-   * session is UNKNOWN.
+   * Shared cross-project message-delivery mechanics for {@link messageSessionAsPlatform} and
+   * {@link messageSessionAsCompanion} — UN-scoped (no parentSessionId check; the caller stands above the
+   * manager/worker tree). Reuses the SAME stdin-enqueue channel (submitted as a turn when idle, queued
+   * FIFO and drained on the next turn boundary when busy), framed per `framing.tag` so the receiver knows
+   * the source. DELIVERY ONLY — it never spawns anything. Throws (→ the router's error envelope) ONLY if
+   * the target session is UNKNOWN.
    *
-   * Returns a `deliveryStatus` (delivered-live | queued | boarded) so the Lead gets an HONEST outcome:
+   * Returns a `deliveryStatus` (delivered-live | queued | boarded) so the caller gets an HONEST outcome:
    *  - LIVE target → the durable stdin-enqueue channel (submitted as a turn if idle = delivered-live;
    *    held FIFO if busy = queued).
    *  - NOT-LIVE target whose recycle lineage has a LIVE successor (card 5519559c) → route to the successor
    *    via the SAME durable channel instead of boarding: the target id was superseded, not gone, so the
-   *    Lead's message reaches whoever is actually doing the work now. `routedTo` names the successor so
-   *    the caller can see the redirect. This is DISTINCT from card 2ca18433 (a still-live recipient that
+   *    message reaches whoever is actually doing the work now. `routedTo` names the successor so the
+   *    caller can see the redirect. This is DISTINCT from card 2ca18433 (a still-live recipient that
    *    recycles AFTER a message is already queued) — here the target is already dead at send time.
    *  - NOT-LIVE target with NO live successor anywhere in its lineage → it has no PTY to take a turn, so
-   *    instead of THROWING (which silently dropped the Lead's message), we BOARD a durable note onto the
-   *    target's OWN project board — the same durable-board fallback platformEscalate uses for an offline
-   *    Lead — and return `boarded`. The message is never lost.
+   *    instead of THROWING (which silently drops the message), we BOARD a durable note onto the target's
+   *    OWN project board — the same durable-board fallback platformEscalate uses for an offline Lead —
+   *    and return `boarded`. The message is never lost.
    */
-  messageSessionAsPlatform(
-    sessionId: string, text: string, senderSessionId?: string,
+  private deliverSessionMessage(
+    sessionId: string, text: string, senderSessionId: string | undefined,
+    framing: { tag: string; senderFallback: string; boardHeading: string; boardFromLine: (s?: string) => string; boardTitlePrefix: string },
   ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string } {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
-    const framed = `[loom:from-platform]\n${text}`;
+    const framed = `[${framing.tag}]\n${text}`;
     const deliverLive = (target: typeof session) => {
-      // Durable-tracked (card 2ca18433): a busy recipient holds it FIFO + we persist it, so the Lead's
+      // Durable-tracked (card 2ca18433): a busy recipient holds it FIFO + we persist it, so a
       // cross-project dispatch survives a sender death / daemon restart before the recipient's next turn.
-      // The sender is the Lead's own session id (threaded from the router) so an undelivered dispatch can be
-      // surfaced back to it on resume; "platform" is a sentinel fallback if no caller id was provided.
-      const r = this.enqueueDurableMessage(target.id, framed, { sender: senderSessionId ?? "platform", taskId: target.taskId ?? null });
+      // The sender is the caller's own session id (threaded from the router) so an undelivered dispatch
+      // can be surfaced back to it on resume; `senderFallback` is a sentinel if no caller id was provided.
+      const r = this.enqueueDurableMessage(target.id, framed, { sender: senderSessionId ?? framing.senderFallback, taskId: target.taskId ?? null });
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId: "", workerSessionId: target.id, taskId: target.taskId ?? null, kind: "session_message",
@@ -3000,10 +3055,10 @@ export class SessionService {
     // message survives until someone reads it.
     const now = new Date().toISOString();
     const body = [
-      "**Message from the Platform Lead** (boarded because the target session was not live).",
+      framing.boardHeading,
       "",
       `- **Target session:** \`${sessionId}\``,
-      senderSessionId ? `- **From (Lead session):** \`${senderSessionId}\`` : "- **From:** Platform Lead",
+      framing.boardFromLine(senderSessionId),
       "",
       "## Message",
       "",
@@ -3012,7 +3067,7 @@ export class SessionService {
     const task: Task = {
       id: randomUUID(),
       projectId: session.projectId,
-      title: `[Platform message] for session ${sessionId.slice(0, 8)}`,
+      title: `${framing.boardTitlePrefix} for session ${sessionId.slice(0, 8)}`,
       body,
       // The target project's default-landing lane (role-resolved, matches platformEscalate's landing).
       columnKey: this.columnKeyForProjectRole(session.projectId, "defaultLanding") ?? "backlog",
@@ -3028,6 +3083,33 @@ export class SessionService {
       detail: { boarded: true, projectId: session.projectId },
     });
     return { deliveryStatus: "boarded", taskId: task.id };
+  }
+
+  /**
+   * Platform-Lead cross-project message delivery (loom-platform `session_message`, P4). Framed
+   * `[loom:from-platform]` so the receiver knows the source is the platform operator, not its own
+   * manager. See {@link deliverSessionMessage} for the shared delivery/routing/boarding mechanics.
+   */
+  messageSessionAsPlatform(
+    sessionId: string, text: string, senderSessionId?: string,
+  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string } {
+    return this.deliverSessionMessage(sessionId, text, senderSessionId, SessionService.PLATFORM_MESSAGE_FRAMING);
+  }
+
+  /**
+   * Companion session-control ACT lever's MESSAGE half (card 305a54fb, `session_message`) — the SCOPED
+   * analogue of `messageSessionAsPlatform`: same UN-scoped delivery mechanics (the companion is not the
+   * target's manager, so no parentSessionId gate applies here either), but framed
+   * `[loom:from-owner-via-companion]` so a live receiver can tell the direction came via the owner's
+   * companion, not its own manager or the Platform Lead. Scope/roleFilter/Primitive-A enforcement all live
+   * in the lever (companion/capabilities.ts) — this method is a thin mechanical wrapper around the SAME
+   * shared delivery helper `messageSessionAsPlatform` uses, exactly like `stopSession`/`resume` are for
+   * the stop/resume halves of the same lever.
+   */
+  messageSessionAsCompanion(
+    sessionId: string, text: string, senderSessionId?: string,
+  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string } {
+    return this.deliverSessionMessage(sessionId, text, senderSessionId, SessionService.COMPANION_MESSAGE_FRAMING);
   }
 
   /**
@@ -4609,7 +4691,10 @@ export class SessionService {
    * Stop ANY session by id (loom-platform `session_stop`; the cross-project analogue of
    * POST /api/sessions/:id/stop). graceful (Ctrl-C ×2, clean, default) | hard (pty.kill) — both
    * resumable + orphan-free (node-pty Job Object). Unlike stopWorker this is NOT parent-scoped: the
-   * platform-lead is human-equivalent, above the manager/worker tree.
+   * platform-lead is human-equivalent, above the manager/worker tree. Also reused, unmodified, as the
+   * STOP half of the companion session-control ACT lever (card 305a54fb, `session_stop`) —
+   * scope/roleFilter/Primitive-A enforcement live entirely in the lever (companion/capabilities.ts); this
+   * method needs no companion-specific variant since it carries no framed text to differentiate.
    */
   stopSession(sessionId: string, mode: StopMode): { stopped: true; sessionId: string } {
     if (!this.db.getSession(sessionId)) throw new Error("session not found");

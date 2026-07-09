@@ -507,6 +507,16 @@ export class OrchestrationMcpRouter {
           return { delivered: false, reason: "send-failed" }; // fail closed — never look like a success.
         }
       },
+    }, {
+      // `session-steer` lever's own seam (card 305a54fb) — a narrow, SCOPED slice of `SessionService`.
+      // message/steer reuse the SAME durable cross-session delivery mechanics as the Platform Lead's own
+      // `session_message`/`redirectWorker`, framed distinctly (`[loom:from-owner-via-companion]` /
+      // `[loom:from-owner-via-companion:redirect]`); stop/resume reuse `stopSession`/`resume` UNCHANGED —
+      // scope/roleFilter/Primitive-A enforcement all live in the lever, not here.
+      messageSession: (sid, text, senderSessionId) => sessions.messageSessionAsCompanion(sid, text, senderSessionId),
+      redirectSession: (sid, text, senderSessionId) => sessions.redirectSessionAsCompanion(sid, text, senderSessionId),
+      stopSession: (sid, mode) => sessions.stopSession(sid, mode),
+      resumeSession: (sid) => sessions.resume(sid),
     });
 
     // Companion (epic Phase 1): the long-lived `assistant` role gets a MINIMAL surface — the read-only
