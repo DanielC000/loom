@@ -4841,14 +4841,33 @@ export class SessionService {
    * real — safe because that method's OWN ALREADY_MERGED re-derive-from-clean-index already handles a
    * duplicate confirm idempotently (card 2eddf573); this registry adds no new merge-side idempotency of
    * its own, it only changes how/when the result is DELIVERED to the caller.
+   *
+   * COMPLETION NUDGE (card TBD): when this degrades to the pending path, the asking manager is left to
+   * spin-poll (re-call this tool / `worker_list.pendingMerge`) to learn the outcome. `pendingOps.attach`'s
+   * `onSettledAfterPending` fires exactly once, only for a key that was actually surfaced pending, straight
+   * from the op's terminal settle — so a manager that went off and did something else instead of polling
+   * still gets pushed a turn the moment the gate/merge actually finishes. `kind:"warning"` because this is
+   * a Loom operational nudge (same-route coalescing is correct), mirroring the decision-inbox answer nudge
+   * / answered-stuck watchdog's use of the same `enqueueStdin` rail. The FAST (already-fast) path never
+   * reaches this callback at all — that caller already has the outcome inline via its own return value.
    */
   async confirmWorkerMergeTracked(
     managerSessionId: string, workerSessionId: string,
   ): Promise<AttachResult<ConfirmMergeResult>> {
     const key = `merge:${workerSessionId}`;
+    const taskId = this.db.getSession(workerSessionId)?.taskId ?? null;
+    const who = `worker ${workerSessionId} (task ${taskId ?? "none"})`;
     return this.pendingOps.attach<ConfirmMergeResult>(
       key, "merge", managerSessionId, SYNC_ATTACH_BUDGET_MS,
       () => this.confirmWorkerMerge(managerSessionId, workerSessionId),
+      (outcome) => {
+        const msg = outcome.ok
+          ? (outcome.value.merged
+            ? `[loom:merge-done] ${who} merged.`
+            : `[loom:merge-failed] ${who} — ${outcome.value.reason ?? "merge did not complete"}`)
+          : `[loom:merge-failed] ${who} — merge confirm errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
+        try { this.pty.enqueueStdin(managerSessionId, msg, "system", undefined, undefined, "warning"); } catch { /* manager not live — best-effort, mirrors every other completion nudge */ }
+      },
     );
   }
 

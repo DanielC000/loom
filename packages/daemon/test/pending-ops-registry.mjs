@@ -107,7 +107,58 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("(listByManager) a SETTLED op does NOT appear — no duplicate/stale placeholder once it landed", !forA.some((op) => op.key === "spawn:t4"));
 }
 
+// --- onSettledAfterPending: the completion-nudge callback (card: worker_merge_confirm spin-poll fix) ---
+// FAST path: op settles within waitMs → the callback must NOT fire (the caller already has the outcome
+// inline; a push here would double-notify).
+{
+  const reg = new PendingOpRegistry();
+  const calls = [];
+  const r = await reg.attach("nudge:fast", "merge", "mgr1", 200, async () => ({ merged: true }), (o) => calls.push(o));
+  check("(nudge fast) settles within budget as usual", r.settled === true && r.ok === true);
+  check("(nudge fast) onSettledAfterPending is NEVER invoked — the sync caller already got the result inline", calls.length === 0);
+}
+
+// SLOW path: op outlives waitMs (caller told "pending") → once it later settles, the callback fires
+// EXACTLY ONCE with the settled outcome, even though nobody ever re-polls.
+{
+  const reg = new PendingOpRegistry();
+  const calls = [];
+  const slow = async () => { await sleep(60); return { merged: true }; };
+  const pending = await reg.attach("nudge:slow-ok", "merge", "mgr1", 10, slow, (o) => calls.push(o));
+  check("(nudge slow-ok) degrades to pending first", pending.settled === false);
+  check("(nudge slow-ok) callback has not fired yet — op still running", calls.length === 0);
+  await sleep(100); // let the op actually settle, well past its own 60ms — nobody re-polls
+  check("(nudge slow-ok) callback fired EXACTLY ONCE once the op actually terminates, with no re-poll", calls.length === 1 && calls[0].ok === true && calls[0].value.merged === true);
+}
+
+// SLOW path, FAILURE outcome (mirrors a gate-failed merge: confirmWorkerMerge doesn't throw for a gate
+// failure, it just resolves with merged:false — this proves the ok:true/value shape covers that case, and
+// a genuinely thrown error still surfaces via ok:false).
+{
+  const reg = new PendingOpRegistry();
+  const calls = [];
+  const slowGateFailed = async () => { await sleep(60); return { merged: false, reason: "build gate failed" }; };
+  const pending = await reg.attach("nudge:slow-gate-failed", "merge", "mgr1", 10, slowGateFailed, (o) => calls.push(o));
+  check("(nudge slow-gate-failed) degrades to pending first", pending.settled === false);
+  await sleep(100);
+  check("(nudge slow-gate-failed) callback fires once with the gate-failed result (ok:true, merged:false)", calls.length === 1 && calls[0].ok === true && calls[0].value.merged === false && calls[0].value.reason === "build gate failed");
+}
+
+// A retry's OWN callback closure is a no-op once an entry already exists — only the entry-creating call's
+// callback is ever wired, so a later attach() on the same in-flight key must not cause a SECOND firing.
+{
+  const reg = new PendingOpRegistry();
+  const calls1 = [], calls2 = [];
+  const slow = async () => { await sleep(60); return { merged: true }; };
+  const p1 = reg.attach("nudge:retry", "merge", "mgr1", 10, slow, (o) => calls1.push(o));
+  await sleep(20);
+  const p2 = reg.attach("nudge:retry", "merge", "mgr1", 10, slow, (o) => calls2.push(o)); // retry — attaches, does NOT re-register
+  await Promise.all([p1, p2]);
+  await sleep(80);
+  check("(nudge retry) only the ORIGINAL (entry-creating) call's callback ever fires", calls1.length === 1 && calls2.length === 0);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), and error identity (subclass + fields) survives the settle path."
+  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, and onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

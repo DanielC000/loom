@@ -38,6 +38,12 @@ interface Entry<T> {
    *  REFERENCE, so reading `e.state`/`e.result`/`e.error` after this resolves is safe even once the map
    *  entry itself has been evicted (see `attach()`'s settle callback). */
   settle: Promise<void>;
+  /** True once some `attach()` call has actually been told this op is still pending (a `waitMs` race that
+   *  timed out before `run()` settled). Gates the completion callback below: a caller who observed the FAST
+   *  path already has the outcome inline (nothing to push); a caller who was told "pending" may go do
+   *  something else entirely instead of re-polling, so the terminal settle is the only guaranteed delivery
+   *  moment for them — see `attach()`'s `onSettledAfterPending`. */
+  surfacedPending: boolean;
 }
 
 export type AttachResult<T> =
@@ -114,25 +120,41 @@ export class PendingOpRegistry {
    * consume-on-read); still running at the deadline → returns the PENDING view WITHOUT consuming (the op
    * keeps running in the background; a later call — retry or poll — attaches again, or `peek()`/
    * `listByManager()` surfaces it read-only).
+   *
+   * `onSettledAfterPending`, when given, fires EXACTLY ONCE — from inside the op's own terminal settle
+   * callback (never from a caller's fast path) — but ONLY if this key was actually surfaced to some caller
+   * as `{settled:false}` first. A call that observes the op resolve within its own `waitMs` already has the
+   * outcome inline and needs no push; a call that was told "pending" may never come back to poll again, so
+   * the terminal callback is the one delivery path guaranteed to fire for it. Only the FIRST (entry-creating)
+   * call's callback is ever wired — later attach() calls on the same in-flight key pass their own callback
+   * closure too, but it's a no-op (the entry already exists, so `run()`/its `.then` are not re-registered);
+   * this is harmless as long as callers derive equivalent callback content from the same key (true here).
    */
   async attach<T>(
     key: string, kind: PendingOpKind, managerSessionId: string, waitMs: number, run: () => Promise<T>,
+    onSettledAfterPending?: (outcome: { ok: true; value: T } | { ok: false; error: unknown }) => void,
   ): Promise<AttachResult<T>> {
     let e = this.entries.get(key) as Entry<T> | undefined;
     if (!e) {
       const fresh: Entry<T> = {
         opId: randomUUID(), kind, key, managerSessionId, startedAt: new Date().toISOString(),
-        state: "running", settle: Promise.resolve(),
+        state: "running", settle: Promise.resolve(), surfacedPending: false,
       };
       this.entries.set(key, fresh);
       fresh.settle = run().then(
-        (value) => { fresh.state = "done"; fresh.result = value; this.entries.delete(key); },
-        (err) => { fresh.state = "failed"; fresh.error = err; this.entries.delete(key); },
+        (value) => {
+          fresh.state = "done"; fresh.result = value; this.entries.delete(key);
+          if (fresh.surfacedPending) onSettledAfterPending?.({ ok: true, value });
+        },
+        (err) => {
+          fresh.state = "failed"; fresh.error = err; this.entries.delete(key);
+          if (fresh.surfacedPending) onSettledAfterPending?.({ ok: false, error: err });
+        },
       );
       e = fresh;
     }
     if (e.state === "running") await Promise.race([e.settle, sleep(waitMs)]);
-    if (e.state === "running") return { settled: false, op: view(e) };
+    if (e.state === "running") { e.surfacedPending = true; return { settled: false, op: view(e) }; }
     return e.state === "done"
       ? { settled: true, ok: true, value: e.result as T }
       : { settled: true, ok: false, error: e.error };
