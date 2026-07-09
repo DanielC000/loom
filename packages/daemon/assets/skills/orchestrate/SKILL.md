@@ -40,7 +40,7 @@ so a first BARE call (`worker_spawn`, `inbox_pull`, `my_context`, `recycle_me`, 
 round-trip. **Preload the lifecycle set in ONE ToolSearch at orchestrator start** — include the
 orientation reads (`worker_list` is your standard first call) and the direction tools, so even your
 first bare call lands:
-`select:mcp__loom-orchestration__idle_report,mcp__loom-orchestration__inbox_pull,mcp__loom-orchestration__my_context,mcp__loom-orchestration__worker_spawn,mcp__loom-orchestration__worker_list,mcp__loom-orchestration__worker_status,mcp__loom-orchestration__worker_transcript,mcp__loom-orchestration__worker_message,mcp__loom-orchestration__worker_redirect,mcp__loom-orchestration__worker_merge,mcp__loom-orchestration__worker_merge_confirm,mcp__loom-orchestration__worker_recycle,mcp__loom-orchestration__worker_stop,mcp__loom-orchestration__recycle_me`
+`select:mcp__loom-orchestration__idle_report,mcp__loom-orchestration__inbox_pull,mcp__loom-orchestration__my_context,mcp__loom-orchestration__worker_spawn,mcp__loom-orchestration__worker_list,mcp__loom-orchestration__worker_status,mcp__loom-orchestration__worker_transcript,mcp__loom-orchestration__worker_message,mcp__loom-orchestration__worker_redirect,mcp__loom-orchestration__worker_merge,mcp__loom-orchestration__worker_merge_confirm,mcp__loom-orchestration__worker_recycle,mcp__loom-orchestration__worker_stop,mcp__loom-orchestration__recycle_me,mcp__loom-orchestration__platform_escalate,mcp__loom-orchestration__served_status,mcp__loom-orchestration__question_ask`
 (add `mcp__loom-tasks__tasks_list,mcp__loom-tasks__tasks_create,mcp__loom-tasks__tasks_update` for the board).
 
 ## Standing goal — never idle
@@ -260,6 +260,12 @@ mid-report — before sending anything.
      for a design note — that store can live outside the worker's isolated worktree and is unreachable
      by its Glob/Read tools. Paste the relevant excerpt into the kickoff, or give an absolute,
      worktree-reachable path.
+   - **A card's cited file location is a HYPOTHESIS, not a scope fence.** When a card (or the finding
+     behind it) guesses where the fix lives, do NOT convert that guess into a hard "touch only this file /
+     do NOT touch other files" constraint in the kickoff — a wrong guess then FORCES the worker to block
+     instead of tracing the real site from the symptom. Let the worker trace the real site and fix it
+     there. When you genuinely need a scope-guard (to de-conflict parallel workers), scope it by
+     SUBSYSTEM/TASK, not by a guessed path.
 4. **Resolve forks decisively.** When a worker reports a decision up, make the call *with* reasoning —
    recommend, don't hand back a menu; name what you rejected and why. If genuinely uncertain, propose
    how to de-risk (a spike, a check) instead of guessing.
@@ -270,6 +276,12 @@ mid-report — before sending anything.
    silently later (atomicity, races, environment pollution, hidden coupling, an upstream bug). Then
    `worker_merge` → review → `worker_merge_confirm`. If it's not ready, request changes via
    `worker_message`. Never merge unreviewed work.
+   - **No gate/build command configured? REQUEST the human set one — never hand-roll it.** Configuring
+     the project's gate command is a HUMAN-ONLY action: it's an exec/RCE surface, so it is never
+     agent-writable and you must not self-configure or improvise one. When the project you orchestrate has
+     no gate configured, surface it to the human as a decision to set one (a `question_ask`). Until a gate
+     exists every merge is UNVERIFIED — say so, and verify green another way in the meantime (read the
+     diff, run the build yourself where you can) rather than merging blind.
    - **A schema or migration change to a persistent datastore gets exercised against a real
      pre-migration snapshot, not just a fresh one.** Verifying it only against a fresh/empty store is
      structurally blind to a schema that references a migration-added column or table — the fresh store
@@ -341,6 +353,9 @@ mid-report — before sending anything.
    it renders the inline base64 but writes no reachable file (Claude Code issue #40141). Use Playwright
    `page.screenshot({ path })` against the loopback page (launch with `{ channel: 'chrome' }` to reuse
    system Chrome and skip a download), or decode the base64 from the transcript for a shot already captured.
+   **Always pass an ABSOLUTE path** to the screenshot call (`page.screenshot({ path })` /
+   `browser_take_screenshot`) — an absolute scratch or vault path, never a bare filename. A bare filename
+   defaults to the session's working directory (the repo tree), risking a stray PNG committed into the repo.
 
    **A render-only eyeball is necessary but not sufficient for an interactive control.** For every NEW
    interactive control (toggle, button, input, menu) the verification must **EXERCISE it** and confirm

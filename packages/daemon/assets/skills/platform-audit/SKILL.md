@@ -75,6 +75,8 @@ a new occurrence as evidence only if it materially strengthens the case). Each f
 
 A finding a human can triage in one read is worth ten vague ones. Quality and dedup over volume.
 
+**A cited code location is a HYPOTHESIS to verify, not an authoritative pointer.** When a finding names where it thinks the defect lives, frame it as something to confirm ("likely in X — confirm by grepping symbol Y"), never as settled fact. A guessed `file:line` that reads as authoritative gets copied downstream into a hard scope-guard, sending a worker to block at the wrong site instead of tracing the real one — so state your confidence and how to verify the location, not just the location.
+
 ### Freshness-check a CODE-LEVEL finding against current `main` BEFORE filing
 
 A transcript shows you what went wrong **when that session ran** — but a session can be days old, and
