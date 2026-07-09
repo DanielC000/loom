@@ -513,9 +513,7 @@ export class OrchestrationMcpRouter {
     // keeps `parentSessionId` pointing at the now-retired predecessor, and an exact-match guard locks the
     // successor out of exactly the findings it needs to act on. Scope READS by LINEAGE instead of exact
     // parent: walk both sessions' `recycledFrom` chains to their roots (the same `lineageRootId` helper the
-    // Platform Lead resume-doc scoping already uses) and compare roots — same lineage ⇒ readable. WRITE ops
-    // (worker_stop/worker_message/worker_redirect, via sessions.*) stay exact-parent-scoped; do not reuse
-    // this for those.
+    // Platform Lead resume-doc scoping already uses) and compare roots — same lineage ⇒ readable.
     const workerReadableByManager = (w: { parentSessionId?: string | null }): boolean => {
       if (!w.parentSessionId) return false;
       if (w.parentSessionId === managerSessionId) return true;
@@ -523,6 +521,42 @@ export class OrchestrationMcpRouter {
       const parentSession = db.getSession(w.parentSessionId);
       if (!managerSession || !parentSession) return false;
       return lineageRootId(db, managerSession) === lineageRootId(db, parentSession);
+    };
+
+    // --- Fleet-lockout self-heal (P1: a manager locked out of its OWN live fleet) -------------------
+    // SYMPTOM: worker_list returns a manager's workers (exact `parent_session_id` match, db.listWorkers),
+    // but every per-id op (worker_status/worker_message/worker_redirect/worker_merge/...) rejected
+    // "not your worker" — the WRITE ops (worker_stop/worker_message/worker_redirect/worker_set_mode/
+    // worker_recycle/worker_merge/worker_merge_confirm, all via sessions.* in service.ts) do an EXACT
+    // `worker.parentSessionId !== managerSessionId` check, unlike the lineage-tolerant read guard just
+    // above. The ONLY previously-known recovery was a full daemon_restart (boot-reconcile's
+    // reparentLiveWorkers, run only from recycleManager/boot — never on-demand for a LIVE manager whose
+    // worker's parent_session_id has otherwise drifted from its own session id).
+    //
+    // Exact drift MECHANISM is still unconfirmed from source (see the worker task's write-up) — every
+    // read of `sessionId` inside a single request is the same closure, and getSession/listWorkers are
+    // uncached direct SQL, so the two guards SHOULD always agree from what's visible here. Ship the
+    // self-heal as defense-in-depth regardless: it's cheap, safe (scoped to this manager's own lineage,
+    // see workerReadableByManager above), and closes the "must restart the whole daemon" gap even if the
+    // root cause turns out to be elsewhere (a race, a missed reparent on some other path, etc).
+    //
+    // FIX: before ANY per-id op reaches its exact-match guard, RE-DERIVE ownership by lineage (the same
+    // tolerant check reads already use) and, if this manager's lineage genuinely owns the row but its
+    // `parent_session_id` is stale, RELINK it in place (a scoped single-row update — never the bulk
+    // process_state='live'-gated reparentLiveWorkers). The downstream exact-match guards in service.ts
+    // are UNCHANGED — they still reject a non-owned worker exactly as before; this only ever repairs a
+    // row this manager's OWN lineage already owns, so it can never grant access across managers/projects.
+    // Logs the disagreement (op, worker id, both session ids) so a genuine repro finally pins the seam.
+    const ensureWorkerLinked = (workerSessionId: string, op: string) => {
+      const w = db.getSession(workerSessionId);
+      if (!w || w.parentSessionId === managerSessionId) return w; // no row, or already correctly linked
+      if (!workerReadableByManager(w)) return w; // genuinely not this manager's lineage — leave it to the "not your worker" guard
+      console.warn(
+        `[orchestration] worker/manager parent desync self-healed: op=${op} worker=${workerSessionId} ` +
+        `managerSessionId(closure)=${managerSessionId} row.parentSessionId=${w.parentSessionId ?? "null"}`,
+      );
+      db.relinkWorkerToManager(w.id, managerSessionId);
+      return { ...w, parentSessionId: managerSessionId };
     };
 
     // The fleet view — the manager's direct children as a compact list. Shared by worker_list and the
@@ -593,7 +627,7 @@ export class OrchestrationMcpRouter {
       async ({ workerSessionId }) => {
         // No id → fleet view (alias worker_list), so worker_status({}) never throws a schema error.
         if (!workerSessionId) return ok(fleetView());
-        const w = db.getSession(workerSessionId);
+        const w = ensureWorkerLinked(workerSessionId, "worker_status");
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
         return ok({ ...w, pendingMerge: sessions.peekPendingMerge(w.id) ?? null, ...reportedProjection(w.id) });
       },
@@ -606,10 +640,43 @@ export class OrchestrationMcpRouter {
         inputSchema: { workerSessionId: z.string(), lastN: z.number().optional() },
       },
       async ({ workerSessionId, lastN }) => {
-        const w = db.getSession(workerSessionId);
+        const w = ensureWorkerLinked(workerSessionId, "worker_transcript");
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
         const turns = w.engineSessionId ? readTranscript(w.cwd, w.engineSessionId) : [];
         return ok(typeof lastN === "number" && lastN > 0 ? turns.slice(-lastN) : turns);
+      },
+    );
+
+    server.registerTool(
+      "worker_relink",
+      {
+        description:
+          "Explicit self-heal backstop for ONE worker: re-derive its ownership by lineage and repair a " +
+          "stale `parent_session_id` in place, WITHOUT a daemon restart. Every other per-worker tool " +
+          "(worker_status/worker_transcript/worker_message/worker_redirect/worker_stop/worker_set_mode/" +
+          "worker_recycle/worker_merge/worker_merge_confirm) already runs this SAME repair automatically " +
+          "before it acts, so you normally never need to call this directly — it exists as a standalone " +
+          "diagnostic/backstop (e.g. to eagerly repair a worker, or confirm its link status, before " +
+          "touching it any other way). Scoped to YOUR OWN lineage ONLY (walks the same recycledFrom-chain " +
+          "check every read tool uses) — can never relink a worker belonging to another manager or another " +
+          "project. Returns {found, wasStale, relinked, parentSessionId} — relinked (and wasStale, always " +
+          "equal) is true only if a stale link was actually repaired just now; false with found:true means " +
+          "NOTHING was relinked — check `parentSessionId` to tell why: equal to your OWN session id means " +
+          "it was already correctly linked, any other id means the worker genuinely isn't yours.",
+        inputSchema: { workerSessionId: z.string() },
+      },
+      async ({ workerSessionId }) => {
+        const before = db.getSession(workerSessionId);
+        if (!before) return ok({ found: false, wasStale: false, relinked: false, parentSessionId: null });
+        const alreadyLinked = before.parentSessionId === managerSessionId;
+        const owned = workerReadableByManager(before);
+        const after = ensureWorkerLinked(workerSessionId, "worker_relink");
+        return ok({
+          found: true,
+          wasStale: owned && !alreadyLinked,
+          relinked: owned && !alreadyLinked,
+          parentSessionId: after?.parentSessionId ?? before.parentSessionId ?? null,
+        });
       },
     );
 
@@ -653,6 +720,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, mode }) => {
         try {
+          ensureWorkerLinked(workerSessionId, "worker_stop");
           sessions.stopWorker(managerSessionId, workerSessionId, mode ?? "graceful");
           return ok({ stopped: true });
         } catch (e) {
@@ -677,6 +745,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, mode }) => {
         try {
+          ensureWorkerLinked(workerSessionId, "worker_set_mode");
           const landed = await sessions.setWorkerMode(managerSessionId, workerSessionId, mode);
           return ok({ landed });
         } catch (e) {
@@ -693,6 +762,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, text }) => {
         try {
+          ensureWorkerLinked(workerSessionId, "worker_message");
           return ok(sessions.messageWorker(managerSessionId, workerSessionId, text));
         } catch (e) {
           return ok({ error: (e as Error).message });
@@ -719,6 +789,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, text }) => {
         try {
+          ensureWorkerLinked(workerSessionId, "worker_redirect");
           return ok(sessions.redirectWorker(managerSessionId, workerSessionId, text));
         } catch (e) {
           return ok({ error: (e as Error).message });
@@ -839,6 +910,7 @@ export class OrchestrationMcpRouter {
         const summary = handoffSummary ?? continuationPrompt;
         if (!summary) return ok({ error: "handoffSummary (or continuationPrompt) is required" });
         try {
+          ensureWorkerLinked(workerSessionId, "worker_recycle");
           const fresh = await sessions.recycleWorker(managerSessionId, workerSessionId, summary);
           return ok({ newWorkerSessionId: fresh.id, gen: fresh.gen, recycledFrom: fresh.recycledFrom });
         } catch (e) {
@@ -868,6 +940,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, fullDiff, files, pathGlob }) => {
         try {
+          ensureWorkerLinked(workerSessionId, "worker_merge");
           return ok(await sessions.reviewWorkerMerge(managerSessionId, workerSessionId, { includePatch: fullDiff === true, files, pathGlob }));
         } catch (e) {
           return ok({ error: (e as Error).message });
@@ -883,6 +956,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId }) => {
         try {
+          ensureWorkerLinked(workerSessionId, "worker_merge_confirm");
           const r = await sessions.confirmWorkerMergeTracked(managerSessionId, workerSessionId);
           if (!r.settled) return ok({ opId: r.op.opId, status: "pending", workerSessionId, note: "gate/merge still running — poll worker_list (this worker's pendingMerge field) or re-call worker_merge_confirm with the SAME workerSessionId to fetch the result once ready." });
           if (!r.ok) return ok({ error: r.error instanceof Error ? r.error.message : String(r.error) });

@@ -3128,6 +3128,17 @@ export class Db {
     return this.db.prepare("UPDATE sessions SET parent_session_id = ? WHERE parent_session_id = ? AND process_state = 'live'")
       .run(newManagerId, oldManagerId).changes;
   }
+  /**
+   * Fleet-lockout self-heal (P1): repair EXACTLY ONE worker row's stale `parent_session_id`, on demand,
+   * regardless of process_state. Unlike `reparentLiveWorkers` (bulk, `process_state='live'`-gated, called
+   * only from recycleManager/boot-reconcile), this is called from the per-op guard path in
+   * mcp/orchestration.ts (`ensureWorkerLinked`) the instant a manager/worker parent desync is caught —
+   * so recovery no longer needs a daemon restart. The caller is responsible for verifying ownership
+   * (lineage) BEFORE calling this — this method performs no ownership check of its own.
+   */
+  relinkWorkerToManager(workerId: string, newManagerId: string): void {
+    this.db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(newManagerId, workerId);
+  }
   /** Move a session's pending wakes to a successor on recycle: the successor inherits the scheduled
    *  nudges, and the retired session is left with nothing to fire (so a due wake can't zombie it). */
   reparentWakes(oldSessionId: string, newSessionId: string): number {

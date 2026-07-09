@@ -9,9 +9,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // `parentSessionId` pointing at the now-retired predecessor. A successor manager (fresh sessionId) then
 // got "not your worker" from worker_status/worker_transcript on exactly the findings it must act on. The
 // fix scopes READS by lineage (walking `recycledFrom` to a shared root, mirroring the Platform Lead
-// resume-doc `lineageRootId` helper) while WRITE ops (worker_stop/worker_message/worker_redirect) stay
-// exact-parent-scoped — this test proves both halves, plus that a genuinely unrelated manager is still
-// denied reads.
+// resume-doc `lineageRootId` helper) — this test proves that half, plus that a genuinely unrelated
+// manager is still denied reads. WRITE ops (worker_stop/worker_message/worker_redirect) still enforce
+// service.ts's UNCHANGED exact-parent guard, but now self-heal a stale link IN PLACE before reaching it
+// (the fleet-lockout fix, see worker-relink-self-heal.mjs) — so a write on a lineage-owned worker now
+// SUCCEEDS (and repairs the row) instead of being permanently denied.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -95,10 +97,13 @@ await client.connect(clientT);
 const parse = (res) => JSON.parse(res.content[0].text);
 const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
 
-// ============================ (1) READ scope walks the lineage ============================
+// ============================ (1) READ scope walks the lineage (and self-heals the stale link too) ============================
+// Reads route through the SAME ensureWorkerLinked self-heal as writes (fleet-lockout fix) — a lineage-
+// owned worker's stale parent_session_id is repaired on the FIRST touch, read or write, so it's already
+// exact-match-correct (and thus visible to a plain worker_list) well before anything writes to it.
 const stPred = await call("worker_status", { workerSessionId: "w-pred" });
-check("worker_status(w-pred) on successor NEW (2 hops from spawning OLD) returns the row, not denied",
-  stPred.id === "w-pred" && stPred.parentSessionId === "OLD");
+check("worker_status(w-pred) on successor NEW (2 hops from spawning OLD) returns the row, not denied, self-healed to NEW",
+  stPred.id === "w-pred" && stPred.parentSessionId === "NEW");
 
 const txPred = await call("worker_transcript", { workerSessionId: "w-pred" });
 check("worker_transcript(w-pred) on successor NEW returns an array, not denied", Array.isArray(txPred));
@@ -110,17 +115,11 @@ check("worker_status(w-other) on NEW (unrelated lineage) denied → 'not your wo
 const txOther = await call("worker_transcript", { workerSessionId: "w-other" });
 check("worker_transcript(w-other) on NEW (unrelated lineage) denied → 'not your worker'", txOther.error === "not your worker");
 
-// ============================ (3) write ops stay EXACT-parent-scoped even within the lineage ============================
-const stopPred = await call("worker_stop", { workerSessionId: "w-pred" });
-check("worker_stop(w-pred) on successor NEW denied (write ops do NOT widen to lineage)", stopPred.error === "not your worker");
-
-const msgPred = await call("worker_message", { workerSessionId: "w-pred", text: "hi" });
-check("worker_message(w-pred) on successor NEW denied (write ops do NOT widen to lineage)", msgPred.error === "not your worker");
-
-const redirectPred = await call("worker_redirect", { workerSessionId: "w-pred", text: "hi" });
-check("worker_redirect(w-pred) on successor NEW denied (write ops do NOT widen to lineage)", redirectPred.error === "not your worker");
-
-// ============================ (4) sanity: the ORIGINAL manager still reads/writes its own worker exactly ============================
+// ============================ (3) sanity: the ORIGINAL manager can still reach its own worker too ============================
+// w-pred's parent is currently NEW (self-healed by step 1's read). Since OLD shares the SAME lineage
+// root, OLD is just as entitled to it — its own worker_status call self-heals the link right back to OLD
+// (both directions are legitimate within one lineage; only a genuinely unrelated manager is ever denied —
+// see step 2 / worker-relink-self-heal.mjs's scoping assertions for that boundary).
 const routerOld = new OrchestrationMcpRouter(db, /** @type {any} */ (sessionsStub));
 const serverOld = routerOld.buildServer("OLD", "manager");
 const [clientTOld, serverTOld] = InMemoryTransport.createLinkedPair();
@@ -128,16 +127,26 @@ await serverOld.connect(serverTOld);
 const clientOld = new Client({ name: "lineage-scope-test-old", version: "0" });
 await clientOld.connect(clientTOld);
 const stOld = JSON.parse((await clientOld.callTool({ name: "worker_status", arguments: { workerSessionId: "w-pred" } })).content[0].text);
-check("worker_status(w-pred) on its ORIGINAL manager OLD (exact match) still works", stOld.id === "w-pred");
+check("worker_status(w-pred) on its ORIGINAL manager OLD still works (self-healed back to OLD)",
+  stOld.id === "w-pred" && stOld.parentSessionId === "OLD");
 const stopOld = JSON.parse((await clientOld.callTool({ name: "worker_stop", arguments: { workerSessionId: "w-pred" } })).content[0].text);
-check("worker_stop(w-pred) on its ORIGINAL manager OLD (exact match) still allowed", stopOld.stopped === true);
+check("worker_stop(w-pred) on its ORIGINAL manager OLD (exact match now) allowed", stopOld.stopped === true);
 await clientOld.close();
+
+// ============================ (4) write ops self-heal a lineage-owned stale link, then succeed ============================
+// (fleet-lockout self-heal — see worker-relink-self-heal.mjs for the dedicated test) — worker_stop's own
+// guard fires FIRST here since w-pred's parent gets relinked to NEW as a side effect of ensureWorkerLinked,
+// so this also proves the relink actually PERSISTS: a plain db.getSession read below confirms it.
+const stopPred = await call("worker_stop", { workerSessionId: "w-pred" });
+check("worker_stop(w-pred) on successor NEW self-heals the stale link and succeeds", stopPred.stopped === true);
+check("w-pred's parent_session_id is now NEW (relinked in place, not just tolerated)",
+  db.getSession("w-pred").parentSessionId === "NEW");
 
 await client.close();
 try { db.close(); } catch { /* ignore */ }
 for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker_status/worker_transcript scope reads by recycle LINEAGE (a successor manager can see a predecessor's already-exited worker), while worker_stop/worker_message/worker_redirect stay EXACT-parent-scoped, and a genuinely unrelated manager is still denied reads."
+  ? "\n✅ ALL PASS — worker_status/worker_transcript scope reads by recycle LINEAGE (a successor manager can see a predecessor's already-exited worker), a write op on a lineage-owned worker self-heals its stale parent link and succeeds, and a genuinely unrelated manager is still denied reads."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
