@@ -82,11 +82,13 @@ for (const role of ["worker", "assistant", "manager", null, undefined]) {
     HUMAN_PROMPT_TOOLS.every((t) => merged.includes(t)));
   check("(P) ON worker: no duplicate tokens", merged.length === new Set(merged).size);
 }
-// ON, a role with NO human-prompt disallow (manager/plain): just the restricted set (orthogonal to role).
-check("(P) ON manager: only the restricted native set (manager has no human-prompt disallow)",
-  eq(disallowedToolsForSpawn("manager", true), RESTRICTED));
+// ON, a plain/role-less session (no base disallow at all): just the restricted set (orthogonal to role).
+// (manager is no longer a zero-base-disallow example — it separately carries the task-tracking disallow;
+// see disallow-task-tools.mjs. Asserted here instead: manager's ON union still contains its own base.)
 check("(P) ON null role: only the restricted native set (orthogonal to role)",
   eq(disallowedToolsForSpawn(null, true), RESTRICTED));
+check("(P) ON manager: union = manager's task-tracking base tools + restricted native set (role tools first)",
+  eq(disallowedToolsForSpawn("manager", true), [...disallowedToolsForRole("manager"), ...RESTRICTED]));
 // The returned array is a fresh copy (no shared-state mutation of the frozen constant / role list).
 { const a = disallowedToolsForSpawn("worker", true); a.push("X"); check("(P) returns a fresh array (no shared-state mutation)", disallowedToolsForSpawn("worker", true).length === HUMAN_PROMPT_TOOLS.length + RESTRICTED.length); }
 
@@ -117,10 +119,12 @@ check("(P) ON null role: only the restricted native set (orthogonal to role)",
   const legacy = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "x", disallowedTools: disallowedToolsForRole("worker") });
   check("(A) OFF worker: argv byte-identical to the pre-flag (disallowedToolsForRole) argv", eq(off, legacy));
   check("(A) OFF worker: NO restricted native tool leaked into the argv", !RESTRICTED.some((t) => off.includes(t)));
-  // A plain/manager (no role disallow) with the flag OFF has NO --disallowedTools at all (fully additive).
+  // A plain/role-less session (no base disallow) with the flag OFF has NO --disallowedTools at all
+  // (fully additive). manager is no longer this example — it carries its task-tracking base regardless
+  // of restrictedTools (see disallow-task-tools.mjs).
   const base = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "x" });
-  const mgrOff = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "x", disallowedTools: disallowedToolsForSpawn("manager", false) });
-  check("(A) OFF manager: NO --disallowedTools flag (byte-identical to the no-arg argv)", eq(mgrOff, base));
+  const plainOff = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "x", disallowedTools: disallowedToolsForSpawn(null, false) });
+  check("(A) OFF plain: NO --disallowedTools flag (byte-identical to the no-arg argv)", eq(plainOff, base));
 }
 
 // ===================== (B) resolveProfile backstop + passthrough =====================

@@ -136,19 +136,21 @@ try {
   check("(b) resume() injects NO startup prompt (resume injects nothing)", oR?.startupPrompt === undefined);
   check("(b) resumed row is back on the live rail", db.getSession(sA.id).processState === "live" && resumed.processState === "live");
 
-  // =================== (d) argv: assistant gets the human-prompt disallow; manager stays byte-identical ===================
+  // =================== (d) argv: assistant gets the human-prompt disallow; a plain role stays byte-identical ===================
+  // (manager separately carries the task-tracking disallow now — see disallow-task-tools.mjs — so a
+  // plain/role-less session is this test's out-of-scope byte-identical example instead.)
   check("(d) disallowedToolsForRole('assistant') === the full human-prompt tool list", JSON.stringify(disallowedToolsForRole("assistant")) === JSON.stringify([...HUMAN_PROMPT_TOOLS]));
-  check("(d) disallowedToolsForRole('manager') === [] (out of scope, unchanged)", disallowedToolsForRole("manager").length === 0);
+  check("(d) disallowedToolsForRole(null) === [] (out of scope, unchanged)", disallowedToolsForRole(null).length === 0);
   const mcpServers = buildMcpServers({ sessionId: "s1", port: 4317, role: "assistant" });
   const asstArgs = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "hi", disallowedTools: disallowedToolsForRole("assistant") });
   const d = asstArgs.indexOf("--disallowedTools");
   check("(d) assistant argv carries `--disallowedTools` with the three tools in order",
     d !== -1 && asstArgs[d + 1] === "AskUserQuestion" && asstArgs[d + 2] === "ExitPlanMode" && asstArgs[d + 3] === "EnterPlanMode");
   check("(d) assistant argv: `--disallowedTools` precedes `--strict-mcp-config` (its variadic is terminated by it)", d < asstArgs.indexOf("--strict-mcp-config") && d + 4 === asstArgs.indexOf("--strict-mcp-config"));
-  // Byte-identical proof for the out-of-scope path: a manager's argv (disallow []) == the no-arg argv.
+  // Byte-identical proof for the out-of-scope path: a plain session's argv (disallow []) == the no-arg argv.
   const base = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } }, startupPrompt: "hi" });
-  const mgr = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } }, startupPrompt: "hi", disallowedTools: disallowedToolsForRole("manager") });
-  check("(d) manager argv is BYTE-IDENTICAL to the no-disallow argv (out-of-scope role unchanged)", JSON.stringify(mgr) === JSON.stringify(base));
+  const plain = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } }, startupPrompt: "hi", disallowedTools: disallowedToolsForRole(null) });
+  check("(d) plain argv is BYTE-IDENTICAL to the no-disallow argv (out-of-scope role unchanged)", JSON.stringify(plain) === JSON.stringify(base));
 
   // buildMcpServers is additive: assistant mounts loom-orchestration + loom-tasks; a plain/no-role map is
   // byte-identical to today (just loom-tasks) — the new `|| assistant` term didn't perturb other roles.

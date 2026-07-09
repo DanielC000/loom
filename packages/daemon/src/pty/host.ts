@@ -1085,6 +1085,19 @@ export interface PtyHostEvents {
 export const HUMAN_PROMPT_TOOLS: readonly string[] = ["AskUserQuestion", "ExitPlanMode", "EnterPlanMode"];
 
 /**
+ * The engine's NATIVE task-tracking tools (TaskCreate/TaskGet/TaskList/TaskOutput/TaskStop/TaskUpdate —
+ * NOT the `mcp__loom-tasks__tasks_*` board tools, a disjoint namespace). A board-driven role's real task
+ * surface IS the loom-tasks board (manager/platform/auditor coordinate via the MCP board, never these),
+ * so leaving the native tools registered buys nothing but a recurring "task tools haven't been used
+ * recently…" `<system-reminder>` the session reasons past every turn (confirmed live: a manager
+ * explicitly dismissed it mid-orchestration). The engine's reminder is gated on the native Task tools
+ * being present in the session's tool list (no settings.json flag suppresses it — `claude-settings.ts`
+ * has no such knob); removing them from the tool list removes the reminder's trigger condition, mirroring
+ * how {@link HUMAN_PROMPT_TOOLS} is removed below rather than merely denied. (Platform card 33f9f181)
+ */
+export const TASK_TRACKING_TOOLS: readonly string[] = ["TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate"];
+
+/**
  * The set of roles whose stdin is Loom-driven and which must NEVER block on a human — so they spawn with
  * {@link HUMAN_PROMPT_TOOLS} disallowed:
  *   - `worker`            — driven by its manager (worker_message/redirect); channel up is worker_report.
@@ -1096,13 +1109,22 @@ export const HUMAN_PROMPT_TOOLS: readonly string[] = ["AskUserQuestion", "ExitPl
  *                           reaped it (a wasted full-timeout window + a `timed_out` run).
  *   - `assistant`         — the long-lived Loom Companion; its "human" reaches it over a CHAT channel and
  *                           it answers via `chat_reply`, so its stdin is never a live TUI human — an
- *                           interactive prompt would block the turn on input that never comes.
+ *                           interactive prompt would block on input that never comes.
  * DELIBERATELY EXCLUDED (left byte-identical): `manager`/orchestrator + `platform` (the human-driven
  * Platform Lead) legitimately surface decisions to the human; a plain (role-less) session is out of
- * scope. Pure + exported so the spawn-args test asserts the per-role mapping with no real claude.
- * (board card 8dd1dd1c)
+ * scope.
+ *
+ * SEPARATELY, the set of BOARD-DRIVEN roles — `manager`/orchestrator, `platform`, `auditor` — spawn with
+ * {@link TASK_TRACKING_TOOLS} disallowed (a disjoint concern from the human-prompt disallow above; `auditor`
+ * gets BOTH sets, unioned). `workspace-auditor`/`setup`/`worker`/`run`/`assistant`/plain are left
+ * byte-identical on this dimension: their real task surface isn't the loom-tasks board the same way, and
+ * scoping narrowly avoids suppressing a signal a role might still find useful.
+ *
+ * Pure + exported so the spawn-args test asserts the per-role mapping with no real claude. (board card
+ * 8dd1dd1c; task-tracking-tools split: Platform card 33f9f181)
  */
 export function disallowedToolsForRole(role?: SessionRole | null): string[] {
+  const out: string[] = [];
   switch (role) {
     case "worker":
     case "setup":
@@ -1110,10 +1132,21 @@ export function disallowedToolsForRole(role?: SessionRole | null): string[] {
     case "workspace-auditor":
     case "run":
     case "assistant":
-      return [...HUMAN_PROMPT_TOOLS];
+      out.push(...HUMAN_PROMPT_TOOLS);
+      break;
     default:
-      return []; // manager / platform / plain — unchanged, no disallow
+      break; // manager / platform / plain — no human-prompt disallow
   }
+  switch (role) {
+    case "manager":
+    case "platform":
+    case "auditor":
+      out.push(...TASK_TRACKING_TOOLS);
+      break;
+    default:
+      break; // worker / setup / workspace-auditor / run / assistant / plain — no task-tracking disallow
+  }
+  return out;
 }
 
 /**
@@ -1152,15 +1185,16 @@ export const RESTRICTED_NATIVE_TOOLS: readonly string[] = Object.freeze([
 ]);
 
 /**
- * The FULL `--disallowedTools` list for a spawn: the role's human-prompt disallow ({@link
- * disallowedToolsForRole}) UNIONed (de-duped, role tools first) with {@link RESTRICTED_NATIVE_TOOLS} iff
- * `restrictedTools` is on. When OFF this returns EXACTLY `disallowedToolsForRole(role)` — so the flag-off
- * argv is BYTE-IDENTICAL to today (no restricted tokens appended). Pure + exported so the spawn-args test
- * asserts the union + the byte-identical-off invariant with no real claude. (Companion blast-radius card.)
+ * The FULL `--disallowedTools` list for a spawn: the role's disallow list ({@link disallowedToolsForRole}
+ * — the human-prompt tools, the task-tracking tools, or both) UNIONed (de-duped, role tools first) with
+ * {@link RESTRICTED_NATIVE_TOOLS} iff `restrictedTools` is on. When OFF this returns EXACTLY
+ * `disallowedToolsForRole(role)` — so the flag-off argv is BYTE-IDENTICAL to today (no restricted tokens
+ * appended). Pure + exported so the spawn-args test asserts the union + the byte-identical-off invariant
+ * with no real claude. (Companion blast-radius card.)
  */
 export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedTools?: boolean): string[] {
   const base = disallowedToolsForRole(role);
-  if (!restrictedTools) return base; // OFF: exactly the role's human-prompt tools (byte-identical to today)
+  if (!restrictedTools) return base; // OFF: exactly the role's disallow list (byte-identical to today)
   const merged = [...base];
   for (const t of RESTRICTED_NATIVE_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
   return merged;
@@ -2803,8 +2837,9 @@ export class PtyHost {
    * strand. This is a BACKSTOP, independent of cycleToMode's own convergence logic invoked from the main
    * SessionStart path (which stays unchanged for that caller — see cycleToMode's doc comment): it fires
    * off the mode ACTUALLY read from the footer, regardless of why the session ended up there. A
-   * manager/platform session is structurally excluded (`disallowedToolsForRole` returns `[]` for those
-   * roles), so this never fights a manager's legitimate, human-approved entry into plan mode.
+   * manager/platform session is structurally excluded (`disallowedToolsForRole` never puts `ExitPlanMode`
+   * in their list — they may separately carry the task-tracking disallow, which this check ignores), so
+   * this never fights a manager's legitimate, human-approved entry into plan mode.
    *
    * Best-effort + bounded: polls the ring (the existing rolling output buffer) a few times to let the
    * footer repaint into its final state, logs as soon as a mode is read (or gives up at the cap, logging

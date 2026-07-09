@@ -20,13 +20,27 @@ check("HUMAN_PROMPT_TOOLS = AskUserQuestion + the two plan-mode prompts",
 // `run` is human-LESS (fully autonomous) — nobody can answer a prompt, so it joins the disallow class.
 // `assistant` (the long-lived Companion) reaches its human over a CHAT channel + answers via chat_reply,
 // so its stdin is never a live TUI human — an interactive prompt would block on input that never comes.
+// `auditor` also carries the (separately-tested, in disallow-task-tools.mjs) task-tracking disallow, so
+// its list is a SUPERSET of HUMAN_PROMPT_TOOLS rather than an exact match — checked via `includes` for
+// every role here; the other five roles get the stronger exact-equality check since nothing else applies.
 for (const role of ["worker", "setup", "auditor", "workspace-auditor", "run", "assistant"]) {
   check(`role '${role}': all human-prompt tools disallowed`,
+    HUMAN_PROMPT_TOOLS.every((t) => disallowedToolsForRole(role).includes(t)));
+}
+for (const role of ["worker", "setup", "workspace-auditor", "run", "assistant"]) {
+  check(`role '${role}': human-prompt disallow list is EXACTLY HUMAN_PROMPT_TOOLS (nothing else)`,
     JSON.stringify(disallowedToolsForRole(role)) === JSON.stringify([...HUMAN_PROMPT_TOOLS]));
 }
-// OUT of scope: manager/orchestrator + the human-driven platform lead, plus plain (null/undefined)
-// — no disallow at all (a manager legitimately surfaces decisions to the human).
-for (const role of ["manager", "platform", null, undefined]) {
+// OUT of scope for the HUMAN-PROMPT disallow specifically: manager/orchestrator + the human-driven
+// platform lead never get AskUserQuestion/ExitPlanMode/EnterPlanMode disallowed (a manager legitimately
+// surfaces decisions to the human) — though manager/platform DO separately carry the task-tracking
+// disallow (see disallow-task-tools.mjs); that's a disjoint concern this file doesn't assert on.
+for (const role of ["manager", "platform"]) {
+  check(`role '${role}': no HUMAN-PROMPT tool disallowed`,
+    HUMAN_PROMPT_TOOLS.every((t) => !disallowedToolsForRole(role).includes(t)));
+}
+// A genuinely plain/role-less session gets NO disallow at all (neither concern applies).
+for (const role of [null, undefined]) {
   check(`role '${String(role)}': NO disallow (left byte-identical)`,
     disallowedToolsForRole(role).length === 0);
 }
@@ -66,19 +80,20 @@ for (const role of ["manager", "platform", null, undefined]) {
 }
 
 // --- Byte-identical proof for the off / out-of-scope path --------------------------------------
-// A manager's argv (disallowedTools = []) must be byte-identical to the no-arg argv — and crucially to
-// the SAME spawn with NO disallowedTools key at all. This is the additive-when-applicable invariant.
+// A plain (role-less) session's argv (disallowedTools = []) must be byte-identical to the no-arg argv —
+// and crucially to the SAME spawn with NO disallowedTools key at all. This is the additive-when-applicable
+// invariant. (Manager is no longer a zero-disallow example — see disallow-task-tools.mjs.)
 {
   const base = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it" });
-  const managerTools = disallowedToolsForRole("manager"); // []
-  const withEmpty = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", disallowedTools: managerTools });
+  const plainTools = disallowedToolsForRole(null); // []
+  const withEmpty = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", disallowedTools: plainTools });
   const withUndef = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", disallowedTools: undefined });
-  check("manager/out-of-scope: NO `--disallowedTools` in argv", !withEmpty.includes("--disallowedTools"));
+  check("plain/out-of-scope: NO `--disallowedTools` in argv", !withEmpty.includes("--disallowedTools"));
   check("empty disallow list: argv byte-identical to the no-arg argv", JSON.stringify(withEmpty) === JSON.stringify(base));
   check("undefined disallow: argv byte-identical to the no-arg argv", JSON.stringify(withUndef) === JSON.stringify(base));
-  // And the worker argv differs from the manager argv ONLY by the inserted flag+names (4 extra tokens).
+  // And the worker argv differs from the plain argv ONLY by the inserted flag+names (4 extra tokens).
   const worker = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", disallowedTools: disallowedToolsForRole("worker") });
-  check("worker argv = manager argv + exactly 4 inserted tokens (flag + 3 names)", worker.length === base.length + 4);
+  check("worker argv = plain argv + exactly 4 inserted tokens (flag + 3 names)", worker.length === base.length + 4);
 }
 
 // Resume path (no prompt): the disallow still threads, --resume still leads, no `--` separator emitted.
@@ -90,6 +105,6 @@ for (const role of ["manager", "platform", null, undefined]) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker/setup/auditor/workspace-auditor/run spawn with AskUserQuestion + Exit/EnterPlanMode disallowed; manager/platform/plain stay byte-identical."
+  ? "\n✅ ALL PASS — worker/setup/auditor/workspace-auditor/run/assistant spawn with AskUserQuestion + Exit/EnterPlanMode disallowed; manager/platform get none of those (plain stays fully byte-identical). See disallow-task-tools.mjs for the separate task-tracking disallow."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
