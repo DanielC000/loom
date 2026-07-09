@@ -14,9 +14,10 @@
 import path from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CompanionRoute, Question, SessionRole } from "@loom/shared";
+import type { CompanionRoute, Question, SessionRole, Task, TaskPriority } from "@loom/shared";
+import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
-import { listProjectTasks, type TaskSummary } from "../mcp/tasks.js";
+import { createProjectTask, listProjectTasks, updateProjectTask, type TaskSummary } from "../mcp/tasks.js";
 import { listVaultTree, readVaultFile, statVaultFile } from "../vault/browser.js";
 import type { OwnerAttestation } from "./attestation.js";
 
@@ -452,13 +453,62 @@ const DECISIONS_RELAY: CompanionCapability = {
   },
 };
 
+/** This lever's own capability slug, reused as Primitive C's namespace (see `ProposeConfirmationInput.
+ *  capability`) — namespaced apart from `DECISIONS_RELAY_SLUG` so the two sensitive levers can each
+ *  hold their own pending token on the SAME (session, route) without clobbering each other. */
+const BOARD_REACH_SLUG = "board-reach";
+
+/** A validated, NOT-YET-CONFIRMED board write, keyed by (sessionId, route) — mirrors
+ *  `pendingDecisionResolves`/`pendingResolveKey` exactly (see their doc). `board_create` and
+ *  `board_update` share this ONE map (and the ONE `BOARD_REACH_SLUG` proposal namespace) since a route
+ *  only ever has a single outstanding board-write confirmation at a time — a fresh propose of either
+ *  kind always overwrites any prior pending entry for that route, matching `OwnerConfirmStore`'s own
+ *  one-pending-per-(session,route,capability) semantics. */
+type PendingBoardWrite =
+  | { action: "create"; projectId: string; title: string; body: string; columnKey?: string; priority?: TaskPriority }
+  | { action: "update"; taskId: string; columnKey?: string; priority?: TaskPriority; held?: boolean };
+const pendingBoardWrites = new Map<string, PendingBoardWrite>();
+
+/** Mirrors `pendingResolveKey` (decisions-relay) exactly, namespaced by `BOARD_REACH_SLUG` instead. */
+function pendingBoardKey(sessionId: string, route: CompanionRoute | null): string {
+  return `${sessionId}::${route ? `${route.channel}:${route.chatId}` : ""}::${BOARD_REACH_SLUG}`;
+}
+
+const BOARD_PRIORITY_SCHEMA = z.enum(["p0", "p1", "p2", "p3"]);
+
 /**
- * `board-reach` READ half (Framework §4) — a read-only `board_list` tool giving the companion
- * cross-project board visibility over its granted projects' cards. Mirrors SESSION_STATUS/
- * DECISIONS_RELAY exactly. This card builds ONLY the read tool — the ACT half (create card, move
- * column, set priority, set held) is a LATER card gated on injection-guard primitives + owner
- * sign-off: a write path on the most injection-exposed surface in Loom must not ship ahead of its
- * guard.
+ * `board-reach` (Framework §4) — `board_list` is the READ half: a read-only tool reporting board cards
+ * across the granted projects. Mirrors SESSION_STATUS/DECISIONS_RELAY exactly.
+ *
+ * `board_create`/`board_update` are the ACT half (card 7975c034) — registered ONLY when at least one of
+ * this grant's projects is act-mode (`hasActGrant`, exactly like `decision_resolve`'s own gate), so a
+ * read-only grant's tool surface stays byte-identical. Both relay into the EXISTING loom-tasks write
+ * path (`createProjectTask`/`updateProjectTask`, mcp/tasks.ts) rather than reimplementing board
+ * mutation — same posture as `decision_resolve` reusing `db.answerQuestion`. There is deliberately NO
+ * delete tool at all (card + owner sign-off 1039e892: no cross-project delete from chat).
+ *
+ * Both tools copy `decision_resolve`'s exact proven shape (its CR-hardened Primitive-C round-trip in
+ * particular — see that lever's doc for the full rationale): every call (propose OR confirm) re-runs
+ * the belt-and-suspenders scope/mayAct guard FIRST, then Primitive A (owner-authored turn), then
+ * requires a reply-to route, then tries `attest.confirmPending` before ever proposing. A first call
+ * PROPOSES (mints a token via `attest.proposeConfirmation`, delivers the prompt DIRECTLY to the owner
+ * via `ctx.outbound.deliverToOwner` — never returned to the companion) and returns a bare
+ * `{status:'proposed'}`; only a SECOND identical call, on the owner's own next turn containing that
+ * token, actually calls into `createProjectTask`/`updateProjectTask`. A failed delivery fails closed
+ * (nothing left pending). Owner sign-off 1039e892 made Primitive C MANDATORY for every board write
+ * (not merely recommended, as the design note's own open fork initially had it) — both tools always
+ * propose-then-confirm, with no lighter-weight path.
+ *
+ * `board_create`'s NEW card content is the one place this lever's guards diverge from `decision_resolve`:
+ * Primitive B applies to `title` and (if given) `body` — each must be a verbatim quote of the owner's own
+ * words this turn, so an injected message can never fabricate card content. `board_update` carries no
+ * free-text content (only columnKey/priority/held — closed-vocabulary fields, not authored text), so
+ * Primitive B does not apply there, mirroring how `decision_resolve`'s own `chosenOption` (also a
+ * closed-vocabulary pick) is validated against the offered set rather than checked verbatim.
+ *
+ * `board_update` resolves its target card GLOBALLY (`db.getTask`, unscoped by project — the only way to
+ * find out which project a bare card id belongs to) before checking that project against scope, exactly
+ * mirroring how `decision_resolve` resolves `db.getQuestion` before its own scope check.
  */
 const BOARD_REACH: CompanionCapability = {
   slug: "board-reach",
@@ -490,6 +540,214 @@ const BOARD_REACH: CompanionCapability = {
           }));
         });
         return ok({ cards });
+      },
+    );
+
+    // ACT half — read-only grants (every project in scope is mode:'read') never see these tools at all,
+    // keeping their surface byte-identical to before this card.
+    const hasActGrant = [...ctx.scope.projectIds].some((pid) => ctx.scope.mayAct(pid));
+    if (!hasActGrant) return;
+
+    server.registerTool(
+      "board_create",
+      {
+        description:
+          "Create a NEW board card on behalf of the owner, in one of your act-granted project(s) — " +
+          "`title` and (if given) `body` MUST each be a verbatim quote of words the owner ACTUALLY said " +
+          "this turn; you may never author card content yourself. This NEVER creates the card on the " +
+          "first call: Loom sends a confirmation request DIRECTLY to the owner's chat itself (you do NOT " +
+          "see or relay any prompt/token — just tell the owner you've requested their confirmation) and " +
+          "returns {status:'proposed'}. Only once the owner replies to THAT message do you call " +
+          "board_create AGAIN with the SAME arguments to actually create it ({status:'created'}) — Loom " +
+          "detects the owner's confirming reply itself. A mismatched confirm reply returns " +
+          "{status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. Requires an " +
+          "act-mode grant on `project` and an owner-authored turn on a channel Loom can reply to — a " +
+          "proactive/heartbeat turn is always rejected. There is no delete tool — card removal stays " +
+          "human-only.",
+        inputSchema: {
+          project: z.string(), title: z.string(), body: z.string().optional(),
+          columnKey: z.string().optional(), priority: BOARD_PRIORITY_SCHEMA.optional(),
+        },
+      },
+      async ({ project, title, body, columnKey, priority }) => {
+        // Belt-and-suspenders (Framework §2, mandatory per-project — never a collapsed scope check).
+        if (!ctx.scope.projectIds.has(project)) {
+          return ok({ error: `project "${project}" is not in your granted scope` });
+        }
+        if (!ctx.scope.mayAct(project)) {
+          return ok({ error: "you only have a read-mode grant on this project — board_create needs act-mode" });
+        }
+        if (columnKey !== undefined) {
+          const cols = resolveConfig(db.getProject(project)?.config).kanbanColumns;
+          if (!cols.some((c) => c.key === columnKey)) {
+            return ok({ error: `unknown column "${columnKey}" on this project's board (valid: ${cols.map((c) => c.key).join(", ")})` });
+          }
+        }
+        // Primitive A — every call (propose OR confirm) must be on an owner-authored turn.
+        const ownerText = ctx.attest.getActiveTurnOwnerText(ctx.sessionId);
+        if (ownerText === null) {
+          return ok({ error: "no owner text this turn — board_create can only act on an owner-authored turn" });
+        }
+        // Fail closed with no verified reply-to channel (mirrors decision_resolve's CR hardening).
+        const route = ctx.pty.getActiveTurnOrigin(ctx.sessionId);
+        if (route === null) {
+          return ok({ error: "no reply-to route for this turn — Loom has no verified channel to confirm this with the owner" });
+        }
+        const key = pendingBoardKey(ctx.sessionId, route);
+        // A whitespace-only body is not a meaningful body — treat it as absent (mirrors decision_resolve's
+        // whitespace-note fold), so Primitive B owns the empty/whitespace decision uniformly.
+        const hasBody = body !== undefined && body.trim() !== "";
+        const normalizedBody = hasBody ? (body as string) : "";
+
+        // Primitive C — try to COMMIT a pending proposal for this exact (route, capability) first.
+        const confirmOutcome = ctx.attest.confirmPending(ctx.sessionId, route, BOARD_REACH_SLUG);
+        if (confirmOutcome.committed) {
+          const pending = pendingBoardWrites.get(key);
+          pendingBoardWrites.delete(key); // single-use, whether or not it still matches below.
+          if (
+            !pending || pending.action !== "create" || pending.projectId !== project || pending.title !== title
+            || pending.body !== normalizedBody || pending.columnKey !== columnKey || pending.priority !== priority
+          ) {
+            return ok({ error: "the confirmed action no longer matches what was proposed — call board_create again to re-propose" });
+          }
+          const created = createProjectTask(db, project, { title, body: normalizedBody, columnKey, priority });
+          if ("error" in created) return ok({ error: created.error });
+          return ok({
+            status: "created",
+            task: { id: created.id, title: created.title, columnKey: created.columnKey, priority: created.priority, projectId: project },
+          });
+        }
+        if (confirmOutcome.reason === "token-mismatch") {
+          // Left standing (not evicted) — a typo'd confirm reply is retry-able within the TTL.
+          return ok({ status: "confirm-mismatch", error: "that doesn't contain the exact confirm token — ask the owner to reply again with it verbatim" });
+        }
+        // An EXPIRED (or never-existed) proposal's payload is dead weight — evict before the fresh propose
+        // below unconditionally overwrites this key, so a reader never sees a stale entry in between.
+        pendingBoardWrites.delete(key);
+
+        // No (or expired) pending confirmation for this route — this is a fresh PROPOSE. Primitive B.
+        if (!ctx.attest.isVerbatimOwnerText(ctx.sessionId, title)) {
+          return ok({ error: "title must be a verbatim quote of what the owner said this turn — you may not author it" });
+        }
+        if (hasBody && !ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody)) {
+          return ok({ error: "body must be a verbatim quote of what the owner said this turn — you may not author it" });
+        }
+        const proposal = ctx.attest.proposeConfirmation({
+          sessionId: ctx.sessionId,
+          route,
+          capability: BOARD_REACH_SLUG,
+          summary: `Create board card "${title}"${normalizedBody ? ` — body: "${normalizedBody}"` : ""} in project ${project}?`,
+        });
+        // CR hardening (inherited from decision_resolve) — deliver DIRECTLY to the owner; never hand
+        // promptText/the token back to the companion. Fail closed on a delivery failure.
+        const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
+        if (!delivered) {
+          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
+        }
+        pendingBoardWrites.set(key, { action: "create", projectId: project, title, body: normalizedBody, columnKey, priority });
+        return ok({ status: "proposed" });
+      },
+    );
+
+    server.registerTool(
+      "board_update",
+      {
+        description:
+          "Update an EXISTING board card (by the exact `id` from board_list) on behalf of the owner — " +
+          "move its column (`columnKey`), change its `priority`, and/or set `held` (the owner-gated " +
+          "'don't nag' flag). At least one of columnKey/priority/held must be given. This NEVER applies " +
+          "the update on the first call: Loom sends a confirmation request DIRECTLY to the owner's chat " +
+          "itself (you do NOT see or relay any prompt/token — just tell the owner you've requested their " +
+          "confirmation) and returns {status:'proposed'}. Only once the owner replies to THAT message do " +
+          "you call board_update AGAIN with the SAME arguments to actually apply it ({status:'updated'}) " +
+          "— Loom detects the owner's confirming reply itself. A mismatched confirm reply returns " +
+          "{status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. Requires an " +
+          "act-mode grant on the card's project and an owner-authored turn on a channel Loom can reply " +
+          "to — a proactive/heartbeat turn is always rejected. There is no delete tool — card removal " +
+          "stays human-only.",
+        inputSchema: {
+          id: z.string(), columnKey: z.string().optional(), priority: BOARD_PRIORITY_SCHEMA.optional(),
+          held: z.boolean().optional(),
+        },
+      },
+      async ({ id, columnKey, priority, held }) => {
+        if (columnKey === undefined && priority === undefined && held === undefined) {
+          return ok({ error: "at least one of columnKey, priority, or held must be given" });
+        }
+        // Resolve the card GLOBALLY first (mirrors decision_resolve's db.getQuestion(questionId) — the
+        // only way to learn which project a bare card id belongs to), THEN apply the belt-and-suspenders
+        // per-project scope check.
+        const task = db.getTask(id);
+        if (!task) return ok({ error: `no task "${id}"` });
+        if (!ctx.scope.projectIds.has(task.projectId)) {
+          return ok({ error: "this task's project is not in your granted scope" });
+        }
+        if (!ctx.scope.mayAct(task.projectId)) {
+          return ok({ error: "you only have a read-mode grant on this task's project — board_update needs act-mode" });
+        }
+        if (columnKey !== undefined) {
+          const cols = resolveConfig(db.getProject(task.projectId)?.config).kanbanColumns;
+          if (!cols.some((c) => c.key === columnKey)) {
+            return ok({ error: `unknown column "${columnKey}" on this project's board (valid: ${cols.map((c) => c.key).join(", ")})` });
+          }
+        }
+        // Primitive A — every call (propose OR confirm) must be on an owner-authored turn.
+        const ownerText = ctx.attest.getActiveTurnOwnerText(ctx.sessionId);
+        if (ownerText === null) {
+          return ok({ error: "no owner text this turn — board_update can only act on an owner-authored turn" });
+        }
+        const route = ctx.pty.getActiveTurnOrigin(ctx.sessionId);
+        if (route === null) {
+          return ok({ error: "no reply-to route for this turn — Loom has no verified channel to confirm this with the owner" });
+        }
+        const key = pendingBoardKey(ctx.sessionId, route);
+
+        // Primitive C — try to COMMIT a pending proposal for this exact (route, capability) first.
+        const confirmOutcome = ctx.attest.confirmPending(ctx.sessionId, route, BOARD_REACH_SLUG);
+        if (confirmOutcome.committed) {
+          const pending = pendingBoardWrites.get(key);
+          pendingBoardWrites.delete(key); // single-use, whether or not it still matches below.
+          if (
+            !pending || pending.action !== "update" || pending.taskId !== id
+            || pending.columnKey !== columnKey || pending.priority !== priority || pending.held !== held
+          ) {
+            return ok({ error: "the confirmed action no longer matches what was proposed — call board_update again to re-propose" });
+          }
+          const patch: Partial<Pick<Task, "columnKey" | "priority" | "held">> = {};
+          if (columnKey !== undefined) patch.columnKey = columnKey;
+          if (priority !== undefined) patch.priority = priority;
+          if (held !== undefined) patch.held = held;
+          const updated = updateProjectTask(db, task.projectId, id, patch);
+          if ("error" in updated) return ok({ error: updated.error });
+          return ok({
+            status: "updated",
+            task: { id: updated.id, title: updated.title, columnKey: updated.columnKey, priority: updated.priority, held: updated.held, projectId: task.projectId },
+          });
+        }
+        if (confirmOutcome.reason === "token-mismatch") {
+          return ok({ status: "confirm-mismatch", error: "that doesn't contain the exact confirm token — ask the owner to reply again with it verbatim" });
+        }
+        pendingBoardWrites.delete(key);
+
+        // No (or expired) pending confirmation for this route — this is a fresh PROPOSE. No free-text
+        // content here (columnKey/priority/held are closed-vocabulary, validated above), so Primitive B
+        // does not apply — mirrors decision_resolve's own chosenOption (validated, not verbatim-checked).
+        const changes: string[] = [];
+        if (columnKey !== undefined) changes.push(`move to column "${columnKey}"`);
+        if (priority !== undefined) changes.push(`set priority to ${priority}`);
+        if (held !== undefined) changes.push(`set held to ${held}`);
+        const proposal = ctx.attest.proposeConfirmation({
+          sessionId: ctx.sessionId,
+          route,
+          capability: BOARD_REACH_SLUG,
+          summary: `Update board card "${task.title}" (${changes.join(", ")})?`,
+        });
+        const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
+        if (!delivered) {
+          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
+        }
+        pendingBoardWrites.set(key, { action: "update", taskId: id, columnKey, priority, held });
+        return ok({ status: "proposed" });
       },
     );
   },

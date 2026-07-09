@@ -1,9 +1,9 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Companion Capability & Permission-Lever Framework — `board-reach` READ half (a `board_list` tool
 // reporting board cards across the companion's granted projects). Mirrors
-// companion-decisions-relay.mjs's coverage shape. READ HALF ONLY — this card does not build the write
-// half (create / move column / set priority / set held); that is a later card gated on injection-guard
-// primitives.
+// companion-decisions-relay.mjs's coverage shape. READ HALF ONLY — the ACT half (board_create/
+// board_update, card 7975c034) has its own dedicated coverage in companion-board-write.mjs; this file
+// only proves board_create/board_update's REGISTRATION-gating (present under act, absent under read).
 // Fully hermetic: a REAL Db on a temp LOOM_HOME + the REAL OrchestrationMcpRouter over an in-memory MCP
 // transport. NO network, NO real claude, NO daemon.
 //
@@ -14,7 +14,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (c) a multi-project grant (A+B) returns both projects' cards, each tagged with its project.
 //   (d) no grant ⇒ board_list is NOT registered (inert + invisible; byte-identical tool surface).
 //   (e) a grant row on a non-assistant-role session registers nothing (role gate).
-//   (f) no create/move/priority/held/write tool is ever registered by this lever, even under mode:'act'.
+//   (f) a mode:'read' grant never registers board_create/board_update (byte-identical read-only
+//       surface); a mode:'act' grant DOES register both (card 7975c034 — the ACT half's own guards are
+//       tested separately in companion-board-write.mjs). NO delete tool is ever registered, under
+//       either mode.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-board-reach.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -151,8 +154,8 @@ try {
     const orch = new OrchestrationMcpRouter(db, {});
     const tools = await listOf(orch.buildServer(companionSess, "assistant"));
     check("(d) an ungranted companion does NOT have board_list", !tools.includes("board_list"));
-    check("(f) no write tool is ever registered by this lever (no ACT half yet)",
-      !tools.includes("board_create") && !tools.includes("board_move") && !tools.includes("board_set_priority") && !tools.includes("board_set_held"));
+    check("(d) no grant at all ⇒ board_create/board_update are not registered either",
+      !tools.includes("board_create") && !tools.includes("board_update"));
     db.close();
   }
 
@@ -173,21 +176,39 @@ try {
     db.close();
   }
 
-  // ============ (f) no write tool registered even for a companion granted mode 'act' ============
+  // ============ (f) board_create/board_update registered ONLY under a mode:'act' grant ============
   {
     const db = tmpDb();
     const proj = "proj-act-mode";
     seedProject(db, proj, "Act mode");
     const companionSess = "companion-act-mode";
     seedSession(db, companionSess, proj, "assistant");
-    // Even a mode:'act' grant must not light up a create/move/write tool — this card builds ONLY the read half.
     db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: proj, mode: "act" });
 
     const orch = new OrchestrationMcpRouter(db, {});
     const tools = await listOf(orch.buildServer(companionSess, "assistant"));
     check("(f) board_list is still registered under an 'act' grant", tools.includes("board_list"));
-    check("(f) no create/move/priority/held/write tool is registered even under an 'act' grant (read-half-only card)",
-      !tools.includes("board_create") && !tools.includes("board_move") && !tools.includes("board_set_priority") && !tools.includes("board_set_held"));
+    check("(f) board_create IS registered under a mode:'act' grant (card 7975c034)", tools.includes("board_create"));
+    check("(f) board_update IS registered under a mode:'act' grant (card 7975c034)", tools.includes("board_update"));
+    check("(f) NO delete tool is ever registered, even under 'act'", !tools.includes("board_delete"));
+    db.close();
+  }
+
+  // ============ (f) a mode:'read' grant NEVER registers board_create/board_update (byte-identical) ============
+  {
+    const db = tmpDb();
+    const proj = "proj-read-mode";
+    seedProject(db, proj, "Read mode");
+    const companionSess = "companion-read-mode";
+    seedSession(db, companionSess, proj, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: proj, mode: "read" });
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const tools = await listOf(orch.buildServer(companionSess, "assistant"));
+    check("(f) board_list is registered under a 'read' grant", tools.includes("board_list"));
+    check("(f) board_create is NOT registered under a mode:'read' grant (byte-identical to before card 7975c034)", !tools.includes("board_create"));
+    check("(f) board_update is NOT registered under a mode:'read' grant (byte-identical to before card 7975c034)", !tools.includes("board_update"));
+    check("(f) NO delete tool is ever registered, even under 'read'", !tools.includes("board_delete"));
     db.close();
   }
 } finally {
@@ -195,6 +216,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — board_list registers ONLY behind a board-reach grant and reports ONLY that grant's non-done cards scoped to the granted project(s), each tagged with its project; a project selector can never widen scope; an ungranted/non-assistant session gets nothing; and no create/move/priority/held/write tool is ever registered by this read-only card, even under a mode:'act' grant."
+  ? "\n✅ ALL PASS — board_list registers ONLY behind a board-reach grant and reports ONLY that grant's non-done cards scoped to the granted project(s), each tagged with its project; a project selector can never widen scope; an ungranted/non-assistant session gets nothing; board_create/board_update are registered ONLY under a mode:'act' grant and stay absent under 'read' (byte-identical); no delete tool is ever registered under either mode."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
