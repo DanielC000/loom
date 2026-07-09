@@ -2781,54 +2781,86 @@ export class SessionService {
   ): { delivered: boolean; position?: number } {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
-    // (a) FLUSH + SUPERSEDE the worker's queued direction before the authoritative redirect lands.
-    const flushed = this.pty.flushPending(workerSessionId);
-    for (const m of flushed) {
-      if (m.onDeliver) { try { m.onDeliver("superseded"); } catch { /* a resolution fault must never block the redirect */ } }
-    }
-    // (b) ENQUEUE the authoritative redirect (durable-tracked like messageWorker). Distinctly framed so the
-    // worker knows this REPLACED its pending direction and may have interrupted it mid-edit.
-    const framed = `[loom:from-manager:redirect]\n${text}`;
-    const r = this.enqueueDurableMessage(workerSessionId, framed, { sender: managerSessionId, taskId: worker.taskId ?? null });
-    // (c) Interrupt ONLY when the redirect was HELD (the worker was busy). For an idle worker the redirect
-    // already went out as a turn (delivered:true) — there is nothing to cancel, and an Esc would wrongly
-    // cancel that very turn.
-    if (!r.delivered) this.pty.interruptForRedirect(workerSessionId);
-    this.db.appendEvent({
-      id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "redirect_worker",
-      detail: { delivered: r.delivered, superseded: flushed.length },
+    return this.deliverRedirect(worker, text, {
+      tag: "loom:from-manager:redirect",
+      enqueueSender: managerSessionId,
+      eventManagerId: managerSessionId,
     });
-    return r;
   }
 
   /**
    * Companion session-control ACT lever's STEER half (card 305a54fb, `session_steer`) — interrupt +
    * redirect ANY session in scope; the SCOPED analogue of {@link redirectWorker} minus its
    * parentSessionId gate (a companion is never the target's manager). Mirrors `redirectWorker`'s exact
-   * mechanics: flush + supersede any queued direction first, enqueue the authoritative redirect as a
-   * durable cross-session message (framed `[loom:from-owner-via-companion:redirect]` so the receiver
-   * knows this replaced its pending direction and may have interrupted it mid-turn), then interrupt ONLY
-   * when it was held (the target was busy) — an idle target already received it as a fresh turn, so an
-   * Esc would wrongly cancel that very turn. Scope/roleFilter/Primitive-A enforcement all live in the
-   * lever (companion/capabilities.ts) — this method assumes the caller already validated them, exactly
-   * like `stopSession`/`resume` are thin mechanical wrappers for the stop/resume halves of the same lever.
-   * Throws ONLY if the target session is UNKNOWN.
+   * mechanics via the shared {@link deliverRedirect} core: flush + supersede any queued direction first,
+   * enqueue the authoritative redirect as a durable cross-session message (framed
+   * `[loom:from-owner-via-companion:redirect]` so the receiver knows this replaced its pending direction
+   * and may have interrupted it mid-turn), then interrupt ONLY when it was held (the target was busy) — an
+   * idle target already received it as a fresh turn, so an Esc would wrongly cancel that very turn.
+   * Scope/roleFilter/Primitive-A enforcement all live in the lever (companion/capabilities.ts) — this
+   * method assumes the caller already validated them, exactly like `stopSession`/`resume` are thin
+   * mechanical wrappers for the stop/resume halves of the same lever. Throws ONLY if the target session is
+   * UNKNOWN.
    */
   redirectSessionAsCompanion(sessionId: string, text: string, senderSessionId?: string): { delivered: boolean; position?: number } {
     const target = this.db.getSession(sessionId);
     if (!target) throw new Error("session not found");
-    const flushed = this.pty.flushPending(sessionId);
+    return this.deliverRedirect(target, text, {
+      tag: "loom:from-owner-via-companion:redirect",
+      enqueueSender: senderSessionId ?? "companion",
+      eventManagerId: senderSessionId ?? "",
+      extraDetail: { via: "companion" },
+    });
+  }
+
+  /**
+   * Shared redirect core for {@link redirectWorker} and {@link redirectSessionAsCompanion} — the mechanics
+   * common to BOTH (see redirectWorker's original doc comment, preserved below, for the full ordering
+   * rationale). Parameterized by exactly what differs between the two callers: the wire framing tag, the
+   * durable-enqueue sender attribution, the `redirect_worker` event's `managerSessionId` attribution, and
+   * any extra event detail (the companion path stamps `via: "companion"`). Callers pre-resolve the target
+   * session and any parent-scope gate (redirectWorker's "not your worker" check) BEFORE calling this — this
+   * core never re-derives or re-checks scope.
+   *
+   * ORDER IS LOAD-BEARING (so the redirect deterministically lands as the next turn):
+   *   (a) FLUSH the target's pending FIFO and SUPERSEDE each flushed durable record (fire its onDeliver
+   *       with reason "superseded" → a session_message_delivered marker), so the worker_report done-guard
+   *       and the boot-recovery scan never later re-drive the direction we're replacing. Plain
+   *       (non-durable) held nudges carry no callback and are simply dropped — the redirect supersedes
+   *       them too.
+   *   (b) ENQUEUE the authoritative redirect (framed per `opts.tag`) via the SAME durable channel as
+   *       messageWorker: a busy target HOLDS it (delivered:false, persisted) — it is now the only entry in
+   *       the freshly-flushed queue; an idle target submits it immediately (delivered:true).
+   *   (c) ONLY IF it was HELD (delivered:false ⇒ the target was busy) do we interrupt: pty.interruptForRedirect
+   *       writes a single Esc to cancel the in-flight turn, then after a bounded settle clears the (stale)
+   *       busy and drains — delivering the redirect we enqueued in (b). The enqueue is SYNCHRONOUS and
+   *       precedes the interrupt's settle timer, so the message is always in the queue before the
+   *       settle-drain fires (if it were idle there's no turn to cancel, so we skip the Esc and the
+   *       redirect already went out as a turn).
+   *
+   * Returns the enqueue status ({delivered, position?}).
+   */
+  private deliverRedirect(
+    target: Session, text: string,
+    opts: { tag: string; enqueueSender: string; eventManagerId: string; extraDetail?: Record<string, unknown> },
+  ): { delivered: boolean; position?: number } {
+    // (a) FLUSH + SUPERSEDE the target's queued direction before the authoritative redirect lands.
+    const flushed = this.pty.flushPending(target.id);
     for (const m of flushed) {
       if (m.onDeliver) { try { m.onDeliver("superseded"); } catch { /* a resolution fault must never block the redirect */ } }
     }
-    const framed = `[loom:from-owner-via-companion:redirect]\n${text}`;
-    const r = this.enqueueDurableMessage(sessionId, framed, { sender: senderSessionId ?? "companion", taskId: target.taskId ?? null });
-    if (!r.delivered) this.pty.interruptForRedirect(sessionId);
+    // (b) ENQUEUE the authoritative redirect (durable-tracked like messageWorker). Distinctly framed so the
+    // receiver knows this REPLACED its pending direction and may have interrupted it mid-edit.
+    const framed = `[${opts.tag}]\n${text}`;
+    const r = this.enqueueDurableMessage(target.id, framed, { sender: opts.enqueueSender, taskId: target.taskId ?? null });
+    // (c) Interrupt ONLY when the redirect was HELD (the target was busy). For an idle target the redirect
+    // already went out as a turn (delivered:true) — there is nothing to cancel, and an Esc would wrongly
+    // cancel that very turn.
+    if (!r.delivered) this.pty.interruptForRedirect(target.id);
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId: senderSessionId ?? "", workerSessionId: sessionId, taskId: target.taskId ?? null, kind: "redirect_worker",
-      detail: { delivered: r.delivered, superseded: flushed.length, via: "companion" },
+      managerSessionId: opts.eventManagerId, workerSessionId: target.id, taskId: target.taskId ?? null, kind: "redirect_worker",
+      detail: { delivered: r.delivered, superseded: flushed.length, ...opts.extraDetail },
     });
     return r;
   }
@@ -3047,6 +3079,14 @@ export class SessionService {
 
     // NOT LIVE: before boarding, resolve to the live end of the target's recycle lineage — the target may
     // simply have been recycled, with a successor already doing the work under a new session id.
+    //
+    // ROLE-FILTER ASSUMPTION: for a companion-originated call, the ORIGINAL `sessionId` already passed
+    // `resolveControlTarget`'s roleFilter check (companion/capabilities.ts) before this method was ever
+    // reached — the successor's role is NOT re-checked here. This is safe today only because recycle
+    // PRESERVES role (a manager recycles to a manager, a worker to a worker), so successor.role ===
+    // session.role and the roleFilter guarantee still holds transitively. If recycle ever starts crossing
+    // roles, a roleFilter allowlist could admit a target whose successor lands outside it — revisit this
+    // routing point (or re-validate the successor's role against the filter) if that invariant changes.
     const successor = liveLineageSuccessor(this.db, sessionId);
     if (successor) return { ...deliverLive(successor), routedTo: successor.id };
 
