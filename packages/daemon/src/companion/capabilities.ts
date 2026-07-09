@@ -18,6 +18,7 @@ import type { SessionRole } from "@loom/shared";
 import type { Db } from "../db.js";
 import { listProjectTasks, type TaskSummary } from "../mcp/tasks.js";
 import { listVaultTree, readVaultFile, statVaultFile } from "../vault/browser.js";
+import type { OwnerAttestation } from "./attestation.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -100,11 +101,15 @@ export function resolveCompanionGrant(db: Db, sessionId: string, capability: str
   };
 }
 
-/** Per-lever registration context — `sessionId`/`scope` are SERVER-DERIVED (never agent-passed); a lever's
- *  `register()` closes over these to pre-scope every tool it adds. */
+/** Per-lever registration context — `sessionId`/`scope`/`attest` are SERVER-DERIVED (never agent-passed);
+ *  a lever's `register()` closes over these to pre-scope every tool it adds. `attest` (Companion injection-
+ *  guard primitives, card 8e511951) is the ONLY surface an ACT lever may use to verify a privileged action
+ *  traces back to the owner's own literal words — no lever consumes it yet (this card just threads it
+ *  through), but every future ACT lever's `register()` reaches it here rather than re-deriving its own. */
 export interface GrantContext {
   sessionId: string;
   scope: ResolvedGrantScope;
+  attest: OwnerAttestation;
 }
 
 /** One pluggable lever descriptor (Framework §2). `register` adds THIS lever's tools to `server`, already
@@ -413,12 +418,16 @@ export const COMPANION_CAPABILITIES: readonly CompanionCapability[] =
  * the most injection-exposed surface in Loom should never depend on a SINGLE layer (grant presence alone)
  * staying correct forever — a future bug that leaves a stale grant row on a non-assistant session id must
  * not be enough, by itself, to light up a capability tool there.
+ *
+ * `attest` (Companion injection-guard primitives, card 8e511951) is injected from the router exactly like
+ * a lever's other server-derived reads — additive: NO lever in {@link COMPANION_CAPABILITIES} reads it yet,
+ * so this parameter changes nothing about what any existing session sees.
  */
-export function registerCompanionCapabilities(server: McpServer, sessionId: string, role: SessionRole, db: Db): void {
+export function registerCompanionCapabilities(server: McpServer, sessionId: string, role: SessionRole, db: Db, attest: OwnerAttestation): void {
   if (role !== "assistant") return;
   for (const cap of COMPANION_CAPABILITIES) {
     const scope = resolveCompanionGrant(db, sessionId, cap.slug);
     if (!scope) continue;
-    cap.register(server, { sessionId, scope }, db);
+    cap.register(server, { sessionId, scope, attest }, db);
   }
 }

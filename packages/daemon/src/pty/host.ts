@@ -878,7 +878,7 @@ export type QueuedMessageKind = "warning" | "agent";
  * produces N queued nudges but only the FIRST pull is productive; the rest would otherwise drain as
  * separate turns and each find nothing left to pull.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string };
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string };
 /**
  * Distinguishes `enqueueStdin`'s two `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -939,6 +939,15 @@ interface Live {
   // replays to its ORIGINAL route on resume. Both null on every non-companion turn ⇒ byte-identical.
   activeTurnRoute: TurnRoute | null;
   lastPromptRoute: TurnRoute | null;
+  // Companion injection-guard Primitive A (Companion Capability & Permission-Lever Framework §3): the
+  // LITERAL authenticated owner inbound bytes forming the IN-FLIGHT turn, or null when the turn wasn't
+  // formed from an authorized owner inbound (proactive/heartbeat/reminder/cross-channel-mirror/memory-
+  // recall → null). Set alongside activeTurnRoute in submit() but — UNLIKE activeTurnRoute, which simply
+  // gets overwritten by the next submit() — is explicitly CLEARED at turn end (the Stop/StopFailure hook):
+  // an ACT lever's owner-text attestation must never see a stale prior turn's text. lastPromptOwnerText
+  // mirrors lastPromptRoute so a rate-limit-killed companion turn replays with its attestation intact.
+  activeTurnOwnerText: string | null;
+  lastPromptOwnerText: string | null;
   startupModeCycles: number; // Shift+Tab presses to inject once, after SessionStart, to reach the target mode
   startupCyclesDone: boolean; // guard so the cycle-inject fires at most once per session
   mcpPromptHandled: boolean;  // guard: dismiss the plugin-MCP enable-prompt with Esc at most once per session
@@ -1717,6 +1726,8 @@ export class PtyHost {
       firstTurnStarted: false, // flips true on the first UserPromptSubmit — see scheduleKickoffGuarantee/healIfStuck
       activeTurnRoute: null,
       lastPromptRoute: null,
+      activeTurnOwnerText: null,
+      lastPromptOwnerText: null,
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
@@ -1846,6 +1857,7 @@ export class PtyHost {
       pending: [], stopping: false, rateLimited: false, lastPrompt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       activeTurnRoute: null, lastPromptRoute: null,
+      activeTurnOwnerText: null, lastPromptOwnerText: null,
       startupModeCycles: 0, startupCyclesDone: true,
       mcpPromptHandled: true, bootScan: "",
       resumeGateHandled: true, resumeGateScan: "",
@@ -1909,6 +1921,7 @@ export class PtyHost {
       pending: [], stopping: false, rateLimited: false, lastPrompt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       activeTurnRoute: null, lastPromptRoute: null,
+      activeTurnOwnerText: null, lastPromptOwnerText: null,
       startupModeCycles: 0, startupCyclesDone: true,
       mcpPromptHandled: true, bootScan: "",
       resumeGateHandled: true, resumeGateScan: "",
@@ -2186,6 +2199,11 @@ export class PtyHost {
         this.finalizingTurn = true;
         try {
           this.setBusy(sessionId, false); // falling edge — exactly one Stop per end-of-turn (no per-tool-use)
+          // Companion injection-guard Primitive A: CLEAR the just-ended turn's attested owner text here —
+          // unlike activeTurnRoute (which persists until the next submit() overwrites it), owner text must
+          // never survive past the turn it attests, so a later non-owner-authored turn can't inherit it. A
+          // rate-limited park below still replays it via lastPromptOwnerText (resumeAfterRateLimit).
+          live.activeTurnOwnerText = null;
           // Refresh context occupancy at the turn boundary — ONE single-pass tail-read of the transcript
           // (card b16320bc review: this used to be read TWICE — once here, once again below for the
           // weekly-cap text sentinel — doubling synchronous parse work of a potentially multi-MB JSONL on
@@ -2263,8 +2281,13 @@ export class PtyHost {
    * `questionId` is an OPTIONAL tail tag (see QueuedMessage.questionId) — undefined for every caller this
    * change didn't touch. Only the decision-inbox answer route sets it, so `purgeQueuedByQuestionIds` can
    * later drop this exact nudge if it goes stale before it drains.
+   *
+   * `ownerText` (Companion injection-guard Primitive A) is an OPTIONAL trailing arg — appended after the
+   * existing params so every positional call site this change didn't touch stays byte-identical. Only the
+   * companion inbound submit path (the ONE place an authorized owner's literal chat text forms a turn)
+   * passes it; every other caller omits it, leaving Live.activeTurnOwnerText null exactly as before.
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason } {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason } {
     const live = this.live.get(sessionId);
     if (!live?.alive) return { delivered: false, reason: "session-dead" };
     this.healIfStuck(live, sessionId);
@@ -2279,7 +2302,7 @@ export class PtyHost {
       if (this.finalizingTurn) {
         throw new Error("M2 invariant violated: enqueueStdin reached the idle-submit path mid turn-finalize — an `await` leaked between setBusy(false) and drainPending in deliverHook (host.ts).");
       }
-      this.submit(sessionId, text, route);
+      this.submit(sessionId, text, route, ownerText);
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
       // enqueue arriving next sees busy and QUEUES instead of racing this turn's pending `\r`. If busy
       // is still false here, a future refactor deferred the set behind an await/callback — fail loud.
@@ -2295,7 +2318,7 @@ export class PtyHost {
     // Held (busy / not-ready / composer-dirty / rate-limit parked). Carry the optional delivery callback so that when this
     // entry is finally handed to the recipient (drainPending or consumePending), the durable queued
     // message can be marked delivered. Undefined for every existing (non-messaging) caller → a no-op.
-    live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind, questionId });
+    live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText });
     return { delivered: false, position: live.pending.length, reason: "held" };
   }
 
@@ -2329,6 +2352,20 @@ export class PtyHost {
    */
   getActiveTurnOrigin(sessionId: string): TurnRoute | null {
     return this.live.get(sessionId)?.activeTurnRoute ?? null;
+  }
+
+  /**
+   * Companion injection-guard Primitive A (Companion Capability & Permission-Lever Framework §3): the
+   * LITERAL authenticated owner inbound bytes forming the session's IN-FLIGHT turn, or null when the
+   * current turn wasn't formed from an authorized owner inbound (proactive/heartbeat/reminder/cross-
+   * channel-mirror/memory-recall — none of those pass `ownerText` to submit()/enqueueStdin), or once the
+   * turn has ended (cleared at the Stop/StopFailure hook — see the Live.activeTurnOwnerText doc for why
+   * this does NOT simply persist like getActiveTurnOrigin's route does). An ACT lever that requires owner
+   * text is therefore automatically refused on any turn this returns null for — there is nothing to
+   * attest. Returns null for an unknown/dead session.
+   */
+  getActiveTurnOwnerText(sessionId: string): string | null {
+    return this.live.get(sessionId)?.activeTurnOwnerText ?? null;
   }
 
   /**
@@ -2614,7 +2651,7 @@ export class PtyHost {
       ) n++;
       drained = live.pending.splice(0, n); // the leading same-route (+ same-kind, unless toggled) run
     }
-    this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR), drained[0]!.route); // one submit, one busy re-arm, FIFO order preserved, ONE route
+    this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR), drained[0]!.route, drained[0]!.ownerText); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText — the head's, mirroring the route)
     // ADDITIVE delivery hook (card 2ca18433): every drained entry was just handed to the recipient as
     // part of this turn — fire each callback (durable-message resolution) AFTER submit, outside the
     // M1/M2 ordering. Guarded so a faulty callback can never disturb the drain. Undefined for every
@@ -2651,7 +2688,7 @@ export class PtyHost {
    * `await`/callback or make submit() async — that would reopen the race. enqueueStdin asserts the set
    * landed synchronously (the M1 GUARD there).
    */
-  private submit(sessionId: string, text: string, route?: TurnRoute): void {
+  private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string): void {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
     live.lastPrompt = text; // remember the in-flight turn so a usage-cap kill is recoverable (§19c-b)
@@ -2660,6 +2697,12 @@ export class PtyHost {
     // turn (route undefined). `lastPromptRoute` mirrors `lastPrompt` so a rate-limit replay keeps the route.
     live.activeTurnRoute = route ?? null;
     live.lastPromptRoute = route ?? null;
+    // Companion injection-guard Primitive A: pin the turn's literal owner text the SAME way — undefined for
+    // every non-owner-authored caller (proactive/heartbeat/reminder/system inject), so activeTurnOwnerText
+    // stays null exactly like activeTurnRoute does today. `lastPromptOwnerText` mirrors lastPromptRoute so a
+    // rate-limit-killed companion turn's replay (resumeAfterRateLimit) still attests correctly.
+    live.activeTurnOwnerText = ownerText ?? null;
+    live.lastPromptOwnerText = ownerText ?? null;
     live.pty.write(BRACKET_PASTE_START);
     // Chunk the text — a long turn (e.g. a worker report) sent as one pty.write is truncated by
     // ConPTY. Close the paste + send Enter only AFTER the last chunk lands, else it submits a partial.
@@ -2684,8 +2727,9 @@ export class PtyHost {
     // held queue) can proceed. submit() re-arms busy, so the reconcile drain stays no-op until that turn ends.
     live.rateLimited = false;
     // Replay the killed turn WITH its original route (lastPromptRoute) so a rate-limited companion inbound
-    // still replies to the channel it came from after the reset (§19c-b + companion route routing).
-    if (live.lastPrompt != null) this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined);
+    // still replies to the channel it came from after the reset (§19c-b + companion route routing). Also
+    // replay its lastPromptOwnerText so Primitive A's attestation survives the kill-and-resume too.
+    if (live.lastPrompt != null) this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined);
     return true;
   }
 

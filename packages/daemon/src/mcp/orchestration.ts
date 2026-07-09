@@ -31,6 +31,7 @@ import {
   removeCompanionMemory,
 } from "../skills/companion-memory-store.js";
 import { registerCompanionCapabilities } from "../companion/capabilities.js";
+import { createOwnerAttestation, OwnerConfirmStore } from "../companion/attestation.js";
 
 // Same envelope as the task MCP server (mcp/server.ts).
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -90,6 +91,12 @@ export class OrchestrationMcpRouter {
     private companion: CompanionHooks = {},
     private pty?: PtyHost,
   ) {}
+
+  // Companion injection-guard Primitive C's pending-proposal store (card 8e511951) — ONE per router
+  // instance (a stateless per-request buildServer would otherwise lose a pending proposal before the
+  // owner's confirming reply arrives). No lever proposes/confirms yet — this just gives `attest` (built in
+  // buildServer below) somewhere durable to keep state across requests once one does.
+  private readonly ownerConfirmStore = new OwnerConfirmStore();
 
   /** Role gate: returns the session's id + orchestration role, or null (→ 404) for plain/unknown.
    *  Admits the Companion (assistant) too — it reaches this surface for its MINIMAL toolset (my_context +
@@ -461,7 +468,11 @@ export class OrchestrationMcpRouter {
     // in practice today's only lever targets the same assistant-role companions). Zero grant rows ⇒ this
     // is a no-op for every session (additive, byte-identical to today). ALSO role-gated to "assistant"
     // (belt-and-suspenders — see registerCompanionCapabilities' doc).
-    registerCompanionCapabilities(server, sessionId, role, db);
+    const attest = createOwnerAttestation(
+      { getActiveTurnOwnerText: (sid) => pty?.getActiveTurnOwnerText(sid) ?? null },
+      this.ownerConfirmStore,
+    );
+    registerCompanionCapabilities(server, sessionId, role, db, attest);
 
     // Companion (epic Phase 1): the long-lived `assistant` role gets a MINIMAL surface — the read-only
     // my_context PLUS (only when this IS the bound companion session) the chat_reply registered just above.

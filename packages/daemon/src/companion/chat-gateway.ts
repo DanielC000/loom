@@ -373,8 +373,11 @@ export class ChatGateway {
     try {
       // Submit WITH the originating route {channel, chatId}: the pty pins it to the formed turn so the
       // agent's chat_reply resolves back to THIS chat (multi-channel routing). The route is the AUTHENTICATED
-      // inbound's own (channel, chatId) — never a body-supplied one.
-      submit = this.submitTurn(binding.sessionId, body, { channel: msg.channel, chatId: msg.chatId });
+      // inbound's own (channel, chatId) — never a body-supplied one. `body` is ALSO passed as `ownerText`
+      // (Companion injection-guard Primitive A) — this is the ONE place `body` is both the turn's text AND
+      // the literal AUTHORIZED owner bytes forming it (past the allowlist + sender-authz gates above), so
+      // getActiveTurnOwnerText can attest it for the sensitive ACT levers later cards will add.
+      submit = this.submitTurn(binding.sessionId, body, { channel: msg.channel, chatId: msg.chatId }, body);
     } catch (err) {
       // The submit primitive (pty.enqueueStdin) can THROW: its fail-loud M1/M2 guards, or realistically
       // `submit()`'s pty.write() throwing when the bound session's pty dies in the window between the

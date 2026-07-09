@@ -137,12 +137,16 @@ export interface CompanionReminder {
 /**
  * Submit inbound text as a TURN into a live session — the EXISTING PTY primitive (pty.enqueueStdin),
  * injected so the gateway stays free of the pty host. `route` is the ORIGINATING (channel, chatId): the pty
- * pins it to the formed turn so chat_reply delivers back there. Returns the primitive's contract:
+ * pins it to the formed turn so chat_reply delivers back there. `ownerText` (Companion injection-guard
+ * Primitive A, optional trailing arg — existing callers omit it, byte-identical) is the LITERAL authorized
+ * owner inbound bytes forming this turn; pass it ONLY when `text` genuinely IS the owner's own words (the
+ * real chat-gateway inbound path), never for a synthesized side-effect turn like "/clear" (see
+ * chat-gateway.ts's resetConversation). Returns the primitive's contract:
  *   { delivered:true }               → submitted immediately as a turn
  *   { delivered:false, position:N }  → HELD in the session's FIFO (busy/not-ready) — still accepted
  *   { delivered:false }              → session not alive (DEAD) — nothing queued
  */
-export type SubmitTurn = (sessionId: string, text: string, route?: CompanionRoute) => { delivered: boolean; position?: number };
+export type SubmitTurn = (sessionId: string, text: string, route?: CompanionRoute, ownerText?: string) => { delivered: boolean; position?: number };
 
 /**
  * The injected STT transcriber (Companion Voice epic, VOICE-P2 — see companion/stt.ts for the local

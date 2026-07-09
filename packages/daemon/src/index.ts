@@ -488,7 +488,7 @@ async function main(): Promise<void> {
     // Wrapped with the self-heal in companion/revive.ts (bug 4cc7826d): one auto-resume-then-retry when the
     // bound session died AFTER boot, strictly after chat-gateway's allowlist + sender-authz gates run.
     submitTurn: withCompanionSelfHeal(
-      (sid, text, route) => pty.enqueueStdin(sid, text, "system", undefined, route, "agent"),
+      (sid, text, route, ownerText) => pty.enqueueStdin(sid, text, "system", undefined, route, "agent", undefined, ownerText),
       { resume: (sid) => { sessions.resume(sid); } },
     ),
     pty,
