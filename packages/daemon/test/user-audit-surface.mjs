@@ -212,11 +212,20 @@ try {
     const lines = Array.from({ length: 50 }, (_, i) => `const line_${f}_${i} = "just an ordinary line of source text";`);
     fs.writeFileSync(path.join(perfDir, `file${f}.ts`), lines.join("\n") + "\n");
   }
-  const perfT0 = Date.now();
+  // MONOTONIC performance.now() (not Date.now()), so a wall-clock backward/forward step under load can't
+  // skew elapsed. The PRIMARY regression guard here is FUNCTIONAL, not wall-clock: a regression back to a
+  // per-line vm crossing (instead of the intended once-per-file crossing) would make this 300-file /
+  // 15000-line scan slow enough to blow repo-read.ts's own GREP_TOTAL_BUDGET_MS (4000ms) partway through,
+  // which flips `timedOut` to true — that's the SAME clock/budget the product code enforces on itself, so
+  // it isn't sensitive to ambient test-load noise the way an arbitrary test-invented wall-clock threshold
+  // is (a bare "<1s" assertion flaked under concurrent daemon+test load — observed ~4010ms on a healthy,
+  // non-regressed run; card 3e5a8dc6). The wall-clock check below is kept only as a generous outer sanity
+  // ceiling (3x GREP_TOTAL_BUDGET_MS + slack) to catch a genuine hang, not to assert "fast".
+  const perfT0 = performance.now();
   const perfRes = await call("repo_grep", { projectId: "pOrd", pattern: "NOTHING_MATCHES_THIS", maxResults: 200 });
-  const perfMs = Date.now() - perfT0;
-  check(`(b3) repo_grep: a 300-file / 15000-line non-pathological tree greps in WELL UNDER 1s (${perfMs}ms) — the per-line vm tax is gone`, perfMs < 1000);
-  check("(b3) repo_grep: the perf-tree scan legitimately found nothing (not silently timed out)", perfRes.timedOut !== true);
+  const perfMs = performance.now() - perfT0;
+  check("(b3) repo_grep: the perf-tree scan legitimately found nothing — FUNCTIONAL per-line-tax regression guard (not silently timed out against GREP_TOTAL_BUDGET_MS)", perfRes.timedOut !== true);
+  check(`(b3) repo_grep: a 300-file / 15000-line non-pathological tree greps within a generous sanity ceiling (${Math.round(perfMs)}ms < 13500ms)`, perfMs < 13500);
   fs.rmSync(perfDir, { recursive: true, force: true });
 
   // CONFINEMENT: a `..` traversal and an absolute path both escape the project root and are REFUSED.
