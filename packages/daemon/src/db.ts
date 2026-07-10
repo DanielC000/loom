@@ -91,11 +91,12 @@ export interface CompanionConfigRow {
 }
 
 /**
- * A stored Connection row (owner-controlled encrypted credential store, agent-tooling epic P1) as read at
- * the DB layer — carries the ENCRYPTED `secretBlob` (envelope ciphertext) that `connections/store.ts`
- * decrypts only on the (future, P2-only) authenticated-request seam. This shape is DAEMON-INTERNAL and must
- * NEVER be returned over REST or to any MCP tool — the REST layer masks to `ConnectionMetadata` (name/host/
- * authScheme/createdAt only, never the secret).
+ * A stored Connection row (owner-controlled encrypted credential store, agent-tooling epic P1, extended
+ * P5a) as read at the DB layer — carries the ENCRYPTED `secretBlob` (envelope ciphertext; for an `oauth2`
+ * row this is the JSON token bundle `{clientSecret,accessToken,refreshToken,expiresAt}`, still ONE
+ * envelope blob) that `connections/store.ts` decrypts only on the authenticated-request seam (P2) or the
+ * refresh-on-use seam (P5a). This shape is DAEMON-INTERNAL and must NEVER be returned over REST or to any
+ * MCP tool — the REST layer masks to `ConnectionMetadata` (never the secret/token bundle).
  */
 export interface ConnectionRow {
   id: string;
@@ -105,6 +106,20 @@ export interface ConnectionRow {
   /** Envelope ciphertext (v1:iv:tag:ct) — NEVER plaintext. */
   secretBlob: string;
   createdAt: string;
+  /** `oauth2` rows only — NON-SECRET provider template slug ("google"|"github"|"custom"). NULL otherwise. */
+  provider: string | null;
+  /** `oauth2` rows only — NON-SECRET OAuth client id. NULL otherwise. */
+  clientId: string | null;
+  /** `oauth2` rows only — NON-SECRET provider authorization endpoint. NULL otherwise. */
+  authUrl: string | null;
+  /** `oauth2` rows only — NON-SECRET provider token endpoint. NULL otherwise. */
+  tokenUrl: string | null;
+  /** `oauth2` rows only — NON-SECRET space-joined scope list. NULL otherwise. */
+  scopes: string | null;
+  /** `oauth2` rows only — NON-SECRET ISO expiry of the CURRENT access token; NULL until the first exchange. */
+  tokenExpiresAt: string | null;
+  /** `oauth2` rows only — true when a refresh attempt failed and consent must be redone. Always false otherwise. */
+  oauthNeedsReauth: boolean;
 }
 
 const SCHEMA = `
@@ -715,7 +730,19 @@ CREATE TABLE IF NOT EXISTS connections (
   host TEXT NOT NULL,
   auth_scheme TEXT NOT NULL,
   secret_blob TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- OAuth2 (agent-tooling epic P5a) — NON-SECRET columns only; an 'oauth2' row's secret_blob holds the
+  -- JSON token bundle {clientSecret,accessToken,refreshToken,expiresAt}, still ONE envelope blob (reuses
+  -- the same encrypt-at-rest path as api-key/bearer's raw-string secret). NULL/0 on every api-key/bearer
+  -- row (unused by those schemes) — byte-identical for every row that predates this phase. Added to
+  -- existing DBs by migrateConnections() below (fresh installs already have them via this CREATE TABLE).
+  provider TEXT,
+  client_id TEXT,
+  auth_url TEXT,
+  token_url TEXT,
+  scopes TEXT,
+  token_expires_at TEXT,
+  oauth_needs_reauth INTEGER NOT NULL DEFAULT 0
 );
 -- Owner-added capability catalog rows (agent-tooling epic P4). The two BUILTIN capabilities
 -- (browser-testing/document-conversion) are NOT rows here — they stay special-cased in buildMcpServers,
@@ -1085,6 +1112,20 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   secret_blob: "TEXT",
 };
 
+/** Columns added to `connections` by the OAuth2 phase (agent-tooling epic P5a); applied to existing DBs
+ *  by migrateConnections() (fresh installs already have them via CREATE TABLE). All nullable/defaulted —
+ *  a pre-P5a row (necessarily api-key/bearer) never had any oauth2-shaped state, so it backfills to
+ *  NULL/0 in place, byte-identical to today. */
+const CONNECTION_ADDED_COLUMNS: Record<string, string> = {
+  provider: "TEXT",
+  client_id: "TEXT",
+  auth_url: "TEXT",
+  token_url: "TEXT",
+  scopes: "TEXT",
+  token_expires_at: "TEXT",
+  oauth_needs_reauth: "INTEGER NOT NULL DEFAULT 0",
+};
+
 type Row = Record<string, unknown>;
 
 /**
@@ -1153,6 +1194,7 @@ export class Db {
     this.migrateCompanionConversations();
     this.migrateOrchestrationEvents();
     this.migrateQuestions();
+    this.migrateConnections();
   }
 
   /**
@@ -1475,6 +1517,23 @@ export class Db {
       if (!have.has(name)) this.db.exec(`ALTER TABLE questions ADD COLUMN ${name} ${type}`);
     }
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_questions_task ON questions(task_id)");
+  }
+
+  /**
+   * Idempotent additive migration for `connections` — the OAuth2 phase (agent-tooling epic P5a): ADD
+   * COLUMN any of CONNECTION_ADDED_COLUMNS missing from an existing DB (fresh installs already have them
+   * via CREATE TABLE). Every added column is nullable/defaulted, so a pre-P5a row (api-key/bearer only,
+   * since oauth2 didn't exist yet) backfills to NULL/0 in place — byte-identical read/write behavior for
+   * every existing row. Boot-tested against a synthesized pre-migration `connections` shape — see
+   * test/connections-oauth-migration.mjs (mirrors questions-type-migration.mjs's pattern).
+   */
+  private migrateConnections(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(connections)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(CONNECTION_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE connections ADD COLUMN ${name} ${type}`);
+    }
   }
 
   /**
@@ -2269,22 +2328,46 @@ export class Db {
   }
   /**
    * Create a new connection. The caller passes an ALREADY-ENCRYPTED `secretBlob` (this layer never sees
-   * the plaintext secret — encryption happens in `connections/store.ts` via the envelope helper).
+   * the plaintext secret — encryption happens in `connections/store.ts` via the envelope helper). The
+   * `provider`/`clientId`/`authUrl`/`tokenUrl`/`scopes` fields are `oauth2`-only NON-SECRET metadata
+   * (agent-tooling P5a) — omitted (→ null) on an api-key/bearer row. `tokenExpiresAt`/`oauthNeedsReauth`
+   * always start null/false at creation; they're set later via `updateConnectionTokens`/
+   * `markConnectionNeedsReauth` once a token exchange or refresh actually happens.
    */
-  createConnection(input: { name: string; host: string; authScheme: ConnectionAuthScheme; secretBlob: string }): ConnectionRow {
+  createConnection(input: {
+    name: string; host: string; authScheme: ConnectionAuthScheme; secretBlob: string;
+    provider?: string | null; clientId?: string | null; authUrl?: string | null; tokenUrl?: string | null; scopes?: string | null;
+  }): ConnectionRow {
     const row: ConnectionRow = {
       id: randomUUID(), name: input.name, host: input.host, authScheme: input.authScheme,
       secretBlob: input.secretBlob, createdAt: new Date().toISOString(),
+      provider: input.provider ?? null, clientId: input.clientId ?? null, authUrl: input.authUrl ?? null,
+      tokenUrl: input.tokenUrl ?? null, scopes: input.scopes ?? null, tokenExpiresAt: null, oauthNeedsReauth: false,
     };
     this.db.prepare(
-      `INSERT INTO connections (id, name, host, auth_scheme, secret_blob, created_at)
-       VALUES (@id, @name, @host, @authScheme, @secretBlob, @createdAt)`,
-    ).run(row);
+      `INSERT INTO connections (id, name, host, auth_scheme, secret_blob, created_at, provider, client_id, auth_url, token_url, scopes, token_expires_at, oauth_needs_reauth)
+       VALUES (@id, @name, @host, @authScheme, @secretBlob, @createdAt, @provider, @clientId, @authUrl, @tokenUrl, @scopes, @tokenExpiresAt, @oauthNeedsReauth)`,
+    ).run({ ...row, oauthNeedsReauth: row.oauthNeedsReauth ? 1 : 0 });
     return row;
   }
   /** Delete a connection by id (idempotent — a missing id matches nothing). */
   deleteConnection(id: string): void {
     this.db.prepare("DELETE FROM connections WHERE id = ?").run(id);
+  }
+  /**
+   * Persist a fresh token set for an `oauth2` connection (agent-tooling P5a) — the initial consent
+   * exchange OR a subsequent refresh. `secretBlob` is the ALREADY re-encrypted whole bundle (this layer
+   * never sees plaintext tokens). Clears `oauthNeedsReauth` (a successful exchange always means the
+   * connection is no longer in a needs-reauth state).
+   */
+  updateConnectionTokens(id: string, patch: { secretBlob: string; tokenExpiresAt: string | null }): void {
+    this.db.prepare(
+      "UPDATE connections SET secret_blob = @secretBlob, token_expires_at = @tokenExpiresAt, oauth_needs_reauth = 0 WHERE id = @id",
+    ).run({ id, secretBlob: patch.secretBlob, tokenExpiresAt: patch.tokenExpiresAt });
+  }
+  /** Mark an `oauth2` connection as needing re-authentication (a refresh attempt failed — revoked/invalid). */
+  markConnectionNeedsReauth(id: string): void {
+    this.db.prepare("UPDATE connections SET oauth_needs_reauth = 1 WHERE id = ?").run(id);
   }
 
   // --- capability_defs (owner-added registry-capability catalog rows, agent-tooling epic P4) ---
@@ -4535,6 +4618,13 @@ function toConnectionRow(r0: unknown): ConnectionRow {
     id: r.id as string, name: r.name as string, host: r.host as string,
     authScheme: r.auth_scheme as ConnectionAuthScheme, secretBlob: r.secret_blob as string,
     createdAt: (r.created_at as string) ?? "",
+    provider: (r.provider as string | null) ?? null,
+    clientId: (r.client_id as string | null) ?? null,
+    authUrl: (r.auth_url as string | null) ?? null,
+    tokenUrl: (r.token_url as string | null) ?? null,
+    scopes: (r.scopes as string | null) ?? null,
+    tokenExpiresAt: (r.token_expires_at as string | null) ?? null,
+    oauthNeedsReauth: (r.oauth_needs_reauth as number | null) === 1,
   };
 }
 function toCapabilityDefRow(r0: unknown): CapabilityDefRow {

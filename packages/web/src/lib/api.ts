@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PermissionAnswer } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PermissionAnswer } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -771,6 +771,16 @@ export const api = {
   createConnection: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string }) =>
     postErr<ConnectionMetadata>("/api/connections", b),
   deleteConnection: (id: string) => delErr<{ ok: boolean }>(`/api/connections/${encodeURIComponent(id)}`),
+  // agent-tooling P5a: register a new oauth2 connection (provider app registration — no token exchange
+  // yet, `connected:false` until a consent round-trip completes) + initiate consent for an EXISTING one
+  // (returns the provider's auth URL for the caller to open in a new tab; the daemon's own fixed loopback
+  // `GET /oauth/callback` completes the exchange once the provider redirects back). Both human-only REST.
+  createOAuthConnection: (b: {
+    name: string; host: string; provider: OAuthProviderSlug; clientId: string; clientSecret: string;
+    authUrl?: string; tokenUrl?: string; scopes?: string[];
+  }) => postErr<ConnectionMetadata>("/api/connections/oauth", b),
+  initiateOAuthConsent: (id: string) =>
+    postErr<{ authUrl: string }>(`/api/connections/${encodeURIComponent(id)}/oauth/consent`),
 
   // --- Poll jobs (agent-tooling epic P3): scheduled local poll triggers. On each due tick the daemon
   // fetches through a connection (server-side authenticated_request path — the secret is injected/redacted

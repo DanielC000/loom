@@ -20,12 +20,19 @@
  *     the daemon event loop.
  *  5. An in-memory per-connection sliding-window rate limiter (the owner-veto-flagged spend guard).
  *
+ * agent-tooling P5a: an `oauth2` connection's access token is obtained the SAME way as any other secret —
+ * `ensureFreshOAuthToken` (connections/oauth.ts) is called at the identical "decrypt LAST" seam below,
+ * transparently refreshing on/near expiry (with cross-caller dedupe) before every dispatch. Both the
+ * agent-facing tool AND the PollService poller route through this one function, so both get refresh-on-use
+ * for free — neither has its own token-freshness logic.
+ *
  * The session-level allowlist (which connection ids a session may use at all) is enforced by the CALLER
  * (mcp/server.ts) before this module ever runs — this module additionally trusts nothing and is safe to
  * call directly in tests.
  */
 import type { ConnectionsGuardConfig } from "@loom/shared";
 import { getConnectionMetadata, getSecretForUse, type ConnectionsDbStore } from "./store.js";
+import { ensureFreshOAuthToken } from "./oauth.js";
 
 export interface AuthenticatedRequestInput {
   /** The P1 connection id to use (must be in the caller's session-pinned allowlist — checked by mcp/server.ts). */
@@ -211,21 +218,30 @@ export async function performAuthenticatedRequest(
     };
   }
 
-  // Decrypt LAST (right before dispatch) so a rejected call never touches the envelope. `decryptSecret`
+  // Decrypt/refresh LAST (right before dispatch) so a rejected call never touches the envelope or fires a
+  // refresh_token grant it doesn't need. For `oauth2`, `ensureFreshOAuthToken` (connections/oauth.ts)
+  // transparently refreshes on/near expiry (with cross-caller dedupe) — this is the ONE seam both the
+  // agent-facing tool AND the PollService poller reach, since both route through this function. `decryptSecret`
   // (the P1 envelope helper) THROWS on a corrupt/wrong-key blob — wrapped so that failure returns the
   // same graceful {ok:false} every other rejection does, instead of propagating an uncaught throw out of
   // the tool handler (no secret leak either way — the crypto error text carries no plaintext — but every
   // other failure path here is a clean return, and this one shouldn't be the lone exception).
   let secret: string | undefined;
   try {
-    secret = getSecretForUse(deps.db, connectionId, deps.keyPath);
+    if (meta.authScheme === "oauth2") {
+      const fresh = await ensureFreshOAuthToken({ db: deps.db, keyPath: deps.keyPath, fetchImpl: deps.fetchImpl, now: deps.now }, connectionId);
+      if (!fresh.ok) return { ok: false, error: fresh.error };
+      secret = fresh.accessToken;
+    } else {
+      secret = getSecretForUse(deps.db, connectionId, deps.keyPath);
+    }
   } catch {
     return { ok: false, error: "connection secret unavailable" };
   }
   if (secret === undefined) return { ok: false, error: "connection not found" }; // revoked between metadata read and use
 
   const authHeader: Record<string, string> =
-    meta.authScheme === "bearer" ? { Authorization: `Bearer ${secret}` } : { "X-API-Key": secret };
+    meta.authScheme === "bearer" || meta.authScheme === "oauth2" ? { Authorization: `Bearer ${secret}` } : { "X-API-Key": secret };
   const headers: Record<string, string> = { ...callerHeaders, ...authHeader };
 
   let requestBody: string | undefined;

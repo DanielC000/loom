@@ -1165,16 +1165,21 @@ export interface CompanionConfigMasked {
   updatedAt: string;
 }
 
-/** Auth scheme a stored Connection uses. API-key/Bearer only in P1 — OAuth is a later agent-tooling phase. */
-export type ConnectionAuthScheme = "api-key" | "bearer";
+/** Auth scheme a stored Connection uses. `oauth2` added in agent-tooling P5a (authorization-code + PKCE). */
+export type ConnectionAuthScheme = "api-key" | "bearer" | "oauth2";
+
+/** OAuth2 provider template slug (agent-tooling P5a). "custom" = human supplies auth/token URLs + scopes directly. */
+export type OAuthProviderSlug = "google" | "github" | "custom";
 
 /**
  * The MASKED, human-facing view of a stored Connection (owner-controlled encrypted credential store,
- * agent-tooling epic P1) — metadata ONLY. The secret material is ENCRYPTED at rest (envelope) and NEVER
- * leaves the daemon: no REST read and no MCP tool ever returns it. There is intentionally NO MCP path (same
- * human-only trust posture as the vault/git/companion writers): an agent in an ordinary project session must
- * never create, list, or read a connection's secret. `host` is stored metadata only in P1 — request-side
- * host-allowlist ENFORCEMENT belongs to a later phase's authenticated-request tool, not this store.
+ * agent-tooling epic P1, extended in P5a) — metadata ONLY. The secret material is ENCRYPTED at rest
+ * (envelope) and NEVER leaves the daemon: no REST read and no MCP tool ever returns it (for an `oauth2`
+ * row this includes the access/refresh tokens AND the client secret — the whole token bundle stays
+ * server-side). There is intentionally NO MCP path (same human-only trust posture as the vault/git/
+ * companion writers): an agent in an ordinary project session must never create, list, or read a
+ * connection's secret. `host` is stored metadata only in P1 — request-side host-allowlist ENFORCEMENT
+ * belongs to the authenticated-request tool (P2), not this store.
  */
 export interface ConnectionMetadata {
   id: string;
@@ -1184,6 +1189,14 @@ export interface ConnectionMetadata {
   host: string;
   authScheme: ConnectionAuthScheme;
   createdAt: string;
+  /** `oauth2` rows only — the provider template this connection was registered under. */
+  provider?: OAuthProviderSlug;
+  /** `oauth2` rows only — true once at least one token exchange (initial consent or refresh) has succeeded. */
+  connected?: boolean;
+  /** `oauth2` rows only — ISO expiry of the current access token, or null before the first exchange. */
+  tokenExpiresAt?: string | null;
+  /** `oauth2` rows only — true when the refresh token is absent/revoked and consent must be redone. */
+  needsReauth?: boolean;
 }
 
 /**

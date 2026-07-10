@@ -8,6 +8,7 @@ import {
   type PlatformConfig,
   type PlatformConfigOverride,
   type ConnectionAuthScheme,
+  type OAuthProviderSlug,
   type PollJob,
   type CapabilityProvisionKind,
 } from "@loom/shared";
@@ -564,12 +565,29 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   );
 }
 
-// --- Connections (owner-controlled encrypted credential store, agent-tooling epic P1) -----------------
-// HUMAN-only loopback REST — there is intentionally NO agent-facing surface this phase. List/add/revoke
-// only: the secret is write-only (accepted on create, never returned by any read, never re-editable in
-// place — revoke + recreate). Daemon-global, like the tuning panel above (one shared credential store).
+// --- Connections (owner-controlled encrypted credential store, agent-tooling epic P1; oauth2 added P5a) -
+// HUMAN-only loopback REST — there is intentionally NO agent-facing surface (agents only ever reach a
+// connection THROUGH the authenticated_request tool, never this panel's data). List/add/revoke for
+// api-key/bearer: the secret is write-only (accepted on create, never returned by any read, never
+// re-editable in place — revoke + recreate). oauth2 is a two-step flow instead: register the provider app
+// (client id/secret + auth/token URLs + scopes — still write-only), then "Connect" opens the provider's
+// consent page in a new tab; the daemon's own fixed loopback callback completes the token exchange
+// out-of-band, so this panel just reflects the resulting status (connected / token expiry / needs-reauth)
+// once the browser tab returns focus here (react-query's default refetch-on-window-focus picks it up).
+// Daemon-global, like the tuning panel above (one shared credential store).
 
-const AUTH_SCHEMES: ConnectionAuthScheme[] = ["api-key", "bearer"];
+const AUTH_SCHEMES: ConnectionAuthScheme[] = ["api-key", "bearer", "oauth2"];
+const OAUTH_PROVIDERS: { value: OAuthProviderSlug; label: string }[] = [
+  { value: "google", label: "Google" },
+  { value: "github", label: "GitHub" },
+  { value: "custom", label: "Custom" },
+];
+
+function oauthStatus(c: { connected?: boolean; needsReauth?: boolean; tokenExpiresAt?: string | null }): { tone: "phosphor" | "red" | "cyan"; label: string } {
+  if (c.needsReauth) return { tone: "red", label: "Needs re-auth" };
+  if (c.connected) return { tone: "phosphor", label: c.tokenExpiresAt ? `Connected · expires ${new Date(c.tokenExpiresAt).toLocaleString()}` : "Connected" };
+  return { tone: "cyan", label: "Not connected" };
+}
 
 function ConnectionsPanel() {
   const qc = useQueryClient();
@@ -584,9 +602,19 @@ function ConnectionsPanel() {
     mutationFn: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string }) => api.createConnection(b),
     onSuccess: () => { setAdding(false); invalidate(); },
   });
+  const createOAuth = useMutation({
+    mutationFn: (b: { name: string; host: string; provider: OAuthProviderSlug; clientId: string; clientSecret: string; authUrl?: string; tokenUrl?: string; scopes?: string[] }) =>
+      api.createOAuthConnection(b),
+    onSuccess: () => { setAdding(false); invalidate(); },
+  });
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteConnection(id),
     onSuccess: () => invalidate(),
+    onError: (e) => window.alert((e as Error).message),
+  });
+  const consent = useMutation({
+    mutationFn: (id: string) => api.initiateOAuthConsent(id),
+    onSuccess: (r) => { window.open(r.authUrl, "_blank", "noopener,noreferrer"); },
     onError: (e) => window.alert((e as Error).message),
   });
 
@@ -597,8 +625,8 @@ function ConnectionsPanel() {
       <Panel>
         <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
           Owner-only credentials for connecting Loom to external services. Secrets are encrypted at rest
-          and never shown again after creation — there is no agent-facing tool that can read, list, or use
-          them yet (this is the foundation phase only).
+          and never shown again after creation. There is no agent-facing tool that can read, list, or use
+          them directly — an allowlisted session can only reach one THROUGH the authenticated_request tool.
         </p>
       </Panel>
 
@@ -606,7 +634,7 @@ function ConnectionsPanel() {
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <SectionLabel style={{ margin: 0 }}>Connections ({rows.length})</SectionLabel>
           <span style={{ flex: 1 }} />
-          {!adding && <Button variant="primary" onClick={() => { setAdding(true); create.reset(); }}>New connection</Button>}
+          {!adding && <Button variant="primary" onClick={() => { setAdding(true); create.reset(); createOAuth.reset(); }}>New connection</Button>}
         </div>
 
         {isLoading && <Hint>loading connections…</Hint>}
@@ -614,8 +642,13 @@ function ConnectionsPanel() {
 
         {adding && (
           <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
-            <ConnectionForm pending={create.isPending} error={create.error ? (create.error as Error).message : null}
-              onSubmit={(v) => create.mutate(v)} onCancel={() => { setAdding(false); create.reset(); }} />
+            <ConnectionForm
+              pending={create.isPending || createOAuth.isPending}
+              error={(create.error ? (create.error as Error).message : null) ?? (createOAuth.error ? (createOAuth.error as Error).message : null)}
+              onSubmit={(v) => create.mutate(v)}
+              onSubmitOAuth={(v) => createOAuth.mutate(v)}
+              onCancel={() => { setAdding(false); create.reset(); createOAuth.reset(); }}
+            />
           </div>
         )}
 
@@ -623,40 +656,78 @@ function ConnectionsPanel() {
           {rows.length === 0 && !adding && !isLoading && (
             <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>No connections yet.</span>
           )}
-          {rows.map((c) => (
-            <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
-              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{c.name}</span>
-              <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>{c.host}</span>
-              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>{c.authScheme}</span>
-              <span style={{ flex: 1 }} />
-              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{new Date(c.createdAt).toLocaleString()}</span>
-              <Button variant="danger" disabled={remove.isPending}
-                onClick={() => { if (window.confirm(`Revoke "${c.name}"? This cannot be undone — you'll need to re-create it with the secret to restore it.`)) remove.mutate(c.id); }}>
-                Revoke
-              </Button>
-            </div>
-          ))}
+          {rows.map((c) => {
+            const status = c.authScheme === "oauth2" ? oauthStatus(c) : null;
+            return (
+              <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6, flexWrap: "wrap" }}>
+                <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{c.name}</span>
+                <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>{c.host}</span>
+                <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                  {c.authScheme}{c.provider ? ` · ${c.provider}` : ""}
+                </span>
+                {status && <Badge tone={status.tone}>{status.label}</Badge>}
+                <span style={{ flex: 1 }} />
+                <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{new Date(c.createdAt).toLocaleString()}</span>
+                {c.authScheme === "oauth2" && (
+                  <Button variant="ghost" disabled={consent.isPending} onClick={() => consent.mutate(c.id)}>
+                    {c.connected && !c.needsReauth ? "Reconnect" : "Connect"}
+                  </Button>
+                )}
+                <Button variant="danger" disabled={remove.isPending}
+                  onClick={() => { if (window.confirm(`Revoke "${c.name}"? This cannot be undone — you'll need to re-create it with the secret to restore it.`)) remove.mutate(c.id); }}>
+                  Revoke
+                </Button>
+              </div>
+            );
+          })}
         </div>
       </Panel>
     </div>
   );
 }
 
-function ConnectionForm({ pending, error, onSubmit, onCancel }: {
+function ConnectionForm({ pending, error, onSubmit, onSubmitOAuth, onCancel }: {
   pending: boolean; error: string | null;
   onSubmit: (v: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string }) => void;
+  onSubmitOAuth: (v: { name: string; host: string; provider: OAuthProviderSlug; clientId: string; clientSecret: string; authUrl?: string; tokenUrl?: string; scopes?: string[] }) => void;
   onCancel: () => void;
 }) {
   const [name, setName] = useState("");
   const [host, setHost] = useState("");
   const [authScheme, setAuthScheme] = useState<ConnectionAuthScheme>("api-key");
   const [secret, setSecret] = useState("");
+  const [provider, setProvider] = useState<OAuthProviderSlug>("google");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [authUrl, setAuthUrl] = useState("");
+  const [tokenUrl, setTokenUrl] = useState("");
+  const [scopesText, setScopesText] = useState("");
   const [localErr, setLocalErr] = useState<string | null>(null);
 
   const submit = () => {
     setLocalErr(null);
-    if (!name.trim() || !host.trim() || !secret.trim()) {
-      setLocalErr("Name, host, and secret are all required.");
+    if (!name.trim() || !host.trim()) {
+      setLocalErr("Name and host are required.");
+      return;
+    }
+    if (authScheme === "oauth2") {
+      if (!clientId.trim() || !clientSecret.trim()) {
+        setLocalErr("Client id and client secret are required.");
+        return;
+      }
+      if (provider === "custom" && (!authUrl.trim() || !tokenUrl.trim())) {
+        setLocalErr("A custom provider needs both an authorization URL and a token URL.");
+        return;
+      }
+      const scopes = scopesText.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+      onSubmitOAuth({
+        name: name.trim(), host: host.trim(), provider, clientId: clientId.trim(), clientSecret: clientSecret.trim(),
+        authUrl: authUrl.trim() || undefined, tokenUrl: tokenUrl.trim() || undefined, scopes: scopes.length > 0 ? scopes : undefined,
+      });
+      return;
+    }
+    if (!secret.trim()) {
+      setLocalErr("Secret is required.");
       return;
     }
     onSubmit({ name: name.trim(), host: host.trim(), authScheme, secret: secret.trim() });
@@ -679,11 +750,49 @@ function ConnectionForm({ pending, error, onSubmit, onCancel }: {
           {AUTH_SCHEMES.map((s) => <option key={s} value={s}>{s}</option>)}
         </Select>
       </label>
-      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={fieldLabel}>Secret</span>
-        <Input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} spellCheck={false} autoComplete="off" />
-        <Hint>encrypted at rest immediately · never shown again after this form is submitted</Hint>
-      </label>
+
+      {authScheme === "oauth2" ? (
+        <>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Provider</span>
+            <Select value={provider} onChange={(e) => setProvider(e.target.value as OAuthProviderSlug)}>
+              {OAUTH_PROVIDERS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+            </Select>
+            <Hint>Google/GitHub prefill the standard auth+token endpoints — register a matching OAuth app there first.</Hint>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Client ID</span>
+            <Input value={clientId} onChange={(e) => setClientId(e.target.value)} spellCheck={false} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Client secret</span>
+            <Input type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} spellCheck={false} autoComplete="off" />
+            <Hint>encrypted at rest immediately · never shown again after this form is submitted</Hint>
+          </label>
+          {provider === "custom" && (
+            <>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={fieldLabel}>Authorization URL</span>
+                <Input value={authUrl} onChange={(e) => setAuthUrl(e.target.value)} placeholder="https://…/authorize" spellCheck={false} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={fieldLabel}>Token URL</span>
+                <Input value={tokenUrl} onChange={(e) => setTokenUrl(e.target.value)} placeholder="https://…/token" spellCheck={false} />
+              </label>
+            </>
+          )}
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Scopes <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>(space or comma separated — optional, uses the provider default)</span></span>
+            <Input value={scopesText} onChange={(e) => setScopesText(e.target.value)} placeholder="e.g. repo read:user" spellCheck={false} />
+          </label>
+        </>
+      ) : (
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={fieldLabel}>Secret</span>
+          <Input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} spellCheck={false} autoComplete="off" />
+          <Hint>encrypted at rest immediately · never shown again after this form is submitted</Hint>
+        </label>
+      )}
 
       {(localErr || error) && <div style={{ fontSize: 12, color: color.red, fontFamily: font.mono }}>{localErr ?? error}</div>}
 

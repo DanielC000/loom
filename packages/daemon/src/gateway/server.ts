@@ -7,7 +7,7 @@ import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer } from "@loom/shared";
 import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS } from "@loom/shared";
-import { resolveWebDistDir, isLoomDev } from "../paths.js";
+import { resolveWebDistDir, isLoomDev, PORT } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt, nextFireTimes } from "../orchestration/cron.js";
@@ -34,7 +34,8 @@ import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
 import { COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
-import { listConnections, createConnection, deleteConnection } from "../connections/store.js";
+import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES } from "../connections/store.js";
+import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validateColumnLayout } from "../mcp/platform.js";
@@ -132,7 +133,7 @@ export interface GatewayDeps {
  * and `/ws` stays the websocket-upgrade route. Boundary-aware so a client route like `/apidocs` (were
  * one to exist) is NOT misclassified as the `/api` surface. */
 const isReservedDaemonPath = (pathname: string): boolean =>
-  ["/api", "/ws", "/mcp", "/internal"].some((p) => pathname === p || pathname.startsWith(`${p}/`));
+  ["/api", "/ws", "/mcp", "/internal", "/oauth"].some((p) => pathname === p || pathname.startsWith(`${p}/`));
 
 /**
  * Sanitize a companion's given name BEFORE it is ever persisted or baked into the server-owned
@@ -183,11 +184,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   };
   app.addHook("onRequest", async (req, reply) => {
     const origin = req.headers.origin;
+    // OAuth2 loopback callback (agent-tooling P5a): the ONE deliberate exemption from the Origin check.
+    // The user's browser reaches this route via a TOP-LEVEL navigation the OAuth PROVIDER redirects —
+    // never a fetch/XHR the daemon's own UI issues — so it is not itself a CSRF-able action (there is no
+    // state-changing effect without also presenting a valid, single-use `state` the callback handler
+    // checks). A top-level GET redirect ordinarily carries no Origin at all, but some providers/proxies do
+    // send one; this route alone tolerates an external Origin rather than 403ing a legitimate provider
+    // redirect. The Host check below still applies (it's still bound loopback-only), and the callback's
+    // own `state` correlation is the real defense (see connections/oauth.ts).
+    const isOAuthCallback = req.method === "GET" && (req.url.split("?")[0] ?? req.url) === "/oauth/callback";
     // PRESENT Origin must be loopback. An ABSENT Origin is the fail-safe ALLOW path for non-browser
     // clients (CLI / Run-API-key / server-to-server). A present-but-malformed Origin — including the
     // literal "null" origin (a sandboxed-iframe CSRF sends `Origin: null`), which fails to parse → not
     // loopback → 403 — is REJECTED (the safer behavior).
-    if (typeof origin === "string" && origin.length > 0 && !isLoopbackHostname(hostnameOf(origin, true))) {
+    if (!isOAuthCallback && typeof origin === "string" && origin.length > 0 && !isLoopbackHostname(hostnameOf(origin, true))) {
       return reply.code(403).send({ error: "cross-origin request refused" });
     }
     // Host must be present and loopback (DNS-rebind defence). Real HTTP clients always send Host; a
@@ -1553,6 +1563,136 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.delete("/api/connections/:id", async (req) => {
     deleteConnection(deps.db, (req.params as { id: string }).id);
     return { ok: true };
+  });
+
+  // --- OAuth2 connections (agent-tooling epic P5a): authorization-code + PKCE via a FIXED loopback
+  // callback route on THIS daemon server (RFC 8252 native-app pattern) — no public ingress needed, unlike
+  // its sibling P5b (webhook receiver). HUMAN-ONLY, same trust posture as the api-key/bearer connections
+  // above: provider registration + consent-initiation are loopback REST; the callback itself is reached by
+  // the user's OWN browser following the provider's redirect (see the onRequest CSRF-hook exemption
+  // above), never an agent. Tokens are NEVER returned by any REST read — `GET /api/connections` above
+  // already masks an oauth2 row to ConnectionMetadata's provider/connected/tokenExpiresAt/needsReauth
+  // (non-secret status only; see connections/store.ts `toMetadata`). ---
+  const pendingOAuthConsents = new PendingOAuthConsents();
+  const oauthRedirectUri = () => `http://127.0.0.1:${PORT}/oauth/callback`;
+  const escapeHtml = (s: string): string =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const oauthHtmlPage = (message: string): string =>
+    `<!doctype html><html><head><meta charset="utf-8"><title>Loom — OAuth</title></head>` +
+    `<body style="font-family:system-ui,sans-serif;padding:2rem;max-width:32rem;margin:0 auto"><p>${escapeHtml(message)}</p></body></html>`;
+
+  // Register a new oauth2 connection (the "per-provider app registration" step). `provider` selects a
+  // seed template (google|github) whose authUrl/tokenUrl/defaultScopes are used unless the caller
+  // overrides them; `custom` REQUIRES authUrl+tokenUrl explicitly. No token exchange happens here — the
+  // connection is created with an EMPTY bundle (connected:false) until a consent round-trip completes.
+  app.post("/api/connections/oauth", async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    if (typeof b.name !== "string" || typeof b.host !== "string") {
+      return reply.code(400).send({ error: "name and host must be strings" });
+    }
+    if (b.provider !== "google" && b.provider !== "github" && b.provider !== "custom") {
+      return reply.code(400).send({ error: "provider must be 'google', 'github', or 'custom'" });
+    }
+    if (typeof b.clientId !== "string" || typeof b.clientSecret !== "string") {
+      return reply.code(400).send({ error: "clientId and clientSecret must be strings" });
+    }
+    const template = b.provider === "custom" ? null : OAUTH_PROVIDER_TEMPLATES[b.provider];
+    const authUrl = typeof b.authUrl === "string" && b.authUrl ? b.authUrl : template?.authUrl;
+    const tokenUrl = typeof b.tokenUrl === "string" && b.tokenUrl ? b.tokenUrl : template?.tokenUrl;
+    const scopes = Array.isArray(b.scopes) && b.scopes.every((s) => typeof s === "string")
+      ? (b.scopes as string[])
+      : template?.defaultScopes ?? [];
+    if (typeof authUrl !== "string" || typeof tokenUrl !== "string") {
+      return reply.code(400).send({ error: "authUrl and tokenUrl are required for a custom provider" });
+    }
+    try {
+      const created = createOAuthConnection(deps.db, {
+        name: b.name, host: b.host, provider: b.provider, clientId: b.clientId, clientSecret: b.clientSecret,
+        authUrl, tokenUrl, scopes,
+      });
+      return reply.code(201).send(created);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
+  // Initiate consent for an EXISTING oauth2 connection: builds the PKCE pair + a fresh `state`, stashes
+  // the pending context (state -> connection id + code_verifier), and returns the full provider auth URL
+  // for the human's browser to open. The daemon never opens a browser itself — the human/web UI does.
+  app.post("/api/connections/:id/oauth/consent", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const meta = getConnectionMetadata(deps.db, id);
+    if (!meta || meta.authScheme !== "oauth2") return reply.code(404).send({ error: "no oauth2 connection with that id" });
+    const row = deps.db.getConnection(id);
+    if (!row?.authUrl || !row.clientId) return reply.code(400).send({ error: "connection is missing its provider configuration" });
+
+    const codeVerifier = generateCodeVerifier();
+    const state = generateOAuthState();
+    pendingOAuthConsents.create(state, id, codeVerifier);
+
+    const authUrl = new URL(row.authUrl);
+    authUrl.searchParams.set("client_id", row.clientId);
+    authUrl.searchParams.set("redirect_uri", oauthRedirectUri());
+    authUrl.searchParams.set("response_type", "code");
+    authUrl.searchParams.set("state", state);
+    if (row.scopes) authUrl.searchParams.set("scope", row.scopes);
+    authUrl.searchParams.set("code_challenge", codeChallengeFromVerifier(codeVerifier));
+    authUrl.searchParams.set("code_challenge_method", "S256");
+    // Google-specific but harmless elsewhere: request a refresh token even on a repeat consent (Google
+    // otherwise omits refresh_token unless the user has never consented, or prompt=consent forces it).
+    authUrl.searchParams.set("access_type", "offline");
+    authUrl.searchParams.set("prompt", "consent");
+
+    return { authUrl: authUrl.toString() };
+  });
+
+  // The FIXED loopback callback the provider redirects the user's browser to. HTML responses only (this
+  // is a browser-navigated page, not a JSON API) — plain, self-contained, no external assets.
+  app.get("/oauth/callback", async (req, reply) => {
+    reply.type("text/html");
+    const q = req.query as Record<string, string | undefined>;
+    if (typeof q.error === "string" && q.error) {
+      return reply.send(oauthHtmlPage(`OAuth consent was not completed: ${q.error}`));
+    }
+    const state = q.state;
+    const code = q.code;
+    if (typeof state !== "string" || !state || typeof code !== "string" || !code) {
+      return reply.code(400).send(oauthHtmlPage("Malformed OAuth callback (missing code or state)."));
+    }
+    const pending = pendingOAuthConsents.consume(state);
+    if (!pending) {
+      return reply.code(400).send(oauthHtmlPage("This consent link has expired or was already used. Go back to Loom Settings and try again."));
+    }
+    const row = deps.db.getConnection(pending.connectionId);
+    if (!row || row.authScheme !== "oauth2" || !row.tokenUrl || !row.clientId) {
+      return reply.code(404).send(oauthHtmlPage("The connection for this consent no longer exists."));
+    }
+    // getOAuthTokenBundle THROWS on a corrupt/wrong-key envelope blob (decryptSecret's contract) — caught
+    // here so a bad blob still resolves to this route's friendly HTML contract, not an uncaught 500
+    // (mirrors ensureFreshOAuthToken's own try/catch around the identical call).
+    let bundle;
+    try {
+      bundle = getOAuthTokenBundle(deps.db, pending.connectionId);
+    } catch {
+      return reply.code(500).send(oauthHtmlPage("This connection's stored credentials could not be read. Revoke and re-register it."));
+    }
+    if (!bundle) {
+      return reply.code(404).send(oauthHtmlPage("The connection for this consent no longer exists."));
+    }
+    const result = await exchangeAuthorizationCode(fetch, row.tokenUrl, {
+      clientId: row.clientId, clientSecret: bundle.clientSecret, code, redirectUri: oauthRedirectUri(), codeVerifier: pending.codeVerifier,
+    });
+    if (!result.ok) {
+      return reply.code(502).send(oauthHtmlPage(`Token exchange failed: ${result.error}`));
+    }
+    const expiresAt = result.tokens.expires_in ? new Date(Date.now() + result.tokens.expires_in * 1000).toISOString() : null;
+    saveOAuthTokens(deps.db, pending.connectionId, {
+      clientSecret: bundle.clientSecret,
+      accessToken: result.tokens.access_token,
+      refreshToken: result.tokens.refresh_token ?? bundle.refreshToken,
+      expiresAt,
+    });
+    return reply.send(oauthHtmlPage("Connected. You can close this tab and return to Loom."));
   });
 
   // --- Capability registry catalog (agent-tooling epic P4): the two BUILTIN capabilities (browser-testing/
