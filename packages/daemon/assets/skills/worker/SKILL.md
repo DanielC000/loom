@@ -63,15 +63,21 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    check your task names) and confirm the behavior. **Run the gate in the FOREGROUND, then commit, then
    report — in ONE flow.** A blocking command completes within your turn, so you never need to launch it
    in the background and park on a poll waiting for it. **The rule: never end your turn while a gate is
-   running — unless it's a re-invoking background task — and never report before committing.** If the
+   running, and never report before committing.** If the
    output would be too long/noisy to read inline, redirect it to a file and read the tail in the same turn
    (e.g. `<gate-cmd> > gate.log 2>&1; echo EXIT=$?`, then read `gate.log`) — the command still runs in the
    foreground and returns to you when done. **Never `ScheduleWakeup`-poll a gate** (park the turn, wake
    later, check if it finished) — that risks a "No response requested" stall and only adds latency; a
-   foreground run just returns when it's done. If a gate is *genuinely* long-running, the ONLY acceptable
-   background pattern is a background **task that re-invokes you on completion** (never a `ScheduleWakeup`
-   poll): end your turn with a short status line naming what you kicked off and what you're waiting on —
-   the harness re-invokes you the moment it completes, so there's nothing to poll for. And even then you
+   foreground run just returns when it's done. **Never end your turn parked on a background task's own
+   completion notification as your only plan, either — that notification is delivered on your *next* turn,
+   not by spontaneously waking an otherwise-silent session, and as a worker you have no standing channel
+   that pokes you on a timer the way a manager does; nothing else may ever arrive to trigger that next turn,
+   and you can dead-stall indefinitely with the gate long since finished.** Run gate/test commands in the
+   FOREGROUND (or poll their output inline) precisely so you're never depending on that notification to
+   bring you back. If you must background a genuinely long-running task for some OTHER reason, don't trust
+   the completion notification alone to resume you: `worker_report progress` immediately, naming what you
+   kicked off and that you're waiting — the report (and whatever direction it draws back down) is a real
+   route back into a turn; the bare notification is not. And even then you
    MUST still read its result, commit, and only THEN report. Re-read your diff
    against the task's acceptance check. Say what you actually ran. **COMMIT your verified work to your
    branch BEFORE you report `done`** (see the report protocol below) — uncommitted work is invisible: the
@@ -186,12 +192,16 @@ tool you call); board reads are `mcp__loom-tasks__tasks_get` / `tasks_list`. Loa
   squash-merged under the card title, but keep your own commits conventional + scoped too.)
 - **`blocked`** — with `needs`: the specific decision, access, or information you're waiting on.
 - **`progress`** — an optional checkpoint on a long task. **Also use it when your own turn is done but a
-  background child you spawned is still outstanding.** A worker that kicks off a background sub-agent (or
-  any task that re-invokes you on completion) and then goes silently idle — a bare `ScheduleWakeup`, no
-  report — is **indistinguishable from a wedge** to your manager. So don't idle silently on a pending
-  child: `worker_report progress` naming what you're waiting on and that you're parked awaiting it, so
-  your idle reads as *waiting*, not *stalled*. Then let the child's completion re-invoke you, read its
-  result, and report `done` (or `blocked`).
+  background child you spawned is still outstanding** — a background sub-agent, or any other backgrounded
+  task you're relying on a completion notification to bring you back to (see the gate-verification rule
+  above: that notification is not a guaranteed wake). A worker that kicks off one of these and then goes
+  silently idle — a bare `ScheduleWakeup`, no report — is **indistinguishable from a wedge** to your
+  manager, and may never resume at all if nothing else happens to trigger your next turn. So don't idle
+  silently on a pending child: `worker_report progress` naming what you're waiting on and that you're
+  parked awaiting it, so your idle reads as *waiting*, not *stalled*, and your manager knows to check on
+  you and nudge you back if the completion notification never surfaces on its own. Then, once you're back
+  (whether from the completion notification or a manager nudge), read the result, and report `done` (or
+  `blocked`).
 
 You **receive** direction via `worker_message`. Act on it, then report again. There is **no mid-turn way
 to check for newer direction** — `my_context` returns only your context `pct`, and a message queued while
