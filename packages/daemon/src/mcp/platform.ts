@@ -140,6 +140,13 @@ const obsidianOverride = z.object({
 const pythonOverride = z.object({
   interpreterPath: z.string().min(1).optional(),
 }).strict();
+// Codescape wiring (card C2): per-project opt-in, agent-settable — unlike dejaCapture, this flag alone
+// has no host-launch capability (it only conditionally mounts an HTTP MCP entry pointing at the
+// already-running daemon-owned supervisor, itself gated behind the daemon-wide isCodescapeSupervisorEnabled()
+// an agent can never flip), so it's a benign on/off toggle like docLint — NOT omitted from the agent shape.
+const codescapeOverride = z.object({
+  enabled: z.boolean().optional(),
+}).strict();
 const projectConfigOverrideSchema = z.object({
   kanbanColumns: kanbanColumnsSchema.optional(),
   permission: permissionOverride.optional(),
@@ -152,6 +159,7 @@ const projectConfigOverrideSchema = z.object({
   // its hook shells out to an external host binary that receives file content + the driving prompt, a
   // host-process + data-exfiltration surface, NOT the benign docLint precedent it might look like.
   dejaCapture: z.boolean().optional(),
+  codescape: codescapeOverride.optional(),
   obsidian: obsidianOverride.optional(),
   python: pythonOverride.optional(),
 }).strict();

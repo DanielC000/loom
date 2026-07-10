@@ -241,6 +241,18 @@ export function isCodescapeSupervisorEnabled(): boolean {
 }
 
 /**
+ * Card C2: whether a SPECIFIC project should get the per-session Codescape MCP wired in. Combines the
+ * daemon-wide supervisor gate ({@link isCodescapeSupervisorEnabled}) with the per-project opt-in
+ * (`ResolvedConfig.codescape.enabled`, LEAD RULING: per-project, NOT per-profile) — a project can only
+ * opt in to what the daemon has already enabled; flipping the project flag alone on a non-dev build (or
+ * with the daemon-wide flag off) wires nothing. Shared with C3 (the worktree lifecycle hooks), which
+ * gates its own ingest/register/drop calls the same way.
+ */
+export function isCodescapeEnabled(config: { codescape: { enabled: boolean } }): boolean {
+  return isCodescapeSupervisorEnabled() && config.codescape.enabled;
+}
+
+/**
  * Card C1: resolve the `codescape` CLI as a `{command, args}` spawn pair (never a shell string — see
  * codescape/supervisor.ts for why). `LOOM_CODESCAPE_BIN` is a human-only override, mirroring
  * `LOOM_DEJA_BIN` (pty/host.ts:627) — but UNLIKE it, does not require an absolute path: the supervisor

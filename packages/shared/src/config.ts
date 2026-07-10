@@ -130,6 +130,17 @@ export interface PythonConfig {
 }
 
 /**
+ * Codescape fleet-daemon wiring (epic `369dde3c`, card C2), per-PROJECT opt-in — LEAD RULING: NOT
+ * per-profile. Gated ADDITIONALLY behind the daemon-wide `isCodescapeSupervisorEnabled()` (LOOM_DEV +
+ * LOOM_CODESCAPE_ENABLED) — this flag alone never wires anything on a regular `loomctl` build. Benign
+ * on/off boolean (no host-launch capability of its own — it only conditionally mounts an HTTP MCP entry
+ * pointing at the ALREADY-running daemon-owned supervisor), so it stays agent-settable, mirroring `docLint`.
+ */
+export interface CodescapeConfig {
+  enabled: boolean;
+}
+
+/**
  * Outbound alert webhook (Richer-notifications, external delivery). When set, the daemon POSTs a
  * small JSON payload to `url` on each orchestration event whose `kind` is in `events`, so the human
  * is alerted OUTSIDE the UI (a generic webhook works for Slack/Discord incoming-webhook URLs + any
@@ -466,6 +477,8 @@ export interface ResolvedConfig {
    * agent-facing config surface beyond a benign on/off boolean, mirroring docLint.
    */
   dejaCapture: boolean;
+  /** Codescape fleet-daemon MCP wiring, per-project opt-in (card C2). Default false — see CodescapeConfig. */
+  codescape: CodescapeConfig;
   /** Obsidian auto-start (self-healing vault tooling). Default OFF — see ObsidianConfig. */
   obsidian: ObsidianConfig;
   /** Python tooling (shared Loom-managed venv). Only `interpreterPath` is configurable — see PythonConfig. */
@@ -500,6 +513,8 @@ export interface ProjectConfigOverride {
   docLint?: boolean;
   /** See ResolvedConfig.dejaCapture. */
   dejaCapture?: boolean;
+  /** See ResolvedConfig.codescape. */
+  codescape?: Partial<CodescapeConfig>;
   obsidian?: Partial<ObsidianConfig>;
   python?: Partial<PythonConfig>;
 }
@@ -576,6 +591,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   docLint: true, // Pillar D vault-lint hook on by default
   dejaCapture: false, // opt-in Deja capture hook (card b3bd4841) — off by default
+  codescape: { enabled: false }, // opt-in Codescape MCP wiring (card C2) — off by default
   // Obsidian auto-start OFF by default: opt-in per project (a daemon-launched GUI process is deliberate).
   obsidian: { autoStart: false },
   // Python: no base-interpreter override by default — the daemon discovers python3/python/`py -3` on PATH.
@@ -919,6 +935,7 @@ export function resolveConfig(
     platform: resolvePlatform(platformOverride),
     docLint: override.docLint ?? d.docLint,
     dejaCapture: override.dejaCapture ?? d.dejaCapture,
+    codescape: { enabled: override.codescape?.enabled ?? d.codescape.enabled },
     obsidian,
     python,
     // Daemon-global (no per-project layer): the session-usage sampler cadence + retention. Always the

@@ -700,6 +700,14 @@ export function buildMcpServers(o: {
   /** Resolve a P1 connection id to its DECRYPTED secret (injected callback, never a live db handle) —
    *  consulted only for a grant whose def has `requiresConnection` AND that carries a `connectionId`. */
   resolveConnectionSecret?: (connectionId: string) => string | undefined;
+  /** Card C2: the project's raw `codescape.enabled` flag — see the "codescape" mount below. */
+  codescapeEnabled?: boolean;
+  /** Card C2: the live Codescape supervisor port, or null/undefined when disabled/not running. */
+  codescapePort?: number | null;
+  /** Card C2: the session's project id (URL scope). */
+  projectId?: string;
+  /** Card C2: `taskKey(taskId)` for a worktree (worker) session, else null/undefined (non-worktree scope). */
+  worktreeId?: string | null;
 }): Record<string, unknown> {
   // Agent Runs R2: a `run` session gets ONLY the restricted run surface — NOT even loom-tasks. This is
   // the one path that does not mount loom-tasks (every other role layers ON TOP of it). The early return
@@ -820,8 +828,45 @@ export function buildMcpServers(o: {
       console.warn(`[pty] ${o.sessionId} capability '${grant.slug}' could not be resolved — spawning without it (provisioning may be in progress in the background).`);
     }
   }
+  // Card C2 (Codescape wiring epic `369dde3c`): a per-PROJECT opt-in (NOT a profile capability grant,
+  // hence outside the resolveProfileCapabilities loop above), mirroring the deja-corpus branch's gate
+  // shape. `o.codescapeEnabled` is the RAW project flag — isLoomDev() is re-checked HERE (not pre-baked
+  // by the caller) so this pure seam can assert the LOOM_DEV-off negative case directly.
+  if (o.codescapeEnabled) {
+    if (isLoomDev()) {
+      const port = o.codescapePort;
+      if (port != null) {
+        // Q3: a worktree (worker) session scopes to <projectId>/<worktreeId> (3-segment); a non-worktree
+        // (manager/plain) session scopes to <projectId> alone (2-segment, no "main" sentinel) — both read
+        // the same always-current main graph.
+        const scope = o.worktreeId ? `${o.projectId}/${o.worktreeId}` : `${o.projectId}`;
+        mcpServers["codescape"] = { type: "http", url: `http://127.0.0.1:${port}/mcp/${scope}` };
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(`[pty] ${o.sessionId} codescape enabled but the supervisor port is unavailable — spawning WITHOUT the Codescape MCP.`);
+      }
+    }
+    // !isLoomDev(): silent skip, mirroring deja-corpus — the "missing" reason is the gate itself.
+  }
   return mcpServers;
 }
+
+/**
+ * Card C2: the `--allowedTools` contribution for a mounted Codescape MCP entry — ONLY the 7 read tools
+ * (list_flows/trace_flow/what_touches/describe_symbol/render_tree/boundary_map/scenario_space), NEVER the
+ * 5 control/write tools (focus_flow/highlight/open_view/annotate/show_diff). Read-only "agent orients
+ * itself" integration (Q4). Named per-tool (mirrors deja-corpus's 3-tool allow), not the whole `mcp__codescape`
+ * server prefix, so the write surface stays unreachable even though the server itself exposes it.
+ */
+export const CODESCAPE_TOOL_ALLOW: readonly string[] = [
+  "mcp__codescape__list_flows",
+  "mcp__codescape__trace_flow",
+  "mcp__codescape__what_touches",
+  "mcp__codescape__describe_symbol",
+  "mcp__codescape__render_tree",
+  "mcp__codescape__boundary_map",
+  "mcp__codescape__scenario_space",
+];
 
 /**
  * The `--allowedTools` contribution from every resolved capability grant (agent-tooling P4) — the
@@ -1067,6 +1112,18 @@ export interface SpawnOpts {
    * every existing spawn is byte-identical when unset/false.
    */
   dejaCorpus?: boolean;
+  /**
+   * Card C2 (Codescape wiring epic `369dde3c`): the project's RAW `codescape.enabled` config flag — NOT
+   * yet combined with `isLoomDev()`/the supervisor port (buildMcpServers applies those gates itself,
+   * mirroring the deja-corpus branch). Default OFF — every existing spawn is byte-identical when unset.
+   */
+  codescapeEnabled?: boolean;
+  /** Card C2: the live Codescape supervisor port, or null when disabled/not running (see `CodescapeSupervisor.getPort`). */
+  codescapePort?: number | null;
+  /** Card C2: the session's project id, needed to scope the Codescape MCP URL. */
+  projectId?: string;
+  /** Card C2: `taskKey(taskId)` for a WORKTREE (worker) session, else null/undefined — see `codescapeWorktreeId`. */
+  worktreeId?: string | null;
   /**
    * Agent-tooling P4: registry-capability grants BEYOND the two legacy booleans above (resolved from the
    * session's Profile/row, RAW — see resolveProfileCapabilities). Default [] — every existing spawn is
@@ -2105,25 +2162,32 @@ export class PtyHost {
     // worth a cache for the read frequency here. Revisit if the catalog ever grows large or spawns get hot.
     const capabilityCatalog = this.getCapabilityCatalog();
     const capabilityAllow = capabilityToolAllowlist(resolveProfileCapabilities(opts), capabilityCatalog);
-    const extraAllow = [
-      ...roleAllow,
-      ...capabilityAllow,
-    ];
-    const permission = extraAllow.length
-      ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
-      : opts.permission;
-    const settingsPath = writeSessionSettings(opts.sessionId, permission, opts.vaultPath, opts.dejaCapture);
 
     // §6 scoping: route by session id in the URL path; daemon derives the project server-side. The
     // mcpServers map (loom-tasks + role surface + opt-in Playwright) is assembled by the testable seam.
     // The HUMAN-only python.interpreterPath rides the session env (config → pythonSessionEnv); read it here
     // and hand it to the shared-venv markitdown resolver (only consulted when documentConversion is on).
+    // Computed BEFORE extraAllow (moved up from below) so a mounted "codescape" entry can gate its OWN
+    // tool allowlist off the actual mount decision, rather than re-deriving the same isLoomDev()/port/
+    // project-enabled condition a second time here.
     const mcpServers = buildMcpServers({
       sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion, dejaCorpus: opts.dejaCorpus,
       vaultPath: opts.vaultPath,
       pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER,
       capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,
+      codescapeEnabled: opts.codescapeEnabled, codescapePort: opts.codescapePort, projectId: opts.projectId, worktreeId: opts.worktreeId,
     });
+    // Card C2: the Codescape MCP tools ALSO need allowlisting (acceptEdits doesn't auto-approve MCP tools —
+    // the §9 lesson), gated on the mcpServers map actually carrying the entry (not re-derived here).
+    const extraAllow = [
+      ...roleAllow,
+      ...capabilityAllow,
+      ...(mcpServers.codescape ? CODESCAPE_TOOL_ALLOW : []),
+    ];
+    const permission = extraAllow.length
+      ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
+      : opts.permission;
+    const settingsPath = writeSessionSettings(opts.sessionId, permission, opts.vaultPath, opts.dejaCapture);
     // Role-scoped disallow of the interactive human-prompt tools (AskUserQuestion / Exit|EnterPlanMode):
     // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human — UNIONed with
     // the curated dangerous native tools when this session's Profile set restrictedTools (Companion

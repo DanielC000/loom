@@ -11,7 +11,7 @@ import {
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree } from "../pty/host.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, toConventionalSubject, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { sessionScratchDir } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
@@ -670,6 +670,9 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
+      codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
+      codescapePort: this.codescape?.getPort() ?? null,
+      projectId: project.id,
       startupPrompt: composedStartupPrompt,
       role,
       browserTesting,
@@ -738,6 +741,9 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
+      codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
+      codescapePort: this.codescape?.getPort() ?? null,
+      projectId: project.id,
       // PL Auditor finding #8: MANAGERS ONLY get a "Where things live" pre-block (absolute repo+vault
       // roots) so a cold-boot orchestrator reads its resume doc by absolute path instead of Globbing.
       // vaultPath is passed here UNGATED by docLint — the orchestrator needs the location regardless of
@@ -828,6 +834,9 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
+      codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
+      codescapePort: this.codescape?.getPort() ?? null,
+      projectId: project.id,
       startupPrompt: composePlatformLeadStartupPrompt(startupPrompt, leadResumeDocPath),
       role,
       browserTesting,
@@ -864,6 +873,8 @@ export class SessionService {
     // Explicit 'auditor' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the restricted loom-audit surface.
     const { role, startupPrompt, permission, browserTesting, documentConversion, dejaCorpus, capabilities, restrictedTools, noCommit, model, skills, connections } = this.resolveAgentSpawn(agent, config, "auditor");
+    const codescapeEnabled = config.codescape.enabled; // card C2: Codescape MCP wiring, per-project opt-in
+    const codescapePort = this.codescape?.getPort() ?? null;
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -900,6 +911,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
+      codescapeEnabled, codescapePort, projectId: project.id, // card C2: Codescape MCP wiring
       startupPrompt: appendScheduledPrompt(startupPrompt, prompt),
       role,
       browserTesting,
@@ -943,6 +955,8 @@ export class SessionService {
     // Explicit 'workspace-auditor' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. The locked role — NOT the profile role — drives the loom-user-audit surface.
     const { role, startupPrompt, permission, browserTesting, documentConversion, dejaCorpus, capabilities, restrictedTools, noCommit, model, skills, connections } = this.resolveAgentSpawn(agent, config, "workspace-auditor");
+    const codescapeEnabled = config.codescape.enabled; // card C2: Codescape MCP wiring, per-project opt-in
+    const codescapePort = this.codescape?.getPort() ?? null;
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -979,6 +993,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
+      codescapeEnabled, codescapePort, projectId: project.id, // card C2: Codescape MCP wiring
       startupPrompt: appendScheduledPrompt(startupPrompt, prompt),
       role,
       browserTesting,
@@ -1060,6 +1075,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
+      codescapeEnabled: config.codescape.enabled, codescapePort: this.codescape?.getPort() ?? null, projectId: project.id, // card C2
       startupPrompt,
       role,
       browserTesting,
@@ -1155,6 +1171,13 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
+      codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
+      codescapePort: this.codescape?.getPort() ?? null,
+      projectId: project.id,
+      // Card C2: a resumed WORKER carries its worktreeId forward from the row's taskId (a taskless
+      // worker's ephemeral worktree is untracked — see codescapeWorktreeId); every non-worker role is
+      // never a worktree session, so this is null/undefined for them (2-segment URL, unchanged).
+      worktreeId: session.role === "worker" ? codescapeWorktreeId(session.taskId) : undefined,
       resumeId: session.engineSessionId,
       // Carry the role across resume so a manager/worker/platform session is re-spawned WITH its
       // role-gated MCP surface (loom-orchestration / loom-platform) + allowlist. Without this a
@@ -2002,6 +2025,11 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
+      codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
+      codescapePort: this.codescape?.getPort() ?? null,
+      projectId: project.id,
+      // Card C2: a forked WORKER carries its worktreeId forward from the SOURCE's taskId (mirrors resume()).
+      worktreeId: src.role === "worker" ? codescapeWorktreeId(src.taskId) : undefined,
       resumeId: src.engineSessionId, // resume the SOURCE conversation...
       fork: true,                    // ...but fork it (--fork-session)...
       forkSessionId: forkEngineId,   // ...into this pre-assigned id (--session-id).
@@ -2636,6 +2664,12 @@ export class SessionService {
         sessionEnv: config.sessionEnv,
         vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
         dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
+        codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
+        codescapePort: this.codescape?.getPort() ?? null,
+        projectId: project.id,
+        // Card C2: a taskless worker's ephemeral worktree (keyed off claimKey, not taskId) has no stable
+        // id for C3's later DELETE to target — untracked, so it gets the 2-segment (non-worktree) URL too.
+        worktreeId: codescapeWorktreeId(taskId),
         // Compose the worker's opening: a worktree LOCATION block first (names this worktree as the edit
         // dir so the worker can't leak edits into the main checkout), then its agent BASE BRIEF (Dev/Bugfix/
         // etc. doctrine — run `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief
@@ -4145,6 +4179,10 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
+      codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
+      codescapePort: this.codescape?.getPort() ?? null,
+      projectId: project.id,
+      worktreeId: codescapeWorktreeId(taskId), // card C2: SAME worktree — same worktreeId as the predecessor
       // Lead with the worktree LOCATION block (same worktree — a recycled worker is equally at risk of
       // leaking edits to the main checkout), then the worker's agent base brief, then the handoff
       // (mirrors spawnWorker + the manager recycle warm-up). Empty brief ⇒ the block + handoff.
@@ -4251,6 +4289,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
+      codescapeEnabled: config.codescape.enabled, codescapePort: this.codescape?.getPort() ?? null, projectId: project.id, // card C2
       startupPrompt,
       role: "manager", // successor keeps the orchestration surface
       browserTesting: old.browserTesting ?? false,
@@ -4403,6 +4442,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
+      codescapeEnabled: config.codescape.enabled, codescapePort: this.codescape?.getPort() ?? null, projectId: project.id, // card C2
       startupPrompt,
       role: "platform", // successor keeps the platform surface
       browserTesting: old.browserTesting ?? false,

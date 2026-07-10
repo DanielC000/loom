@@ -70,8 +70,19 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
  * onto the same branch/worktree (H1.3). Deterministic, so the SAME task always resolves to the same
  * worktree (re-spawn after a rejected merge, and recycle which carries the stored path forward).
  */
-function taskKey(taskId: string): string {
+export function taskKey(taskId: string): string {
   return createHash("sha256").update(taskId).digest("hex").slice(0, 12);
+}
+
+/**
+ * Card C2/C3: the Codescape `worktreeId` for a worker session — the SAME opaque key naming its
+ * `loom/<key>` branch + worktree dir (above), so the daemon's Codescape MCP URL (C2) and its later
+ * DELETE-on-drop (C3) always agree on which worktree they mean. `null` for a taskless spawn (no stable
+ * id to key off — see `createWorktree`'s `taskId ?? claimKey` carve-out) or a non-worktree session
+ * (manager/plain), so those get the 2-segment (no-worktree-scope) MCP URL instead.
+ */
+export function codescapeWorktreeId(taskId: string | null | undefined): string | null {
+  return taskId ? taskKey(taskId) : null;
 }
 
 /**
