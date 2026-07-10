@@ -539,8 +539,9 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
           <Hint>
             Off (default): each agent/worker message — a manager&apos;s direction, a worker&apos;s report, a
             human composer turn — is delivered as its own turn. On: multiple queued messages are concatenated
-            into one turn (the pre-2026-07 behavior). Loom&apos;s own operational nudges always group together
-            regardless of this setting.
+            into one turn (the pre-2026-07 behavior). Loom&apos;s own routine nudges (idle/context/rate-limit
+            watchdogs, etc.) still coalesce regardless of this setting; action-required nudges (a merge
+            rejection, an already-merged notice) stay on their own turn either way.
           </Hint>
         </label>
       </Panel>
