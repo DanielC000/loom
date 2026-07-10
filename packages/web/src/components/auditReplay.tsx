@@ -28,6 +28,7 @@ function eventTone(e: AuditEvent): Tone {
       k === "schedule_fire_failed" || k === "worker_report_undelivered") return "red";
   if (k === "merge_request" || k === "worker_stuck" || k === "idle_report" || k === "redirect_worker") return "amber";
   if (k === "merge_done" || k === "recycle_complete" || k === "session_recovered") return "phosphor";
+  if (k === "build_gate_retry_attempt" || k === "build_gate_retry") return "cyan";
   return "cyan";
 }
 
@@ -50,6 +51,8 @@ function detailLine(e: AuditEvent): string {
     case "idle_escalated": return `${s("unanswered")} unanswered nudges`;
     case "context_escalated": return `~${s("pct")}% context · ${s("unanswered")} ignored nudges`;
     case "worker_stuck": return `busy ${s("minutesBusy")}m`;
+    case "build_gate_retry_attempt": return `gate retry${s("priorClass") ? ` (was ${s("priorClass")})` : ""}`;
+    case "build_gate_retry": return `gate retry: ${d.passed != null ? (d.passed ? "passed" : "still failed") : "?"}`;
     case "session_message":
     case "session_message_queued": return s("text").slice(0, 90);
     default: return "";
