@@ -336,10 +336,12 @@ mid-report — before sending anything.
    human." Playwright is the agent default; claude-in-chrome is Lead-only / special-case (the real
    authenticated browser) — heavy cockpit/Overview pages freeze its CDP renderer (mounting a live-session
    terminal is the trigger), so if you must use it, eyeball only LIGHT, non-terminal pages (`/settings`,
-   `/skills`, `/platform`). Division of labor: browser-capable verification workers (QA / Web Designer —
-   sessions with the Playwright/`browserTesting` surface provisioned + allowlisted) **self-verify**
-   UI/visual work with Playwright before reporting done; non-browser workers (Dev / Bugfix / Docs) report
-   UI work **up** and you, the manager, verify it. Either way you still own the integrated end-to-end pass.
+   `/skills`, `/platform`). Division of labor keys on the provisioned capability, not the role name: any
+   worker that HAS the Playwright/`browserTesting` surface provisioned + allowlisted **self-verifies**
+   UI/visual work with Playwright before reporting done — whatever its role name (e.g. the QA / Web
+   Designer rigs are provisioned this way, but so could a Dev/SEO/Docs rig be); only a worker WITHOUT that
+   surface reports UI work **up** for you, the manager, to verify. Either way you still own the integrated
+   end-to-end pass.
    When the project runs its own deployed instance, a worker's dev-server self-verify can PASS while the
    *deployed* build is stale — so your post-deploy integrated pass must hit the **deployed/served**
    target, not just trust the worker's dev-server check (see *A project that runs its own deployed
