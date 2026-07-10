@@ -287,6 +287,17 @@ try {
   check("(c) list_all_sessions (unknown prefix): explicit error, never a silent []",
     !Array.isArray(unknownPfxSess) && unknownPfxSess.error === "project not found");
 
+  // 8-char id-PREFIX resolution for list_all_agents (sibling of list_all_sessions's card 7097f3fb /
+  // f10093f) — reuses the "cafe1234" fixture above: a full id OR an unambiguous 8-char prefix resolves
+  // the SAME rows; unknown is an EXPLICIT error, never a silent [].
+  const fullIdAgents = await call("list_all_agents", { projectId: "cafe1234-full-uuid-form" });
+  const byPrefixAgents = await call("list_all_agents", { projectId: "cafe1234" });
+  check("(c) list_all_agents (8-char prefix): returns the SAME rows as the full id",
+    byPrefixAgents.some((a) => a.id === "agentPfx") && byPrefixAgents.length === fullIdAgents.length);
+  const unknownPfxAgents = await call("list_all_agents", { projectId: "ffffffff" });
+  check("(c) list_all_agents (unknown prefix): explicit error, never a silent []",
+    !Array.isArray(unknownPfxAgents) && unknownPfxAgents.error === "project not found");
+
   // project_archive (the ONE v1 widen) — soft, reversible, reserved-guarded.
   // A NON-reserved project archives (hidden from the active list; row retained).
   const toArchive = await call("project_create", { name: "Disposable", repoPath: repo });

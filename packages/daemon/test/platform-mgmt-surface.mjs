@@ -164,6 +164,33 @@ try {
     !Array.isArray(ambiguousPfxSess) && /ambiguous/.test(ambiguousPfxSess.error || "") &&
     ambiguousPfxSess.error.includes("beef1234-aaaa-1111-1111-111111111111") && ambiguousPfxSess.error.includes("beef1234-bbbb-2222-2222-222222222222"));
 
+  // ---- 8-char id-PREFIX resolution for list_all_agents / list_all_schedules (siblings of
+  // list_all_sessions's card 7097f3fb / f10093f) — reuses the "cafe1234"/"beef1234" fixtures above. ----
+  const fullIdAgents = await call("list_all_agents", { projectId: "cafe1234-full-uuid-form" });
+  const byPrefixAgents = await call("list_all_agents", { projectId: "cafe1234" });
+  check("list_all_agents (8-char prefix): returns the SAME rows as the full id",
+    byPrefixAgents.some((a) => a.id === "agentPfx") && byPrefixAgents.length === fullIdAgents.length);
+  const unknownPfxAgents = await call("list_all_agents", { projectId: "ffffffff" });
+  check("list_all_agents (unknown prefix): explicit error, never a silent []",
+    !Array.isArray(unknownPfxAgents) && unknownPfxAgents.error === "project not found");
+  const ambiguousPfxAgents = await call("list_all_agents", { projectId: "beef1234" });
+  check("list_all_agents (ambiguous prefix): explicit error naming the candidates",
+    !Array.isArray(ambiguousPfxAgents) && /ambiguous/.test(ambiguousPfxAgents.error || "") &&
+    ambiguousPfxAgents.error.includes("beef1234-aaaa-1111-1111-111111111111") && ambiguousPfxAgents.error.includes("beef1234-bbbb-2222-2222-222222222222"));
+
+  db.insertSchedule({ id: "schedPfx", agentId: "agentPfx", cron: "0 9 * * *", enabled: true, nextFireAt: now, lastFiredAt: null, createdAt: now, kind: "manager", prompt: null });
+  const fullIdSched = await call("list_all_schedules", { projectId: "cafe1234-full-uuid-form" });
+  const byPrefixSched = await call("list_all_schedules", { projectId: "cafe1234" });
+  check("list_all_schedules (8-char prefix): returns the SAME rows as the full id",
+    byPrefixSched.some((s) => s.id === "schedPfx") && byPrefixSched.length === fullIdSched.length);
+  const unknownPfxSched = await call("list_all_schedules", { projectId: "ffffffff" });
+  check("list_all_schedules (unknown prefix): explicit error, never a silent []",
+    !Array.isArray(unknownPfxSched) && unknownPfxSched.error === "project not found");
+  const ambiguousPfxSched = await call("list_all_schedules", { projectId: "beef1234" });
+  check("list_all_schedules (ambiguous prefix): explicit error naming the candidates",
+    !Array.isArray(ambiguousPfxSched) && /ambiguous/.test(ambiguousPfxSched.error || "") &&
+    ambiguousPfxSched.error.includes("beef1234-aaaa-1111-1111-111111111111") && ambiguousPfxSched.error.includes("beef1234-bbbb-2222-2222-222222222222"));
+
   // ===================== (a) PROFILES (the human-equivalent elevation, gated to platform) =====================
   const nProfBefore = db.listProfiles().length;
   const pc = await call("profile_create", { profile: { name: "Reviewer", role: "worker", allowDelta: ["Bash(git diff:*)"] } });

@@ -686,7 +686,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_agents",
       {
-        description: "List agents across the platform. Optional projectId narrows to one project (unknown id ⇒ []). With no filter, aggregates the agents of every live project (incl. the reserved home). DEFAULT returns a lightweight SUMMARY per agent (id, projectId, name, position, profileId, endpoint) so the aggregate stays bounded; the heavy startupPrompt + ioSchema are DROPPED (a full aggregate overflowed at ~104K chars). Pass full:true for whole agent rows. Summary reads are capped at " + DEFAULT_AGENT_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
+        description: "List agents across the platform. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no filter, aggregates the agents of every live project (incl. the reserved home). DEFAULT returns a lightweight SUMMARY per agent (id, projectId, name, position, profileId, endpoint) so the aggregate stays bounded; the heavy startupPrompt + ioSchema are DROPPED (a full aggregate overflowed at ~104K chars). Pass full:true for whole agent rows. Summary reads are capped at " + DEFAULT_AGENT_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
         inputSchema: {
           projectId: z.string().optional(),
           full: z.boolean().optional(),
@@ -695,9 +695,18 @@ export class PlatformMcpRouter {
         },
       },
       async ({ projectId, full, limit, offset }) => {
+        // projectId resolves EXACTLY like the sibling cross-project reads (project_get/list_all_sessions) —
+        // full id OR unambiguous 8-char prefix, error on unknown/ambiguous — so it can never silently
+        // read as an agentless project (sibling of card 7097f3fb / f10093f).
+        let resolvedProjectId: string | undefined;
+        if (projectId !== undefined) {
+          const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+          if ("error" in project) return ok(project);
+          resolvedProjectId = project.id;
+        }
         // No db.listAllAgents — aggregate across every live project (reuses listAllProjects + listAgents).
-        const all = projectId !== undefined
-          ? db.listAgents(projectId)
+        const all = resolvedProjectId !== undefined
+          ? db.listAgents(resolvedProjectId)
           : db.listAllProjects().flatMap((p) => db.listAgents(p.id));
         // Backstop the summary feed so an aggregate read can't overflow the tool-result cap with no limit.
         const effLimit = limit ?? (full ? undefined : DEFAULT_AGENT_SUMMARY_CAP);
@@ -747,14 +756,18 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_schedules",
       {
-        description: "List cron schedules across the platform (each {id, agentId, cron, enabled, nextFireAt, lastFiredAt, kind, prompt}). Optional projectId narrows to schedules whose agent lives in that project (unknown id => []). With no filter, returns every schedule. Read-only. Use to discover a scheduleId before schedule_update/schedule_delete.",
+        description: "List cron schedules across the platform (each {id, agentId, cron, enabled, nextFireAt, lastFiredAt, kind, prompt}). Optional projectId narrows to schedules whose agent lives in that project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no filter, returns every schedule. Read-only. Use to discover a scheduleId before schedule_update/schedule_delete.",
         inputSchema: { projectId: z.string().optional() },
       },
       async ({ projectId }) => {
         const all = db.listSchedules();
         if (projectId === undefined) return ok(all);
+        // projectId resolves EXACTLY like the sibling cross-project reads (project_get/list_all_sessions) —
+        // full id OR unambiguous 8-char prefix, error on unknown/ambiguous (sibling of card 7097f3fb / f10093f).
+        const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+        if ("error" in project) return ok(project);
         // Schedules are keyed by agentId; a project filter resolves each schedule's agent → its project.
-        return ok(all.filter((s) => db.getAgent(s.agentId)?.projectId === projectId));
+        return ok(all.filter((s) => db.getAgent(s.agentId)?.projectId === project.id));
       },
     );
 

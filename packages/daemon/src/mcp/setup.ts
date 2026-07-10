@@ -444,7 +444,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "list_all_agents",
       {
-        description: "List agents across the platform. Optional projectId narrows to one project (unknown id ⇒ []). With no filter, aggregates the agents of every live project. DEFAULT returns a lightweight SUMMARY per agent (id, projectId, name, position, profileId, endpoint) so the aggregate stays bounded; the heavy startupPrompt + ioSchema are DROPPED. Pass full:true for whole agent rows. Summary reads are capped at " + DEFAULT_AGENT_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
+        description: "List agents across the platform. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no filter, aggregates the agents of every live project. DEFAULT returns a lightweight SUMMARY per agent (id, projectId, name, position, profileId, endpoint) so the aggregate stays bounded; the heavy startupPrompt + ioSchema are DROPPED. Pass full:true for whole agent rows. Summary reads are capped at " + DEFAULT_AGENT_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
         inputSchema: {
           projectId: z.string().optional(),
           full: z.boolean().optional(),
@@ -453,8 +453,16 @@ export class SetupMcpRouter {
         },
       },
       async ({ projectId, full, limit, offset }) => {
-        const all = projectId !== undefined
-          ? db.listAgents(projectId)
+        // projectId resolves EXACTLY like the sibling cross-project reads (project_get/list_all_sessions) —
+        // full id OR unambiguous 8-char prefix, error on unknown/ambiguous (sibling of card 7097f3fb / f10093f).
+        let resolvedProjectId: string | undefined;
+        if (projectId !== undefined) {
+          const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+          if ("error" in project) return ok(project);
+          resolvedProjectId = project.id;
+        }
+        const all = resolvedProjectId !== undefined
+          ? db.listAgents(resolvedProjectId)
           : db.listAllProjects().flatMap((p) => db.listAgents(p.id));
         const effLimit = limit ?? (full ? undefined : DEFAULT_AGENT_SUMMARY_CAP);
         return ok(projectAgentList(all, { full, limit: effLimit, offset }));
