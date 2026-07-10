@@ -580,7 +580,9 @@ const BOARD_REACH: CompanionCapability = {
       "board_create",
       {
         description:
-          "Create a NEW board card on behalf of the owner, in one of your act-granted project(s) — " +
+          "Create a NEW board card on behalf of the owner, in one of your act-granted project(s) — use " +
+          "THIS tool (never tasks_create) whenever the owner names a project OTHER than your own home " +
+          "board; tasks_create only ever files to your home board and cannot target any other project. " +
           "`title` and (if given) `body` MUST each be a verbatim quote of words the owner ACTUALLY said " +
           "this turn; you may never author card content yourself. This NEVER creates the card on the " +
           "first call: Loom sends a confirmation request DIRECTLY to the owner's chat itself (you do NOT " +
@@ -681,8 +683,10 @@ const BOARD_REACH: CompanionCapability = {
       "board_update",
       {
         description:
-          "Update an EXISTING board card (by the exact `id` from board_list) on behalf of the owner — " +
-          "move its column (`columnKey`), change its `priority`, and/or set `held` (the owner-gated " +
+          "Update an EXISTING board card (by the exact `id` from board_list) on behalf of the owner — use " +
+          "THIS tool (never tasks_update) for a card that lives on a project OTHER than your own home " +
+          "board; tasks_update only ever reaches cards on your home board. " +
+          "Move its column (`columnKey`), change its `priority`, and/or set `held` (the owner-gated " +
           "'don't nag' flag). At least one of columnKey/priority/held must be given. This NEVER applies " +
           "the update on the first call: Loom sends a confirmation request DIRECTLY to the owner's chat " +
           "itself (you do NOT see or relay any prompt/token — just tell the owner you've requested their " +
