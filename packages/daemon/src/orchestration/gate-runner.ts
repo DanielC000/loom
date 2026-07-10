@@ -70,7 +70,7 @@ export interface GateStepRunner {
  * other work (and let the sync-wait budget's timer actually fire) while the OS process runs in the
  * background.
  */
-const runGateStep: GateStepRunner = (command, cwd, timeoutMs) => new Promise((resolve) => {
+export const runGateStep: GateStepRunner = (command, cwd, timeoutMs) => new Promise((resolve) => {
   // Bounded capture ring: keep roughly the last OUTPUT_TAIL_BYTES, dropping whole chunks off the front
   // as newer ones arrive. The final tail() slices to exactly the cap. Same shape as python/venv.ts's
   // runAsync — captured (not ignored) so a rejection can surface the actual gate output.
@@ -139,6 +139,44 @@ export async function runGateSequential(
     }
   }
   return { passed: true };
+}
+
+/** Whether the merge gate auto-retries ONCE on a transient-kill classification (see {@link
+ *  classifyGateFailure}) before reporting a rejection. Default ON; env-overridable (mirrors host.ts's
+ *  `Number(process.env.LOOM_X) || default` constants) so an op/test can force it off deterministically —
+ *  e.g. to prove a genuine non-zero exit is NEVER retried regardless of this flag's own default. */
+export const GATE_RETRY_ENABLED = process.env.LOOM_GATE_RETRY_ENABLED !== "0";
+
+/** Settle delay before that one auto-retry, giving transient memory pressure a chance to actually clear
+ *  before re-running the same gate. Env-overridable so a test can drive it near-zero instead of waiting
+ *  out a real multi-second delay. */
+export const GATE_RETRY_SETTLE_MS = Number(process.env.LOOM_GATE_RETRY_SETTLE_MS) || 5_000;
+
+/** {@link classifyGateFailure}'s three buckets. "kill" and "timeout" are both retry-ELIGIBLE (the merge
+ *  gate auto-retries once); "genuine" never is. */
+export type GateFailureClass = "genuine" | "kill" | "timeout";
+
+/**
+ * Classify a failed gate step so the merge gate can tell a transient external kill (an OOM-killer/
+ * resource-limit SIGKILL under memory pressure) from a genuine test/build failure (card bcba83a1) — the
+ * merge gate used to surface BOTH as the same flat "build gate failed", so managers learned the gate
+ * "lies" under load and hand-rolled an unsafe `--no-verify` squash to route around it.
+ *  - **"kill"** — an external signal terminated the step and OUR OWN {@link runGateStep} timeout bound
+ *    was NOT the cause (`failedTimedOut` false, `failedSignal` set) — the shape of an OOM-killer/cgroup/
+ *    resource-limit kill. Retry-eligible.
+ *  - **"timeout"** — OUR OWN `gateTimeoutMs` bound killed the step (`failedTimedOut` true; `runGateStep`
+ *    always pairs this with `signal:"SIGKILL"`, but the CAUSE is our own bound, not an external kill — a
+ *    separate bucket because a retry here may just re-time-out under the same load; see the merge-gate
+ *    retry call site's guardrail). Retry-eligible, but deliberately so.
+ *  - **"genuine"** — a clean non-zero exit (or a spawn error) with no signal and no timeout: a real
+ *    test/build failure. NEVER retried — retrying would waste cycles and could mask a flaky-passing test.
+ */
+export function classifyGateFailure(
+  result: Pick<GateSequentialResult, "failedSignal" | "failedTimedOut">,
+): GateFailureClass {
+  if (result.failedTimedOut) return "timeout";
+  if (result.failedSignal) return "kill";
+  return "genuine";
 }
 
 /** Best-effort classification of which build/DoD phase a failing gate step belongs to, derived from the

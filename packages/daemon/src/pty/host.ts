@@ -1594,8 +1594,11 @@ async function enumerateProcessesPosix(_timeoutMs: number): Promise<WorktreeProc
 }
 
 /** Matches any raw ASCII control character (0x00–0x1F) — built from char codes so the source never embeds
- *  a literal control character itself. See its use in {@link enumerateProcessesWin32}. */
-const CONTROL_CHAR_RE = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}]`, "g");
+ *  a literal control character itself. Strips ESC (0x1B) among others, which is what neutralizes an
+ *  embedded terminal escape sequence — e.g. the bracketed-paste terminator `\x1b[201~` becomes the inert
+ *  literal text `[201~` once its leading ESC is gone. See its use in {@link enumerateProcessesWin32}, and
+ *  (exported) in sessions/service.ts to sanitize gate output before it's piped through `enqueueStdin`. */
+export const CONTROL_CHAR_RE = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}]`, "g");
 
 /** Real win32 process enumerator: `Get-CimInstance Win32_Process` for every live process's ExecutablePath
  *  + CommandLine (win32 exposes no per-process cwd via CIM, so `cwd` is always null here — Path +

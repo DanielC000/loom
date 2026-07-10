@@ -597,6 +597,11 @@ export type OrchestrationEventKind =
   | "redirect_worker"
   | "recycle_begin" | "recycle_complete" | "merge_request" | "merge_done"
   | "merge_rejected" | "build_gate" | "kill_switch" | "schedule_fired"
+  // Merge-gate TRANSIENT-KILL auto-retry (card bcba83a1): `build_gate` failed with a retry-eligible
+  // classification (an OOM/SIGKILL, or the daemon's own gateTimeoutMs bound) — `build_gate_retry_attempt`
+  // marks that the one auto-retry is about to run (`detail.priorClass`), `build_gate_retry` records its
+  // outcome (`detail.passed`). A genuine non-zero exit never fires either — see classifyGateFailure.
+  | "build_gate_retry_attempt" | "build_gate_retry"
   // A scheduled fire FAILED to spawn (startManager/startAuditor threw). The durable mirror of
   // `schedule_fired`: without it a spawn failure ONLY hit stderr, so a cadence could silently never run
   // with no surfaced reason. Filed under the SCHEDULE id (managerSessionId = the schedule — no session was

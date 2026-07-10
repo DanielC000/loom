@@ -10,7 +10,7 @@ import {
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
-import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { sessionScratchDir, isCodescapeEnabled } from "../paths.js";
@@ -37,7 +37,7 @@ import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-worker
 import { RESUME_NUDGE_TAIL } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_RETRY_ENABLED, GATE_RETRY_SETTLE_MS, type GateSequentialResult } from "../orchestration/gate-runner.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
@@ -356,6 +356,15 @@ export class SessionService {
    */
   private readonly reapWorktreeProcesses: ((worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>) | undefined;
   /**
+   * Injectable seam for {@link runGateSequential} (card bcba83a1 — the merge gate's kill-classification +
+   * auto-retry). `undefined` in production ⇒ {@link confirmWorkerMerge} falls back to the real
+   * `runGateSequential`, which spawns real processes. Lets a hermetic test drive a deterministic
+   * signal/timedOut sequence — including one that differs between the first call and a retry — without
+   * needing a real cross-platform OOM/SIGKILL (signal delivery on `close` is not reliably fakeable via a
+   * real spawn on every OS this daemon runs on).
+   */
+  private readonly runGate: ((gate: string, cwd: string, timeoutMs: number) => Promise<GateSequentialResult>) | undefined;
+  /**
    * SLOW-retry policy for a wedged worktree (task dea6728e — the owner-directed refinement: "quarantine"
    * must not mean "dangles forever"). A wedge is usually eventually-resolvable (a held OS-indexer/
    * Defender-scan handle releases, or a pnpm-junction structure `rmdir` succeeds where `fs.rm` choked), so
@@ -459,6 +468,7 @@ export class SessionService {
       gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number; runTimeoutMs?: number;
       removeDir?: (target: string, timeoutMs: number) => Promise<{ removed: boolean; killed: boolean }>;
       reapWorktreeProcesses?: (worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>;
+      runGate?: (gate: string, cwd: string, timeoutMs: number) => Promise<GateSequentialResult>;
       wedgeSweepIntervalMs?: number; wedgeGiveUpAttempts?: number; wedgeGiveUpMs?: number;
       codescape?: CodescapeSupervisor;
     },
@@ -467,6 +477,7 @@ export class SessionService {
     this.provisionMs = opts?.provisionMs;
     this.removeDirOverride = opts?.removeDir;
     this.reapWorktreeProcesses = opts?.reapWorktreeProcesses;
+    this.runGate = opts?.runGate;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
     this.wedgeGiveUpMs = opts?.wedgeGiveUpMs ?? SessionService.DEFAULT_WEDGE_GIVE_UP_MS;
@@ -5218,17 +5229,63 @@ export class SessionService {
         }
       }
 
-      const gateResult = await runGateSequential(gate, worktreePath, gateTimeoutMs);
+      const runGateSeq = this.runGate ?? runGateSequential;
+      let gateResult = await runGateSeq(gate, worktreePath, gateTimeoutMs);
       evt("build_gate", { passed: gateResult.passed });
+      // TRANSIENT-KILL AUTO-RETRY (card bcba83a1 — the gate "lies" under memory pressure): an OOM/SIGKILL
+      // (or our OWN gateTimeoutMs bound) killing a step used to surface identically to a genuine test/build
+      // failure as the flat "build gate failed" — managers learned not to trust it under load and hand-
+      // rolled `git merge --squash --no-verify`, defeating the review/merge safety rail entirely. On a
+      // retry-eligible classification ONLY (never a clean non-zero exit — see classifyGateFailure), settle
+      // briefly then re-run the SAME gate ONCE before reporting anything. A pass here is absorbed silently:
+      // the manager never even sees that a transient kill happened, and execution falls through to the
+      // normal squash-merge below exactly as if the gate had been green the first time.
+      let gateRetried = false;
+      if (!gateResult.passed && GATE_RETRY_ENABLED && classifyGateFailure(gateResult) !== "genuine") {
+        gateRetried = true;
+        evt("build_gate_retry_attempt", { priorClass: classifyGateFailure(gateResult) });
+        await new Promise((resolve) => setTimeout(resolve, GATE_RETRY_SETTLE_MS));
+        gateResult = await runGateSeq(gate, worktreePath, gateTimeoutMs);
+        evt("build_gate_retry", { passed: gateResult.passed });
+      }
       if (!gateResult.passed) {
         // DIAGNOSTIC DETAIL (card 4b8f2b6e): the old bare "build gate failed" string discarded the
         // failing phase/step, the first failing test/assertion, and the child's own output — a manager
         // burned whole cycles blind-diagnosing (a real test failure vs. an fs.rmSync teardown flake vs.
         // a self-wiped node_modules TS2688 all looked identical). Enrich BOTH the sync result and the
-        // `[loom:merge-rejected]` signal text with the same detail; `reason` itself stays the bare
-        // string for back-compat with any existing consumer that only reads it.
+        // `[loom:merge-rejected]` signal text with the same detail.
+        //
+        // KILL CLASSIFICATION (card bcba83a1): `reason`/the headline now vary for a retry-eligible
+        // classification — "gate killed by <signal> [(possibly OOM/resource)] — <retry outcome>" / "gate
+        // timed out (possibly resource-starved under load) — <retry outcome>" instead of the flat "build
+        // gate failed" — but ONLY for those two classes; a genuine clean non-zero exit keeps the exact
+        // bare "build gate failed" string, so the existing back-compat contract for a real test/build
+        // failure (merge-gate-diagnostic.mjs case A) is untouched. The "kill" headline names the ACTUAL
+        // signal rather than asserting OOM outright (CR follow-up on bcba83a1): a SIGSEGV/SIGABRT from a
+        // broken native addon is a genuine deterministic crash, not memory pressure, and mislabeling it
+        // "likely OOM" would misdirect a manager diagnosing a real bug. The "(possibly OOM/resource)" hint
+        // is appended ONLY for SIGKILL — the signal an OOM-killer/cgroup limit actually sends.
+        const finalClass = classifyGateFailure(gateResult);
+        const retryOutcome = gateRetried
+          ? "retried once, still failed"
+          : (finalClass !== "genuine" ? "auto-retry disabled" : undefined);
+        const headline = finalClass === "kill"
+          ? `gate killed by ${gateResult.failedSignal}${gateResult.failedSignal === "SIGKILL" ? " (possibly OOM/resource)" : ""} — ${retryOutcome}`
+          : finalClass === "timeout"
+            ? `gate timed out (possibly resource-starved under load) — ${retryOutcome}`
+            : "build gate failed";
         const phase = classifyGatePhase(gateResult.failedStep);
-        const failingTest = gateResult.outputTail ? extractFailingTest(gateResult.outputTail) : undefined;
+        // INJECTION HYGIENE (CR e926d258 Minor, folded in on card bcba83a1): strip C0 control chars incl.
+        // ESC from the output tail + extracted failing-test line BEFORE they're embedded into the
+        // `[loom:merge-rejected]` pty text — this is the first flow that pipes RAW process bytes through
+        // enqueueStdin, and a colorized test runner's ANSI (or a tail that happened to literally contain
+        // the bracketed-paste terminator `\x1b[201~`) would otherwise inject noise — or, worse, break OUT
+        // of bracketed paste — into the MANAGER's TUI. Reuses pty/host.ts's own CONTROL_CHAR_RE rather than
+        // inventing a new regex. Sanitized once and reused for both the pty text and the sync gateDetail so
+        // the two never disagree.
+        const outputTail = gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
+        const rawFailingTest = outputTail ? extractFailingTest(outputTail) : undefined;
+        const failingTest = rawFailingTest ? rawFailingTest.replace(CONTROL_CHAR_RE, "") : undefined;
         const killNote = gateResult.failedTimedOut
           ? `timed out after ${gateTimeoutMs}ms`
           : gateResult.failedSignal
@@ -5240,20 +5297,22 @@ export class SessionService {
           gateResult.failedStep ? `step: ${gateResult.failedStep}` : undefined,
           phase ? `phase: ${phase}` : undefined,
           killNote,
+          gateRetried ? `retried once (settled ${GATE_RETRY_SETTLE_MS}ms)` : undefined,
           failingTest ? `failing: ${failingTest}` : undefined,
         ].filter(Boolean).join("; ");
-        const tailBlock = gateResult.outputTail ? `\n--- gate output tail ---\n${gateResult.outputTail}` : "";
-        const suppressed = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — build gate failed${detailBits ? ` (${detailBits})` : ""}; canonical repo untouched, worktree retained.${tailBlock}`);
+        const tailBlock = outputTail ? `\n--- gate output tail ---\n${outputTail}` : "";
+        const suppressed = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — ${headline}${detailBits ? ` (${detailBits})` : ""}; canonical repo untouched, worktree retained.${tailBlock}`);
         evt("merge_rejected", {
           reason: "gate", phase, failedStep: gateResult.failedStep, failingTest,
           exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
+          killClass: finalClass, retried: gateRetried,
           ...(suppressed ? { suppressed: true } : {}),
         });
         return {
           merged: false,
-          reason: "build gate failed",
+          reason: headline,
           gateDetail: {
-            phase, failedStep: gateResult.failedStep, failingTest, stderrTail: gateResult.outputTail,
+            phase, failedStep: gateResult.failedStep, failingTest, stderrTail: outputTail,
             exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
           },
           notified: !suppressed,
