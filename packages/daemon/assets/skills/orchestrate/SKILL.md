@@ -130,6 +130,12 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   `recommendation` when the choice is between concrete alternatives; a pure blocker is title+body only.
   It's NON-BLOCKING: keep orchestrating your other tracks, but don't guess past *this* decision point —
   `question_pull` the answer (which consumes it) when you reach it, or when the push nudge says it's answered.
+  **This holds even — especially — mid-conversation.** When you're actively chatting with the owner it
+  feels natural to inline a genuine decision as prose options for them to answer right there in the chat;
+  don't. You may narrate the decision or point at it in the chat, but the decision OBJECT is FILED via
+  `question_ask` — never typed as chat-prose options — so it becomes a durable, pushable, answerable
+  inbox record instead of a message that scrolls away with no answer surface. The litmus: **"Am I asking
+  the owner to CHOOSE? → `question_ask`, not chat."**
 - When the explicit backlog empties, distinguish **drained-for-now** from **converged**. *Drained*
   means no actionable card sits on the board *right now* but the project's planned work (per the vault)
   isn't finished — so don't idle: identify the highest-value next step toward the standing goal and do
