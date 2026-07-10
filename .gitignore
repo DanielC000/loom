@@ -23,3 +23,10 @@ spike/
 # Python bytecode (packages/daemon/assets/python/*.py run live by the daemon)
 __pycache__/
 *.pyc
+
+# Transient verify-run SQLite DBs (migration/backup verification) + their sidecars
+tmp-*verify.db*
+
+# Ad-hoc browser-verification screenshots written to the repo root (cwd) —
+# root-only so tracked assets under docs/, packages/**, site/** are untouched
+/*.png
