@@ -6,7 +6,7 @@ import type { Task, TaskPriority, KanbanColumn, SessionListItem } from "@loom/sh
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Button, Input, SectionLabel, StatusPill, Chip } from "../components/ui";
-import { RequestModal, RequestTypeTag } from "../components/requests";
+import { useOpenRequest, RequestTypeTag } from "../components/requests";
 import { relativeAge, requestOutcome, requestNeedsChip, REQUEST_TYPE_TONE } from "../lib/questions";
 import { color, font, tone, roleTone, type Tone } from "../theme";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
@@ -613,7 +613,7 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
 // history), so no new daemon route is needed. Each row opens the shared Request detail modal.
 function LinkedRequests({ taskId }: { taskId: string }) {
   const questions = useQuery({ queryKey: ["openQuestions", "history"], queryFn: () => api.openQuestions(true), refetchInterval: 5000 });
-  const [openId, setOpenId] = useState<string | null>(null);
+  const openRequest = useOpenRequest();
   const now = Date.now();
   const linked = (questions.data ?? []).filter((q) => q.taskId === taskId);
   if (linked.length === 0) return null;
@@ -634,11 +634,10 @@ function LinkedRequests({ taskId }: { taskId: string }) {
                 agent {q.sessionId.slice(0, 8)} · {meta} · {relativeAge(q.state === "pending" ? q.createdAt : q.answeredAt, now)}
               </span>
             </div>
-            <Button variant="ghost" onClick={() => setOpenId(q.id)} style={{ padding: "0 6px", flexShrink: 0 }}>view ↗</Button>
+            <Button variant="ghost" onClick={() => openRequest(q.id)} style={{ padding: "0 6px", flexShrink: 0 }}>view ↗</Button>
           </div>
         );
       })}
-      {openId && <RequestModal id={openId} onClose={() => setOpenId(null)} />}
     </div>
   );
 }

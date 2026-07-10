@@ -8,6 +8,7 @@ import { NAV_PAGES, useVisibleNavPages, type NavGroup } from "./nav";
 import { NavTab, Badge, Button } from "./components/ui";
 import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
+import { RequestModalProvider, useOpenRequest } from "./components/requests";
 import { api } from "./lib/api";
 import { useAttention, useNewAttention, attentionOpenTarget, type AttentionItem } from "./lib/attention";
 import { useDismissable } from "./lib/useDismissable";
@@ -295,6 +296,7 @@ let nextToastId = 0;
 
 function ToastContainer() {
   const navigate = useNavigate();
+  const openRequest = useOpenRequest();
   const [toasts, setToasts] = useState<{ id: number; item: AttentionItem }[]>([]);
   const dismiss = (id: number) => setToasts((ts) => ts.filter((t) => t.id !== id));
 
@@ -310,9 +312,10 @@ function ToastContainer() {
         <Toast key={id} item={item}
           onDismiss={() => dismiss(id)}
           onOpen={() => {
-            // MERGE REQUEST → review panel; every other openable kind → its session view; else no-op.
-            const target = attentionOpenTarget(item);
-            if (target) navigate(target);
+            // A pending REQUEST (any type — it carries a questionId) opens the shared in-place modal;
+            // a MERGE REQUEST → review panel; every other openable kind → its session view.
+            if (item.questionId) openRequest(item.questionId);
+            else { const target = attentionOpenTarget(item); if (target) navigate(target); }
             dismiss(id);
           }} />
       ))}
@@ -398,6 +401,7 @@ export default function App() {
   const visiblePages = useVisibleNavPages();
   return (
     <ActiveProjectProvider>
+      <RequestModalProvider>
       <div style={{ minHeight: "100vh" }}>
         <CommandPalette />
         <FirstRunWelcome />
@@ -437,6 +441,7 @@ export default function App() {
           </Routes>
         </main>
       </div>
+      </RequestModalProvider>
     </ActiveProjectProvider>
   );
 }

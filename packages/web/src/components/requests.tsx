@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { QuestionInboxItem, QuestionType, PermissionScope } from "@loom/shared";
@@ -144,7 +144,7 @@ export function RequestsInbox() {
   const qc = useQueryClient();
   const [typeFacet, setTypeFacet] = useState<QuestionType | "all">("all");
   const [projFacet, setProjFacet] = useState<string>("all"); // projectId | "all"
-  const [openId, setOpenId] = useState<string | null>(null);
+  const openRequest = useOpenRequest();
   const now = Date.now();
 
   const items = questions.data ?? [];
@@ -206,17 +206,15 @@ export function RequestsInbox() {
 
       {pending.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {pending.map((q) => <RequestRow key={q.id} q={q} now={now} onOpen={setOpenId} />)}
+          {pending.map((q) => <RequestRow key={q.id} q={q} now={now} onOpen={openRequest} />)}
         </div>
       )}
       {answered.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <SectionLabel style={{ margin: "4px 0 0", color: color.textMuted }}>Answered · waiting on manager pickup</SectionLabel>
-          {answered.map((q) => <RequestRow key={q.id} q={q} now={now} onOpen={setOpenId} />)}
+          {answered.map((q) => <RequestRow key={q.id} q={q} now={now} onOpen={openRequest} />)}
         </div>
       )}
-
-      {openId && <RequestModal id={openId} onClose={() => setOpenId(null)} />}
     </div>
   );
 }
@@ -246,6 +244,34 @@ export function RequestModal({ id, onClose }: { id: string; onClose: () => void 
       </div>
     </div>
   );
+}
+
+// ── RequestModalProvider / useOpenRequest ──────────────────────────────────────────
+// ONE app-wide mechanism for opening a Request as an in-place modal, so EVERY in-app answer
+// affordance — the Requests inbox/history, the Overview + Mission attention rows, the fleet decision
+// hints, the command palette, the global attention toast, and the Board task drawer — opens the SAME
+// dialog over the current page instead of navigating away to /question/:id. The provider is mounted
+// once near the app root: it owns the openId state and renders a single <RequestModal>; useOpenRequest()
+// returns the opener a consumer calls with a questionId. /question/:id stays a working standalone
+// deep-link (bookmarks, the toast's browser Notification, external links) — only the IN-APP click
+// affordances route through here, so there's no parallel per-page modal copy to drift.
+const RequestModalContext = createContext<((questionId: string) => void) | null>(null);
+
+export function RequestModalProvider({ children }: { children: ReactNode }) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  const open = useCallback((questionId: string) => setOpenId(questionId), []);
+  return (
+    <RequestModalContext.Provider value={open}>
+      {children}
+      {openId && <RequestModal id={openId} onClose={() => setOpenId(null)} />}
+    </RequestModalContext.Provider>
+  );
+}
+
+export function useOpenRequest(): (questionId: string) => void {
+  const open = useContext(RequestModalContext);
+  if (!open) throw new Error("useOpenRequest must be used within a RequestModalProvider");
+  return open;
 }
 
 // ── RequestDetail — the reusable detail/response body (4 affordances) ──────────────
@@ -580,7 +606,7 @@ export function RequestHistory() {
   const [projF, setProjF] = useState<string>("all");
   const [outcomeF, setOutcomeF] = useState<"all" | "authorized" | "denied" | "answered" | "provided">("all");
   const [dateF, setDateF] = useState<"all" | "24h" | "7d" | "30d">("all");
-  const [openId, setOpenId] = useState<string | null>(null);
+  const openRequest = useOpenRequest();
   const now = Date.now();
 
   const all = questions.data ?? [];
@@ -646,7 +672,7 @@ export function RequestHistory() {
       {rows.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {rows.map((q) => (
-            <button key={q.id} onClick={() => setOpenId(q.id)}
+            <button key={q.id} onClick={() => openRequest(q.id)}
               style={{ display: "flex", alignItems: "center", gap: 10, textAlign: "left", cursor: "pointer",
                 background: color.panel, border: `1px solid ${color.border}`, borderLeft: `3px solid ${tone[REQUEST_TYPE_TONE[q.type]]}`,
                 borderRadius: radius.sm, padding: "6px 10px" }}>
@@ -660,8 +686,6 @@ export function RequestHistory() {
           ))}
         </div>
       )}
-
-      {openId && <RequestModal id={openId} onClose={() => setOpenId(null)} />}
     </div>
   );
 }

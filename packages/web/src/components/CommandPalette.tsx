@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAttention, attentionOpenTarget } from "../lib/attention";
+import { useOpenRequest } from "./requests";
 import { useVisibleNavPages } from "../nav";
 import { color, font } from "../theme";
 
@@ -10,6 +11,7 @@ export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const navigate = useNavigate();
+  const openRequest = useOpenRequest();
   const { items: attention } = useAttention();
   // Gated nav list — the dev "Loom Platform" entry stays out for shipping users (see useVisibleNavPages).
   const navPages = useVisibleNavPages();
@@ -36,7 +38,10 @@ export function CommandPalette() {
       const decision = a.questionId != null;
       const verb = merge ? "Review" : decision ? "Answer" : "Open";
       const hint = merge ? "review" : decision ? "question" : "session";
-      return [{ label: `${verb} · ${a.kind} ${a.text}`, hint, run: () => navigate(target) }];
+      // A REQUEST opens the shared in-place modal (the provider renders it, so the closing palette can't
+      // race the mount); everything else navigates to its route. `go()` closes the palette after `run`.
+      const run = decision ? () => openRequest(a.questionId!) : () => navigate(target);
+      return [{ label: `${verb} · ${a.kind} ${a.text}`, hint, run }];
     }),
   ].filter((c) => c.label.toLowerCase().includes(q.toLowerCase()));
 

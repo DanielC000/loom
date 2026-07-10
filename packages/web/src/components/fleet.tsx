@@ -1,4 +1,3 @@
-import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, UsageLimitsStatus, UsageWindow } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
@@ -6,6 +5,7 @@ import { api } from "../lib/api";
 import { isRateLimited, usePendingDecisionsBySession, type AttentionItem, type PendingDecision } from "../lib/attention";
 import { fleetRollup, workerBuckets, capArchived } from "../lib/fleet";
 import { DecisionStateChip } from "./decisions";
+import { useOpenRequest } from "./requests";
 import { Panel, StatusPill, Chip, Meter, Button, Dot } from "./ui";
 import { color, font, radius, tone, type Tone } from "../theme";
 
@@ -171,7 +171,7 @@ function ClearRateLimitButton({ sessionId }: { sessionId: string }) {
 }
 
 export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
-  const navigate = useNavigate();
+  const openRequest = useOpenRequest();
   const decisions = usePendingDecisionsBySession();
   const decision = decisions.get(s.id);
   const st = sessionStatus(s);
@@ -192,7 +192,7 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
             border: `1px solid ${color.cyan}`, borderRadius: radius.sm, padding: "1px 7px" }}>
             <Dot tone="cyan" />{decision.count} decision{decision.count === 1 ? "" : "s"} · waiting on you
           </span>
-          <Button variant="primary" style={{ padding: "1px 8px", fontSize: 11 }} onClick={() => navigate(`/question/${decision.questionId}`)}>Answer →</Button>
+          <Button variant="primary" style={{ padding: "1px 8px", fontSize: 11 }} onClick={() => openRequest(decision.questionId)}>Answer →</Button>
         </span>
       )}
       {s.taskId && <Chip label="task" value={s.taskId.slice(0, 8)} />}
@@ -293,7 +293,7 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
   // new visual language. Optional + defaulted-off, so live cards stay byte-identical.
   muted?: boolean;
 }) {
-  const navigate = useNavigate();
+  const openRequest = useOpenRequest();
   const decisions = usePendingDecisionsBySession();
   const running = [...managers, ...workers];
   // A manager on this card holding a pending decision → the cyan card affordance (surface 5). Pick the
@@ -366,7 +366,7 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
         </div>
         {decision && (
           <Button variant="primary" style={{ padding: "1px 8px", fontSize: 11, flexShrink: 0 }}
-            onClick={() => navigate(`/question/${decision.questionId}`)}>Answer →</Button>
+            onClick={() => openRequest(decision.questionId)}>Answer →</Button>
         )}
       </div>
     </Panel>

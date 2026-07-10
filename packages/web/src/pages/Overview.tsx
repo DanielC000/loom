@@ -5,6 +5,7 @@ import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole 
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention, attentionOpenTarget, dismissAttention, type AttentionItem } from "../lib/attention";
+import { useOpenRequest } from "../components/requests";
 import { bySessionActivity, byCreatedStable, byManagerThenCreated, dedupeSessionsById } from "../lib/sessions";
 import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
 import { useStopSession, useForkSession, useEndSession } from "../lib/useSessionActions";
@@ -245,15 +246,23 @@ const ATTENTION_COLLAPSED_COUNT = 5;
 
 function OtherAttentionList({ items }: { items: AttentionItem[] }) {
   const navigate = useNavigate();
+  const openRequest = useOpenRequest();
   const [expanded, setExpanded] = useState(false);
   const overflow = items.length - ATTENTION_COLLAPSED_COUNT;
   // ≤N items ⇒ overflow ≤ 0 ⇒ render every row and NO toggle (byte-identical to the pre-cap output).
   const visible = overflow > 0 && !expanded ? items.slice(0, ATTENTION_COLLAPSED_COUNT) : items;
+  // A pending REQUEST item (it carries a questionId) opens the shared in-place modal (URL unchanged);
+  // every other openable alert (session/merge) still navigates to its route via attentionOpenTarget.
+  const openFor = (item: AttentionItem): (() => void) | undefined => {
+    if (item.questionId) return () => openRequest(item.questionId!);
+    const t = attentionOpenTarget(item);
+    return t ? () => navigate(t) : undefined;
+  };
   return (
     <>
       {visible.map((item) => (
         <AttentionRow key={item.key} item={item}
-          onOpen={(() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()}
+          onOpen={openFor(item)}
           onDismiss={item.dismissKey ? () => dismissAttention(item.dismissKey!) : undefined} />
       ))}
       {overflow > 0 && (
