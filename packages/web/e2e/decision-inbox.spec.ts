@@ -18,7 +18,7 @@ test.describe("decision inbox (card 8701bdbb, child B)", () => {
   test("a pending decision surfaces as an attention item, badges the bell, and answering it clears the item + persists", async ({ page, loomDaemon }) => {
     const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "DecMgr" });
     const title = `Rate-limit strategy ${Date.now()}`;
-    await loomDaemon.seedQuestion({
+    const id = await loomDaemon.seedQuestion({
       sessionId: mgr.sessionId, projectId: mgr.projectId, title,
       body: "A worker keeps hitting the 5h rate limit mid-wave. Which recovery strategy?",
       options: ["Keep workers warm", "Fail fast — free the slots now", "Freeze the wave"],
@@ -40,27 +40,30 @@ test.describe("decision inbox (card 8701bdbb, child B)", () => {
     // The per-project facet chip carries the seeded project's name.
     await expect(page.locator("main").getByRole("button", { name: new RegExp(mgr.projectName) })).toBeVisible();
 
-    // (3) Open the answer page from the inbox row's "Answer →".
+    // (3) The inbox row's "Answer →" opens the detail as a MODAL in place (NOT a route push) — the owner
+    // picked "answer without leaving the page you're on". The URL stays /inbox; a dialog appears.
     await page.locator("main").getByRole("button", { name: "Answer →" }).first().click();
-    await expect(page).toHaveURL(/\/question\//);
-    // main-scoped: the same title also appears in the transient attention toast (rendered outside <main>).
-    await expect(page.locator("main").getByText(title)).toBeVisible();
-    // The recommendation is flagged.
-    await expect(page.locator("main").getByText("recommended")).toBeVisible();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect(page).toHaveURL(/\/inbox$/);
+    await expect(dialog.getByText(title)).toBeVisible();
+    // The recommendation is flagged inside the modal.
+    await expect(dialog.getByText("recommended")).toBeVisible();
 
-    // Pick an option (click its choice panel) and submit.
-    await page.locator("main").getByText("Keep workers warm").click();
-    const submit = page.getByRole("button", { name: "Submit answer" });
+    // Pick an option (click its choice panel) and submit — inside the modal.
+    await dialog.getByText("Keep workers warm").click();
+    const submit = dialog.getByRole("button", { name: "Submit answer" });
     await expect(submit).toBeEnabled();
     await submit.click();
 
     // OBSERVABLE state change: the state chip flips to ANSWERED and the recorded-answer readout appears
     // (the pending form unmounts). This is the durable, non-racy witness (vs. the transient success flash).
-    await expect(page.locator("main").getByText("ANSWERED", { exact: true })).toBeVisible();
-    await expect(page.locator("main").getByText(/waiting on manager pickup/)).toBeVisible();
+    await expect(dialog.getByText("ANSWERED", { exact: true })).toBeVisible();
+    await expect(dialog.getByText(/waiting on manager pickup/)).toBeVisible();
 
-    // Persistence via GET: reload the answer page — the recorded choice is still there (read back from the daemon).
-    await page.reload();
+    // Persistence via GET on the deep-link route: the SAME content renders at /question/:id, and the
+    // recorded choice is read back from the daemon (proves the answer durably persisted).
+    await page.goto(`${loomDaemon.baseURL}/question/${id}`);
     await expect(page.locator("main").getByText("Keep workers warm")).toBeVisible();
     await expect(page.locator("main").getByText(/Answered/)).toBeVisible();
 

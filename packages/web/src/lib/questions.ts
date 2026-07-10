@@ -1,4 +1,4 @@
-import type { Question } from "@loom/shared";
+import type { Question, QuestionType } from "@loom/shared";
 import type { Tone } from "../theme";
 
 // Pure (JSX-free) helpers for the manager→human DECISION INBOX web surfaces (card 8701bdbb, child B):
@@ -55,4 +55,90 @@ export function decisionAttentionText(q: Pick<Question, "sessionId" | "title"> &
   const mgr = `mgr ${q.sessionId.slice(0, 8)}`;
   const proj = q.projectName ? ` · ${q.projectName}` : "";
   return `${mgr}${proj} — ${q.title}`;
+}
+
+// ── Request-type facet (card 695ebab0 — the Requests Inbox) ─────────────────────────────────────
+// A durable Request carries a `type` discriminator (decision | input | permission | credential). Each
+// type gets ONE signal tone from the EXISTING palette (no new color system) + its own answer affordance.
+// These pure, JSX-free helpers are the single source of truth for how a type reads across every surface
+// (the inbox rows, the type filter, the detail modal, the history table) so they can never drift; the
+// hermetic web test imports them too.
+
+// Type → signal tone. Owner-locked: decision=cyan (actionable question), input=phosphor (open answer),
+// permission=red (irreversible/outward), credential=amber (secret).
+export const REQUEST_TYPE_TONE: Record<QuestionType, Tone> = {
+  decision: "cyan",
+  input: "phosphor",
+  permission: "red",
+  credential: "amber",
+};
+
+// Display order for the type-filter chip row + any per-type enumeration — a stable, deliberate sequence
+// (the two everyday asks first, then the two trust-boundary asks).
+export const REQUEST_TYPE_ORDER: QuestionType[] = ["decision", "input", "permission", "credential"];
+
+// The pending row's primary action-button label, per type.
+export function requestActionLabel(type: QuestionType): string {
+  switch (type) {
+    case "permission": return "Review →";
+    case "credential": return "Provide →";
+    default: return "Answer →"; // decision / input
+  }
+}
+
+// The pending row's short "what's needed" state chip label, per type.
+export function requestNeedsChip(type: QuestionType): string {
+  switch (type) {
+    case "decision": return "needs pick";
+    case "input": return "needs answer";
+    case "permission": return "needs auth";
+    case "credential": return "needs secret";
+  }
+}
+
+// The detail modal's "how to answer" badge label, per type. A pure-blocker decision (no options) reads
+// "note only" — the note IS the answer — matching the pre-generalization decision page.
+export function requestAnswerBadge(q: Pick<Question, "type" | "options">): string {
+  switch (q.type) {
+    case "decision": return q.options && q.options.length > 0 ? "pick one or write a note" : "note only";
+    case "input": return "open answer";
+    case "permission": return "authorize or deny";
+    case "credential": return "write-only secret";
+  }
+}
+
+// The type-colored one-line hint shown under a pending row's meta line, per type.
+export function requestHint(q: Pick<Question, "type" | "options" | "recommendation" | "permissionAction">): string {
+  switch (q.type) {
+    case "credential":
+      return "secret · stored encrypted, never echoed back";
+    case "permission":
+      return `irreversible · outward${q.permissionAction ? ` — ${q.permissionAction}` : ""}`;
+    case "input":
+      return "open answer · free text";
+    default: {
+      // decision — options + recommendation, or a pure-blocker note-only ask.
+      if (q.options && q.options.length > 0) {
+        return `${q.options.length} option${q.options.length === 1 ? "" : "s"}${q.recommendation ? ` · rec. ${q.recommendation}` : ""}`;
+      }
+      return "open decision · note only";
+    }
+  }
+}
+
+// The recorded-outcome text for an answered/consumed request (the history table + the answered readout).
+// Never surfaces a secret — a credential always reads "provided · encrypted, not shown".
+export function requestOutcome(q: Pick<Question, "type" | "chosenOption" | "note">): string {
+  switch (q.type) {
+    case "credential":
+      return "provided · encrypted, not shown";
+    case "permission":
+      return q.chosenOption === "authorize"
+        ? `authorized${q.note ? ` · ${q.note}` : " · this action"}`
+        : `denied${q.note ? ` · ${q.note}` : ""}`;
+    case "input":
+      return q.note ? `“${q.note}”` : "—";
+    default: // decision
+      return q.chosenOption ? `chose ${q.chosenOption}` : q.note ? `“${q.note}”` : "—";
+  }
 }

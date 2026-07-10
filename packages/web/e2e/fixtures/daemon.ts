@@ -258,7 +258,13 @@ export interface LoomDaemon {
    */
   seedQuestion: (q: {
     sessionId: string; projectId: string; title?: string; body?: string;
-    options?: string[] | null; recommendation?: string | null;
+    // Requests-object generalization (card 695ebab0): `type` + its per-type ask-time payload. The daemon
+    // seed handler already forwards all of these to insertQuestion; a spec that omits `type` gets the
+    // default "decision" shape (byte-identical to before).
+    type?: "decision" | "input" | "permission" | "credential";
+    options?: string[] | null; recommendation?: string | null; taskId?: string | null;
+    permissionAction?: string | null; permissionScope?: "once" | "standing" | null; permissionExpiresAt?: string | null;
+    credentialEnvVar?: string | null;
     state?: "pending" | "answered" | "consumed"; chosenOption?: string | null; note?: string | null;
     createdAt?: string; answeredAt?: string;
   }) => Promise<string>;
@@ -537,14 +543,23 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       if (seededQuestionIds.length === 0) return;
       const ids = seededQuestionIds.splice(0); // clear as we go — an already-answered / unknown id just 400/404s
       for (const id of ids) {
-        // Answer via the real human-only route (note-only works for options-less AND options questions). A
-        // question a spec already answered (decision-inbox) 400s "already answered"; ignore it. Best-effort —
-        // the point is to leave NO pending question behind, so nothing keeps a global toast on later pages.
+        // Answer via the real human-only route. The answer SHAPE branches by the question's type (card
+        // 695ebab0): credential → {secret}; permission → {decision}; decision/input → {note}. So we read
+        // the type first, then send the matching body — otherwise a seeded permission/credential question
+        // (whose route rejects a bare {note}) would stay pending and keep pushing a global toast onto every
+        // later spec. A question already answered/consumed (or gone) just 400/404s and is ignored.
+        // Best-effort — a torn-down daemon at teardown must never fail the test.
         try {
+          const r = await fetch(`${baseURL}/api/questions/${id}`);
+          const type = r.ok ? ((await r.json()) as { type?: string }).type : undefined;
+          const body =
+            type === "credential" ? { secret: "e2e-cleanup-secret" }
+              : type === "permission" ? { decision: "deny", note: "e2e cleanup — auto-resolved" }
+                : { note: "e2e cleanup — auto-resolved" };
           await fetch(`${baseURL}/api/questions/${id}/answer`, {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ note: "e2e cleanup — auto-resolved" }),
+            body: JSON.stringify(body),
           });
         } catch { /* best-effort — a torn-down daemon at teardown must never fail the test */ }
       }

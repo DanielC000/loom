@@ -1,10 +1,13 @@
 import { useState, useEffect, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
 import type { Task, TaskPriority, KanbanColumn, SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Button, Input, SectionLabel, StatusPill, Chip } from "../components/ui";
+import { RequestModal, RequestTypeTag } from "../components/requests";
+import { relativeAge, requestOutcome, requestNeedsChip, REQUEST_TYPE_TONE } from "../lib/questions";
 import { color, font, tone, roleTone, type Tone } from "../theme";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
 import { useVoiceLang } from "../lib/useVoiceLang";
@@ -67,6 +70,18 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   const onDragEnd = (e: DragEndEvent) => {
     if (e.over && e.active.id !== e.over.id) move.mutate({ id: String(e.active.id), columnKey: String(e.over.id) });
   };
+
+  // Deep-link into a specific card's drawer via `?task=<id>` — used by a Request's reverse "linked task"
+  // chip (components/requests → RequestDetail). Consumed once the target card is present in the loaded
+  // board, then the param is cleared so a later close/reopen doesn't re-open it. A dangling id (deleted
+  // card) never resolves and simply leaves the board as-is — the soft link tolerates it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const taskParam = searchParams.get("task");
+  useEffect(() => {
+    if (!taskParam || !board.data) return;
+    if (board.data.tasks.some((t) => t.id === taskParam)) setOpenTaskId(taskParam);
+    setSearchParams((p) => { p.delete("task"); return p; }, { replace: true });
+  }, [taskParam, board.data, setSearchParams]);
 
   const openTask = board.data?.tasks.find((t) => t.id === openTaskId) ?? null;
 
@@ -577,7 +592,46 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
         </div>
         {/* The server's live-session guard (or any failure) surfaces here rather than silently closing. */}
         {deleteError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{deleteError}</span>}
+        {/* Requests soft-linked to this card (card 695ebab0). Read-only surfacing — "view ↗" opens the
+            Request detail modal. A deleted task never orphans a request (taskId is a non-FK soft link),
+            so this is derived by filtering the global inbox by taskId; a dangling id just never matches. */}
+        <LinkedRequests taskId={task.id} />
       </div>
+    </div>
+  );
+}
+
+// The "Linked requests" section inside the task drawer: every Request (any state) whose soft `taskId`
+// points at this card. Derived client-side from the global inbox (`openQuestions(true)` folds in consumed
+// history), so no new daemon route is needed. Each row opens the shared Request detail modal.
+function LinkedRequests({ taskId }: { taskId: string }) {
+  const questions = useQuery({ queryKey: ["openQuestions", "history"], queryFn: () => api.openQuestions(true), refetchInterval: 5000 });
+  const [openId, setOpenId] = useState<string | null>(null);
+  const now = Date.now();
+  const linked = (questions.data ?? []).filter((q) => q.taskId === taskId);
+  if (linked.length === 0) return null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
+      <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>
+        Linked requests ({linked.length})
+      </span>
+      {linked.map((q) => {
+        const meta = q.state === "pending" ? requestNeedsChip(q.type) : requestOutcome(q);
+        return (
+          <div key={q.id} style={{ display: "flex", alignItems: "center", gap: 8,
+            border: `1px solid ${color.border}`, borderLeft: `3px solid ${tone[REQUEST_TYPE_TONE[q.type]]}`, borderRadius: 4, padding: "5px 8px" }}>
+            <RequestTypeTag type={q.type} />
+            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+              <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
+              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                agent {q.sessionId.slice(0, 8)} · {meta} · {relativeAge(q.state === "pending" ? q.createdAt : q.answeredAt, now)}
+              </span>
+            </div>
+            <Button variant="ghost" onClick={() => setOpenId(q.id)} style={{ padding: "0 6px", flexShrink: 0 }}>view ↗</Button>
+          </div>
+        );
+      })}
+      {openId && <RequestModal id={openId} onClose={() => setOpenId(null)} />}
     </div>
   );
 }
