@@ -360,6 +360,90 @@ body {
   animation: loom-typing 1.2s ease-in-out infinite;
 }
 
+/* ── Companion chat: day divider — a centered pill between hairlines, segmenting the stream by day. ── */
+.loom-chat-day {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 2px 12px;
+}
+.loom-chat-day::before,
+.loom-chat-day::after {
+  content: "";
+  height: 1px;
+  background: var(--loom-border);
+  flex: 1;
+}
+.loom-chat-day span {
+  font-family: var(--loom-font-head);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: var(--loom-text-muted);
+  padding: 3px 11px;
+  border: 1px solid var(--loom-border);
+  border-radius: 999px;
+  background: var(--loom-panel-2);
+  white-space: nowrap;
+}
+
+/* ── Companion chat: inline "/new" reset boundary — a dashed rule marking a conversation reset. ── */
+.loom-chat-reset {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 2px;
+}
+.loom-chat-reset::before,
+.loom-chat-reset::after {
+  content: "";
+  flex: 1;
+  border-top: 1px dashed var(--loom-border-strong);
+}
+.loom-chat-reset span {
+  font-family: var(--loom-font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--loom-text-muted);
+  white-space: nowrap;
+}
+
+/* ── Companion chat: floating "Jump to latest" anchor — the direct fix for "grows endlessly". ──
+   Absolutely positioned over the scroll region; fades + slides in only once the reader scrolls up. */
+.loom-chat-jump {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%) translateY(8px);
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 14px 7px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  background: var(--loom-panel);
+  border: 1px solid var(--loom-phosphor);
+  color: var(--loom-text);
+  font-family: var(--loom-font-mono);
+  font-size: 11.5px;
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.55),
+    0 0 0 4px rgba(46, 230, 110, 0.06);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 140ms ease,
+    transform 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  z-index: 20;
+}
+.loom-chat-jump.is-shown {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+
 /* Honor reduced-motion: drop the cosmetic hover/active transitions + the mic pulse + overlay entrance. */
 @media (prefers-reduced-motion: reduce) {
   .loom-btn,
@@ -382,6 +466,9 @@ body {
   }
   .loom-chat-in {
     animation: none;
+  }
+  .loom-chat-jump {
+    transition: none;
   }
   .loom-typing-dot {
     animation: none;

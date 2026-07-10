@@ -62,6 +62,11 @@ export interface ChatMessage {
    *  (historyMessage) carries its own real channel (e.g. "telegram"), so a reload surfaces a per-bubble
    *  provenance badge for anything that didn't happen in this web panel. */
   channel: string;
+  /** ISO timestamp for this turn — a history-seeded row carries the stored `createdAt`; a LIVE message is
+   *  stamped at send/receive by the panel. Drives the day dividers, per-group timestamps, and grouping-gap
+   *  in {@link buildTimeline}. Optional so an un-stamped message still renders (it just never anchors a day
+   *  divider or a per-group time) and so the pure builders stay byte-identical when no timestamp is passed. */
+  ts?: string;
   /** True only for a history-seeded row whose text is itself a voice-note STT transcript (e.g. a Telegram
    *  voice message) — the panel renders a small mic indicator alongside it. Never set on a live message. */
   voice?: boolean;
@@ -71,6 +76,18 @@ export interface ChatMessage {
   /** Present only on a `send_media` delivery (the `media-out` lever's in-app fast-follow, card 9ec79b52) —
    *  never persisted, never on a "you"/history bubble (media is live-transport-only, exactly like `audio`). */
   media?: InboundMedia;
+  /** A non-bubble timeline SENTINEL rather than a real turn. `"reset"` marks a "/new" conversation boundary
+   *  (see {@link resetMarker}) so the panel draws an inline reset divider where the conversation was reset,
+   *  instead of silently emptying. {@link buildTimeline} routes a marker to its own timeline item and never a
+   *  chat bubble. */
+  marker?: "reset";
+  /** A proactive / unsolicited companion turn (a heartbeat, a fired reminder, an attention-push alert) —
+   *  rendered as a distinct amber EVENT LINE, not a chat bubble (see {@link buildTimeline}'s `event` item).
+   *  NOTE: no live producer sets this yet — a proactive reply currently reaches the in-app panel as an
+   *  ordinary `{type:"chat"}` frame the daemon does NOT tag (companion/in-app.ts). Wiring it needs a small
+   *  daemon change to mark a proactive-origin reply on the frame + history row; the render + grouping path
+   *  here is complete and unit-tested against that flag ahead of it. */
+  proactive?: boolean;
 }
 
 // Validate + frame an outbound send. Returns null for an empty/whitespace-only draft (nothing to send —
@@ -184,15 +201,31 @@ export function parseCrossChannel(
 }
 
 // Build a "you" (local) bubble from a prepared send. Split out so the send path is one testable step. This
-// WS is in-app-only by construction, so every live message is tagged IN_APP_CHANNEL.
-export function youMessage(text: string, id: string): ChatMessage {
-  return { id, author: "you", text, channel: IN_APP_CHANNEL };
+// WS is in-app-only by construction, so every live message is tagged IN_APP_CHANNEL. `ts` (the panel's
+// send-time stamp) is attached only when passed, so an un-stamped call stays byte-identical.
+export function youMessage(text: string, id: string, ts?: string): ChatMessage {
+  const m: ChatMessage = { id, author: "you", text, channel: IN_APP_CHANNEL };
+  if (ts) m.ts = ts;
+  return m;
 }
 
 // Build a "companion" (remote) bubble from a parsed inbound reply. `audio` (VOICE-P4 outbound) is present
-// only for a voiced reply — omitted from the returned object when absent (never `audio: undefined`).
-export function companionMessage(text: string, id: string, audio?: InboundAudio): ChatMessage {
-  return audio ? { id, author: "companion", text, channel: IN_APP_CHANNEL, audio } : { id, author: "companion", text, channel: IN_APP_CHANNEL };
+// only for a voiced reply, `ts` only when the panel stamps it — each omitted from the returned object when
+// absent (never `audio: undefined` / `ts: undefined`).
+export function companionMessage(text: string, id: string, audio?: InboundAudio, ts?: string): ChatMessage {
+  const m: ChatMessage = { id, author: "companion", text, channel: IN_APP_CHANNEL };
+  if (audio) m.audio = audio;
+  if (ts) m.ts = ts;
+  return m;
+}
+
+// Build a non-bubble RESET sentinel (a "/new"/"/reset" conversation boundary) for the live transcript, so
+// the panel draws an inline reset divider where the conversation was reset instead of silently emptying.
+// `buildTimeline` routes `marker:"reset"` to its own timeline item; the empty text never renders as a bubble.
+export function resetMarker(id: string, ts?: string): ChatMessage {
+  const m: ChatMessage = { id, author: "companion", text: "", channel: IN_APP_CHANNEL, marker: "reset" };
+  if (ts) m.ts = ts;
+  return m;
 }
 
 // The panel's connection lifecycle — drives the status pill + whether Send is enabled. `reconnecting`
@@ -210,6 +243,10 @@ export interface CompanionHistoryRow {
   text: string;
   channel: string;
   viaVoice?: boolean;
+  /** The stored `createdAt` (ISO) — the daemon serves the full CompanionMessage row (db.ts), so this is on
+   *  the wire; the panel threads it onto the bubble's `ts` for the day dividers + per-group timestamps.
+   *  Optional so a row without it still renders (older/partial seeds), just without a time anchor. */
+  createdAt?: string;
 }
 
 // Map ONE stored row to a rendered bubble — the daemon's "user"/"companion" author maps to this panel's
@@ -219,8 +256,10 @@ export interface CompanionHistoryRow {
 // carries the row's real provenance (e.g. "telegram") so the panel can badge a non-in-app bubble; `voice`
 // is set only when the row is a voice-note transcript (card 7d63e200).
 export function historyMessage(row: CompanionHistoryRow): ChatMessage {
-  const base: ChatMessage = { id: row.id, author: row.author === "user" ? "you" : "companion", text: row.text, channel: row.channel };
-  return row.viaVoice ? { ...base, voice: true } : base;
+  const m: ChatMessage = { id: row.id, author: row.author === "user" ? "you" : "companion", text: row.text, channel: row.channel };
+  if (row.viaVoice) m.voice = true;
+  if (row.createdAt) m.ts = row.createdAt;
+  return m;
 }
 
 // A file delivered via `send_media` (the `media-out` lever's in-app fast-follow, card 9ec79b52) — base64
@@ -251,8 +290,10 @@ export function parseMedia(raw: string): { chatId: string; data: string; mimeTyp
 // Build a "companion" bubble from a parsed {type:"media"} delivery — no text (the file IS the message,
 // mirrors a voice-only reply having empty accompanying prose in practice, though `audio` always rides
 // alongside reply text; media never does).
-export function mediaMessage(media: InboundMedia, id: string): ChatMessage {
-  return { id, author: "companion", text: "", channel: IN_APP_CHANNEL, media };
+export function mediaMessage(media: InboundMedia, id: string, ts?: string): ChatMessage {
+  const m: ChatMessage = { id, author: "companion", text: "", channel: IN_APP_CHANNEL, media };
+  if (ts) m.ts = ts;
+  return m;
 }
 
 // Build a rendered bubble from a parsed {type:"cross-channel"} live push (live-push card) — the SAME shape
@@ -260,7 +301,146 @@ export function mediaMessage(media: InboundMedia, id: string): ChatMessage {
 // counter), so a live-pushed row and the same row's later history-reload are structurally identical and can
 // be deduped by id alone: the panel drops one when it already holds a message with that id (see
 // CompanionChat's ws handler).
-export function crossChannelMessage(msg: { id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean }): ChatMessage {
-  const base: ChatMessage = { id: msg.id, author: msg.author === "user" ? "you" : "companion", text: msg.text, channel: msg.channel };
-  return msg.viaVoice ? { ...base, voice: true } : base;
+export function crossChannelMessage(msg: { id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean }, ts?: string): ChatMessage {
+  const m: ChatMessage = { id: msg.id, author: msg.author === "user" ? "you" : "companion", text: msg.text, channel: msg.channel };
+  if (msg.viaVoice) m.voice = true;
+  if (ts) m.ts = ts;
+  return m;
+}
+
+// ══ Timeline assembly (the "real chat" structure) ════════════════════════════════════════════════════
+// Turn a flat `ChatMessage[]` into a structured timeline the panel renders — the anti-"endless wall"
+// mechanics live HERE, in one pure, unit-tested function, so the component stays a thin view over it:
+//   • DAY DIVIDERS   — a divider before the first message of each calendar day.
+//   • GROUPING       — a run of same-author + same-channel messages within GROUP_GAP_MS collapses under ONE
+//                      header (name + time); only the group's LAST bubble shows the delivery/channel meta.
+//   • RESET MARKERS  — a `marker:"reset"` sentinel becomes an inline "/new" boundary (and breaks a run).
+//   • EVENT LINES    — a `proactive:true` turn becomes an amber event line, never a bubble (and breaks a run).
+//   • DELIVERY STATE — a "you" group-end bubble is "delivered" when a later turn proves the round trip, else
+//                      "sent" (it's on the wire, no reply yet). Honest: no fabricated read-receipt.
+
+/** Max gap between two same-author + same-channel messages for them to still GROUP under one header. Beyond
+ *  it a fresh header (name + time) is drawn even for the same sender — mirrors how mainstream chats re-stamp
+ *  a sender after a lull. */
+export const GROUP_GAP_MS = 5 * 60 * 1000;
+
+export type TimelineItem =
+  | { kind: "day"; id: string; label: string }
+  | { kind: "reset"; id: string }
+  | { kind: "event"; id: string; msg: ChatMessage; time: string }
+  | {
+      kind: "message";
+      id: string;
+      msg: ChatMessage;
+      /** Continues the previous same-sender run — the view suppresses the avatar + header. */
+      grouped: boolean;
+      /** Last message of its run — the view shows the delivery/channel meta + the bubble "tail" corner. */
+      groupEnd: boolean;
+      /** Formatted clock time for the group header (empty when the message carries no timestamp). */
+      time: string;
+      /** For a "you" group-end bubble only: whether a later turn proves the round trip. */
+      delivery?: "sent" | "delivered";
+    };
+
+/** Local calendar-day key for a timestamp (never a UTC key — dividers must match the viewer's own day
+ *  boundaries), or null when there's no/an unparseable timestamp. */
+function dayKeyOf(ts?: string): string | null {
+  if (!ts) return null;
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+/** Epoch ms for a timestamp, or null when absent/unparseable (an un-stamped message never groups by gap). */
+function tsMs(ts?: string): number | null {
+  if (!ts) return null;
+  const t = new Date(ts).getTime();
+  return Number.isNaN(t) ? null : t;
+}
+
+/** A per-group clock time, e.g. "9:14 AM" — locale/timezone of the viewer. Empty for a missing/bad stamp. */
+export function formatTime(ts?: string): string {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+/** A day-divider label relative to `now`: "Today" / "Yesterday" / a short weekday+date this year / a full
+ *  date otherwise. Relative labels are computed from local day boundaries so they're timezone-honest. */
+export function formatDayLabel(ts: string, now: Date = new Date()): string {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  const key = (x: Date) => `${x.getFullYear()}-${x.getMonth()}-${x.getDate()}`;
+  if (key(d) === key(now)) return "Today";
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  if (key(d) === key(yesterday)) return "Yesterday";
+  return d.toLocaleDateString(
+    undefined,
+    d.getFullYear() === now.getFullYear()
+      ? { weekday: "short", month: "short", day: "numeric" }
+      : { year: "numeric", month: "short", day: "numeric" },
+  );
+}
+
+/**
+ * Assemble the rendered timeline from a flat message list. Pure + deterministic given `now` (defaulted for
+ * the live panel; injected by the unit test) — the single source of truth for day dividers, consecutive-
+ * sender grouping, reset boundaries, proactive event lines, and the honest sent/delivered state.
+ */
+export function buildTimeline(messages: ChatMessage[], now: Date = new Date()): TimelineItem[] {
+  const items: TimelineItem[] = [];
+  let lastDayKey: string | null = null;
+  // The previous emitted plain-message run head, for grouping — cleared by any divider / reset / event.
+  let prev: { author: ChatAuthor; channel: string; dayKey: string | null; ms: number | null; itemIndex: number } | null = null;
+
+  for (const msg of messages) {
+    const dk = dayKeyOf(msg.ts);
+    // A day divider before the first DATED item of a new calendar day (an un-stamped item never anchors one).
+    if (dk && dk !== lastDayKey) {
+      items.push({ kind: "day", id: `day-${dk}-${msg.id}`, label: formatDayLabel(msg.ts as string, now) });
+      lastDayKey = dk;
+      prev = null; // a divider breaks a group run
+    }
+
+    if (msg.marker === "reset") {
+      items.push({ kind: "reset", id: `reset-${msg.id}` });
+      prev = null;
+      continue;
+    }
+    if (msg.proactive) {
+      items.push({ kind: "event", id: msg.id, msg, time: formatTime(msg.ts) });
+      prev = null;
+      continue;
+    }
+
+    const ms = tsMs(msg.ts);
+    const grouped: boolean =
+      prev !== null &&
+      prev.author === msg.author &&
+      prev.channel === msg.channel &&
+      prev.dayKey === dk &&
+      ms !== null &&
+      prev.ms !== null &&
+      ms - prev.ms <= GROUP_GAP_MS;
+
+    const itemIndex: number = items.push({ kind: "message", id: msg.id, msg, grouped, groupEnd: true, time: formatTime(msg.ts) }) - 1;
+    // Continuing a run demotes the previous head from group-end (only the LAST bubble carries the tail/meta).
+    if (grouped && prev) {
+      const p = items[prev.itemIndex];
+      if (p && p.kind === "message") p.groupEnd = false;
+    }
+    prev = { author: msg.author, channel: msg.channel, dayKey: dk, ms, itemIndex };
+  }
+
+  // Delivery state (honest, position-derived — no fabricated read-receipt): a "you" group-end bubble is
+  // "delivered" once ANY later timeline item exists (the conversation moved on ⇒ the turn landed), else it's
+  // the trailing turn and shows "sent" (on the wire, no reply yet).
+  const lastIndex = items.length - 1;
+  items.forEach((it, i) => {
+    if (it.kind === "message" && it.groupEnd && it.msg.author === "you") {
+      it.delivery = i < lastIndex ? "delivered" : "sent";
+    }
+  });
+  return items;
 }

@@ -14,8 +14,9 @@
 //   node --experimental-strip-types packages/web/test/companionChat.mjs
 import assert from "node:assert/strict";
 import {
-  IN_APP_CHANNEL, companionMessage, crossChannelMessage, historyMessage, isArmedInApp, mediaMessage, parseCrossChannel,
-  parseInbound, parseMedia, parseTranscript, prepareSend, prepareSendAudio, youMessage,
+  GROUP_GAP_MS, IN_APP_CHANNEL, buildTimeline, companionMessage, crossChannelMessage, formatDayLabel, formatTime,
+  historyMessage, isArmedInApp, mediaMessage, parseCrossChannel, parseInbound, parseMedia, parseTranscript,
+  prepareSend, prepareSendAudio, resetMarker, youMessage,
 } from "../src/lib/companionChat.ts";
 
 let pass = 0;
@@ -267,6 +268,126 @@ check("parseInbound never mistakes a media frame for a companion text reply (the
 check("mediaMessage: builds a companion bubble with empty text, carrying the media payload", () => {
   const media = { data: "QUJD", mimeType: "image/png", fileName: "mockup.png" };
   assert.deepEqual(mediaMessage(media, "1"), { id: "1", author: "companion", text: "", channel: "in-app", media });
+});
+
+// ── Timestamp threading: the "real chat" rebuild (card bbd1ced9) — every builder attaches `ts` ONLY when
+// passed, so an un-stamped call stays byte-identical while a stamped live/history turn carries a time. ─────
+check("youMessage / companionMessage / mediaMessage / crossChannelMessage: a passed ts is attached; omitted otherwise", () => {
+  assert.equal("ts" in youMessage("m", "1"), false, "no ts arg → no ts key");
+  assert.equal(youMessage("m", "1", "2026-07-10T09:00:00.000Z").ts, "2026-07-10T09:00:00.000Z");
+  assert.equal(companionMessage("m", "2", undefined, "2026-07-10T09:01:00.000Z").ts, "2026-07-10T09:01:00.000Z");
+  // audio + ts coexist, and the plain reply still carries neither key.
+  const voiced = companionMessage("v", "3", { data: "QUJD", mimeType: "audio/ogg" }, "2026-07-10T09:02:00.000Z");
+  assert.deepEqual(voiced, { id: "3", author: "companion", text: "v", channel: "in-app", audio: { data: "QUJD", mimeType: "audio/ogg" }, ts: "2026-07-10T09:02:00.000Z" });
+  assert.equal(mediaMessage({ data: "QUJD", mimeType: "image/png", fileName: "x.png" }, "4", "2026-07-10T09:03:00.000Z").ts, "2026-07-10T09:03:00.000Z");
+  assert.equal(crossChannelMessage({ id: "5", channel: "telegram", author: "user", text: "t", viaVoice: false }, "2026-07-10T09:04:00.000Z").ts, "2026-07-10T09:04:00.000Z");
+});
+
+check("historyMessage: the row's stored createdAt threads onto the bubble's ts; absent → no ts key", () => {
+  assert.equal(historyMessage({ id: "h1", author: "user", text: "x", channel: "in-app", createdAt: "2026-07-10T09:00:00.000Z" }).ts, "2026-07-10T09:00:00.000Z");
+  assert.equal("ts" in historyMessage({ id: "h2", author: "user", text: "x", channel: "in-app" }), false);
+});
+
+check("resetMarker: a non-bubble '/new' sentinel carrying marker:'reset' (empty text, never a bubble)", () => {
+  assert.deepEqual(resetMarker("r1"), { id: "r1", author: "companion", text: "", channel: "in-app", marker: "reset" });
+  assert.equal(resetMarker("r2", "2026-07-10T09:00:00.000Z").ts, "2026-07-10T09:00:00.000Z");
+});
+
+// ── buildTimeline: the anti-"endless wall" structure — day dividers, consecutive-sender grouping, per-group
+// timestamps, reset markers, proactive event lines, and the honest sent/delivered state. Deterministic given
+// an injected `now`; timestamps are built from LOCAL Date parts so the Today/Yesterday labels are TZ-stable. ─
+const NOW = new Date(2026, 6, 10, 15, 0, 0); // local noon-ish on 2026-07-10 — stable day boundaries
+const at = (h, m = 0) => new Date(2026, 6, 10, h, m, 0).toISOString(); // Today
+const atY = (h, m = 0) => new Date(2026, 6, 9, h, m, 0).toISOString(); // Yesterday
+const kinds = (items) => items.map((i) => i.kind);
+
+check("buildTimeline: a single dated message yields a day divider then the message", () => {
+  const items = buildTimeline([companionMessage("hi", "1", undefined, at(10))], NOW);
+  assert.deepEqual(kinds(items), ["day", "message"]);
+  assert.equal(items[0].label, "Today");
+  assert.equal(items[1].grouped, false);
+  assert.equal(items[1].groupEnd, true);
+});
+
+check("buildTimeline: consecutive same-author+channel messages within the gap GROUP under one header", () => {
+  const items = buildTimeline([
+    companionMessage("first", "1", undefined, at(10, 0)),
+    companionMessage("second", "2", undefined, at(10, 2)), // 2 min later, < GROUP_GAP_MS
+  ], NOW);
+  assert.deepEqual(kinds(items), ["day", "message", "message"]);
+  assert.equal(items[1].grouped, false, "run head is not grouped");
+  assert.equal(items[1].groupEnd, false, "run head is demoted from group-end once the run continues");
+  assert.equal(items[2].grouped, true, "the continuation is grouped");
+  assert.equal(items[2].groupEnd, true, "the last of the run is the group-end");
+});
+
+check("buildTimeline: an author change breaks the group", () => {
+  const items = buildTimeline([
+    companionMessage("theirs", "1", undefined, at(10, 0)),
+    youMessage("mine", "2", at(10, 1)),
+  ], NOW);
+  assert.equal(items[2].grouped, false);
+});
+
+check("buildTimeline: a channel change breaks the group (same author, different channel)", () => {
+  const items = buildTimeline([
+    youMessage("in-app turn", "1", at(10, 0)),
+    crossChannelMessage({ id: "2", channel: "telegram", author: "user", text: "phone turn", viaVoice: false }, at(10, 1)),
+  ], NOW);
+  assert.equal(items[2].grouped, false, "a telegram turn never groups with an in-app one");
+});
+
+check("buildTimeline: a gap beyond GROUP_GAP_MS breaks the group even for the same sender", () => {
+  const gapMin = GROUP_GAP_MS / 60000 + 1;
+  const items = buildTimeline([
+    companionMessage("early", "1", undefined, at(10, 0)),
+    companionMessage("much later", "2", undefined, at(10, gapMin)),
+  ], NOW);
+  assert.equal(items[2].grouped, false);
+});
+
+check("buildTimeline: messages spanning two days get a divider per day, labelled relative to now", () => {
+  const items = buildTimeline([
+    companionMessage("yesterday", "1", undefined, atY(9)),
+    companionMessage("today", "2", undefined, at(10)),
+  ], NOW);
+  assert.deepEqual(kinds(items), ["day", "message", "day", "message"]);
+  assert.equal(items[0].label, "Yesterday");
+  assert.equal(items[2].label, "Today");
+});
+
+check("buildTimeline: a reset marker becomes a reset item and breaks grouping across it", () => {
+  const items = buildTimeline([
+    companionMessage("before", "1", undefined, at(10, 0)),
+    resetMarker("r", at(10, 1)),
+    companionMessage("after", "2", undefined, at(10, 2)),
+  ], NOW);
+  assert.deepEqual(kinds(items), ["day", "message", "reset", "message"]);
+  assert.equal(items[3].grouped, false, "the message after a reset never groups with the one before it");
+});
+
+check("buildTimeline: a proactive turn becomes an amber EVENT item (never a bubble) and breaks grouping", () => {
+  const proactive = { ...companionMessage("heartbeat check-in", "1", undefined, at(10, 0)), proactive: true };
+  const items = buildTimeline([proactive, companionMessage("normal reply", "2", undefined, at(10, 1))], NOW);
+  assert.deepEqual(kinds(items), ["day", "event", "message"]);
+  assert.equal(items[1].time, formatTime(at(10, 0)), "the event line carries its formatted time");
+  assert.equal(items[2].grouped, false, "a normal reply after an event line is not grouped into it");
+});
+
+check("buildTimeline: delivery state is honest — a trailing 'you' turn is 'sent'; one a reply follows is 'delivered'", () => {
+  const trailing = buildTimeline([youMessage("no reply yet", "1", at(10, 0))], NOW);
+  assert.equal(trailing[1].delivery, "sent");
+  const answered = buildTimeline([
+    youMessage("question", "1", at(10, 0)),
+    companionMessage("answer", "2", undefined, at(10, 1)),
+  ], NOW);
+  assert.equal(answered[1].delivery, "delivered", "a later turn proves the round trip");
+  assert.equal(answered[2].delivery, undefined, "a companion bubble carries no delivery state");
+});
+
+check("formatDayLabel: Today / Yesterday are computed relative to now", () => {
+  assert.equal(formatDayLabel(at(9), NOW), "Today");
+  assert.equal(formatDayLabel(atY(9), NOW), "Yesterday");
 });
 
 console.log(`\n${pass} passed`);

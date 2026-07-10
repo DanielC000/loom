@@ -174,8 +174,15 @@ test("conversation history: the rail lists an archived conversation, opening it 
   await expect(chat.getByText("read-only")).toBeVisible();
   await expect(chat.getByText("Here is the roadmap summary.")).toBeVisible(); // the companion's reply bubble
   await expect(chat.getByText("voice note please")).toBeVisible(); // the Telegram voice turn's text
-  await expect(chat.getByText("Telegram")).toBeVisible(); // the cross-channel provenance badge
+  // The cross-channel provenance BADGE — `exact` so it targets the header badge, not the "via Telegram · sent"
+  // delivery meta the rebuild now also renders on the owner's Telegram turn (card bbd1ced9).
+  await expect(chat.getByText("Telegram", { exact: true })).toBeVisible();
   await expect(chat.locator('[aria-label="Voice message"]')).toBeVisible(); // the 🎤 voice indicator
+
+  // ── The "real chat" rebuild (card bbd1ced9): the transcript is STRUCTURED, not a flat wall. The seed
+  // inserts these rows now, so they all fall under a single "Today" day divider — proving the timeline
+  // assembly (day dividers + per-group timestamps) renders on real data, not just a bare bubble list. ──────
+  await expect(chat.locator('[role="separator"][aria-label="Today"]')).toBeVisible();
 
   // A past conversation is READ-ONLY — no composer while viewing it.
   await expect(chat.getByRole("textbox", { name: "Message" })).toHaveCount(0);
@@ -184,6 +191,54 @@ test("conversation history: the rail lists an archived conversation, opening it 
   await chat.getByRole("button", { name: /Live chat/ }).click();
   await expect(chat.getByRole("textbox", { name: "Message" })).toBeVisible();
   await expect(chat.getByText("read-only")).toHaveCount(0);
+});
+
+test("live chat: a long conversation stays anchored — scrolling up reveals 'Jump to latest', clicking returns to the newest", async ({ page, loomDaemon }) => {
+  // The "real chat" rebuild (card bbd1ced9) kills the "endless wall" with a stick-to-bottom + jump-to-latest
+  // anchor. Seed the CURRENT (open) conversation with a long back-and-forth so the live chat overflows and is
+  // scrollable, then prove the anchor appears only when scrolled up and returns to the newest on click.
+  const name = `Ada-${randomUUID().slice(0, 8)}`;
+  const companion = await loomDaemon.seedCompanion({ name });
+  const longConversation = Array.from({ length: 40 }, (_, i) => ({
+    author: (i % 2 === 0 ? "user" : "companion") as "user" | "companion",
+    text: `Turn ${i + 1}: ${i % 2 === 0 ? "owner asks about the roadmap" : "companion replies with the rundown"}`,
+  }));
+  await loomDaemon.seedCompanionConversations(companion.sessionId, [longConversation]); // single batch ⇒ stays open = live chat
+  await page.setViewportSize({ width: 820, height: 420 }); // keep the panel short enough that the turns overflow
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  // Focus OUR companion (picker renders with >1 companion on the shared daemon).
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+  const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
+  if (await pickerBtn.count()) {
+    await pickerBtn.click();
+    await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
+  }
+
+  const chat = page.locator("#companion-panel-chat");
+  const scroll = chat.getByTestId("companion-chat-scroll");
+  const jump = chat.locator(".loom-chat-jump");
+
+  // The newest turn renders and the view auto-anchors to the bottom → the jump anchor is NOT engaged.
+  await expect(scroll.getByText("Turn 40:", { exact: false })).toBeVisible();
+  await expect(jump).not.toHaveClass(/is-shown/);
+
+  // Precondition the mechanic depends on: the transcript actually OVERFLOWS its scroll box (else there's
+  // nothing to jump to). Fails loud with the measured heights if the layout didn't bound the panel.
+  const overflows = await scroll.evaluate((el) => el.scrollHeight > el.clientHeight + 80);
+  expect(overflows, "the seeded transcript should overflow the scroll box").toBe(true);
+
+  // Scroll up off the bottom → the "Jump to latest" anchor engages (observable class-state change). Drive a
+  // real 'scroll' event via the wheel (a raw scrollTop assignment can skip React's onScroll in some engines).
+  await scroll.hover();
+  await page.mouse.wheel(0, -4000);
+  await expect(jump).toHaveClass(/is-shown/);
+  await expect(jump).toContainText("Jump to latest");
+
+  // Click it → the view snaps back to the newest turn and the anchor disengages.
+  await jump.click();
+  await expect(jump).not.toHaveClass(/is-shown/);
+  await expect(scroll.getByText("Turn 40:", { exact: false })).toBeVisible();
 });
 
 test("Manage tab: Delete companion is two-step, names the companion, then removes it (observable)", async ({ page, loomDaemon }) => {
