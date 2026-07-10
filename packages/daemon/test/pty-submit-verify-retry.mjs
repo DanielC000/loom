@@ -140,8 +140,12 @@ try {
     // verify window: the OLD fire-and-forget code would do nothing here and strand the turn forever.
     await sleepUntil(t0, writeAt(2) + VERIFY_TIMEOUT / 2); // safely after write 2, safely before write 3
     check("(1) RETRY: a SECOND Enter was written after the withheld confirmation timed out", countOf(ENTER) === 2);
-    check("(1) still exactly ONE bracketed paste (the retry re-sends only Enter, not the whole turn again)",
-      countOf(PASTE_START) === 1);
+    // Card 97558183 (pty-submit-paste-end-retry.mjs) made attempt>1 ALSO re-assert a zero-length
+    // START+END pair before its Enter — defensive against a dropped closing paste marker — so PASTE_START
+    // now legitimately appears more than once. What this check actually guards (the retry re-sends only
+    // the Enter/re-assert bytes, never the whole turn's BODY again) is asserted on the body text instead.
+    check("(1) the turn's BODY appears exactly once (the retry never re-sends the whole turn again)",
+      countOf("REPORT_ONE") === 1);
     check("(1) busy is still true while retrying (turn presumed still trying to land)", busyLog[SID].at(-1) === true);
 
     // ===================== (2) confirmation (even just Stop, no UserPromptSubmit) stops retries =====================

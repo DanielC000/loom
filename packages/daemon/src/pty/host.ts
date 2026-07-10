@@ -2964,7 +2964,9 @@ export class PtyHost {
    *    wedge) — NOT auto-cleared here: a blind Ctrl-U could just as easily destroy a genuine, unrelated
    *    HUMAN draft the composer-dirty guard (`deferForHumanDraft`) would otherwise have protected (see
    *    card e1829591 — never destroy a user's uncommitted draft), and give-up doesn't re-check
-   *    `composerLen` at the moment it fires. Left as a documented residual risk pending a follow-up.
+   *    `composerLen` at the moment it fires. Left as a documented residual risk (card ee082fbb — LEAVE
+   *    AS IS pending a real-claude spike on whether a blind clear can even reliably empty a multi-line
+   *    composer; an unverified partial clear could be worse than the current stray-text concatenation).
    *
    * VALIDATED against a real claude engine (v2.1.206, card 9549e322 review item ②): forcing
    * SUBMIT_VERIFY_TIMEOUT_MS well below a normal UserPromptSubmit round-trip (so the retry ALWAYS fires a
@@ -2973,10 +2975,32 @@ export class PtyHost {
    * by-then-empty, mid-generation composer is INERT (no stray blank turn, no corruption). A retry firing
    * into a turn that actually already started is therefore harmless; the real risk this loop guards
    * against is a retry NOT firing when the Enter genuinely never registered.
+   *
+   * RETRY re-asserts the paste-close too (card 97558183): `submit()`'s own `BRACKET_PASTE_END` write is
+   * JUST as fire-and-forget as the Enter it precedes, and the SAME ConPTY drop class can lose it. When it
+   * does, Ink stays mid-paste and swallows every retried `\r` as paste CONTENT (never a submit) — worse,
+   * each swallowed byte resets Ink's paste idle-timer, actively preventing self-heal, so the old code's
+   * bare-Enter retry could NEVER recover from this and would burn all attempts before giving up. Every
+   * retry (attempt > 1; the FIRST attempt follows immediately after submit()'s own END write, so
+   * re-asserting there would just be redundant) re-sends a zero-length `START+END` pair — not a bare END
+   * — as ONE write, before the `\r`:
+   *   - Already closed (the common case — only the Enter dropped, not the END): Ink is idle, sees a fresh
+   *     START immediately followed by END, and treats it as an empty paste — a true no-op. A bare END
+   *     alone sent while idle is NOT verified safe (Ink may not recognize an out-of-context terminator the
+   *     same way a fresh START+END pair is defined to behave either idle or mid-paste — see this file's
+   *     own `CONTROL_CHAR_RE` note for the sibling risk of a stripped-ESC CSI turning into literal text).
+   *   - Still genuinely open (the bug): the extra bytes fold in as a few stray literal paste-content
+   *     characters, but END is found and the paste closes — recovering the turn (submitted with a small
+   *     cosmetic tail) instead of losing it entirely after 4 failed attempts.
+   * Real-`claude` confirmation of both branches (does an idle START+END truly no-op; does a still-open
+   * paste truly close and submit with just a small stray tail) is the Lead's live-verification pass — the
+   * fake pty this file's own test drives can't model Ink's paste state machine, only that the BYTES this
+   * host writes are exactly what's intended.
    */
   private sendEnterAndVerify(sessionId: string, attempt: number, gen: number): void {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.enterConfirmed || live.submitGeneration !== gen) return;
+    if (attempt > 1) live.pty.write(BRACKET_PASTE_START + BRACKET_PASTE_END);
     live.pty.write(ENTER);
     // eslint-disable-next-line no-console
     console.log(`[submit] ${sessionId} Enter attempt ${attempt}/${SUBMIT_MAX_ATTEMPTS} written — awaiting confirmation`);
