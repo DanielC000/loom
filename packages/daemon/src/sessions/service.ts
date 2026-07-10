@@ -13,7 +13,7 @@ import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "
 import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
-import { sessionScratchDir } from "../paths.js";
+import { sessionScratchDir, isCodescapeEnabled } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
 import { readRunUsage, readRunUsageFromFile } from "./context.js";
@@ -430,9 +430,12 @@ export class SessionService {
   private readonly redriveInFlightMsgIds = new Set<string>();
   /**
    * Codescape fleet-daemon wiring (card C1, epic `369dde3c`): the daemon-singleton supervisor handle,
-   * injected like every other boot-owned dependency here. Accepted only — C1 wires no behavior off it;
-   * C2 (per-session MCP injection) and C3 (lifecycle hooks: worktree spawn/merge/drop) are the consumers.
-   * `undefined` in every existing test constructor (3-arg or opts-less) ⇒ byte-identical.
+   * injected like every other boot-owned dependency here. C2 reads `getPort()` for the per-session MCP
+   * injection; C3 (`fireCodescapeRegister`/`fireCodescapeReingest`/`fireCodescapeDrop`) fires the
+   * worktree-spawn/merge/gc lifecycle hooks off it — every call gated `isCodescapeEnabled(config)` (folds
+   * in `isLoomDev()`), so a non-dev or Codescape-disabled project calls none of its methods.
+   * `undefined` in every existing test constructor (3-arg or opts-less) ⇒ byte-identical (`this.codescape?.`
+   * everywhere, never a bare `this.codescape.`).
    */
   private readonly codescape: CodescapeSupervisor | undefined;
   constructor(
@@ -2624,6 +2627,11 @@ export class SessionService {
       // with another taskless spawn's (this is also how a read-only reviewer avoids ever sharing the
       // author's worktree — see the guard note above).
       const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit });
+      // Codescape C3: register this worktree with the fleet-daemon supervisor — fire-and-forget, NEVER
+      // blocks the spawn (isCodescapeEnabled folds in isLoomDev(), so a non-dev/disabled daemon fires
+      // nothing). Skipped for a taskless spawn: codescapeWorktreeId(taskId) is null (no stable id for
+      // C3's later drop-on-gc to target — same carve-out C2's MCP wiring already uses).
+      this.fireCodescapeRegister(project.id, config, codescapeWorktreeId(taskId), worktreePath, branch);
 
       const now = new Date().toISOString();
       const worker: Session = {
@@ -5076,7 +5084,7 @@ export class SessionService {
     if (!fs.existsSync(worktreePath) || taskAlreadyTerminal) {
       const alreadyLanded = await findLandedSquashCommit(project.repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
       if (alreadyLanded) {
-        return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath });
+        return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id });
       }
     }
 
@@ -5247,7 +5255,7 @@ export class SessionService {
       }
       // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the
       // bookkeeping idempotently via the SAME helper the early-idempotency check above uses.
-      return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath });
+      return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id });
     }
 
     // Green: the branch is on the canonical repo. The worker (which reported 'done' but is still
@@ -5262,7 +5270,7 @@ export class SessionService {
     // Retire the worktree, delete the now-merged branch (so a later worker on this task — or any
     // id8-colliding task — doesn't hit "branch already exists"), and finish the task. The rejected
     // paths above return early WITHOUT deleting, so a re-task keeps its retained worktree + branch.
-    await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath });
+    await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id });
     // NO-GATE WARNING (finding 8363e602): with no gateCommand configured, the branch above merges
     // unconditionally — carry that forward explicitly so the manager knows this merge was NOT verified by
     // any build/DoD check, rather than silently rubber-stamping it with no signal either way.
@@ -5281,7 +5289,7 @@ export class SessionService {
    */
   private async finishAlreadyMerged(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
-    worktreePath: string; branch: string; repoPath: string;
+    worktreePath: string; branch: string; repoPath: string; projectId: string;
   }): Promise<ConfirmMergeResult> {
     try { this.pty.enqueueStdin(args.managerSessionId, `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.`, "system", undefined, undefined, "agent"); } catch { /* manager not live */ }
     this.pty.stop(args.workerSessionId, "hard");
@@ -5377,6 +5385,74 @@ export class SessionService {
   }
 
   /**
+   * Codescape C3 — register a newly-created worktree with the fleet-daemon supervisor. Fire-and-forget:
+   * called synchronously (not awaited by the caller) so a Codescape hiccup can never delay a worker spawn.
+   * Gated on `isCodescapeEnabled(config)` (which itself folds in `isLoomDev()` — a non-dev or
+   * Codescape-disabled project fires nothing) AND a non-null `worktreeId` — a taskless spawn's
+   * `codescapeWorktreeId(taskId)` is null (no stable id for a later drop to target), so it's skipped, not
+   * registered with a throwaway/incorrect id.
+   */
+  private fireCodescapeRegister(projectId: string, config: ResolvedConfig, worktreeId: string | null, worktreePath: string, baseRef: string): void {
+    if (!worktreeId || !isCodescapeEnabled(config)) return;
+    void this.codescape?.registerWorktree(projectId, { worktreeId, path: worktreePath, baseRef })
+      .then((res) => {
+        if (!res.ok) console.warn(`[codescape] register-worktree failed for project ${projectId} worktree ${worktreeId}: ${res.error ?? `status ${res.status}`}`);
+      })
+      .catch((err) => console.warn(`[codescape] register-worktree errored for project ${projectId} worktree ${worktreeId}: ${(err as Error).message}`));
+  }
+
+  /**
+   * Codescape C3 — reingest main's current working tree after a merge lands (both the Green and
+   * ALREADY_MERGED paths converge in {@link finalizeMerge}, which calls this once at the end). Resolves
+   * the project's config LIVE (mirrors the gate-command re-resolve elsewhere) so a human toggling the
+   * per-project `codescape.enabled` flag takes effect with no daemon restart. Fire-and-forget: the
+   * supervisor's own reingest is synchronous server-side (~9-11s, single-flight-serialized) — awaiting it
+   * here would hold the merge caller for that whole window, which the contract explicitly forbids.
+   *
+   * The whole body is wrapped: this is the LAST statement of {@link finalizeMerge}, called AFTER the
+   * merge has already landed — a synchronous throw here (a closed db mid-shutdown, a malformed config)
+   * must never surface as finalizeMerge REJECTING a merge that already fully succeeded (which would give
+   * the manager a spurious merge-failed for a task that's actually done). Best-effort by construction,
+   * never propagates.
+   */
+  private fireCodescapeReingest(projectId: string): void {
+    try {
+      const project = this.db.getProject(projectId);
+      if (!project) return;
+      const config = resolveConfig(project.config);
+      if (!isCodescapeEnabled(config)) return;
+      void this.codescape?.reingestMain(projectId)
+        .then((res) => {
+          if (!res.ok) console.warn(`[codescape] reingest-main failed for project ${projectId}: ${res.error ?? `status ${res.status}`}`);
+        })
+        .catch((err) => console.warn(`[codescape] reingest-main errored for project ${projectId}: ${(err as Error).message}`));
+    } catch (err) {
+      console.warn(`[codescape] reingest-main setup errored for project ${projectId} (merge already landed, unaffected): ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Codescape C3 — deregister a worktree that {@link gcWorktreeDir} just GENUINELY removed. Never fires
+   * for `recycleWorker` reuse (that path never calls gcWorktreeDir — the worktree persists). `ctx` is
+   * omitted/has a null `worktreeId` for the wedge-sweep retry path (no projectId/taskId on a
+   * `WedgedWorktreeEntry`) and for a taskless spawn's worktree (no stable id was ever registered) — both
+   * skipped rather than guessing. Fire-and-forget, same discipline as the register/reingest hooks above.
+   */
+  private fireCodescapeDrop(ctx?: { projectId: string; worktreeId: string | null }): void {
+    if (!ctx?.worktreeId) return;
+    const { projectId, worktreeId } = ctx;
+    const project = this.db.getProject(projectId);
+    if (!project) return;
+    const config = resolveConfig(project.config);
+    if (!isCodescapeEnabled(config)) return;
+    void this.codescape?.dropWorktree(projectId, worktreeId)
+      .then((res) => {
+        if (!res.ok) console.warn(`[codescape] drop-worktree failed for project ${projectId} worktree ${worktreeId}: ${res.error ?? `status ${res.status}`}`);
+      })
+      .catch((err) => console.warn(`[codescape] drop-worktree errored for project ${projectId} worktree ${worktreeId}: ${(err as Error).message}`));
+  }
+
+  /**
    * Slow-retry-aware wrapper around {@link removeWorktree} — the single removal chokepoint shared by
    * finalizeMerge, boot-reconcile Pass B's two GC sites, and the background wedge sweep (task dea6728e).
    * A worktree that's given up on (`needsHuman`, past the long give-up bound) is SKIPPED entirely — no
@@ -5398,7 +5474,11 @@ export class SessionService {
    * matches THIS `worktreePath`, so a caller that only ever reaches this method with a worktree it has
    * already decided to discard (every call site here does) can never sweep a live/protected one.
    */
-  private async gcWorktreeDir(repoPath: string, worktreePath: string): Promise<"removed" | "wedged" | "left-on-disk" | "needs-human-skip"> {
+  private async gcWorktreeDir(
+    repoPath: string,
+    worktreePath: string,
+    codescapeCtx?: { projectId: string; worktreeId: string | null },
+  ): Promise<"removed" | "wedged" | "left-on-disk" | "needs-human-skip"> {
     if (this.db.getWedgedWorktree(worktreePath)?.needsHuman) return "needs-human-skip";
     const reap = this.reapWorktreeProcesses ?? ((p: string) => reapProcessesRootedInWorktree(p));
     try {
@@ -5410,6 +5490,9 @@ export class SessionService {
     const { removed, wedged } = await removeWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs, removeDir: this.removeDirOverride });
     if (removed) {
       this.db.clearWedgedWorktree(worktreePath);
+      // Codescape C3: this worktree is GENUINELY gone (never fired for recycleWorker reuse — that path
+      // never calls gcWorktreeDir at all) — deregister it. Fire-and-forget, best-effort.
+      this.fireCodescapeDrop(codescapeCtx);
       return "removed";
     }
     if (wedged) {
@@ -5456,6 +5539,10 @@ export class SessionService {
   async sweepWedgedWorktreesOnce(): Promise<void> {
     const pending = this.db.listWedgedWorktrees().filter((e) => !e.needsHuman);
     for (const entry of pending) {
+      // Codescape C3: a wedge entry carries no projectId/taskId (WedgedWorktreeEntry is repoPath +
+      // worktreePath only) — the drop hook is skipped for a retry that succeeds via THIS path. Advisory
+      // metadata only (never correctness-critical, same as baseRef), so a stale registration lingering a
+      // bit longer here is an accepted gap, not a bug.
       await this.gcWorktreeDir(entry.repoPath, entry.worktreePath);
     }
     const stillPending = this.db.listWedgedWorktrees().some((e) => !e.needsHuman);
@@ -5494,7 +5581,7 @@ export class SessionService {
    */
   private async finalizeMerge(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
-    worktreePath: string; branch: string; repoPath: string;
+    worktreePath: string; branch: string; repoPath: string; projectId: string;
   }): Promise<void> {
     // SIBLING SWEEP first (incident 35fc823f): retire any OTHER live session bound to this task before the
     // worktree is removed, so no zombie is left running in the about-to-be-deleted cwd. The keep is the
@@ -5503,7 +5590,10 @@ export class SessionService {
     // Sessions has already marked prior-run ptys exited, so the task has no live siblings).
     await this.retireSiblingSessionsForTask(args.taskId, args.workerSessionId);
     try {
-      const outcome = await this.gcWorktreeDir(args.repoPath, args.worktreePath);
+      const outcome = await this.gcWorktreeDir(args.repoPath, args.worktreePath, {
+        projectId: args.projectId,
+        worktreeId: codescapeWorktreeId(args.taskId),
+      });
       if (outcome !== "removed") {
         // eslint-disable-next-line no-console
         console.warn(`[finalizeMerge] worktree ${args.worktreePath} not removed (${outcome}); ` +
@@ -5530,6 +5620,11 @@ export class SessionService {
       taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch },
     });
     await deleteBranch(args.repoPath, args.branch, { timeoutMs: this.gitOpMs });
+    // Codescape C3: reingest main's CURRENT working tree AFTER it's been checked out above (both the
+    // Green path and the ALREADY_MERGED path converge here) — fire-and-forget, NEVER awaited inline: the
+    // supervisor's own request is synchronous server-side (~9-11s, single-flight-serialized), so awaiting
+    // it here would hold the merge caller for that whole window. Best-effort by construction.
+    this.fireCodescapeReingest(args.projectId);
   }
 
   /**
@@ -5608,7 +5703,7 @@ export class SessionService {
         if (taskDone && !worktreeOnDisk) continue; // already fully reconciled — nothing to finish
         await this.finalizeMerge({
           managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId,
-          worktreePath, branch: s.branch, repoPath: project.repoPath,
+          worktreePath, branch: s.branch, repoPath: project.repoPath, projectId: project.id,
         });
         handledWorktrees.add(worktreePath);
         mergesFinished++;
@@ -5671,7 +5766,10 @@ export class SessionService {
       // worktrees stays byte-intact). Scope: only the no-`.git` case — NOT the rarer "`.git` exists but
       // gitdir pruned" variant.
       if (!fs.existsSync(path.join(worktreePath, ".git"))) {
-        const outcome = await this.gcWorktreeDir(project.repoPath, worktreePath).catch(() => "left-on-disk" as const);
+        const outcome = await this.gcWorktreeDir(project.repoPath, worktreePath, {
+          projectId: project.id,
+          worktreeId: codescapeWorktreeId(s.taskId),
+        }).catch(() => "left-on-disk" as const);
         // Only an ACTUAL removal counts as pruned — "wedged"/"left-on-disk" is a retry-pending attempt,
         // not a completed prune, and double-counting it here overstated the aggregate.
         if (outcome === "needs-human-skip") worktreesNeedsHuman++;
@@ -5684,7 +5782,10 @@ export class SessionService {
         worktreesKept++;
         continue;
       }
-      const outcome = await this.gcWorktreeDir(project.repoPath, worktreePath).catch(() => "left-on-disk" as const);
+      const outcome = await this.gcWorktreeDir(project.repoPath, worktreePath, {
+        projectId: project.id,
+        worktreeId: codescapeWorktreeId(s.taskId),
+      }).catch(() => "left-on-disk" as const);
       // Only an ACTUAL removal counts as pruned — see the identical comment on the dead-leftover branch above.
       if (outcome === "needs-human-skip") worktreesNeedsHuman++;
       else if (outcome === "removed") worktreesPruned++;
