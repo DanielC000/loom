@@ -37,7 +37,7 @@ import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-worker
 import { RESUME_NUDGE_TAIL } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest } from "../orchestration/gate-runner.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
@@ -57,7 +57,22 @@ const GIT_TIMEOUT_FLOOR_MS = 1_000;
  *  generic `[loom:merge-failed]` echo when the rich rejection already told the manager. Left `undefined`
  *  on a `merged:true` return (finishAlreadyMerged / the green path) — irrelevant there, the callback only
  *  consults it on `!merged`. */
-type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean };
+/** Diagnostic detail for a `reason:"gate"` rejection (card 4b8f2b6e) — populated ONLY when a configured
+ *  gateCommand step actually failed, so a manager can tell a real test failure apart from an fs teardown
+ *  flake or a self-wiped node_modules TS2688 without re-running the gate blind. `signal`/`timedOut` are
+ *  carried through (not yet acted on) so a later change (card bcba83a1) can classify an OOM/SIGKILL kill
+ *  distinctly from a genuine failure. */
+type GateRejectionDetail = {
+  phase?: "typecheck" | "test" | "build";
+  failedStep?: string;
+  failingTest?: string;
+  stderrTail?: string;
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+  timedOut?: boolean;
+};
+
+type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail };
 
 /**
  * worker_set_mode's mode ALLOWLIST (card 610abe29) — the security boundary for `setWorkerMode`.
@@ -5206,9 +5221,43 @@ export class SessionService {
       const gateResult = await runGateSequential(gate, worktreePath, gateTimeoutMs);
       evt("build_gate", { passed: gateResult.passed });
       if (!gateResult.passed) {
-        const suppressed = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — build gate failed; canonical repo untouched, worktree retained.`);
-        evt("merge_rejected", { reason: "gate", ...(suppressed ? { suppressed: true } : {}) });
-        return { merged: false, reason: "build gate failed", notified: !suppressed };
+        // DIAGNOSTIC DETAIL (card 4b8f2b6e): the old bare "build gate failed" string discarded the
+        // failing phase/step, the first failing test/assertion, and the child's own output — a manager
+        // burned whole cycles blind-diagnosing (a real test failure vs. an fs.rmSync teardown flake vs.
+        // a self-wiped node_modules TS2688 all looked identical). Enrich BOTH the sync result and the
+        // `[loom:merge-rejected]` signal text with the same detail; `reason` itself stays the bare
+        // string for back-compat with any existing consumer that only reads it.
+        const phase = classifyGatePhase(gateResult.failedStep);
+        const failingTest = gateResult.outputTail ? extractFailingTest(gateResult.outputTail) : undefined;
+        const killNote = gateResult.failedTimedOut
+          ? `timed out after ${gateTimeoutMs}ms`
+          : gateResult.failedSignal
+            ? `killed by ${gateResult.failedSignal}`
+            : gateResult.failedStatus != null
+              ? `exit ${gateResult.failedStatus}`
+              : undefined;
+        const detailBits = [
+          gateResult.failedStep ? `step: ${gateResult.failedStep}` : undefined,
+          phase ? `phase: ${phase}` : undefined,
+          killNote,
+          failingTest ? `failing: ${failingTest}` : undefined,
+        ].filter(Boolean).join("; ");
+        const tailBlock = gateResult.outputTail ? `\n--- gate output tail ---\n${gateResult.outputTail}` : "";
+        const suppressed = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) — build gate failed${detailBits ? ` (${detailBits})` : ""}; canonical repo untouched, worktree retained.${tailBlock}`);
+        evt("merge_rejected", {
+          reason: "gate", phase, failedStep: gateResult.failedStep, failingTest,
+          exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
+          ...(suppressed ? { suppressed: true } : {}),
+        });
+        return {
+          merged: false,
+          reason: "build gate failed",
+          gateDetail: {
+            phase, failedStep: gateResult.failedStep, failingTest, stderrTail: gateResult.outputTail,
+            exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
+          },
+          notified: !suppressed,
+        };
       }
     }
 
