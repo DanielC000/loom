@@ -3,7 +3,7 @@ import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "./api";
 import { hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
-import { decisionAttentionText } from "./questions";
+import { decisionAttentionText, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
 // isRateLimited / isStuckBusy (+ its exclusion helpers) moved to lib/fleet.ts (a JSX-free, runtime-
@@ -114,8 +114,10 @@ export interface AttentionItem {
   // affordance deep-links to that session's view (/session/:sessionId), NOT the merge panel.
   sessionId?: string | null;
   rateLimitSessionId?: string | null; // when set, the row offers a "clear / retry now" action (POST .../rate-limit/clear)
-  // Set ONLY on the DECISION NEEDED kind (a pending manager→human question). Its "Answer →" affordance
-  // opens the answer page (/question/:id); the row also renders a PENDING state chip off this presence.
+  // Set ONLY on a pending/orphaned request item (a manager→human Request of ANY type — decision, input,
+  // permission, credential). Its "Answer →" affordance opens the answer page (/question/:id); the row
+  // also renders a PENDING state chip off this presence. This is the structural "is a request" check —
+  // prefer it over comparing `kind` to a literal label, since the label itself is now type-varying.
   questionId?: string | null;
 }
 
@@ -125,7 +127,9 @@ export interface AttentionItem {
 // Overview rows, the toast, and the command palette can't drift on where "Open" goes (card a16dfafb).
 export function attentionOpenTarget(item: AttentionItem): string | null {
   if (item.kind === "MERGE REQUEST") return item.workerSessionId ? `/review/${item.workerSessionId}` : null;
-  if (item.kind === "DECISION NEEDED" || item.kind === "DECISION ORPHANED") return item.questionId ? `/question/${item.questionId}` : null;
+  // A pending/orphaned request item is the only kind that carries a questionId (any type — decision,
+  // input, permission, credential — so this is structural, not a hardcoded "DECISION" kind string).
+  if (item.questionId) return `/question/${item.questionId}`;
   return item.sessionId ? `/session/${item.sessionId}` : null;
 }
 
@@ -193,13 +197,14 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   // never learn the manager needs attention) or leaving it indistinguishable from a live, answerable
   // decision (misleading — see the residual-gap investigation, card 8701bdbb follow-up).
   for (const q of (questions.data ?? []).filter((x) => x.state === "pending")) {
+    const label = requestAttentionLabel(q.type); // type-aware — a credential/permission/input ask is not a "decision"
     items.push(q.sessionOrphaned
       ? {
-          key: `q-${q.id}`, tone: "amber", kind: "DECISION ORPHANED", questionId: q.id, sessionId: q.sessionId,
+          key: `q-${q.id}`, tone: "amber", kind: label.replace(" NEEDED", " ORPHANED"), questionId: q.id, sessionId: q.sessionId,
           text: `${decisionAttentionText(q)} — asking session is gone; may never be consumed`,
         }
       : {
-          key: `q-${q.id}`, tone: "cyan", kind: "DECISION NEEDED", questionId: q.id, sessionId: q.sessionId,
+          key: `q-${q.id}`, tone: "cyan", kind: label, questionId: q.id, sessionId: q.sessionId,
           text: decisionAttentionText(q),
         });
   }

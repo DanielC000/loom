@@ -31,7 +31,9 @@ export function CommandPalette() {
       const target = attentionOpenTarget(a);
       if (!target) return [];
       const merge = a.kind === "MERGE REQUEST";
-      const decision = a.kind === "DECISION NEEDED" || a.kind === "DECISION ORPHANED";
+      // Structural check (any pending/orphaned Request type carries a questionId) — the kind LABEL now
+      // varies by type (DECISION/SECRET/PERMISSION/INPUT NEEDED), so it can't be compared literally.
+      const decision = a.questionId != null;
       const verb = merge ? "Review" : decision ? "Answer" : "Open";
       const hint = merge ? "review" : decision ? "question" : "session";
       return [{ label: `${verb} · ${a.kind} ${a.text}`, hint, run: () => navigate(target) }];

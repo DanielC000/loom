@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import {
   DECISION_WATCHDOG_MS, relativeAge, isDecisionWatchdog, questionStateChip, decisionAttentionText,
+  requestAttentionLabel,
 } from "../src/lib/questions.ts";
 
 let pass = 0;
@@ -65,6 +66,13 @@ check("decisionAttentionText: mgr <id8> · <project> — <title>", () => {
     decisionAttentionText({ sessionId: "b2d40f18bbbb", title: "Protected main" }),
     "mgr b2d40f18 — Protected main",
   );
+});
+
+check("requestAttentionLabel: type-aware global attention label, per Request type", () => {
+  assert.equal(requestAttentionLabel("decision"), "DECISION NEEDED");
+  assert.equal(requestAttentionLabel("input"), "INPUT NEEDED");
+  assert.equal(requestAttentionLabel("permission"), "PERMISSION NEEDED");
+  assert.equal(requestAttentionLabel("credential"), "SECRET NEEDED");
 });
 
 console.log(`\n${pass} passed — decision-inbox helpers`);

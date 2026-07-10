@@ -86,6 +86,18 @@ export function requestActionLabel(type: QuestionType): string {
   }
 }
 
+// The global attention-surface label (toast/bell/⌘K + Mission Control queue), per type — a pending
+// request is NOT always a "decision" (a credential ask is a secret, not a choice). Single source so the
+// label can't drift between surfaces; lib/attention derives every pending-request item's `kind` off this.
+export function requestAttentionLabel(type: QuestionType): string {
+  switch (type) {
+    case "credential": return "SECRET NEEDED";
+    case "permission": return "PERMISSION NEEDED";
+    case "input": return "INPUT NEEDED";
+    case "decision": return "DECISION NEEDED";
+  }
+}
+
 // The pending row's short "what's needed" state chip label, per type.
 export function requestNeedsChip(type: QuestionType): string {
   switch (type) {

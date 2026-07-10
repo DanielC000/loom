@@ -4,6 +4,7 @@ import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "../lib/api";
 import { bySessionActivity, mostRecentActivity } from "../lib/sessions";
 import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/attention";
+import { REQUEST_TYPE_ORDER, requestAttentionLabel } from "../lib/questions";
 import { useState } from "react";
 import { Panel, SectionLabel, Badge, Button } from "../components/ui";
 import { color, font } from "../theme";
@@ -13,11 +14,13 @@ import { ReviewQueue } from "../components/reviewQueue";
 import { AuditReplayPanel } from "../components/auditReplay";
 
 // Attention severity ranking — surfaces the REVIEW/decision bottleneck at the top of the queue. Merge
-// requests already live in the dedicated Review queue above; among the rest, a needed human DECISION or a
-// stalled manager (red, blocking the wave) outranks the recoverable amber states (rate-limit/stuck). The
-// parallel ceiling is human review, so what needs a human first must read first.
+// requests already live in the dedicated Review queue above; among the rest, a pending human Request (any
+// type — decision/input/permission/credential) or a stalled manager (red, blocking the wave) outranks the
+// recoverable amber states (rate-limit/stuck). The parallel ceiling is human review, so what needs a human
+// first must read first. Every request-type label ranks -1 — derived from requestAttentionLabel so this
+// can't drift from the label source of truth in lib/questions.
 const ATTN_RANK: Record<string, number> = {
-  "DECISION NEEDED": -1, // a blocked human is the wave's tightest bottleneck — a pending decision reads first
+  ...Object.fromEntries(REQUEST_TYPE_ORDER.map((t) => [requestAttentionLabel(t), -1])),
   "NEEDS A HUMAN": 0,
   "MANAGER ASLEEP": 1,
   "CONTEXT OVERFLOW": 2,

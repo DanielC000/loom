@@ -122,11 +122,13 @@ export function PlanUsageStrip() {
 }
 
 export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionItem; onOpen?: () => void; onDismiss?: () => void }) {
-  // A pending DECISION (live or orphaned) reads as an answerable question: a cyan left-edge, a PENDING
-  // state chip, and an "Answer →" (not the generic "Open") — distinct from the phosphor MERGE REQUEST and
-  // the red/amber alerts. DECISION ORPHANED still routes to the same answer page (its own amber tone/text
-  // already flags the asker is gone), just via item.tone rather than a hardcoded second border color.
-  const decision = item.kind === "DECISION NEEDED" || item.kind === "DECISION ORPHANED";
+  // A pending Request of ANY type (live or orphaned) reads as an answerable ask: a cyan left-edge, a
+  // PENDING state chip, and an "Answer →" (not the generic "Open") — distinct from the phosphor MERGE
+  // REQUEST and the red/amber alerts. Orphaned still routes to the same answer page (its own amber
+  // tone/text already flags the asker is gone), just via item.tone rather than a hardcoded second border
+  // color. `questionId` (not a literal kind string) is the structural marker — the kind LABEL now varies
+  // by request type (DECISION/SECRET/PERMISSION/INPUT NEEDED), so it can no longer be compared literally.
+  const decision = item.questionId != null;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${color.border}`,
       borderLeft: decision ? `3px solid ${color.cyan}` : `1px solid ${color.border}`, borderRadius: 4, padding: "6px 10px", marginBottom: 6 }}>
