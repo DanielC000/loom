@@ -143,9 +143,20 @@ test("conversation history: the rail lists an archived conversation, opening it 
   ]);
   await page.goto(`${loomDaemon.baseURL}/companion`);
 
-  // Focus OUR companion (the shared daemon accumulates others; the picker renders when >1 exist).
+  // Focus OUR companion. On the shared worker daemon sibling tests leave their own companions in the config
+  // list (archived rows aren't dropped), so the page loads focused on whichever is "most active" — usually
+  // NOT ours — and the picker (rendered when >1 companion exists) is how we switch to it. Gate on the
+  // always-present "+ New companion" affordance first: it renders only once the companion list has loaded and
+  // the switcher is in its FINAL form, so the picker-present check below can't race an unrendered picker (the
+  // old `if (await pickerBtn.count())` read the count right after goto — before the picker mounted — skipped
+  // the click, and left a sibling focused: no history rail, a false failure). In an isolated single-companion
+  // run there's no picker and ours is already focused, so the click is legitimately skipped.
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
   const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
-  if (await pickerBtn.count()) await pickerBtn.click();
+  if (await pickerBtn.count()) {
+    await pickerBtn.click();
+    await expect(pickerBtn).toHaveAttribute("aria-pressed", "true"); // focus actually landed on ours
+  }
 
   const chat = page.locator("#companion-panel-chat");
   const rail = chat.locator('aside[aria-label="Conversation history"]');

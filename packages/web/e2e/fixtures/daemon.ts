@@ -248,6 +248,13 @@ export interface LoomDaemon {
    * page, the global inbox, the fleet affordance). Inserted straight through deps.db.insertQuestion (the
    * same writer question_ask uses); it NEVER runs a real ask. Point `sessionId` at a seeded live manager
    * session so the fleet affordance + "jump to live session" resolve. Returns the inserted question id.
+   *
+   * A PENDING seeded question renders a GLOBAL "DECISION NEEDED" notification toast (the attention plane is
+   * daemon-wide, not per-page), so on the SHARED worker daemon it leaks into every LATER spec's page and its
+   * toast stack overlays the bottom-right corner of the viewport — where e.g. the composer's "Preset prompts"
+   * trigger lives, so a click there can punch through into a toast. `autoIsolation` therefore auto-resolves
+   * every seeded question after each test (see {@link LoomDaemon.resolveSeededQuestions}); specs don't clean
+   * up their own.
    */
   seedQuestion: (q: {
     sessionId: string; projectId: string; title?: string; body?: string;
@@ -288,6 +295,18 @@ export interface LoomDaemon {
    * already-archived / unknown id is a no-op).
    */
   archiveSeededSessions: () => Promise<void>;
+  /**
+   * Answer (pending → answered) every question seeded by {@link LoomDaemon.seedQuestion} so far, via the real
+   * human-only `POST /api/questions/:id/answer` route. The `autoIsolation` auto fixture calls this after EVERY
+   * test: a PENDING question stays a GLOBAL "DECISION NEEDED" attention item, so on the SHARED worker daemon it
+   * would keep pushing notification toasts onto every LATER spec's page — and that toast stack overlays the
+   * viewport's bottom-right corner, where a `force`-click on the composer's "Preset prompts" trigger could
+   * punch through into a toast and navigate away. Answered questions leave the attention plane, closing that
+   * forward leak centrally. Idempotent + best-effort: a question a spec already answered (decision-inbox) or an
+   * unknown id just 400/404s and is ignored; the manager-nudge the route enqueues is a no-op for a seeded
+   * no-pty session, so no real claude is ever spawned.
+   */
+  resolveSeededQuestions: () => Promise<void>;
 }
 
 export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomDaemon: LoomDaemon }>({
@@ -317,13 +336,17 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
   // files (playwright.config.ts: workers:1, fullyParallel:false), so a session a spec seeds (a live
   // terminal OR an exited companion) lingers into the NEXT spec and pollutes its global-visible empty
   // states — the Usage page's Live-occupancy plane counts EVERY non-archived session, not just live ones
-  // (the pre-existing companion→usage leak). Archiving seeded sessions + hard-killing spawned host shells
-  // after each test closes that forward leak centrally. Idempotent: an already-archived / already-killed
-  // id is a no-op, so a spec that also cleans up explicitly is harmless.
+  // (the pre-existing companion→usage leak). A seeded PENDING question is a second forward leak: it stays a
+  // GLOBAL "DECISION NEEDED" attention item whose toast stack overlays every later page's bottom-right corner
+  // (it navigated a `force`-click on the composer's "Preset prompts" trigger straight into a toast). Archiving
+  // seeded sessions, hard-killing spawned host shells, AND answering seeded questions after each test closes
+  // all three forward leaks centrally. Idempotent: an already-archived / already-killed / already-answered id
+  // is a no-op, so a spec that also cleans up explicitly is harmless.
   autoIsolation: [async ({ loomDaemon }, use) => {
     await use();
     await loomDaemon.killSpawnedShells();
     await loomDaemon.archiveSeededSessions();
+    await loomDaemon.resolveSeededQuestions();
   }, { auto: true }],
 
   // eslint-disable-next-line no-empty-pattern
@@ -399,6 +422,9 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
     // Track every seeded session id (live terminals + companions) so afterEach can archive them off the
     // shared daemon's rail (any non-archived row pollutes a later spec's global "no live sessions" state).
     const seededSessionIds: string[] = [];
+    // Track every seeded question id so afterEach can answer them off the shared daemon's attention plane — a
+    // lingering PENDING question keeps pushing a global "DECISION NEEDED" toast onto every later spec's page.
+    const seededQuestionIds: string[] = [];
 
     const seedUsageSample: LoomDaemon["seedUsageSample"] = async (sample) => {
       const res = await apiPost<{ usageSampleIds: string[] }>(baseURL, "/internal/test/seed", {
@@ -496,13 +522,32 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
 
     const seedQuestion: LoomDaemon["seedQuestion"] = async (q) => {
       const res = await apiPost<{ questionIds: string[] }>(baseURL, "/internal/test/seed", { questions: [q] });
-      return res.questionIds[0];
+      const id = res.questionIds[0];
+      seededQuestionIds.push(id);
+      return id;
     };
 
     const archiveSeededSessions: LoomDaemon["archiveSeededSessions"] = async () => {
       if (seededSessionIds.length === 0) return;
       const ids = seededSessionIds.splice(0); // clear as we archive — already-archived ids are no-ops
       await apiPost(baseURL, "/internal/test/seed", { archiveSessions: ids });
+    };
+
+    const resolveSeededQuestions: LoomDaemon["resolveSeededQuestions"] = async () => {
+      if (seededQuestionIds.length === 0) return;
+      const ids = seededQuestionIds.splice(0); // clear as we go — an already-answered / unknown id just 400/404s
+      for (const id of ids) {
+        // Answer via the real human-only route (note-only works for options-less AND options questions). A
+        // question a spec already answered (decision-inbox) 400s "already answered"; ignore it. Best-effort —
+        // the point is to leave NO pending question behind, so nothing keeps a global toast on later pages.
+        try {
+          await fetch(`${baseURL}/api/questions/${id}/answer`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ note: "e2e cleanup — auto-resolved" }),
+          });
+        } catch { /* best-effort — a torn-down daemon at teardown must never fail the test */ }
+      }
     };
 
     // Track every real shell spawned via POST /api/terminals so killSpawnedShells can tear them down.
@@ -527,7 +572,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, seedOrchestrationEvent, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions });
+    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, seedOrchestrationEvent, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.
