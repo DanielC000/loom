@@ -105,8 +105,10 @@ test("create → floor-gate → toggle → delete a poll job end to end", async 
   await expect.poll(() => pollJobByPath(loomDaemon.baseURL, pollPath).then((j) => j?.enabled ?? null)).toBe(false);
 
   // --- Delete (observable #4): Confirm removes the row AND drops it from the REST list. ---
-  await page.getByRole("button", { name: "Delete" }).click();
-  await page.getByRole("button", { name: "Confirm" }).click();
+  // Scope to the poll-job `row` — the Capabilities panel on this same page renders its own "Delete"
+  // per non-builtin capability, so an unscoped match is ambiguous (strict-mode violation).
+  await row.getByRole("button", { name: "Delete" }).click();
+  await row.getByRole("button", { name: "Confirm" }).click();
   await expect(page.getByText(pollPath, { exact: true })).toHaveCount(0);
   await expect.poll(() => pollJobByPath(loomDaemon.baseURL, pollPath)).toBeNull();
 
