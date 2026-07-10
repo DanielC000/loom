@@ -13,6 +13,7 @@
 // cards that test seeded.
 import { expect, test } from "./fixtures/daemon";
 import type { Page } from "@playwright/test";
+import path from "node:path";
 
 // The default board (shared/src/config.ts PLATFORM_DEFAULTS.kanbanColumns) a freshly-seeded project resolves
 // to. Order + labels are asserted below, so they live in one place.
@@ -379,4 +380,93 @@ test("a Blocked lane added to the board renders and holds a card seeded into it"
   // …and the seeded card sits in it (not spilled to the landing lane).
   await expect(cardInLane(page, "Blocked", blockedTitle)).toBeVisible();
   await expect(cardInLane(page, "Backlog", blockedTitle)).toHaveCount(0);
+});
+
+// Phone-density reflow: on a TIGHT lane a card carrying BOTH a priority chip AND a held badge reflows its
+// title onto its own full-width line (so a long unbroken word never breaks mid-word), while on a WIDE lane
+// the chip + badge + title stay on one row (unchanged). The observable is the title span's TOP relative to
+// the priority chip's top: on one row they're baseline-aligned (Δy ≈ 0); once the title wraps below the
+// badge row its top drops a whole line (Δy ≫ 0). A two-lane board (defaultLanding + terminal) is the
+// smallest valid layout — two lanes make each lane genuinely WIDE at a desktop viewport (the default 7-lane
+// board pins every lane to the ~240px tight floor, so it can't exercise the wide case). The SAME board at a
+// phone viewport pins the lane to the 200px tight floor. Pre-fix (no flex-wrap) the title stayed on the
+// chip row at every width, so the tight assertion below fails on the old code — it's a real regression guard.
+test("a card's title reflows to its own line on a tight lane, stays inline on a wide lane", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`board-reflow-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+
+  // Two-lane board: To Do (landing) + Done (terminal) — the minimum valid layout, and few enough that each
+  // lane is wide at a desktop viewport.
+  const columns = [
+    { key: "todo", label: "To Do", role: "defaultLanding" },
+    { key: "done", label: "Done", role: "terminal" },
+  ];
+  const putRes = await fetch(`${loomDaemon.baseURL}/api/projects/${project.id}/columns`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ columns }),
+  });
+  expect(putRes.ok).toBeTruthy();
+
+  // A p0 card (the "P0" priority chip pops) with a long UNBROKEN word for a title — the token that used to
+  // break mid-word on a starved line. No body, so the title is the last item on its row (nothing competes
+  // for the wrapped line's width).
+  const title = `reflowword${Date.now()}longunbrokentitletoken`;
+  const task = await loomDaemon.createTask(project.id, { title, columnKey: "todo", priority: "p0" });
+  // `held` has no REST create field — set it through the same PATCH the drawer's Hold switch uses, so the
+  // card also wears the amber "held" badge that shares the title's flex line.
+  {
+    const res = await fetch(`${loomDaemon.baseURL}/api/tasks/${task.id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ held: true }),
+    });
+    expect(res.ok).toBeTruthy();
+  }
+
+  const chip = () => lane(page, "To Do").getByTitle("Priority: Critical");
+  const titleSpan = () => cardInLane(page, "To Do", title);
+  // Screenshot hook (opt-in via LOOM_E2E_SHOTS): unset in CI, so this is a no-op there. Set it to a dir to
+  // persist the before/after lane shots for a visual review.
+  const shotDir = process.env.LOOM_E2E_SHOTS;
+  const shoot = async (name: string) => { if (shotDir) await lane(page, "To Do").screenshot({ path: path.join(shotDir, name) }); };
+
+  // ── WIDE lane: two lanes at a desktop viewport → the chip, badge and title share one row. ──
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(`${loomDaemon.baseURL}/board`);
+  await expect(chip()).toBeVisible();
+  await expect(lane(page, "To Do").getByText("held", { exact: true })).toBeVisible();
+  await expect(titleSpan()).toBeVisible();
+  {
+    const c = await chip().boundingBox();
+    const t = await titleSpan().boundingBox();
+    expect(c).not.toBeNull();
+    expect(t).not.toBeNull();
+    // Same row: baseline-aligned, so the title's top sits within a chip-height of the chip's top…
+    expect(Math.abs(t!.y - c!.y)).toBeLessThan(8);
+    // …and the title is to the RIGHT of the chip (it follows the chip + held badge inline).
+    expect(t!.x).toBeGreaterThan(c!.x + c!.width);
+    await shoot("board-card-title-wide.png");
+  }
+
+  // ── TIGHT lane: the SAME board at a phone viewport pins the lane to the 200px floor → the title reflows
+  //    onto its own full-width line below the chip + badge row. ──
+  await page.setViewportSize({ width: 380, height: 820 });
+  // The title's top drops by a full line once it wraps; poll so the assertion waits out the viewport reflow.
+  await expect.poll(async () => {
+    const c = await chip().boundingBox();
+    const t = await titleSpan().boundingBox();
+    if (!c || !t) return 0;
+    return t.y - c.y;
+  }).toBeGreaterThan(12);
+  {
+    const t = await titleSpan().boundingBox();
+    const laneBox = await lane(page, "To Do").boundingBox();
+    // The reflowed title gets (nearly) the full lane width — well past its 120px flex-basis, so a long word
+    // has room to sit on one line instead of breaking mid-word.
+    expect(t!.width).toBeGreaterThan(120);
+    // And it starts at the card's left edge (its own line), not indented behind the chip.
+    expect(t!.x).toBeLessThan(laneBox!.x + 40);
+    await shoot("board-card-title-tight.png");
+  }
 });

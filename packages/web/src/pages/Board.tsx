@@ -373,7 +373,14 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
         <span {...listeners} {...attributes} title="Drag to move"
           style={{ cursor: "grab", color: color.textMuted, lineHeight: "16px", touchAction: "none", userSelect: "none" }}>⠿</span>
         <div onClick={onOpen} title="Open task" style={{ flex: 1, cursor: "pointer", minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 6, minWidth: 0 }}>
+          {/* flexWrap is the phone-density hinge: the priority chip + a held/deferred badge share this
+              line with the title. On a TIGHT lane (phone ~200px / the 240px desktop floor) a chip + badge
+              starve the title's slice, so the title's 120px flex-basis no longer fits beside them and
+              wraps to its OWN full-width line below the badge row — giving a long word the whole lane so
+              it never breaks mid-word. On a WIDE lane the basis fits inline and the row stays one line,
+              unchanged. Self-adjusting: only a genuinely starved title reflows (a chip-only card with room
+              keeps its title inline). */}
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: 6, minWidth: 0 }}>
             <PriorityChip priority={prio(task)} />
             {task.held && (
               <span title="Held — won't be worked or nagged (the owner's brake)"
@@ -392,7 +399,7 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
             {/* `break-word` (not `anywhere`): normal titles wrap at WORD boundaries, and only a genuinely
                 long unbroken token breaks mid-word. `anywhere` makes the title's min-content width one
                 character, so at a crushed lane width the flex row collapses it to one letter per row. */}
-            <span style={{ flex: 1, minWidth: 0, overflowWrap: "break-word" }}>{task.title}</span>
+            <span style={{ flex: "1 1 120px", minWidth: 0, overflowWrap: "break-word" }}>{task.title}</span>
             {hasBody && <span title="has a description" style={{ color: color.textMuted, flexShrink: 0 }}>≣</span>}
           </div>
           {worker && st && (
