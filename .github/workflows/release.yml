@@ -45,7 +45,11 @@ jobs:
           # No package-manager cache: never cache in a release build (publish only what was just built+tested).
 
       - name: Upgrade npm for OIDC trusted publishing (needs npm >= 11.5.1; Node 22 ships npm 10.x)
-        run: npm install -g npm@latest && npm --version
+        # PINNED to 11.18.0 (the version that shipped 0.16.0): npm@latest is now 12.0.0, whose provenance
+        # path throws `Cannot find module 'sigstore'` (MODULE_NOT_FOUND) and breaks `npm publish` under
+        # trusted-publishing/provenance — it blocked the first 0.17.0 release attempt. Re-pin to @latest once
+        # a fixed 12.x ships. 11.18.0 is >= 11.5.1 (OIDC min) and known-good for automatic provenance.
+        run: npm install -g npm@11.18.0 && npm --version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
