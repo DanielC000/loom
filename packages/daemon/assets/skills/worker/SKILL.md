@@ -159,7 +159,7 @@ Your action/report tools live under the `mcp__loom-orchestration__` namespace �
 tool you call); board reads are `mcp__loom-tasks__tasks_get` / `tasks_list`. Load them in ONE ToolSearch:
 `select:mcp__loom-orchestration__worker_report,mcp__loom-orchestration__my_context,mcp__loom-tasks__tasks_get`.
 
-`worker_report` is your action tool — your only way to affect the tree. Use it to report:
+`worker_report` is your action tool — your only way to affect the tree. **A `worker_report(done|blocked|progress)` call is the MANDATORY terminal action of every assignment** — ending a turn with only a prose summary and no report is a FALSE done: your manager can't see prose as a completion, so a bare prose turn-end reads as a stall. Use it to report:
 - **`done`** — stage + **commit** your verified work *first*, then report `done` with the **commit
   SHA** plus a one-line summary of what you did + your key decisions / anything the reviewer should
   check. Your worktree is **already checked out on your assigned branch** — commit straight to it.
