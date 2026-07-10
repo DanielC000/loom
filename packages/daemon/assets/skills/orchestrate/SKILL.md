@@ -125,9 +125,10 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   can settle is one you resolve by reading them and then *proceeding*, not a reason to STOP or escalate
   up. Escalating on self-doubt you could have checked just burns a no-op round-trip.
 - **When you DO need the human, file a first-class `question_ask`** — the durable, human-facing
-  **Requests inbox** (the same tool the manager and the platform Lead use) — never only an ephemeral
-  `idle_report('blocked_human')` free-text note. It's durable, the human answers it in the UI, and Loom
-  pushes the answer back into your session. **Pick the request `type` to fit the ask** (it defaults to
+  **Requests inbox** (the same tool the manager and the platform Lead use). It is the ONLY channel that
+  reaches a person — the `idle_report` statuses signal your own park state to the idle-watchdog, they do
+  not ask the human for anything. It's durable, the human answers it in the UI, and Loom pushes the
+  answer back into your session. **Pick the request `type` to fit the ask** (it defaults to
   `"decision"`; `title`+`body` are always required; an optional `taskId` soft-links it to the board card):
   - **`decision`** — pick among concrete alternatives: pass `options` + a `recommendation`. (A pure
     blocker with no clean options is title+body only.)
@@ -180,10 +181,13 @@ you intentionally park, via the `idle_report` MCP tool — don't wait to be nudg
 
 - **`waiting`** — parked on a long worker or external thing. Pass `minutes` if you can estimate it →
   the watchdog snoozes that long.
-- **`blocked_human`** — you need a human decision / credential / access. Pass `detail`; this raises a
-  human attention alert.
 - **`done`** — the planned work has genuinely converged (not merely drained-for-now — see the autonomy
   rules). Pass `detail`; this alerts the human to reclaim. It does **not** auto-close the session.
+
+`idle_report` signals your own park state to the watchdog — it is NOT how you ask a human for something.
+Need a human decision, approval, secret, or input? File a `question_ask` Request (the autonomy rules
+above), not an idle report. (If you go silent and unresponsive, the watchdog itself escalates you to the
+human after `maxUnansweredNudges` — that safety net is separate and automatic.)
 
 **Re-read before you park.** Before ANY `idle_report('done')`/`idle_report('waiting')` — or any park,
 `recycle_me`, or stop — do a FRESH `tasks_list` and drain your inbox (`inbox_pull`); never conclude the
@@ -192,8 +196,8 @@ queue is "drained" from an earlier read or from memory. New actionable cards lan
 is only ever a statement about a board you *just* re-read. If that fresh read shows any non-`blocked`
 actionable card, pick it up and `idle_report('working')` instead of parking.
 
-When you resume from a parked or blocked state, `idle_report('working')`: it re-arms normal watching
-**and** clears any `blocked_human`/`done`/asleep alert you raised (a `working` or `waiting` report
+When you resume from a parked state, `idle_report('working')`: it re-arms normal watching
+**and** clears any `done`/asleep alert you raised (a `working` or `waiting` report
 clears the alert). **Recycle takes precedence** over an idle nudge — if a worker handoff is what's
 pending, recycle it (see the loop, step 7) rather than treating the nudge as idleness.
 
