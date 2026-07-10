@@ -1021,6 +1021,13 @@ interface Live {
   ring: { chunks: Buffer[]; bytes: number };
   subscribers: Set<Subscriber>;
   alive: boolean;
+  // Epoch ms when THIS pty process started — set once at creation for every kind. Distinct from the DB
+  // session's createdAt (unchanged across a resume/recycle/upgrade): this is the CURRENT live process's
+  // own start, so a resume/fork/recycle/companion-upgrade (all through createPty) each get a fresh value.
+  // Surfaced via `liveStartedAt` so a reader (e.g. the companion capability panel) can tell whether a
+  // grant changed AFTER the running process last (re)read its tool surface — i.e. whether a respawn is
+  // still pending to apply it.
+  startedAt: number;
   logStream: fs.WriteStream;
   busy: boolean;        // a turn is in flight (locally tracked; mirrored to DB via onBusy)
   ready: boolean;       // the TUI has booted (first SessionStart, after mode-cycles) — gate for injection.
@@ -1868,6 +1875,7 @@ export class PtyHost {
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
       alive: true,
+      startedAt: Date.now(),
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.sessionId}.log`)),
       busy: false,
       ready: false, // flipped on the first SessionStart (after mode-cycles) — see Live.ready / markReady
@@ -2012,6 +2020,7 @@ export class PtyHost {
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
       alive: true,
+      startedAt: Date.now(),
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.id}.log`)),
       // The Claude-only state below is inert for a shell (nothing reads it once kind:"shell" gates the
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
@@ -2081,6 +2090,7 @@ export class PtyHost {
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
       alive: true,
+      startedAt: Date.now(),
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.id}.log`)),
       busy: false, ready: true, busySince: null,
       lastOutputAt: Date.now(), composerLen: 0,
@@ -3538,6 +3548,15 @@ export class PtyHost {
 
   isAlive(sessionId: string): boolean {
     return this.live.get(sessionId)?.alive ?? false;
+  }
+
+  /** Epoch ms when this session's CURRENTLY LIVE pty process started, or null if it has no live process
+   *  (never spawned, or exited). A resume/fork/recycle/companion-upgrade returns a fresh value (each goes
+   *  through createPty). Read by the companion capability panel to decide whether a grant change is still
+   *  pending a respawn to take effect (grant created AFTER this ⇒ not yet applied to the running process). */
+  liveStartedAt(sessionId: string): number | null {
+    const live = this.live.get(sessionId);
+    return live && live.alive ? live.startedAt : null;
   }
 
   /** The OS pid of this session's own pty process, or undefined if it isn't live. Lets a caller that's

@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PermissionAnswer } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PermissionAnswer } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -728,6 +728,40 @@ export const api = {
     getErr<CompanionRestrictedTools>(`/api/companion/restricted-tools/${encodeURIComponent(sessionId)}`),
   updateCompanionRestrictedTools: (sessionId: string, restrictedTools: boolean) =>
     putErr<CompanionRestrictedTools>(`/api/companion/restricted-tools/${encodeURIComponent(sessionId)}`, { restrictedTools }),
+
+  // --- Companion CAPABILITY GRANTS (Companion Capability & Permission-Lever Framework — the fleet-monitoring
+  // "levers": session-status, decisions-relay, board-reach, vault-read, attention-push, media-out,
+  // session-steer). HUMAN-only loopback REST — INTENTIONALLY NO agent MCP path: an injection-exposed
+  // companion must never widen its OWN capability (same trust posture as the config/bindings/restricted-tools
+  // writers above). A lever is ON iff a grant row exists (default-OFF), scoped per project. `upsertCompanionGrant`
+  // POSTs (create OR change mode/config — the server upserts on the (capability, projectId) key); an omitted
+  // mode/config PRESERVES the stored value. `deleteCompanionGrant` removes one (capability, projectId) grant.
+  // Both surface the server's `{ error }` body verbatim (per-lever config validation — e.g. an unknown
+  // decisionClass) via *Err. A grant change takes effect on the companion's NEXT respawn (its MCP tool
+  // surface is fixed at OS-process-start) — see `upgradeCompanionSession`. ---
+  // Returns the grant rows PLUS `liveProcessStartedAt` (ISO, or null if the companion has no live process) —
+  // the server truth the Capabilities panel compares each grant's createdAt against to derive an
+  // apply-pending state that survives a page reload (a grant newer than the running process isn't yet on
+  // its respawn-fixed tool surface).
+  companionGrants: (sessionId: string) =>
+    get<{ grants: CompanionCapabilityGrant[]; liveProcessStartedAt: string | null }>(`/api/companion/${encodeURIComponent(sessionId)}/grants`),
+  upsertCompanionGrant: (sessionId: string, b: { capability: string; projectId?: string | null; mode?: "read" | "act"; config?: Record<string, unknown> }) =>
+    postErr<CompanionCapabilityGrant>(`/api/companion/${encodeURIComponent(sessionId)}/grants`, b),
+  deleteCompanionGrant: (sessionId: string, capability: string, projectId?: string | null) => {
+    const params = new URLSearchParams({ capability });
+    if (projectId) params.set("projectId", projectId); // omitted ⇒ the null-scope grant (companion's own project)
+    return delErr<{ ok: boolean; grants: CompanionCapabilityGrant[] }>(
+      `/api/companion/${encodeURIComponent(sessionId)}/grants?${params.toString()}`,
+    );
+  },
+  // The conversation-preserving RESPAWN that APPLIES a grant change: stops the old companion process and
+  // resumes a fresh one under the re-resolved capability surface, keeping the SAME conversation thread. A
+  // grant write does NOT auto-respawn (a respawn has a brief availability gap, so the owner picks WHEN); the
+  // Capabilities panel drives this explicitly after a change. Human-only loopback — NO agent MCP path (an
+  // injection-exposed companion must never trigger its own respawn). 409 (surfaced via postErr) if a
+  // concurrent lifecycle op is in flight.
+  upgradeCompanionSession: (sessionId: string) =>
+    postErr<{ sessionId: string; session: Session }>(`/api/companion/${encodeURIComponent(sessionId)}/upgrade`),
 
   // --- Owner-controlled encrypted credential store (agent-tooling epic, P1 foundation). HUMAN-only
   // loopback REST — INTENTIONALLY NO agent MCP path (same trust posture as the companion/vault/git

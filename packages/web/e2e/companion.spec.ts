@@ -277,6 +277,157 @@ test("Manage tab: Delete companion is two-step, names the companion, then remove
   await expect(page.getByText(nameB, { exact: true }).first()).toBeVisible();
 });
 
+test("Capabilities: granting a lever persists across reload + prompts a restart-to-apply, and revoking removes it", async ({ page, loomDaemon }) => {
+  // The capability-grant panel (Companion Capability & Permission-Lever Framework): each lever is OFF by
+  // default and granted PER PROJECT over the human-only grants REST. A grant takes effect on the companion's
+  // NEXT respawn, so the panel must surface an unmistakable "restart to apply" state — never a silent no-op.
+  // Seeded companion is provisioned:false + NOT live, so the POST/DELETE grant round-trips (each calls
+  // deps.companion.reconcile) run the config path WITHOUT a session stop/spawn — no real claude (the fixture's
+  // [pty] spawn no-spawn guard). This drives the full grant→persist→revoke round-trip + the UI states; it does
+  // NOT click the actual respawn (that IS the heavy live path — exercised only against a real companion).
+  const name = `Ada-${randomUUID().slice(0, 8)}`;
+  const companion = await loomDaemon.seedCompanion({ name });
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  // Focus OUR companion (the picker renders with >1 companion on the shared worker daemon).
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+  const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
+  if (await pickerBtn.count()) {
+    await pickerBtn.click();
+    await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
+  }
+  await page.getByRole("tab", { name: "Manage" }).click();
+
+  // The Capabilities section renders, with the read-only lever flagged read-only and the act-only session
+  // control flagged ELEVATED (task DoD: sensitive ACT levers visually flagged).
+  await expect(page.getByText("Capabilities", { exact: true })).toBeVisible();
+  const fleetCard = page.getByTestId("companion-lever-session-status");
+  await expect(fleetCard.getByText("Fleet status", { exact: true })).toBeVisible();
+  await expect(fleetCard.getByText("off", { exact: true })).toBeVisible(); // OFF by default
+  await expect(page.getByTestId("companion-lever-session-steer").getByText("elevated", { exact: true })).toBeVisible();
+
+  // No restart-to-apply prompt until a grant actually changes.
+  await expect(page.getByTestId("companion-grants-apply")).toHaveCount(0);
+
+  // Grant fleet-status on the companion's own seeded project.
+  await fleetCard.getByRole("combobox", { name: "Grant Fleet status on a project" }).selectOption(companion.projectId);
+  await page.getByTestId("companion-grant-add-session-status").click();
+
+  // The grant persisted (the panel re-reads it via GET) + the restart-to-apply state is unmistakable.
+  await expect(fleetCard.getByText("on · 1 project", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("companion-grants-apply")).toBeVisible();
+  await expect(page.getByTestId("companion-grants-restart")).toBeVisible();
+
+  // Persistence across a FULL reload — a fresh GET, not just the post-mutation optimistic cache.
+  await page.reload();
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+  const pickerBtn2 = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
+  if (await pickerBtn2.count()) {
+    await pickerBtn2.click();
+    await expect(pickerBtn2).toHaveAttribute("aria-pressed", "true");
+  }
+  await page.getByRole("tab", { name: "Manage" }).click();
+  const fleetCardReloaded = page.getByTestId("companion-lever-session-status");
+  await expect(fleetCardReloaded.getByText("on · 1 project", { exact: true })).toBeVisible();
+
+  // Revoke → back to off (observable state change: the DELETE round-trips and the card re-reads empty).
+  await fleetCardReloaded.getByRole("button", { name: "Remove" }).click();
+  await expect(fleetCardReloaded.getByText("off", { exact: true })).toBeVisible();
+  await expect(fleetCardReloaded.getByText("on · 1 project", { exact: true })).toHaveCount(0);
+});
+
+test("Capabilities: decisions-relay act mode reveals the decision-class picker; toggling a class round-trips", async ({ page, loomDaemon }) => {
+  // decisions-relay is act-CAPABLE: a read grant lists decisions, an act grant can resolve one — but only for
+  // the decision CLASSES the owner explicitly allowlists (an empty set resolves nothing). The panel must (a)
+  // offer the read/act mode picker, (b) reveal the class picker only in act mode, and (c) round-trip a class
+  // toggle. Same no-spawn seeded-companion path as the grant round-trip above.
+  const name = `Ada-${randomUUID().slice(0, 8)}`;
+  const companion = await loomDaemon.seedCompanion({ name });
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+  const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
+  if (await pickerBtn.count()) {
+    await pickerBtn.click();
+    await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
+  }
+  await page.getByRole("tab", { name: "Manage" }).click();
+
+  const card = page.getByTestId("companion-lever-decisions-relay");
+  await card.getByRole("combobox", { name: "Grant Decisions relay on a project" }).selectOption(companion.projectId);
+  await page.getByTestId("companion-grant-add-decisions-relay").click();
+  await expect(card.getByText("on · 1 project", { exact: true })).toBeVisible();
+
+  // A fresh grant defaults to READ — no decision-class picker yet.
+  await expect(card.getByRole("button", { name: "deploy" })).toHaveCount(0);
+
+  // Switch the grant to ACT → the decision-class picker appears (observable state change).
+  await card.getByRole("button", { name: "act", exact: true }).click();
+  const deployClass = card.getByRole("button", { name: "deploy" });
+  await expect(deployClass).toBeVisible();
+  await expect(deployClass).toHaveAttribute("aria-pressed", "false");
+
+  // Toggle the "deploy" class ON → it round-trips and reads pressed on the re-read grant.
+  await deployClass.click();
+  await expect(card.getByRole("button", { name: "deploy" })).toHaveAttribute("aria-pressed", "true");
+});
+
+test("Capabilities: granting attention-push (arms live) does NOT raise the restart-to-apply banner", async ({ page, loomDaemon }) => {
+  // attention-push is the one lever a daemon watcher arms LIVE (reconcile) with no respawn — so granting it
+  // must NOT set the apply-pending state, unlike every respawn-fixed lever. This is the load-bearing focus-4
+  // behavior most likely to silently regress (a future refactor that flips every grant to "restart to apply").
+  const name = `Ada-${randomUUID().slice(0, 8)}`;
+  const companion = await loomDaemon.seedCompanion({ name });
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+  const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
+  if (await pickerBtn.count()) {
+    await pickerBtn.click();
+    await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
+  }
+  await page.getByRole("tab", { name: "Manage" }).click();
+
+  const card = page.getByTestId("companion-lever-attention-push");
+  await expect(page.getByTestId("companion-grants-apply")).toHaveCount(0); // nothing granted yet
+  await card.getByRole("combobox", { name: "Grant Attention push on a project" }).selectOption(companion.projectId);
+  await page.getByTestId("companion-grant-add-attention-push").click();
+
+  // Granted (observable) — but because it arms live, NO restart banner is raised.
+  await expect(card.getByText("on · 1 project", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("companion-grants-apply")).toHaveCount(0);
+});
+
+test("Capabilities: an elevated lever (session control) gates its initial grant behind a confirm", async ({ page, loomDaemon }) => {
+  // session-steer defaults to an EMPTY roleFilter = ALL roles controllable, and the grant persists (re-arms
+  // on any future respawn), so granting it must be deliberate — one click opens a confirm that NAMES the
+  // lever + project, it does NOT grant yet (Code Review Major #2).
+  const name = `Ada-${randomUUID().slice(0, 8)}`;
+  const companion = await loomDaemon.seedCompanion({ name });
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+  const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
+  if (await pickerBtn.count()) {
+    await pickerBtn.click();
+    await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
+  }
+  await page.getByRole("tab", { name: "Manage" }).click();
+
+  const card = page.getByTestId("companion-lever-session-steer");
+  await card.getByRole("combobox", { name: "Grant Session control on a project" }).selectOption(companion.projectId);
+  await page.getByTestId("companion-grant-add-session-steer").click();
+
+  // One click opens a confirm — it does NOT grant yet (still "off").
+  const confirm = page.getByTestId("companion-grant-confirm-session-steer");
+  await expect(confirm).toBeVisible();
+  await expect(card.getByText("off", { exact: true })).toBeVisible();
+
+  // Confirming grants it (observable state change).
+  await page.getByTestId("companion-grant-confirm-go-session-steer").click();
+  await expect(card.getByText("on · 1 project", { exact: true })).toBeVisible();
+});
+
 test("multi-companion: the create form opens over the current companion and cancels back", async ({ page, loomDaemon }) => {
   await loomDaemon.seedCompanion({ name: `Ada-${randomUUID().slice(0, 8)}` });
   await page.goto(`${loomDaemon.baseURL}/companion`);

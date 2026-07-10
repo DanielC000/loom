@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { resolveConfig, type CompanionConfigMasked, type CompanionBinding } from "@loom/shared";
+import { resolveConfig, type CompanionConfigMasked, type CompanionBinding, type CompanionCapabilityGrant, type Project } from "@loom/shared";
 import { api, restartCompanionSession, type CompanionProvisionError, type CompanionSkillEntry, type CompanionMemoryEntry, type CompanionReminderEntry } from "../lib/api";
+import {
+  COMPANION_LEVERS, DECISION_CLASSES, ATTENTION_ALERT_CLASSES, grantsForLever, configStringArray, configNumber,
+  defaultGrantMode, type LeverMeta, type GrantMode,
+} from "../lib/companionCapabilities";
 import {
   bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, companionDisplayName, COMPANION_DEFAULT_NAME, emptyConfigForm,
   emptyTelegramForm, formFromMasked, hasChannelBinding, maskedToken, provisionBody, provisionErrorMessage,
@@ -514,6 +518,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
           <MemorySection sessionId={companion.sessionId} />
           <RemindersSection sessionId={companion.sessionId} />
           <RestrictToolsSection sessionId={companion.sessionId} />
+          <CapabilityGrantsSection sessionId={companion.sessionId} />
           <PairingSection sessionId={companion.sessionId} />
           <DeleteCompanionSection companion={companion} label={label} onDeleted={onDeleted} />
         </div>
@@ -1312,6 +1317,451 @@ function RestrictToolsSection({ sessionId }: { sessionId: string }) {
       )}
       {restart.error && <span style={errStyle}>{(restart.error as Error).message}</span>}
     </section>
+  );
+}
+
+// ── Capabilities: the companion's fleet-monitoring / permission LEVERS (grant panel) ──────────────────
+// The human-only surface over the capability-grant REST (Companion Capability & Permission-Lever
+// Framework). Each lever (fleet status, decisions relay, board reach, vault lookup, attention push, send
+// media, session control) is OFF by default and granted PER PROJECT: granting = a `companion_capability_grants`
+// row (POST), revoking = its removal (DELETE). Grants are HUMAN-only — the companion can never widen its own
+// capability. A grant change takes effect on the companion's NEXT respawn (its MCP tool surface is fixed at
+// OS-process-start), so the panel surfaces an unmistakable "restart to apply" state + a conversation-preserving
+// respawn button — never a silent no-op grant. The one exception is `attention-push` (appliesLive): a daemon
+// watcher arms it live, so it never sets the restart-pending state. The two ELEVATED act-only levers (send
+// media, session control) are flagged distinctly so the owner grants them deliberately.
+function CapabilityGrantsSection({ sessionId }: { sessionId: string }) {
+  const qc = useQueryClient();
+  const grants = useQuery({ queryKey: ["companionGrants", sessionId], queryFn: () => api.companionGrants(sessionId) });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
+  // A within-session hint: a mode/config CHANGE (or a revoke) doesn't move a grant's createdAt, so the
+  // server-derived signal below can't see it after the fact — flag it locally so the banner shows THIS
+  // session. It's the belt to the server-derived braces (which own the survives-a-reload case).
+  const [pendingApply, setPendingApply] = useState(false);
+  const [confirmRestart, setConfirmRestart] = useState(false);
+
+  // A lever mutation that isn't armed live (every lever but attention-push) leaves the running companion's
+  // tool surface stale until it respawns — flag that so the owner can apply it.
+  const onGrantMutated = (appliesLive: boolean) => { if (!appliesLive) setPendingApply(true); };
+
+  const respawn = useMutation({
+    mutationFn: () => api.upgradeCompanionSession(sessionId),
+    onSuccess: () => {
+      setPendingApply(false);
+      setConfirmRestart(false);
+      // Refetch grants — its liveProcessStartedAt now post-dates every grant, so serverPending clears too.
+      qc.invalidateQueries({ queryKey: ["companionGrants", sessionId] });
+      qc.invalidateQueries({ queryKey: ["allSessions"] });
+    },
+  });
+
+  const rows = grants.data?.grants ?? [];
+  const liveProcessStartedAt = grants.data?.liveProcessStartedAt ?? null;
+  const projectList = projects.data ?? [];
+
+  // SERVER-DERIVED apply-pending (Code Review Major #1): a non-appliesLive grant created AFTER the running
+  // companion process started isn't on its respawn-fixed tool surface yet — so it's granted-but-not-applied,
+  // and this survives a page reload (unlike the ephemeral pendingApply above). attention-push arms live, so
+  // it never counts. Null liveProcessStartedAt (companion not live) ⇒ nothing stale (a fresh spawn re-reads
+  // every grant). Belt-and-braces with pendingApply so a same-session mode/config edit or revoke also shows.
+  const appliesLiveSlugs = useMemo(() => new Set<string>(COMPANION_LEVERS.filter((l) => l.appliesLive).map((l) => l.slug)), []);
+  const serverPending = liveProcessStartedAt !== null
+    && rows.some((g) => !appliesLiveSlugs.has(g.capability) && Date.parse(g.createdAt) > Date.parse(liveProcessStartedAt));
+  const showRestart = pendingApply || serverPending;
+
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <SectionLabel style={{ margin: 0 }}>Capabilities</SectionLabel>
+      <p style={{ ...hint, margin: 0 }}>
+        What this companion can do beyond chat — monitor your fleet, relay decisions, reach the board, and
+        more. Every lever is <strong style={{ color: color.text }}>off by default</strong> and granted{" "}
+        <strong style={{ color: color.text }}>per project</strong>. Granting is human-only; the companion can
+        never widen its own access. A change takes effect on the companion's next restart.
+      </p>
+
+      {grants.isLoading ? (
+        <span style={hint}>Loading…</span>
+      ) : grants.isError ? (
+        <span style={errStyle}>{(grants.error as Error).message}</span>
+      ) : (
+        <>
+          {showRestart && (
+            <div
+              data-testid="companion-grants-apply"
+              style={{
+                display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "8px 10px",
+                border: `1px solid ${color.amber}`, borderRadius: radius.base, background: "rgba(232,168,68,0.06)",
+              }}
+            >
+              <Badge tone="amber">restart to apply</Badge>
+              <span style={{ ...hint, margin: 0, flex: 1, minWidth: 180 }}>
+                Grant changes take effect when the companion restarts — its conversation is preserved.
+              </span>
+              {confirmRestart ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={errStyle}>Restart now? Brief pause; the thread is kept.</span>
+                  <Button variant="danger" disabled={respawn.isPending} onClick={() => respawn.mutate()} data-testid="companion-grants-restart-go">
+                    {respawn.isPending ? "Restarting…" : "Confirm restart"}
+                  </Button>
+                  <Button variant="ghost" disabled={respawn.isPending} onClick={() => setConfirmRestart(false)}>Cancel</Button>
+                </div>
+              ) : (
+                <Button variant="primary" onClick={() => setConfirmRestart(true)} data-testid="companion-grants-restart">
+                  Restart to apply
+                </Button>
+              )}
+            </div>
+          )}
+          {respawn.error && <span style={errStyle}>{(respawn.error as Error).message}</span>}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {COMPANION_LEVERS.map((meta) => (
+              <LeverCard
+                key={meta.slug}
+                sessionId={sessionId}
+                meta={meta}
+                grants={grantsForLever(rows, meta.slug)}
+                projects={projectList}
+                onMutated={onGrantMutated}
+              />
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+// One lever's card: header (name + tool slug + tier flag + granted summary), its per-project grant rows,
+// and an "add a project" control. Owns the grant upsert/delete mutations; every success invalidates the
+// grants query and notifies the section so the "restart to apply" state can arm.
+function LeverCard({ sessionId, meta, grants, projects, onMutated }: {
+  sessionId: string; meta: LeverMeta; grants: CompanionCapabilityGrant[]; projects: Project[]; onMutated: (appliesLive: boolean) => void;
+}) {
+  const qc = useQueryClient();
+  const [addProjectId, setAddProjectId] = useState("");
+  // For an ELEVATED lever, the initial grant on a project is confirm-gated (Code Review Major #2): granting
+  // it is one click that persists AND re-activates on any future respawn (crash recovery / boot-reconcile),
+  // so it must be deliberate. Holds the project id awaiting confirmation; null = no pending confirm.
+  const [confirmAddId, setConfirmAddId] = useState<string | null>(null);
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["companionGrants", sessionId] });
+
+  const upsert = useMutation({
+    mutationFn: (b: { projectId: string | null; mode: GrantMode; config: Record<string, unknown> }) =>
+      api.upsertCompanionGrant(sessionId, { capability: meta.slug, projectId: b.projectId, mode: b.mode, config: b.config }),
+    onSuccess: () => { invalidate(); onMutated(meta.appliesLive); },
+  });
+  const remove = useMutation({
+    mutationFn: (projectId: string | null) => api.deleteCompanionGrant(sessionId, meta.slug, projectId),
+    onSuccess: () => { invalidate(); onMutated(meta.appliesLive); },
+  });
+
+  const grantedProjectIds = new Set(grants.map((g) => g.projectId).filter((p): p is string => !!p));
+  const addable = projects.filter((p) => !grantedProjectIds.has(p.id));
+  const projectName = (id: string | null) =>
+    id === null ? "This companion's project" : (projects.find((p) => p.id === id)?.name ?? id.slice(0, 8));
+  const busy = upsert.isPending || remove.isPending;
+
+  // Grant this lever on a project at its least-privilege default (read for a read-capable lever, act for an
+  // act-only one; empty config), then clear the add + any pending confirm.
+  const grantOnProject = (projectId: string) => {
+    upsert.mutate({ projectId, mode: defaultGrantMode(meta), config: {} });
+    setAddProjectId("");
+    setConfirmAddId(null);
+  };
+
+  const tierFlag =
+    meta.tier === "elevated" ? <StatusPill tone="red" label="elevated" glow />
+    : meta.tier === "act-capable" ? <Badge tone="amber">act-capable</Badge>
+    : <Badge tone="cyan">read-only</Badge>;
+
+  return (
+    <div data-testid={`companion-lever-${meta.slug}`} style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, border: `1px solid ${meta.tier === "elevated" ? color.red : color.border}`, borderRadius: radius.base, background: color.panel2 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 12, color: color.text }}>{meta.name}</strong>
+        <code style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{meta.slug}</code>
+        {tierFlag}
+        <span style={{ flex: 1 }} />
+        {grants.length > 0
+          ? <StatusPill tone="phosphor" label={`on · ${grants.length} project${grants.length === 1 ? "" : "s"}`} />
+          : <span style={{ ...hint, margin: 0 }}>off</span>}
+      </div>
+      <p style={{ ...hint, margin: 0 }}>{meta.summary}</p>
+
+      {grants.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {grants.map((g) => (
+            <GrantScopeRow
+              key={g.id}
+              meta={meta}
+              grant={g}
+              projectName={projectName(g.projectId)}
+              busy={busy}
+              onSetMode={(mode) => upsert.mutate({ projectId: g.projectId, mode, config: g.config })}
+              onSetConfig={(config) => upsert.mutate({ projectId: g.projectId, mode: g.mode, config })}
+              onRemove={() => remove.mutate(g.projectId)}
+            />
+          ))}
+        </div>
+      )}
+
+      {addable.length > 0 ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <Select value={addProjectId} onChange={(e) => { setAddProjectId(e.target.value); setConfirmAddId(null); }} aria-label={`Grant ${meta.name} on a project`}>
+              <option value="">Grant on a project…</option>
+              {addable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </Select>
+            <Button
+              variant="primary"
+              disabled={busy || !addProjectId || confirmAddId !== null}
+              data-testid={`companion-grant-add-${meta.slug}`}
+              onClick={() => {
+                if (!addProjectId) return;
+                // Elevated levers gate the grant behind a deliberate confirm; everything else grants at once.
+                if (meta.tier === "elevated") setConfirmAddId(addProjectId);
+                else grantOnProject(addProjectId);
+              }}
+            >
+              {upsert.isPending ? "Granting…" : "Grant"}
+            </Button>
+          </div>
+          {confirmAddId !== null && (
+            <div
+              role="alertdialog"
+              aria-label={`Grant ${meta.name}`}
+              data-testid={`companion-grant-confirm-${meta.slug}`}
+              style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, border: `1px solid ${color.red}`, borderRadius: radius.base, background: "rgba(224,90,90,0.06)" }}
+            >
+              <StatusPill tone="red" label="Elevated grant" glow />
+              <span style={{ ...hint, margin: 0 }}>
+                This grants <strong style={{ color: color.text }}>{meta.name}</strong> — one of Loom's most
+                powerful levers. The companion will be able to {meta.elevatedAction} in{" "}
+                <strong style={{ color: color.text }}>{projectName(confirmAddId)}</strong> on any future
+                respawn, including crash recovery. Grant it?
+              </span>
+              <div style={{ display: "flex", gap: 8 }}>
+                <Button variant="danger" disabled={busy} data-testid={`companion-grant-confirm-go-${meta.slug}`} onClick={() => grantOnProject(confirmAddId)}>
+                  {upsert.isPending ? "Granting…" : `Grant ${meta.name}`}
+                </Button>
+                <Button variant="ghost" disabled={busy} onClick={() => setConfirmAddId(null)}>Cancel</Button>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        grants.length === 0 && <span style={hint}>No projects available to grant — create a project first.</span>
+      )}
+      {(upsert.error || remove.error) && <span style={errStyle}>{((upsert.error ?? remove.error) as Error).message}</span>}
+    </div>
+  );
+}
+
+// One granted project's row: the project name, a mode control (read/act picker for an act-CAPABLE lever;
+// a fixed "act" flag for an act-ONLY lever; nothing for a read-only lever), the lever's per-project config
+// editor where it has one, and a Remove. Every change round-trips as a grant upsert/delete.
+function GrantScopeRow({ meta, grant, projectName, busy, onSetMode, onSetConfig, onRemove }: {
+  meta: LeverMeta; grant: CompanionCapabilityGrant; projectName: string; busy: boolean;
+  onSetMode: (mode: GrantMode) => void; onSetConfig: (config: Record<string, unknown>) => void; onRemove: () => void;
+}) {
+  const isAct = grant.mode === "act";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 8, border: `1px solid ${color.border}`, borderRadius: radius.base }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <Chip label="project" value={projectName} tone="cyan" />
+        {meta.modes.length > 1 ? (
+          <div role="group" aria-label="Grant mode" style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden" }}>
+            {meta.modes.map((m) => {
+              const on = grant.mode === m;
+              const elevated = m === "act";
+              return (
+                <button
+                  key={m}
+                  type="button"
+                  aria-pressed={on}
+                  disabled={busy}
+                  onClick={() => { if (!on) onSetMode(m); }}
+                  className="loom-toggle"
+                  style={{
+                    background: on ? (elevated ? "rgba(224,90,90,0.14)" : color.phosphorDim) : "transparent",
+                    color: on ? (elevated ? color.red : color.text) : color.textDim,
+                    border: "none", padding: "3px 12px", fontFamily: font.mono, fontSize: 12, cursor: busy ? "default" : "pointer",
+                    textTransform: "uppercase", letterSpacing: "0.06em",
+                  }}
+                >
+                  {m}
+                </button>
+              );
+            })}
+          </div>
+        ) : isAct ? (
+          <Badge tone="red">act</Badge>
+        ) : null}
+        <span style={{ flex: 1 }} />
+        <Button variant="danger" disabled={busy} onClick={onRemove}>Remove</Button>
+      </div>
+
+      {meta.configKind === "decisionClasses" && isAct && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={{ ...hint, margin: 0 }}>
+            Decision classes this companion may resolve on your behalf — an empty set lists decisions but
+            resolves none.
+          </span>
+          <ClassChipRow
+            all={DECISION_CLASSES}
+            selected={configStringArray(grant.config, "decisionClasses")}
+            disabled={busy}
+            onChange={(next) => onSetConfig({ ...grant.config, decisionClasses: next })}
+          />
+        </div>
+      )}
+
+      {meta.configKind === "alertClasses" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={{ ...hint, margin: 0 }}>Alert kinds to push — an empty set pushes nothing.</span>
+          <ClassChipRow
+            all={ATTENTION_ALERT_CLASSES}
+            selected={configStringArray(grant.config, "alertClasses")}
+            disabled={busy}
+            onChange={(next) => onSetConfig({ ...grant.config, alertClasses: next })}
+          />
+          <DigestMinutesInput
+            value={configNumber(grant.config, "digestMinutes")}
+            disabled={busy}
+            onCommit={(mins) => {
+              const next = { ...grant.config };
+              if (mins === undefined) delete next.digestMinutes; else next.digestMinutes = mins;
+              onSetConfig(next);
+            }}
+          />
+        </div>
+      )}
+
+      {meta.configKind === "roots" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={{ ...hint, margin: 0 }}>
+            Allowlisted source roots — only files INSIDE one of these absolute paths are ever deliverable.
+            Nothing is deliverable until you add at least one.
+          </span>
+          <StringListEditor
+            items={configStringArray(grant.config, "roots")}
+            placeholder="an absolute path, e.g. C:\\Users\\you\\loom\\Assets"
+            disabled={busy}
+            onChange={(next) => onSetConfig({ ...grant.config, roots: next })}
+          />
+        </div>
+      )}
+
+      {meta.configKind === "roleFilter" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={{ ...hint, margin: 0 }}>
+            Restrict to these session roles (e.g. <code>manager</code>, <code>worker</code>) — empty means
+            every role in the project is controllable.
+          </span>
+          <StringListEditor
+            items={configStringArray(grant.config, "roleFilter")}
+            placeholder="a role, e.g. manager"
+            disabled={busy}
+            onChange={(next) => onSetConfig({ ...grant.config, roleFilter: next })}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A row of toggle chips over a fixed vocabulary (decision classes / alert classes) — each click flips that
+// member in/out and hands the WHOLE next array up (the caller folds it into the grant config).
+function ClassChipRow({ all, selected, disabled, onChange }: {
+  all: readonly string[]; selected: string[]; disabled?: boolean; onChange: (next: string[]) => void;
+}) {
+  const sel = new Set(selected);
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      {all.map((c) => {
+        const on = sel.has(c);
+        return (
+          <button
+            key={c}
+            type="button"
+            aria-pressed={on}
+            disabled={disabled}
+            onClick={() => onChange(on ? selected.filter((x) => x !== c) : [...selected, c])}
+            className="loom-toggle"
+            style={{
+              background: on ? color.phosphorDim : "transparent",
+              color: on ? color.text : color.textDim,
+              border: `1px solid ${on ? color.phosphor : color.border}`,
+              borderRadius: radius.base, padding: "3px 10px",
+              fontFamily: font.mono, fontSize: 11, cursor: disabled ? "default" : "pointer",
+            }}
+          >
+            {c}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// A small add/remove list editor for arbitrary string values (media-out roots, session-steer roleFilter).
+// Each add/remove hands the WHOLE next array up. Trims + de-dupes on add; Enter adds.
+function StringListEditor({ items, placeholder, disabled, onChange }: {
+  items: string[]; placeholder: string; disabled?: boolean; onChange: (next: string[]) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const add = () => {
+    const v = draft.trim();
+    if (!v || items.includes(v)) { setDraft(""); return; }
+    onChange([...items, v]);
+    setDraft("");
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {items.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {items.map((it) => (
+            <span key={it} style={{ display: "inline-flex", alignItems: "center", gap: 6, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "2px 6px", fontFamily: font.mono, fontSize: 11, color: color.text, maxWidth: "100%" }}>
+              <span style={{ overflowWrap: "anywhere", minWidth: 0 }}>{it}</span>
+              <button type="button" aria-label={`Remove ${it}`} disabled={disabled} onClick={() => onChange(items.filter((x) => x !== it))}
+                style={{ background: "transparent", border: "none", color: color.red, cursor: disabled ? "default" : "pointer", fontSize: 12, lineHeight: 1, padding: 0 }}>×</button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 6 }}>
+        <Input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={placeholder} spellCheck={false} disabled={disabled}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }} style={{ flex: 1, minWidth: 0 }} />
+        <Button variant="primary" disabled={disabled || !draft.trim()} onClick={add}>Add</Button>
+      </div>
+    </div>
+  );
+}
+
+// The optional attention-push digest interval (minutes; 0/blank = every alert immediately). Local draft +
+// commit on blur/Enter so a keystroke doesn't round-trip a grant write per character.
+function DigestMinutesInput({ value, disabled, onCommit }: {
+  value: number | undefined; disabled?: boolean; onCommit: (mins: number | undefined) => void;
+}) {
+  const [draft, setDraft] = useState(value === undefined ? "" : String(value));
+  useEffect(() => { setDraft(value === undefined ? "" : String(value)); }, [value]);
+  const commit = () => {
+    const t = draft.trim();
+    if (t === "") { onCommit(undefined); return; }
+    const n = Number(t);
+    if (!Number.isFinite(n) || n < 0) { setDraft(value === undefined ? "" : String(value)); return; }
+    onCommit(n);
+  };
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 8, ...hint, margin: 0 }}>
+      <span>Digest interval</span>
+      <Input type="number" min={0} value={draft} disabled={disabled}
+        onChange={(e) => setDraft(e.target.value)} onBlur={commit}
+        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); (e.target as HTMLInputElement).blur(); } }}
+        placeholder="0" style={{ width: 80 }} />
+      <span>minutes · blank = each alert immediately</span>
+    </label>
   );
 }
 

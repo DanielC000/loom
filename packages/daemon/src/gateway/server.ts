@@ -1357,7 +1357,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const sessionId = (req.params as { sessionId: string }).sessionId;
     const r = resolveCompanionAgent(sessionId);
     if (!r.ok) return reply.code(r.code).send({ error: r.error });
-    return { grants: deps.db.listCompanionCapabilityGrantsForSession(sessionId) };
+    // `liveProcessStartedAt` (ISO, or null if the companion has no live process) lets the web panel derive
+    // the "restart to apply" state from SERVER truth rather than ephemeral client state: a grant created
+    // AFTER the running process started isn't yet on its (respawn-fixed) tool surface — so it survives a
+    // page reload. Null when not live ⇒ nothing to be stale against (a fresh spawn re-reads every grant).
+    const started = deps.pty.liveStartedAt(sessionId);
+    return {
+      grants: deps.db.listCompanionCapabilityGrantsForSession(sessionId),
+      liveProcessStartedAt: started === null ? null : new Date(started).toISOString(),
+    };
   });
   app.post("/api/companion/:sessionId/grants", async (req, reply) => {
     const sessionId = (req.params as { sessionId: string }).sessionId;

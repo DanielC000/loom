@@ -40,7 +40,10 @@ const { buildServer } = await import("../dist/gateway/server.js");
 const dbFile = path.join(tmpHome, "loom.db");
 const db = new Db(dbFile);
 const stub = {};
-const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub });
+// The grants GET reads `pty.liveStartedAt(sessionId)` (Code Review Major #1: server-derived apply-pending)
+// — these routes never touch a real pty, so a stub returning null (no live process) is the right seam.
+const ptyStub = { liveStartedAt: () => null };
+const app = await buildServer({ db, pty: ptyStub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub });
 
 const now = new Date().toISOString();
 const projId = randomUUID();
@@ -138,6 +141,9 @@ try {
     const body = JSON.parse(res.payload);
     check("GET: 200", res.statusCode === 200);
     check("GET: lists both grants", body.grants.length === 2);
+    // Code Review Major #1: the GET exposes the live-process start time so the web panel can derive an
+    // apply-pending state that survives a reload. The stub pty reports no live process ⇒ null.
+    check("GET: carries liveProcessStartedAt (null with no live pty)", "liveProcessStartedAt" in body && body.liveProcessStartedAt === null);
   }
   // ============ PUT: update an EXISTING grant (read → act) ============
   {
