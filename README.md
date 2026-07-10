@@ -186,6 +186,9 @@ You set it up and run it from a single **Companion** page: chat on one side; con
 ## Screenshots
 
 <p align="center">
+  <img src="docs/images/screenshot-terminals.png" alt="Loom's terminal cockpit: several lead sessions each driving their own worker fleet across multiple projects side by side — live interactive claude transcripts, per-session context meters, and voice controls in one phosphor-on-dark panel." width="100%" /> <br /> <em>The terminal cockpit — multiple leads each orchestrating a worker fleet across projects at once, every pane a real interactive <code>claude</code> session with its own context meter and branch.</em> </p>
+
+<p align="center">
   <img src="docs/images/screenshot-board.png" alt="Loom's per-project task board: a kanban of cards that both you and the agents read and move through columns." width="100%" /> <br /> <em>The per-project task board — a kanban you and the agents share, with live worker status and branch on each card.</em> </p>
 
 <p align="center">
