@@ -89,30 +89,26 @@ body {
 }
 
 /* ── Board (kanban) responsive lane grid ─────────────────────────────────────────
-   Desktop-first, degrade-on-narrow. On a WIDE viewport the lanes are equal 1fr tracks that fill
-   the width and stay all-visible — identical to the old `repeat(N, 1fr)` (min 0 lets them share the
-   width however many there are, no forced scroll). Below the breakpoints a per-lane MIN width kicks
-   in: once the lanes can't all fit at that min, the board scrolls HORIZONTALLY inside its own box
-   instead of crushing every lane to an unreadable sliver — self-adapting to the lane count (a
-   3-lane board still fills the width; a 7-lane board scrolls). A partial next-lane peek is the
-   swipe affordance. Auto-flow:column keeps the lanes in a single row at every width. */
+   Lanes are equal 1fr tracks with a per-lane MIN width that holds at EVERY width. Few lanes still
+   fill the width (1fr wins until the mins overflow); once the lanes can't all fit at that min, the
+   board scrolls HORIZONTALLY inside its own box instead of crushing every lane to an unreadable
+   sliver — self-adapting to the lane count (a 3-lane board fills the width; a 7-lane board scrolls
+   on a narrow window). A partial next-lane peek is the swipe affordance. Auto-flow:column keeps the
+   lanes in a single row at every width.
+   The min MUST be non-zero: a `minmax(0, 1fr)` track can shrink to zero, so the grid never overflows
+   and `overflow-x: auto` below never engages — the lanes just crush indefinitely, collapsing card
+   titles to one character per row on a many-column board at a narrow-but-wide window. The 240px floor
+   is what makes the horizontal scroll actually kick in. */
 .loom-board-grid {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-columns: minmax(240px, 1fr);
   gap: 10px;
   flex: 1;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 2px; /* breathing room so the scrollbar never sits on a lane's bottom edge */
-}
-@media (max-width: 1100px) {
-  /* Tablet / small-laptop: stop crushing — a full board of lanes now scrolls rather than shrinking
-     below a readable width. Few lanes still fill the width (1fr wins until the mins overflow). */
-  .loom-board-grid {
-    grid-auto-columns: minmax(240px, 1fr);
-  }
 }
 @media (max-width: 560px) {
   /* Phone: a tighter min so a full lane plus a peek of the next fits a ~380px viewport. */

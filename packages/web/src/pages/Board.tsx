@@ -374,7 +374,10 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
                 deferred
               </span>
             )}
-            <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{task.title}</span>
+            {/* `break-word` (not `anywhere`): normal titles wrap at WORD boundaries, and only a genuinely
+                long unbroken token breaks mid-word. `anywhere` makes the title's min-content width one
+                character, so at a crushed lane width the flex row collapses it to one letter per row. */}
+            <span style={{ flex: 1, minWidth: 0, overflowWrap: "break-word" }}>{task.title}</span>
             {hasBody && <span title="has a description" style={{ color: color.textMuted, flexShrink: 0 }}>≣</span>}
           </div>
           {worker && st && (
