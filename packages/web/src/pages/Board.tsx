@@ -8,7 +8,7 @@ import { useActiveProject } from "../lib/activeProject";
 import { Button, Input, SectionLabel, StatusPill, Chip } from "../components/ui";
 import { useOpenRequest, RequestTypeTag } from "../components/requests";
 import { relativeAge, requestOutcome, requestNeedsChip, REQUEST_TYPE_TONE } from "../lib/questions";
-import { color, font, tone, roleTone, type Tone } from "../theme";
+import { color, font, radius, tone, roleTone, type Tone } from "../theme";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
 import { useVoiceLang } from "../lib/useVoiceLang";
 import { isDoneColumn } from "../lib/columnSort";
@@ -414,9 +414,14 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
   );
 }
 
-// Slide-over detail drawer: view + edit a task's title and description (the `body` field that the
-// MCP task tools read/write but the card never showed). Backdrop or Esc closes; keyed by task id so
-// switching cards resets the fields. Save patches the shared task store, then the board refetches.
+// Centered modal detail dialog: view + edit a task's title and description (the `body` field that the
+// MCP task tools read/write but the card never showed). Renders as a centered overlay OVER the current
+// page — backdrop, ✕, click-outside or Esc closes; keyed by task id so switching cards resets the fields.
+// Mirrors the RequestModal chrome (components/requests.tsx) so the task-detail and request-detail
+// surfaces feel like one system. zIndex 50 sits BELOW the RequestModal's 60, so a "view ↗" from the
+// Linked-requests section opens the request dialog ABOVE this one. Save patches the shared task store,
+// then the board refetches. EVERY entry point (a Board card click, the `?task=` deep-link, a Request's
+// reverse linked-task chip → /board?task=) funnels through Board's openTaskId state into this one modal.
 function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteError }:
   { task: Task; onClose: () => void; onSave: (patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean }) => void; saving: boolean;
     onDelete: () => void; deleting: boolean; deleteError: string | null }) {
@@ -485,11 +490,12 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
   };
   const labelStyle = { fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim } as const;
   return (
-    <div onClick={requestClose}
-      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50, display: "flex", justifyContent: "flex-end" }}>
+    <div onClick={requestClose} role="dialog" aria-modal
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 50, display: "flex",
+        alignItems: "flex-start", justifyContent: "center", padding: "6vh 16px", overflowY: "auto" }}>
       <div onClick={(e) => e.stopPropagation()}
-        style={{ width: 460, maxWidth: "90vw", height: "100%", background: color.panel, borderLeft: `1px solid ${color.borderStrong}`,
-          padding: 16, display: "flex", flexDirection: "column", gap: 10, boxSizing: "border-box" }}>
+        style={{ width: 520, maxWidth: "100%", background: color.panel, border: `1px solid ${color.borderStrong}`,
+          borderRadius: radius.base, padding: 16, display: "flex", flexDirection: "column", gap: 10, boxSizing: "border-box" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <SectionLabel style={{ margin: 0, flex: 1 }}>Task · {task.id.slice(0, 8)}</SectionLabel>
           <Button onClick={requestClose} title="Close (Esc)">✕</Button>
