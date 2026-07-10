@@ -3447,6 +3447,17 @@ export class Db {
       .all(managerSessionId) as Row[]).map(toOrchestrationEvent);
   }
   /**
+   * Every `platform_escalate` event whose `detail.originProjectId` matches the given project — the
+   * manager-facing `escalation_status` read's SERVER-SIDE scoped set (mcp/orchestration.ts). Scoped by
+   * ORIGIN PROJECT (not managerSessionId), so a recycled successor manager in the same project still
+   * sees escalations its predecessor filed. Newest first (ts DESC, rowid DESC breaks same-ts ties).
+   */
+  listEscalationsForProject(originProjectId: string): OrchestrationEvent[] {
+    return (this.db.prepare(
+      "SELECT * FROM orchestration_events WHERE kind = 'platform_escalate' AND json_extract(detail_json, '$.originProjectId') = ? ORDER BY ts DESC, rowid DESC",
+    ).all(originProjectId) as Row[]).map(toOrchestrationEvent);
+  }
+  /**
    * One worker's audit trail in chronological order — used by boot-reconcile's dangling-merge
    * detector to pair a `merge_request` with its later terminal `merge_done`/`merge_rejected`
    * regardless of which manager id the events were filed under (rowid breaks same-ts ties).

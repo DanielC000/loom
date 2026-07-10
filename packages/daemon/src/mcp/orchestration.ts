@@ -1542,6 +1542,31 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    server.registerTool(
+      "escalation_status",
+      {
+        description:
+          "READ-ONLY: check whether the Platform Lead has picked up / resolved an escalation YOUR PROJECT " +
+          "filed via platform_escalate — closes the gap where a manager re-escalates work the Lead already " +
+          "claimed. Pass `taskId` (the id platform_escalate returned) to check one escalation; omit it to " +
+          "list every escalation ever filed from your project, most-recent first. Scoped server-side to " +
+          "YOUR OWN project's origin — a taskId outside that set (another project's escalation, or unknown) " +
+          "returns `{found:false}` uniformly, never an error, so this can't be used to probe another " +
+          "project's escalations. Each escalation reports its CURRENT title (the Lead may have refined it — " +
+          "itself a sign it was seen), a `status` of pending (still in the landing lane — not yet picked " +
+          "up), in_progress (moved into a working lane — picked up), resolved (in a done/terminal column), " +
+          "or closed (the task was deleted/archived), its columnKey, and updatedAt. No writes.",
+        inputSchema: { taskId: z.string().optional() },
+      },
+      async ({ taskId }) => {
+        try {
+          return ok(sessions.escalationStatus(managerSessionId, { taskId }));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     return server;
   }
 

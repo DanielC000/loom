@@ -252,6 +252,18 @@ export interface ShippedCardMatch {
   mainBranch: string;
 }
 
+/** One escalation's manager-facing status (orchestration `escalation_status`) — a compact, honest read of
+ *  a `platform_escalate` task's CURRENT state; never the Platform task's full body. */
+export interface EscalationStatusItem {
+  taskId: string;
+  /** The task's CURRENT title — the Lead may have refined it, itself a signal it was seen. Falls back to
+   *  the originally-filed title once the task is `closed` (deleted/archived — no live row to read). */
+  title: string;
+  status: "pending" | "in_progress" | "resolved" | "closed";
+  columnKey: string | null;
+  updatedAt: string;
+}
+
 /** Bounded scan window for {@link findShippedCardMatch} — recent mainline history only, not a full-repo
  *  grep. 200 commits comfortably covers "did this land recently" without an unbounded git log read. */
 const SHIPPED_MATCH_SCAN_LIMIT = 200;
@@ -3324,6 +3336,55 @@ export class SessionService {
       }
     }
     return { taskId: task.id, projectId: home.id, deliveryStatus };
+  }
+
+  /**
+   * Manager→Platform escalation READ (orchestration `escalation_status`) — closes the gap where a manager
+   * has no way to tell whether a `platform_escalate` it filed was ever picked up, so it re-escalates work
+   * the Lead already claimed. READ-ONLY, origin-project-scoped: the candidate set is derived SERVER-SIDE
+   * from `platform_escalate` events whose `detail.originProjectId` equals the CALLER'S OWN project (never
+   * a client-supplied projectId) — scoped by origin project, not by managerSessionId, so a recycled
+   * successor manager in the same project still sees escalations its predecessor filed. A `taskId` outside
+   * that set — whether it belongs to another project's escalation or is simply unknown — returns
+   * `{ found: false }` uniformly; it never confirms or denies that a given Platform task exists, so a
+   * manager can't use this to probe another project's escalations.
+   */
+  escalationStatus(
+    managerSessionId: string,
+    input: { taskId?: string },
+  ): { found: false } | { found: true; escalation: EscalationStatusItem } | { found: true; escalations: EscalationStatusItem[] } {
+    const caller = this.db.getSession(managerSessionId);
+    if (!caller || caller.role !== "manager") throw new Error("escalation_status is a manager-only surface");
+
+    const events = this.db.listEscalationsForProject(caller.projectId);
+    if (input.taskId) {
+      const match = events.find((e) => e.taskId === input.taskId);
+      if (!match) return { found: false };
+      return { found: true, escalation: this.describeEscalation(match) };
+    }
+    return { found: true, escalations: events.map((e) => this.describeEscalation(e)) };
+  }
+
+  /** One `platform_escalate` event → its current escalation status, read fresh off the live Platform task
+   *  (its title/column may have moved since filing — a refined title is itself a signal the Lead saw it). */
+  private describeEscalation(event: OrchestrationEvent): EscalationStatusItem {
+    const taskId = event.taskId ?? "";
+    const filedTitle = (event.detail?.title as string | undefined) ?? "";
+    const platformProjectId = (event.detail?.platformProjectId as string | undefined) ?? "";
+    const task = this.db.getTask(taskId);
+    if (!task) return { taskId, title: filedTitle, status: "closed", columnKey: null, updatedAt: event.ts };
+    return { taskId, title: task.title, status: this.classifyEscalationStatus(platformProjectId, task.columnKey), columnKey: task.columnKey, updatedAt: task.updatedAt };
+  }
+
+  /** Column → escalation status, role-resolved against the Platform project's OWN column roles (never a
+   *  hardcoded "inbox"/"backlog"/"done" key) — mirrors the landing-lane fallback `platformEscalate` files
+   *  new escalations into, so a task still sitting in that exact lane reads back as "pending". */
+  private classifyEscalationStatus(platformProjectId: string, columnKey: string): "resolved" | "pending" | "in_progress" {
+    const terminalKey = this.columnKeyForProjectRole(platformProjectId, "terminal");
+    if (terminalKey !== undefined && columnKey === terminalKey) return "resolved";
+    const landingKey = this.columnKeyForProjectRole(platformProjectId, "defaultLanding") ?? "backlog";
+    if (columnKey === landingKey) return "pending";
+    return "in_progress";
   }
 
   /**
