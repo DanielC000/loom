@@ -243,9 +243,16 @@ async function main(): Promise<void> {
   const pty = new PtyHost({
     onEngineSessionId: (sessionId, engineId) => db.setEngineSessionId(sessionId, engineId),
     // Persist busy, and on the falling edge nudge the manager if a worker went idle without
-    // reporting (stranded-worker guard; no-op for non-workers). `sessions` is assigned below but
-    // this closure only runs at runtime — same forward-reference pattern as onExit→orchMcp.
-    onBusy: (sessionId, busy) => { db.setBusy(sessionId, busy); if (!busy) sessions.notifyManagerOfIdleWorker(sessionId); },
+    // reporting (stranded-worker guard; no-op for non-workers). On the RISING edge, purge any
+    // still-queued idle-worker nudge for this worker from its manager's FIFO — it re-engaged, so a
+    // nudge computed back when it was idle would otherwise drain stale into a later manager turn
+    // (auditor finding 2e3a8e6f). `sessions` is assigned below but this closure only runs at
+    // runtime — same forward-reference pattern as onExit→orchMcp.
+    onBusy: (sessionId, busy) => {
+      db.setBusy(sessionId, busy);
+      if (!busy) sessions.notifyManagerOfIdleWorker(sessionId);
+      else sessions.purgeStaleIdleNudgeForReengagedWorker(sessionId);
+    },
     onContextStats: (sessionId, s) => db.setContextCounters(sessionId, { ctxInputTokens: s.inputTokens, ctxTurns: s.turns, model: s.model }),
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so

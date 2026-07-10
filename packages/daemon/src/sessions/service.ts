@@ -4055,6 +4055,28 @@ export class SessionService {
   }
 
   /**
+   * Fire-time correctness guard for the idle-worker watchdog (auditor finding 2e3a8e6f — a delivery-vs-
+   * watchdog TIMING race, distinct from the progress-vs-blocked guard on 5d41fc8a). Called on a WORKER's
+   * OWN busy(false→true) edge (index.ts's onBusy hook) — the instant it re-engages, whether because its
+   * manager replied (`worker_message`/`worker_redirect`) or it resumed on its own for any other reason.
+   *
+   * WHY: `notifyManagerOfIdleWorker` (above) classifies and enqueues its nudge the MOMENT a worker goes
+   * idle (or on IdleWatcher's periodic re-check) — correct when computed. But if the manager is busy right
+   * then, the nudge only QUEUES in its pending FIFO and drains on the manager's NEXT turn boundary. A
+   * manager can reply to that very worker LATER IN THE SAME still-in-flight turn and only end its turn
+   * afterward — at which point the STALE queued nudge (computed before the reply) drains as if fresh,
+   * falsely telling an already-responded manager "it IS parked awaiting your reply". Purging on THIS edge
+   * removes any such nudge before it can ever reach the manager. A worker that STAYS idle (no busy edge)
+   * never has its queued nudge touched — this can only remove a nudge whose "still idle" premise has since
+   * become false, so a genuinely-stranded worker with no reply is never silenced.
+   */
+  purgeStaleIdleNudgeForReengagedWorker(workerSessionId: string): void {
+    const w = this.db.getSession(workerSessionId);
+    if (!w || w.role !== "worker" || !w.parentSessionId) return;
+    try { this.pty.purgeQueuedWorkerIdleNudges(w.parentSessionId, workerSessionId); } catch { /* manager not live */ }
+  }
+
+  /**
    * Exited-without-report guard (board card 84151b99). A worker's ONLY channel up is worker_report's
    * push, and the idle nudge above (notifyManagerOfIdleWorker) fires on a busy→false EDGE — but a
    * fast/first worker can EXIT before that edge ever lands: a pty exit routes through the onExit hook,

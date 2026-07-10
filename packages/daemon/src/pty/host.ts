@@ -2603,6 +2603,43 @@ export class PtyHost {
   }
 
   /**
+   * Drop still-queued `[loom:worker-idle]` / `[loom:worker-spawn-broken]` nudges for ONE worker from its
+   * manager's pending FIFO (auditor finding 2e3a8e6f — delivery-vs-watchdog TIMING race). Mirrors
+   * `purgeQueuedByQuestionIds`'s exact mechanics (synchronous splice, no drain/submit boundary crossed) but
+   * keys off the nudge's own literal text prefix — these nudges predate `questionId`-style tagging and
+   * already embed the workerSessionId in their text (`classifyIdleWorker`'s queued-report guard matches the
+   * same way).
+   *
+   * WHY THIS EXISTS: `notifyManagerOfIdleWorker` classifies and enqueues a nudge the INSTANT a worker goes
+   * idle (or on IdleWatcher's periodic re-check) — correct when computed. But if the manager is BUSY at
+   * that moment the nudge just QUEUES (delivered:false) and only drains on the manager's NEXT turn
+   * boundary. A manager can reply to that very worker (`messageWorker`/`redirectWorker`) LATER IN THE SAME
+   * still-in-flight turn — re-engaging it — and only then end its turn, at which point the STALE queued
+   * nudge (computed before the reply) drains as if it were fresh, falsely claiming "it IS parked awaiting
+   * your reply" to a manager that already replied. Called on the worker's OWN busy(false→true) edge
+   * (index.ts's onBusy hook) — an objective, unambiguous "no longer idle" signal, whether that edge came
+   * from a manager reply or the worker resuming on its own — so any not-yet-delivered nudge about it is
+   * purged the instant it goes stale, before it can ever drain into the manager's turn. A worker that STAYS
+   * idle (no busy edge) never has its queued nudge touched, so a genuinely-stranded worker's nudge still
+   * fires exactly as before — this only ever removes a nudge whose premise ("still idle") has since become
+   * false.
+   */
+  purgeQueuedWorkerIdleNudges(managerSessionId: string, workerSessionId: string): QueuedMessage[] {
+    const live = this.live.get(managerSessionId);
+    if (!live?.alive) return [];
+    const prefixes = [`[loom:worker-idle] worker ${workerSessionId} `, `[loom:worker-spawn-broken] worker ${workerSessionId}`];
+    const removed: QueuedMessage[] = [];
+    for (let i = live.pending.length - 1; i >= 0; i--) {
+      const m = live.pending[i]!;
+      if (prefixes.some((p) => m.text.startsWith(p))) {
+        removed.push(m);
+        live.pending.splice(i, 1);
+      }
+    }
+    return removed.reverse(); // restore original FIFO order (the scan walked back-to-front)
+  }
+
+  /**
    * The three human-facing queue mutators (delete / edit / reorder a queued entry). All are addressed
    * by the stable QueuedMessage.id and are SYNCHRONOUS BY CONSTRUCTION — they only touch the
    * `live.pending` array (no `await`, no submit(), never a pty write), exactly like consumePending. So
