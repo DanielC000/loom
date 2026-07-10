@@ -4899,6 +4899,61 @@ export class SessionService {
   }
 
   /**
+   * Auto-archive-on-exit gate (card 6cd3ce9e — the orphaned-fleet strand). index.ts's onExit archives
+   * EVERY exited non-run session by default (every "stopped" session leaves the live rail for Archive).
+   * That default is wrong for a manager/platform that still owns ≥1 LIVE worker/child session at the
+   * instant it exits — ANY exit cause (a deliberate human Stop, an interrupt, an unexpected death):
+   * archiving would silently strand the fleet, since Archive drops the row off every rail/god's-eye list
+   * (listSessions/listWorkers exclude archived rows) while its children stay live+busy with no live
+   * parent to review/merge/stop them — invisible until a human happens to notice.
+   *
+   * This is the after-the-fact twin of `endMe`'s "live-workers" gate: that one REFUSES a VOLUNTARY
+   * self-stop up front (the pty is still alive, so the stop itself can be blocked); here the pty is
+   * ALREADY DEAD by the time onExit runs, so there's nothing left to refuse — the only lever is what
+   * happens to the ROW. So: skip the archive (leave it exited-but-unarchived — still on the live rail,
+   * still resumable via the normal resume flow, which un-archives regardless) and file a DISTINCT durable
+   * `manager_exited_with_live_workers` event naming the stranded count — the audit-trail record (mirrors
+   * the strand-family events `worker_report_undelivered`/`worker_exited_without_report`), retrievable via
+   * listEventsForSession/a Lead's audit sweep. useAttention (web) only polls orchestration events for LIVE
+   * managers, so a dead manager's event alone would never reach Mission Control — the SAME `lastError`
+   * banner ALSO stamped here (`[loom:orphaned-fleet]`) is what actually surfaces it: web/src/lib/
+   * attention.ts's `isOrphanedFleet` reads this role-agnostic session-row signal exactly like the existing
+   * `isCrashLooped`/`[loom:crash-loop]` pair, turning it into a red "ORPHANED FLEET" attention item + shell
+   * bell regardless of role/liveness.
+   *
+   * Deliberately does NOT change auto-resume policy: an INTENDED stop is still never auto-resumed by the
+   * crash-recovery watchdog (recordUnexpectedExit's `intended` gate is untouched) — this only keeps the
+   * row (and its orphaned children) VISIBLE so a human (or a resumed successor) can act. A manager/
+   * platform with NO live children — the overwhelming common case — archives exactly as before, and every
+   * non-manager/platform role (worker/run/assistant/etc.) is byte-identical to the old unconditional call.
+   */
+  archiveOnExit(session: Session): void {
+    if (session.role === "manager" || session.role === "platform") {
+      const liveWorkers = this.db.listWorkers(session.id).filter((w) => w.processState === "live");
+      if (liveWorkers.length > 0) {
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          // Filed with workerSessionId = the exited manager itself (the SUBJECT), managerSessionId = its
+          // OWN parent if any else its own id — mirrors session_died/session_recovery_abandoned so
+          // listEventsForWorker(session.id) retrieves it regardless of role (a manager has no "worker id"
+          // of its own otherwise).
+          managerSessionId: session.parentSessionId ?? session.id, workerSessionId: session.id,
+          kind: "manager_exited_with_live_workers",
+          detail: { count: liveWorkers.length, workerIds: liveWorkers.map((w) => w.id) },
+        });
+        this.db.setLastError(
+          session.id,
+          `[loom:orphaned-fleet] This ${session.role} exited while ${liveWorkers.length} worker(s)/child ` +
+          `session(s) were still live — they are now parentless. Resume this session (it will re-adopt ` +
+          `them) or reparent/stop them via a sibling manager. Loom did NOT auto-archive so this stays visible.`,
+        );
+        return; // do NOT archive — stay on the live rail, visible + resumable
+      }
+    }
+    this.db.archiveSession(session.id);
+  }
+
+  /**
    * Step 1 of the two-step merge gate (#16): show the manager a worker's branch diff. NO merge
    * happens — this is the review the manager cannot skip (there is no worker-side merge tool).
    */

@@ -692,6 +692,17 @@ export type OrchestrationEventKind =
   // a [loom:worker-exited] nudge enqueued to the (live) manager. Sibling of `worker_report_undelivered`
   // (report reached nobody) — this is "no report at all".
   | "worker_exited_without_report"
+  // ORPHANED-FLEET STRAND BACKSTOP (card 6cd3ce9e): a manager/platform session EXITED (any cause —
+  // a deliberate stop, an interrupt, an unexpected death) while it still owned ≥1 LIVE worker/child
+  // session. Auto-archive-on-exit (index.ts onExit) would otherwise silently move it to Archive —
+  // off every rail/god's-eye list (listSessions/listWorkers exclude archived rows) — leaving those
+  // workers live+busy with NO live parent to review/merge/stop them, invisible until a human happens
+  // to notice. This is the durable alert SessionService.archiveOnExit files INSTEAD of archiving in
+  // that case (the row stays on the live rail, exited-but-unarchived — still resumable, still
+  // visible); `detail` carries { count, workerIds }. The synchronous, already-dead-pty twin of
+  // end_me's "live-workers" REFUSAL gate (which blocks a VOLUNTARY self-stop up front) — here the
+  // pty is already gone, so there's nothing left to refuse; only the row's visibility can be saved.
+  | "manager_exited_with_live_workers"
   // DURABLE QUEUED-MESSAGE INBOX (card 2ca18433): a down/cross-tree message (message_worker /
   // session_message) that could NOT be delivered as a turn at send time — the recipient was busy, so it
   // was HELD in the recipient's in-memory FIFO (`delivered:false`). That FIFO dies with the process, so a

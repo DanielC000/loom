@@ -24,6 +24,18 @@ export function isCrashLooped(s: SessionListItem): boolean {
   return s.processState === "exited" && !!s.lastError && s.lastError.startsWith(CRASH_LOOP_PREFIX);
 }
 
+// Orphaned-fleet strand (card 6cd3ce9e): a manager/platform exited while it still owned ≥1 LIVE worker/
+// child session — SessionService.archiveOnExit skipped the archive (the row stays exited-but-visible) and
+// stamped this banner on lastError instead. Exact parallel of isCrashLooped above, for the exact same
+// reason: a dead manager has no live parent whose event stream the attention queue reads (the manager_
+// exited_with_live_workers event it ALSO files is real audit trail, but useAttention only fetches
+// orchestration events for LIVE managers — see the `managers` filter below), so the role-agnostic,
+// session-row lastError signal is what makes this reach the queue/bell at all.
+const ORPHANED_FLEET_PREFIX = "[loom:orphaned-fleet]";
+export function isOrphanedFleet(s: SessionListItem): boolean {
+  return s.processState === "exited" && !!s.lastError && s.lastError.startsWith(ORPHANED_FLEET_PREFIX);
+}
+
 // User-dismissable attention items (STUCK-BUSY only) carry a `dismissKey` — see the dismiss store
 // below. Keyed on `${sessionId}:${lastActivity}`, NOT the session id alone: lastActivity is frozen
 // for the duration of one stuck episode (so a dismiss sticks for THIS episode), but advances the
@@ -263,6 +275,12 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     items.push({
       key: `cl-${s.id}`, tone: "red", kind: "CRASH-LOOPED", sessionId: s.id,
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — died repeatedly after auto-resume; auto-resume STOPPED. Inspect the log + resume manually.`,
+    });
+  }
+  for (const s of all.filter(isOrphanedFleet)) {
+    items.push({
+      key: `of-${s.id}`, tone: "red", kind: "ORPHANED FLEET", sessionId: s.id,
+      text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — exited while still owning live worker(s); they are now parentless. Resume this session or reparent/stop them manually.`,
     });
   }
 

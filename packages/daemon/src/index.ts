@@ -301,7 +301,11 @@ async function main(): Promise<void> {
       // — so archiving them is consistent with "ALL stopped sessions in Archive". EXCEPTION: role==='run'
       // — Agent Run sessions are ephemeral (finalized + GC'd via onRunSessionExit) and must never clutter
       // the project Archive tab; a null row (non-DB shell terminal) is skipped too.
-      if (exited && exited.role !== "run") db.archiveSession(sessionId);
+      // ORPHANED-FLEET GUARD (card 6cd3ce9e): routed through SessionService.archiveOnExit rather than a
+      // bare db.archiveSession — a manager/platform that still owns ≥1 LIVE worker/child session at exit
+      // is NOT archived (it would silently strand that fleet off every rail/god's-eye list); every other
+      // case archives exactly as before. See that method's doc for the full reasoning.
+      if (exited && exited.role !== "run") sessions.archiveOnExit(exited);
       // Disarm a leaked companion heartbeat/reminder timer on exit (fix 9227335b): an enabled companion's
       // config row survives the pty death (see companion/revive.ts), so a plain reconcile() would no-op —
       // onSessionExit bypasses that diff and tears down THIS session's live gateway/heartbeat/reminders
