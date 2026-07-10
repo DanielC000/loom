@@ -129,10 +129,17 @@ export class PendingOpRegistry {
    * call's callback is ever wired — later attach() calls on the same in-flight key pass their own callback
    * closure too, but it's a no-op (the entry already exists, so `run()`/its `.then` are not re-registered);
    * this is harmless as long as callers derive equivalent callback content from the same key (true here).
+   *
+   * `run` is handed this op's own `opId` (minted BEFORE `run()` starts, so it's stable across the whole
+   * invocation) — a caller whose result carries a manager-facing correlation signal (e.g.
+   * `confirmWorkerMergeTracked`'s `[loom:merge-*]` nudges, card 369d8824) threads it through so an async
+   * completion push can be matched back to the SAME `opId` the caller was handed in its own `{status:
+   * "pending", opId}` response. `onSettledAfterPending` is handed the same `opId` for the same reason —
+   * covers the `{ok:false}` branch too, which has no `value` of its own to carry one.
    */
   async attach<T>(
-    key: string, kind: PendingOpKind, managerSessionId: string, waitMs: number, run: () => Promise<T>,
-    onSettledAfterPending?: (outcome: { ok: true; value: T } | { ok: false; error: unknown }) => void,
+    key: string, kind: PendingOpKind, managerSessionId: string, waitMs: number, run: (opId: string) => Promise<T>,
+    onSettledAfterPending?: (outcome: { ok: true; value: T } | { ok: false; error: unknown }, opId: string) => void,
   ): Promise<AttachResult<T>> {
     let e = this.entries.get(key) as Entry<T> | undefined;
     if (!e) {
@@ -141,14 +148,14 @@ export class PendingOpRegistry {
         state: "running", settle: Promise.resolve(), surfacedPending: false,
       };
       this.entries.set(key, fresh);
-      fresh.settle = run().then(
+      fresh.settle = run(fresh.opId).then(
         (value) => {
           fresh.state = "done"; fresh.result = value; this.entries.delete(key);
-          if (fresh.surfacedPending) onSettledAfterPending?.({ ok: true, value });
+          if (fresh.surfacedPending) onSettledAfterPending?.({ ok: true, value }, fresh.opId);
         },
         (err) => {
           fresh.state = "failed"; fresh.error = err; this.entries.delete(key);
-          if (fresh.surfacedPending) onSettledAfterPending?.({ ok: false, error: err });
+          if (fresh.surfacedPending) onSettledAfterPending?.({ ok: false, error: err }, fresh.opId);
         },
       );
       e = fresh;

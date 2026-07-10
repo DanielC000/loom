@@ -23,7 +23,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (a) a SECOND confirm call for the SAME worker, after the first already merged + retired the
 //       worktree/branch, returns merged:true/ALREADY_MERGED — NOT a false "build gate failed" — even
 //       though the (still-configured, would-otherwise-pass) gate command can no longer even run (its cwd
-//       is gone), and lands NO additional commit on main.
+//       is gone), and lands NO additional commit on main. It also carries `notified:true` and the SAME
+//       correlation `opId` shape as any other confirm — but does NOT push a SECOND
+//       `[loom:already-merged]` pty nudge for a manager who was already told by the FIRST call's own
+//       finalize (card 369d8824's "already consumed" facet — a stale echo across a resume/retry).
 //   (b) a successful merge with NO gateCommand configured carries an explicit `warning` field.
 //   (c) a successful merge WITH a passing gateCommand carries NO `warning` field (contrast).
 // Run: 1) build daemon (pnpm build), 2) node test/merge-confirm-stale-retry-idempotent.mjs
@@ -49,8 +52,14 @@ const PASS_GATE = 'node -e "process.exit(0)"';
 
 const db = new Db();
 // confirmWorkerMerge only touches pty.stop / pty.isAlive / pty.enqueueStdin / pty.getPid on these paths; a
-// no-pty worker row (processState 'exited') is !isAlive anyway, so a stub keeps the test hermetic.
-const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {}, getPid() { return undefined; } };
+// no-pty worker row (processState 'exited') is !isAlive anyway, so a stub keeps the test hermetic. Records
+// every enqueueStdin() call so scenario (a) can prove the stale-retry's own [loom:already-merged] push is
+// suppressed (not merely that the RETURN VALUE looks idempotent).
+const enqueueCalls = [];
+const ptyStub = {
+  stop() {}, isAlive() { return false; }, getPid() { return undefined; },
+  enqueueStdin(sessionId, text) { enqueueCalls.push({ sessionId, text }); },
+};
 // Inject a fake reap seam — WITHOUT this, scenarios (a)/(c) (a configured, passing gateCommand) fall
 // through confirmWorkerMerge's pre-gate sweep to the REAL OS process enumerator, which shells out
 // (powershell Get-CimInstance / a /proc walk) even though it's bounded and matches nothing here. Keeps
@@ -104,11 +113,16 @@ try {
     // dir are retired), so a second call against the SAME workerSessionId is exactly the shape a
     // pending-op re-attach-after-eviction retry takes. The gate is STILL configured (and would still pass
     // if it could run) — the OLD bug was that it ran anyway, in a now-nonexistent cwd, and failed.
+    const enqueueCountBeforeRetry = enqueueCalls.length;
     const confirmA2 = await sessions.confirmWorkerMerge(A.mgrId, A.workerId);
     check("(a) SECOND confirm reports merged:true (not a false 'build gate failed')", confirmA2.merged === true);
     check("(a) SECOND confirm is distinguishable as ALREADY_MERGED", confirmA2.emptyKind === "ALREADY_MERGED");
     check("(a) SECOND confirm's reason is undefined (not a gate-failure reason)", confirmA2.reason === undefined);
     check("(a) NO additional commit landed on main from the second confirm", git(A.repo, "rev-parse HEAD") === headAfterFirst);
+    check("(a) SECOND confirm still carries notified:true (owns the announcement either way)", confirmA2.notified === true);
+    check("(a) SECOND confirm carries its OWN opId, distinct from the first call's", typeof confirmA2.opId === "string" && confirmA2.opId !== confirmA1.opId);
+    check("(a) the STALE retry pushes NO [loom:already-merged] echo — the manager was already told by the FIRST call's finalize (card 369d8824)",
+      enqueueCalls.length === enqueueCountBeforeRetry);
   }
 
   // ── (b) NO GATE CONFIGURED: a successful merge carries an explicit unverified warning ─────────────────
@@ -148,6 +162,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a stale confirm retry after a prior successful merge finishes idempotently (ALREADY_MERGED) instead of falsely failing the gate against a removed worktree, and a successful merge with no gateCommand configured explicitly says so instead of silently rubber-stamping."
+  ? "\n✅ ALL PASS — a stale confirm retry after a prior successful merge finishes idempotently (ALREADY_MERGED) instead of falsely failing the gate against a removed worktree, pushes NO duplicate [loom:already-merged] echo (card 369d8824), and a successful merge with no gateCommand configured explicitly says so instead of silently rubber-stamping."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

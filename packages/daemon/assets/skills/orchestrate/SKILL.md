@@ -282,6 +282,13 @@ mid-report — before sending anything.
    silently later (atomicity, races, environment pollution, hidden coupling, an upstream bug). Then
    `worker_merge` → review → `worker_merge_confirm`. If it's not ready, request changes via
    `worker_message`. Never merge unreviewed work.
+   - **A slow gate degrades `worker_merge_confirm` to `{status:"pending", opId}` — don't spin-poll it.**
+     Once you're told the op is pending, go do something else (review another worker, work your queue) and
+     wait for the async `[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]` nudge that
+     lands the moment the gate/merge actually finishes — it carries the same `opId` you were handed, so if
+     several merges are pending at once you can tell which one just settled. Re-calling `worker_merge_confirm`
+     with the same `workerSessionId` (or reading `worker_list`'s `pendingMerge` field) is a safe fallback if
+     you need the answer sooner, but don't fall back to `git log` guesswork while waiting.
    - **No gate/build command configured? REQUEST the human set one — never hand-roll it.** Configuring
      the project's gate command is a HUMAN-ONLY action: it's an exec/RCE surface, so it is never
      agent-writable and you must not self-configure or improvise one. When the project you orchestrate has
