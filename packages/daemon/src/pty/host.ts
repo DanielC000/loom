@@ -103,13 +103,29 @@ const BUSY_STALE_MS = 5 * 60_000;
 
 /** Shift+Tab (CSI Z / back-tab) — Claude's TUI cycles the permission mode on this key. */
 const SHIFT_TAB = "\x1b[Z";
-/** Down arrow (CSI B) — moves the selection in Claude's TUI menus. */
+/** Down/Up arrow (CSI B / CSI A) — move the selection in Claude's TUI menus. */
 const DOWN_ARROW = "\x1b[B";
+const UP_ARROW = "\x1b[A";
 const ENTER = "\r";
 const ESC_KEY = "\x1b";
 /** Strip CSI sequences so the boot-output scan matches the MCP prompt's words across TUI styling. */
 const ANSI_CSI = new RegExp(ESC_KEY + "\\[[0-9;?]*[ -/]*[@-~]", "g");
 const collapseBoot = (s: string): string => s.replace(ANSI_CSI, "").replace(/\s+/g, "");
+
+/** Settle window before the ONE Down press on the resume-summary gate (let its initial render finish
+ *  painting before we read/press anything — mirrors MODE_CYCLE_SETTLE_MS's rationale). */
+const RESUME_GATE_SETTLE_MS = 300;
+/** Poll cadence + total budget while waiting for the ❯ cursor to confirm the (single) Down landed on
+ *  option 2 (resolveResumeGate). Exactly ONE Down is ever written for the confirm loop itself — a retry
+ *  that re-presses Down while an earlier, merely-SLOW (not dropped) press is still in flight would
+ *  overshoot the cursor 1→2→3, landing on "Don't ask me again" (a code-review catch, card c7353d24
+ *  follow-up: persists the gate-disable AND still compacts this turn — worse than the bug this fix
+ *  exists to kill). So the budget is GENEROUS (not a tight per-press window) rather than retried —
+ *  bounded so a genuinely wedged/garbled gate can't poll forever, but sized to let one slow render land.
+ *  Env-overridable so the hermetic test drives the whole confirm loop in milliseconds (mirrors
+ *  RESUME_MODE_*). */
+const RESUME_GATE_POLL_MS = Number(process.env.LOOM_RESUME_GATE_POLL_MS) || 150;
+const RESUME_GATE_MAX_POLLS = Number(process.env.LOOM_RESUME_GATE_MAX_POLLS) || 20;
 
 /**
  * Recompute the human's RAW-terminal composer draft length from ONE input chunk, given the prior
@@ -184,6 +200,32 @@ export function nextComposerLen(prevLen: number, data: string): number {
  */
 export function isResumeSummaryGate(flatCollapsed: string): boolean {
   return /resumefromsummary/i.test(flatCollapsed) && /resumefullsession/i.test(flatCollapsed);
+}
+
+/**
+ * Which option the resume-summary gate's ❯ cursor currently sits on — "1" (still the default, "Resume
+ * from summary"), "2" (the target, "Resume full session as-is"), "3" ("Don't ask me again"), or `null`
+ * if unreadable (the frame hasn't painted the cursor yet, or the gate isn't on screen). PURE + exported
+ * for the hermetic test. `collapseBoot` strips ANSI but does NOT insert separators between lines (it
+ * collapses whitespace to nothing), so a rendered "❯ 2. Resume full session as-is" flattens to
+ * "❯2.Resumefullsessionas-is" — the cursor glyph sits immediately against the option's leading digit.
+ *
+ * This is what lets `resolveResumeGate` CONFIRM a Down press actually landed before risking Enter,
+ * closing the 2026-07-10 incident: the old handler wrote a blind, unverified Down+Enter pair, and under
+ * restart load the Down was delayed/reordered past the Enter — which then confirmed the still-default
+ * option 1, silently compacting the manager's full context (3-for-3 simultaneously, a systematic race,
+ * not a random dropped keystroke).
+ *
+ * Takes the LAST `❯N.` match, not the first: `resumeGateScan` is a CUMULATIVE rolling buffer (each
+ * re-render is appended, not substituted — the TUI repaints via cursor-repositioning escapes that
+ * `collapseBoot` strips, leaving every prior frame's text still concatenated in front of the current
+ * one), so only the most recent occurrence reflects the gate's current state. Same "last occurrence
+ * wins" reasoning as `detectPermissionMode`'s footer-mode `lastIndexOf` scan above.
+ */
+export function resumeGateCursorOption(flatCollapsed: string): "1" | "2" | "3" | null {
+  const matches = [...flatCollapsed.matchAll(/❯(\d)\./g)];
+  const digit = matches.at(-1)?.[1];
+  return digit === "1" || digit === "2" || digit === "3" ? digit : null;
 }
 
 /**
@@ -1039,7 +1081,12 @@ interface Live {
   startupCyclesDone: boolean; // guard so the cycle-inject fires at most once per session
   mcpPromptHandled: boolean;  // guard: dismiss the plugin-MCP enable-prompt with Esc at most once per session
   bootScan: string;           // bounded rolling buffer of early boot output, scanned for that prompt
-  resumeGateHandled: boolean; // guard: select "as-is" on the resume-from-summary gate at most once per session
+  resumeGateHandled: boolean; // TERMINAL: true once Enter has actually been sent for the resume-from-summary
+                              // gate (confirmed-or-given-up) — see resolveResumeGate. Also gates whether
+                              // resumeGateScan keeps accumulating (stays false through the whole verify-retry).
+  resumeGateDetected: boolean; // true once the gate text is first recognized — guards the detect→drive
+                                // trigger from re-arming on every subsequent chunk while resumeGateHandled
+                                // is still false (the verify-retry is in flight).
   resumeGateScan: string;     // bounded rolling buffer scanned for that gate (separate from bootScan)
   isResume: boolean;          // spawned with --resume (vs a fresh spawn) — for the landed-mode log only
   modeLogged: boolean;        // guard: log the landed permission mode at most once per session (observability)
@@ -1838,6 +1885,7 @@ export class PtyHost {
       mcpPromptHandled: false,
       bootScan: "",
       resumeGateHandled: false,
+      resumeGateDetected: false,
       resumeGateScan: "",
       isResume: !!opts.resumeId,
       modeLogged: false,
@@ -1873,19 +1921,19 @@ export class PtyHost {
       // whose DEFAULT (option 1) summarizes — silently compacting away the manager's full context — and
       // which blocks the whole resume (mode-cycles + the queued boot nudge never run; the readiness
       // fallback then drains the nudge INTO the gate, selecting that default → the 2026-06-03 incident).
-      // Always pick option 2 "Resume full session as-is": one Down then Enter (moves ❯ off option 1).
+      // PRIMARY prevention is writeSessionSettings' CLAUDE_CODE_RESUME_THRESHOLD_MINUTES/TOKEN_THRESHOLD
+      // env override (should keep this gate from ever rendering at all); this is the belt-and-suspenders
+      // fallback via resolveResumeGate, which CONFIRMS the cursor actually reached option 2 before Enter
+      // (see its doc comment for the 2026-07-10 incident this replaces the old blind Down+Enter for).
+      // `resumeGateHandled` stays false — and this scan keeps accumulating — for the WHOLE verify-retry,
+      // not just until first detection; `resumeGateDetected` guards the one-shot trigger below instead.
       if (!live.resumeGateHandled) {
         live.resumeGateScan = (live.resumeGateScan + d).slice(-8192);
-        if (isResumeSummaryGate(collapseBoot(live.resumeGateScan))) {
-          live.resumeGateHandled = true;
-          live.resumeGateScan = "";
+        if (!live.resumeGateDetected && isResumeSummaryGate(collapseBoot(live.resumeGateScan))) {
+          live.resumeGateDetected = true;
           // eslint-disable-next-line no-console
-          console.log(`[pty] ${opts.sessionId} resume-summary gate → selecting "Resume full session as-is" (Down, Enter)`);
-          setTimeout(() => {
-            if (!live.alive) return;
-            live.pty.write(DOWN_ARROW);
-            setTimeout(() => { if (live.alive) live.pty.write(ENTER); }, 150);
-          }, 300);
+          console.log(`[pty] ${opts.sessionId} resume-summary gate detected → driving cursor to "Resume full session as-is" (verify-retry)`);
+          setTimeout(() => this.resolveResumeGate(opts.sessionId), RESUME_GATE_SETTLE_MS);
         }
       }
       this.appendRing(live, buf);
@@ -1966,7 +2014,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null,
       startupModeCycles: 0, startupCyclesDone: true,
       mcpPromptHandled: true, bootScan: "",
-      resumeGateHandled: true, resumeGateScan: "",
+      resumeGateHandled: true, resumeGateDetected: true, resumeGateScan: "",
       isResume: false, modeLogged: true, // a shell has no claude footer/permission mode to read
       resumeModeTarget: null, // a shell never cycles a permission mode
       role: null, // a shell has no role; unreachable anyway (modeLogged:true skips the auto-heal read)
@@ -2032,7 +2080,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null,
       startupModeCycles: 0, startupCyclesDone: true,
       mcpPromptHandled: true, bootScan: "",
-      resumeGateHandled: true, resumeGateScan: "",
+      resumeGateHandled: true, resumeGateDetected: true, resumeGateScan: "",
       isResume: false, modeLogged: true,
       resumeModeTarget: null,
       dejaCapture: false, lastPromptText: null, // a canned entry never fires UserPromptSubmit — inert
@@ -3047,6 +3095,91 @@ export class PtyHost {
       finish("footer-unreadable", "unknown");
     };
     setTimeout(() => awaitReadable(0), MODE_CYCLE_SETTLE_MS);
+  }
+
+  /**
+   * Resolve the resume-summary gate (see `isResumeSummaryGate`/`resumeGateCursorOption`) by pressing
+   * Down EXACTLY ONCE and then CONFIRMING the ❯ cursor actually landed on option 2 "Resume full session
+   * as-is" before ever sending Enter — replacing the old blind fire-and-forget Down+(150ms later)Enter
+   * pair that caused the 2026-07-10 incident (a delayed/reordered Down under restart load let Enter
+   * confirm the still-default option 1 "Resume from summary", silently compacting three managers' full
+   * context simultaneously).
+   *
+   * Code-review catch on the first draft of this fix: a version that RETRIED the Down (re-pressing once
+   * the current press's poll window elapsed unconfirmed) reintroduced the exact class of bug it was
+   * meant to kill — if Down #1 was merely SLOW to render (not dropped), a retried Down #2 could land
+   * right after, overshooting the cursor 1→2→3 and selecting "Don't ask me again" (worse than the
+   * original bug: that persists the gate-disable AND still compacts this turn). So this presses Down
+   * ONCE and never again for the normal path — the poll BUDGET is generous (RESUME_GATE_MAX_POLLS) rather
+   * than the press being retried, which makes a two-Down-in-flight race structurally impossible.
+   *
+   * Defensive-only (should be unreachable with a single Down ever written): if the cursor is ever read at
+   * option 3 anyway, this corrects with exactly ONE Up press (never a second Down) and keeps polling —
+   * see the "3" branch below. NO path may confirm/Enter while the cursor reads "3": that would durably
+   * persist "don't ask me again" (an ONGOING config change) on top of still compacting this one time,
+   * which is a strictly worse outcome than the belt-and-suspenders give-up (still sends Enter — the
+   * pre-fix behavior — but only when the cursor is NOT known to be sitting on 3).
+   *
+   * This is the belt-and-suspenders fallback, not the primary defense — see the caller's doc comment:
+   * writeSessionSettings' env override is meant to keep this gate from ever rendering for a Loom-spawned
+   * session, so this loop should rarely if ever actually run in production.
+   */
+  private resolveResumeGate(sessionId: string): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive || live.resumeGateHandled) return;
+    live.pty.write(DOWN_ARROW);
+    this.awaitResumeGateConfirm(sessionId, 0, false);
+  }
+
+  /** Poll (read-only — no further Down keypress) for the resume-gate cursor to confirm option 2 after
+   *  the one Down press; see resolveResumeGate for the full rationale. `upCorrected` tracks whether the
+   *  one-time defensive Up-correction (for an unreachable-in-normal-operation option-3 read) has already
+   *  fired, so it can only ever happen once. */
+  private awaitResumeGateConfirm(sessionId: string, polls: number, upCorrected: boolean): void {
+    setTimeout(() => {
+      const live = this.live.get(sessionId);
+      if (!live?.alive || live.resumeGateHandled) return;
+      const cursor = resumeGateCursorOption(collapseBoot(live.resumeGateScan));
+      if (cursor === "2") {
+        live.resumeGateHandled = true;
+        live.resumeGateScan = "";
+        // eslint-disable-next-line no-console
+        console.log(`[pty] ${sessionId} resume-summary gate CONFIRMED on "Resume full session as-is" after ${polls} poll(s)${upCorrected ? " (following a defensive Up-correction)" : ""} — Enter`);
+        live.pty.write(ENTER);
+        return;
+      }
+      if (cursor === "3" && !upCorrected) {
+        // Should be unreachable — this loop writes exactly one Down and never a second keypress on this
+        // path. Correct with exactly ONE Up (not a Down retry) and keep polling; never confirm/Enter here.
+        // eslint-disable-next-line no-console
+        console.error(`[pty] ${sessionId} resume-summary gate cursor unexpectedly on option 3 ("Don't ask me again") — correcting with a single Up (never confirming on 3)`);
+        live.pty.write(UP_ARROW);
+        this.awaitResumeGateConfirm(sessionId, 0, true);
+        return;
+      }
+      if (polls < RESUME_GATE_MAX_POLLS) {
+        this.awaitResumeGateConfirm(sessionId, polls + 1, upCorrected);
+        return;
+      }
+      // Genuine give-up: the one Down (± the one defensive Up-correction) never confirmed option 2 within
+      // a generous budget — a real dropped keystroke (rare; PRIMARY-prevented by the settings env
+      // override). NEVER send Enter while still reading option 3 — that would durably persist "don't ask
+      // me again" on top of still compacting this turn, strictly worse than leaving the gate on screen.
+      // Every other read (1, or unreadable) falls back to the pre-fix behavior (send Enter anyway) rather
+      // than stranding an otherwise-recoverable gate forever.
+      if (cursor === "3") {
+        live.resumeGateHandled = true;
+        live.resumeGateScan = "";
+        // eslint-disable-next-line no-console
+        console.error(`[pty] ${sessionId} resume-summary gate still on option 3 after the give-up budget — NOT sending Enter (would durably persist "don't ask me again"); leaving the gate on screen`);
+        return;
+      }
+      live.resumeGateHandled = true;
+      live.resumeGateScan = "";
+      // eslint-disable-next-line no-console
+      console.error(`[pty] ${sessionId} resume-summary gate cursor NEVER confirmed on option 2 after ${polls} poll(s) — sending Enter anyway (best effort; may resume from a summary)`);
+      live.pty.write(ENTER);
+    }, RESUME_GATE_POLL_MS);
   }
 
   /**

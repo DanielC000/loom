@@ -4,6 +4,29 @@ import type { PermissionPolicy } from "@loom/shared";
 import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, DEJA_CAPTURE_SCRIPT, PORT, isLoomDev } from "../paths.js";
 
 /**
+ * Loom NEVER wants Claude Code's "resume from summary / as-is" gate (isResumeSummaryGate in host.ts) to
+ * render at all — the DEFAULT option silently compacts a resumed session's full context, which is
+ * exactly what happened to three managers simultaneously in the 2026-07-10 incident when the pty-side
+ * Down/Enter guard raced and lost. The gate (`Ifa`/`U1p` in the shipped CLI, confirmed against 2.1.206 by
+ * inspecting the bundled binary) only renders when BOTH the session's age exceeds
+ * `CLAUDE_CODE_RESUME_THRESHOLD_MINUTES` (default 70) AND its estimated tokens exceed
+ * `CLAUDE_CODE_RESUME_TOKEN_THRESHOLD` (default 100_000) — both read via `process.env` at the moment the
+ * gate would show. Overriding either to a value no real session will ever reach suppresses it
+ * unconditionally; both are overridden for defense-in-depth. This is settings.json's documented `env`
+ * key (confirmed in the same binary: `env:v.record(v.string())`, merged into `process.env` at CLI
+ * startup — the exact mechanism Claude Code itself uses to apply per-session env), so it rides the
+ * SAME per-session `--settings` file this function already writes — no new spawn plumbing. The pty-side
+ * `resolveResumeGate` verify-retry (host.ts) stays as a belt-and-suspenders fallback in case a future
+ * CLI version changes this threshold logic.
+ */
+const RESUME_GATE_ENV_OVERRIDE: Record<string, string> = {
+  // ~100 years — no real session is ever that old; suppresses the gate via the age check alone.
+  CLAUDE_CODE_RESUME_THRESHOLD_MINUTES: String(60 * 24 * 365 * 100),
+  // Comfortably above any real context window; suppresses the gate via the token check too.
+  CLAUDE_CODE_RESUME_TOKEN_THRESHOLD: "999999999",
+};
+
+/**
  * Write the per-session --settings file: the hooks that relay back to the daemon, plus the
  * resolved permission policy. SessionStart captures the engine id; UserPromptSubmit/Stop/
  * StopFailure drive the busy state machine (rising/falling edges). acceptEdits + allowlist
@@ -57,6 +80,7 @@ export function writeSessionSettings(
       deny: permission.deny,
     },
     includeCoAuthoredBy: false,
+    env: RESUME_GATE_ENV_OVERRIDE,
   };
   const file = path.join(SETTINGS_DIR, `${sessionId}.json`);
   const tmp = `${file}.tmp`;
