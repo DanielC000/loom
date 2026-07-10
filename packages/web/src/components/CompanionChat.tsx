@@ -158,7 +158,7 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
           clearReplyTimer();
           setAwaitingReply(false);
           setReplyTimedOut(false);
-          setMessages((m) => [...m, companionMessage(reply.text, nextId(), reply.audio, nowIso())]);
+          setMessages((m) => [...m, companionMessage(reply.text, nextId(), reply.audio, nowIso(), reply.proactive)]);
           if (reply.audio) {
             // Autoplay ONLY a LIVE reply (never a history-seeded row — that path never carries audio at
             // all, since audio is transport-only). Scoped to this interaction per the design note: the
@@ -596,9 +596,9 @@ function ResetDivider() {
 
 // ── Proactive / heartbeat EVENT LINE: a distinct amber row, never a chat bubble ───────────────────────
 // A heartbeat, a fired reminder, or an attention-push alert — an UNSOLICITED companion turn — reads as a
-// centered amber event line so it's visibly not part of the back-and-forth. (Wiring the `proactive` flag it
-// keys on needs a small daemon change to tag a proactive-origin reply; the render is complete — see the
-// ChatMessage.proactive doc in lib/companionChat.)
+// centered amber event line so it's visibly not part of the back-and-forth. The daemon tags the originating
+// {type:"chat"}/{type:"cross-channel"} frame and the persisted history row (companion/in-app.ts,
+// chat-gateway.ts) — see the ChatMessage.proactive doc in lib/companionChat.
 function EventLine({ msg, time, title }: { msg: ChatMessage; time: string; title: string }) {
   return (
     <div style={{ display: "flex", justifyContent: "center", margin: "12px 0 8px" }} role="status">

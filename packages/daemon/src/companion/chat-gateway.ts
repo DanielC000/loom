@@ -156,6 +156,14 @@ export class ChatGateway {
    *                    Commands, card 9db7d09c) — see {@link CompanionHistoryExport}. Default undefined ⇒
    *                    "/export" reports it isn't available (every existing/test construction stays
    *                    byte-identical). The daemon injects a db-backed impl (factory.ts).
+   * @param proactiveResolver  the injected PER-TURN PROACTIVE resolver (proactive event-line producer) —
+   *                    given a sessionId, returns whether the session's in-flight turn was a daemon-driven
+   *                    heartbeat/reminder/attention-push submit (the pty host pins it when the turn is
+   *                    formed — mirrors `originResolver`'s route resolution exactly). `deliverReply` reads
+   *                    this ONCE per reply and tags the outbound frame + persisted history row so the web
+   *                    chat renders the amber event line instead of an ordinary bubble. Defaults to
+   *                    undefined (⇒ never proactive ⇒ every existing/test construction stays byte-identical);
+   *                    the daemon injects `(sid) => pty.getActiveTurnIsProactive(sid)`.
    */
   constructor(
     private readonly submitTurn: SubmitTurn,
@@ -171,6 +179,7 @@ export class ChatGateway {
     private readonly reinjectPersona: ((sessionId: string) => boolean) | undefined = undefined,
     private readonly livePush: CompanionLivePush | undefined = undefined,
     private readonly historyExport: CompanionHistoryExport | undefined = undefined,
+    private readonly proactiveResolver: ((sessionId: string) => boolean) | undefined = undefined,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -512,40 +521,43 @@ export class ChatGateway {
     const id = randomUUID();
     if (this.recorder) {
       try {
-        this.recorder.record(sessionId, channel, chatId, "user", text, viaVoice, id);
+        // An inbound turn is always the owner's own message, never proactive (that's an outbound-only tag).
+        this.recorder.record(sessionId, channel, chatId, "user", text, viaVoice, id, false);
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error(`[companion] inbound history record failed: ${describeError(err)}`);
       }
     }
-    this.pushLiveSafely(sessionId, channel, "user", text, viaVoice, id);
+    this.pushLiveSafely(sessionId, channel, "user", text, viaVoice, id, false);
   }
 
   /** Best-effort outbound chat-history record for a delivered/voiced reply (unified cross-channel chat,
    *  card 7d63e200) — generalizes in-app.ts's own outbound record hook to every channel; see
    *  {@link recordInboundSafely} / {@link CompanionMessageRecorder}. ADDITIONALLY live-pushes the reply —
-   *  see {@link recordInboundSafely}'s live-push note. Never throws. */
-  private recordOutboundSafely(sessionId: string, channel: string, chatId: string, text: string): void {
+   *  see {@link recordInboundSafely}'s live-push note. `proactive` (proactive event-line producer) tags a
+   *  heartbeat/reminder/attention-push-originated reply so the persisted row + live push both carry it —
+   *  defaults false (every existing caller omitting it stays byte-identical). Never throws. */
+  private recordOutboundSafely(sessionId: string, channel: string, chatId: string, text: string, proactive = false): void {
     if (!this.recorder && !this.livePush) return;
     const id = randomUUID();
     if (this.recorder) {
       try {
-        this.recorder.record(sessionId, channel, chatId, "companion", text, false, id);
+        this.recorder.record(sessionId, channel, chatId, "companion", text, false, id, proactive);
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error(`[companion] outbound history record failed: ${describeError(err)}`);
       }
     }
-    this.pushLiveSafely(sessionId, channel, "companion", text, false, id);
+    this.pushLiveSafely(sessionId, channel, "companion", text, false, id, proactive);
   }
 
   /** Shared live-push containment (live-push card): a push failure must NEVER break the record/inbound/
    *  reply path it's mirroring — contained exactly like {@link recordInboundSafely}/{@link
    *  recordOutboundSafely}'s own recorder try/catch. No-op when no `livePush` is injected. */
-  private pushLiveSafely(sessionId: string, channel: string, author: "user" | "companion", text: string, viaVoice: boolean, id: string): void {
+  private pushLiveSafely(sessionId: string, channel: string, author: "user" | "companion", text: string, viaVoice: boolean, id: string, proactive: boolean): void {
     if (!this.livePush) return;
     try {
-      this.livePush.push(sessionId, { id, channel, author, text, viaVoice });
+      this.livePush.push(sessionId, { id, channel, author, text, viaVoice, proactive });
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error(`[companion] live cross-channel push failed: ${describeError(err)}`);
@@ -615,26 +627,31 @@ export class ChatGateway {
     // what makes cross-delivery impossible by construction: the reply can only go where the turn came from.
     const target = this.replyTarget(sessionId);
     if (!target) return { delivered: false, reason: "no-target" };
+    // Loom Companion (proactive event-line producer): resolve ONCE whether the turn this reply answers was
+    // a daemon-driven heartbeat/reminder/attention-push submit — read via the SAME per-turn mechanism as
+    // `target` above (the pty pins it when the turn is formed), so it can never drift from the turn this
+    // reply is actually answering. Threaded to every record/send path below.
+    const proactive = this.isProactive(sessionId);
     // VOICE REPLY (Companion Voice epic, VOICE-P3/P4) — attempted BEFORE the text send, never INSTEAD of it:
     // tryDeliverVoice resolves a DeliverResult only on a genuine voice-message success; ANY ineligibility
     // or failure (no synthesize dep, mode off, mode auto with no/false agent flag, adapter lacks sendVoice,
     // synth not ready/fails, sendVoice throws) resolves null and falls straight through to the EXISTING
     // text send below — the reply is NEVER lost to a voice-pipeline problem.
     if (this.synthesize) {
-      const voiceResult = await this.tryDeliverVoice(sessionId, target, text, voice);
+      const voiceResult = await this.tryDeliverVoice(sessionId, target, text, voice, proactive);
       if (voiceResult) {
-        this.recordOutboundSafely(sessionId, target.channel, target.chatId, text);
+        this.recordOutboundSafely(sessionId, target.channel, target.chatId, text, proactive);
         return voiceResult;
       }
     }
-    const result = await this.sendVia(target.channel, target.chatId, text);
+    const result = await this.sendVia(target.channel, target.chatId, text, { proactive });
     if (!result.delivered) {
       // PARTIAL SEND (CR#2 L1): a chunked reply that fails on chunk k>1 has already reached the chat with
       // chunks 1..k-1 — recording NOTHING here would leave Loom history/the web panel with zero trace of a
       // reply the user actually received. Record exactly the prefix that was actually sent (chunkText's
       // splits are byte-lossless, so joining the sent chunks reconstructs that prefix exactly).
       if (result.reason === "send-failed" && result.sentChunks > 0) {
-        this.recordOutboundSafely(sessionId, target.channel, target.chatId, result.sentText);
+        this.recordOutboundSafely(sessionId, target.channel, target.chatId, result.sentText, proactive);
       }
       return result.reason === "no-adapter" ? { delivered: false, reason: "no-adapter" } : { delivered: false, reason: "send-failed" };
     }
@@ -644,7 +661,7 @@ export class ChatGateway {
     // reply" recording point. NOT called from sendToChannel (the web→other-channels MIRROR, card 92b6445c):
     // that echoes an ALREADY-recorded user message with a disclaimer — recording it again here would
     // misattribute it as a companion reply.
-    this.recordOutboundSafely(sessionId, target.channel, target.chatId, text);
+    this.recordOutboundSafely(sessionId, target.channel, target.chatId, text, proactive);
     return { delivered: true, chunks: result.chunks };
   }
 
@@ -658,8 +675,13 @@ export class ChatGateway {
    * @param agentVoice  the agent's per-reply voice request (VOICE-P4) — consulted ONLY in `"auto"` mode;
    *   `"on"`/`"off"` never look at it. `"off"` can NEVER be forced to voice by this flag (the user's opt-out
    *   is load-bearing); an omitted/false flag in `"auto"` mode conservatively stays TEXT (no surprise voice).
+   * @param proactive  Loom Companion (proactive event-line producer) — threaded through to `adapter.sendVoice`
+   *   exactly like `send`'s `opts.proactive`, so an adapter that self-records on the voice path (in-app) can
+   *   tag its OWN frame + history row (unlike `send`, `sendVoice` REPLACES the record/deliver step entirely on
+   *   the voice path — see in-app.ts's `sendVoice` doc — so this can't ride the generic recordOutboundSafely
+   *   tagging alone).
    */
-  private async tryDeliverVoice(sessionId: string, target: CompanionRoute, text: string, agentVoice?: boolean): Promise<DeliverResult | null> {
+  private async tryDeliverVoice(sessionId: string, target: CompanionRoute, text: string, agentVoice?: boolean, proactive = false): Promise<DeliverResult | null> {
     if (!this.synthesize) return null;
     try {
       // Outbound pref resolution FIRST — senderId is ALWAYS null (Companion Voice epic, VOICE-P3 fork #3):
@@ -682,7 +704,7 @@ export class ChatGateway {
       const audio = await this.synthesize.synthesize({ text, lang: pref.ttsLang, voice: pref.ttsVoice });
       if (!audio) return null;
       try {
-        await adapter.sendVoice(target.chatId, audio.filePath, text);
+        await adapter.sendVoice(target.chatId, audio.filePath, text, proactive);
         return { delivered: true, chunks: 1 };
       } finally {
         await audio.cleanup().catch(() => { /* best-effort — cleanup must never block/throw */ });
@@ -739,8 +761,10 @@ export class ChatGateway {
    *  throw (never propagates) — the only failure modes are "no adapter registered for this channel" and
    *  "the adapter's send threw". Pure outbound: never calls submitTurn, never consults inbound routing.
    *  On a mid-stream send failure, `sentChunks`/`sentText` report exactly what already reached the chat
-   *  (chunks 1..k-1) — see deliverReply's partial-send record (CR#2 L1). */
-  private async sendVia(channel: string, chatId: string, text: string): Promise<
+   *  (chunks 1..k-1) — see deliverReply's partial-send record (CR#2 L1). `opts.proactive` (proactive
+   *  event-line producer) is forwarded to the adapter's `send` verbatim — `sendToChannel`'s mirror-echo
+   *  caller omits it (never proactive), only `deliverReply` passes it. */
+  private async sendVia(channel: string, chatId: string, text: string, opts?: { proactive?: boolean }): Promise<
     | { delivered: true; chunks: number }
     | { delivered: false; reason: "no-adapter" }
     | { delivered: false; reason: "send-failed"; sentChunks: number; sentText: string }
@@ -751,7 +775,7 @@ export class ChatGateway {
     let sent = 0;
     try {
       for (const part of parts) {
-        await adapter.send(chatId, part);
+        await adapter.send(chatId, part, opts);
         sent++;
       }
       return { delivered: true, chunks: parts.length };
@@ -770,6 +794,16 @@ export class ChatGateway {
    */
   private replyTarget(sessionId: string): CompanionRoute | null {
     try { return this.originResolver?.(sessionId) ?? null; } catch { return null; }
+  }
+
+  /**
+   * Whether `sessionId`'s IN-FLIGHT turn was a daemon-driven proactive submit (heartbeat/reminder/
+   * attention-push), via the injected proactiveResolver (pty.getActiveTurnIsProactive) — mirrors {@link
+   * replyTarget} exactly. False when no resolver is injected, and a throwing resolver degrades to false
+   * (never breaks a reply path).
+   */
+  private isProactive(sessionId: string): boolean {
+    try { return this.proactiveResolver?.(sessionId) ?? false; } catch { return false; }
   }
 
   /** Start every registered adapter (called after the daemon's server is listening). */

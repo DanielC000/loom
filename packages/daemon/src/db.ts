@@ -646,7 +646,8 @@ CREATE TABLE IF NOT EXISTS companion_messages (
   text TEXT NOT NULL,
   created_at TEXT NOT NULL,
   via_voice INTEGER NOT NULL DEFAULT 0,  -- 1 iff this inbound turn's text is a voice-note STT transcript
-  conversation_seq INTEGER NOT NULL DEFAULT 1  -- which conversation this turn belongs to (see companion_conversations)
+  conversation_seq INTEGER NOT NULL DEFAULT 1,  -- which conversation this turn belongs to (see companion_conversations)
+  proactive INTEGER NOT NULL DEFAULT 0  -- 1 iff this outbound reply's turn was a daemon-driven heartbeat/reminder/attention-push submit (proactive event-line producer) — always 0 for author='user'
 );
 CREATE INDEX IF NOT EXISTS idx_companion_messages_session ON companion_messages(session_id, channel, created_at);
 -- NOTE: the (session_id, conversation_seq) index is created in migrateCompanionMessages() — NOT here —
@@ -1064,6 +1065,9 @@ const COMPANION_MESSAGES_ADDED_COLUMNS: Record<string, string> = {
   // Conversation history (card 85f62475): DEFAULT 1 backfills every legacy row into conversation 1 — correct,
   // since migrateCompanionConversations() below gives every such session exactly one open conversation-1 row.
   conversation_seq: "INTEGER NOT NULL DEFAULT 1",
+  // Proactive event-line producer: DEFAULT 0 backfills every legacy row to non-proactive — correct, since no
+  // row recorded before this column existed could have been tagged as a heartbeat/reminder/attention-push reply.
+  proactive: "INTEGER NOT NULL DEFAULT 0",
 };
 
 /** Columns added to `questions` by the Requests-object generalization (card 695ebab0); applied to
@@ -4193,15 +4197,15 @@ export class Db {
    *  companion/in-app.ts's outbound hook) wrap this in a try/catch: a history-record failure must never break
    *  the reply/inbound path it's mirroring — a dropped history row is acceptable, a dropped reply or a
    *  crashed inbound is not. */
-  insertCompanionMessage(m: { id: string; sessionId: string; channel: string; chatId: string; author: "user" | "companion"; text: string; createdAt: string; viaVoice?: boolean }): void {
+  insertCompanionMessage(m: { id: string; sessionId: string; channel: string; chatId: string; author: "user" | "companion"; text: string; createdAt: string; viaVoice?: boolean; proactive?: boolean }): void {
     // Defensive: open-seq→insert→prune is multi-statement; wrap it so the sequence is explicitly atomic
     // (better-sqlite3 is sync so behavior is unchanged — this just makes the invariant explicit).
     this.db.transaction(() => {
       const conversationSeq = this.currentConversationSeq(m.sessionId);
       this.db.prepare(
-        `INSERT INTO companion_messages (id, session_id, channel, chat_id, author, text, created_at, via_voice, conversation_seq)
-         VALUES (@id, @sessionId, @channel, @chatId, @author, @text, @createdAt, @viaVoice, @conversationSeq)`,
-      ).run({ ...m, viaVoice: m.viaVoice ? 1 : 0, conversationSeq });
+        `INSERT INTO companion_messages (id, session_id, channel, chat_id, author, text, created_at, via_voice, conversation_seq, proactive)
+         VALUES (@id, @sessionId, @channel, @chatId, @author, @text, @createdAt, @viaVoice, @conversationSeq, @proactive)`,
+      ).run({ ...m, viaVoice: m.viaVoice ? 1 : 0, conversationSeq, proactive: m.proactive ? 1 : 0 });
       this.db.prepare(
         `DELETE FROM companion_messages WHERE session_id = ? AND channel = ? AND conversation_seq = ? AND id NOT IN (
            SELECT id FROM companion_messages WHERE session_id = ? AND channel = ? AND conversation_seq = ? ORDER BY created_at DESC, rowid DESC LIMIT ?
@@ -4501,6 +4505,7 @@ function toCompanionMessage(r0: unknown): CompanionMessage {
     author: r.author as CompanionMessage["author"], text: r.text as string, createdAt: (r.created_at as string) ?? "",
     viaVoice: (r.via_voice as number | undefined) === 1,
     conversationSeq: (r.conversation_seq as number | undefined) ?? 1,
+    proactive: (r.proactive as number | undefined) === 1,
   };
 }
 /** Collapse a preview candidate to one line and cap its length (card 85f62475's conversation-list preview). */

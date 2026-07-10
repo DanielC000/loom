@@ -1084,6 +1084,12 @@ export interface CompanionMessage {
    *  85f62475). Every "/new"/"/reset" closes the current conversation and opens the next `conversationSeq`;
    *  a message's conversationSeq never changes after insert. See {@link CompanionConversationSummary}. */
   conversationSeq: number;
+  /** True iff this turn's underlying pty turn was a daemon-driven PROACTIVE submit — a heartbeat, a fired
+   *  recurring reminder, or an attention-push alert — rather than an owner inbound or an ordinary system
+   *  inject (proactive event-line producer). Always false for author:"user" (an inbound is never proactive
+   *  by definition). The web cockpit renders a `true` row as a distinct amber event line, never a chat
+   *  bubble. */
+  proactive: boolean;
 }
 
 /**

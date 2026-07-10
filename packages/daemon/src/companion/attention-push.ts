@@ -321,7 +321,9 @@ export class AttentionPushWatcher {
     if (qualifying.length > IMMEDIATE_BURST_CAP) {
       const home = this.deps.db.getCompanionHome(this.deps.sessionId);
       const lines = qualifying.map(({ e, cls, projectName }) => alertLine(e, cls, projectName));
-      this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home ?? undefined, "agent");
+      // proactive:true (proactive event-line producer) — a daemon-driven alert push, tagged for the web
+      // chat's amber event line.
+      this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home ?? undefined, "agent", undefined, undefined, true);
       this.deferredSinceLastPush = false;
       for (const { e, cls } of qualifying) {
         this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind });
@@ -330,7 +332,8 @@ export class AttentionPushWatcher {
       const home = this.deps.db.getCompanionHome(this.deps.sessionId);
       for (const { e, cls, projectName } of qualifying) {
         // kind:"agent" — a daemon-driven push turn, must land as its own turn (never mashed with a sibling).
-        this.deps.pty.enqueueStdin(this.deps.sessionId, framedAlert(alertLine(e, cls, projectName)), "system", undefined, home ?? undefined, "agent");
+        // proactive:true — see the digest branch above.
+        this.deps.pty.enqueueStdin(this.deps.sessionId, framedAlert(alertLine(e, cls, projectName)), "system", undefined, home ?? undefined, "agent", undefined, undefined, true);
         this.deferredSinceLastPush = false;
         this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind });
       }
@@ -364,7 +367,8 @@ export class AttentionPushWatcher {
     }
     const home = this.deps.db.getCompanionHome(this.deps.sessionId);
     const lines = qualifying.map(({ e, cls, projectName }) => alertLine(e, cls, projectName));
-    this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home ?? undefined, "agent");
+    // proactive:true — see tickImmediate's digest branch above.
+    this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home ?? undefined, "agent", undefined, undefined, true);
     this.lastDigestFlushAt = now.getTime();
     this.deferredSinceLastPush = false;
     for (const { e, cls } of qualifying) {

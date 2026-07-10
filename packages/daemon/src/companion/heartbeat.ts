@@ -37,7 +37,10 @@ export function framedHeartbeat(prompt: string): string {
  *  pins on the proactive turn, so its chat_reply flows out on the home channel via the per-turn-route path). */
 export interface HeartbeatPty {
   isAlive(sessionId: string): boolean;
-  /** Submit text as a turn if the session is idle, else queue it FIFO (drains on the next Stop). */
+  /** Submit text as a turn if the session is idle, else queue it FIFO (drains on the next Stop). `proactive`
+   *  (proactive event-line producer) tags the formed turn as a daemon-driven proactive submit — the three
+   *  watchers sharing this interface (heartbeat/reminder/attention-push) each pass `true` so the companion's
+   *  chat_reply can tag its outbound frame + persisted history row for the web chat's amber event line. */
   enqueueStdin(
     sessionId: string,
     text: string,
@@ -45,6 +48,9 @@ export interface HeartbeatPty {
     onDeliver?: () => void,
     route?: CompanionRoute,
     kind?: "warning" | "agent",
+    questionId?: string,
+    ownerText?: string,
+    proactive?: boolean,
   ): { delivered: boolean; position?: number };
   /** The session's queued message texts (FIFO) — the no-stacking guard checks for an unconsumed heartbeat. */
   getPending(sessionId: string): string[];
@@ -119,7 +125,9 @@ export class CompanionHeartbeatWatcher {
     const home = this.deps.db.getCompanionHome(this.deps.sessionId);
     // kind:"agent" — a user-configured proactive prompt, the companion's own analogue of an inbound
     // chat message; it must land as its own turn, never mashed with a sibling reminder/heartbeat.
-    this.deps.pty.enqueueStdin(this.deps.sessionId, framedHeartbeat(this.deps.prompt), "system", undefined, home ?? undefined, "agent");
+    // proactive:true (proactive event-line producer) — this IS the daemon-driven heartbeat submit, so the
+    // companion's reply is tagged for the web chat's amber event line.
+    this.deps.pty.enqueueStdin(this.deps.sessionId, framedHeartbeat(this.deps.prompt), "system", undefined, home ?? undefined, "agent", undefined, undefined, true);
     this.lastFiredAt = now.getTime();
     this.deferredSinceLastFire = false;
     this.emit(now, "companion_heartbeat_fired", { intervalMinutes: this.deps.intervalMinutes });

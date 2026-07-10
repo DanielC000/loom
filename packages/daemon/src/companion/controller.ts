@@ -228,6 +228,13 @@ export interface CompanionControllerDeps {
    *  built gateway's "/new" leaves the companion identity-less after `/clear`, and "/refresh" is a no-op,
    *  byte-identical to today. */
   reinjectPersona?: (sessionId: string) => boolean;
+  /** The per-turn PROACTIVE resolver (proactive event-line producer), threaded into the default gateway
+   *  builder exactly like `originResolver` — STABLE across a gateway rebuild. The daemon injects
+   *  `(sid) => pty.getActiveTurnIsProactive(sid)` so `deliverReply` can tag a heartbeat/reminder/
+   *  attention-push-originated reply for the web chat's amber event line. Optional: absent ⇒ every built
+   *  gateway's replies are never tagged proactive (test seams that don't exercise the event-line path stay
+   *  byte-identical). */
+  proactiveResolver?: (sessionId: string) => boolean;
   /** CONVERSATION-PRESERVING respawn primitive (Framework §6) — the daemon injects
    *  `(sid) => sessions.upgradeCompanionCapabilities(sid)`, mirroring how `submitTurn`/`reinjectPersona`
    *  close over SessionService rather than the controller holding a direct reference. Optional: absent ⇒
@@ -630,7 +637,7 @@ export class CompanionController implements CompanionControl {
     // injected buildGateway test seam supplies its own). The hub is stable across rebuilds — see in-app.ts.
     const build =
       this.deps.buildGateway ??
-      ((c: CompanionConfig, submit: SubmitTurn, db: typeof this.deps.db) => createCompanionGateway(c, submit, db, this.deps.inApp, this.deps.originResolver, this.deps.transcribe, this.deps.synthesize, this.deps.reinjectPersona));
+      ((c: CompanionConfig, submit: SubmitTurn, db: typeof this.deps.db) => createCompanionGateway(c, submit, db, this.deps.inApp, this.deps.originResolver, this.deps.transcribe, this.deps.synthesize, this.deps.reinjectPersona, this.deps.proactiveResolver));
     const gateway = build(cfg, this.deps.submitTurn, this.deps.db);
     this.gateways.set(cfg.sessionId, gateway);
     gateway.start();

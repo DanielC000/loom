@@ -992,7 +992,7 @@ export type QueuedMessageKind = "warning" | "agent";
  * produces N queued nudges but only the FIRST pull is productive; the rest would otherwise drain as
  * separate turns and each find nothing left to pull.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string };
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean };
 /**
  * Distinguishes `enqueueStdin`'s two `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -1068,6 +1068,15 @@ interface Live {
   // replays to its ORIGINAL route on resume. Both null on every non-companion turn ⇒ byte-identical.
   activeTurnRoute: TurnRoute | null;
   lastPromptRoute: TurnRoute | null;
+  // Loom Companion (proactive event-line producer): whether the IN-FLIGHT turn was FORMED from a
+  // daemon-driven proactive submit (heartbeat/reminder/attention-push alert) — caller-supplied at
+  // enqueueStdin/submit(), never sniffed from the text. Persists like activeTurnRoute (simply overwritten
+  // by the next submit(), not cleared at Stop — unlike activeTurnOwnerText). `lastPromptProactive` mirrors
+  // `lastPromptRoute` so a rate-limit-killed proactive turn's replay (resumeAfterRateLimit) is still tagged
+  // correctly. Read by getActiveTurnIsProactive when the companion's chat_reply fires, so the outbound
+  // frame + persisted history row can be tagged for the web chat's amber event-line render.
+  activeTurnProactive: boolean;
+  lastPromptProactive: boolean;
   // Companion injection-guard Primitive A (Companion Capability & Permission-Lever Framework §3): the
   // LITERAL authenticated owner inbound bytes forming the IN-FLIGHT turn, or null when the turn wasn't
   // formed from an authorized owner inbound (proactive/heartbeat/reminder/cross-channel-mirror/memory-
@@ -1879,6 +1888,8 @@ export class PtyHost {
       lastPromptRoute: null,
       activeTurnOwnerText: null,
       lastPromptOwnerText: null,
+      activeTurnProactive: false,
+      lastPromptProactive: false,
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
@@ -2012,6 +2023,7 @@ export class PtyHost {
       submitGeneration: 0,
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null,
+      activeTurnProactive: false, lastPromptProactive: false,
       startupModeCycles: 0, startupCyclesDone: true,
       mcpPromptHandled: true, bootScan: "",
       resumeGateHandled: true, resumeGateDetected: true, resumeGateScan: "",
@@ -2078,6 +2090,7 @@ export class PtyHost {
       submitGeneration: 0,
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null,
+      activeTurnProactive: false, lastPromptProactive: false,
       startupModeCycles: 0, startupCyclesDone: true,
       mcpPromptHandled: true, bootScan: "",
       resumeGateHandled: true, resumeGateDetected: true, resumeGateScan: "",
@@ -2454,8 +2467,14 @@ export class PtyHost {
    * existing params so every positional call site this change didn't touch stays byte-identical. Only the
    * companion inbound submit path (the ONE place an authorized owner's literal chat text forms a turn)
    * passes it; every other caller omits it, leaving Live.activeTurnOwnerText null exactly as before.
+   *
+   * `proactive` (Loom Companion, proactive event-line producer) is an OPTIONAL trailing arg, appended after
+   * `ownerText` for the same byte-identical-by-default reason — defaults false. Only the three daemon-owned
+   * proactive watchers (CompanionHeartbeatWatcher, CompanionReminderWatcher, AttentionPushWatcher) pass
+   * `true`, so their fired turn's `getActiveTurnIsProactive` reads true and the companion's chat_reply can
+   * tag its outbound frame + persisted history row for the web chat's amber event-line render.
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason } {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason } {
     const live = this.live.get(sessionId);
     if (!live?.alive) return { delivered: false, reason: "session-dead" };
     this.healIfStuck(live, sessionId);
@@ -2470,7 +2489,7 @@ export class PtyHost {
       if (this.finalizingTurn) {
         throw new Error("M2 invariant violated: enqueueStdin reached the idle-submit path mid turn-finalize — an `await` leaked between setBusy(false) and drainPending in deliverHook (host.ts).");
       }
-      this.submit(sessionId, text, route, ownerText);
+      this.submit(sessionId, text, route, ownerText, proactive);
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
       // enqueue arriving next sees busy and QUEUES instead of racing this turn's pending `\r`. If busy
       // is still false here, a future refactor deferred the set behind an await/callback — fail loud.
@@ -2486,7 +2505,7 @@ export class PtyHost {
     // Held (busy / not-ready / composer-dirty / rate-limit parked). Carry the optional delivery callback so that when this
     // entry is finally handed to the recipient (drainPending or consumePending), the durable queued
     // message can be marked delivered. Undefined for every existing (non-messaging) caller → a no-op.
-    live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText });
+    live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText, proactive });
     return { delivered: false, position: live.pending.length, reason: "held" };
   }
 
@@ -2520,6 +2539,18 @@ export class PtyHost {
    */
   getActiveTurnOrigin(sessionId: string): TurnRoute | null {
     return this.live.get(sessionId)?.activeTurnRoute ?? null;
+  }
+
+  /**
+   * Loom Companion (proactive event-line producer): whether the session's IN-FLIGHT (or most-recently
+   * formed) turn was a daemon-driven proactive submit — a heartbeat/reminder/attention-push alert — rather
+   * than an owner inbound or an ordinary system/human inject. Mirrors {@link getActiveTurnOrigin} exactly
+   * (caller-supplied at submit()/enqueueStdin, persists until the next submit() overwrites it, false for an
+   * unknown/dead session). The companion's chat_reply reads this to tag its outbound frame + persisted
+   * history row so the web chat renders the amber event line instead of an ordinary bubble.
+   */
+  getActiveTurnIsProactive(sessionId: string): boolean {
+    return this.live.get(sessionId)?.activeTurnProactive ?? false;
   }
 
   /**
@@ -2860,7 +2891,7 @@ export class PtyHost {
       ) n++;
       drained = live.pending.splice(0, n); // the leading same-route (+ same-kind, unless toggled) run
     }
-    this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR), drained[0]!.route, drained[0]!.ownerText); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText — the head's, mirroring the route)
+    this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText/proactive — the head's, mirroring the route)
     // ADDITIVE delivery hook (card 2ca18433): every drained entry was just handed to the recipient as
     // part of this turn — fire each callback (durable-message resolution) AFTER submit, outside the
     // M1/M2 ordering. Guarded so a faulty callback can never disturb the drain. Undefined for every
@@ -2904,7 +2935,7 @@ export class PtyHost {
    * a bounded verify/retry schedule until `UserPromptSubmit` (or a Stop, proving a turn ran) confirms
    * it, or gives up and recovers busy so the session doesn't wedge.
    */
-  private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string): void {
+  private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false): void {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
     live.lastPrompt = text; // remember the in-flight turn so a usage-cap kill is recoverable (§19c-b)
@@ -2919,6 +2950,11 @@ export class PtyHost {
     // rate-limit-killed companion turn's replay (resumeAfterRateLimit) still attests correctly.
     live.activeTurnOwnerText = ownerText ?? null;
     live.lastPromptOwnerText = ownerText ?? null;
+    // Loom Companion (proactive event-line producer): pin whether THIS turn is a daemon-driven proactive
+    // submit, caller-supplied — false for every existing caller this change didn't touch. Persists like
+    // activeTurnRoute (not cleared at Stop); `lastPromptProactive` mirrors lastPromptRoute for replay.
+    live.activeTurnProactive = proactive;
+    live.lastPromptProactive = proactive;
     live.enterConfirmed = false; // this submit's Enter has not landed yet — see sendEnterAndVerify
     // NEW generation for THIS submit — the value sendEnterAndVerify's chain captures and checks on every
     // fire, so a chain left over from a PRIOR turn (already superseded by this fresh submit) recognizes
@@ -3032,8 +3068,10 @@ export class PtyHost {
     live.rateLimited = false;
     // Replay the killed turn WITH its original route (lastPromptRoute) so a rate-limited companion inbound
     // still replies to the channel it came from after the reset (§19c-b + companion route routing). Also
-    // replay its lastPromptOwnerText so Primitive A's attestation survives the kill-and-resume too.
-    if (live.lastPrompt != null) this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined);
+    // replay its lastPromptOwnerText so Primitive A's attestation survives the kill-and-resume too, and its
+    // lastPromptProactive so a rate-limited heartbeat/reminder/alert turn's replayed chat_reply is still
+    // tagged as proactive.
+    if (live.lastPrompt != null) this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive);
     return true;
   }
 

@@ -203,15 +203,19 @@ check("isArmedInApp: an in-app binding whose chatId is NOT the session id does n
 });
 
 // ── parseCrossChannel / crossChannelMessage: the live-push card's NON-in-app-channel live frame ─────────
-check("parseCrossChannel: a well-formed frame parses every field, including viaVoice defaulting to false", () => {
+check("parseCrossChannel: a well-formed frame parses every field, including viaVoice/proactive defaulting to false", () => {
   assert.deepEqual(
     parseCrossChannel(JSON.stringify({ type: "cross-channel", chatId: "sess-1", id: "row-9", channel: "telegram", author: "user", text: "hi" })),
-    { chatId: "sess-1", id: "row-9", channel: "telegram", author: "user", text: "hi", viaVoice: false },
+    { chatId: "sess-1", id: "row-9", channel: "telegram", author: "user", text: "hi", viaVoice: false, proactive: false },
   );
 });
 check("parseCrossChannel: viaVoice:true is preserved", () => {
   const parsed = parseCrossChannel(JSON.stringify({ type: "cross-channel", chatId: "s", id: "r1", channel: "telegram", author: "user", text: "a voice note transcript", viaVoice: true }));
   assert.equal(parsed.viaVoice, true);
+});
+check("parseCrossChannel: proactive:true is preserved (a heartbeat/reminder/attention-push-tagged Telegram reply)", () => {
+  const parsed = parseCrossChannel(JSON.stringify({ type: "cross-channel", chatId: "s", id: "r1b", channel: "telegram", author: "companion", text: "proactive check-in", proactive: true }));
+  assert.equal(parsed.proactive, true);
 });
 check("parseCrossChannel: a companion-authored frame parses too", () => {
   const parsed = parseCrossChannel(JSON.stringify({ type: "cross-channel", chatId: "s", id: "r2", channel: "telegram", author: "companion", text: "reply" }));

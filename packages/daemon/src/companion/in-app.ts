@@ -90,6 +90,10 @@ export type InAppServerFrame =
       text: string;
       /** Present only when this reply was voiced (`/voice on` + successful synthesis) — see `sendVoice`. */
       audio?: InAppServerAudio;
+      /** Present (true) only for a heartbeat/reminder/attention-push-originated reply (proactive event-line
+       *  producer) — the web chat renders it as the amber event line instead of an ordinary bubble. Absent
+       *  for an ordinary reply (never `proactive:false`), matching `audio`'s present-only-when-true shape. */
+      proactive?: boolean;
     }
   | {
       type: "transcript";
@@ -112,6 +116,9 @@ export type InAppServerFrame =
       author: "user" | "companion";
       text: string;
       viaVoice: boolean;
+      /** Proactive event-line producer — true only for a heartbeat/reminder/attention-push-originated
+       *  reply on the originating (non-in-app) channel; always false for an inbound (author:"user") turn. */
+      proactive: boolean;
     }
   | {
       type: "media";
@@ -134,10 +141,12 @@ export interface InAppClient {
  * CompanionPairing are injected into ChatGateway rather than the gateway holding a `Db` directly. The
  * daemon injects `(sessionId, author, text) => db.insertCompanionMessage({ sessionId, channel: IN_APP_CHANNEL,
  * chatId: sessionId, author, text, ... })` (index.ts). Optional: absent ⇒ no recording (every existing/test
- * `new InAppChannel()` construction stays byte-identical).
+ * `new InAppChannel()` construction stays byte-identical). `proactive` (proactive event-line producer) is
+ * an OPTIONAL trailing arg, defaults false — true only for a heartbeat/reminder/attention-push-originated
+ * reply (`author:"companion"`), never for an inbound (`author:"user"`) turn.
  */
 export interface InAppMessageRecorder {
-  record(sessionId: string, author: "user" | "companion", text: string): void;
+  record(sessionId: string, author: "user" | "companion", text: string, proactive?: boolean): void;
 }
 
 /**
@@ -247,7 +256,7 @@ export class InAppChannel {
     async stop() {
       /* no long-poll to stop */
     },
-    send: async (chatId: string, text: string, opts?: { record?: boolean }) => {
+    send: async (chatId: string, text: string, opts?: { record?: boolean; proactive?: boolean }) => {
       // Record by default (`opts.record !== false`) — even with zero attached clients — so a proactive
       // heartbeat/reminder reply to a session nobody is viewing right now still shows up in history on the
       // next attach (this is what "in-app has no store-and-forward" used to mean for chat history; now it's
@@ -256,8 +265,12 @@ export class InAppChannel {
       // as a history row (cross-channel asymmetry fix: Telegram's `send` never recorded these either). The
       // "/new"/"/reset" conversation-boundary marker is the one ack `tryAck` opts back IN. Contained: a
       // history-record failure must never break the actual reply delivery below.
-      if (opts?.record !== false) this.recordSafely(chatId, "companion", text);
-      this.deliver(chatId, text);
+      // Proactive event-line producer: `opts.proactive` (set by deliverReply, threaded via chat-gateway's
+      // sendVia) tags BOTH the persisted row and the live-pushed frame, so a panel reload/late-attach and an
+      // already-open panel both render the amber event line for a heartbeat/reminder/attention-push reply.
+      const proactive = opts?.proactive === true;
+      if (opts?.record !== false) this.recordSafely(chatId, "companion", text, proactive);
+      this.deliver(chatId, text, undefined, proactive);
     },
     // VOICE INBOUND (Companion Voice epic, VOICE-P4). Unlike Telegram's real network fetch, the in-app
     // channel's audio is ALREADY local by the time handleInbound sees it: the /ws/companion route decodes
@@ -281,10 +294,13 @@ export class InAppChannel {
     // above, or a successful voice reply would silently vanish from history/reload. Reads + base64-encodes
     // the synthesized OGG/Opus file; a read failure THROWS (deliberately) so chat-gateway's tryDeliverVoice
     // catch degrades to the plain `send` above instead of this method silently double-recording nothing.
-    sendVoice: async (chatId: string, audioFilePath: string, text: string) => {
+    // `proactive` (proactive event-line producer) is threaded through EXACTLY like `send`'s `opts.proactive`
+    // — this replaces `send` entirely on the voice path, so it's the only place left to tag a voiced
+    // heartbeat/reminder/attention-push reply's self-recorded row + live frame.
+    sendVoice: async (chatId: string, audioFilePath: string, text: string, proactive = false) => {
       const data = await fs.promises.readFile(audioFilePath, { encoding: "base64" });
-      this.recordSafely(chatId, "companion", text);
-      this.deliver(chatId, text, { data, mimeType: "audio/ogg" });
+      this.recordSafely(chatId, "companion", text, proactive);
+      this.deliver(chatId, text, { data, mimeType: "audio/ogg" }, proactive);
     },
     // OUTBOUND MEDIA (the `media-out` lever's in-app delivery, card 9ec79b52). `filePath` was already
     // resolved + allowlist-checked by the send_media tool (capabilities.ts) — this is transport only, never
@@ -308,10 +324,10 @@ export class InAppChannel {
 
   /** Best-effort record (never throws upward) — mirrors `deliver`'s per-client try/catch containment. A
    *  dropped history row is acceptable; it must never break the reply/inbound path it's mirroring. */
-  private recordSafely(sessionId: string, author: "user" | "companion", text: string): void {
+  private recordSafely(sessionId: string, author: "user" | "companion", text: string, proactive = false): void {
     if (!this.recorder) return;
     try {
-      this.recorder.record(sessionId, author, text);
+      this.recorder.record(sessionId, author, text, proactive);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error(`[companion] in-app history record failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -350,8 +366,14 @@ export class InAppChannel {
    * so a proactive reply (heartbeat) to a session nobody is viewing right now shows up on the next attach
    * instead of vanishing. A reply-to-inbound always has an attached client (they just sent the message).
    */
-  private deliver(chatId: string, text: string, audio?: InAppServerAudio): void {
-    this.pushFrame(chatId, audio ? { type: "chat", chatId, text, audio } : { type: "chat", chatId, text });
+  private deliver(chatId: string, text: string, audio?: InAppServerAudio, proactive = false): void {
+    this.pushFrame(chatId, {
+      type: "chat",
+      chatId,
+      text,
+      ...(audio ? { audio } : {}),
+      ...(proactive ? { proactive: true as const } : {}),
+    });
   }
 
   /**
@@ -381,10 +403,11 @@ export class InAppChannel {
    * persisting the row, so an open CompanionChat panel sees a Telegram message appear without a reload.
    * `msg.id` is the SAME id the row was persisted under — the client's dedup identity against the same
    * row's later history-reload. Purely the live push (mirrors pushCleared/pushTranscript): never writes to
-   * the db itself.
+   * the db itself. `msg.proactive` (proactive event-line producer) tags a heartbeat/reminder/attention-push
+   * -originated reply so an already-open panel renders the amber event line live.
    */
-  pushCrossChannel(chatId: string, msg: { id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean }): void {
-    this.pushFrame(chatId, { type: "cross-channel", chatId, id: msg.id, channel: msg.channel, author: msg.author, text: msg.text, viaVoice: msg.viaVoice });
+  pushCrossChannel(chatId: string, msg: { id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean; proactive: boolean }): void {
+    this.pushFrame(chatId, { type: "cross-channel", chatId, id: msg.id, channel: msg.channel, author: msg.author, text: msg.text, viaVoice: msg.viaVoice, proactive: msg.proactive });
   }
 
   /** Shared per-client fan-out: a client `deliver` that throws is CONTAINED (one bad socket can't drop the

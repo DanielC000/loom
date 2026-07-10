@@ -83,10 +83,9 @@ export interface ChatMessage {
   marker?: "reset";
   /** A proactive / unsolicited companion turn (a heartbeat, a fired reminder, an attention-push alert) —
    *  rendered as a distinct amber EVENT LINE, not a chat bubble (see {@link buildTimeline}'s `event` item).
-   *  NOTE: no live producer sets this yet — a proactive reply currently reaches the in-app panel as an
-   *  ordinary `{type:"chat"}` frame the daemon does NOT tag (companion/in-app.ts). Wiring it needs a small
-   *  daemon change to mark a proactive-origin reply on the frame + history row; the render + grouping path
-   *  here is complete and unit-tested against that flag ahead of it. */
+   *  Set from a LIVE `{type:"chat"}` reply frame's own `proactive` field ({@link parseInbound}) and from a
+   *  history-seeded row's `proactive` column ({@link historyMessage}) — both daemon-tagged (companion/
+   *  in-app.ts + chat-gateway.ts) whenever the reply's turn was a heartbeat/reminder/attention-push submit. */
   proactive?: boolean;
 }
 
@@ -125,11 +124,13 @@ function parseInboundAudio(raw: unknown): InboundAudio | null {
   return { data: a.data, mimeType: a.mimeType };
 }
 
-// Parse an inbound WS frame. Returns the companion reply { chatId, text, audio? } ONLY for a well-formed
-// {type:"chat"} frame (`audio` present only when the reply was voiced — VOICE-P4 outbound); returns null
-// for malformed JSON, a non-object, or any non-chat frame (which the panel silently ignores). Defensive by
-// construction — the socket payload is untrusted transport data.
-export function parseInbound(raw: string): { chatId: string; text: string; audio?: InboundAudio } | null {
+// Parse an inbound WS frame. Returns the companion reply { chatId, text, audio?, proactive? } ONLY for a
+// well-formed {type:"chat"} frame (`audio` present only when the reply was voiced — VOICE-P4 outbound;
+// `proactive` present only when the daemon tagged this reply's turn as a heartbeat/reminder/attention-push
+// submit — companion/in-app.ts); returns null for malformed JSON, a non-object, or any non-chat frame
+// (which the panel silently ignores). Defensive by construction — the socket payload is untrusted transport
+// data.
+export function parseInbound(raw: string): { chatId: string; text: string; audio?: InboundAudio; proactive?: boolean } | null {
   let msg: unknown;
   try {
     msg = JSON.parse(raw);
@@ -137,11 +138,14 @@ export function parseInbound(raw: string): { chatId: string; text: string; audio
     return null;
   }
   if (typeof msg !== "object" || msg === null) return null;
-  const m = msg as { type?: unknown; chatId?: unknown; text?: unknown; audio?: unknown };
+  const m = msg as { type?: unknown; chatId?: unknown; text?: unknown; audio?: unknown; proactive?: unknown };
   if (m.type !== "chat" || typeof m.text !== "string") return null;
   const chatId = typeof m.chatId === "string" ? m.chatId : "";
   const audio = parseInboundAudio(m.audio);
-  return audio ? { chatId, text: m.text, audio } : { chatId, text: m.text };
+  const result: { chatId: string; text: string; audio?: InboundAudio; proactive?: boolean } = { chatId, text: m.text };
+  if (audio) result.audio = audio;
+  if (m.proactive === true) result.proactive = true;
+  return result;
 }
 
 // Parse an inbound {type:"transcript"} frame (Companion Voice epic, VOICE-P4 inbound) — the daemon's live
@@ -186,7 +190,7 @@ export function parseCleared(raw: string): { chatId: string } | null {
 // author) — defensive by construction, like every other frame parser here.
 export function parseCrossChannel(
   raw: string,
-): { chatId: string; id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean } | null {
+): { chatId: string; id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean; proactive: boolean } | null {
   let msg: unknown;
   try {
     msg = JSON.parse(raw);
@@ -194,10 +198,10 @@ export function parseCrossChannel(
     return null;
   }
   if (typeof msg !== "object" || msg === null) return null;
-  const m = msg as { type?: unknown; chatId?: unknown; id?: unknown; channel?: unknown; author?: unknown; text?: unknown; viaVoice?: unknown };
+  const m = msg as { type?: unknown; chatId?: unknown; id?: unknown; channel?: unknown; author?: unknown; text?: unknown; viaVoice?: unknown; proactive?: unknown };
   if (m.type !== "cross-channel" || typeof m.id !== "string" || typeof m.channel !== "string" || typeof m.text !== "string") return null;
   if (m.author !== "user" && m.author !== "companion") return null;
-  return { chatId: typeof m.chatId === "string" ? m.chatId : "", id: m.id, channel: m.channel, author: m.author, text: m.text, viaVoice: m.viaVoice === true };
+  return { chatId: typeof m.chatId === "string" ? m.chatId : "", id: m.id, channel: m.channel, author: m.author, text: m.text, viaVoice: m.viaVoice === true, proactive: m.proactive === true };
 }
 
 // Build a "you" (local) bubble from a prepared send. Split out so the send path is one testable step. This
@@ -210,12 +214,14 @@ export function youMessage(text: string, id: string, ts?: string): ChatMessage {
 }
 
 // Build a "companion" (remote) bubble from a parsed inbound reply. `audio` (VOICE-P4 outbound) is present
-// only for a voiced reply, `ts` only when the panel stamps it — each omitted from the returned object when
-// absent (never `audio: undefined` / `ts: undefined`).
-export function companionMessage(text: string, id: string, audio?: InboundAudio, ts?: string): ChatMessage {
+// only for a voiced reply, `ts` only when the panel stamps it, `proactive` only for a heartbeat/reminder/
+// attention-push-tagged reply (renders as the amber event line — see buildTimeline) — each omitted from the
+// returned object when absent (never `audio: undefined` / `ts: undefined` / `proactive: undefined`).
+export function companionMessage(text: string, id: string, audio?: InboundAudio, ts?: string, proactive?: boolean): ChatMessage {
   const m: ChatMessage = { id, author: "companion", text, channel: IN_APP_CHANNEL };
   if (audio) m.audio = audio;
   if (ts) m.ts = ts;
+  if (proactive) m.proactive = true;
   return m;
 }
 
@@ -247,6 +253,10 @@ export interface CompanionHistoryRow {
    *  the wire; the panel threads it onto the bubble's `ts` for the day dividers + per-group timestamps.
    *  Optional so a row without it still renders (older/partial seeds), just without a time anchor. */
   createdAt?: string;
+  /** True iff this row's turn was a daemon-driven heartbeat/reminder/attention-push submit (proactive
+   *  event-line producer) — the daemon's full CompanionMessage row carries this too. Optional so a row
+   *  without it (a legacy seed shape) still renders, just as an ordinary bubble. */
+  proactive?: boolean;
 }
 
 // Map ONE stored row to a rendered bubble — the daemon's "user"/"companion" author maps to this panel's
@@ -259,6 +269,7 @@ export function historyMessage(row: CompanionHistoryRow): ChatMessage {
   const m: ChatMessage = { id: row.id, author: row.author === "user" ? "you" : "companion", text: row.text, channel: row.channel };
   if (row.viaVoice) m.voice = true;
   if (row.createdAt) m.ts = row.createdAt;
+  if (row.proactive) m.proactive = true;
   return m;
 }
 
@@ -301,10 +312,11 @@ export function mediaMessage(media: InboundMedia, id: string, ts?: string): Chat
 // counter), so a live-pushed row and the same row's later history-reload are structurally identical and can
 // be deduped by id alone: the panel drops one when it already holds a message with that id (see
 // CompanionChat's ws handler).
-export function crossChannelMessage(msg: { id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean }, ts?: string): ChatMessage {
+export function crossChannelMessage(msg: { id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean; proactive: boolean }, ts?: string): ChatMessage {
   const m: ChatMessage = { id: msg.id, author: msg.author === "user" ? "you" : "companion", text: msg.text, channel: msg.channel };
   if (msg.viaVoice) m.voice = true;
   if (ts) m.ts = ts;
+  if (msg.proactive) m.proactive = true;
   return m;
 }
 

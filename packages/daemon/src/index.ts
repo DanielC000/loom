@@ -464,10 +464,10 @@ async function main(): Promise<void> {
   // The injected recorder (bug 0f01f234) persists every OUTBOUND in-app reply to the durable chat-history
   // store, symmetric with the inbound record in companion/controller.ts's handleInAppInbound.
   const inAppChannel = new InAppChannel({
-    record: (sessionId, author, text) => {
+    record: (sessionId, author, text, proactive) => {
       db.insertCompanionMessage({
         id: randomUUID(), sessionId, channel: IN_APP_CHANNEL, chatId: sessionId, author, text,
-        createdAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(), proactive,
       });
     },
   });
@@ -516,6 +516,10 @@ async function main(): Promise<void> {
     // Per-turn ORIGIN resolver: chat_reply delivers to the in-flight turn's originating route (pinned in the
     // pty when the turn was formed). The SOLE reply-target source — no binding/home guessing, no cross-wire.
     originResolver: (sid) => pty.getActiveTurnOrigin(sid),
+    // Per-turn PROACTIVE resolver (proactive event-line producer): whether the in-flight turn was a
+    // daemon-driven heartbeat/reminder/attention-push submit — mirrors originResolver exactly. deliverReply
+    // reads this to tag the outbound frame + persisted history row for the web chat's amber event line.
+    proactiveResolver: (sid) => pty.getActiveTurnIsProactive(sid),
     transcribe: sttTranscriber,
     synthesize: ttsSynthesizer,
     // PERSONA reinject (companion-persona-after-clear card, generalized by the standalone "/refresh" command

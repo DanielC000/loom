@@ -71,8 +71,13 @@ export interface ChannelAdapter {
    *   (omitted) is `true` — a REAL reply (deliverReply/sendToChannel) always records. `tryAck` explicitly
    *   passes `false` for transport chrome (command/error/pairing acks are not conversation) and `true` only
    *   for the "/new"/"/reset" conversation-boundary marker.
+   * @param opts.proactive  Loom Companion (proactive event-line producer): true when this reply's turn was
+   *   a heartbeat/reminder/attention-push submit — for an adapter that self-records on send (in-app), so it
+   *   can tag its OWN frame + history row. A channel with no separate record hook (Telegram) ignores this;
+   *   its outbound turn is tagged generically via chat-gateway's recordOutboundSafely instead. Default
+   *   (omitted/false) ⇒ an ordinary reply, byte-identical to before this field existed.
    */
-  send(chatId: string, text: string, opts?: { record?: boolean }): Promise<void>;
+  send(chatId: string, text: string, opts?: { record?: boolean; proactive?: boolean }): Promise<void>;
   /**
    * OPTIONAL: download a non-text attachment to a local temp file (Companion Voice epic, VOICE-P2). Only
    * the adapter that emitted the attachment knows how to resolve it (wire-format-specific — e.g. Telegram's
@@ -94,8 +99,14 @@ export interface ChannelAdapter {
    * concept (in-app: `sendVoice` REPLACES `send` entirely on the voice path, so it's the only place left to
    * record chat history + push the live frame) can still do so. Telegram's implementation ignores it (a
    * native voice bubble needs no accompanying text).
+   *
+   * `proactive` (proactive event-line producer) — mirrors `send`'s `opts.proactive` exactly, threaded
+   * through for the SAME reason `text` is: `sendVoice` replaces `send` entirely on the voice path for an
+   * adapter with no separate record hook (in-app), so it's the only place left to tag that self-recorded
+   * row + the live frame. Telegram's implementation ignores it (its outbound tagging happens generically via
+   * chat-gateway's recordOutboundSafely instead). Default (omitted/false) ⇒ an ordinary reply.
    */
-  sendVoice?(chatId: string, audioFilePath: string, text: string): Promise<void>;
+  sendVoice?(chatId: string, audioFilePath: string, text: string, proactive?: boolean): Promise<void>;
   /**
    * OPTIONAL: send a local file to `chatId` as a native image/document message (the `media-out` Companion
    * lever, card 3a81b0f2 — "show me the latest mockup"). Only implemented by adapters whose platform can
@@ -246,8 +257,11 @@ export interface CompanionMessageRecorder {
   /** `id` (added for the live-push card below) is the id THIS turn is persisted under — optional so an
    *  existing/test recorder that ignores it (ignores the extra arg, mints its own id) stays byte-identical;
    *  the daemon's real impl (factory.ts) uses it verbatim so the persisted row and the live-pushed frame
-   *  (see CompanionLivePush) share the SAME id — the client's dedup identity. */
-  record(sessionId: string, channel: string, chatId: string, author: "user" | "companion", text: string, viaVoice: boolean, id?: string): void;
+   *  (see CompanionLivePush) share the SAME id — the client's dedup identity.
+   *  `proactive` (proactive event-line producer) — optional trailing arg, defaults false: true only for a
+   *  heartbeat/reminder/attention-push-originated outbound reply, never for an inbound (author:"user") turn.
+   *  Persisted so a panel reload / late-attach still renders the amber event line. */
+  record(sessionId: string, channel: string, chatId: string, author: "user" | "companion", text: string, viaVoice: boolean, id?: string, proactive?: boolean): void;
 }
 
 /**
@@ -263,7 +277,9 @@ export interface CompanionMessageRecorder {
  * break the inbound/reply path it's mirroring).
  */
 export interface CompanionLivePush {
-  push(sessionId: string, msg: { id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean }): void;
+  /** `proactive` (proactive event-line producer) — true only for a heartbeat/reminder/attention-push
+   *  originated outbound reply, so an already-open panel renders it as the amber event line live. */
+  push(sessionId: string, msg: { id: string; channel: string; author: "user" | "companion"; text: string; viaVoice: boolean; proactive: boolean }): void;
 }
 
 /** The OUTBOUND delivery result — STRUCTURED across every failure mode (never throws out of chat_reply).
