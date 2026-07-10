@@ -756,6 +756,10 @@ CREATE TABLE IF NOT EXISTS questions (
 );
 -- Serves both the manager's pull (session_id + state='answered') and a future project-scoped inbox read.
 CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id, state);
+-- Serves the answered-stuck watchdog's full scan (listAnsweredStuckQuestions: state='answered' AND
+-- answered_at <= ?) and pullAnsweredQuestionsForAgent's per-agent join (card f88e91f0) — both filter on
+-- state before/without a known session_id, which idx_questions_session (session_id-leading) can't serve.
+CREATE INDEX IF NOT EXISTS idx_questions_state_answered ON questions(state, answered_at);
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, created_at);
@@ -3362,6 +3366,20 @@ export class Db {
     return (this.db.prepare("SELECT * FROM sessions WHERE role = 'manager' AND process_state = 'live'")
       .all() as Row[]).map(toSession);
   }
+  /**
+   * The currently-LIVE session for an agent lineage (card f88e91f0) — resolves whoever is orchestrating
+   * this agent RIGHT NOW, whether that's a recycle successor (already reparented via reparentQuestions)
+   * OR a fresh, non-recycle respawn on the SAME agent (never reparented — a manual stop + fresh spawn is
+   * not a recycle). Used to route decision-inbox nudges/reads to the live session instead of a dead
+   * predecessor's id. At most one session per agent is normally live; if several somehow are, the most
+   * recently created wins. Undefined if the agent has no live session.
+   */
+  getLiveSessionForAgent(agentId: string): Session | undefined {
+    const r = this.db.prepare(
+      "SELECT * FROM sessions WHERE agent_id = ? AND process_state = 'live' ORDER BY created_at DESC LIMIT 1",
+    ).get(agentId) as Row | undefined;
+    return r ? toSession(r) : undefined;
+  }
   /** Currently-LIVE worker sessions across all projects — the BusyWorkerWatcher's work set (stuck-busy). */
   listLiveWorkers(): Session[] {
     return (this.db.prepare("SELECT * FROM sessions WHERE role = 'worker' AND process_state = 'live'")
@@ -3405,11 +3423,13 @@ export class Db {
   /**
    * Move a manager's decision-inbox questions (card 8701bdbb) to its recycle successor — the SAME
    * recycle-changes-session-id class card 93609ef3 fixed for worker reads (there via lineage-walking;
-   * here, consistent with reparentWakes just above, by moving the row itself). Without this an
-   * 'answered' question asked by the predecessor is stranded: question_pull is scoped by exact
-   * session_id, so the successor (a fresh session id) could never see it. Moves EVERY state
+   * here, consistent with reparentWakes just above, by moving the row itself). Moves EVERY state
    * (pending/answered/consumed) unconditionally, exactly like reparentWakes — a still-'pending'
    * question's eventual answer must also nudge the successor, not the retired predecessor's dead pty.
+   * A FAST PATH, not the only mechanism (card f88e91f0): `pullAnsweredQuestionsForAgent` /
+   * `getLiveSessionForAgent` read by agent lineage, so a question is reachable even when this never ran
+   * (a manual stop + fresh, non-recycle spawn). Keeping this means the recycle path still gets an
+   * immediate, explicit handoff rather than relying solely on the lineage read.
    */
   reparentQuestions(oldSessionId: string, newSessionId: string): number {
     return this.db.prepare("UPDATE questions SET session_id = ? WHERE session_id = ?")
@@ -3815,6 +3835,42 @@ export class Db {
     return this.db.transaction((): Question[] => {
       const rows = (this.db.prepare("SELECT * FROM questions WHERE session_id = ? AND state = 'answered' ORDER BY answered_at")
         .all(sessionId) as Row[]).map(toQuestion);
+      if (rows.length === 0) return rows;
+      const flip = this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ?");
+      for (const r of rows) flip.run(consumedAt, r.id);
+      return rows;
+    })();
+  }
+  /**
+   * The manager/Lead pull/consume, scoped to an AGENT LINEAGE rather than one exact session id (bug
+   * f88e91f0): a FRESH (non-recycle) successor on the SAME agent must still see decisions its
+   * predecessor filed. `reparentQuestions` only rewrites a row's session_id on the recycle path — a
+   * manual stop + fresh spawn leaves it pointing at the dead predecessor, unreachable from
+   * `pullAnsweredQuestions(newSessionId, …)`. Joins through `sessions.agent_id` (a session row persists
+   * after exit — only `deleteSession`, which cascades its questions away first, removes it) rather than
+   * `project_id`: agent-scope is a strict SUBSET of project-scope, and the only one still correct when a
+   * project runs more than one manager/Lead agent concurrently — e.g. the Platform Lead's reserved
+   * project, where multiple Lead LINEAGES can be live at once (see recyclePlatformLead's "PER-LINEAGE
+   * REPLACEMENT" doc); project-scoping there would let one Lead's pull consume a sibling Lead's
+   * still-pending decision. Atomically flips every matched row to 'consumed' in the SAME transaction as
+   * the read, exactly like `pullAnsweredQuestions`.
+   *
+   * KNOWN LIMITATION (CR, non-blocking): agent-lineage reachability is bounded by the predecessor
+   * session ROW surviving. If `deleteSession` garbage-collects the exited predecessor before a
+   * successor ever pulls, its still-'answered' question is cascade-deleted right along with it (the FK
+   * on `questions.session_id` enforces this — see question-orphan-no-successor.mjs). Not a regression:
+   * before this fix the question was ALREADY unreachable from a fresh successor even with the row
+   * intact; this only narrows the window where recovery is *possible* down to "the predecessor row
+   * hasn't been GC'd yet," rather than closing it further. The recycle path is immune — reparentQuestions
+   * moves the row onto the successor's own session_id, so it's never at the mercy of the predecessor
+   * row's lifetime.
+   */
+  pullAnsweredQuestionsForAgent(agentId: string, consumedAt: string): Question[] {
+    return this.db.transaction((): Question[] => {
+      const rows = (this.db.prepare(
+        `SELECT q.* FROM questions q JOIN sessions s ON s.id = q.session_id
+         WHERE s.agent_id = ? AND q.state = 'answered' ORDER BY q.answered_at`,
+      ).all(agentId) as Row[]).map(toQuestion);
       if (rows.length === 0) return rows;
       const flip = this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ?");
       for (const r of rows) flip.run(consumedAt, r.id);

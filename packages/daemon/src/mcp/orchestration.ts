@@ -1009,7 +1009,12 @@ export class OrchestrationMcpRouter {
         inputSchema: {},
       },
       async () => {
-        const answered = db.pullAnsweredQuestions(managerSessionId, new Date().toISOString());
+        // Scoped by AGENT LINEAGE, not this exact session id (card f88e91f0) — so a fresh (non-recycle)
+        // successor manager on the SAME agent still sees decisions its predecessor filed, not just a
+        // recycle successor (which reparentQuestions already handles as a fast path).
+        const asker = db.getSession(managerSessionId);
+        if (!asker) return ok({ error: "session not found" });
+        const answered = db.pullAnsweredQuestionsForAgent(asker.agentId, new Date().toISOString());
         // Purge any OTHER still-queued answer-nudge for a question this same pull just consumed — a
         // multi-answer batch enqueues one nudge per answer, but this pull drains them all atomically, so
         // every nudge past the first is now stale (card bbc46336 follow-up). Does not touch the nudge for

@@ -1394,7 +1394,14 @@ export class PlatformMcpRouter {
       },
       async () => {
         if (!callerSessionId) return ok({ error: "no caller session" });
-        const answered = db.pullAnsweredQuestions(callerSessionId, new Date().toISOString());
+        // Scoped by AGENT LINEAGE, not this exact session id (card f88e91f0) — so a fresh (non-recycle)
+        // successor Lead on the SAME agent still sees decisions its predecessor filed. Deliberately NOT
+        // project-scoped: the reserved Platform project can host several concurrently-LIVE Lead LINEAGES
+        // (recyclePlatformLead's "PER-LINEAGE REPLACEMENT" — create-only, not a global singleton), and
+        // project-scoping would let one Lead's pull consume a sibling Lead's still-pending decision.
+        const asker = db.getSession(callerSessionId);
+        if (!asker) return ok({ error: "session not found" });
+        const answered = db.pullAnsweredQuestionsForAgent(asker.agentId, new Date().toISOString());
         // Purge any OTHER still-queued answer-nudge for a question this same pull just consumed — mirrors
         // the manager path's card bbc46336 follow-up (see orchestration.ts question_pull).
         if (answered.length > 0) {

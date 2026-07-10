@@ -274,13 +274,17 @@ export class IdleWatcher {
    * Answered-stuck-question watchdog (follow-up to card 8701bdbb): a `questions` row the human answered
    * (`POST /api/questions/:id/answer`) but the asking manager never `question_pull`ed, stuck past
    * ANSWERED_QUESTION_STUCK_MINUTES, re-nudges that MANAGER — never the human, who already answered and
-   * would only see noise. Skips silently when the asking session isn't a live manager, is human-paused,
-   * is rate-limited/parked (it'll auto-resume on its own), or has itself flagged non-'watching' via
-   * idle_report (waiting/blocked_human/escalated) — reusing the SAME idle-nudge-state policy the manager
-   * idle loop above reads, so a manager legitimately not watching its inbox right now isn't nagged twice.
-   * Nudged EXACTLY ONCE per answered→still-answered window via the in-memory `nudgedAnsweredQuestions`
-   * Set (no schema change): pruned the moment a question leaves 'answered' (pulled/consumed), so the Set
-   * stays bounded and a hypothetical future re-answer of the same id isn't silenced by a stale entry.
+   * would only see noise. Routed by AGENT LINEAGE, not the exact asking session id (card f88e91f0):
+   * `db.getLiveSessionForAgent` resolves whoever is CURRENTLY live for the asker's agent — a recycle
+   * successor OR a fresh non-recycle respawn on the same agent — so this nudge reaches a live successor
+   * instead of nagging a session id whose pty is already gone. Skips silently when there's no live
+   * session for that agent, it isn't a manager, is human-paused, is rate-limited/parked (it'll
+   * auto-resume on its own), or has itself flagged non-'watching' via idle_report (waiting/blocked_human/
+   * escalated) — reusing the SAME idle-nudge-state policy the manager idle loop above reads, so a manager
+   * legitimately not watching its inbox right now isn't nagged twice. Nudged EXACTLY ONCE per
+   * answered→still-answered window via the in-memory `nudgedAnsweredQuestions` Set (no schema change):
+   * pruned the moment a question leaves 'answered' (pulled/consumed), so the Set stays bounded and a
+   * hypothetical future re-answer of the same id isn't silenced by a stale entry.
    */
   private tickAnsweredStuckQuestions(nowMs: number): void {
     const { db, pty, control } = this.deps;
@@ -294,8 +298,10 @@ export class IdleWatcher {
     for (const q of db.listAnsweredStuckQuestions(beforeIso)) {
       if (this.nudgedAnsweredQuestions.has(q.id)) continue; // already nudged this window
 
-      const m = db.getSession(q.sessionId);
-      if (!m || m.role !== "manager" || m.processState !== "live") continue; // asking session isn't a live manager
+      const asker = db.getSession(q.sessionId);
+      if (!asker) continue; // defensive — the FK on questions.session_id makes this unreachable in practice
+      const m = db.getLiveSessionForAgent(asker.agentId);
+      if (!m || m.role !== "manager") continue; // no live manager for this agent right now
       if (!pty.isAlive(m.id)) continue;
       if (control.isPaused(m.id)) continue; // human-paused (own scope or global)
       if (m.rateLimitedUntil && Date.parse(m.rateLimitedUntil) > nowMs) continue; // rate-limited/parked

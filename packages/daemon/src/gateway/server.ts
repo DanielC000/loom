@@ -3171,11 +3171,22 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // dying between the alive-check and submit()'s write) or trip an M1/M2 fail-loud guard — every OTHER
     // enqueueStdin caller in the daemon wraps it best-effort; this was the one that didn't.
     try {
+      // Route by AGENT LINEAGE, not the exact asking session id (card f88e91f0 — the third of three
+      // decision-delivery paths this fixes, alongside question_pull and the answered-stuck watchdog): on
+      // the recycle path reparentQuestions already moved updated.sessionId onto the successor, so this
+      // resolves to the SAME live session either way; on a FRESH non-recycle respawn updated.sessionId
+      // still points at the dead predecessor, so this instead finds the live successor on the same
+      // agent — without it the fresh successor would get no immediate nudge and only learn via the
+      // answered-stuck watchdog up to ANSWERED_QUESTION_STUCK_MINUTES later. Falls back to
+      // updated.sessionId if the asking session row or a live agent session can't be resolved
+      // (defensive — the FK on questions.session_id makes a missing asker row unreachable in practice).
+      const asker = deps.db.getSession(updated.sessionId);
+      const target = (asker && deps.db.getLiveSessionForAgent(asker.agentId)?.id) ?? updated.sessionId;
       const nudge = `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.`;
       // Tagged with the question id (questionId) so a LATER question_pull that consumes this question in
       // the same batch as others can purge this exact nudge if it's still queued when it goes stale
       // (card bbc46336 follow-up — see SessionService.purgeAnsweredQuestionNudges).
-      deps.pty.enqueueStdin(updated.sessionId, nudge, "human", undefined, undefined, "agent", updated.id);
+      deps.pty.enqueueStdin(target, nudge, "human", undefined, undefined, "agent", updated.id);
     } catch { /* best-effort — the answer already persisted; question_pull is the durable fallback */ }
     return reply.send(updated);
   });
