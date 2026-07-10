@@ -20,13 +20,40 @@ import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/
 
 const RING_CAP_BYTES = 256 * 1024;
 /**
- * Gap between writing a turn's text and writing the Enter (\r) that submits it. A SINGLE
+ * Gap between writing a turn's text and writing the FIRST Enter (\r) that submits it. A SINGLE
  * `text + "\r"` write does NOT submit a second turn to a running claude v2.1.150 session — the
  * trailing \r is swallowed with the text and no UserPromptSubmit fires (observed; this also
  * explains PR #9's earlier injected-turn finding). Writing Enter as a separate write a beat
  * later submits reliably. (Revises the roadmap's S2 "single raw write" note.)
+ *
+ * This constant alone is NOT the fix for a swallowed/dropped Enter (card 9549e322) — it is just
+ * the initial gap before the FIRST attempt. `pasteSettleExtraMs` scales that initial gap with the
+ * paste size, and `sendEnterAndVerify`'s verify-and-retry loop (below) is the real backstop: it
+ * re-sends the Enter on a bounded schedule until `UserPromptSubmit` (or a Stop/StopFailure, which
+ * implies a turn ran) confirms the turn actually started.
  */
-const SUBMIT_ENTER_DELAY_MS = 150;
+const SUBMIT_ENTER_DELAY_MS = Number(process.env.LOOM_SUBMIT_ENTER_DELAY_MS) || 150;
+
+/** Extra bytes of paste body absorbed per extra ms added to the initial pre-Enter delay — a larger
+ * injected message (a worker report, a coalesced multi-message drain) gives claude's TUI more real
+ * time to finish ingesting/re-rendering the paste before the first Enter races it. Capped by
+ * SUBMIT_ENTER_DELAY_MAX_EXTRA_MS so a huge paste can't stall the first attempt for seconds — the
+ * verify-retry loop is what actually guarantees delivery, this is just a better-aimed first shot. */
+const SUBMIT_ENTER_DELAY_BYTES_PER_MS = 50;
+const SUBMIT_ENTER_DELAY_MAX_EXTRA_MS = 1500;
+function pasteSettleExtraMs(textLength: number): number {
+  return Math.min(SUBMIT_ENTER_DELAY_MAX_EXTRA_MS, Math.ceil(textLength / SUBMIT_ENTER_DELAY_BYTES_PER_MS));
+}
+
+/**
+ * How long to wait for `UserPromptSubmit` (or a Stop/StopFailure, either of which proves a turn ran)
+ * to confirm a written Enter actually registered, before re-sending it. Bounds the verify-and-retry
+ * loop in `sendEnterAndVerify`. Env-overridable so tests can shrink it instead of waiting real seconds.
+ */
+const SUBMIT_VERIFY_TIMEOUT_MS = Number(process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS) || 900;
+
+/** Total Enter attempts (the first write + retries) before giving up and recovering busy. */
+const SUBMIT_MAX_ATTEMPTS = Number(process.env.LOOM_SUBMIT_MAX_ATTEMPTS) || 4;
 
 /**
  * A single large `pty.write` is truncated by Windows ConPTY's input buffer — observed as long
@@ -931,6 +958,21 @@ interface Live {
   // turn stale window (FIRST_TURN_STALE_MS) — see both for why "never started a turn" needs distinct
   // handling from "mid a long turn". Irrelevant for shell/canned entries (seeded true — no kickoff to guarantee).
   firstTurnStarted: boolean;
+  // True once the CURRENT outstanding submit()'s Enter is confirmed to have actually started a turn
+  // (a `UserPromptSubmit` hook, or a `Stop`/`StopFailure` — either proves a turn ran even if the
+  // UserPromptSubmit hook itself was lost). False from the moment submit() writes the paste until
+  // confirmed. `sendEnterAndVerify` checks this to decide whether to re-send the Enter or give up (card
+  // 9549e322 — the swallowed/dropped lone-Enter bug).
+  enterConfirmed: boolean;
+  // Bumped by submit() on every call, and by every OUT-OF-BAND busy-clearing path (healIfStuck,
+  // interruptForRedirect, stop) — see `sendEnterAndVerify`. `enterConfirmed` ALONE is not enough to
+  // scope a verify/retry chain: a fast turn can confirm+Stop (setting enterConfirmed=true) and a NEW
+  // submit() can then reset it back to false for the NEXT turn WHILE the FIRST turn's verify timer is
+  // still pending (CR-caught, card 9549e322 review) — that stale timer would read the reset false and
+  // wrongly retry-Enter into the NEW turn's window, and could even give-up→setBusy(false) mid-turn. Each
+  // `sendEnterAndVerify` chain captures the generation it was scheduled under and bails the instant the
+  // live value no longer matches, regardless of what `enterConfirmed` currently reads.
+  submitGeneration: number;
   // Loom Companion (multi-channel reply routing): the ORIGINATING chat route of the IN-FLIGHT turn, or null
   // when the turn wasn't formed from a companion inbound / proactive-home submit. Set SYNCHRONOUSLY in
   // submit() (both the idle-submit and drain paths), read by getActiveTurnOrigin when the companion's
@@ -1724,6 +1766,8 @@ export class PtyHost {
       // route (a startup turn is never a companion inbound), so the route fields start null.
       lastPrompt: opts.startupPrompt ?? null,
       firstTurnStarted: false, // flips true on the first UserPromptSubmit — see scheduleKickoffGuarantee/healIfStuck
+      enterConfirmed: true, // no submit() outstanding yet (the startup turn is a CLI arg, not submit()) — see submit()'s reset
+      submitGeneration: 0,
       activeTurnRoute: null,
       lastPromptRoute: null,
       activeTurnOwnerText: null,
@@ -1856,6 +1900,8 @@ export class PtyHost {
       lastOutputAt: Date.now(), composerLen: 0,
       pending: [], stopping: false, rateLimited: false, lastPrompt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
+      enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
+      submitGeneration: 0,
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null,
       startupModeCycles: 0, startupCyclesDone: true,
@@ -1920,6 +1966,8 @@ export class PtyHost {
       lastOutputAt: Date.now(), composerLen: 0,
       pending: [], stopping: false, rateLimited: false, lastPrompt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
+      enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
+      submitGeneration: 0,
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null,
       startupModeCycles: 0, startupCyclesDone: true,
@@ -2178,6 +2226,7 @@ export class PtyHost {
         // turn actually started, closing scheduleKickoffGuarantee's fallback window and healIfStuck's
         // short pre-first-turn stale window (see both). Idempotent after the first.
         live.firstTurnStarted = true;
+        live.enterConfirmed = true; // proof the outstanding submit()'s Enter registered — cancels sendEnterAndVerify's retry loop (card 9549e322)
         this.setBusy(sessionId, true); // rising edge — fires for the startup-prompt arg and injected prompts alike
         // Deja origin_prompt v2 (card d4b48f31): retain ONLY the most-recent turn's literal text, and
         // ONLY when this session opted into dejaCapture — overwritten every turn, never appended, never
@@ -2196,6 +2245,10 @@ export class PtyHost {
         // │ turns into one session and breaking FIFO serialization. The `finalizingTurn` tripwire    │
         // │ below makes that regression LOUD: enqueueStdin asserts it is never seen true (see there).│
         // └────────────────────────────────────────────────────────────────────────────────────────┘
+        // A Stop/StopFailure can only fire for a turn that actually ran, so it is itself proof the
+        // outstanding submit()'s Enter registered — even on the rare path where UserPromptSubmit's own
+        // hook was lost. Neutralize any still-pending verify-retry BEFORE the M2 window below.
+        live.enterConfirmed = true;
         this.finalizingTurn = true;
         try {
           this.setBusy(sessionId, false); // falling edge — exactly one Stop per end-of-turn (no per-tool-use)
@@ -2583,6 +2636,10 @@ export class PtyHost {
     const staleMs = live.firstTurnStarted ? this.busyStaleMs : FIRST_TURN_STALE_MS;
     if (live.busy && live.busySince != null
       && now - live.busySince > staleMs && now - live.lastOutputAt > staleMs) {
+      // An OUT-OF-BAND busy clear (no Stop hook involved) — bump submitGeneration so a still-pending
+      // sendEnterAndVerify chain for whatever turn this was recognizes it's stale and bails instead of
+      // retry-Enter'ing (or give-up→setBusy(false)'ing) into whatever submits next. See submitGeneration.
+      live.submitGeneration++;
       this.setBusy(sessionId, false);
     }
   }
@@ -2687,6 +2744,13 @@ export class PtyHost {
    * busy=true and QUEUES rather than racing the still-pending `\r`. DO NOT move this set behind an
    * `await`/callback or make submit() async — that would reopen the race. enqueueStdin asserts the set
    * landed synchronously (the M1 GUARD there).
+   *
+   * The Enter itself is NOT fire-and-forget (card 9549e322): a lone `\r` can land mid-ingest of a
+   * large/coalesced paste, or get dropped outright by Windows ConPTY (the same class of drop already
+   * documented for the boot Esc, card dacb8571) — either way the text strands un-submitted with busy
+   * stuck true. `enterConfirmed` is reset to false here and `sendEnterAndVerify` re-sends the Enter on
+   * a bounded verify/retry schedule until `UserPromptSubmit` (or a Stop, proving a turn ran) confirms
+   * it, or gives up and recovers busy so the session doesn't wedge.
    */
   private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string): void {
     const live = this.live.get(sessionId);
@@ -2703,6 +2767,12 @@ export class PtyHost {
     // rate-limit-killed companion turn's replay (resumeAfterRateLimit) still attests correctly.
     live.activeTurnOwnerText = ownerText ?? null;
     live.lastPromptOwnerText = ownerText ?? null;
+    live.enterConfirmed = false; // this submit's Enter has not landed yet — see sendEnterAndVerify
+    // NEW generation for THIS submit — the value sendEnterAndVerify's chain captures and checks on every
+    // fire, so a chain left over from a PRIOR turn (already superseded by this fresh submit) recognizes
+    // it's stale and bails instead of acting on this turn's `enterConfirmed`/`busy` state (CR-caught
+    // overlap, card 9549e322 review — see the field doc on `Live.submitGeneration`).
+    const gen = ++live.submitGeneration;
     live.pty.write(BRACKET_PASTE_START);
     // Chunk the text — a long turn (e.g. a worker report) sent as one pty.write is truncated by
     // ConPTY. Close the paste + send Enter only AFTER the last chunk lands, else it submits a partial.
@@ -2710,9 +2780,67 @@ export class PtyHost {
       const l = this.live.get(sessionId);
       if (!l?.alive) return;
       l.pty.write(BRACKET_PASTE_END);
-      setTimeout(() => { const x = this.live.get(sessionId); if (x?.alive) x.pty.write("\r"); }, SUBMIT_ENTER_DELAY_MS);
+      const delay = SUBMIT_ENTER_DELAY_MS + pasteSettleExtraMs(text.length); // scale the first attempt's gap with paste size
+      setTimeout(() => this.sendEnterAndVerify(sessionId, 1, gen), delay);
     });
     this.setBusy(sessionId, true); // M1: optimistic, SYNCHRONOUS — see the M1 INVARIANT note above. Keep last; keep sync.
+  }
+
+  /**
+   * Write ONE Enter attempt, then wait `SUBMIT_VERIFY_TIMEOUT_MS` for confirmation (`enterConfirmed`,
+   * set by deliverHook on `UserPromptSubmit`/`Stop`/`StopFailure`) before deciding what's next — the
+   * verify-and-retry loop that closes card 9549e322 (a swallowed/dropped lone Enter strands the
+   * composer with busy stuck true).
+   *
+   * `gen` is the `submitGeneration` this chain was scheduled under (captured once in `submit()`, threaded
+   * through every recursive retry of the SAME submit). Every fire — the write AND the verify-timeout
+   * callback — bails the instant `live.submitGeneration !== gen`: a NEWER submit() (or an out-of-band
+   * busy-clear — healIfStuck / interruptForRedirect / stop, which all bump the generation too) means this
+   * chain belongs to an ALREADY-SUPERSEDED turn, so its `enterConfirmed`/`busy` reads are meaningless for
+   * whatever is live now — checking `enterConfirmed` alone is not enough (a fast turn can confirm+Stop
+   * and a brand-new submit can reset `enterConfirmed` back to false WHILE this chain is still waiting,
+   * which would otherwise read as "still unconfirmed" and retry-Enter into the new turn's window).
+   *
+   *  - Confirmed / stale generation / the session died by the time the wait elapses → stop, nothing more.
+   *  - Not confirmed and attempts remain → log it (this IS the live validation the merge gate wants:
+   *    it proves whether a real drop/swallow happened) and re-send `\r` for the next attempt.
+   *  - Not confirmed and out of attempts → give up: log an error and recover busy (setBusy(false)) so
+   *    the session is never left busy=true with an unsent composer forever. The composer may still hold
+   *    the un-submitted paste in this rare give-up case (there is no way to un-paste it without reading
+   *    back the TUI's screen state) — the NEXT turn would then concatenate onto that stray text rather
+   *    than a clean composer. This is a deliberate trade-off (recovered-busy now vs. the old permanent
+   *    wedge) — NOT auto-cleared here: a blind Ctrl-U could just as easily destroy a genuine, unrelated
+   *    HUMAN draft the composer-dirty guard (`deferForHumanDraft`) would otherwise have protected (see
+   *    card e1829591 — never destroy a user's uncommitted draft), and give-up doesn't re-check
+   *    `composerLen` at the moment it fires. Left as a documented residual risk pending a follow-up.
+   *
+   * VALIDATED against a real claude engine (v2.1.206, card 9549e322 review item ②): forcing
+   * SUBMIT_VERIFY_TIMEOUT_MS well below a normal UserPromptSubmit round-trip (so the retry ALWAYS fires a
+   * real second Enter into an already-genuinely-submitted, still-generating turn) still produced exactly
+   * ONE UserPromptSubmit + ONE Stop for the one logical turn sent — the redundant bare `\r` landing on the
+   * by-then-empty, mid-generation composer is INERT (no stray blank turn, no corruption). A retry firing
+   * into a turn that actually already started is therefore harmless; the real risk this loop guards
+   * against is a retry NOT firing when the Enter genuinely never registered.
+   */
+  private sendEnterAndVerify(sessionId: string, attempt: number, gen: number): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive || live.enterConfirmed || live.submitGeneration !== gen) return;
+    live.pty.write(ENTER);
+    // eslint-disable-next-line no-console
+    console.log(`[submit] ${sessionId} Enter attempt ${attempt}/${SUBMIT_MAX_ATTEMPTS} written — awaiting confirmation`);
+    setTimeout(() => {
+      const l = this.live.get(sessionId);
+      if (!l?.alive || l.enterConfirmed || l.submitGeneration !== gen) return; // confirmed / stale generation / dead — nothing more to do
+      if (attempt < SUBMIT_MAX_ATTEMPTS) {
+        // eslint-disable-next-line no-console
+        console.log(`[submit] ${sessionId} Enter attempt ${attempt} NOT confirmed within ${SUBMIT_VERIFY_TIMEOUT_MS}ms — retrying`);
+        this.sendEnterAndVerify(sessionId, attempt + 1, gen);
+      } else {
+        // eslint-disable-next-line no-console
+        console.error(`[submit] ${sessionId} gave up after ${attempt} Enter attempts — turn never confirmed started; recovering busy so the session doesn't wedge`);
+        this.setBusy(sessionId, false);
+      }
+    }, SUBMIT_VERIFY_TIMEOUT_MS);
   }
 
   /**
@@ -2993,6 +3121,11 @@ export class PtyHost {
     // field writes only (no await) → the M2 lower-busy→drain window in deliverHook is untouched.
     live.stopping = true;
     live.pending.length = 0;
+    // Bump the generation so a still-pending sendEnterAndVerify chain from whatever turn was in flight
+    // recognizes it's stale and bails — the `alive` guard alone isn't enough during the graceful window
+    // (the pty stays alive through escalateGracefulStop), and a stray retry-Enter or give-up→setBusy(false)
+    // during a deliberate stop serves no purpose. See Live.submitGeneration.
+    live.submitGeneration++;
     if (mode === "hard") {
       live.pty.kill(); // TerminateProcess on Windows; node-pty Job Object kills the tree (no orphans)
       return;
@@ -3059,6 +3192,11 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.stopping || !live.ready || !live.busy) return; // nothing in flight to interrupt
     const busySinceAtInterrupt = live.busySince; // snapshot: a NEW turn (re-armed busy) updates this
+    // We are deliberately abandoning this turn's Enter — bump the generation so a still-pending
+    // sendEnterAndVerify chain for it recognizes it's stale and bails (never retry-Enters or
+    // give-up→setBusy(false)'s into the cancelled prompt or whatever the redirect submits next). See
+    // Live.submitGeneration.
+    live.submitGeneration++;
     live.pty.write(ESC_KEY); // single Esc: cancel the in-flight generation, return to the idle prompt
     setTimeout(() => {
       const l = this.live.get(sessionId);
