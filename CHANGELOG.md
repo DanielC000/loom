@@ -4,6 +4,33 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-07-10
+
+**The Companion becomes an operator, plus a broad orchestration-reliability pass.** Behind owner-granted, default-off permission levers, the in-app Companion can now *read* your fleet (session status, decisions, board, vault) and *act* on your behalf from chat — resolve a decision, file or move a board card, message/steer/stop/resume a session, or send you a screenshot/file — each gated by owner-only grants and injection-guard primitives. Managers gain a batch of orchestration tooling (intra-turn worker liveness, transcript pagination, a merge-confirm completion signal, taskless spike workers, escalation status), and the merge gate, crash recovery, and worktree lifecycle get a large hardening pass.
+
+### Added
+- **Companion permission levers — an owner-granted capability framework.** A per-companion, per-project grant model (a grants table + a single `resolveCompanionGrant` chokepoint + a capability registry + a **HUMAN-only** grants REST surface, never an agent tool) lets the owner selectively enable what a Companion may do. **Read levers:** live session status, a decisions relay (`decisions_list`), cross-project board reach (`board_list`), scoped vault lookup (secret-excluded), and a proactive attention-push that relays fleet alerts to chat. **Act levers** (owner-confirmed, injection-guarded via new A/B/C primitives): resolve a decision-inbox question, scoped board writes (create/move/priority/held), session control (message/steer/stop/resume), and media-out (send a screenshot/mockup/file to chat, incl. in-app rendering). All **default-OFF and inert until granted**; a running Companion picks up a newly-granted lever via a conversation-preserving respawn.
+- **Companion `/refresh`** — live, non-destructive persona/memory reinject for a running Companion, decoupled from `/new`'s history reset.
+- **Decision inbox: free-text answers** — answer a manager's decision with a note, without picking one of the offered options.
+- **Manager orchestration tooling** — intra-turn worker liveness on `worker_list` (a busy worker in one long turn no longer looks wedged); `worker_transcript` pagination (no more whole-transcript dumps); a `worker_merge_confirm` completion signal (no more spin-polling a pending merge); taskless spike / no-commit workers (a research worker no longer has to hijack a real card); `escalation_status` (a manager sees whether the Platform Lead picked up an escalation it filed); and a shipped-card lifecycle link so a squash-merged card is closed, not re-dispatched.
+- **GitHub MCP capability** — the first credential-tied catalog capability, an end-to-end proof of the connection-bind path (profile-gated, host-allowlisted, token-injected).
+- **Overview attention list** is capped + collapsible so it can't grow unbounded; the **Profiles role picker** reads as a legible capability-"class" selector.
+- **Platform (dev) tooling** — the Platform Lead gains a session-transcript read tool and its own decision inbox; the workspace auditor gains confined, read-only own-project source-read tools.
+
+### Changed
+- **Deja mockup capture is now gated behind `LOOM_DEV`** — public `loomctl` users never see or hit it.
+- **Shipped skills refreshed** — the `setup-assistant` and `workspace-audit` skills generalized with operator/Lead and code-gap-hunt doctrine; broad `orchestrate`/`worker`/`platform-audit` doctrine refinements (report discipline, capability-vs-role UI verification, decision routing, Windows worktree hygiene).
+
+### Fixed
+- **Merge gate** — a rejection now carries a diagnostic payload (failing phase/test/stderr) instead of an opaque "build gate failed"; a build OOM/kill under concurrent worker load is classified and retried once instead of masquerading as a genuine failure; merge lifecycle signals carry an opId/worker correlation stamp so a manager can match a `[loom:merge-*]` to the confirm it issued; a rejected async confirm no longer double-notifies.
+- **Crash & restart recovery** — a planned/supervised restart no longer resumes sessions with a false "the daemon crashed" note; boot-reconcile surfaces an orphaned live fleet (a user-interrupt that archived a manager while its workers stayed live) instead of stranding it; stale/duplicated idle- and decision-nudges are silenced (a blocked-and-parked worker, an already-answered question, a multi-answer batch).
+- **Companion** — a guardrail stops it silently misfiling an owner's "put this on project X" card onto its own board; `chat_reply` is pre-warmed on the silent startup turn so the first reply isn't gated on a tool round-trip; the injected-message submit-strand (paste-without-submit) is fixed.
+- **Platform** — `list_all_agents` / `list_all_schedules` / `list_all_sessions` resolve an 8-char projectId prefix (or error) instead of silently returning `[]`.
+- **Orchestration robustness** — a manager no longer gets locked out of its own live fleet; a Playwright eyeball no longer leaves worktree dev servers holding the worktree open (a Windows merge-cleanup failure); recycle/wake/serve-static param + script mismatches that cost failed round-trips are reconciled; a fresh (non-recycle) orchestrator boot gets an accurate absolute-paths "Where things live" block; the per-session Playwright MCP can write to a vault root.
+
+### Internal
+- LOOM_DEV-gated Codescape fleet-daemon integration (serve supervision + loopback control client + per-agent MCP injection + worktree/merge lifecycle hooks); de-flaked timing assertions (user-audit ReDoS wall-clock, merge-confirm-nudge, merge-gate completion); and the `build_gate_retry` events surfaced in the audit-replay stream.
+
 ## [0.16.0] — 2026-07-08
 
 **Voice, integrations, and a decision inbox** — the Companion gains voice (talk to it, it talks back), grows to a multi-companion cross-channel agent, and Loom gains the plumbing to *act* on the outside world: an encrypted credential store, an authenticated-request tool, scheduled triggers, and a data-described capability registry. Managers get a first-class way to ask *you* a durable, answerable question. Plus session self-stop, Deja mockup capture, a redesigned marketing site, and a large reliability pass on crash-recovery, worktree isolation, and the merge gate.
