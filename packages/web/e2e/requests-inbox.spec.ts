@@ -76,6 +76,53 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await expect(dialog.getByText(/authorized/)).toBeVisible();
   });
 
+  test("a permission request can be denied — the recorded outcome reads 'denied'", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "DenyMgr" });
+    const title = uniq("permission-deny");
+    await loomDaemon.seedQuestion({
+      sessionId: mgr.sessionId, projectId: mgr.projectId, title, type: "permission",
+      body: "May I delete the stale feature branch?",
+      permissionAction: "git branch -D old-feature", permissionScope: "once",
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    await page.locator("main").getByRole("button", { name: "Review →" }).first().click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+
+    // Deny resolves the request — the readout flips to answered/denied (mirrors the Authorize spec above).
+    await dialog.getByRole("button", { name: "Deny" }).click();
+    await expect(dialog.getByText("ANSWERED", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("denied", { exact: true })).toBeVisible();
+  });
+
+  test("a standing-scope permission request starts with the expiry select already enabled; Authorize folds scope+expiry into the recorded note", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "StandingMgr" });
+    const title = uniq("permission-standing");
+    await loomDaemon.seedQuestion({
+      sessionId: mgr.sessionId, projectId: mgr.projectId, title, type: "permission",
+      body: "May I keep auto-merging green dependency bumps?",
+      permissionAction: "gh pr merge --auto", permissionScope: "standing",
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    await page.locator("main").getByRole("button", { name: "Review →" }).first().click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+
+    // Seeded permissionScope:"standing" ⇒ the expiry select starts ENABLED with no click needed — the
+    // mirror image of the "once"-seeded Authorize spec above, which starts disabled.
+    const expiry = dialog.getByRole("combobox");
+    await expect(expiry).toBeEnabled();
+    await expiry.selectOption("30d");
+
+    await dialog.getByRole("button", { name: "Authorize" }).click();
+    await expect(dialog.getByText("ANSWERED", { exact: true })).toBeVisible();
+    // The human's scope/expiry choice is folded into the recorded note (composeNote), never silently
+    // dropped — the answer route only carries {decision, note}.
+    await expect(dialog.getByText("authorized · scope: standing until 30d", { exact: true })).toBeVisible();
+  });
+
   test("a credential request is masked with a working show/hide toggle and never echoes the value back", async ({ page, loomDaemon }) => {
     const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "CredMgr" });
     const title = uniq("credential-ask");
@@ -173,5 +220,60 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await expect(dialog.getByText(reqTitle, { exact: true })).toBeVisible();
     // The reverse link renders: the request header shows the linked-task chip.
     await expect(dialog.getByText(new RegExp(`task #${task.id.slice(0, 8)}`))).toBeVisible();
+  });
+
+  test("a request's linked-task chip deep-links to the board and opens that card's drawer, clearing ?task= from the URL", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`req-tasklink-${Date.now()}`);
+    const cardTitle = uniq("deep-link-card");
+    const task = await loomDaemon.createTask(project.id, { title: cardTitle, columnKey: "todo" });
+    const mgr = await loomDaemon.seedLiveSession({ project, role: "manager", agentName: "DeepLinkMgr" });
+    const reqTitle = uniq("decision-deep-link");
+    const qId = await loomDaemon.seedQuestion({
+      sessionId: mgr.sessionId, projectId: project.id, title: reqTitle, type: "decision",
+      options: ["Ship", "Hold"], taskId: task.id,
+    });
+
+    // The standalone deep-link page (/question/:id) renders the same detail as the modal.
+    await page.goto(`${loomDaemon.baseURL}/question/${qId}`);
+    await expect(page.getByText(reqTitle, { exact: true })).toBeVisible();
+
+    // The header's linked-task chip is clickable; click it (OBSERVABLE navigation, not inert metadata).
+    const chip = page.getByRole("button", { name: new RegExp(`^task #${task.id.slice(0, 8)}`) });
+    await expect(chip).toBeVisible();
+    await chip.click();
+
+    // Board opens scoped to the request's project with the RIGHT card's drawer already open, and the
+    // ?task= param is consumed + cleared — no lingering query string on the URL.
+    await expect(page).toHaveURL(/\/board$/);
+    await expect(page.getByText(`Task · ${task.id.slice(0, 8)}`)).toBeVisible();
+  });
+
+  test("a dangling (deleted) linked taskId never crashes the request row, its detail, or the board it deep-links to", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "DanglingMgr" });
+    const reqTitle = uniq("decision-dangling");
+    const bogusTaskId = "no-such-task-deadbeef01"; // soft link — no card was ever created with this id
+    const qId = await loomDaemon.seedQuestion({
+      sessionId: mgr.sessionId, projectId: mgr.projectId, title: reqTitle, type: "decision",
+      options: ["A", "B"], taskId: bogusTaskId,
+    });
+
+    // The inbox row renders fine — the dangling chip is inert metadata there, no crash.
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    const main = page.locator("main");
+    await expect(main.getByText(reqTitle, { exact: true })).toBeVisible();
+    await expect(main.getByText(`task #${bogusTaskId.slice(0, 8)}`, { exact: true })).toBeVisible();
+
+    // The detail page also renders fine, with a CLICKABLE chip — the title never resolves for a bogus id
+    // (the soft-link task lookup simply finds nothing), but the chip itself is never blocked from rendering.
+    await page.goto(`${loomDaemon.baseURL}/question/${qId}`);
+    await expect(page.getByText(reqTitle, { exact: true })).toBeVisible();
+    const chip = page.getByRole("button", { name: new RegExp(`^task #${bogusTaskId.slice(0, 8)}`) });
+    await expect(chip).toBeVisible();
+
+    // Clicking still navigates to the board — the dangling id just never resolves against any real card:
+    // no drawer opens, nothing throws, and the ?task= param is still consumed/cleared either way.
+    await chip.click();
+    await expect(page).toHaveURL(/\/board$/);
+    await expect(page.getByText(/^Task · /)).toHaveCount(0);
   });
 });
