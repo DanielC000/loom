@@ -169,7 +169,7 @@ function cleanup(e) {
   seedQuestion(e2, "mgr-5b", { answeredMinutesAgo: 30 });
   e2.db.setIdleNudgePolicy("mgr-5b", "suppressed");
   e2.watcher.tick(NOW);
-  check("(5b) a suppressed (escalated/blocked_human) manager draws NO answered-stuck nudge",
+  check("(5b) a suppressed (escalated/done) manager draws NO answered-stuck nudge",
     !e2.enqueued.some((x) => x.id === "mgr-5b"));
   cleanup(e); cleanup(e2);
 }

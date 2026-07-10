@@ -9,7 +9,7 @@ import { Panel, Button, SectionLabel, StatusPill } from "../components/ui";
 import { color, font } from "../theme";
 
 // Deep-linkable SINGLE-session view (/session/:id) — the destination a non-merge attention alert
-// (STUCK-BUSY / CRASH-LOOPED / MANAGER ASLEEP / NEEDS A HUMAN / QUEUE DRAINED / CONTEXT OVERFLOW) opens
+// (STUCK-BUSY / CRASH-LOOPED / MANAGER ASLEEP / QUEUE DRAINED / CONTEXT OVERFLOW) opens
 // to, so "Open" lands on the session the alert is ACTUALLY about rather than the merge-review panel it
 // used to mis-route to (card a16dfafb). A LIVE session renders the shared TerminalTile (the same Fork/
 // Stop surface as the Terminals page); an EXITED one (e.g. a crash-looped session) has no live terminal,

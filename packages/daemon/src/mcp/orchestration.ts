@@ -1199,14 +1199,14 @@ export class OrchestrationMcpRouter {
       "idle_report",
       {
         description:
-          "Tell Loom's idle watchdog your disposition so it stops nudging you (or, later, knows to alert " +
-          "the human) — call it when you end a turn with no active work. `state`: 'working' = back at it " +
-          "(resumes normal watching); 'waiting' = nothing to do until something lands — optionally snooze " +
-          "for `minutes` (defaults to the per-project idle snooze); 'blocked_human' = you need the human; " +
-          "'done' = this agent's work is complete. Always clears your unanswered-nudge counter. Pass a short " +
-          "`detail` to say why (recorded for the human).",
+          "Tell Loom's idle watchdog your disposition so it stops nudging you — call it when you end a " +
+          "turn with no active work. `state`: 'working' = back at it (resumes normal watching); 'waiting' " +
+          "= nothing to do until something lands — optionally snooze for `minutes` (defaults to the " +
+          "per-project idle snooze); 'done' = this agent's work is complete. If you need the human, file " +
+          "a Request via `question_ask` instead. Always clears your unanswered-nudge counter. Pass a " +
+          "short `detail` to say why (recorded for the human).",
         inputSchema: {
-          state: z.enum(["working", "waiting", "blocked_human", "done"]),
+          state: z.enum(["working", "waiting", "done"]),
           detail: z.string().optional(),
           minutes: z.number().optional(),
         },

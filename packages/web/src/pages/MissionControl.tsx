@@ -22,7 +22,6 @@ import { AuditReplayPanel } from "../components/auditReplay";
 // can't drift from the label source of truth in lib/questions.
 const ATTN_RANK: Record<string, number> = {
   ...Object.fromEntries(REQUEST_TYPE_ORDER.map((t) => [requestAttentionLabel(t), -1])),
-  "NEEDS A HUMAN": 0,
   "MANAGER ASLEEP": 1,
   "CONTEXT OVERFLOW": 2,
   "CRASH-LOOPED": 3,

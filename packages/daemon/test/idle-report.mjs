@@ -2,13 +2,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Asleep-at-the-Wheel idle-manager watchdog — Task 2 (the `idle_report` manager-surface tool + the
 // SessionService.recordIdleReport it calls). HERMETIC like idle-watch-foundation.mjs / profiles.mjs:
 // isolated temp DB, imports dist/* + @loom/shared, NO daemon, NO real claude, NO pty. Covers:
-//   (S) SERVICE recordIdleReport — each of the 4 states writes the correct P1 idle_nudge_* policy +
+//   (S) SERVICE recordIdleReport — each of the 3 states writes the correct P1 idle_nudge_* policy +
 //       snooze columns and leaves the unanswered counter at 0:
-//         working       → policy 'watching'  (reset)
-//         waiting       → policy 'snoozed', snoozeUntil = now + (explicit minutes) — and, separately,
-//                         the per-project idleDefaultSnoozeMinutes FALLBACK when minutes is omitted
-//         blocked_human → policy 'suppressed'
-//         done          → policy 'suppressed'
+//         working → policy 'watching'  (reset)
+//         waiting → policy 'snoozed', snoozeUntil = now + (explicit minutes) — and, separately,
+//                   the per-project idleDefaultSnoozeMinutes FALLBACK when minutes is omitted
+//         done    → policy 'suppressed'
+//       (The retired `blocked_human` disposition — card fb888d49 — is gone; an agent that needs a
+//       human now files a Request via `question_ask` instead.)
 //       In ALL cases unanswered ends 0 (pre-seeded with recorded nudges first, to prove it's cleared).
 //   (T) TOOL SURFACE — `idle_report` is registered on the MANAGER tool surface and NOT on the worker
 //       surface (asserted at the McpServer tool-registration seam, where the role gate is applied).
@@ -101,16 +102,6 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
     check("(S) waiting() → unanswered 0", s.unanswered === 0);
   }
 
-  // blocked_human → policy 'suppressed', snooze cleared, unanswered 0 (no human alert built — Task 4).
-  {
-    const id = freshManager();
-    svc.recordIdleReport(id, "blocked_human", { detail: "need a decision on the API shape" });
-    const s = db.getIdleNudgeState(id);
-    check("(S) blocked_human → policy 'suppressed'", s.policy === "suppressed");
-    check("(S) blocked_human → snoozeUntil null", s.snoozeUntil === null);
-    check("(S) blocked_human → unanswered 0", s.unanswered === 0);
-  }
-
   // done → policy 'suppressed', snooze cleared, unanswered 0.
   {
     const id = freshManager();
@@ -124,10 +115,10 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   // The detail/state is audited to the orchestration timeline (so Task 4 can surface the 'why').
   {
     const id = freshManager();
-    svc.recordIdleReport(id, "blocked_human", { detail: "waiting on prod creds" });
+    svc.recordIdleReport(id, "done", { detail: "queue is drained" });
     const evt = db.listEvents(id).find((e) => e.kind === "idle_report");
     check("(S) recordIdleReport appends an 'idle_report' audit event with state + detail",
-      !!evt && evt.detail?.state === "blocked_human" && evt.detail?.detail === "waiting on prod creds" &&
+      !!evt && evt.detail?.state === "done" && evt.detail?.detail === "queue is drained" &&
       evt.detail?.policy === "suppressed");
   }
 

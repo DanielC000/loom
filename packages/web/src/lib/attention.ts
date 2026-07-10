@@ -110,7 +110,7 @@ export interface AttentionItem {
   // every non-merge alert to a "No diff" merge page — card a16dfafb); use `sessionId` for those.
   workerSessionId?: string | null;
   // The session this NON-merge alert is ABOUT — STUCK-BUSY / CRASH-LOOPED (the session itself) or
-  // MANAGER ASLEEP / NEEDS A HUMAN / QUEUE DRAINED / CONTEXT OVERFLOW (the manager session). Its "Open"
+  // MANAGER ASLEEP / QUEUE DRAINED / CONTEXT OVERFLOW (the manager session). Its "Open"
   // affordance deep-links to that session's view (/session/:sessionId), NOT the merge panel.
   sessionId?: string | null;
   rateLimitSessionId?: string | null; // when set, the row offers a "clear / retry now" action (POST .../rate-limit/clear)
@@ -167,7 +167,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   }
 
   // Asleep-at-the-Wheel watchdog (Task 4): surface the manager's LATEST idle disposition. An
-  // `idle_escalated` (slept through every nudge) or an `idle_report` with state blocked_human/done is
+  // `idle_escalated` (slept through every nudge) or an `idle_report` with state done is
   // a human-facing alert; a later `working`/`waiting` report — or any newer idle event — clears it (we
   // only keep the single latest idle event per manager, mirroring latestMerge). detail is typed
   // Record<string,unknown>, so read .state/.detail through a cast as elsewhere in this codebase.
@@ -232,11 +232,6 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
       items.push({
         key: `ie-${e.id}`, tone: "red", kind: "MANAGER ASLEEP", sessionId: e.managerSessionId,
         text: `manager ${e.managerSessionId.slice(0, 8)} — ${detail.unanswered ?? "?"} unanswered idle nudges, escalated`,
-      });
-    } else if (detail.state === "blocked_human") {
-      items.push({
-        key: `ib-${e.id}`, tone: "red", kind: "NEEDS A HUMAN", sessionId: e.managerSessionId,
-        text: `manager ${e.managerSessionId.slice(0, 8)} — needs a human decision${detail.detail ? `: ${detail.detail}` : ""}`,
       });
     } else if (detail.state === "done") {
       items.push({

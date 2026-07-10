@@ -144,7 +144,7 @@ export class IdleWatcher {
       // Timed snooze expiry: a manager that reported `waiting` is silent only UNTIL snooze_until
       // ("silent until then" — reuses wake_me semantics; persisted, so honored across a restart).
       // Once it elapses, re-arm to 'watching' (clears the snooze) so the normal predicate evaluates
-      // it again this/next tick. ONLY for 'snoozed' — 'suppressed' (blocked_human/done) stays sticky
+      // it again this/next tick. ONLY for 'snoozed' — 'suppressed' (done) stays sticky
       // until genuine activity or a human reclaims it (Task 4). unanswered is already 0 for a manager
       // that answered `waiting`, so the reset is safe.
       if (state.policy === "snoozed" && state.snoozeUntil && nowIso >= state.snoozeUntil) {
@@ -248,18 +248,18 @@ export class IdleWatcher {
           `nobody else watches this. Check on them first: worker_transcript / worker_status, then worker_message or ` +
           `worker_merge as appropriate. ${openTodos} other actionable task(s) pending. Then call idle_report with your ` +
           `state: 'working' (back at it), 'waiting' (on a long worker or external thing — optionally pass minutes), ` +
-          `'blocked_human' (need a human decision/credential/access), or 'done' (the queue is genuinely drained).`
+          `or 'done' (the queue is genuinely drained). Need a human decision/credential/access? File a Request via question_ask instead.`
         : liveWorkers.length > 0
         ? `[loom:idle] You've been idle ~${n} min with ${openTodos} actionable task(s) pending. ` +
           `Why are you idle? If you simply dropped the orchestration loop, pick up the next task NOW. ` +
           `Then call idle_report with your state: 'working' (back at it), 'waiting' (on a long worker or ` +
-          `external thing — optionally pass minutes), 'blocked_human' (need a human decision/credential/access), ` +
-          `or 'done' (the queue is genuinely drained). Resume the loop if appropriate.`
+          `external thing — optionally pass minutes), or 'done' (the queue is genuinely drained). Need a human ` +
+          `decision/credential/access? File a Request via question_ask instead. Resume the loop if appropriate.`
         : `[loom:idle] You've been idle ~${n} min with no live workers and ${openTodos} actionable task(s). ` +
           `Why are you idle? If you simply dropped the orchestration loop, pick up the next task NOW. ` +
           `Then call idle_report with your state: 'working' (back at it), 'waiting' (on a long worker or ` +
-          `external thing — optionally pass minutes), 'blocked_human' (need a human decision/credential/access), ` +
-          `or 'done' (the queue is genuinely drained). Resume the loop if appropriate.`;
+          `external thing — optionally pass minutes), or 'done' (the queue is genuinely drained). Need a human ` +
+          `decision/credential/access? File a Request via question_ask instead. Resume the loop if appropriate.`;
       try { pty.enqueueStdin(m.id, msg); } catch { /* manager not live */ }
       db.recordIdleNudge(m.id, nowIso); // stamp last_idle_nudge_at + increment idle_nudge_unanswered
       // eslint-disable-next-line no-console
@@ -279,7 +279,7 @@ export class IdleWatcher {
    * successor OR a fresh non-recycle respawn on the same agent — so this nudge reaches a live successor
    * instead of nagging a session id whose pty is already gone. Skips silently when there's no live
    * session for that agent, it isn't a manager, is human-paused, is rate-limited/parked (it'll
-   * auto-resume on its own), or has itself flagged non-'watching' via idle_report (waiting/blocked_human/
+   * auto-resume on its own), or has itself flagged non-'watching' via idle_report (waiting/done/
    * escalated) — reusing the SAME idle-nudge-state policy the manager idle loop above reads, so a manager
    * legitimately not watching its inbox right now isn't nagged twice. Nudged EXACTLY ONCE per
    * answered→still-answered window via the in-memory `nudgedAnsweredQuestions` Set (no schema change):

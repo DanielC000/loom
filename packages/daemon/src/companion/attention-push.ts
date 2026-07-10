@@ -112,7 +112,7 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     case "idle_escalated":
       return "manager-idle";
     case "idle_report":
-      return detail?.state === "blocked_human" || detail?.state === "done" ? "manager-idle" : null;
+      return detail?.state === "done" ? "manager-idle" : null;
     case "context_escalated":
       return "context-overflow";
     case "platform_escalate":
@@ -162,9 +162,7 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       line = `${projectName}: manager asleep, unanswered idle nudges — ${m8}`;
       break;
     case "idle_report":
-      line = detail.state === "blocked_human"
-        ? `${projectName}: manager needs a human — ${m8}`
-        : `${projectName}: manager queue drained — ${m8}`;
+      line = `${projectName}: manager queue drained — ${m8}`;
       break;
     case "context_escalated":
       line = `${projectName}: manager context overflow risk — ${m8}`;
