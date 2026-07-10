@@ -3,9 +3,10 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import type { Project, ProjectConfigOverride, PlatformConfigOverride, Profile, Schedule, Task, Question } from "@loom/shared";
+import type { Project, ProjectConfigOverride, PlatformConfigOverride, Profile, Schedule, Task } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem } from "./questionTool.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
 import { checkRepoRebind } from "../projects/rebind.js";
@@ -1326,10 +1327,12 @@ export class PlatformMcpRouter {
       },
     );
 
-    // --- Lead→human DECISION INBOX (ports question_ask/question_pull from the manager surface,
+    // --- Lead→human Requests object (ports question_ask/question_pull from the manager surface,
     // mcp/orchestration.ts, so the Lead has a native structured decision channel instead of Claude Code's
-    // own AskUserQuestion chat prompt, which the owner does not want used for decisions). REUSES
-    // db.insertQuestion / db.pullAnsweredQuestions VERBATIM (no schema change). Keyed on the Lead's OWN
+    // own AskUserQuestion chat prompt, which the owner does not want used for decisions). Generalized by
+    // card 695ebab0 — shares buildQuestionAsk/questionPullItem (mcp/questionTool.ts) with the manager
+    // surface so the two callers' validation/shaping can never drift; still REUSES db.insertQuestion /
+    // db.pullAnsweredQuestionsForAgent VERBATIM (no schema branching by role). Keyed on the Lead's OWN
     // platform session id (callerSessionId, the URL-path caller) — exactly like recycle_me/end_me/
     // session_message above — with projectId derived SERVER-SIDE from that session (the reserved Platform
     // home), never passed by the caller. The human answers via the SAME REST path (POST
@@ -1341,42 +1344,32 @@ export class PlatformMcpRouter {
       "question_ask",
       {
         description:
-          "Ask the HUMAN a mid-flight decision you need them for — NON-BLOCKING: creates a durable, " +
-          "answerable question and returns IMMEDIATELY, so you keep working instead of blocking this turn " +
-          "on a reply. `title`+`body` frame the decision. `options` is an OPTIONAL array of choices for the " +
-          "human to pick between — omit it for a pure blocker (the human replies with a free-text note " +
-          "only, no options to choose from). `recommendation` is an OPTIONAL suggested answer shown to the " +
-          "human as a nudge (not enforced). You'll get a one-time push nudge into your own session when the " +
-          "human answers; call question_pull (e.g. when you reach the decision point this was blocking) to " +
-          "fetch the answer. Returns {questionId}.",
-        inputSchema: {
-          title: z.string(),
-          body: z.string(),
-          options: z.array(z.string()).optional(),
-          recommendation: z.string().optional(),
-        },
+          "Ask the HUMAN something you need them for — NON-BLOCKING: creates a durable, answerable " +
+          "request and returns IMMEDIATELY, so you keep working instead of blocking this turn on a " +
+          "reply. `title`+`body` frame the ask. `type` picks the shape (defaults to \"decision\"): " +
+          "\"decision\" — `options` is an OPTIONAL array of choices for the human to pick between (omit " +
+          "for a pure blocker — free-text note only) and `recommendation` is an OPTIONAL suggested " +
+          "answer shown as a nudge, not enforced. \"input\" — a freeform-text ask, no options. " +
+          "\"permission\" — ask the human to authorize/deny an irreversible/outward/spend action; " +
+          "`action` (REQUIRED) describes it, `scope` (\"once\"|\"standing\", optional) is the requested " +
+          "grant lifetime, `expiresAt` (optional ISO timestamp) is a requested expiry — this is an " +
+          "ask/answer channel, not a second gate: it does not itself block anything, so if the action " +
+          "must actually WAIT on the answer, hold it yourself. \"credential\" — ask for a secret (API " +
+          "key/token) under a NEVER-ECHO model: you will NEVER receive the plaintext, only an ack once " +
+          "it's provided; `envVar` (optional) hints the env var/config key you expect it under. " +
+          "`taskId` (optional) softly links this to a board task. You'll get a one-time push nudge into " +
+          "your own session when the human answers; call question_pull (e.g. when you reach the point " +
+          "this was blocking) to fetch the answer. Returns {questionId}.",
+        inputSchema: QUESTION_ASK_INPUT_SHAPE,
       },
-      async ({ title, body, options, recommendation }) => {
+      async (input) => {
         if (!callerSessionId) return ok({ error: "no caller session" });
         const projectId = db.getSession(callerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
-        const question: Question = {
-          id: randomUUID(),
-          sessionId: callerSessionId,
-          projectId,
-          title,
-          body,
-          options: options && options.length > 0 ? options : null,
-          recommendation: recommendation ?? null,
-          state: "pending",
-          chosenOption: null,
-          note: null,
-          createdAt: new Date().toISOString(),
-          answeredAt: null,
-          consumedAt: null,
-        };
-        db.insertQuestion(question);
-        return ok({ questionId: question.id });
+        const built = buildQuestionAsk(input, { sessionId: callerSessionId, projectId });
+        if ("error" in built) return ok({ error: built.error });
+        db.insertQuestion(built.question);
+        return ok({ questionId: built.question.id });
       },
     );
 
@@ -1384,14 +1377,14 @@ export class PlatformMcpRouter {
       "question_pull",
       {
         description:
-          "Pull (return AND consume) every ANSWERED question you've asked via question_ask — your " +
-          "decision-inbox pickup. Each entry is {questionId, title, chosenOption, note}: chosenOption is " +
-          "one of the options you offered (or null for a pure-blocker ask, or an unanswered-options case), " +
-          "note is the human's optional free-text. Pulling consumes them in one shot (flips them to " +
-          "'consumed') so they won't be returned again — call this when you reach the decision point the " +
-          "question was blocking, or after the push nudge tells you one was answered. Returns " +
-          "{questions: [...]} (empty if none are answered yet — a still-'pending' question is NOT " +
-          "returned; keep working and check back later).",
+          "Pull (return AND consume) every ANSWERED request you've asked via question_ask — your " +
+          "requests-inbox pickup. Each entry carries {questionId, title, type, ...}: a \"decision\"/" +
+          "\"input\" entry has {chosenOption, note} (chosenOption is one of the options you offered, or " +
+          "null); a \"permission\" entry has {approved, note}; a \"credential\" entry has {ack} — NEVER " +
+          "the secret itself. Pulling consumes them in one shot (flips them to 'consumed') so they won't " +
+          "be returned again — call this when you reach the point the request was blocking, or after the " +
+          "push nudge tells you one was answered. Returns {questions: [...]} (empty if none are answered " +
+          "yet — a still-'pending' request is NOT returned; keep working and check back later).",
         inputSchema: {},
       },
       async () => {
@@ -1409,11 +1402,7 @@ export class PlatformMcpRouter {
         if (answered.length > 0) {
           sessions.purgeAnsweredQuestionNudges(callerSessionId, answered.map((q) => q.id));
         }
-        return ok({
-          questions: answered.map((q) => ({
-            questionId: q.id, title: q.title, chosenOption: q.chosenOption, note: q.note,
-          })),
-        });
+        return ok({ questions: answered.map(questionPullItem) });
       },
     );
 

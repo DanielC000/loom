@@ -1293,29 +1293,80 @@ export const QUESTION_STATES = ["pending", "answered", "consumed"] as const;
 export type QuestionState = (typeof QUESTION_STATES)[number];
 
 /**
- * A manager→human DECISION INBOX entry (card 8701bdbb, daemon core / child A): a manager/orchestrator
- * hits a mid-flight decision it needs the human for (approve / pick-between-approaches / unblock),
- * asked NON-BLOCKING (the ask tool returns immediately — the manager keeps orchestrating the rest of
- * its fleet) and answered asynchronously in the UI. Lifecycle: "pending" (waiting on the human) →
- * "answered" (the human replied; waiting on the asking manager's pickup) → "consumed" (the manager
- * pulled it). `options`/`recommendation` are optional — a pure-blocker ask (no options) carries only
- * `title`+`body`, and round-trips on `note` alone (`chosenOption` stays null even once answered).
+ * The Requests-object type discriminator (card 695ebab0 — generalizes the decision-only inbox below into
+ * a durable, typed Requests object; the UI epic beb61d23 rests on top). `decision` is the ORIGINAL shape
+ * (card 8701bdbb) and stays the default for backward compat. `input` is a first-class freeform-text ask
+ * (no options — previously modeled as a decision with none). `permission` asks the human to authorize/deny
+ * an irreversible/outward/spend action — this is an ASK/ANSWER CHANNEL, not a second gate mechanism: it
+ * does not itself block anything the way a task's `held`/`blocked` state does (see Task.held above); an
+ * agent that wants a permission request to actually STOP work must still park via those existing brakes,
+ * then use `permission` only to carry the human's authorize/deny answer. `credential` asks for a secret
+ * the agent needs (an API key/token) under a NEVER-ECHO model: the plaintext never round-trips through
+ * this object or any agent-readable response — see `credentialEnvVar` below and `Db.answerCredentialQuestion`.
+ */
+export const QUESTION_TYPES = ["decision", "input", "permission", "credential"] as const;
+export type QuestionType = (typeof QUESTION_TYPES)[number];
+
+/** A `permission` request's requested grant lifetime: `once` (this action only) or `standing` (keep
+ *  authorizing this class of action going forward) — the human's answer may grant a narrower scope than
+ *  requested; Loom does not enforce the requested scope, it's a hint shown alongside the ask. */
+export const PERMISSION_SCOPES = ["once", "standing"] as const;
+export type PermissionScope = (typeof PERMISSION_SCOPES)[number];
+
+/** A `permission` request's answer vocabulary — the ONLY two values `chosenOption` may hold for
+ *  `type:"permission"` (the human-only REST answer route validates against this; `mcp/questionTool.ts`'s
+ *  `questionPullItem` derives its `approved` boolean by comparing against this SAME const) — a single
+ *  shared source so the write-side validation and the read-side derivation can never drift apart. */
+export const PERMISSION_ANSWERS = ["authorize", "deny"] as const;
+export type PermissionAnswer = (typeof PERMISSION_ANSWERS)[number];
+
+/**
+ * A manager→human DECISION INBOX entry (card 8701bdbb, daemon core / child A), generalized (card
+ * 695ebab0) into a typed Requests object via the `type` discriminator. A manager/orchestrator hits a
+ * mid-flight decision/input/permission/credential need, asks NON-BLOCKING (the ask tool returns
+ * immediately — the manager keeps orchestrating the rest of its fleet) and is answered asynchronously in
+ * the UI. Lifecycle: "pending" (waiting on the human) → "answered" (the human replied; waiting on the
+ * asking manager's pickup) → "consumed" (the manager pulled it). `options`/`recommendation` are
+ * `type:"decision"`-only and optional there too — a pure-blocker decision ask (no options) carries only
+ * `title`+`body`, and round-trips on `note` alone (`chosenOption` stays null even once answered);
+ * `type:"input"` always has null `options` and answers via `note` alone, same as a pure-blocker decision.
+ * The `permission*`/`credentialEnvVar` fields are the per-type ASK-TIME payload for their own type and
+ * null for every other type. The credential's ANSWER (the envelope-encrypted secret) is deliberately NOT
+ * a field here — it never flows through this agent-reachable object; see `Db.answerCredentialQuestion`.
  */
 export interface Question {
   id: string;
   /** The asking manager/orchestrator session id — server-derived at ask time, never agent-supplied. */
   sessionId: string;
   projectId: string;
+  /** Defaults to "decision" — an existing caller that never passes `type` is byte-identical to before. */
+  type: QuestionType;
   title: string;
   body: string;
-  /** Nullable — a pure-blocker ask carries no options. */
+  /** Nullable — a pure-blocker ask carries no options; always null for a non-"decision" type. */
   options: string[] | null;
   /** Nullable — the asking manager's suggested answer, shown to the human as a nudge, not enforced. */
   recommendation: string | null;
+  /** Optional soft link to a board task (card 695ebab0) — deliberately NOT a DB foreign key: a deleted
+   *  task must not orphan this request's history row, so a dangling id here just means "the linked task
+   *  is gone," never a constraint violation. */
+  taskId: string | null;
+  /** `type:"permission"` ask-time payload — the action being authorized/denied. Null for every other type. */
+  permissionAction: string | null;
+  /** `type:"permission"` ask-time payload — the requested grant lifetime. Null for every other type. */
+  permissionScope: PermissionScope | null;
+  /** `type:"permission"` ask-time payload — an optional ISO expiry for the requested grant. Null for every other type. */
+  permissionExpiresAt: string | null;
+  /** `type:"credential"` ask-time payload — the env var / config key name the agent expects the secret
+   *  under once granted (a display hint, not itself wired to injection — see Question's own doc). Null for
+   *  every other type. */
+  credentialEnvVar: string | null;
   state: QuestionState;
-  /** Set by the human's answer; null for a pure-blocker (or before answering). */
+  /** Set by the human's answer; null for a pure-blocker/input/credential (or before answering). For
+   *  `type:"permission"` this is `"authorize"` or `"deny"`. */
   chosenOption: string | null;
-  /** Optional human note, set by the answer (freeform — the pure-blocker's only payload). */
+  /** Optional human note, set by the answer (freeform — the pure-blocker's only payload). Never set for
+   *  `type:"credential"` — its answer is the envelope-encrypted secret, not this field. */
   note: string | null;
   createdAt: string;
   answeredAt: string | null;

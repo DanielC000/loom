@@ -32,7 +32,7 @@ function assertNotProdDbInTest(file: string): void {
 import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, Question, QuestionInboxItem, QuestionState, PresetPrompt, PresetPromptSuggestion,
+  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, PresetPrompt, PresetPromptSuggestion,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
   CompanionCapabilityGrant,
   ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
@@ -735,22 +735,39 @@ CREATE TABLE IF NOT EXISTS capability_defs (
   secret_env_var TEXT,                       -- env var name the P1 secret is injected under; NULL if N/A
   created_at TEXT NOT NULL
 );
--- Manager→human DECISION INBOX (card 8701bdbb, daemon core / child A): a durable, answerable object
--- for a mid-flight decision a manager/orchestrator needs the human for. Brand-new table ⇒ CREATE TABLE
--- IF NOT EXISTS is itself the additive migration (no ALTER needed), exactly like runs/api_keys/
--- connections/poll_jobs above — an existing DB simply gains an empty table on next boot; zero rows ⇒
--- byte-identical to today until a manager actually asks one. options_json/recommendation are nullable
--- (a pure-blocker ask carries neither); chosen_option/note are written by the human-only REST answer
--- endpoint. The manager-only ask/pull MCP tools + the human-only REST answer route are the only writers
--- — no agent MCP tool answers its own question (mirrors the human-only-write trust posture of vault/git).
+-- Manager→human DECISION INBOX (card 8701bdbb, daemon core / child A), generalized (card 695ebab0) into
+-- a durable, TYPED Requests object via the 'type' discriminator: 'decision' (the original shape, and the
+-- default — backward-compat for every pre-695ebab0 caller), 'input' (freeform-text, no options),
+-- 'permission' (authorize/deny an action; ask-time payload in permission_action/permission_scope/
+-- permission_expires_at), 'credential' (a NEVER-ECHO secret ask; ask-time payload credential_env_var, the
+-- answer's ciphertext in secret_blob — see Db.answerCredentialQuestion). Brand-new table => CREATE TABLE
+-- IF NOT EXISTS is itself the additive migration for a fresh install (no ALTER needed), exactly like
+-- runs/api_keys/connections/poll_jobs above; an EXISTING DB (already has questions from card 8701bdbb)
+-- picks up the type/task_id/permission_*/credential_env_var/secret_blob columns via migrateQuestions()
+-- below (ALTER TABLE ADD COLUMN — see QUESTION_ADDED_COLUMNS), backfilling every legacy row to
+-- type='decision' in place. task_id is a deliberately SOFT link (no REFERENCES/FK): a deleted task must
+-- not orphan this request's history row. options_json/recommendation are nullable ('decision'-only; a
+-- pure-blocker ask carries neither); chosen_option/note are written by the human-only REST answer
+-- endpoint (and, for 'credential', secret_blob instead — chosen_option/note are NEVER used for that type,
+-- so the plaintext secret never lands in an agent-readable column). The manager-only ask/pull MCP tools +
+-- the human-only REST answer route are the only writers — no agent MCP tool answers its own question
+-- (mirrors the human-only-write trust posture of vault/git).
 CREATE TABLE IF NOT EXISTS questions (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id),
   project_id TEXT NOT NULL REFERENCES projects(id),
+  type TEXT NOT NULL DEFAULT 'decision',   -- 'decision' | 'input' | 'permission' | 'credential'
   title TEXT NOT NULL,
   body TEXT NOT NULL DEFAULT '',
   options_json TEXT,
   recommendation TEXT,
+  task_id TEXT,                            -- soft link to tasks(id) — deliberately no FK, see doc above
+  permission_action TEXT,
+  permission_scope TEXT,                   -- 'once' | 'standing', 'permission' type only
+  permission_expires_at TEXT,
+  credential_env_var TEXT,
+  secret_blob TEXT,                        -- envelope ciphertext (v1:iv:tag:ct), 'credential' type only —
+                                            -- NEVER mapped into the Question object (see toQuestion)
   state TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'answered' | 'consumed'
   chosen_option TEXT,
   note TEXT,
@@ -760,6 +777,11 @@ CREATE TABLE IF NOT EXISTS questions (
 );
 -- Serves both the manager's pull (session_id + state='answered') and a future project-scoped inbox read.
 CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id, state);
+-- idx_questions_task (on task_id, card 695ebab0's soft task link) is deliberately NOT created here: on a
+-- legacy DB predating that column, this CREATE TABLE IF NOT EXISTS is a no-op (the table already exists in
+-- its OLD shape) but a CREATE INDEX in this same unconditional block would still run against the
+-- not-yet-added column and throw "no such column: task_id". It's created in migrateQuestions() below,
+-- AFTER the ALTER TABLE ADD COLUMN — see QUESTION_ADDED_COLUMNS.
 -- Serves the answered-stuck watchdog's full scan (listAnsweredStuckQuestions: state='answered' AND
 -- answered_at <= ?) and pullAnsweredQuestionsForAgent's per-agent join (card f88e91f0) — both filter on
 -- state before/without a known session_id, which idx_questions_session (session_id-leading) can't serve.
@@ -1044,6 +1066,21 @@ const COMPANION_MESSAGES_ADDED_COLUMNS: Record<string, string> = {
   conversation_seq: "INTEGER NOT NULL DEFAULT 1",
 };
 
+/** Columns added to `questions` by the Requests-object generalization (card 695ebab0); applied to
+ *  existing DBs by migrateQuestions() (fresh installs already have them via CREATE TABLE). NOT NULL +
+ *  constant DEFAULT 'decision' backfills every legacy row to today's exact type, in place; every other
+ *  added column is nullable and stays NULL on a legacy row (a 'decision' never had a permission/credential
+ *  payload or a task link) — no other existing column is touched. */
+const QUESTION_ADDED_COLUMNS: Record<string, string> = {
+  type: "TEXT NOT NULL DEFAULT 'decision'",
+  task_id: "TEXT",
+  permission_action: "TEXT",
+  permission_scope: "TEXT",
+  permission_expires_at: "TEXT",
+  credential_env_var: "TEXT",
+  secret_blob: "TEXT",
+};
+
 type Row = Record<string, unknown>;
 
 /**
@@ -1111,6 +1148,7 @@ export class Db {
     this.migrateCompanionMessages();
     this.migrateCompanionConversations();
     this.migrateOrchestrationEvents();
+    this.migrateQuestions();
   }
 
   /**
@@ -1413,6 +1451,26 @@ export class Db {
       this.db.exec(`UPDATE sqlite_sequence SET seq = MAX(seq, ${maxSeq}) WHERE name = 'orchestration_event_seq'`);
       this.db.exec("DELETE FROM orchestration_event_seq");
     })();
+  }
+
+  /**
+   * Idempotent additive migration for `questions` — the Requests-object generalization (card 695ebab0):
+   * ADD COLUMN any of QUESTION_ADDED_COLUMNS missing from an existing DB (fresh installs already have
+   * them via CREATE TABLE). The NOT NULL + constant DEFAULT 'decision' on `type` backfills every legacy
+   * row (a pre-695ebab0 DB has ONLY ever inserted decision-shaped rows) to `type='decision'` in place —
+   * BYTE-IDENTICAL semantics for every existing row: its options_json/recommendation/chosen_option/note
+   * were always decision-shaped, so classifying it as 'decision' after the fact changes nothing about how
+   * it reads or answers. Every other added column is nullable and stays NULL on a legacy row. Boot-tested
+   * against a copy of a real pre-migration `~/.loom/loom.db` — see test/questions-type-migration.mjs.
+   */
+  private migrateQuestions(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(questions)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(QUESTION_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE questions ADD COLUMN ${name} ${type}`);
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_questions_task ON questions(task_id)");
   }
 
   /**
@@ -3808,16 +3866,26 @@ export class Db {
     ).run(patch.nextPollAt, patch.error, id);
   }
 
-  // --- questions (manager→human decision inbox, card 8701bdbb) ---
+  // --- questions (manager→human Requests object, card 8701bdbb generalized by card 695ebab0) ---
   insertQuestion(q: Question): void {
     this.db.prepare(
       `INSERT INTO questions
-        (id,session_id,project_id,title,body,options_json,recommendation,state,chosen_option,note,created_at,answered_at,consumed_at)
+        (id,session_id,project_id,type,title,body,options_json,recommendation,task_id,
+         permission_action,permission_scope,permission_expires_at,credential_env_var,
+         state,chosen_option,note,created_at,answered_at,consumed_at)
        VALUES
-        (@id,@sessionId,@projectId,@title,@body,@optionsJson,@recommendation,@state,@chosenOption,@note,@createdAt,@answeredAt,@consumedAt)`,
+        (@id,@sessionId,@projectId,@type,@title,@body,@optionsJson,@recommendation,@taskId,
+         @permissionAction,@permissionScope,@permissionExpiresAt,@credentialEnvVar,
+         @state,@chosenOption,@note,@createdAt,@answeredAt,@consumedAt)`,
     ).run({
-      id: q.id, sessionId: q.sessionId, projectId: q.projectId, title: q.title, body: q.body,
+      // `type` defaults to "decision" at the RUNTIME layer too (not just TS's Question interface) — a
+      // plain-JS caller (a hermetic test predating card 695ebab0, or any future untyped caller) that never
+      // set it is byte-identical to before this card, rather than tripping the column's NOT NULL.
+      id: q.id, sessionId: q.sessionId, projectId: q.projectId, type: q.type ?? "decision", title: q.title, body: q.body,
       optionsJson: q.options ? JSON.stringify(q.options) : null, recommendation: q.recommendation ?? null,
+      taskId: q.taskId ?? null,
+      permissionAction: q.permissionAction ?? null, permissionScope: q.permissionScope ?? null,
+      permissionExpiresAt: q.permissionExpiresAt ?? null, credentialEnvVar: q.credentialEnvVar ?? null,
       state: q.state, chosenOption: q.chosenOption ?? null, note: q.note ?? null,
       createdAt: q.createdAt, answeredAt: q.answeredAt ?? null, consumedAt: q.consumedAt ?? null,
     });
@@ -3835,13 +3903,36 @@ export class Db {
    * The human-only REST answer write: 'pending' → 'answered', recording chosenOption/note + answeredAt.
    * Returns the updated row, or undefined if `id` doesn't exist or isn't currently 'pending' (answering
    * twice, or answering an already-consumed question, is a no-op rather than silently overwriting).
+   * REFUSES a `type:"credential"` row (returns undefined without writing) — its answer is the
+   * envelope-encrypted secret, which this generic writer never touches; the REST route must go through
+   * `answerCredentialQuestion` instead. This is a load-bearing backstop, not defensive dead code: it's
+   * what guarantees the plaintext secret can never land in the plain chosen_option/note columns via a
+   * caller that (by mistake or otherwise) reuses this generic path for a credential ask.
    */
   answerQuestion(id: string, patch: { chosenOption: string | null; note: string | null; answeredAt: string }): Question | undefined {
     const existing = this.getQuestion(id);
-    if (!existing || existing.state !== "pending") return undefined;
+    if (!existing || existing.state !== "pending" || existing.type === "credential") return undefined;
     this.db.prepare(
       "UPDATE questions SET state = 'answered', chosen_option = ?, note = ?, answered_at = ? WHERE id = ?",
     ).run(patch.chosenOption, patch.note, patch.answeredAt, id);
+    return this.getQuestion(id);
+  }
+  /**
+   * The human-only REST answer write for a `type:"credential"` ask — the ONLY path that ever sets
+   * secret_blob. `secretBlob` MUST already be envelope ciphertext (the caller encrypts via
+   * `keys/envelope.ts` `encryptSecret` BEFORE calling this — mirrors `createConnection`, which never sees
+   * plaintext either); this layer never decrypts, logs, or otherwise touches the plaintext. Refuses (returns
+   * undefined without writing) unless the row is a still-`pending` `type:"credential"` ask, so this can never
+   * be used to smuggle a secret onto a decision/input/permission row. chosen_option/note are deliberately
+   * left untouched (stay NULL) — the credential's only answer payload is secret_blob, which `toQuestion`
+   * never maps into the agent-reachable `Question` object.
+   */
+  answerCredentialQuestion(id: string, patch: { secretBlob: string; answeredAt: string }): Question | undefined {
+    const existing = this.getQuestion(id);
+    if (!existing || existing.state !== "pending" || existing.type !== "credential") return undefined;
+    this.db.prepare(
+      "UPDATE questions SET state = 'answered', secret_blob = ?, answered_at = ? WHERE id = ?",
+    ).run(patch.secretBlob, patch.answeredAt, id);
     return this.getQuestion(id);
   }
   /**
@@ -4500,14 +4591,23 @@ function toPollJob(r0: unknown): PollJob {
     createdAt: r.created_at as string,
   };
 }
+// NOTE: intentionally does NOT map `secret_blob` — the envelope-encrypted credential ciphertext must
+// never flow into the agent-reachable `Question` object (question_pull's payload, the web JSON API, the
+// companion decisions-relay). It stays a db.ts-internal column, touched only by answerCredentialQuestion.
 function toQuestion(r0: unknown): Question {
   const r = r0 as Row;
   const optionsJson = r.options_json as string | null | undefined;
   return {
     id: r.id as string, sessionId: r.session_id as string, projectId: r.project_id as string,
+    type: (r.type as QuestionType | null) ?? "decision",
     title: r.title as string, body: r.body as string,
     options: optionsJson ? (JSON.parse(optionsJson) as string[]) : null,
     recommendation: (r.recommendation as string | null) ?? null,
+    taskId: (r.task_id as string | null) ?? null,
+    permissionAction: (r.permission_action as string | null) ?? null,
+    permissionScope: (r.permission_scope as PermissionScope | null) ?? null,
+    permissionExpiresAt: (r.permission_expires_at as string | null) ?? null,
+    credentialEnvVar: (r.credential_env_var as string | null) ?? null,
     state: r.state as QuestionState,
     chosenOption: (r.chosen_option as string | null) ?? null,
     note: (r.note as string | null) ?? null,

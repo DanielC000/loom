@@ -5,8 +5,8 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, OrchestrationEventKind } from "@loom/shared";
-import { resolveConfig, columnKeyForRole, describeCron } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer } from "@loom/shared";
+import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
@@ -1807,8 +1807,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // uses); NEVER spawns a real ask. `sessionId` should point at a seeded live manager session so the
         // fleet affordance + "jump to live session" resolve. Defaults to a pending, options-less ask.
         questions?: {
-          id?: string; sessionId: string; projectId: string; title?: string; body?: string;
-          options?: string[] | null; recommendation?: string | null;
+          id?: string; sessionId: string; projectId: string;
+          // Requests-object generalization (card 695ebab0) — defaults to "decision" (today's exact seed
+          // shape) for a spec that doesn't care about the newer types.
+          type?: QuestionType; title?: string; body?: string;
+          options?: string[] | null; recommendation?: string | null; taskId?: string | null;
+          permissionAction?: string | null; permissionScope?: PermissionScope | null; permissionExpiresAt?: string | null;
+          credentialEnvVar?: string | null;
           state?: "pending" | "answered" | "consumed"; chosenOption?: string | null; note?: string | null;
           // Optional instant overrides — backdate `answeredAt` to drive the client-side watchdog (an
           // ignored `answered` re-escalating to amber) in a spec, or `createdAt` for a deterministic age.
@@ -2026,9 +2031,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         const state = q.state ?? "pending";
         const now = new Date().toISOString();
         deps.db.insertQuestion({
-          id, sessionId: q.sessionId, projectId: q.projectId,
+          id, sessionId: q.sessionId, projectId: q.projectId, type: q.type ?? "decision",
           title: q.title ?? "Seeded decision", body: q.body ?? "",
-          options: q.options ?? null, recommendation: q.recommendation ?? null,
+          options: q.options ?? null, recommendation: q.recommendation ?? null, taskId: q.taskId ?? null,
+          permissionAction: q.permissionAction ?? null, permissionScope: q.permissionScope ?? null,
+          permissionExpiresAt: q.permissionExpiresAt ?? null, credentialEnvVar: q.credentialEnvVar ?? null,
           state, chosenOption: q.chosenOption ?? null, note: q.note ?? null,
           createdAt: q.createdAt ?? now,
           answeredAt: q.answeredAt ?? (state === "answered" || state === "consumed" ? now : null),
@@ -3164,26 +3171,52 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!question) return reply.code(404).send({ error: "question not found" });
     if (question.state !== "pending")
       return reply.code(400).send({ error: `question is already ${question.state}, not pending` });
-    const body = (req.body ?? {}) as { chosenOption?: string | null; note?: string };
-    const chosenOption = body.chosenOption ?? null;
-    const note = typeof body.note === "string" ? body.note : null;
-    const hasOptions = !!(question.options && question.options.length > 0);
-    const hasNote = !!(note && note.trim());
-    // Selecting an offered option is a CONVENIENCE, never a requirement: a human may answer any question
-    // — even one WITH options — by free-text note alone (owner request, card f4bb2f6f). So we validate
-    // shape, not force a pick. (1) A chosenOption, when present, must actually be offered by this
-    // question. (2) Otherwise the note carries the answer — reject ONLY a fully-empty answer (no option
-    // AND no non-empty note), which would flip the question to 'answered' with nothing for the manager
-    // to act on. question_pull already surfaces {chosenOption: null, note} for a note-only answer.
-    if (chosenOption != null) {
-      if (!hasOptions)
-        return reply.code(400).send({ error: "this question has no options — chosenOption must be null (answer via note)" });
-      if (!question.options!.includes(chosenOption))
-        return reply.code(400).send({ error: `chosenOption must be one of: ${question.options!.join(", ")}` });
-    } else if (!hasNote) {
-      return reply.code(400).send({ error: "an answer is required — pick an option or type a note" });
+    const answeredAt = new Date().toISOString();
+    // Requests-object generalization (card 695ebab0): the answer SHAPE branches by `type`. Every branch
+    // still ends in a single human-only write (answerQuestion or, for credential, its own
+    // answerCredentialQuestion) — never a second parallel writer.
+    let updated;
+    if (question.type === "credential") {
+      // NEVER-ECHO model: the plaintext is envelope-encrypted RIGHT HERE, at this one human-only write
+      // boundary, and this route NEVER returns it back — `updated` (below) is the bare Question, which
+      // never carries secret_blob (see toQuestion). The daemon has no other path that ever sees the
+      // plaintext again.
+      const body = (req.body ?? {}) as { secret?: string };
+      const secret = typeof body.secret === "string" ? body.secret : "";
+      if (!secret.trim()) return reply.code(400).send({ error: "a secret value is required" });
+      updated = deps.db.answerCredentialQuestion(id, { secretBlob: encryptSecret(secret), answeredAt });
+    } else if (question.type === "permission") {
+      const body = (req.body ?? {}) as { decision?: string; note?: string };
+      const isPermissionAnswer = (v: string | undefined): v is PermissionAnswer =>
+        (PERMISSION_ANSWERS as readonly string[]).includes(v ?? "");
+      if (!isPermissionAnswer(body.decision)) {
+        return reply.code(400).send({ error: `decision must be one of: ${PERMISSION_ANSWERS.join(", ")}` });
+      }
+      const note = typeof body.note === "string" ? body.note : null;
+      updated = deps.db.answerQuestion(id, { chosenOption: body.decision, note, answeredAt });
+    } else {
+      // 'decision' / 'input' — today's exact validation, byte-identical for existing callers.
+      const body = (req.body ?? {}) as { chosenOption?: string | null; note?: string };
+      const chosenOption = body.chosenOption ?? null;
+      const note = typeof body.note === "string" ? body.note : null;
+      const hasOptions = !!(question.options && question.options.length > 0);
+      const hasNote = !!(note && note.trim());
+      // Selecting an offered option is a CONVENIENCE, never a requirement: a human may answer any question
+      // — even one WITH options — by free-text note alone (owner request, card f4bb2f6f). So we validate
+      // shape, not force a pick. (1) A chosenOption, when present, must actually be offered by this
+      // question. (2) Otherwise the note carries the answer — reject ONLY a fully-empty answer (no option
+      // AND no non-empty note), which would flip the question to 'answered' with nothing for the manager
+      // to act on. question_pull already surfaces {chosenOption: null, note} for a note-only answer.
+      if (chosenOption != null) {
+        if (!hasOptions)
+          return reply.code(400).send({ error: "this question has no options — chosenOption must be null (answer via note)" });
+        if (!question.options!.includes(chosenOption))
+          return reply.code(400).send({ error: `chosenOption must be one of: ${question.options!.join(", ")}` });
+      } else if (!hasNote) {
+        return reply.code(400).send({ error: "an answer is required — pick an option or type a note" });
+      }
+      updated = deps.db.answerQuestion(id, { chosenOption, note, answeredAt });
     }
-    const updated = deps.db.answerQuestion(id, { chosenOption, note, answeredAt: new Date().toISOString() });
     if (!updated) return reply.code(400).send({ error: "question was answered concurrently" });
     // Best-effort push nudge — the answer is ALREADY durably persisted above; a torn-down asking-manager
     // pty (hard recycle/crash racing this exact request) must never turn a successful trust-boundary
