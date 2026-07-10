@@ -140,6 +140,14 @@ push -- <paths>`). If you ever cause an unresolved out-of-scope side effect anyw
 couldn't restore, a process you killed, a file touched outside your worktree — **report it explicitly**
 in your `worker_report`; never claim a cleanup you didn't actually do.
 
+**Windows worktree hazard — never junction a live tree before removing it.** On Windows, **never**
+create a directory junction or symlink (`mklink /J`, `New-Item -ItemType SymbolicLink`) from a live
+worktree's `node_modules` (or any directory) into another location and then run `git worktree remove` /
+cleanup — the remove follows the link and deletes *through* it, destroying the REAL target. Reuse deps
+via a real install or a plain file copy, never a junction/symlink into a tree that will be removed. And
+clone or check out large/deep trees into a **short** filesystem path to avoid Windows MAX_PATH (260-char)
+failures — enable `core.longpaths` if the path is unavoidably deep.
+
 **Never let a shell command hang your turn.** Your session is **unattended** — a command that blocks on
 input never returns, so the turn never ends and you wedge at `busy` (a false "stuck" trip + your report
 sits undelivered). Always inspect git with **`git --no-pager`** (`git --no-pager diff`, `git --no-pager
