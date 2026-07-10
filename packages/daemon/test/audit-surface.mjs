@@ -281,7 +281,7 @@ try {
   check("(b5) small structured return (array-of-blocks form) comes through intact",
     /"ok":true,"merged":2/.test(trText));
   check("(b5) an is_error tool_result is flagged AND its error string is preserved",
-    /-> tool result \(error\)/.test(trText) && /fatal: not a git repository/.test(trText));
+    /-> tool result(?: \{[^}]+\})? \(error\)/.test(trText) && /fatal: not a git repository/.test(trText));
   // (b5b) cp1252-SAFETY — OUR injected turn markup is pure ASCII so a downstream char-slice / print of
   // the transcript on a Windows cp1252 console can't crash on a non-ASCII marker glyph (the "↳"/"⚙" hazard).
   check("(b5b) rendered tool markers are ASCII-only (no non-ASCII marker glyphs in Loom's own markup)",

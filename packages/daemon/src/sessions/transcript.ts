@@ -100,11 +100,24 @@ function toolResultBody(c: Record<string, unknown>): string {
       else if (p && typeof p === "object") {
         const b = p as Record<string, unknown>;
         if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
+        // A tool that RETURNS an image (e.g. a browser/Playwright screenshot) has an "image" sub-block
+        // here — mirror the top-level image handling in extractText so the turn doesn't fall back to
+        // the bare "-> tool result" placeholder with no indication an image came back.
+        else if (b.type === "image") parts.push("[image]");
       }
     }
     return repairMangledCommentMarkers(parts.join("\n"));
   }
   return "";
+}
+
+// A short correlation tag (last 8 chars of the full tool_use_id) embedded in both a tool_use turn's
+// "[tool]" marker and its matching tool_result turn's "-> tool result" marker, so a reader scanning a
+// transcript with many interleaved tool calls can visually pair a result back to its call — full ids
+// are long opaque tokens (`toolu_01…`) that add noise; the tail is enough to disambiguate within one
+// transcript (same convention as a git short SHA) without a schema change or a UI rendering change.
+function shortToolTag(id: unknown): string {
+  return typeof id === "string" && id.length > 0 ? ` {${id.slice(-8)}}` : "";
 }
 
 function extractText(content: unknown): string {
@@ -117,7 +130,7 @@ function extractText(content: unknown): string {
   // markup ASCII removes that hazard from the part of the transcript Loom controls.
   for (const c of content as Array<Record<string, unknown>>) {
     if (c.type === "text" && typeof c.text === "string") parts.push(c.text);
-    else if (c.type === "tool_use") parts.push(`[tool] ${String(c.name ?? "")}(${JSON.stringify(c.input ?? {}).slice(0, 200)})`);
+    else if (c.type === "tool_use") parts.push(`[tool]${shortToolTag(c.id)} ${String(c.name ?? "")}(${JSON.stringify(c.input ?? {}).slice(0, 200)})`);
     // A pasted screenshot with no caption text is a content array of ONLY an "image" block — without
     // this, the whole turn produces no text and parseTranscriptFile's `text.trim()` check drops it
     // silently (no placeholder at all, unlike the tool_result case right below), so an auditor can't
@@ -126,13 +139,14 @@ function extractText(content: unknown): string {
     else if (c.type === "tool_result") {
       // Retain the body (truncated) instead of collapsing to a bare placeholder, so an auditor can
       // verify error strings / structured returns rather than read only the agent's paraphrase.
+      const tag = shortToolTag(c.tool_use_id);
       const errFlag = c.is_error === true ? " (error)" : "";
       const body = toolResultBody(c).trim();
-      if (!body) { parts.push(`-> tool result${errFlag}`); continue; }
+      if (!body) { parts.push(`-> tool result${tag}${errFlag}`); continue; }
       const shown = body.length > TOOL_RESULT_BODY_CAP
         ? `${body.slice(0, TOOL_RESULT_BODY_CAP)}... [+${body.length - TOOL_RESULT_BODY_CAP} chars truncated]`
         : body;
-      parts.push(`-> tool result${errFlag}: ${shown}`);
+      parts.push(`-> tool result${tag}${errFlag}: ${shown}`);
     }
   }
   return parts.join("\n");
