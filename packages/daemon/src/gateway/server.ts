@@ -6,11 +6,11 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, OrchestrationEventKind } from "@loom/shared";
-import { resolveConfig, columnKeyForRole } from "@loom/shared";
+import { resolveConfig, columnKeyForRole, describeCron } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
-import { nextFireAt } from "../orchestration/cron.js";
+import { nextFireAt, nextFireTimes } from "../orchestration/cron.js";
 import { MIN_POLL_INTERVAL_MS } from "../orchestration/poll.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, engineTranscriptExists, deleteProjectArchives } from "../sessions/transcript.js";
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
@@ -471,10 +471,28 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- Schedules (phase-2 Pillar B): cron triggers. next_fire_at is computed here on
   // create/update (the Scheduler advances it after each fire). ---
   app.get("/api/schedules", async () => deps.db.listSchedules());
+  // Preview a cron for the builder: the human-readable summary + the REAL next-N fires, computed with
+  // the SAME cron-parser matcher the Scheduler fires on (nextFireTimes), so the builder can never
+  // disagree with what actually runs. Compute-only (no DB write); returns { valid:false } on a bad cron
+  // rather than a 400, so the builder shows an inline invalid state without treating it as an error.
+  app.post("/api/schedules/preview", async (req) => {
+    const b = (req.body ?? {}) as { cron?: string };
+    const cron = (b.cron ?? "").trim();
+    if (!cron) return { valid: false, summary: "", next: [] as string[] };
+    try {
+      return { valid: true, summary: describeCron(cron), next: nextFireTimes(cron, new Date(), 3) };
+    } catch {
+      return { valid: false, summary: "", next: [] as string[] };
+    }
+  });
   app.post("/api/schedules", async (req, reply) => {
-    const b = (req.body ?? {}) as { agentId?: string; cron?: string; enabled?: boolean; kind?: string; prompt?: string | null };
+    const b = (req.body ?? {}) as { name?: string; agentId?: string; cron?: string; enabled?: boolean; kind?: string; prompt?: string | null };
     if (!b.agentId || !b.cron) return reply.code(400).send({ error: "agentId and cron required" });
     if (!deps.db.getAgent(b.agentId)) return reply.code(404).send({ error: "agent not found" });
+    // A schedule NAME is mandatory on creation (Schedules UI redesign): reject a missing/blank name
+    // rather than silently deriving one, so a human-created schedule always carries an intentional name.
+    const name = (b.name ?? "").trim();
+    if (!name) return reply.code(400).send({ error: "name required" });
     // P5/B6: kind selects what a fire spawns — "manager" (default), "auditor" (the dev read-and-file-only
     // Platform Auditor), or "workspace-auditor" (the suggest-only end-user Workspace Auditor). Reject any
     // other value rather than silently coercing.
@@ -484,7 +502,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     let next: string;
     try { next = nextFireAt(b.cron, new Date()); } catch { return reply.code(400).send({ error: "invalid cron expression" }); }
     const schedule: Schedule = {
-      id: randomUUID(), agentId: b.agentId, cron: b.cron,
+      id: randomUUID(), name, agentId: b.agentId, cron: b.cron,
       enabled: b.enabled ?? true, nextFireAt: next, lastFiredAt: null, createdAt: new Date().toISOString(),
       kind: (b.kind as Schedule["kind"]) ?? "manager",
       // Optional per-schedule custom prompt, appended to the agent's own startupPrompt on fire.
@@ -496,11 +514,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/schedules/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getSchedule(id)) return reply.code(404).send({ error: "schedule not found" });
-    const b = (req.body ?? {}) as { cron?: string; enabled?: boolean; kind?: string; prompt?: string | null };
+    const b = (req.body ?? {}) as { name?: string; cron?: string; enabled?: boolean; kind?: string; prompt?: string | null };
     if (b.kind !== undefined && !isScheduleKind(b.kind)) {
       return reply.code(400).send({ error: 'kind must be "manager", "auditor", or "workspace-auditor"' });
     }
-    const patch: { cron?: string; enabled?: boolean; nextFireAt?: string; kind?: Schedule["kind"]; prompt?: string | null } = {};
+    // A rename to blank is rejected (name stays mandatory); omitting `name` leaves it untouched.
+    if (b.name !== undefined && b.name.trim().length === 0) return reply.code(400).send({ error: "name cannot be blank" });
+    const patch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; kind?: Schedule["kind"]; prompt?: string | null } = {};
+    if (typeof b.name === "string") patch.name = b.name.trim();
     if (typeof b.enabled === "boolean") patch.enabled = b.enabled;
     if (isScheduleKind(b.kind)) patch.kind = b.kind;
     if (b.prompt !== undefined) patch.prompt = b.prompt;

@@ -249,6 +249,14 @@ body {
   );
 }
 
+/* Schedules table rows: a quiet hover wash signalling the whole row is a click-to-edit target. */
+.loom-sched-row {
+  transition: background-color 80ms linear;
+}
+.loom-sched-row:hover {
+  background-color: var(--loom-panel-2) !important;
+}
+
 /* Vault file-tree rows + breadcrumb segments: a quiet hover wash, no layout shift. */
 .loom-tree-row {
   transition: background-color 80ms linear;

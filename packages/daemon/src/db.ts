@@ -41,7 +41,7 @@ import type {
   ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
 } from "@loom/shared";
 import type { CapabilityDefRow } from "./capabilities/registry.js";
-import { isOwnerHeldTaskTitle } from "@loom/shared";
+import { isOwnerHeldTaskTitle, describeCron } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken } from "./keys/hash.js";
 // Type-only — companion/types.ts has zero runtime imports, so this can never form a runtime cycle with
 // the companion/* modules that import `Db` from here. CompanionReminder.route reuses THIS module's
@@ -358,6 +358,10 @@ CREATE TABLE IF NOT EXISTS tasks (
 -- Cron-triggered schedules (phase-2 Pillar B): the daemon Scheduler boots a manager on the tick.
 CREATE TABLE IF NOT EXISTS schedules (
   id TEXT PRIMARY KEY,
+  -- Human-facing name (Schedules UI redesign). Mandatory on new creation (validated at the REST create
+  -- surface + the builder); NULLABLE so a legacy row that predates names is not a migration hazard — it
+  -- reads a derived default (describeCron(cron)) at the DB boundary (toSchedule).
+  name TEXT,
   agent_id TEXT NOT NULL REFERENCES agents(id),
   cron TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1,
@@ -950,6 +954,10 @@ const SCHEDULE_ADDED_COLUMNS: Record<string, string> = {
   // Optional per-schedule custom prompt, appended to the agent's own startupPrompt on fire. Nullable;
   // legacy rows backfill to NULL, so an unset schedule composes byte-identical to today.
   prompt: "TEXT",
+  // Human-facing name (Schedules UI redesign). NULLABLE (not NOT NULL) on purpose: a legacy row can't be
+  // given a meaningful constant default in SQL, so it backfills to NULL and reads a derived default
+  // (describeCron(cron)) at toSchedule — new creations require a non-empty name at the create surface.
+  name: "TEXT",
 };
 
 /**
@@ -966,6 +974,22 @@ function normalizeSchedulePrompt(prompt: string | null | undefined): string | nu
   if (prompt === undefined) return undefined;
   if (prompt === null) return null;
   return prompt.trim().length === 0 ? null : prompt;
+}
+
+/**
+ * Resolve a schedule NAME for a WRITE. On insert, a missing/blank name derives a friendly default from
+ * the cron (describeCron) so the column is never left NULL for a newly-created row (the create surfaces
+ * REQUIRE a non-empty name, but this is the belt-and-suspenders derive). On update, `undefined` (omit)
+ * stays `undefined` so an omitted name leaves the row untouched, and a blank string is treated as an
+ * omit (never blanks an existing name — the REST/builder layer already rejects a blank rename).
+ */
+function normalizeScheduleName(name: string | undefined): string | undefined {
+  if (name === undefined) return undefined;
+  const t = name.trim();
+  return t.length === 0 ? undefined : t;
+}
+function scheduleNameForInsert(name: string | undefined, cron: string): string {
+  return normalizeScheduleName(name) ?? describeCron(cron);
 }
 
 /** Columns added to `runs` after R2; applied to existing DBs by migrateRuns() (Agent Runs R3). */
@@ -3649,9 +3673,9 @@ export class Db {
   // --- schedules (phase-2 Pillar B) ---
   insertSchedule(s: Schedule): void {
     this.db.prepare(
-      `INSERT INTO schedules (id,agent_id,cron,enabled,next_fire_at,last_fired_at,created_at,kind,prompt)
-       VALUES (@id,@agentId,@cron,@enabled,@nextFireAt,@lastFiredAt,@createdAt,@kind,@prompt)`,
-    ).run({ ...s, enabled: s.enabled ? 1 : 0, lastFiredAt: s.lastFiredAt ?? null, kind: s.kind ?? "manager", prompt: normalizeSchedulePrompt(s.prompt) ?? null });
+      `INSERT INTO schedules (id,name,agent_id,cron,enabled,next_fire_at,last_fired_at,created_at,kind,prompt)
+       VALUES (@id,@name,@agentId,@cron,@enabled,@nextFireAt,@lastFiredAt,@createdAt,@kind,@prompt)`,
+    ).run({ ...s, name: scheduleNameForInsert(s.name, s.cron), enabled: s.enabled ? 1 : 0, lastFiredAt: s.lastFiredAt ?? null, kind: s.kind ?? "manager", prompt: normalizeSchedulePrompt(s.prompt) ?? null });
   }
   listSchedules(): Schedule[] {
     return (this.db.prepare("SELECT * FROM schedules ORDER BY created_at").all() as Row[]).map(toSchedule);
@@ -3661,8 +3685,11 @@ export class Db {
     return r ? toSchedule(r) : undefined;
   }
   /** Partial edit (REST): any provided field is written; omitted fields are left as-is. */
-  updateSchedule(id: string, patch: { cron?: string; enabled?: boolean; nextFireAt?: string; lastFiredAt?: string | null; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null }): void {
+  updateSchedule(id: string, patch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; lastFiredAt?: string | null; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null }): void {
     const cols: Record<string, unknown> = {
+      // A blank rename normalizes to undefined (omit) — never blanks an existing name (the create/rename
+      // surfaces already reject a blank name, so this is the belt-and-suspenders guard).
+      name: normalizeScheduleName(patch.name),
       cron: patch.cron,
       enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
       next_fire_at: patch.nextFireAt,
@@ -4436,8 +4463,13 @@ function toPresetPromptSuggestion(r0: unknown): PresetPromptSuggestion {
 }
 function toSchedule(r0: unknown): Schedule {
   const r = r0 as Row;
+  const cron = r.cron as string;
   return {
-    id: r.id as string, agentId: r.agent_id as string, cron: r.cron as string,
+    id: r.id as string,
+    // Legacy rows (pre-name) read NULL → derive a friendly default from the cron so the model's `name`
+    // is always a non-empty string. A blank stored value falls back the same way (defensive).
+    name: ((r.name as string | null) ?? "").trim() || describeCron(cron),
+    agentId: r.agent_id as string, cron,
     enabled: (r.enabled as number) === 1,
     nextFireAt: r.next_fire_at as string, lastFiredAt: (r.last_fired_at as string) ?? null,
     createdAt: r.created_at as string,

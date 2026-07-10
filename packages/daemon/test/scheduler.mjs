@@ -311,20 +311,27 @@ const rproj = `rp-${rid}`, ragent = `rt-${rid}`;
 }
 try {
   // Far-future cron ("0 0 1 1 *" = next Jan 1) so the daemon's own scheduler never fires it here.
-  const created = await (await post("/api/schedules", { agentId: ragent, cron: "0 0 1 1 *" })).json();
-  check("REST create: 201 with id + a future next_fire_at + enabled", !!created.id && new Date(created.nextFireAt).getTime() > Date.now() && created.enabled === true);
+  const created = await (await post("/api/schedules", { name: "New Year fire", agentId: ragent, cron: "0 0 1 1 *" })).json();
+  check("REST create: 201 with id + name + a future next_fire_at + enabled", !!created.id && created.name === "New Year fire" && new Date(created.nextFireAt).getTime() > Date.now() && created.enabled === true);
   let list = await get("/api/schedules");
   check("REST list: includes the created schedule", list.some((s) => s.id === created.id));
   const updated = await (await post(`/api/schedules/${created.id}`, { enabled: false })).json();
   check("REST update: disable → enabled:false", updated.enabled === false);
+  const renamed = await (await post(`/api/schedules/${created.id}`, { name: "Renamed fire" })).json();
+  check("REST update: rename → name changes", renamed.name === "Renamed fire");
   await fetch(`${BASE}/api/schedules/${created.id}`, { method: "DELETE" });
   list = await get("/api/schedules");
   check("REST delete: no longer listed", !list.some((s) => s.id === created.id));
   // Validation: a bad cron is rejected 400 (not inserted).
-  const bad = await post("/api/schedules", { agentId: ragent, cron: "not a cron" });
+  const bad = await post("/api/schedules", { name: "bad", agentId: ragent, cron: "not a cron" });
   check("REST create: invalid cron → 400", bad.status === 400);
+  // Validation: a missing/blank name is rejected 400 (name is mandatory on creation).
+  const noName = await post("/api/schedules", { agentId: ragent, cron: "0 0 1 1 *" });
+  check("REST create: missing name → 400", noName.status === 400);
+  const blankName = await post("/api/schedules", { name: "   ", agentId: ragent, cron: "0 0 1 1 *" });
+  check("REST create: blank name → 400", blankName.status === 400);
   // B6 — kind round-trip: create with kind="workspace-auditor" persists it on the row (create→row).
-  const wsa = await (await post("/api/schedules", { agentId: ragent, cron: "0 0 1 1 *", kind: "workspace-auditor" })).json();
+  const wsa = await (await post("/api/schedules", { name: "WSA cadence", agentId: ragent, cron: "0 0 1 1 *", kind: "workspace-auditor" })).json();
   check("REST create: kind=workspace-auditor round-trips onto the row", wsa.kind === "workspace-auditor" && !!wsa.id);
   const wsaList = await get("/api/schedules");
   check("REST list: the workspace-auditor schedule shows its kind", wsaList.some((s) => s.id === wsa.id && s.kind === "workspace-auditor"));
@@ -332,7 +339,7 @@ try {
   check("REST update: disable a workspace-auditor schedule (kind preserved)", wsaDisabled.enabled === false && wsaDisabled.kind === "workspace-auditor");
   await fetch(`${BASE}/api/schedules/${wsa.id}`, { method: "DELETE" });
   // Validation: an unknown kind is rejected 400 (not coerced).
-  const badKind = await post("/api/schedules", { agentId: ragent, cron: "0 0 1 1 *", kind: "bogus" });
+  const badKind = await post("/api/schedules", { name: "bad kind", agentId: ragent, cron: "0 0 1 1 *", kind: "bogus" });
   check("REST create: invalid kind → 400", badKind.status === 400);
 } finally {
   const t = new Database(DB_FILE);

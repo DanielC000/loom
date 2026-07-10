@@ -1187,6 +1187,15 @@ export interface ConnectionMetadata {
  */
 export interface Schedule {
   id: string;
+  /**
+   * Human-facing name, MANDATORY on new creation (validated non-empty at the REST create surface + the
+   * Schedules builder). Added after the initial ship (Schedules UI redesign) as a NULLABLE column, so
+   * legacy rows that predate names read a derived default (`describeCron(cron)` — e.g. "Every day at
+   * 9:00 AM") at the DB boundary rather than an empty string; the agent MCP `schedule_create` derives
+   * the same default when a name is omitted (backward-compatible). Always a non-empty string in the
+   * model as a result.
+   */
+  name: string;
   agentId: AgentId;
   cron: string;              // 5-field cron expression
   enabled: boolean;

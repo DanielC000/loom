@@ -278,7 +278,7 @@ function AuditorScheduleList({ auditorId }: { auditorId?: string }) {
   const [cron, setCron] = useState("0 9 * * *");
 
   const create = useMutation({
-    mutationFn: () => api.createSchedule({ agentId: auditorId!, cron: cron.trim(), enabled: true, kind: "auditor" }),
+    mutationFn: () => api.createSchedule({ agentId: auditorId!, cron: cron.trim(), enabled: true, kind: "auditor", name: "Platform Auditor" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
   });
   const toggle = useMutation({
@@ -349,7 +349,7 @@ function AuditorScheduleInlineForm({ agentId, existing }: { agentId: string; exi
   const [cron, setCron] = useState(existing?.cron ?? "0 9 * * *");
   const invalidate = () => qc.invalidateQueries({ queryKey: ["schedules"] });
   const create = useMutation({ meta: { inlineError: true },
-    mutationFn: () => api.createSchedule({ agentId, cron: cron.trim(), enabled: true, kind: "workspace-auditor" }), onSuccess: invalidate });
+    mutationFn: () => api.createSchedule({ agentId, cron: cron.trim(), enabled: true, kind: "workspace-auditor", name: "Workspace Auditor" }), onSuccess: invalidate });
   const save = useMutation({ meta: { inlineError: true },
     mutationFn: () => api.updateSchedule(existing!.id, { cron: cron.trim() }), onSuccess: invalidate });
   const toggle = useMutation({ mutationFn: () => api.updateSchedule(existing!.id, { enabled: !existing!.enabled }), onSuccess: invalidate });

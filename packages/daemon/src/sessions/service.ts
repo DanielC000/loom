@@ -4840,7 +4840,7 @@ export class SessionService {
    * an invalid cron expression is rejected.
    */
   createSchedule(
-    managerSessionId: string, input: { agentId: string; cron: string; enabled?: boolean; prompt?: string | null },
+    managerSessionId: string, input: { agentId: string; cron: string; enabled?: boolean; prompt?: string | null; name?: string },
   ): Schedule {
     this.requireManager(managerSessionId, "schedule_create");
     const targetAgent = this.db.getAgent(input.agentId);
@@ -4849,7 +4849,12 @@ export class SessionService {
     let next: string;
     try { next = nextFireAt(input.cron, new Date()); } catch { throw new Error("invalid cron expression"); }
     const schedule: Schedule = {
-      id: randomUUID(), agentId: input.agentId, cron: input.cron,
+      id: randomUUID(),
+      // The agent surface makes a name OPTIONAL (unlike the human REST/builder, which requires it): a
+      // blank/omitted name derives a friendly default from the cron at the DB write path (describeCron),
+      // so an existing agent caller stays backward-compatible.
+      name: (input.name ?? "").trim(),
+      agentId: input.agentId, cron: input.cron,
       enabled: input.enabled ?? true, nextFireAt: next, lastFiredAt: null, createdAt: new Date().toISOString(),
       // A manager's self-service schedule always boots a manager (P5 'auditor' schedules are a
       // platform/human concern — created via the platform tool or REST, never this surface).
@@ -4866,7 +4871,7 @@ export class SessionService {
    * next_fire_at (rejected if invalid); enabled toggles the Scheduler on/off for this row.
    */
   updateScheduleAsManager(
-    managerSessionId: string, scheduleId: string, patch: { cron?: string; enabled?: boolean; prompt?: string | null },
+    managerSessionId: string, scheduleId: string, patch: { cron?: string; enabled?: boolean; prompt?: string | null; name?: string },
   ): Schedule {
     this.requireManager(managerSessionId, "schedule_update");
     const schedule = this.db.getSchedule(scheduleId);
@@ -4874,7 +4879,9 @@ export class SessionService {
     // Resolve the schedule → its agent → that agent's project; reject a schedule outside the caller's
     // project (a missing agent can never match own, so it's rejected too).
     this.requireOwnProject(managerSessionId, this.db.getAgent(schedule.agentId)?.projectId, "schedule_update");
-    const dbPatch: { cron?: string; enabled?: boolean; nextFireAt?: string; prompt?: string | null } = {};
+    const dbPatch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; prompt?: string | null } = {};
+    // A blank rename is ignored at the DB write path (normalizeScheduleName), so an agent can't wipe a name.
+    if (typeof patch.name === "string") dbPatch.name = patch.name;
     if (typeof patch.enabled === "boolean") dbPatch.enabled = patch.enabled;
     if (patch.prompt !== undefined) dbPatch.prompt = patch.prompt;
     if (typeof patch.cron === "string") {

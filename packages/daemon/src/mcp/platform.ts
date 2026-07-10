@@ -1231,15 +1231,16 @@ export class PlatformMcpRouter {
     server.registerTool(
       "schedule_create",
       {
-        description: "Create a cron schedule that boots a session in an agent (explicit cross-project agentId) on each tick (5-field cron). kind selects WHAT it spawns: \"manager\" (default — a manager session that runs the orchestration loop), \"auditor\" (the read-and-file-only Platform Auditor, spawned with a locked auditor role), or \"workspace-auditor\" (the suggest-only end-user Workspace Auditor, spawned with a locked workspace-auditor role). enabled defaults to true. An unknown agent or an invalid cron is rejected. next_fire_at is computed here. Optional `prompt` is a custom task description, APPENDED to the agent's own startupPrompt (agent prompt first, then this as a clearly-delimited block) when the schedule fires — omit for today's behavior (agent prompt only).",
-        inputSchema: { agentId: z.string(), cron: z.string(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional(), prompt: z.string().optional() },
+        description: "Create a cron schedule that boots a session in an agent (explicit cross-project agentId) on each tick (5-field cron). kind selects WHAT it spawns: \"manager\" (default — a manager session that runs the orchestration loop), \"auditor\" (the read-and-file-only Platform Auditor, spawned with a locked auditor role), or \"workspace-auditor\" (the suggest-only end-user Workspace Auditor, spawned with a locked workspace-auditor role). enabled defaults to true. An unknown agent or an invalid cron is rejected. next_fire_at is computed here. Optional `prompt` is a custom task description, APPENDED to the agent's own startupPrompt (agent prompt first, then this as a clearly-delimited block) when the schedule fires — omit for today's behavior (agent prompt only). Optional `name` is a human-facing label shown in the Schedules UI; omit it and a friendly default is derived from the cron.",
+        inputSchema: { agentId: z.string(), cron: z.string(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional(), prompt: z.string().optional(), name: z.string().optional() },
       },
-      async ({ agentId, cron, enabled, kind, prompt }) => {
+      async ({ agentId, cron, enabled, kind, prompt, name }) => {
         if (!db.getAgent(agentId)) return ok({ error: "agent not found" });
         let next: string;
         try { next = nextFireAt(cron, new Date()); } catch { return ok({ error: "invalid cron expression" }); }
         const schedule: Schedule = {
-          id: randomUUID(), agentId, cron, enabled: enabled ?? true,
+          // Blank/omitted derives a friendly default from the cron at the DB write path (describeCron).
+          id: randomUUID(), name: (name ?? "").trim(), agentId, cron, enabled: enabled ?? true,
           nextFireAt: next, lastFiredAt: null, createdAt: new Date().toISOString(),
           kind: kind ?? "manager",
           prompt: prompt ?? null,
@@ -1252,12 +1253,13 @@ export class PlatformMcpRouter {
     server.registerTool(
       "schedule_update",
       {
-        description: "Update a schedule's cron, enabled flag, kind (\"manager\"|\"auditor\"|\"workspace-auditor\"), and/or custom prompt by id. A changed cron recomputes next_fire_at (rejected if invalid); enabled toggles the Scheduler for this row; kind changes what a fire spawns; prompt is appended to the agent's own startupPrompt on fire (pass an empty string to clear it). Omitted fields are left as-is. 404 if the schedule is unknown.",
-        inputSchema: { scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional(), prompt: z.string().optional() },
+        description: "Update a schedule's name, cron, enabled flag, kind (\"manager\"|\"auditor\"|\"workspace-auditor\"), and/or custom prompt by id. A changed cron recomputes next_fire_at (rejected if invalid); enabled toggles the Scheduler for this row; kind changes what a fire spawns; prompt is appended to the agent's own startupPrompt on fire (pass an empty string to clear it). Omitted fields are left as-is; a blank `name` is ignored (a schedule always keeps a name). 404 if the schedule is unknown.",
+        inputSchema: { scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional(), prompt: z.string().optional(), name: z.string().optional() },
       },
-      async ({ scheduleId, cron, enabled, kind, prompt }) => {
+      async ({ scheduleId, cron, enabled, kind, prompt, name }) => {
         if (!db.getSchedule(scheduleId)) return ok({ error: "schedule not found" });
-        const patch: { cron?: string; enabled?: boolean; nextFireAt?: string; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null } = {};
+        const patch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null } = {};
+        if (typeof name === "string") patch.name = name;
         if (typeof enabled === "boolean") patch.enabled = enabled;
         if (kind !== undefined) patch.kind = kind;
         if (prompt !== undefined) patch.prompt = prompt;

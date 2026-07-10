@@ -582,9 +582,14 @@ export const api = {
   // `kind` (Platform Manager P5 / B6) selects what a fire spawns — "manager" (default), "auditor" (the
   // dev read-and-file-only Platform Auditor), or "workspace-auditor" (the end-user Workspace Auditor).
   // The Platform page's Auditor card puts the Workspace Auditor on a cadence with it.
-  createSchedule: (b: { agentId: string; cron: string; enabled?: boolean; kind?: Schedule["kind"]; prompt?: string | null }) => post<Schedule>("/api/schedules", b),
-  updateSchedule: (id: string, patch: { cron?: string; enabled?: boolean; kind?: Schedule["kind"]; prompt?: string | null }) => post<Schedule>(`/api/schedules/${encodeURIComponent(id)}`, patch),
+  // `name` is MANDATORY on create (Schedules UI redesign — the daemon 400s a missing/blank name). The
+  // Platform page's Auditor cadences pass a fixed kind-derived name.
+  createSchedule: (b: { name: string; agentId: string; cron: string; enabled?: boolean; kind?: Schedule["kind"]; prompt?: string | null }) => post<Schedule>("/api/schedules", b),
+  updateSchedule: (id: string, patch: { name?: string; cron?: string; enabled?: boolean; kind?: Schedule["kind"]; prompt?: string | null }) => post<Schedule>(`/api/schedules/${encodeURIComponent(id)}`, patch),
   deleteSchedule: (id: string) => del<{ ok: boolean }>(`/api/schedules/${encodeURIComponent(id)}`),
+  // Preview a cron for the builder: the human summary + the REAL next-3 fires, computed server-side with
+  // the SAME matcher the Scheduler fires on (so the preview can never drift from what actually runs).
+  previewSchedule: (cron: string) => post<{ valid: boolean; summary: string; next: string[] }>("/api/schedules/preview", { cron }),
 
   // --- Preset Prompts (the GLOBAL "terminal action-buttons" store — one shared list, same on every
   // terminal card). HUMAN/UI data managed inline in the terminal popover; there is intentionally NO MCP
