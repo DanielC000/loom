@@ -4,7 +4,7 @@ import path from "node:path";
 import { LOOM_HOME } from "../paths.js";
 
 export interface TranscriptTurn {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "tool_result";
   text: string;
 }
 
@@ -118,6 +118,11 @@ function extractText(content: unknown): string {
   for (const c of content as Array<Record<string, unknown>>) {
     if (c.type === "text" && typeof c.text === "string") parts.push(c.text);
     else if (c.type === "tool_use") parts.push(`[tool] ${String(c.name ?? "")}(${JSON.stringify(c.input ?? {}).slice(0, 200)})`);
+    // A pasted screenshot with no caption text is a content array of ONLY an "image" block — without
+    // this, the whole turn produces no text and parseTranscriptFile's `text.trim()` check drops it
+    // silently (no placeholder at all, unlike the tool_result case right below), so an auditor can't
+    // even tell a turn happened there.
+    else if (c.type === "image") parts.push("[image]");
     else if (c.type === "tool_result") {
       // Retain the body (truncated) instead of collapsing to a bare placeholder, so an auditor can
       // verify error strings / structured returns rather than read only the agent's paraphrase.
@@ -133,6 +138,25 @@ function extractText(content: unknown): string {
   return parts.join("\n");
 }
 
+/**
+ * Claude Code submits a tool's result back to the engine as a JSONL entry with `type: "user"` — the
+ * Anthropic Messages API models a tool_result as a "user"-role turn even though no human typed it. A
+ * REAL human turn's content is a string or an array of "text"/"image" blocks; a tool-result submission's
+ * content is an array of ONLY "tool_result" blocks. Reclassify the latter so the transcript view doesn't
+ * mislabel a tool's output as something the human typed.
+ */
+function classifyRole(engineType: "user" | "assistant", content: unknown): TranscriptTurn["role"] {
+  if (engineType === "assistant") return "assistant";
+  if (
+    Array.isArray(content) &&
+    content.length > 0 &&
+    content.every((b) => b !== null && typeof b === "object" && (b as Record<string, unknown>).type === "tool_result")
+  ) {
+    return "tool_result";
+  }
+  return "user";
+}
+
 /** Parse one transcript JSONL file at `file` into clean, ordered turns (shared by live + archived). */
 function parseTranscriptFile(file: string): TranscriptTurn[] {
   let raw: string;
@@ -145,7 +169,7 @@ function parseTranscriptFile(file: string): TranscriptTurn[] {
     if (o.type !== "user" && o.type !== "assistant") continue; // skip system/meta/summary
     const msg = o.message as { content?: unknown } | undefined;
     const text = extractText(msg?.content);
-    if (text.trim()) turns.push({ role: o.type, text });
+    if (text.trim()) turns.push({ role: classifyRole(o.type, msg?.content), text });
   }
   return turns;
 }

@@ -39,7 +39,7 @@ export type ProfileFieldResolution = "mine" | "shipped";
 // the per-column accent / soft WIP limit it didn't touch — the PUT replaces the entire array.
 export interface DesiredColumn { key: string; label: string; role?: ColumnRole; prevKey?: string; accentColor?: string; wipLimit?: number; }
 
-export interface TranscriptTurn { role: "user" | "assistant"; text: string; }
+export interface TranscriptTurn { role: "user" | "assistant" | "tool_result"; text: string; }
 // One queued (not-yet-delivered) message. `id` is server-minted and stable, so the UI can
 // delete/edit/reorder a specific entry even as the FIFO head drains between polls. `source` is who
 // enqueued it: 'human' (the composer — adjustable) vs 'system' (worker reports / nudges — read-only).

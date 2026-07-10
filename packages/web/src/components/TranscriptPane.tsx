@@ -4,7 +4,7 @@ import { api, type TranscriptTurn } from "../lib/api";
 import { color, font } from "../theme";
 import { Badge, Button, Input } from "./ui";
 
-type RoleFilter = "all" | "user" | "assistant";
+type RoleFilter = "all" | "user" | "assistant" | "tool_result";
 
 // Split `text` into plain runs + <mark>ed runs for every case-insensitive occurrence of `q`.
 function highlight(text: string, q: string): ReactNode {
@@ -88,6 +88,7 @@ export function TranscriptPane({ sessionId, runRef }: { sessionId: string; runRe
         <RoleChip label="all" current={role} onPick={setRole} />
         <RoleChip label="user" current={role} onPick={setRole} />
         <RoleChip label="assistant" current={role} onPick={setRole} />
+        <RoleChip label="tool_result" current={role} onPick={setRole} />
         {active && (
           <Badge tone={filtered.length ? "phosphor" : "muted"}>
             {filtered.length} / {turns?.length ?? 0}
@@ -113,15 +114,19 @@ export function TranscriptPane({ sessionId, runRef }: { sessionId: string; runRe
 function RoleChip({ label, current, onPick }: { label: RoleFilter; current: RoleFilter; onPick: (r: RoleFilter) => void }) {
   return (
     <Button variant={current === label ? "primary" : "ghost"} onClick={() => onPick(label)} style={{ textTransform: "uppercase" }}>
-      {label}
+      {label.replace("_", " ")}
     </Button>
   );
 }
 
+// user = green, assistant = blue, tool_result = muted (it's a tool's output, not a speaker).
+const ROLE_COLOR: Record<TranscriptTurn["role"], string> = { user: "#8c8", assistant: "#9ad", tool_result: color.textMuted };
+const ROLE_LABEL: Record<TranscriptTurn["role"], string> = { user: "user", assistant: "assistant", tool_result: "tool result" };
+
 function Turn({ turn, q }: { turn: TranscriptTurn; q: string }) {
   return (
     <div style={{ marginBottom: 12 }}>
-      <div style={{ fontSize: 11, textTransform: "uppercase", color: turn.role === "user" ? "#8c8" : "#9ad", marginBottom: 2 }}>{turn.role}</div>
+      <div style={{ fontSize: 11, textTransform: "uppercase", color: ROLE_COLOR[turn.role], marginBottom: 2 }}>{ROLE_LABEL[turn.role]}</div>
       <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: 13, color: color.text }}>
         {highlight(turn.text, q)}
       </pre>
