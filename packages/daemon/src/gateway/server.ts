@@ -5,8 +5,8 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer } from "@loom/shared";
-import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer } from "@loom/shared";
+import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, EVENT_TRIGGER_EVENT_KINDS } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev, PORT } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
@@ -1997,6 +1997,93 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.delete("/api/poll-jobs/:id", async (req) => {
     deps.db.deletePollJob((req.params as { id: string }).id);
+    return { ok: true };
+  });
+
+  // --- Event triggers (Loom Event Triggers subsystem, card f5d07121 T2 — EventTriggerService's REST).
+  // REST, INTENTIONALLY NO MCP path (mirrors poll-jobs/connections/schedules above): this dispatcher
+  // fires autonomously across arbitrary event kinds, broader than any agent should self-configure. ---
+  const isEventTriggerMode = (v: unknown): v is EventTrigger["mode"] => v === "wake" || v === "spawn";
+  const isEventTriggerKind = (v: unknown): v is EventTriggerEventKind =>
+    typeof v === "string" && (EVENT_TRIGGER_EVENT_KINDS as readonly string[]).includes(v);
+  /** Mirrors validatePollTarget above: the ONE mode<->target coherence + existence check both create and
+   *  update must enforce, called with the EFFECTIVE post-patch mode/targetSessionId/agentId. */
+  const validateEventTriggerTarget = (
+    mode: EventTrigger["mode"], targetSessionId: string | null | undefined, agentId: string | null | undefined,
+  ): { ok: true; targetSessionId: string | null; agentId: string | null } | { ok: false; status: number; error: string } => {
+    if (mode === "wake") {
+      if (!targetSessionId || !deps.db.getSession(targetSessionId)) return { ok: false, status: 404, error: "mode 'wake' requires an existing targetSessionId" };
+      return { ok: true, targetSessionId, agentId: null };
+    }
+    if (!agentId || !deps.db.getAgent(agentId)) return { ok: false, status: 404, error: "mode 'spawn' requires an existing agentId" };
+    return { ok: true, targetSessionId: null, agentId };
+  };
+  app.get("/api/event-triggers", async () => deps.db.listEventTriggers());
+  app.post("/api/event-triggers", async (req, reply) => {
+    const b = (req.body ?? {}) as {
+      eventKind?: string; projectId?: string | null; mode?: string;
+      targetSessionId?: string; agentId?: string; enabled?: boolean;
+    };
+    if (!isEventTriggerKind(b.eventKind)) {
+      return reply.code(400).send({ error: `eventKind must be one of: ${EVENT_TRIGGER_EVENT_KINDS.join(", ")}` });
+    }
+    if (b.projectId != null && !deps.db.getProject(b.projectId)) return reply.code(404).send({ error: "project not found" });
+    if (!isEventTriggerMode(b.mode)) return reply.code(400).send({ error: "mode must be 'wake' or 'spawn'" });
+    const target = validateEventTriggerTarget(b.mode, b.targetSessionId, b.agentId);
+    if (!target.ok) return reply.code(target.status).send({ error: target.error });
+    // BASELINE WATERMARK SEED (CR fix f5d07121-T2-①): seed lastSeq to the CURRENT bus max, never 0 — a
+    // fresh trigger's first tick calls listEventsSince(lastSeq, ...), so a lastSeq of 0 would scan from
+    // the OLDEST row on the bus and fire (spawn/wake claude) on days-old matches, draining the whole
+    // backlog at one tick per MIN_EVENT_TRIGGER_INTERVAL_MS. Mirrors the established precedent this
+    // subsystem's own type doc cites: AttentionPushWatcher.seedWatermark() seeds to getMaxEventSeq() "so a
+    // daemon restart never replays history", and PollService seeds a baseline + fires nothing on its
+    // first poll. A trigger must only react to events from THIS POINT FORWARD.
+    const trigger: EventTrigger = {
+      id: randomUUID(), eventKind: b.eventKind, projectId: b.projectId ?? null, mode: b.mode,
+      targetSessionId: target.targetSessionId, agentId: target.agentId,
+      enabled: b.enabled ?? true, lastSeq: deps.db.getMaxEventSeq(), lastFiredAt: null, createdAt: new Date().toISOString(),
+    };
+    deps.db.insertEventTrigger(trigger);
+    return reply.code(201).send(trigger);
+  });
+  app.post("/api/event-triggers/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const existing = deps.db.getEventTrigger(id);
+    if (!existing) return reply.code(404).send({ error: "event trigger not found" });
+    const b = (req.body ?? {}) as {
+      eventKind?: string; projectId?: string | null; mode?: string;
+      targetSessionId?: string; agentId?: string; enabled?: boolean;
+    };
+    if (b.eventKind !== undefined && !isEventTriggerKind(b.eventKind)) {
+      return reply.code(400).send({ error: `eventKind must be one of: ${EVENT_TRIGGER_EVENT_KINDS.join(", ")}` });
+    }
+    if (b.projectId !== undefined && b.projectId !== null && !deps.db.getProject(b.projectId)) {
+      return reply.code(404).send({ error: "project not found" });
+    }
+    if (b.mode !== undefined && !isEventTriggerMode(b.mode)) return reply.code(400).send({ error: "mode must be 'wake' or 'spawn'" });
+    // Re-validate the EFFECTIVE (post-patch) mode<->target pairing — same asymmetry fix as poll-jobs'
+    // update path: a PATCH that changes mode, or the target, or neither, must always land on a
+    // consistent, existing target (never silently disabled later by the tick's own structural guard).
+    const effectiveMode: EventTrigger["mode"] = isEventTriggerMode(b.mode) ? b.mode : existing.mode;
+    const effectiveTargetSessionId = b.targetSessionId !== undefined ? b.targetSessionId : existing.targetSessionId;
+    const effectiveAgentId = b.agentId !== undefined ? b.agentId : existing.agentId;
+    const target = validateEventTriggerTarget(effectiveMode, effectiveTargetSessionId, effectiveAgentId);
+    if (!target.ok) return reply.code(target.status).send({ error: target.error });
+    // RE-ENABLE BASELINE RESEED (CR fix f5d07121-T2-③, same theme as create's ①): a disabled->enabled
+    // transition re-seeds lastSeq to the CURRENT bus max too — otherwise re-enabling replays whatever
+    // matching events accrued on the bus during the whole disabled window in one burst.
+    const reenabling = existing.enabled === false && b.enabled === true;
+    deps.db.updateEventTrigger(id, {
+      eventKind: isEventTriggerKind(b.eventKind) ? b.eventKind : undefined,
+      projectId: b.projectId,
+      mode: effectiveMode, targetSessionId: target.targetSessionId, agentId: target.agentId,
+      enabled: b.enabled,
+      lastSeq: reenabling ? deps.db.getMaxEventSeq() : undefined,
+    });
+    return deps.db.getEventTrigger(id);
+  });
+  app.delete("/api/event-triggers/:id", async (req) => {
+    deps.db.deleteEventTrigger((req.params as { id: string }).id);
     return { ok: true };
   });
 

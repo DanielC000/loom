@@ -39,6 +39,7 @@ import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
 import { UsageStatusPoller } from "./orchestration/usage-status.js";
 import { WakeService } from "./orchestration/wake.js";
 import { PollService } from "./orchestration/poll.js";
+import { EventTriggerService } from "./orchestration/event-triggers.js";
 import { performAuthenticatedRequest } from "./connections/request.js";
 import { getSecretForUse } from "./connections/store.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
@@ -437,6 +438,16 @@ async function main(): Promise<void> {
     spawn: (agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt }),
     intervalMs: pollIntervalMs,
   });
+  // EventTriggerService (local event triggers, Loom Event Triggers subsystem T2) — ALWAYS ON like
+  // PollService: with zero event_triggers rows every tick is a no-op, byte-identical to today until a
+  // human creates one over the (human-only) REST surface. Reacts to the INTERNAL orchestration_events bus
+  // (never an outbound fetch) via each trigger's own watermark cursor; `spawn` reuses the SAME
+  // startNew-based profile resolution as PollService's spawn path.
+  const eventTriggers = new EventTriggerService({
+    db, pty, control,
+    resume: (id) => sessions.resume(id),
+    spawn: (agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt }),
+  });
   // Loom Companion (multi-companion runtime): ONE OR MORE chat-native companions, each a live `claude` PTY
   // session, served by the ChatGateway subsystem (registry of channel adapters + inbound routing + outbound
   // deliverReply) — one gateway per enabled companion config. OFF by default — no gateway is constructed
@@ -807,6 +818,10 @@ async function main(): Promise<void> {
   polls.start();
   console.log(`[boot] poll ticker on (tick ${pollIntervalMs}ms)`);
 
+  // The local event-trigger dispatcher (always on; zero rows ⇒ a no-op tick).
+  eventTriggers.start();
+  console.log("[boot] event-trigger dispatcher on");
+
   // Input-queue reconcile: self-heal stuck-busy sessions and drain any message held while the session
   // was busy / the human was typing — so a worker report never strands behind a phantom 'busy' or an
   // unfinished compose. The Stop hook is the fast path; this is the safety net (10s).
@@ -1029,7 +1044,7 @@ async function main(): Promise<void> {
     // Best-effort courtesy stop of the companion (long-poll + heartbeat, no-op when off); it dies with the
     // process anyway. The controller owns BOTH now, so stop() disarms the heartbeat too (no separate stop).
     void companionController.stop().catch(() => { /* never block the exit */ });
-    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop();
+    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop();
     console.log(`[shutdown] graceful stop (${reason})`);
     process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
   };

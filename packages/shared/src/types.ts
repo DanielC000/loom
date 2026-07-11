@@ -810,6 +810,19 @@ export type OrchestrationEventKind =
   // baseline) so the misconfiguration is visible instead of silently spamming; `detail` carries
   // { pollJobId, itemCount, withIdCount }. Session-less.
   | "poll_id_guard_tripped"
+  // ── Event triggers (Loom Event Triggers subsystem, card f5d07121 — T2, EventTriggerService) ─────────
+  // A trigger's watermark scan over `orchestration_events` matched its configured `eventKind` (+ optional
+  // `projectId` scope) and the anti-hammer floor allowed it to actually deliver — a wake or spawn fired.
+  // Filed under the TRIGGERED session (managerSessionId — the woken session, or the freshly-spawned one);
+  // `detail` carries { eventTriggerId, matchedCount, mode }. Mirrors `poll_fired`.
+  | "event_trigger_fired"
+  // A trigger found matching event(s) this tick but its per-trigger `MIN_EVENT_TRIGGER_INTERVAL_MS` floor
+  // (anti-hammer / anti-loop — several allowlisted kinds are self-retriggerable, e.g. a `spawn` on
+  // `worker_report` produces a worker that itself emits `worker_report`) had not yet elapsed since
+  // `lastFiredAt`. The matched event(s) are consumed (the watermark still advances) WITHOUT firing —
+  // deliberately dropped, not queued, so a sustained burst can never build an unbounded backlog to release
+  // all at once. Session-less (managerSessionId = ""); `detail` carries { eventTriggerId, matchedCount }.
+  | "event_trigger_throttled"
   // ── Self-stop (agent MCP `end_me`, card 3b015fc7) — the no-successor sibling of recycle_me ──────────
   // A self-scoped session called end_me but one of its two safety gates tripped, so Loom REFUSED (did
   // NOT stop it). `detail.reason` discriminates: "queued-inbound" (unconsumed AGENT-kind direction still

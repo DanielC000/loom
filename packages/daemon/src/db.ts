@@ -4209,15 +4209,19 @@ export class Db {
     const r = this.db.prepare("SELECT * FROM event_triggers WHERE id = ?").get(id) as Row | undefined;
     return r ? toEventTrigger(r) : undefined;
   }
-  /** Partial edit (REST): any provided field is written; omitted fields are left as-is. */
+  /** Partial edit (REST): any provided field is written; omitted fields are left as-is. `lastSeq` is
+   *  exposed here ONLY for the REST re-enable path (CR fix f5d07121-T2-③): re-seeding the watermark to
+   *  `getMaxEventSeq()` on a disabled->enabled transition, so re-enabling a trigger doesn't replay
+   *  whatever accrued on the bus while it sat disabled — mirrors the create-time baseline seed. */
   updateEventTrigger(id: string, patch: {
     eventKind?: EventTriggerEventKind; projectId?: string | null; mode?: "wake" | "spawn";
-    targetSessionId?: string | null; agentId?: string | null; enabled?: boolean;
+    targetSessionId?: string | null; agentId?: string | null; enabled?: boolean; lastSeq?: number;
   }): void {
     const cols: Record<string, unknown> = {
       event_kind: patch.eventKind, project_id: patch.projectId, mode: patch.mode,
       target_session_id: patch.targetSessionId, agent_id: patch.agentId,
       enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
+      last_seq: patch.lastSeq,
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
