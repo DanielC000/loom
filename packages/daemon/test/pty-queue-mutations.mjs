@@ -4,12 +4,15 @@
 //   - delete / edit / reorder a SPECIFIC entry by its stable id, preserving FIFO for the rest;
 //   - be a graceful NO-OP for an unknown / already-drained id (the whole reason ids exist — an array
 //     index would silently hit the wrong, shifted entry);
-//   - MUTABILITY GATE (isHumanMutable): act on a HUMAN-MUTABLE entry — the human's OWN composed turns
-//     (source:'human') AND Loom's OWN operational nudges (kind:'warning', e.g. [loom:worker-idle]) — but
-//     REFUSE an agent-AUTHORED entry (source:'system' + kind:'agent' — a worker report / manager
-//     direction), returning false WITH refused:true and leaving it intact, so an agent's queued message
-//     can never be rewritten or reordered out from under it (owner-directed 2026-07-11: the human owns the
-//     daemon, so both their own and Loom's own queued text are theirs to clear — but another agent's is not);
+//   - MUTABILITY GATE, split by op: delete/reorder use isHumanMutable — act on a HUMAN-MUTABLE entry
+//     (the human's OWN composed turns, source:'human', OR Loom's OWN operational nudges, kind:'warning',
+//     e.g. [loom:worker-idle]) — but REFUSE an agent-AUTHORED entry (source:'system' + kind:'agent' — a
+//     worker report / manager direction), returning false WITH refused:true and leaving it intact, so an
+//     agent's queued message can never be deleted or reordered out from under it (owner-directed
+//     2026-07-11: the human owns the daemon, so both their own and Loom's own queued text are theirs to
+//     clear — but another agent's is not). EDIT uses the NARROWER isHumanEditable (source:'human' ONLY):
+//     a Loom kind:'warning' nudge is delete/reorder-able but its wording is Loom's, not the human's, so
+//     editQueued REFUSES it too — matching the web UI's isEditable = source === 'human';
 //   - reorder permutes MUTABLE entries (human + warning) only, leaving every agent-authored entry pinned;
 //   - preserve any mutable entry NOT named in a reorder (e.g. one enqueued after the client's snapshot);
 //   - leave the FIFO DRAIN order following the (possibly reordered) queue;
@@ -121,23 +124,25 @@ try {
   check("reorder naming an agent id: REFUSED {reordered:false, refused:true}, queue unchanged",
     roAgt.reordered === false && roAgt.refused === true && JSON.stringify(texts()) === JSON.stringify(["AAA", "WARN1", "AGT1", "ZZZ"]));
 
-  // ---- WARNING IS MUTABLE (the fix): a Loom nudge (WARN1) is deletable/editable/reorderable, exactly
-  //      like a human entry — the human owns the daemon, so Loom's own queued text is theirs to clear. ----
+  // ---- WARNING IS DELETE/REORDER-MUTABLE BUT NOT EDITABLE (the fix): a Loom nudge (WARN1) is
+  //      deletable/reorderable exactly like a human entry (the human owns the daemon, so Loom's own
+  //      queued text is theirs to clear/reposition) — but its WORDING is Loom's, not the human's, so
+  //      editQueued REFUSES to rewrite it, matching the web UI's isEditable = source === 'human'. ----
   const idW = idOf("WARN1");
   const eW = host.editQueued(SID, idW, "WARN1x");
-  check("edit warning: ALLOWED {edited:true}, text changed in place, FIFO held, id unchanged",
-    eW.edited === true && eW.refused === undefined && JSON.stringify(texts()) === JSON.stringify(["AAA", "WARN1x", "AGT1", "ZZZ"]) && idOf("WARN1x") === idW && kindOf("WARN1x") === "warning");
+  check("edit warning: REFUSED {edited:false, refused:true}, text still 'WARN1', queue unchanged",
+    eW.edited === false && eW.refused === true && kindOf("WARN1") === "warning" && idOf("WARN1") === idW && JSON.stringify(texts()) === JSON.stringify(["AAA", "WARN1", "AGT1", "ZZZ"]));
 
   // ---- REORDER: permute MUTABLE entries (human + warning) only; the agent-authored entry holds its slot.
-  // current [AAA(h,0), WARN1x(w,1), AGT1(a,2), ZZZ(h,3)] → mutable slots {0,1,3}; desired mutable order
-  // [ZZZ, AAA, WARN1x] fills them → [ZZZ, AAA, AGT1, WARN1x] (AGT1 pinned at index 2). ----
-  const ro = host.reorderQueued(SID, [idOf("ZZZ"), idOf("AAA"), idOf("WARN1x")]);
+  // current [AAA(h,0), WARN1(w,1), AGT1(a,2), ZZZ(h,3)] → mutable slots {0,1,3}; desired mutable order
+  // [ZZZ, AAA, WARN1] fills them → [ZZZ, AAA, AGT1, WARN1] (AGT1 pinned at index 2). ----
+  const ro = host.reorderQueued(SID, [idOf("ZZZ"), idOf("AAA"), idOf("WARN1")]);
   check("reorder mutable: returns {reordered:true}", ro.reordered === true);
-  check("reorder mutable: applied across human+warning, agent slot pinned → [ZZZ,AAA,AGT1,WARN1x]", JSON.stringify(texts()) === JSON.stringify(["ZZZ", "AAA", "AGT1", "WARN1x"]));
+  check("reorder mutable: applied across human+warning, agent slot pinned → [ZZZ,AAA,AGT1,WARN1]", JSON.stringify(texts()) === JSON.stringify(["ZZZ", "AAA", "AGT1", "WARN1"]));
   check("reorder mutable: AGT1 still pinned at its slot (index 2)", texts()[2] === "AGT1");
 
   // ---- DELETE a WARNING by id (the owner's actual complaint: a [loom:worker-idle] they couldn't remove) ----
-  const dW = host.deleteQueued(SID, idOf("WARN1x"));
+  const dW = host.deleteQueued(SID, idOf("WARN1"));
   check("delete warning: ALLOWED {deleted:true}, queue is now [ZZZ,AAA,AGT1]",
     dW.deleted === true && dW.refused === undefined && JSON.stringify(texts()) === JSON.stringify(["ZZZ", "AAA", "AGT1"]));
 
@@ -179,6 +184,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — queue mutators target one entry by id, no-op on stale ids, act on human + Loom-warning entries, REFUSE agent-authored ones (pinned in reorder), preserve FIFO + drain order, and stop() still clears."
+  ? "\n✅ ALL PASS — queue mutators target one entry by id, no-op on stale ids; delete/reorder act on human + Loom-warning entries while edit is human-only (REFUSES a warning entry's text); all REFUSE agent-authored entries (pinned in reorder); preserve FIFO + drain order, and stop() still clears."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

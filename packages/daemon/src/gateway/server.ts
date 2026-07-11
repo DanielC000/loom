@@ -3270,7 +3270,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // stale/already-drained id is a graceful no-op (false), never a 500. 404 only for an unknown session;
   // 403 (`refused`) when the op targets an agent-AUTHORED entry (source:"system" + kind:"agent" — a
   // worker report / manager direction) — those stay read-only. The human's own composed turns AND Loom's
-  // own kind:"warning" operational nudges (e.g. [loom:worker-idle]) are actionable (see isHumanMutable).
+  // own kind:"warning" operational nudges (e.g. [loom:worker-idle]) are delete/reorder-able (see
+  // isHumanMutable); EDIT is narrower (see isHumanEditable) — a warning nudge's wording is Loom's own,
+  // not the human's, so PATCH refuses it while DELETE/reorder still allow it.
   app.delete("/api/sessions/:id/queue/:entryId", async (req, reply) => {
     const { id, entryId } = req.params as { id: string; entryId: string };
     if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });

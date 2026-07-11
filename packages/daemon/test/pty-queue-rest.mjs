@@ -10,9 +10,10 @@
 // The trust boundary is the point of the test: an agent-AUTHORED enqueue (a worker report / manager
 // direction — source:'system' + kind:'agent') is REFUSED by the mutators → the route maps refused→403,
 // so an agent's queued message can never be rewritten or reordered from the human surface. A Loom
-// kind:'warning' operational nudge (idle/context watchdog), by contrast, IS human-mutable (owner-directed
-// 2026-07-11) and its delete/edit/reorder return 200. Plus the validation edges: 404 unknown session,
-// 400 bad body, and a stale/unknown id is a graceful 200 no-op.
+// kind:'warning' operational nudge (idle/context watchdog), by contrast, IS delete/reorder-mutable
+// (owner-directed 2026-07-11) and returns 200 for those two ops — but PATCH-edit still REFUSES it (403):
+// its wording is Loom's own, not the human's, matching the web UI's isEditable = source === 'human'. Plus
+// the validation edges: 404 unknown session, 400 bad body, and a stale/unknown id is a graceful 200 no-op.
 //
 // RUN (self-isolating; sets its OWN temp LOOM_HOME before importing dist):
 //   1) build the daemon, 2) node test/pty-queue-rest.mjs
@@ -99,23 +100,25 @@ try {
   q = await getQueue();
   check("after refused ops: queue + agent-authored text untouched", q.map((e) => e.text).join("|") === "H2|H1-edited|WORKER REPORT");
 
-  // ════════ WARNING IS HUMAN-MUTABLE: a Loom kind:'warning' nudge edits/reorders/deletes via REST (200) ════════
+  // ════════ WARNING IS DELETE/REORDER-MUTABLE BUT NOT EDITABLE: a Loom kind:'warning' nudge is
+  // reorderable/deletable via REST (200) but PATCH-edit REFUSES it (403) — its wording is Loom's own,
+  // not the human's, matching the web UI's isEditable = source === 'human' ════════
   host.enqueueStdin(SID, "LOOM NUDGE", "system", undefined, undefined, "warning"); // → [H2, H1-edited, WORKER REPORT, LOOM NUDGE]
   q = await getQueue();
   const nudge = idOf(q, "LOOM NUDGE");
   check("GET /queue: Loom nudge tagged source:'system' + kind:'warning'", q.find((e) => e.text === "LOOM NUDGE")?.source === "system" && q.find((e) => e.text === "LOOM NUDGE")?.kind === "warning");
   const eNudge = await app.inject({ method: "PATCH", url: `/api/sessions/${SID}/queue/${nudge}`, payload: { text: "LOOM NUDGE 2" } });
-  check("PATCH warning edit: 200 {edited:true} (Loom nudge is human-mutable)", eNudge.statusCode === 200 && eNudge.json().edited === true);
+  check("PATCH warning edit: 403 refused (Loom nudge is delete/reorder-mutable but NOT editable)", eNudge.statusCode === 403 && eNudge.json().refused === true);
+  q = await getQueue();
+  check("PATCH warning edit refused: text unchanged, still 'LOOM NUDGE'", q.find((e) => e.id === nudge)?.text === "LOOM NUDGE");
   // Reorder NAMING the warning is ALLOWED (200, not the old 403) — the point of contrast with the agent
   // entry above. Passing the movable ids in their current order is a net-stable permutation, so the
   // agent-authored WORKER REPORT stays pinned at index 2 and the downstream human-delete order holds.
-  q = await getQueue();
-  const nudge2 = idOf(q, "LOOM NUDGE 2");
-  const rNudge = await app.inject({ method: "PATCH", url: `/api/sessions/${SID}/queue`, payload: { orderedIds: [h2, h1, nudge2] } });
+  const rNudge = await app.inject({ method: "PATCH", url: `/api/sessions/${SID}/queue`, payload: { orderedIds: [h2, h1, nudge] } });
   check("PATCH reorder naming a warning id: 200 {reordered:true} (not refused)", rNudge.statusCode === 200 && rNudge.json().reordered === true);
   q = await getQueue();
   check("reorder across human+warning: agent-authored WORKER REPORT still pinned at index 2", q[2].text === "WORKER REPORT");
-  const dNudge = await app.inject({ method: "DELETE", url: `/api/sessions/${SID}/queue/${nudge2}` });
+  const dNudge = await app.inject({ method: "DELETE", url: `/api/sessions/${SID}/queue/${nudge}` });
   check("DELETE warning: 200 {deleted:true} (Loom nudge removed)", dNudge.statusCode === 200 && dNudge.json().deleted === true);
   q = await getQueue();
   check("after warning delete: LOOM NUDGE gone, agent-authored WORKER REPORT survives", !q.some((e) => e.text.startsWith("LOOM NUDGE")) && q.some((e) => e.text === "WORKER REPORT"));
@@ -145,6 +148,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the queue REST surface tags human vs system at enqueue, returns id+text+source, edits/reorders/deletes human entries, REFUSES (403) every mutation of a system entry, and validates 404/400/stale-id edges."
+  ? "\n✅ ALL PASS — the queue REST surface tags human vs system at enqueue, returns id+text+source, edits/reorders/deletes human entries, delete/reorders (but REFUSES editing) a warning entry, REFUSES (403) every mutation of an agent-authored entry, and validates 404/400/stale-id edges."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

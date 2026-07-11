@@ -2747,15 +2747,17 @@ export class PtyHost {
    * no-op returning false — the whole reason ids exist (an index would silently hit the wrong, shifted
    * entry). The auto-drain (drainPending/reconcile) safety net is unaffected.
    *
-   * MUTABILITY GATE (see {@link isHumanMutable}): a mutator may only touch a HUMAN-MUTABLE entry —
-   * the human's OWN composed turns (`source:"human"`) AND Loom's OWN operational injections
-   * (`kind:"warning"` — idle/context/busy-stuck watchdog nudges, restart/boot continuation notes,
-   * rate-limit/memory-recall). An op aimed at an agent-AUTHORED entry (`source:"system"` +
-   * `kind:"agent"` — a worker→manager report, manager→worker direction, a Lead session_message, a
-   * companion inbound) is REFUSED — it returns false WITH `refused:true` (the REST layer maps that to a
-   * 403) and leaves the entry untouched, so an agent's queued message can never be deleted, rewritten,
-   * or reordered out from under it. (A missing id stays a plain false with no `refused` — it's not a
-   * boundary violation, just a lost race with the drain.)
+   * MUTABILITY GATE — delete/reorder use {@link isHumanMutable}: a HUMAN-MUTABLE entry is the human's
+   * OWN composed turns (`source:"human"`) OR Loom's OWN operational injections (`kind:"warning"` —
+   * idle/context/busy-stuck watchdog nudges, restart/boot continuation notes, rate-limit/memory-recall).
+   * EDIT is narrower — it uses {@link isHumanEditable} (`source:"human"` only): a `kind:"warning"` Loom
+   * nudge may be deleted or reordered but not rewritten, since its wording is Loom's, not the human's
+   * (matches the web UI, `SessionQueue.tsx`'s `isEditable = source === "human"`). Any op aimed at an
+   * agent-AUTHORED entry (`source:"system"` + `kind:"agent"` — a worker→manager report, manager→worker
+   * direction, a Lead session_message, a companion inbound) is REFUSED — it returns false WITH
+   * `refused:true` (the REST layer maps that to a 403) and leaves the entry untouched, so an agent's
+   * queued message can never be deleted, rewritten, or reordered out from under it. (A missing id stays
+   * a plain false with no `refused` — it's not a boundary violation, just a lost race with the drain.)
    */
   deleteQueued(sessionId: string, id: string): { deleted: boolean; refused?: boolean } {
     const live = this.live.get(sessionId);
@@ -2772,13 +2774,13 @@ export class PtyHost {
     if (!live?.alive) return { edited: false };
     const m = live.pending.find((m) => m.id === id);
     if (!m) return { edited: false }; // already drained / unknown id — safe no-op
-    if (!this.isHumanMutable(m)) return { edited: false, refused: true }; // agent-authored — read-only
+    if (!this.isHumanEditable(m)) return { edited: false, refused: true }; // not the human's own text — read-only
     m.text = text; // identity (id) and FIFO position preserved; only the body changes
     return { edited: true };
   }
 
   /**
-   * Which held entries the HUMAN may mutate (delete / edit / reorder). Two classes qualify (owner-directed
+   * Which held entries the HUMAN may DELETE or REORDER. Two classes qualify (owner-directed
    * 2026-07-11 — the human owns the daemon, so both their own and Loom's own queued text are theirs to clear):
    *   • `source:"human"` — the human's OWN composed turns (any kind);
    *   • `kind:"warning"` — Loom's OWN operational injections (idle/context/busy-stuck watchdog nudges like
@@ -2788,9 +2790,23 @@ export class PtyHost {
    * human TO this recipient (worker→manager report, manager→worker direction/redirect, Lead session_message,
    * companion inbound) — which must never be deleted, rewritten, or reordered out from under the running
    * orchestration. (`source:"human"` entries are always `kind:"agent"` in practice, hence the OR, not AND.)
+   *
+   * NOTE: this is DELETE/REORDER's gate only — EDIT is narrower (see {@link isHumanEditable}): a
+   * `kind:"warning"` Loom nudge may be cleared or repositioned, but its wording is Loom's own, not the
+   * human's, so it is not rewritable — matches the web UI (`SessionQueue.tsx`'s `isEditable`).
    */
   private isHumanMutable(m: QueuedMessage): boolean {
     return m.source === "human" || m.kind === "warning";
+  }
+
+  /**
+   * Which held entries the HUMAN may EDIT (rewrite the text of). Narrower than {@link isHumanMutable}:
+   * only the human's OWN composed turns (`source:"human"`) qualify — a `kind:"warning"` Loom nudge is
+   * deletable/reorderable (see isHumanMutable) but its wording belongs to Loom, not the human, so it is
+   * NOT editable. Mirrors the web UI's own gate (`SessionQueue.tsx`'s `isEditable = source === "human"`).
+   */
+  private isHumanEditable(m: QueuedMessage): boolean {
+    return m.source === "human";
   }
 
   /**
