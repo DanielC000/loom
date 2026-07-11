@@ -632,7 +632,7 @@ const BOARD_REACH_SLUG = "board-reach";
  *  one-pending-per-(session,route,capability) semantics. */
 type PendingBoardWrite =
   | { action: "create"; projectId: string; title: string; body: string; columnKey?: string; priority?: TaskPriority }
-  | { action: "update"; taskId: string; columnKey?: string; priority?: TaskPriority; held?: boolean };
+  | { action: "update"; taskId: string; title?: string; body?: string; columnKey?: string; priority?: TaskPriority; held?: boolean };
 const pendingBoardWrites = new Map<string, PendingBoardWrite>();
 
 /** Mirrors `pendingResolveKey` (decisions-relay) exactly, namespaced by `BOARD_REACH_SLUG` instead. */
@@ -641,6 +641,27 @@ function pendingBoardKey(sessionId: string, route: CompanionRoute | null): strin
 }
 
 const BOARD_PRIORITY_SCHEMA = z.enum(["p0", "p1", "p2", "p3"]);
+
+/**
+ * A per-project `config_json.authoredContent` opt-in (Framework §4.5's Tier-A residual, this card) —
+ * fail-closed default OFF: while absent/false, `board_create`/`board_update` title/body MUST still be a
+ * VERBATIM owner quote (Primitive B), byte-identical to before this card. Set explicitly `true` for a
+ * project, `board_create`/`board_update` may author REAL card text on that project — Primitive B is
+ * SKIPPED for title/body there, and only there (never a collapsed/scope-wide read — always read via
+ * `ctx.scope.configFor(projectId)` for the SPECIFIC project being written).
+ *
+ * SAFETY (state per the card, CR will verify): with `authoredContent` ON, an injected/attacker turn on a
+ * WARM trust window could create/update a card with arbitrary authored text — this is the design's
+ * OWNER-ACCEPTED Tier-A residual (design §4.5): the safety floor there is grant-scoping + the verify-once
+ * trust window + Tier-X-on-catastrophic, NOT per-action verbatim. That is WHY this opt-in is fail-closed
+ * PER-PROJECT (default OFF) and why the flag is human-REST-only (gateway/server.ts's grant config
+ * validator runs only on the human grant-write path — an agent can never set it on its own grant).
+ * `authoredContent` never widens scope, bypasses Primitive A, or waives the reply-to-route requirement —
+ * it ONLY conditions the Primitive-B verbatim-content check.
+ */
+function authoredContentAllowed(cfg: { authoredContent?: unknown }): boolean {
+  return cfg.authoredContent === true;
+}
 
 /**
  * `board-reach` (Framework §4) — `board_list` is the READ half: a read-only tool reporting board cards
@@ -674,12 +695,19 @@ const BOARD_PRIORITY_SCHEMA = z.enum(["p0", "p1", "p2", "p3"]);
  * (not merely recommended, as the design note's own open fork initially had it) — both tools always
  * propose-then-confirm, with no lighter-weight path.
  *
- * `board_create`'s NEW card content is the one place this lever's guards diverge from `decision_resolve`:
- * Primitive B applies to `title` and (if given) `body` — each must be a verbatim quote of the owner's own
- * words this turn, so an injected message can never fabricate card content. `board_update` carries no
- * free-text content (only columnKey/priority/held — closed-vocabulary fields, not authored text), so
- * Primitive B does not apply there, mirroring how `decision_resolve`'s own `chosenOption` (also a
- * closed-vocabulary pick) is validated against the offered set rather than checked verbatim.
+ * `title`/`body` content is the one place this lever's guards diverge from `decision_resolve`: by default
+ * Primitive B applies to `board_create`'s `title`/(if given) `body` and to `board_update`'s optional
+ * `title`/`body` inputs — each must be a verbatim quote of the owner's own words this turn, so an injected
+ * message can never fabricate card content. `board_update`'s closed-vocabulary fields (columnKey/priority/
+ * held) are UNAFFECTED either way — never checked against Primitive B, mirroring how `decision_resolve`'s
+ * own `chosenOption` (also a closed-vocabulary pick) is validated against the offered set rather than
+ * checked verbatim.
+ *
+ * `authoredContent` (this card, Framework §4.5's Tier-A residual) is a per-project grant-config opt-in,
+ * fail-closed default OFF, that CONDITIONS the Primitive-B verbatim-content check above: ON for a given
+ * project, `board_create`/`board_update` may author real card text there instead of quoting the owner
+ * verbatim. See {@link authoredContentAllowed}'s doc for the full safety framing — this never widens
+ * scope, bypasses Primitive A, or waives the reply-to-route requirement; it only conditions Primitive B.
  *
  * `board_update` resolves its target card GLOBALLY (`db.getTask`, unscoped by project — the only way to
  * find out which project a bare card id belongs to) before checking that project against scope, exactly
@@ -759,8 +787,10 @@ const BOARD_REACH: CompanionCapability = {
           "Create a NEW board card on behalf of the owner, in one of your act-granted project(s) — use " +
           "THIS tool (never tasks_create) whenever the owner names a project OTHER than your own home " +
           "board; tasks_create only ever files to your home board and cannot target any other project. " +
-          "`title` and (if given) `body` MUST each be a verbatim quote of words the owner ACTUALLY said " +
-          "this turn; you may never author card content yourself. This creates the card IMMEDIATELY " +
+          "By default, `title` and (if given) `body` MUST each be a verbatim quote of words the owner " +
+          "ACTUALLY said this turn — you may never author card content yourself. If this project has been " +
+          "opted into authored content, you may instead write real, well-formed card text yourself rather " +
+          "than quoting the owner verbatim. This creates the card IMMEDIATELY " +
           "({status:'created'}) once the owner has recently confirmed something in this chat — no per-" +
           "action code needed while that trust window stays warm. Otherwise (a cold window, or this grant " +
           "configured to always confirm) it does NOT create the card on the first call: Loom sends a " +
@@ -779,6 +809,15 @@ const BOARD_REACH: CompanionCapability = {
         },
       },
       async ({ project, title, body, columnKey, priority }) => {
+        // A whitespace-only title is never a meaningful card title — reject it up front (mirrors
+        // board_update's own hasTitle fold). Without this, authoredContent ON could author a blank-title
+        // card: createProjectTask itself doesn't guard an empty title (mcp/tasks.ts), and neither did the
+        // pre-authoredContent verbatim check (a verbatim BLANK title would've meant the owner's own turn
+        // was itself blank, which Primitive A's ownerText-null check already catches downstream — but
+        // authoredContent bypasses that coincidental floor, so this needs its own explicit guard).
+        if (title.trim() === "") {
+          return ok({ error: "title must not be blank" });
+        }
         // Belt-and-suspenders (Framework §2, mandatory per-project — never a collapsed scope check).
         if (!ctx.scope.projectIds.has(project)) {
           return ok({ error: `project "${project}" is not in your granted scope` });
@@ -805,7 +844,8 @@ const BOARD_REACH: CompanionCapability = {
         // Friction tiering (Framework §6.2, Card 0): board_create is always Tier A (an ordinary act) —
         // flows in a warm trust window with no per-action confirm, unless this grant is configured
         // friction:"per-action".
-        const friction = resolveFrictionMode(ctx.scope.configFor(project) as { friction?: unknown });
+        const cfg = ctx.scope.configFor(project) as { friction?: unknown; authoredContent?: unknown };
+        const friction = resolveFrictionMode(cfg);
         const frictionScope: FrictionScope = {
           sessionId: ctx.sessionId, route, senderId: ctx.pty.getActiveTurnSenderId(ctx.sessionId), capability: BOARD_REACH_SLUG,
         };
@@ -816,9 +856,11 @@ const BOARD_REACH: CompanionCapability = {
         const normalizedBody = hasBody ? (body as string) : "";
         // Primitive B applies on EVERY path that can actually commit title/body content THIS call (the
         // low-friction direct-commit below, and the fresh-propose path further down) — never on a bare
-        // CONFIRM reply.
-        const contentIsVerbatim = ctx.attest.isVerbatimOwnerText(ctx.sessionId, title)
-          && (!hasBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody));
+        // CONFIRM reply — UNLESS this project's grant has opted into `authoredContent` (see its doc): then
+        // the verbatim requirement is skipped entirely and the companion may author real card text.
+        const contentIsVerbatim = authoredContentAllowed(cfg)
+          || (ctx.attest.isVerbatimOwnerText(ctx.sessionId, title)
+            && (!hasBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody)));
 
         // Low-friction path (Framework Card 0): a warm Tier-A trust window commits DIRECTLY, no
         // propose/confirm round-trip at all.
@@ -889,8 +931,11 @@ const BOARD_REACH: CompanionCapability = {
           "Update an EXISTING board card (by the exact `id` from board_list) on behalf of the owner — use " +
           "THIS tool (never tasks_update) for a card that lives on a project OTHER than your own home " +
           "board; tasks_update only ever reaches cards on your home board. " +
-          "Move its column (`columnKey`), change its `priority`, and/or set `held` (the owner-gated " +
-          "'don't nag' flag). At least one of columnKey/priority/held must be given. This applies the " +
+          "Move its column (`columnKey`), change its `priority`, set `held` (the owner-gated 'don't nag' " +
+          "flag), and/or rewrite its `title`/`body`. At least one field must be given. By default, `title`/ " +
+          "`body` (if given) MUST each be a verbatim quote of words the owner ACTUALLY said this turn — " +
+          "you may never author card content yourself; if this project has been opted into authored " +
+          "content, you may instead write real, well-formed text yourself. This applies the " +
           "update IMMEDIATELY ({status:'updated'}) once the owner has recently confirmed something in " +
           "this chat — no per-action code needed while that trust window stays warm. Otherwise (a cold " +
           "window, or this grant configured to always confirm) it does NOT apply the update on the first " +
@@ -904,13 +949,19 @@ const BOARD_REACH: CompanionCapability = {
           "to — a proactive/heartbeat turn is always rejected. There is no delete tool — card removal " +
           "stays human-only.",
         inputSchema: {
-          id: z.string(), columnKey: z.string().optional(), priority: BOARD_PRIORITY_SCHEMA.optional(),
+          id: z.string(), title: z.string().optional(), body: z.string().optional(),
+          columnKey: z.string().optional(), priority: BOARD_PRIORITY_SCHEMA.optional(),
           held: z.boolean().optional(),
         },
       },
-      async ({ id, columnKey, priority, held }) => {
-        if (columnKey === undefined && priority === undefined && held === undefined) {
-          return ok({ error: "at least one of columnKey, priority, or held must be given" });
+      async ({ id, title, body, columnKey, priority, held }) => {
+        // A whitespace-only title/body is not a meaningful edit — treat it as absent (mirrors
+        // board_create's own whitespace-body fold), so a raw undefined check below stays the ONLY thing
+        // that decides "was a real title/body change even requested".
+        const hasTitle = title !== undefined && title.trim() !== "";
+        const hasBody = body !== undefined && body.trim() !== "";
+        if (columnKey === undefined && priority === undefined && held === undefined && !hasTitle && !hasBody) {
+          return ok({ error: "at least one of title, body, columnKey, priority, or held must be given" });
         }
         // Resolve the card GLOBALLY first (mirrors decision_resolve's db.getQuestion(questionId) — the
         // only way to learn which project a bare card id belongs to), THEN apply the belt-and-suspenders
@@ -939,13 +990,27 @@ const BOARD_REACH: CompanionCapability = {
           return ok({ error: "no reply-to route for this turn — Loom has no verified channel to confirm this with the owner" });
         }
         // Friction tiering (Framework §6.2, Card 0): board_update is always Tier A, same as board_create.
-        const friction = resolveFrictionMode(ctx.scope.configFor(task.projectId) as { friction?: unknown });
+        const cfg = ctx.scope.configFor(task.projectId) as { friction?: unknown; authoredContent?: unknown };
+        const friction = resolveFrictionMode(cfg);
         const frictionScope: FrictionScope = {
           sessionId: ctx.sessionId, route, senderId: ctx.pty.getActiveTurnSenderId(ctx.sessionId), capability: BOARD_REACH_SLUG,
         };
         const key = pendingBoardKey(ctx.sessionId, route);
+        const normalizedTitle = hasTitle ? (title as string) : undefined;
+        const normalizedBody = hasBody ? (body as string) : undefined;
+        // Primitive B applies to `title`/`body` on EVERY path that can actually commit them THIS call (the
+        // low-friction direct-commit below, and the fresh-propose path further down) — never on a bare
+        // CONFIRM reply — UNLESS this project's grant has opted into `authoredContent` (see its doc): then
+        // the verbatim requirement is skipped entirely. `columnKey`/`priority`/`held` are closed-vocabulary
+        // fields, unaffected either way — mirrors decision_resolve's own chosenOption (validated, not
+        // verbatim-checked).
+        const contentIsVerbatim = authoredContentAllowed(cfg)
+          || ((!hasTitle || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedTitle as string))
+            && (!hasBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody as string)));
         const applyPatch = (): { error: string } | { updated: Task } => {
-          const patch: Partial<Pick<Task, "columnKey" | "priority" | "held">> = {};
+          const patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "priority" | "held">> = {};
+          if (hasTitle) patch.title = normalizedTitle;
+          if (hasBody) patch.body = normalizedBody;
           if (columnKey !== undefined) patch.columnKey = columnKey;
           if (priority !== undefined) patch.priority = priority;
           if (held !== undefined) patch.held = held;
@@ -954,9 +1019,11 @@ const BOARD_REACH: CompanionCapability = {
         };
 
         // Low-friction path (Framework Card 0): a warm Tier-A trust window commits DIRECTLY, no
-        // propose/confirm round-trip at all. No free-text content here (Primitive B doesn't apply — see
-        // the fresh-propose branch below), so nothing else needs re-checking on this path.
+        // propose/confirm round-trip at all.
         if (mayProceedWithoutConfirm(ctx.trustWindow, "A", friction, frictionScope)) {
+          if (!contentIsVerbatim) {
+            return ok({ error: "title/body must be a verbatim quote of what the owner said this turn — you may not author it" });
+          }
           const result = applyPatch();
           if ("error" in result) return ok({ error: result.error });
           const updated = result.updated;
@@ -973,6 +1040,7 @@ const BOARD_REACH: CompanionCapability = {
           pendingBoardWrites.delete(key); // single-use, whether or not it still matches below.
           if (
             !pending || pending.action !== "update" || pending.taskId !== id
+            || pending.title !== normalizedTitle || pending.body !== normalizedBody
             || pending.columnKey !== columnKey || pending.priority !== priority || pending.held !== held
           ) {
             return ok({ error: "the confirmed action no longer matches what was proposed — call board_update again to re-propose" });
@@ -991,10 +1059,15 @@ const BOARD_REACH: CompanionCapability = {
         }
         pendingBoardWrites.delete(key);
 
-        // No (or expired) pending confirmation for this route — this is a fresh PROPOSE. No free-text
-        // content here (columnKey/priority/held are closed-vocabulary, validated above), so Primitive B
-        // does not apply — mirrors decision_resolve's own chosenOption (validated, not verbatim-checked).
+        // No (or expired) pending confirmation for this route — this is a fresh PROPOSE. Primitive B
+        // applies here (title/body only — see above); columnKey/priority/held are closed-vocabulary,
+        // validated above, so Primitive B never applies to them.
+        if (!contentIsVerbatim) {
+          return ok({ error: "title/body must be a verbatim quote of what the owner said this turn — you may not author it" });
+        }
         const changes: string[] = [];
+        if (hasTitle) changes.push(`change title to "${normalizedTitle}"`);
+        if (hasBody) changes.push(`change body to "${normalizedBody}"`);
         if (columnKey !== undefined) changes.push(`move to column "${columnKey}"`);
         if (priority !== undefined) changes.push(`set priority to ${priority}`);
         if (held !== undefined) changes.push(`set held to ${held}`);
@@ -1008,7 +1081,7 @@ const BOARD_REACH: CompanionCapability = {
         if (!delivered) {
           return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
         }
-        pendingBoardWrites.set(key, { action: "update", taskId: id, columnKey, priority, held });
+        pendingBoardWrites.set(key, { action: "update", taskId: id, title: normalizedTitle, body: normalizedBody, columnKey, priority, held });
         return ok({ status: "proposed" });
       },
     );

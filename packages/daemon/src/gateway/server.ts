@@ -1529,6 +1529,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     return true;
   };
+  // `board-reach`'s own config shape (this card, Framework §4.5's Tier-A residual: `{authoredContent:
+  // boolean}`) — checked ON TOP of isValidGrantConfig's generic floor, only when capability ===
+  // "board-reach". Absent is valid (the lever's own fail-closed default: `authoredContent` OFF, so
+  // board_create/board_update keep requiring a verbatim owner quote until the owner explicitly opts a
+  // project in — mirrors decisions-relay's absent-decisionClasses / media-out's absent-roots default).
+  const isValidBoardReachConfig = (v: Record<string, unknown> | undefined): v is Record<string, unknown> | undefined => {
+    if (v === undefined) return true;
+    if (v.authoredContent !== undefined && typeof v.authoredContent !== "boolean") return false;
+    return true;
+  };
   // `friction` (Companion Trust Window, Framework Card 0, §4.7): `"session-trust" | "per-action"` — a
   // CROSS-CAPABILITY config key (unlike decisionClasses/roots above, which are one lever's own shape), so
   // it's checked on EVERY grant write regardless of `capability`, not gated to one slug. Absent is valid
@@ -1568,6 +1578,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     if (b.capability === "media-out" && !isValidMediaOutConfig(b.config as Record<string, unknown> | undefined)) {
       return { ok: false, code: 400, error: "media-out config.roots must be an array of non-empty path strings" };
+    }
+    if (b.capability === "board-reach" && !isValidBoardReachConfig(b.config as Record<string, unknown> | undefined)) {
+      return { ok: false, code: 400, error: "board-reach config.authoredContent must be a boolean" };
     }
     if (!isValidFrictionConfig(b.config as Record<string, unknown> | undefined)) {
       return { ok: false, code: 400, error: `config.friction must be one of: ${FRICTION_MODES.join(", ")}` };

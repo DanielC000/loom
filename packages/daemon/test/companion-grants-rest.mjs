@@ -128,6 +128,25 @@ try {
     // exactly the 2 session-status rows this file seeds) stay accurate.
     const cleanupMedia = await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=media-out` });
     check("DELETE: cleanup the media-out validation grant (test isolation)", cleanupMedia.statusCode === 200);
+
+    // board-reach's own config shape (card a5c940a0: {authoredContent:boolean}) — checked ON TOP of the
+    // generic floor, mirroring media-out's roots checks above. Fail-closed default OFF: absent is a VALID
+    // config (byte-identical verbatim-required behavior), only a non-boolean value is rejected.
+    const badAuthoredContentType = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "board-reach", config: { authoredContent: "true" } } });
+    check("POST: board-reach config.authoredContent as a string (not boolean) → 400", badAuthoredContentType.statusCode === 400);
+
+    const goodAuthoredContent = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "board-reach", config: { authoredContent: true } } });
+    check("POST: a well-formed board-reach config.authoredContent:true → 201", goodAuthoredContent.statusCode === 201);
+
+    // Absent authoredContent is still a VALID config (the lever's own fail-closed default: verbatim
+    // required until the owner explicitly opts in — mirrors media-out's absent-roots default), so an
+    // empty-config PUT on the just-created row must succeed, not 400.
+    const emptyBoardReachConfig = await app.inject({ method: "PUT", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "board-reach", config: {} } });
+    check("PUT: an absent board-reach authoredContent config is still valid (200)", emptyBoardReachConfig.statusCode === 200);
+
+    // Test isolation: clean up the board-reach validation grant, same as media-out above.
+    const cleanupBoardReach = await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=board-reach` });
+    check("DELETE: cleanup the board-reach validation grant (test isolation)", cleanupBoardReach.statusCode === 200);
   }
   // ============ POST: a second, project-scoped grant for the SAME capability coexists ============
   {
