@@ -142,6 +142,42 @@ try {
   try { applyWorkflowTemplate(db, solo, "nonexistent-project-id"); } catch { unknownProjectThrew = true; }
   check("(4) applying to an unknown projectId throws", unknownProjectThrew);
 
+  // ===================== (5) atomicity: a mixed-validity template writes NOTHING =====================
+  // A valid agent BEFORE an invalid one (unknown profileName) must not leak the valid agent's insert —
+  // proves the pre-flight validation pass runs over ALL agents before any write.
+  const beforeAgentsAtomic = db.listAgents(project.id).length;
+  const beforeTasksAtomic = db.listTasks(project.id).length;
+  const mixedValidityTemplate = {
+    name: "Mixed validity", description: "test-only",
+    agents: [
+      { name: "ValidFirst", profileName: profileNameFor(orchestrated, "Dev"), startupPrompt: "x", position: 0 },
+      { name: "InvalidSecond", profileName: "Does Not Exist", startupPrompt: "x", position: 1 },
+    ],
+    boardSeed: [{ title: "should never be seeded", body: "x" }],
+  };
+  let mixedValidityThrew = false;
+  try { applyWorkflowTemplate(db, mixedValidityTemplate, project.id); } catch { mixedValidityThrew = true; }
+  check("(5) applying a mixed-validity template (valid agent before an invalid one) throws", mixedValidityThrew);
+  check("(5) ZERO agents inserted — the valid agent before the invalid one did not leak",
+    db.listAgents(project.id).length === beforeAgentsAtomic);
+  check("(5) no 'ValidFirst' agent was actually created", db.listAgents(project.id).find((a) => a.name === "ValidFirst") === undefined);
+  check("(5) ZERO tasks inserted", db.listTasks(project.id).length === beforeTasksAtomic);
+
+  // Same shape, but the 2nd agent is ELEVATED rather than unknown — still fully atomic.
+  const mixedElevatedTemplate = {
+    name: "Mixed elevated", description: "test-only",
+    agents: [
+      { name: "ValidFirst2", profileName: profileNameFor(orchestrated, "Dev"), startupPrompt: "x", position: 0 },
+      { name: "SneakySecond", profileName: "Sneaky Elevated Profile", startupPrompt: "x", position: 1 },
+    ],
+    boardSeed: [],
+  };
+  let mixedElevatedThrew = false;
+  try { applyWorkflowTemplate(db, mixedElevatedTemplate, project.id); } catch { mixedElevatedThrew = true; }
+  check("(5) applying a mixed-validity template (valid agent before an elevated one) throws", mixedElevatedThrew);
+  check("(5) ZERO agents inserted for the elevated-second case",
+    db.listAgents(project.id).length === beforeAgentsAtomic);
+
   db.close();
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle on Windows) */ } }

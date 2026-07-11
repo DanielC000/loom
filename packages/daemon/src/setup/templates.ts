@@ -111,6 +111,10 @@ export function findWorkflowTemplate(name: string): WorkflowTemplate | undefined
  * bundled profile by name) and seed its starter board cards. PURE in the sense of writing only through
  * the existing `insertAgent`/`insertTask` rows — no new writer surface, no new DB table.
  *
+ * ATOMIC: a pre-flight VALIDATION pass resolves + checks every `template.agents` entry BEFORE any write —
+ * so a mixed-validity template (a valid agent before an invalid one) throws with NOTHING written, rather
+ * than leaking the valid agents inserted before the throw.
+ *
  * Each agent's resolved profile role passes `setupRoleError` (mcp/setup.ts) before it is written — the
  * same least-privilege allowlist enforced on the ungated setup surface — so a template can never be an
  * elevation back-door. Throws if the project doesn't exist, if a `profileName` doesn't match an existing
@@ -122,11 +126,16 @@ export function applyWorkflowTemplate(db: Db, template: WorkflowTemplate, projec
 
   const profilesByName = new Map(db.listProfiles().map((p) => [p.name, p]));
 
-  const agents: Agent[] = template.agents.map((spec) => {
+  // Pre-flight: resolve + validate EVERY agent before writing any of them, so the apply is all-or-nothing.
+  const resolved = template.agents.map((spec) => {
     const profile = profilesByName.get(spec.profileName);
     if (!profile) throw new Error(`applyWorkflowTemplate: unknown bundled profile "${spec.profileName}" for agent "${spec.name}"`);
     const roleError = setupRoleError(profile.role);
     if (roleError) throw new Error(`applyWorkflowTemplate: agent "${spec.name}" — ${roleError}`);
+    return { spec, profile };
+  });
+
+  const agents: Agent[] = resolved.map(({ spec, profile }) => {
     const agent: Agent = {
       id: randomUUID(),
       projectId,
