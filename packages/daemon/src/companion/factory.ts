@@ -61,7 +61,7 @@ function toSessionBinding(b: CompanionBinding): SessionBinding {
  * returning whether a prompt was actually composed+enqueued; undefined ⇒ resetConversation's persona-reinject
  * half and "/refresh" are both no-ops, byte-identical to today.
  */
-export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitTurn, db: CompanionBindingStore, inApp?: InAppChannel, originResolver?: (sessionId: string) => CompanionRoute | null, transcribe?: CompanionTranscriber, synthesize?: CompanionSynthesizer, reinjectPersona?: (sessionId: string) => boolean, proactiveResolver?: (sessionId: string) => boolean): ChatGateway {
+export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitTurn, db: CompanionBindingStore, inApp?: InAppChannel, originResolver?: (sessionId: string) => CompanionRoute | null, transcribe?: CompanionTranscriber, synthesize?: CompanionSynthesizer, reinjectPersona?: (sessionId: string) => boolean, proactiveResolver?: (sessionId: string) => boolean, closeTrustWindow?: (sessionId: string) => void): ChatGateway {
   // Load durable bindings SCOPED TO THIS SESSION (multi-companion runtime, SECURITY-CRITICAL): filtering to
   // cfg.sessionId — rather than the global companion_bindings table — is what guarantees a gateway's OWN
   // routing map can NEVER contain another companion's binding, even when multiple companions are armed
@@ -134,7 +134,7 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // Per-turn ORIGIN resolver (multi-channel reply routing): deliverReply targets the in-flight turn's
   // originating route (pty.getActiveTurnOrigin, injected). NOT the old home fallback — a proactive/heartbeat
   // turn now carries the home route ON its submit, so its chat_reply flows through the SAME per-turn path.
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport, proactiveResolver);
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport, proactiveResolver, closeTrustWindow);
   // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
   // arms NO Telegram long-poll: the gateway comes up with the in-app adapter alone (registered below), so no
   // external network transport is started and default-OFF stays byte-identical. The adapter normalizes each

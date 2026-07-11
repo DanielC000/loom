@@ -235,6 +235,12 @@ export interface CompanionControllerDeps {
    *  gateway's replies are never tagged proactive (test seams that don't exercise the event-line path stay
    *  byte-identical). */
   proactiveResolver?: (sessionId: string) => boolean;
+  /** Companion Trust Window close hook (Framework Card 0), threaded into the default gateway builder
+   *  exactly like `originResolver`/`proactiveResolver` — the daemon injects
+   *  `(sid) => orchMcp.closeCompanionTrustWindow(sid)` (index.ts). Called on a pairing re-bind and the
+   *  "/lock" command. Optional: absent ⇒ every built gateway's re-pair/"/lock" close is a no-op (test
+   *  seams that don't exercise the trust window stay byte-identical). */
+  closeTrustWindow?: (sessionId: string) => void;
   /** CONVERSATION-PRESERVING respawn primitive (Framework §6) — the daemon injects
    *  `(sid) => sessions.upgradeCompanionCapabilities(sid)`, mirroring how `submitTurn`/`reinjectPersona`
    *  close over SessionService rather than the controller holding a direct reference. Optional: absent ⇒
@@ -637,7 +643,7 @@ export class CompanionController implements CompanionControl {
     // injected buildGateway test seam supplies its own). The hub is stable across rebuilds — see in-app.ts.
     const build =
       this.deps.buildGateway ??
-      ((c: CompanionConfig, submit: SubmitTurn, db: typeof this.deps.db) => createCompanionGateway(c, submit, db, this.deps.inApp, this.deps.originResolver, this.deps.transcribe, this.deps.synthesize, this.deps.reinjectPersona, this.deps.proactiveResolver));
+      ((c: CompanionConfig, submit: SubmitTurn, db: typeof this.deps.db) => createCompanionGateway(c, submit, db, this.deps.inApp, this.deps.originResolver, this.deps.transcribe, this.deps.synthesize, this.deps.reinjectPersona, this.deps.proactiveResolver, this.deps.closeTrustWindow));
     const gateway = build(cfg, this.deps.submitTurn, this.deps.db);
     this.gateways.set(cfg.sessionId, gateway);
     gateway.start();

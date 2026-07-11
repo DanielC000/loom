@@ -21,6 +21,7 @@ import type { Db } from "../db.js";
 import { createProjectTask, listProjectTasks, updateProjectTask, type TaskSummary } from "../mcp/tasks.js";
 import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } from "../vault/browser.js";
 import type { OwnerAttestation } from "./attestation.js";
+import { CompanionTrustWindow } from "./trust-window.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -109,6 +110,10 @@ export function resolveCompanionGrant(db: Db, sessionId: string, capability: str
  *  `PtyHost` class, so a lever's tests can pass a plain stub. */
 export interface GrantPty {
   getActiveTurnOrigin(sessionId: string): CompanionRoute | null;
+  /** Companion Trust Window: the authenticated sender id of the in-flight turn, for a GROUP-scope route
+   *  only (null for DM — see pty/host.ts's `getActiveTurnSenderId`). Used to key a group route's trust
+   *  window per-sender so one member's confirm never covers another's acts. */
+  getActiveTurnSenderId(sessionId: string): string | null;
   enqueueStdin(
     sessionId: string,
     text: string,
@@ -177,6 +182,92 @@ export interface GrantContext {
   pty: GrantPty;
   outbound: GrantOutbound;
   sessions: GrantSessions;
+  /** Companion Trust Window (Framework Card 0) — the ONE shared instance a sensitive ACT lever consults
+   *  through {@link mayProceedWithoutConfirm}/{@link onStepUpCommitted}, never directly (mirrors how a
+   *  lever never touches `OwnerConfirmStore` directly, only through `attest`). */
+  trustWindow: CompanionTrustWindow;
+}
+
+// --- Friction tiering (Companion Capability & Permission-Lever Framework §6.2) — the ONE shared
+// tier/friction helper every sensitive ACT lever calls BEFORE committing, so "when does this act need a
+// fresh owner confirm" has exactly one implementation instead of one per lever. ---------------------------
+
+/** A per-grant `config_json.friction` override (Framework §4.7): `"session-trust"` (default) lets a
+ *  Tier-A act flow inside a warm trust window with no per-action confirm; `"per-action"` reverts EVERY
+ *  Tier-A act on that grant to the legacy unconditional propose/confirm (Tier X is UNAFFECTED by this
+ *  either way — a catastrophic act always confirms). Validated at grant-write time (gateway/server.ts). */
+export type FrictionMode = "session-trust" | "per-action";
+export const FRICTION_MODES: readonly FrictionMode[] = ["session-trust", "per-action"];
+export const DEFAULT_FRICTION_MODE: FrictionMode = "session-trust";
+
+/** Parse a grant config's raw `friction` value into a {@link FrictionMode}, defaulting anything other than
+ *  the literal `"per-action"` (absent, malformed, a stray string) to the conservative-toward-usability
+ *  default `"session-trust"` — an invalid value degrades to the DEFAULT behavior, never to the stricter
+ *  one, since the human-only REST validator (gateway/server.ts) already rejects a bad value at write time;
+ *  this is a read-time belt-and-suspenders, not a second enforcement point. */
+export function resolveFrictionMode(rawConfig: { friction?: unknown }): FrictionMode {
+  return rawConfig.friction === "per-action" ? "per-action" : DEFAULT_FRICTION_MODE;
+}
+
+/**
+ * A lever act's RISK TIER (Framework §6.2 — distinct from a capability's `mode: read|act`, which is scope,
+ * not friction):
+ *   - `"R"` (routine) — never confirms, regardless of trust window or friction config. No lever in this
+ *     card uses R (every act half here is at least Tier A); it exists so the helper's contract is complete
+ *     for a future low-risk act lever.
+ *   - `"A"` (ordinary act) — flows inside a WARM trust window with no per-action confirm (when
+ *     `friction:"session-trust"`, the default); a COLD window (or `friction:"per-action"`) still runs
+ *     exactly one step-up (the existing Primitive-C propose/confirm), and a step-up that then commits ARMS
+ *     the window for subsequent Tier-A calls on that (session, route, sender).
+ *   - `"X"` (catastrophic) — ALWAYS runs a step-up, even inside an otherwise-warm window, and a step-up
+ *     committing under Tier X never arms/extends the window (confirming one irreversible action must never
+ *     lower friction for the next one).
+ */
+export type FrictionTier = "R" | "A" | "X";
+
+/** The identity a friction decision is scoped to — mirrors `TrustWindowKey` plus the lever's own
+ *  capability slug (the SAME namespace `OwnerConfirmStore`'s `capability` param uses). */
+export interface FrictionScope {
+  sessionId: string;
+  route: CompanionRoute;
+  senderId: string | null;
+  /** Reserved for a future per-capability trust window split — today every lever shares one window per
+   *  (session, route, sender), matching the design note's "session-scoped trust window" (singular). */
+  capability: string;
+}
+
+/**
+ * THE shared friction chokepoint (Framework §6.2). Called by a lever BEFORE it attempts its existing
+ * Primitive-C propose/confirm dance: `true` means this call may commit its write DIRECTLY, THIS call, with
+ * no propose/confirm round-trip at all — the lever must still run its OWN scope + Primitive A/B checks
+ * first (this function does nothing to widen or replace those), and must still `touch`/consult nothing
+ * else itself; a `true` return for Tier A ALSO refreshes the window's idle TTL as a side effect (the
+ * lever's own act IS the "activity" that keeps a warm window warm). `false` means the lever must fall
+ * through to its existing `attest.confirmPending`/`attest.proposeConfirmation` flow, UNCHANGED.
+ */
+export function mayProceedWithoutConfirm(trustWindow: CompanionTrustWindow, tier: FrictionTier, friction: FrictionMode, scope: FrictionScope): boolean {
+  if (tier === "R") return true;
+  if (tier === "X") return false;
+  // Tier A.
+  if (friction === "per-action") return false;
+  const key = { sessionId: scope.sessionId, route: scope.route, senderId: scope.senderId };
+  if (!trustWindow.isWarm(key)) return false;
+  trustWindow.touch(key);
+  return true;
+}
+
+/**
+ * Called by a lever AFTER its OWN `attest.confirmPending` just reported `committed:true` (a step-up the
+ * lever ran because {@link mayProceedWithoutConfirm} returned `false`) — decides whether THIS step-up arms
+ * the trust window for subsequent Tier-A calls. Only a Tier-A step-up under `friction:"session-trust"`
+ * arms it (a cold Tier-A window, now warmed by the owner's own confirm); Tier X never arms (see
+ * {@link FrictionTier}'s doc), and a `friction:"per-action"` grant never arms either — arming a window that
+ * `mayProceedWithoutConfirm` will never consult (it short-circuits on `friction` before ever checking
+ * `isWarm`) would be dead state that could wrongly apply if the grant's friction mode is later flipped back.
+ */
+export function onStepUpCommitted(trustWindow: CompanionTrustWindow, tier: FrictionTier, friction: FrictionMode, scope: FrictionScope): void {
+  if (tier !== "A" || friction !== "session-trust") return;
+  trustWindow.arm({ sessionId: scope.sessionId, route: scope.route, senderId: scope.senderId });
 }
 
 /** One pluggable lever descriptor (Framework §2). `register` adds THIS lever's tools to `server`, already
@@ -365,15 +456,18 @@ const DECISIONS_RELAY: CompanionCapability = {
           "single highest-risk tool you have. `chosenOption` MUST be one of the question's offered " +
           "options (a question with no options is human-only; ask the owner directly instead). An " +
           "optional `note` MUST be a verbatim quote of words the owner ACTUALLY said this turn — you may " +
-          "never author it yourself. This NEVER resolves on the first call: Loom sends a confirmation " +
-          "request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/token — just " +
-          "tell the owner you've requested their confirmation) and returns {status:'proposed'}. Only once " +
-          "the owner replies to THAT message do you call decision_resolve AGAIN with the SAME arguments to " +
-          "actually commit it ({status:'resolved'}) — Loom detects the owner's confirming reply itself. A " +
-          "mismatched confirm reply returns {status:'confirm-mismatch'} — tell the owner to reply again, " +
-          "don't re-propose. Requires an act-mode grant on the question's project, a project-configured " +
-          "decisionClasses allowlist covering this decision, and an owner-authored turn on a channel Loom " +
-          "can reply to — a proactive/heartbeat turn is always rejected.",
+          "never author it yourself. An ORDINARY (\"general\") decision resolves IMMEDIATELY once the owner " +
+          "has recently confirmed something in this chat ({status:'resolved'}) — no per-action code needed " +
+          "while that trust window stays warm. Otherwise (a cold window, a deploy/irreversible decision, or " +
+          "this grant configured to always confirm) it does NOT resolve on the first call: Loom sends a " +
+          "confirmation request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/" +
+          "token — just tell the owner you've requested their confirmation) and returns {status:'proposed'}. " +
+          "Only once the owner replies to THAT message do you call decision_resolve AGAIN with the SAME " +
+          "arguments to actually commit it ({status:'resolved'}) — Loom detects the owner's confirming reply " +
+          "itself. A mismatched confirm reply returns {status:'confirm-mismatch'} — tell the owner to reply " +
+          "again, don't re-propose. Requires an act-mode grant on the question's project, a project-" +
+          "configured decisionClasses allowlist covering this decision, and an owner-authored turn on a " +
+          "channel Loom can reply to — a proactive/heartbeat turn is always rejected.",
         inputSchema: { questionId: z.string(), chosenOption: z.string(), note: z.string().optional() },
       },
       async ({ questionId, chosenOption, note }) => {
@@ -387,7 +481,7 @@ const DECISIONS_RELAY: CompanionCapability = {
           return ok({ error: "you only have a read-mode grant on this question's project — decision_resolve needs act-mode" });
         }
         const decisionClass = classifyDecisionClass(question);
-        const cfg = ctx.scope.configFor(question.projectId) as { decisionClasses?: unknown };
+        const cfg = ctx.scope.configFor(question.projectId) as { decisionClasses?: unknown; friction?: unknown };
         const allowedClasses = new Set(Array.isArray(cfg.decisionClasses) ? cfg.decisionClasses as string[] : []);
         if (!allowedClasses.has(decisionClass)) {
           return ok({
@@ -417,12 +511,41 @@ const DECISIONS_RELAY: CompanionCapability = {
         if (route === null) {
           return ok({ error: "no reply-to route for this turn — Loom has no verified channel to confirm this with the owner" });
         }
+        // Friction tiering (Framework §6.2, Card 0): a "general" decision is Tier A (flows in a warm trust
+        // window with no per-action confirm); a deploy/irreversible decision is Tier X (ALWAYS steps up,
+        // even inside an otherwise-warm window — confirming one irreversible decision must never lower
+        // friction for the next one).
+        const tier: FrictionTier = decisionClass === "general" ? "A" : "X";
+        const friction = resolveFrictionMode(cfg);
+        const frictionScope: FrictionScope = {
+          sessionId: ctx.sessionId, route, senderId: ctx.pty.getActiveTurnSenderId(ctx.sessionId), capability: DECISIONS_RELAY_SLUG,
+        };
         const key = pendingResolveKey(ctx.sessionId, route);
         // Fold #2 (whitespace-note bypass): a whitespace-only note is NOT a meaningful note — treat it as
         // absent (store null) so Primitive B owns the empty/whitespace decision uniformly, rather than
         // slipping past the `hasNote` gate below unchecked.
         const hasNote = note !== undefined && note.trim() !== "";
         const normalizedNote = hasNote ? (note as string) : null;
+        // Primitive B applies on EVERY path that can actually commit `note` content THIS call (the
+        // low-friction direct-commit below, and the fresh-propose path further down) — never on a bare
+        // CONFIRM reply, whose own text is just "CONFIRM <token>", not the original note.
+        const noteIsVerbatim = !hasNote || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedNote as string);
+
+        // Low-friction path (Framework Card 0): a warm Tier-A trust window commits DIRECTLY, no
+        // propose/confirm round-trip at all. Scope/Primitive-A/allowlist checks above already ran; this
+        // ONLY changes WHEN a confirm fires, never what's in scope.
+        if (mayProceedWithoutConfirm(ctx.trustWindow, tier, friction, frictionScope)) {
+          if (!noteIsVerbatim) {
+            return ok({ error: "note must be a verbatim quote of what the owner said this turn — you may not author it" });
+          }
+          const updated = db.answerQuestion(questionId, { chosenOption, note: normalizedNote, answeredAt: new Date().toISOString() });
+          if (!updated) return ok({ error: "question was answered or changed concurrently — nothing to resolve" });
+          try {
+            const nudge = `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.`;
+            ctx.pty.enqueueStdin(updated.sessionId, nudge, "human", undefined, undefined, "agent", updated.id);
+          } catch { /* best-effort — the answer already persisted; question_pull is the durable fallback */ }
+          return ok({ status: "resolved", questionId, chosenOption, note: normalizedNote });
+        }
 
         // Primitive C — try to COMMIT a pending proposal for this exact (route, capability) first.
         const confirmOutcome = ctx.attest.confirmPending(ctx.sessionId, route, DECISIONS_RELAY_SLUG);
@@ -434,6 +557,9 @@ const DECISIONS_RELAY: CompanionCapability = {
           }
           const updated = db.answerQuestion(questionId, { chosenOption, note: normalizedNote, answeredAt: new Date().toISOString() });
           if (!updated) return ok({ error: "question was answered or changed concurrently — nothing to resolve" });
+          // Friction (Card 0): a Tier-A step-up under friction:"session-trust" ARMS the trust window so
+          // subsequent Tier-A calls on this (session, route, sender) skip the round-trip; Tier X never arms.
+          onStepUpCommitted(ctx.trustWindow, tier, friction, frictionScope);
           try {
             const nudge = `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.`;
             ctx.pty.enqueueStdin(updated.sessionId, nudge, "human", undefined, undefined, "agent", updated.id);
@@ -456,7 +582,7 @@ const DECISIONS_RELAY: CompanionCapability = {
 
         // No (or expired) pending confirmation for this route — this is a fresh PROPOSE. Primitive B only
         // applies here: the confirming turn's own text is just "CONFIRM <token>", never the original note.
-        if (hasNote && !ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedNote as string)) {
+        if (!noteIsVerbatim) {
           return ok({ error: "note must be a verbatim quote of what the owner said this turn — you may not author it" });
         }
         const proposal = ctx.attest.proposeConfirmation({
@@ -584,10 +710,13 @@ const BOARD_REACH: CompanionCapability = {
           "THIS tool (never tasks_create) whenever the owner names a project OTHER than your own home " +
           "board; tasks_create only ever files to your home board and cannot target any other project. " +
           "`title` and (if given) `body` MUST each be a verbatim quote of words the owner ACTUALLY said " +
-          "this turn; you may never author card content yourself. This NEVER creates the card on the " +
-          "first call: Loom sends a confirmation request DIRECTLY to the owner's chat itself (you do NOT " +
-          "see or relay any prompt/token — just tell the owner you've requested their confirmation) and " +
-          "returns {status:'proposed'}. Only once the owner replies to THAT message do you call " +
+          "this turn; you may never author card content yourself. This creates the card IMMEDIATELY " +
+          "({status:'created'}) once the owner has recently confirmed something in this chat — no per-" +
+          "action code needed while that trust window stays warm. Otherwise (a cold window, or this grant " +
+          "configured to always confirm) it does NOT create the card on the first call: Loom sends a " +
+          "confirmation request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/" +
+          "token — just tell the owner you've requested their confirmation) and returns " +
+          "{status:'proposed'}. Only once the owner replies to THAT message do you call " +
           "board_create AGAIN with the SAME arguments to actually create it ({status:'created'}) — Loom " +
           "detects the owner's confirming reply itself. A mismatched confirm reply returns " +
           "{status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. Requires an " +
@@ -623,11 +752,37 @@ const BOARD_REACH: CompanionCapability = {
         if (route === null) {
           return ok({ error: "no reply-to route for this turn — Loom has no verified channel to confirm this with the owner" });
         }
+        // Friction tiering (Framework §6.2, Card 0): board_create is always Tier A (an ordinary act) —
+        // flows in a warm trust window with no per-action confirm, unless this grant is configured
+        // friction:"per-action".
+        const friction = resolveFrictionMode(ctx.scope.configFor(project) as { friction?: unknown });
+        const frictionScope: FrictionScope = {
+          sessionId: ctx.sessionId, route, senderId: ctx.pty.getActiveTurnSenderId(ctx.sessionId), capability: BOARD_REACH_SLUG,
+        };
         const key = pendingBoardKey(ctx.sessionId, route);
         // A whitespace-only body is not a meaningful body — treat it as absent (mirrors decision_resolve's
         // whitespace-note fold), so Primitive B owns the empty/whitespace decision uniformly.
         const hasBody = body !== undefined && body.trim() !== "";
         const normalizedBody = hasBody ? (body as string) : "";
+        // Primitive B applies on EVERY path that can actually commit title/body content THIS call (the
+        // low-friction direct-commit below, and the fresh-propose path further down) — never on a bare
+        // CONFIRM reply.
+        const contentIsVerbatim = ctx.attest.isVerbatimOwnerText(ctx.sessionId, title)
+          && (!hasBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody));
+
+        // Low-friction path (Framework Card 0): a warm Tier-A trust window commits DIRECTLY, no
+        // propose/confirm round-trip at all.
+        if (mayProceedWithoutConfirm(ctx.trustWindow, "A", friction, frictionScope)) {
+          if (!contentIsVerbatim) {
+            return ok({ error: "title/body must be a verbatim quote of what the owner said this turn — you may not author it" });
+          }
+          const created = createProjectTask(db, project, { title, body: normalizedBody, columnKey, priority });
+          if ("error" in created) return ok({ error: created.error });
+          return ok({
+            status: "created",
+            task: { id: created.id, title: created.title, columnKey: created.columnKey, priority: created.priority, projectId: project },
+          });
+        }
 
         // Primitive C — try to COMMIT a pending proposal for this exact (route, capability) first.
         const confirmOutcome = ctx.attest.confirmPending(ctx.sessionId, route, BOARD_REACH_SLUG);
@@ -642,6 +797,7 @@ const BOARD_REACH: CompanionCapability = {
           }
           const created = createProjectTask(db, project, { title, body: normalizedBody, columnKey, priority });
           if ("error" in created) return ok({ error: created.error });
+          onStepUpCommitted(ctx.trustWindow, "A", friction, frictionScope);
           return ok({
             status: "created",
             task: { id: created.id, title: created.title, columnKey: created.columnKey, priority: created.priority, projectId: project },
@@ -656,11 +812,8 @@ const BOARD_REACH: CompanionCapability = {
         pendingBoardWrites.delete(key);
 
         // No (or expired) pending confirmation for this route — this is a fresh PROPOSE. Primitive B.
-        if (!ctx.attest.isVerbatimOwnerText(ctx.sessionId, title)) {
-          return ok({ error: "title must be a verbatim quote of what the owner said this turn — you may not author it" });
-        }
-        if (hasBody && !ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody)) {
-          return ok({ error: "body must be a verbatim quote of what the owner said this turn — you may not author it" });
+        if (!contentIsVerbatim) {
+          return ok({ error: "title/body must be a verbatim quote of what the owner said this turn — you may not author it" });
         }
         const proposal = ctx.attest.proposeConfirmation({
           sessionId: ctx.sessionId,
@@ -687,10 +840,13 @@ const BOARD_REACH: CompanionCapability = {
           "THIS tool (never tasks_update) for a card that lives on a project OTHER than your own home " +
           "board; tasks_update only ever reaches cards on your home board. " +
           "Move its column (`columnKey`), change its `priority`, and/or set `held` (the owner-gated " +
-          "'don't nag' flag). At least one of columnKey/priority/held must be given. This NEVER applies " +
-          "the update on the first call: Loom sends a confirmation request DIRECTLY to the owner's chat " +
-          "itself (you do NOT see or relay any prompt/token — just tell the owner you've requested their " +
-          "confirmation) and returns {status:'proposed'}. Only once the owner replies to THAT message do " +
+          "'don't nag' flag). At least one of columnKey/priority/held must be given. This applies the " +
+          "update IMMEDIATELY ({status:'updated'}) once the owner has recently confirmed something in " +
+          "this chat — no per-action code needed while that trust window stays warm. Otherwise (a cold " +
+          "window, or this grant configured to always confirm) it does NOT apply the update on the first " +
+          "call: Loom sends a confirmation request DIRECTLY to the owner's chat itself (you do NOT see or " +
+          "relay any prompt/token — just tell the owner you've requested their confirmation) and returns " +
+          "{status:'proposed'}. Only once the owner replies to THAT message do " +
           "you call board_update AGAIN with the SAME arguments to actually apply it ({status:'updated'}) " +
           "— Loom detects the owner's confirming reply itself. A mismatched confirm reply returns " +
           "{status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. Requires an " +
@@ -732,7 +888,33 @@ const BOARD_REACH: CompanionCapability = {
         if (route === null) {
           return ok({ error: "no reply-to route for this turn — Loom has no verified channel to confirm this with the owner" });
         }
+        // Friction tiering (Framework §6.2, Card 0): board_update is always Tier A, same as board_create.
+        const friction = resolveFrictionMode(ctx.scope.configFor(task.projectId) as { friction?: unknown });
+        const frictionScope: FrictionScope = {
+          sessionId: ctx.sessionId, route, senderId: ctx.pty.getActiveTurnSenderId(ctx.sessionId), capability: BOARD_REACH_SLUG,
+        };
         const key = pendingBoardKey(ctx.sessionId, route);
+        const applyPatch = (): { error: string } | { updated: Task } => {
+          const patch: Partial<Pick<Task, "columnKey" | "priority" | "held">> = {};
+          if (columnKey !== undefined) patch.columnKey = columnKey;
+          if (priority !== undefined) patch.priority = priority;
+          if (held !== undefined) patch.held = held;
+          const result = updateProjectTask(db, task.projectId, id, patch);
+          return "error" in result ? { error: result.error } : { updated: result };
+        };
+
+        // Low-friction path (Framework Card 0): a warm Tier-A trust window commits DIRECTLY, no
+        // propose/confirm round-trip at all. No free-text content here (Primitive B doesn't apply — see
+        // the fresh-propose branch below), so nothing else needs re-checking on this path.
+        if (mayProceedWithoutConfirm(ctx.trustWindow, "A", friction, frictionScope)) {
+          const result = applyPatch();
+          if ("error" in result) return ok({ error: result.error });
+          const updated = result.updated;
+          return ok({
+            status: "updated",
+            task: { id: updated.id, title: updated.title, columnKey: updated.columnKey, priority: updated.priority, held: updated.held, projectId: task.projectId },
+          });
+        }
 
         // Primitive C — try to COMMIT a pending proposal for this exact (route, capability) first.
         const confirmOutcome = ctx.attest.confirmPending(ctx.sessionId, route, BOARD_REACH_SLUG);
@@ -745,12 +927,10 @@ const BOARD_REACH: CompanionCapability = {
           ) {
             return ok({ error: "the confirmed action no longer matches what was proposed — call board_update again to re-propose" });
           }
-          const patch: Partial<Pick<Task, "columnKey" | "priority" | "held">> = {};
-          if (columnKey !== undefined) patch.columnKey = columnKey;
-          if (priority !== undefined) patch.priority = priority;
-          if (held !== undefined) patch.held = held;
-          const updated = updateProjectTask(db, task.projectId, id, patch);
-          if ("error" in updated) return ok({ error: updated.error });
+          const result = applyPatch();
+          if ("error" in result) return ok({ error: result.error });
+          onStepUpCommitted(ctx.trustWindow, "A", friction, frictionScope);
+          const updated = result.updated;
           return ok({
             status: "updated",
             task: { id: updated.id, title: updated.title, columnKey: updated.columnKey, priority: updated.priority, held: updated.held, projectId: task.projectId },
@@ -1235,11 +1415,11 @@ export const COMPANION_CAPABILITIES: readonly CompanionCapability[] =
  * reads — additive: every lever that doesn't read them (every lever except `decision_resolve`/
  * `board_create`/`board_update`/`send_media`/`session-steer` today) sees nothing different.
  */
-export function registerCompanionCapabilities(server: McpServer, sessionId: string, role: SessionRole, db: Db, attest: OwnerAttestation, pty: GrantPty, outbound: GrantOutbound, sessions: GrantSessions): void {
+export function registerCompanionCapabilities(server: McpServer, sessionId: string, role: SessionRole, db: Db, attest: OwnerAttestation, pty: GrantPty, outbound: GrantOutbound, sessions: GrantSessions, trustWindow: CompanionTrustWindow): void {
   if (role !== "assistant") return;
   for (const cap of COMPANION_CAPABILITIES) {
     const scope = resolveCompanionGrant(db, sessionId, cap.slug);
     if (!scope) continue;
-    cap.register(server, { sessionId, scope, attest, pty, outbound, sessions }, db);
+    cap.register(server, { sessionId, scope, attest, pty, outbound, sessions, trustWindow }, db);
   }
 }

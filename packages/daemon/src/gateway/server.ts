@@ -34,7 +34,7 @@ import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
-import { COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES } from "../companion/capabilities.js";
+import { COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
 import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
@@ -863,6 +863,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // the live routing-map removal to that ONE channel, leaving the session's other channel(s) untouched.
     deps.db.deleteCompanionBinding(sessionId, channel);
     deps.companion?.unbind(sessionId, channel); // stop routing immediately (no stale in-memory binding until restart)
+    // Companion Trust Window close path (Framework Card 0): a binding change (partial OR full unbind)
+    // revokes EVERY window for this session, across every route/sender — erring toward MORE friction (a
+    // forced re-arm) is always the safe direction; a partial per-channel unbind closing an unrelated
+    // channel's window too is a harmless over-close, never a gap. Optional-chained on the METHOD (not
+    // just `deps.orchMcp`): several existing gateway tests construct a minimal `orchMcp` stub that
+    // predates this method — a throw here must not turn an unrelated bind change into a 500.
+    deps.orchMcp.closeCompanionTrustWindow?.(sessionId);
     return { ok: true };
   });
 
@@ -1115,6 +1122,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const existing = deps.db.getCompanionConfig(sessionId);
     deps.db.deleteCompanionConfig(sessionId); // cascade: config + bindings + allowed-senders + pairing codes
     await deps.companion?.reconcile(sessionId); // tear the live companion down to the OFF state — no restart, scoped to this session
+    deps.orchMcp.closeCompanionTrustWindow?.(sessionId); // Companion Trust Window close path (Framework Card 0)
     if (existing?.provisioned) {
       // Best-effort graceful retire (preserves the transcript; the session archives on exit). Never let a
       // teardown fault fail the delete — the durable cascade already succeeded.
@@ -1521,6 +1529,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     return true;
   };
+  // `friction` (Companion Trust Window, Framework Card 0, §4.7): `"session-trust" | "per-action"` — a
+  // CROSS-CAPABILITY config key (unlike decisionClasses/roots above, which are one lever's own shape), so
+  // it's checked on EVERY grant write regardless of `capability`, not gated to one slug. Absent is valid
+  // (the lever's own default, DEFAULT_FRICTION_MODE — see capabilities.ts's resolveFrictionMode).
+  const isValidFrictionConfig = (v: Record<string, unknown> | undefined): v is Record<string, unknown> | undefined => {
+    if (v === undefined) return true;
+    if (v.friction !== undefined && !(FRICTION_MODES as readonly string[]).includes(v.friction as string)) return false;
+    return true;
+  };
   const parseGrantBody = (body: unknown):
     | { ok: true; capability: string; projectId: string | null; mode?: "read" | "act"; config?: Record<string, unknown> }
     | { ok: false; code: number; error: string } => {
@@ -1551,6 +1568,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     if (b.capability === "media-out" && !isValidMediaOutConfig(b.config as Record<string, unknown> | undefined)) {
       return { ok: false, code: 400, error: "media-out config.roots must be an array of non-empty path strings" };
+    }
+    if (!isValidFrictionConfig(b.config as Record<string, unknown> | undefined)) {
+      return { ok: false, code: 400, error: `config.friction must be one of: ${FRICTION_MODES.join(", ")}` };
     }
     return { ok: true, capability: b.capability, projectId, mode: b.mode as "read" | "act" | undefined, config: b.config as Record<string, unknown> | undefined };
   };

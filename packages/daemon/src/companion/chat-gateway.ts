@@ -180,6 +180,12 @@ export class ChatGateway {
     private readonly livePush: CompanionLivePush | undefined = undefined,
     private readonly historyExport: CompanionHistoryExport | undefined = undefined,
     private readonly proactiveResolver: ((sessionId: string) => boolean) | undefined = undefined,
+    /** Companion Trust Window close hook (Framework Card 0): revoke every trust window held for a
+     *  session — called on a pairing re-bind (dm-bind / group-sender redemption, below) and threaded to
+     *  the "/lock" command (commands.ts) via CommandDeps. Default undefined ⇒ every existing/test
+     *  construction stays byte-identical (no-op). The daemon injects `(sid) =>
+     *  orchMcp.closeCompanionTrustWindow(sid)` (index.ts, via CompanionControllerDeps). */
+    private readonly closeTrustWindow: ((sessionId: string) => void) | undefined = undefined,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -270,6 +276,9 @@ export class ChatGateway {
       const red = this.pairing.redeem({ grantType: "dm-bind", channel: msg.channel, chatId: msg.chatId, senderId: msg.sender?.id, body: msg.body });
       if (red.outcome === "bound") {
         this.bind(red.binding); // live-sync the routing map so this chat routes immediately (no restart)
+        // Companion Trust Window close path (Framework Card 0): a fresh re-pair changes WHO may drive this
+        // session — revoke any window a prior binding left behind rather than let it silently carry over.
+        this.closeTrustWindow?.(red.binding.sessionId);
         const acked = await this.tryAck(red.binding, PAIRED_ACK);
         this.debug(`inbound PAIRED (dm-bind): chat now bound (channel=${msg.channel} chat=${msg.chatId} session=${red.binding.sessionId})`);
         return { accepted: false, reason: "paired-dm", sessionId: red.binding.sessionId, acked };
@@ -289,6 +298,10 @@ export class ChatGateway {
       // silent reject below.
       const red = this.pairing.redeem({ grantType: "group-sender", channel: msg.channel, chatId: msg.chatId, senderId: msg.sender?.id, body: msg.body, bindingSessionId: binding.sessionId });
       if (red.outcome === "sender-added") {
+        // Companion Trust Window close path (Framework Card 0): a new group member being paired in changes
+        // WHO may drive this session — revoke every window so the fresh member (and everyone else) starts
+        // cold, never inheriting an existing member's warm window.
+        this.closeTrustWindow?.(binding.sessionId);
         const acked = await this.tryAck(binding, PAIRED_ACK);
         this.debug(`inbound PAIRED (group-sender): sender allowlisted (channel=${msg.channel} chat=${msg.chatId} session=${binding.sessionId})`);
         return { accepted: false, reason: "paired-sender", sessionId: binding.sessionId, acked };
@@ -363,6 +376,7 @@ export class ChatGateway {
         resetConversation: (sid) => this.resetConversation(sid),
         exportConversation: (sid) => this.exportConversation(sid),
         refreshPersona: (sid) => this.refreshPersona(sid),
+        closeTrustWindow: (sid) => this.closeTrustWindow?.(sid),
       });
       // Every command ack is transport chrome EXCEPT "/new"/"/reset" — that ack IS the intentional
       // conversation-boundary marker (resetConversation's doc), so it alone is persisted, on EVERY channel.
@@ -385,8 +399,14 @@ export class ChatGateway {
       // inbound's own (channel, chatId) — never a body-supplied one. `body` is ALSO passed as `ownerText`
       // (Companion injection-guard Primitive A) — this is the ONE place `body` is both the turn's text AND
       // the literal AUTHORIZED owner bytes forming it (past the allowlist + sender-authz gates above), so
-      // getActiveTurnOwnerText can attest it for the sensitive ACT levers later cards will add.
-      submit = this.submitTurn(binding.sessionId, body, { channel: msg.channel, chatId: msg.chatId }, body);
+      // getActiveTurnOwnerText can attest it for the sensitive ACT levers later cards will add. `senderId`
+      // (Companion Trust Window) mirrors voicePrefRoute's own group-only rule: the authenticated sender for
+      // a GROUP-scope binding, null for DM (the chatId alone already identifies the single owner) — so a
+      // trust window keyed off it can never let one group member's confirm cover another's.
+      submit = this.submitTurn(
+        binding.sessionId, body, { channel: msg.channel, chatId: msg.chatId }, body,
+        binding.scope === "group" ? (msg.sender?.id ?? null) : null,
+      );
     } catch (err) {
       // The submit primitive (pty.enqueueStdin) can THROW: its fail-loud M1/M2 guards, or realistically
       // `submit()`'s pty.write() throwing when the bound session's pty dies in the window between the

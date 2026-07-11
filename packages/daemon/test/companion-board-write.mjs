@@ -277,7 +277,15 @@ try {
     const companionSess = "companion-confirm-update";
     seedSession(db, companionSess, proj, "assistant");
     seedTask(db, "t-upd", proj, { title: "Move me", columnKey: "backlog", priority: "p2" });
-    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: proj, mode: "act" });
+    // Companion Trust Window (Framework Card 0): board_update carries no free-text content, so — unlike
+    // board_create — a warm trust window has nothing to re-validate and would let a THIRD identical call
+    // legitimately re-apply the SAME patch (the intended low-friction behavior). This test's own purpose is
+    // verifying Primitive C's single-use/exactly-once round-trip machinery itself, so pin friction:
+    // "per-action" to exercise that machinery unconditionally, exactly as before this card.
+    db.upsertCompanionCapabilityGrant({
+      sessionId: companionSess, capability: "board-reach", projectId: proj, mode: "act",
+      config: { friction: "per-action" },
+    });
     const pty = makeFakePty("the owner said: bump that to p0 and move it to in_progress");
     const companion = makeFakeCompanion();
     const orch = new OrchestrationMcpRouter(db, {}, companion, pty);

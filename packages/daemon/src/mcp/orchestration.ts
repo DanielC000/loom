@@ -34,6 +34,7 @@ import {
 } from "../skills/companion-memory-store.js";
 import { registerCompanionCapabilities } from "../companion/capabilities.js";
 import { createOwnerAttestation, OwnerConfirmStore } from "../companion/attestation.js";
+import { CompanionTrustWindow } from "../companion/trust-window.js";
 
 // Same envelope as the task MCP server (mcp/server.ts).
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -103,6 +104,20 @@ export class OrchestrationMcpRouter {
   // owner's confirming reply arrives). No lever proposes/confirms yet — this just gives `attest` (built in
   // buildServer below) somewhere durable to keep state across requests once one does.
   private readonly ownerConfirmStore = new OwnerConfirmStore();
+
+  // Companion Trust Window (Framework Card 0) — ONE per router instance, same lifetime/rationale as
+  // `ownerConfirmStore` above (in-memory, lost on restart is a fail-safe). Public so gateway/server.ts's
+  // REST handlers can revoke every window for a session on the documented close paths (recycle/unbind/
+  // binding-allowlist change/re-pair) via {@link closeCompanionTrustWindow} without reaching into the
+  // instance directly.
+  readonly trustWindow = new CompanionTrustWindow();
+
+  /** Revoke every trust window held for `sessionId`, across every route/sender — called from the REST
+   *  layer's own close paths (session recycle/unbind, a binding/allowlist change, a re-pair); a daemon
+   *  restart closes every window automatically (in-memory). */
+  closeCompanionTrustWindow(sessionId: string): void {
+    this.trustWindow.closeAllForSession(sessionId);
+  }
 
   /** Role gate: returns the session's id + orchestration role, or null (→ 404) for plain/unknown.
    *  Admits the Companion (assistant) too — it reaches this surface for its MINIMAL toolset (my_context +
@@ -486,6 +501,10 @@ export class OrchestrationMcpRouter {
     // never throws.
     registerCompanionCapabilities(server, sessionId, role, db, attest, {
       getActiveTurnOrigin: (sid) => pty?.getActiveTurnOrigin(sid) ?? null,
+      // Optional-chained on the METHOD too (not just `pty`): a test double built before this card added
+      // getActiveTurnSenderId (every existing companion-lever test's fake pty) must not THROW here — it
+      // degrades to null exactly like a real dead/unknown session would, never breaking an existing test.
+      getActiveTurnSenderId: (sid) => pty?.getActiveTurnSenderId?.(sid) ?? null,
       enqueueStdin: (sid, text, source, onDeliver, route, kind, questionId) =>
         pty?.enqueueStdin(sid, text, source, onDeliver, route, kind, questionId) ?? { delivered: false, reason: "session-dead" },
     }, {
@@ -519,7 +538,7 @@ export class OrchestrationMcpRouter {
       redirectSession: (sid, text, senderSessionId) => sessions.redirectSessionAsCompanion(sid, text, senderSessionId),
       stopSession: (sid, mode) => sessions.stopSession(sid, mode),
       resumeSession: (sid) => sessions.resume(sid),
-    });
+    }, this.trustWindow);
 
     // Companion (epic Phase 1): the long-lived `assistant` role gets a MINIMAL surface — the read-only
     // my_context PLUS (only when this IS the bound companion session) the chat_reply registered just above.

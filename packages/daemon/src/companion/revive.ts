@@ -60,14 +60,14 @@ export function reviveCompanionSessionAtBoot(cfg: CompanionConfig | null, deps: 
  * chat-gateway's own "queued" ack for a busy/not-ready session; only resume/retry itself is one-shot.
  */
 export function withCompanionSelfHeal(submit: SubmitTurn, deps: Pick<ReviveDeps, "resume">): SubmitTurn {
-  return (sessionId, text, route, ownerText) => {
-    const result = submit(sessionId, text, route, ownerText);
+  return (sessionId, text, route, ownerText, senderId) => {
+    const result = submit(sessionId, text, route, ownerText, senderId);
     if (result.delivered || result.position !== undefined) return result;
     try {
       deps.resume(sessionId);
     } catch {
       return result; // unresumable — surface the ORIGINAL session-dead result
     }
-    return submit(sessionId, text, route, ownerText);
+    return submit(sessionId, text, route, ownerText, senderId);
   };
 }

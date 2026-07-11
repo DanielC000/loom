@@ -87,6 +87,11 @@ export interface CommandDeps {
    *  was actually composed+enqueued — false for a missing/non-assistant session or no injected side-channel
    *  (e.g. a test construction that doesn't inject one). Never throws. */
   refreshPersona(sessionId: string): boolean;
+  /** The "/lock" command's action (Companion Trust Window, Framework Card 0): revoke every trust window
+   *  held for this session, across every route/sender, forcing the NEXT sensitive act back to a fresh
+   *  owner confirm. Never throws. Optional: absent ⇒ "/lock" acks but there is nothing to revoke (a test
+   *  seam that doesn't inject the trust-window close hook stays byte-identical). */
+  closeTrustWindow?(sessionId: string): void;
 }
 
 /**
@@ -197,6 +202,17 @@ const COMMANDS: Record<string, CommandDef> = {
     handler(_args, route) {
       const senderLine = route.senderId ? `\nSender: ${route.senderId}` : "";
       return { ack: `🪪 Channel: ${route.channel}\nChat: ${route.chatId}${senderLine}` };
+    },
+  },
+  lock: {
+    description: "Revoke my standing confirmation — the next sensitive action needs your OK again",
+    // Companion Trust Window (Framework Card 0): the owner's explicit "step down" — closes every warm
+    // window this session holds, across every route/sender, so a subsequent Tier-A act (decision_resolve/
+    // board_create/board_update) falls back to a fresh propose/confirm round-trip. Never destructive to
+    // anything else (the conversation, grants, and scope are all untouched).
+    handler(_args, route, _prefs, deps) {
+      deps.closeTrustWindow?.(route.sessionId);
+      return { ack: "🔒 Locked — I'll need your confirmation again before I take any action." };
     },
   },
   refresh: {

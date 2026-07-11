@@ -536,7 +536,7 @@ async function main(): Promise<void> {
     // Wrapped with the self-heal in companion/revive.ts (bug 4cc7826d): one auto-resume-then-retry when the
     // bound session died AFTER boot, strictly after chat-gateway's allowlist + sender-authz gates run.
     submitTurn: withCompanionSelfHeal(
-      (sid, text, route, ownerText) => pty.enqueueStdin(sid, text, "system", undefined, route, "agent", undefined, ownerText),
+      (sid, text, route, ownerText, senderId) => pty.enqueueStdin(sid, text, "system", undefined, route, "agent", undefined, ownerText, undefined, senderId),
       { resume: (sid) => { sessions.resume(sid); } },
     ),
     pty,
@@ -550,6 +550,10 @@ async function main(): Promise<void> {
     // daemon-driven heartbeat/reminder/attention-push submit — mirrors originResolver exactly. deliverReply
     // reads this to tag the outbound frame + persisted history row for the web chat's amber event line.
     proactiveResolver: (sid) => pty.getActiveTurnIsProactive(sid),
+    // Companion Trust Window close hook (Framework Card 0): a re-pair (dm-bind / group-sender) or "/lock"
+    // revokes every window the session holds. orchMcp is constructed below this block, so this closes over
+    // the `let` it's assigned to — safe: neither fires until a real inbound/command lands, well after boot.
+    closeTrustWindow: (sid) => orchMcp.closeCompanionTrustWindow(sid),
     transcribe: sttTranscriber,
     synthesize: ttsSynthesizer,
     // PERSONA reinject (companion-persona-after-clear card, generalized by the standalone "/refresh" command

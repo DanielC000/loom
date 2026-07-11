@@ -163,12 +163,16 @@ export interface CompanionReminder {
  * Primitive A, optional trailing arg — existing callers omit it, byte-identical) is the LITERAL authorized
  * owner inbound bytes forming this turn; pass it ONLY when `text` genuinely IS the owner's own words (the
  * real chat-gateway inbound path), never for a synthesized side-effect turn like "/clear" (see
- * chat-gateway.ts's resetConversation). Returns the primitive's contract:
+ * chat-gateway.ts's resetConversation). `senderId` (Companion Trust Window, optional trailing arg —
+ * existing callers omit it, byte-identical) is the AUTHENTICATED sender id for a GROUP-scope route only
+ * (mirrors {@link VoicePrefRoute}'s own group-only senderId rule — null/omitted for a DM route), read back
+ * via `pty.getActiveTurnSenderId` to key a group route's trust window per-sender. Returns the primitive's
+ * contract:
  *   { delivered:true }               → submitted immediately as a turn
  *   { delivered:false, position:N }  → HELD in the session's FIFO (busy/not-ready) — still accepted
  *   { delivered:false }              → session not alive (DEAD) — nothing queued
  */
-export type SubmitTurn = (sessionId: string, text: string, route?: CompanionRoute, ownerText?: string) => { delivered: boolean; position?: number };
+export type SubmitTurn = (sessionId: string, text: string, route?: CompanionRoute, ownerText?: string, senderId?: string | null) => { delivered: boolean; position?: number };
 
 /**
  * The injected STT transcriber (Companion Voice epic, VOICE-P2 — see companion/stt.ts for the local
