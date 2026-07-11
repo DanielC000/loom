@@ -85,7 +85,11 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs) => new Prom
     const s = Buffer.concat(chunks).toString("utf-8").trim();
     return s.length > OUTPUT_TAIL_BYTES ? s.slice(-OUTPUT_TAIL_BYTES) : s;
   };
-  const child = spawn(command, { cwd, shell: true, stdio: ["ignore", "pipe", "pipe"] });
+  // GIT_TERMINAL_PROMPT=0 — a gateCommand/deployCommand step may run `git push` (or any git op); without
+  // this, an uncached-credential push blocks on an interactive prompt until the timeout SIGKILL instead
+  // of failing fast (mirrors git/writer.ts and pty/host.ts's same guard).
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  const child = spawn(command, { cwd, shell: true, stdio: ["ignore", "pipe", "pipe"], env });
   child.stdout?.on("data", capture);
   child.stderr?.on("data", capture);
   let settled = false;

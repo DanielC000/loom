@@ -63,7 +63,7 @@ export interface IdleWatcherDeps {
 const ORCH_ACTIVITY_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<OrchestrationEventKind>([
   "spawn_worker", "message_worker", "stop_worker",
   "merge_request", "merge_done", "merge_rejected",
-  "recycle_begin", "recycle_complete", "build_gate", "kill_switch",
+  "recycle_begin", "recycle_complete", "build_gate", "kill_switch", "deploy",
 ]);
 
 /**

@@ -29,6 +29,7 @@ function eventTone(e: AuditEvent): Tone {
   if (k === "merge_request" || k === "worker_stuck" || k === "idle_report" || k === "redirect_worker") return "amber";
   if (k === "merge_done" || k === "recycle_complete" || k === "session_recovered") return "phosphor";
   if (k === "build_gate_retry_attempt" || k === "build_gate_retry") return "cyan";
+  if (k === "deploy") return (e.detail as { ok?: boolean } | null)?.ok ? "phosphor" : "red";
   return "cyan";
 }
 
@@ -55,6 +56,7 @@ function detailLine(e: AuditEvent): string {
     case "build_gate_retry": return `gate retry: ${d.passed != null ? (d.passed ? "passed" : "still failed") : "?"}`;
     case "session_message":
     case "session_message_queued": return s("text").slice(0, 90);
+    case "deploy": return d.ok ? "deployed" : `failed (exit ${s("exitCode")})`;
     default: return "";
   }
 }
