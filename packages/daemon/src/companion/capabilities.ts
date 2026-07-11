@@ -21,7 +21,7 @@ import type { Db } from "../db.js";
 import { MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { AMBIGUOUS_ID_ERROR } from "../mcp/transcript-read.js";
 import { spawnableRoleError } from "../mcp/spawnable-role.js";
-import { createProjectTask, getProjectTask, listProjectTasks, updateProjectTask, type TaskSummary } from "../mcp/tasks.js";
+import { createProjectTask, getProjectTask, listProjectTasks, relocateProjectTask, updateProjectTask, type TaskSummary } from "../mcp/tasks.js";
 import { readTranscript, readArchivedTranscript, pageTranscript } from "../sessions/transcript.js";
 import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } from "../vault/browser.js";
 import type { OwnerAttestation } from "./attestation.js";
@@ -640,7 +640,8 @@ const BOARD_REACH_SLUG = "board-reach";
  *  one-pending-per-(session,route,capability) semantics. */
 type PendingBoardWrite =
   | { action: "create"; projectId: string; title: string; body: string; columnKey?: string; priority?: TaskPriority }
-  | { action: "update"; taskId: string; title?: string; body?: string; columnKey?: string; priority?: TaskPriority; held?: boolean };
+  | { action: "update"; taskId: string; title?: string; body?: string; columnKey?: string; priority?: TaskPriority; held?: boolean }
+  | { action: "relocate"; taskId: string; toProject: string; fromProject: string };
 const pendingBoardWrites = new Map<string, PendingBoardWrite>();
 
 /** Mirrors `pendingResolveKey` (decisions-relay) exactly, namespaced by `BOARD_REACH_SLUG` instead. */
@@ -720,6 +721,27 @@ function authoredContentAllowed(cfg: { authoredContent?: unknown }): boolean {
  * `board_update` resolves its target card GLOBALLY (`db.getTask`, unscoped by project — the only way to
  * find out which project a bare card id belongs to) before checking that project against scope, exactly
  * mirroring how `decision_resolve` resolves `db.getQuestion` before its own scope check.
+ *
+ * `board_relocate` (card bfa25ea5, lever 5) is a THIRD ACT tool, gated by the SAME `hasActGrant` — it
+ * reassigns a MISFILED card's `projectId` from one granted project to another, the one cross-project move
+ * `board_update` cannot do (`updateProjectTask`/`db.updateTask` never touch `project_id`; see
+ * `relocateProjectTask`, mcp/tasks.ts). Cross-project by nature, it requires act-mode on BOTH the card's
+ * CURRENT project and the destination — never a single-project scope check — and is ALWAYS Tier X
+ * (Framework §6.2): unlike `board_create`/`board_update`'s Tier A, it never flows through a warm trust
+ * window and always steps up to a fresh owner confirm (its dead low-friction branch, if `mayProceedWithout
+ * Confirm` ever regressed to `true` for "X", fails SAFE with an internal error rather than committing —
+ * mirrors this file's sibling `session_spawn` lever's own Tier-X dead branch). It shares
+ * `pendingBoardWrites`/`BOARD_REACH_SLUG` with the other two writes (one route, one outstanding board-write
+ * confirmation at a time) via its own `{action:"relocate", taskId, toProject, fromProject}` variant of
+ * `PendingBoardWrite` — `fromProject` (the source project AT PROPOSE TIME) is re-checked against the card's
+ * CURRENT project on confirm, so a card that moved between propose and confirm can never silently commit a
+ * different move than the one the owner actually confirmed. Refuses to relocate a card with a LIVE worker
+ * session bound to it (`db.countLiveSessionsForTask`, mirroring the task-delete guard, gateway/server.ts) —
+ * relocating out from under a running worker would strand it in the source project while the card moves.
+ * No Primitive-B check applies — `taskId`/`toProject` are id references, not authored content. KNOWN v1
+ * LIMITATION (tracked separately, card e7591ed2): a relocated card's connected decision-inbox Requests are
+ * NOT re-homed — they keep their original `project_id`, so they no longer show up as "connected" from the
+ * destination project's view of the card.
  */
 const BOARD_REACH: CompanionCapability = {
   slug: "board-reach",
@@ -1090,6 +1112,136 @@ const BOARD_REACH: CompanionCapability = {
           return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
         }
         pendingBoardWrites.set(key, { action: "update", taskId: id, title: normalizedTitle, body: normalizedBody, columnKey, priority, held });
+        return ok({ status: "proposed" });
+      },
+    );
+
+    server.registerTool(
+      "board_relocate",
+      {
+        description:
+          "Reassign a MISFILED card's project — move it from its CURRENT project's board to a DIFFERENT " +
+          "project's board (by the exact `taskId` from board_list, and `toProject`, a project id), on " +
+          "behalf of the owner. Requires an act-mode grant on BOTH the card's current project AND " +
+          "`toProject` — relocating a card OUT OF, or INTO, a project you don't have act-mode on is " +
+          "rejected, and relocating to the card's own current project is rejected as a no-op. The card " +
+          "keeps its current column if that column exists on the destination board, else it falls back " +
+          "to the destination's first/landing column (it is never left on a non-existent column) and " +
+          "gets a fresh position there. This is the single HIGHEST-friction tool you have — it NEVER " +
+          "applies on the first call, even inside an otherwise-warm trust window: Loom sends a " +
+          "confirmation request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/" +
+          "token — just tell the owner you've requested their confirmation) and returns " +
+          "{status:'proposed'}. Only once the owner replies to THAT message do you call board_relocate " +
+          "AGAIN with the SAME arguments to actually relocate it ({status:'relocated'}) — Loom detects " +
+          "the owner's confirming reply itself. A mismatched confirm reply returns " +
+          "{status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. Requires an " +
+          "owner-authored turn on a channel Loom can reply to — a proactive/heartbeat turn is always " +
+          "rejected. Refuses to relocate a card that has a LIVE worker session bound to it — stop or " +
+          "finish that session first. There is no delete tool — card removal stays human-only. KNOWN v1 " +
+          "LIMITATION: a relocated card's connected decision-inbox Requests are NOT re-homed to the " +
+          "destination project — they keep their original project.",
+        inputSchema: { taskId: z.string(), toProject: z.string() },
+      },
+      async ({ taskId, toProject }) => {
+        // Resolve the card GLOBALLY first (mirrors board_update/decision_resolve) — a bare taskId names
+        // no project until resolved.
+        const task = db.getTask(taskId);
+        if (!task) return ok({ error: `no task "${taskId}"` });
+        const sourceProject = task.projectId;
+        // Both-project-act scope (cross-project, Tier X) — NEVER a collapsed scope check: the SOURCE and
+        // the DESTINATION must EACH be individually granted AND act-mode.
+        if (!ctx.scope.projectIds.has(sourceProject) || !ctx.scope.mayAct(sourceProject)) {
+          return ok({ error: "you don't have an act-mode grant on this card's current project" });
+        }
+        if (!ctx.scope.projectIds.has(toProject) || !ctx.scope.mayAct(toProject)) {
+          return ok({ error: "you don't have an act-mode grant on the destination project" });
+        }
+        if (toProject === sourceProject) {
+          return ok({ error: "toProject is the same as the card's current project — nothing to relocate" });
+        }
+        // Safety guard (CR fold): a card with a LIVE worker session bound to it must never be relocated
+        // out from under that worker — the session would stay in the source project while the card moves
+        // to the destination, stranding it. Checked on EVERY call (propose and confirm alike), mirroring
+        // the task-delete guard's own posture (gateway/server.ts's DELETE /api/tasks/:id).
+        if (db.countLiveSessionsForTask(taskId) > 0) {
+          return ok({ error: "this card has a live worker session bound to it — stop/finish it before relocating" });
+        }
+        // Primitive A — every call (propose OR confirm) must be on an owner-authored turn.
+        const ownerText = ctx.attest.getActiveTurnOwnerText(ctx.sessionId);
+        if (ownerText === null) {
+          return ok({ error: "no owner text this turn — board_relocate can only act on an owner-authored turn" });
+        }
+        const route = ctx.pty.getActiveTurnOrigin(ctx.sessionId);
+        if (route === null) {
+          return ok({ error: "no reply-to route for this turn — Loom has no verified channel to confirm this with the owner" });
+        }
+        // Friction tiering (Framework §6.2): board_relocate is ALWAYS Tier X (catastrophic, cross-
+        // project) — it ALWAYS steps up, even inside an otherwise-warm trust window (mayProceedWithout
+        // Confirm returns false unconditionally for "X", so there is deliberately no low-friction
+        // direct-commit path here, unlike board_create/board_update's Tier A). Still routed through the
+        // SAME shared chokepoint every act lever calls first, so no lever hand-rolls its own bypass.
+        const tier: FrictionTier = "X";
+        const friction = resolveFrictionMode(ctx.scope.configFor(sourceProject) as { friction?: unknown });
+        const frictionScope: FrictionScope = {
+          sessionId: ctx.sessionId, route, senderId: ctx.pty.getActiveTurnSenderId(ctx.sessionId), capability: BOARD_REACH_SLUG,
+        };
+        const key = pendingBoardKey(ctx.sessionId, route);
+
+        if (mayProceedWithoutConfirm(ctx.trustWindow, tier, friction, frictionScope)) {
+          // Never reached — Tier X always returns false — kept so this lever runs through the SAME
+          // shared friction chokepoint every other sensitive ACT lever does (mirrors session_spawn's own
+          // Tier-X dead branch), and if that invariant ever regressed, this fails SAFE rather than
+          // performing the real cross-project move with zero owner confirm.
+          return ok({ error: "internal: tier-X action reported a low-friction path" });
+        }
+
+        // Primitive C — try to COMMIT a pending proposal for this exact (route, capability) first.
+        const confirmOutcome = ctx.attest.confirmPending(ctx.sessionId, route, BOARD_REACH_SLUG);
+        if (confirmOutcome.committed) {
+          const pending = pendingBoardWrites.get(key);
+          pendingBoardWrites.delete(key); // single-use, whether or not it still matches below.
+          if (
+            !pending || pending.action !== "relocate" || pending.taskId !== taskId || pending.toProject !== toProject
+            // The card's CURRENT project must still match what it was AT PROPOSE TIME — if it moved
+            // between propose and confirm (e.g. a second relocate landed first), this confirm must not
+            // silently commit a different move than the one the owner actually confirmed.
+            || pending.fromProject !== sourceProject
+          ) {
+            return ok({ error: "the confirmed action no longer matches what was proposed — call board_relocate again to re-propose" });
+          }
+          const relocated = relocateProjectTask(db, taskId, toProject);
+          if ("error" in relocated) return ok({ error: relocated.error });
+          // Tier X never arms the trust window (onStepUpCommitted is a no-op for any tier but "A") — a
+          // confirmed relocate must never lower friction for the next catastrophic act.
+          onStepUpCommitted(ctx.trustWindow, tier, friction, frictionScope);
+          return ok({
+            status: "relocated",
+            task: { id: relocated.id, title: relocated.title, columnKey: relocated.columnKey, priority: relocated.priority, projectId: relocated.projectId },
+          });
+        }
+        if (confirmOutcome.reason === "token-mismatch") {
+          // Left standing (not evicted) — a typo'd confirm reply is retry-able within the TTL.
+          return ok({ status: "confirm-mismatch", error: "that doesn't contain the exact confirm token — ask the owner to reply again with it verbatim" });
+        }
+        // An EXPIRED (or never-existed) proposal's payload is dead weight — evict before the fresh
+        // propose below unconditionally overwrites this key, so a reader never sees a stale entry.
+        pendingBoardWrites.delete(key);
+
+        // No (or expired) pending confirmation for this route — this is a fresh PROPOSE.
+        const proposal = ctx.attest.proposeConfirmation({
+          sessionId: ctx.sessionId,
+          route,
+          capability: BOARD_REACH_SLUG,
+          summary: `Move board card "${task.title}" from project ${sourceProject} to project ${toProject}?`,
+        });
+        // CR hardening (inherited from decision_resolve/board_create/board_update) — deliver DIRECTLY to
+        // the owner; never hand promptText/the token back to the companion. Fail closed on a delivery
+        // failure (nothing is left pending for the owner to stumble into confirming blind).
+        const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
+        if (!delivered) {
+          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
+        }
+        pendingBoardWrites.set(key, { action: "relocate", taskId, toProject, fromProject: sourceProject });
         return ok({ status: "proposed" });
       },
     );

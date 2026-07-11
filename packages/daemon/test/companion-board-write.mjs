@@ -224,7 +224,9 @@ try {
     check("board_create is registered", tools.includes("board_create"));
     check("board_update is registered", tools.includes("board_update"));
     check("NO delete tool is registered (board_delete)", !tools.includes("board_delete"));
-    check("only board_list/board_get/board_create/board_update are the board tools", tools.filter((t) => t.startsWith("board_")).sort().join(",") === "board_create,board_get,board_list,board_update");
+    // board_relocate (card bfa25ea5) is ALSO registered under an act-mode grant, alongside these four —
+    // covered in full by companion-board-relocate.mjs; this list just needs to stay in sync with it.
+    check("only board_list/board_get/board_create/board_update/board_relocate are the board tools", tools.filter((t) => t.startsWith("board_")).sort().join(",") === "board_create,board_get,board_list,board_relocate,board_update");
     db.close();
   }
 

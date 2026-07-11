@@ -3982,6 +3982,16 @@ export class Db {
       "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, updated_at=@updatedAt WHERE id=@id",
     ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0 });
   }
+  /** Reassign a card to a DIFFERENT project's board — the one write `updateTask` never performs (it has
+   *  no `projectId` in its patch type). Single atomic UPDATE (project_id + column_key + position
+   *  together), so a card is never observably orphaned mid-write. `board_relocate`'s backing op
+   *  (`relocateProjectTask`, mcp/tasks.ts) is the only caller — it resolves the destination column +
+   *  fresh position before calling this. */
+  relocateTask(id: string, patch: { projectId: string; columnKey: string; position: number }): void {
+    this.db.prepare(
+      "UPDATE tasks SET project_id=@projectId, column_key=@columnKey, position=@position, updated_at=@updatedAt WHERE id=@id",
+    ).run({ id, projectId: patch.projectId, columnKey: patch.columnKey, position: patch.position, updatedAt: new Date().toISOString() });
+  }
   /** PERMANENTLY delete a task card. Idempotent on a missing id (DELETE … WHERE matches nothing). HUMAN-only
    * (no MCP path) — an agent can only move a card to done; the REST route enforces the live-session guard. */
   deleteTask(id: string): void {

@@ -260,6 +260,33 @@ export function updateProjectTask(
   return { ...owned, ...patch, updatedAt: new Date().toISOString() };
 }
 
+/**
+ * Reassign a MISFILED card from one project's board to another (`board_relocate`'s backing op, card
+ * bfa25ea5) — the one cross-project move {@link updateProjectTask} cannot do (its patch type has no
+ * `projectId`, and `db.updateTask` never writes that column). Resolves `taskId` GLOBALLY (`db.getTask`,
+ * unscoped — the caller already knows the source project from that same read) and validates `toProject`
+ * names a real project. Lands the card in the SAME `columnKey` on the destination board if that column
+ * exists there, else falls back to the destination's first/landing column (`columnKeyForRole`'s
+ * `defaultLanding` role IS "the first column" — mirrors `createProjectTask`'s own landing-column
+ * fallback) — never orphans the card onto a non-existent key, mirroring `updateProjectTask`'s
+ * column-validation discipline. Assigns a fresh `position` (mirrors `createProjectTask`'s own
+ * `Date.now()` convention for "a card landing fresh on a board"). Single atomic `db.relocateTask` write
+ * (project_id + column_key + position together).
+ */
+export function relocateProjectTask(db: Db, taskId: string, toProject: string): Task | { error: string } {
+  const task = db.getTask(taskId);
+  if (!task) return { error: `no task "${taskId}"` };
+  const destProject = db.getProject(toProject);
+  if (!destProject) return { error: `no project "${toProject}"` };
+  const destCols = resolveConfig(destProject.config).kanbanColumns;
+  const columnKey = destCols.some((c) => c.key === task.columnKey)
+    ? task.columnKey
+    : (columnKeyForRole(destCols, "defaultLanding") ?? destCols[0]?.key ?? task.columnKey);
+  const position = Date.now();
+  db.relocateTask(taskId, { projectId: toProject, columnKey, position });
+  return { ...task, projectId: toProject, columnKey, position, updatedAt: new Date().toISOString() };
+}
+
 /** Tool descriptors (name/description/input shape) for wiring to the MCP SDK. */
 export const TASK_TOOL_DESCRIPTORS = [
   { name: "tasks_list", description: "List the current project's board tasks. Defaults to a lightweight summary (no body) with done cards excluded; pass includeBody:true or use tasks_get(id) for bodies." },
