@@ -12,9 +12,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       Symmetrically, the setup router returns NULL for every NON-setup role (manager/worker/plain/
 //       platform/auditor) — an agent/non-setup session can never reach /mcp-setup. buildMcpServers(setup)
 //       mounts loom-setup ONLY (+loom-tasks), never platform/orch/audit, with a ["mcp__loom-setup"] allow.
-//   (b) the surface is EXACTLY the curated subset of 20 (incl. project_init, project_archive, agent_update,
-//       the agent_get/profile_get/project_get reads, and the self-scoped end_me terminal exit) — and NONE
-//       of the elevated/outward/self-improvement tools (no git/vault/message/stop/schedule/escalate/audit).
+//   (b) the surface is EXACTLY the curated subset of 22 (incl. project_init, project_archive, agent_update,
+//       the agent_get/profile_get/project_get reads, template_list/template_apply, and the self-scoped
+//       end_me terminal exit) — and NONE of the elevated/outward/self-improvement tools (no git/vault/
+//       message/stop/schedule/escalate/audit).
+//   (l) template_list/template_apply (onboarding C2) — template_list reads the canonical workflow-template
+//       catalog (name + description + agent roster summary), read-only. template_apply stands up a named
+//       template's agents + starter board cards on an EXISTING project (reusing agent_create + task-insert
+//       only); an unknown templateName, an unknown projectId (the project-scope guard), and an unknown
+//       profileName are all rejected with nothing written.
 //   (c) the curated tools work end-to-end: project_create (real git repo), project_configure,
 //       project_update, project_archive (soft + reserved-guarded), agent_create,
 //       profile_create/update/assign, list_all_*, session_spawn(manager|plain).
@@ -69,6 +75,7 @@ import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
 
 const { Db } = await import("../dist/db.js");
+const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
 const { PtyHost, buildMcpServers } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -92,6 +99,10 @@ fs.mkdirSync(nonGit, { recursive: true });
 
 const now = new Date().toISOString();
 const db = new Db();
+// Seed the CORE bundled profiles (Orchestrator/Dev/Bugfix/QA Tester/Web Designer/Code Reviewer) — LOOM_DEV
+// is unset above, so no elevated Platform-layer profiles seed. template_apply ((l) below) binds a
+// canonical template's agents to these EXISTING bundled profiles by name.
+seedDefaultProfiles(db);
 // The reserved "Getting Started" home (E1-6 seeds this; here we just need a project to host the agents).
 db.insertProject({ id: "pHome", name: "Getting Started", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: true });
 db.insertAgent({ id: "agentSetup", projectId: "pHome", name: "Setup Assistant", startupPrompt: "SETUP", position: 0, profileId: null });
@@ -165,9 +176,9 @@ try {
     "agent_create", "agent_get", "agent_update", "end_me", "list_all_agents", "list_all_projects", "list_all_sessions",
     "profile_assign", "profile_create", "profile_get", "profile_update",
     "project_archive", "project_configure", "project_create", "project_get", "project_init", "project_update", "session_spawn",
-    "skill_list", "skill_write",
+    "skill_list", "skill_write", "template_apply", "template_list",
   ];
-  check(`(b) setup surface is EXACTLY the curated subset of 20 (got ${tools.length}: ${tools.join(",")})`,
+  check(`(b) setup surface is EXACTLY the curated subset of 22 (got ${tools.length}: ${tools.join(",")})`,
     JSON.stringify(tools) === JSON.stringify(expected));
   // The still-ABSENT trust boundary — project_archive is now INCLUDED (the ONE v1 widen), but the
   // outward/host/elevated/self-improvement set must stay unreachable.
@@ -525,6 +536,42 @@ try {
   const missingVault = await call("project_create", { name: "Ghost", vaultPath: path.join(path.resolve(tmpHome), "does-not-exist") });
   check("(k) project_create: a non-existent vaultPath is rejected", typeof missingVault.error === "string" && !missingVault.id);
 
+  // ============ (l) template_list / template_apply (onboarding C2) ============
+  // template_list: read-only catalog — the two canonical presets, each with a roster summary.
+  const templates = await call("template_list", {});
+  check("(l) template_list: returns both canonical templates", Array.isArray(templates) && templates.length === 2);
+  const soloListed = templates.find((t) => t.name === "Solo builder");
+  check("(l) template_list: 'Solo builder' has a description + a roster summary (name+profileName, no startupPrompt)",
+    !!soloListed && typeof soloListed.description === "string"
+    && soloListed.agents.length === 3
+    && soloListed.agents.every((a) => typeof a.name === "string" && typeof a.profileName === "string" && a.startupPrompt === undefined));
+
+  // template_apply: applied to `created` (a real project from (c)) — stands up the roster + starter cards
+  // via the ordinary agent_create/task-insert path, reflected on the ordinary reads.
+  const nAgentsBefore = db.listAgents(created.id).length;
+  const nTasksBefore = db.listTasks(created.id).length;
+  const applied = await call("template_apply", { projectId: created.id, templateName: "Solo builder" });
+  check("(l) template_apply: stands up one agent per templated agent", !applied.error && applied.agents.length === 3);
+  check("(l) template_apply: seeds the starter board card(s)", applied.tasks.length === 1);
+  check("(l) template_apply: the new agents are visible via the ordinary listAgents read",
+    db.listAgents(created.id).length === nAgentsBefore + 3);
+  check("(l) template_apply: the new tasks are visible via the ordinary listTasks read",
+    db.listTasks(created.id).length === nTasksBefore + 1);
+  check("(l) template_apply: every applied agent is bound to an EXISTING profile (never minted) and passes setupRoleError",
+    applied.agents.every((a) => a.profileId != null && db.getProfile(a.profileId) != null));
+
+  // Fail-closed: an unknown templateName is rejected, nothing written.
+  const nAgentsBeforeUnknown = db.listAgents(created.id).length;
+  const unknownTemplate = await call("template_apply", { projectId: created.id, templateName: "Nope, not a real template" });
+  check("(l) template_apply: an unknown templateName is rejected", typeof unknownTemplate.error === "string" && !unknownTemplate.agents);
+  check("(l) template_apply: the rejected unknown-template apply wrote NO agents", db.listAgents(created.id).length === nAgentsBeforeUnknown);
+
+  // Fail-closed / project-scope guard: an unknown projectId is rejected the SAME way project_configure/
+  // agent_create reject one (db.getProject lookup → 404), never widening the operator's reach.
+  const unknownProject = await call("template_apply", { projectId: "not-a-real-project-id", templateName: "Solo builder" });
+  check("(l) template_apply: an unknown projectId is rejected (project-scope guard)",
+    unknownProject.error === "project not found");
+
   await client.close();
 } finally {
   db.close();
@@ -535,6 +582,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Setup Assistant surface is the curated, fail-closed subset of 19 (project_create (incl. VAULT-ONLY)/project_init (sanctioned-base bootstrap, traversal-rejected)/configure/update + agent_create + agent_update (least-privilege, no elevated-rig assignment) + agent_get/profile_get/project_get reads + project_archive (soft, reserved-guarded) + manager|plain spawn + list_all_* + skill_list/skill_write), project_init confines to WORKSPACE_ROOT and refuses traversal/escape/clobber, a setup session 404s on /mcp-platform, /mcp-orch AND /mcp-audit, a non-setup session can never reach /mcp-setup, every config path rejects gateCommand/alertWebhook, session_spawn refuses platform/auditor/worker/setup, a kanbanColumns layout is accepted by the AGENT validator, and skill_write is confirm-first + bounded to the USER store (never the bundled/dev set) — claude-free, network-free."
+  ? "\n✅ ALL PASS — the Setup Assistant surface is the curated, fail-closed subset of 22 (project_create (incl. VAULT-ONLY)/project_init (sanctioned-base bootstrap, traversal-rejected)/configure/update + agent_create + agent_update (least-privilege, no elevated-rig assignment) + agent_get/profile_get/project_get reads + project_archive (soft, reserved-guarded) + manager|plain spawn + list_all_* + skill_list/skill_write + template_list/template_apply (onboarding C2, project-scope guarded)), project_init confines to WORKSPACE_ROOT and refuses traversal/escape/clobber, a setup session 404s on /mcp-platform, /mcp-orch AND /mcp-audit, a non-setup session can never reach /mcp-setup, every config path rejects gateCommand/alertWebhook, session_spawn refuses platform/auditor/worker/setup, a kanbanColumns layout is accepted by the AGENT validator, and skill_write is confirm-first + bounded to the USER store (never the bundled/dev set) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

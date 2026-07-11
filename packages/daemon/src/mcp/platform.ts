@@ -22,6 +22,7 @@ import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData, skillWriteInputSchema } from "./skillTools.js";
+import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { createProjectTask, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP } from "./tasks.js";
 import { prioritySchema } from "./server.js";
 import { getByIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
@@ -1137,6 +1138,61 @@ export class PlatformMcpRouter {
         if (p.reserved) return ok({ error: "cannot archive a reserved/system project (the Loom Platform home)" });
         db.archiveProject(projectId);
         return ok({ archived: true, projectId });
+      },
+    );
+
+    // === templates (Guided Onboarding & Templates, onboarding C2) — mirrored from the loom-setup operator
+    // surface so the loom-setup ⊆ loom-platform invariant holds (every operator tool is also on the Lead's
+    // surface). Identical implementation: template_list reads the canonical WORKFLOW_TEMPLATES catalog;
+    // template_apply resolves projectId via the SAME plain db.getProject existence guard project_configure/
+    // project_update/agent_create already use above, then applies via applyWorkflowTemplate (setup/
+    // templates.ts), which itself checks every templated agent's resolved profile role against
+    // setupRoleError before writing it — a template can never be an elevation back-door, on this surface
+    // either. The Lead's broader cross-project reach (any projectId) is BY DESIGN, same as agent_create/
+    // project_create above — it is not a widened guard, just the Lead's ordinary reach. ===
+    server.registerTool(
+      "template_list",
+      {
+        description:
+          "List the available workflow templates: each has a name, description, and a roster summary " +
+          "(name + bound profile name) of the agents it stands up. Read-only, no secrets, no writes.",
+        inputSchema: {},
+      },
+      async () =>
+        ok(
+          WORKFLOW_TEMPLATES.map((t) => ({
+            name: t.name,
+            description: t.description,
+            agents: t.agents.map((a) => ({ name: a.name, profileName: a.profileName })),
+          })),
+        ),
+    );
+
+    server.registerTool(
+      "template_apply",
+      {
+        description:
+          "Apply a named workflow template to an EXISTING project (by projectId): stands up its agents — " +
+          "each bound to an EXISTING bundled profile by name, never minted — and seeds its starter board " +
+          "cards. Reuses the existing agent_create + task-insert writers only, no new writer surface. " +
+          "Fail-closed: an unknown templateName, an unknown projectId, an unknown profileName, or a " +
+          "template whose agent resolves to an elevated profile role (platform/auditor/workspace-auditor) " +
+          "are all rejected and nothing is written.",
+        inputSchema: {
+          projectId: z.string(),
+          templateName: z.string(),
+        },
+      },
+      async ({ projectId, templateName }) => {
+        const project = db.getProject(projectId);
+        if (!project) return ok({ error: "project not found" });
+        const template = findWorkflowTemplate(templateName);
+        if (!template) return ok({ error: `unknown workflow template: "${templateName}"` });
+        try {
+          return ok(applyWorkflowTemplate(db, template, projectId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
       },
     );
 

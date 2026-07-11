@@ -16,6 +16,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (e) profile_delete / agent_delete (task 2c9b2960) mirror the human DELETE /api/profiles/:id and
 //       /api/agents/:id EXACTLY: profile_delete has NO in-use guard (an assigned profileId just dangles
 //       safely); agent_delete refuses while the agent has a LIVE session; both 404 on an unknown id.
+//   (f) template_list/template_apply (onboarding C2) are MIRRORED here (the loom-setup ⊆ loom-platform
+//       invariant, surface-subset.mjs) with the SAME implementation: template_list reads the canonical
+//       catalog; template_apply stands up a named template's agents + starter card on an EXISTING
+//       project, rejecting an unknown templateName/projectId/profileName with nothing written.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-mgmt-surface.mjs
 import fs from "node:fs";
@@ -40,6 +44,7 @@ import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
 
 const { Db } = await import("../dist/db.js");
+const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -55,6 +60,10 @@ execSync(`git init -q && git add . && git -c user.email=p2@loom -c user.name=p2 
 
 const now = new Date().toISOString();
 const db = new Db();
+// Seed the CORE bundled profiles (Orchestrator/Dev/Bugfix/QA Tester/Web Designer/Code Reviewer) — LOOM_DEV
+// is unset, so no elevated Platform-layer profiles seed. template_apply ((f) below) binds a canonical
+// template's agents to these EXISTING bundled profiles by name.
+seedDefaultProfiles(db);
 // The reserved/system "Loom Platform" home (P1) — project_archive must REFUSE it.
 db.insertProject({ id: "pHome", name: "Loom Platform", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: true });
 // An ordinary project (the spawn/update target) + a throwaway one to archive.
@@ -118,7 +127,7 @@ try {
     "list_all_projects", "list_all_agents", "list_all_sessions",
     "profile_create", "profile_update", "profile_assign", "profile_delete", "agent_delete",
     "session_spawn", "session_stop", "project_update", "project_archive",
-    "schedule_create", "schedule_update",
+    "schedule_create", "schedule_update", "template_list", "template_apply",
   ];
   check(`(a) surface includes all P2 tools (missing: ${expected.filter((t) => !tools.includes(t)).join(",") || "none"})`,
     expected.every((t) => tools.includes(t)));
@@ -304,6 +313,40 @@ try {
   check("schedule_update: invalid cron rejected", (await call("schedule_update", { scheduleId: sc.id, cron: "bogus" })).error === "invalid cron expression");
   check("schedule_update: 404 on an unknown schedule", (await call("schedule_update", { scheduleId: "ghost", enabled: true })).error === "schedule not found");
 
+  // ===================== (f) template_list / template_apply (onboarding C2, mirrored onto the Lead) =====
+  const templates = await call("template_list", {});
+  check("(f) template_list: returns both canonical templates", Array.isArray(templates) && templates.length === 2);
+  const soloListed = templates.find((t) => t.name === "Solo builder");
+  check("(f) template_list: 'Solo builder' has a description + a roster summary (no startupPrompt)",
+    !!soloListed && typeof soloListed.description === "string"
+    && soloListed.agents.length === 3
+    && soloListed.agents.every((a) => typeof a.name === "string" && typeof a.profileName === "string" && a.startupPrompt === undefined));
+
+  // template_apply: applied to "pOrd" (an ordinary project) — the Lead's broader cross-project reach
+  // (any projectId) is BY DESIGN, same as agent_create/project_create above.
+  const nAgentsBefore = db.listAgents("pOrd").length;
+  const nTasksBefore = db.listTasks("pOrd").length;
+  const applied = await call("template_apply", { projectId: "pOrd", templateName: "Solo builder" });
+  check("(f) template_apply: stands up one agent per templated agent", !applied.error && applied.agents.length === 3);
+  check("(f) template_apply: seeds the starter board card(s)", applied.tasks.length === 1);
+  check("(f) template_apply: the new agents are visible via the ordinary listAgents read",
+    db.listAgents("pOrd").length === nAgentsBefore + 3);
+  check("(f) template_apply: the new tasks are visible via the ordinary listTasks read",
+    db.listTasks("pOrd").length === nTasksBefore + 1);
+  check("(f) template_apply: every applied agent is bound to an EXISTING profile (never minted)",
+    applied.agents.every((a) => a.profileId != null && db.getProfile(a.profileId) != null));
+
+  // Fail-closed: an unknown templateName is rejected, nothing written.
+  const nAgentsBeforeUnknown = db.listAgents("pOrd").length;
+  const unknownTemplate = await call("template_apply", { projectId: "pOrd", templateName: "Nope, not a real template" });
+  check("(f) template_apply: an unknown templateName is rejected", typeof unknownTemplate.error === "string" && !unknownTemplate.agents);
+  check("(f) template_apply: the rejected unknown-template apply wrote NO agents", db.listAgents("pOrd").length === nAgentsBeforeUnknown);
+
+  // An unknown projectId is rejected the SAME way project_update/project_archive reject one (404, nothing written).
+  const unknownProject = await call("template_apply", { projectId: "ghost", templateName: "Solo builder" });
+  check("(f) template_apply: an unknown projectId is rejected (404, matches project_update/project_archive)",
+    unknownProject.error === "project not found");
+
   await client.close();
 } finally {
   db.close();
@@ -312,6 +355,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the platform P2 management surface works for a platform session (reads / profiles / session_spawn|stop / project update+archive / schedules), the role gate holds (manager/worker/plain → no surface), session_spawn NEVER mints a platform or worker session (only manager|plain) and creates nothing on rejection, and project_archive refuses the reserved home — claude-free, network-free."
+  ? "\n✅ ALL PASS — the platform P2 management surface works for a platform session (reads / profiles / session_spawn|stop / project update+archive / schedules / template_list+template_apply mirrored from loom-setup), the role gate holds (manager/worker/plain → no surface), session_spawn NEVER mints a platform or worker session (only manager|plain) and creates nothing on rejection, project_archive refuses the reserved home, and template_apply rejects an unknown templateName/projectId with nothing written — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

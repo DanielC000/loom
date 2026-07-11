@@ -17,6 +17,7 @@ import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP 
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData } from "./skillTools.js";
 import { getByIdPrefix } from "../id-prefix.js";
+import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -55,6 +56,9 @@ export function setupRoleError(role: string | null | undefined): string | null {
  * ║               operator's ONLY host-write — confined to WORKSPACE_ROOT) / project_configure /           ║
  * ║               project_update / agent_create                                                            ║
  * ║   rigs       — profile_create / profile_update / profile_assign                                       ║
+ * ║   templates  — template_list (read) / template_apply (apply a named workflow template to an           ║
+ * ║               EXISTING project — reuses agent_create + task-insert only, NO new writer surface;       ║
+ * ║               setupRoleError guard, binds existing profiles only, unknown template/project rejected)  ║
  * ║   lifecycle  — session_spawn (manager|plain ONLY — never platform/auditor/worker/setup);              ║
  * ║                project_archive (SOFT, reversible — REFUSES a reserved/system home; rows retained);     ║
  * ║                end_me (SELF-SCOPED terminal exit, no target arg — always ends the CALLING setup        ║
@@ -359,6 +363,62 @@ export class SetupMcpRouter {
         }
         db.updateAgent(agentId, v.patch);
         return ok(db.getAgent(agentId));
+      },
+    );
+
+    // === templates (Guided Onboarding & Templates, onboarding C2) — read the canonical presets + apply one
+    // to an EXISTING project. NO new writer surface: applyWorkflowTemplate (setup/templates.ts) writes only
+    // ordinary agent-create + task-insert rows, and checks every templated agent's resolved profile role
+    // against setupRoleError before writing it — the same least-privilege allowlist the rest of this surface
+    // enforces, so a template can never be an elevation back-door. ===
+    server.registerTool(
+      "template_list",
+      {
+        description:
+          "List the available workflow templates: each has a name, description, and a roster summary " +
+          "(name + bound profile name) of the agents it stands up. Read-only, no secrets, no writes.",
+        inputSchema: {},
+      },
+      async () =>
+        ok(
+          WORKFLOW_TEMPLATES.map((t) => ({
+            name: t.name,
+            description: t.description,
+            agents: t.agents.map((a) => ({ name: a.name, profileName: a.profileName })),
+          })),
+        ),
+    );
+
+    server.registerTool(
+      "template_apply",
+      {
+        description:
+          "Apply a named workflow template to an EXISTING project (by projectId): stands up its agents — " +
+          "each bound to an EXISTING bundled profile by name, never minted — and seeds its starter board " +
+          "cards. Reuses the existing agent_create + task-insert writers only, no new writer surface. " +
+          "Fail-closed: an unknown templateName, an unknown projectId, an unknown profileName, or a " +
+          "template whose agent resolves to an elevated profile role (platform/auditor/workspace-auditor) " +
+          "are all rejected and nothing is written.",
+        inputSchema: {
+          projectId: z.string(),
+          templateName: z.string(),
+        },
+      },
+      async ({ projectId, templateName }) => {
+        // Same project-scope guard as project_configure/project_update/agent_create: resolve by exact id
+        // via db.getProject, 404 on unknown — the operator's reach is bounded to a project that actually
+        // exists, never widened to an arbitrary/unresolvable target.
+        const project = db.getProject(projectId);
+        if (!project) return ok({ error: "project not found" });
+        const template = findWorkflowTemplate(templateName);
+        if (!template) return ok({ error: `unknown workflow template: "${templateName}"` });
+        try {
+          return ok(applyWorkflowTemplate(db, template, projectId));
+        } catch (e) {
+          // applyWorkflowTemplate throws on an unknown profileName or an elevated resolved role
+          // (setupRoleError) — surface as a clean tool error, not an uncaught exception.
+          return ok({ error: (e as Error).message });
+        }
       },
     );
 
