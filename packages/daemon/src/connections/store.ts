@@ -39,6 +39,9 @@ function toMetadata(row: ConnectionRow): ConnectionMetadata {
   return {
     ...base,
     provider: (row.provider as OAuthProviderSlug | null) ?? undefined,
+    // Granted scopes are NON-secret (they ride in the consent URL, stored plaintext) — surface the
+    // parsed list so the UI can show which products a connection covers. Space-joined column → array.
+    scopes: row.scopes ? row.scopes.split(/\s+/).filter(Boolean) : [],
     // "connected" means at least one token exchange has ever succeeded — every exchange (initial consent
     // or refresh) sets tokenExpiresAt, so its presence is a reliable NON-SECRET proxy without decrypting.
     connected: row.tokenExpiresAt !== null,

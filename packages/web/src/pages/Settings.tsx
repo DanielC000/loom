@@ -11,6 +11,7 @@ import {
   type OAuthProviderSlug,
   type PollJob,
   type CapabilityProvisionKind,
+  GOOGLE_ANALYTICS_SCOPE_PRESETS,
 } from "@loom/shared";
 import { api, type ProjectPatchError } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -574,7 +575,9 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
 // consent page in a new tab; the daemon's own fixed loopback callback completes the token exchange
 // out-of-band, so this panel just reflects the resulting status (connected / token expiry / needs-reauth)
 // once the browser tab returns focus here (react-query's default refetch-on-window-focus picks it up).
-// Daemon-global, like the tuning panel above (one shared credential store).
+// The New-connection form leads with a turnkey "Google Analytics" preset (provider google, endpoints
+// pre-filled by the daemon template, per-product read scopes as checkboxes) over that same oauth2 surface;
+// "Custom" is the full free-text form. Daemon-global, like the tuning panel above (one shared store).
 
 const AUTH_SCHEMES: ConnectionAuthScheme[] = ["api-key", "bearer", "oauth2"];
 const OAUTH_PROVIDERS: { value: OAuthProviderSlug; label: string }[] = [
@@ -582,6 +585,13 @@ const OAUTH_PROVIDERS: { value: OAuthProviderSlug; label: string }[] = [
   { value: "github", label: "GitHub" },
   { value: "custom", label: "Custom" },
 ];
+
+// Short human label for a stored scope URL — a known GA preset scope maps to its product name; anything
+// else falls back to its last path segment (e.g. ".../auth/drive.readonly" → "drive.readonly").
+function scopeLabel(scope: string): string {
+  const known = GOOGLE_ANALYTICS_SCOPE_PRESETS.find((p) => p.scope === scope);
+  return known ? known.label : (scope.split("/").pop() || scope);
+}
 
 function oauthStatus(c: { connected?: boolean; needsReauth?: boolean; tokenExpiresAt?: string | null }): { tone: "phosphor" | "red" | "cyan"; label: string } {
   if (c.needsReauth) return { tone: "red", label: "Needs re-auth" };
@@ -666,6 +676,15 @@ function ConnectionsPanel() {
                   {c.authScheme}{c.provider ? ` · ${c.provider}` : ""}
                 </span>
                 {status && <Badge tone={status.tone}>{status.label}</Badge>}
+                {c.authScheme === "oauth2" && c.scopes && c.scopes.length > 0 && (
+                  <span style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                    {c.scopes.map((s) => (
+                      <span key={s} title={s} style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 4, padding: "1px 5px" }}>
+                        {scopeLabel(s)}
+                      </span>
+                    ))}
+                  </span>
+                )}
                 <span style={{ flex: 1 }} />
                 <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{new Date(c.createdAt).toLocaleString()}</span>
                 {c.authScheme === "oauth2" && (
@@ -686,13 +705,25 @@ function ConnectionsPanel() {
   );
 }
 
+// The New-connection form leads with a CONNECTOR picker: a turnkey "Google Analytics" preset (the
+// first-class oauth2 path — provider google, endpoints pre-filled by the daemon template, read scopes
+// ticked as checkboxes) vs. "Custom" (the full api-key/bearer/oauth2 form with free-text URLs). The
+// preset is UX-only: it POSTs the SAME /api/connections/oauth surface, just with the fields pre-shaped.
+// v1 uses USER-supplied client id/secret (the user registers their own Google Cloud OAuth app) — a
+// shared Loom-owned OAuth app is a separate owner-liability decision, not built here.
+type ConnectorMode = "google-analytics" | "custom";
+// GA products span several googleapis.com hosts (analyticsdata / searchconsole / adsense); host is
+// metadata-only + unenforced today, so the preset pins the headline GA4 Data API host and hides the field.
+const GA_PRESET_HOST = "analyticsdata.googleapis.com";
+
 function ConnectionForm({ pending, error, onSubmit, onSubmitOAuth, onCancel }: {
   pending: boolean; error: string | null;
   onSubmit: (v: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string }) => void;
   onSubmitOAuth: (v: { name: string; host: string; provider: OAuthProviderSlug; clientId: string; clientSecret: string; authUrl?: string; tokenUrl?: string; scopes?: string[] }) => void;
   onCancel: () => void;
 }) {
-  const [name, setName] = useState("");
+  const [mode, setMode] = useState<ConnectorMode>("google-analytics");
+  const [name, setName] = useState("Google Analytics");
   const [host, setHost] = useState("");
   const [authScheme, setAuthScheme] = useState<ConnectionAuthScheme>("api-key");
   const [secret, setSecret] = useState("");
@@ -702,10 +733,35 @@ function ConnectionForm({ pending, error, onSubmit, onSubmitOAuth, onCancel }: {
   const [authUrl, setAuthUrl] = useState("");
   const [tokenUrl, setTokenUrl] = useState("");
   const [scopesText, setScopesText] = useState("");
+  // Which GA product read-scopes are ticked (Analytics Data API on by default — the headline use).
+  const [gaScopes, setGaScopes] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(GOOGLE_ANALYTICS_SCOPE_PRESETS.map((p) => [p.key, p.key === "analytics"])),
+  );
   const [localErr, setLocalErr] = useState<string | null>(null);
 
   const submit = () => {
     setLocalErr(null);
+    if (mode === "google-analytics") {
+      if (!name.trim()) {
+        setLocalErr("A name is required.");
+        return;
+      }
+      if (!clientId.trim() || !clientSecret.trim()) {
+        setLocalErr("Client ID and client secret are required.");
+        return;
+      }
+      const scopes = GOOGLE_ANALYTICS_SCOPE_PRESETS.filter((p) => gaScopes[p.key]).map((p) => p.scope);
+      if (scopes.length === 0) {
+        setLocalErr("Tick at least one product to read.");
+        return;
+      }
+      // provider "google" ⇒ the daemon fills authUrl/tokenUrl from its template; we send only the scopes.
+      onSubmitOAuth({
+        name: name.trim(), host: GA_PRESET_HOST, provider: "google",
+        clientId: clientId.trim(), clientSecret: clientSecret.trim(), scopes,
+      });
+      return;
+    }
     if (!name.trim() || !host.trim()) {
       setLocalErr("Name and host are required.");
       return;
@@ -733,65 +789,116 @@ function ConnectionForm({ pending, error, onSubmit, onSubmitOAuth, onCancel }: {
     onSubmit({ name: name.trim(), host: host.trim(), authScheme, secret: secret.trim() });
   };
 
+  const modeBtn = (m: ConnectorMode, label: string) => (
+    <Button variant={mode === m ? "primary" : "ghost"} onClick={() => { setMode(m); setLocalErr(null); }}>{label}</Button>
+  );
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={fieldLabel}>Name</span>
-        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. GitHub personal token" />
-      </label>
-      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={fieldLabel}>Host</span>
-        <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="e.g. api.github.com" spellCheck={false} />
-        <Hint>the target host this connection's secret is scoped to (metadata only — not yet enforced)</Hint>
-      </label>
-      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={fieldLabel}>Auth scheme</span>
-        <Select value={authScheme} onChange={(e) => setAuthScheme(e.target.value as ConnectionAuthScheme)}>
-          {AUTH_SCHEMES.map((s) => <option key={s} value={s}>{s}</option>)}
-        </Select>
-      </label>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Connector</span>
+        <div style={{ display: "flex", gap: 6 }} role="group" aria-label="Connector type">
+          {modeBtn("google-analytics", "Google Analytics")}
+          {modeBtn("custom", "Custom")}
+        </div>
+      </div>
 
-      {authScheme === "oauth2" ? (
+      {mode === "google-analytics" ? (
         <>
+          <Hint>Read GA4, Search Console &amp; AdSense numbers through one connection. Register your own Google Cloud OAuth app, then paste its client ID/secret below — Loom fills the rest and walks you through one consent.</Hint>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={fieldLabel}>Provider</span>
-            <Select value={provider} onChange={(e) => setProvider(e.target.value as OAuthProviderSlug)}>
-              {OAUTH_PROVIDERS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-            </Select>
-            <Hint>Google/GitHub prefill the standard auth+token endpoints — register a matching OAuth app there first.</Hint>
+            <span style={fieldLabel}>Name</span>
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Google Analytics" />
           </label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span style={fieldLabel}>Read scopes</span>
+            {GOOGLE_ANALYTICS_SCOPE_PRESETS.map((p) => (
+              <label key={p.key} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "7px 9px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={!!gaScopes[p.key]}
+                  onChange={(e) => setGaScopes((s) => ({ ...s, [p.key]: e.target.checked }))}
+                  style={{ accentColor: color.phosphor, width: 15, height: 15, marginTop: 1, flexShrink: 0 }}
+                />
+                <span style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                  <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{p.label}</span>
+                  <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{p.description}</span>
+                </span>
+              </label>
+            ))}
+            <Hint>Only the products you tick are requested — every scope is read-only.</Hint>
+          </div>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Client ID</span>
-            <Input value={clientId} onChange={(e) => setClientId(e.target.value)} spellCheck={false} />
+            <Input value={clientId} onChange={(e) => setClientId(e.target.value)} spellCheck={false} autoComplete="off" />
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Client secret</span>
             <Input type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} spellCheck={false} autoComplete="off" />
             <Hint>encrypted at rest immediately · never shown again after this form is submitted</Hint>
           </label>
-          {provider === "custom" && (
-            <>
-              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <span style={fieldLabel}>Authorization URL</span>
-                <Input value={authUrl} onChange={(e) => setAuthUrl(e.target.value)} placeholder="https://…/authorize" spellCheck={false} />
-              </label>
-              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <span style={fieldLabel}>Token URL</span>
-                <Input value={tokenUrl} onChange={(e) => setTokenUrl(e.target.value)} placeholder="https://…/token" spellCheck={false} />
-              </label>
-            </>
-          )}
-          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={fieldLabel}>Scopes <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>(space or comma separated — optional, uses the provider default)</span></span>
-            <Input value={scopesText} onChange={(e) => setScopesText(e.target.value)} placeholder="e.g. repo read:user" spellCheck={false} />
-          </label>
         </>
       ) : (
-        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <span style={fieldLabel}>Secret</span>
-          <Input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} spellCheck={false} autoComplete="off" />
-          <Hint>encrypted at rest immediately · never shown again after this form is submitted</Hint>
-        </label>
+        <>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Name</span>
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. GitHub personal token" />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Host</span>
+            <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="e.g. api.github.com" spellCheck={false} />
+            <Hint>the target host this connection's secret is scoped to (metadata only — not yet enforced)</Hint>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Auth scheme</span>
+            <Select value={authScheme} onChange={(e) => setAuthScheme(e.target.value as ConnectionAuthScheme)}>
+              {AUTH_SCHEMES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </Select>
+          </label>
+
+          {authScheme === "oauth2" ? (
+            <>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={fieldLabel}>Provider</span>
+                <Select value={provider} onChange={(e) => setProvider(e.target.value as OAuthProviderSlug)}>
+                  {OAUTH_PROVIDERS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+                </Select>
+                <Hint>Google/GitHub prefill the standard auth+token endpoints — register a matching OAuth app there first.</Hint>
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={fieldLabel}>Client ID</span>
+                <Input value={clientId} onChange={(e) => setClientId(e.target.value)} spellCheck={false} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={fieldLabel}>Client secret</span>
+                <Input type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} spellCheck={false} autoComplete="off" />
+                <Hint>encrypted at rest immediately · never shown again after this form is submitted</Hint>
+              </label>
+              {provider === "custom" && (
+                <>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={fieldLabel}>Authorization URL</span>
+                    <Input value={authUrl} onChange={(e) => setAuthUrl(e.target.value)} placeholder="https://…/authorize" spellCheck={false} />
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={fieldLabel}>Token URL</span>
+                    <Input value={tokenUrl} onChange={(e) => setTokenUrl(e.target.value)} placeholder="https://…/token" spellCheck={false} />
+                  </label>
+                </>
+              )}
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={fieldLabel}>Scopes <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>(space or comma separated — optional, uses the provider default)</span></span>
+                <Input value={scopesText} onChange={(e) => setScopesText(e.target.value)} placeholder="e.g. repo read:user" spellCheck={false} />
+              </label>
+            </>
+          ) : (
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span style={fieldLabel}>Secret</span>
+              <Input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} spellCheck={false} autoComplete="off" />
+              <Hint>encrypted at rest immediately · never shown again after this form is submitted</Hint>
+            </label>
+          )}
+        </>
       )}
 
       {(localErr || error) && <div style={{ fontSize: 12, color: color.red, fontFamily: font.mono }}>{localErr ?? error}</div>}

@@ -1172,6 +1172,50 @@ export type ConnectionAuthScheme = "api-key" | "bearer" | "oauth2";
 export type OAuthProviderSlug = "google" | "github" | "custom";
 
 /**
+ * One read-only Google product scope offered as a checkbox by the turnkey "Google Analytics" connector
+ * preset (agent-tooling P5b). Non-secret catalog data — the shared source of truth both the Settings form
+ * (renders the checkboxes) and the daemon (routes provider "google" through its existing template) read.
+ * The daemon already accepts an explicit `scopes` array on `POST /api/connections/oauth`; these are just
+ * the human-facing labels + the exact scope strings a user ticks.
+ */
+export interface GoogleScopePreset {
+  /** Stable key for React lists + form state. */
+  key: string;
+  /** Human label shown next to the checkbox (e.g. "Analytics Data API"). */
+  label: string;
+  /** The exact OAuth scope URL sent to Google. */
+  scope: string;
+  /** One-line explanation of what the scope grants. */
+  description: string;
+}
+
+/**
+ * The read-only per-product scopes the "Google Analytics" connector preset offers. All three are
+ * `*.readonly` — this connector reads numbers, it never writes. Ticked scopes populate the oauth2
+ * connection's `scopes`; Google's authUrl/tokenUrl come from the daemon's existing "google" template.
+ */
+export const GOOGLE_ANALYTICS_SCOPE_PRESETS: readonly GoogleScopePreset[] = [
+  {
+    key: "analytics",
+    label: "Analytics Data API",
+    scope: "https://www.googleapis.com/auth/analytics.readonly",
+    description: "GA4 metrics & reports (properties/<id>:runReport)",
+  },
+  {
+    key: "search-console",
+    label: "Search Console",
+    scope: "https://www.googleapis.com/auth/webmasters.readonly",
+    description: "Search queries, clicks & impressions",
+  },
+  {
+    key: "adsense",
+    label: "AdSense",
+    scope: "https://www.googleapis.com/auth/adsense.readonly",
+    description: "AdSense earnings & report data",
+  },
+];
+
+/**
  * The MASKED, human-facing view of a stored Connection (owner-controlled encrypted credential store,
  * agent-tooling epic P1, extended in P5a) — metadata ONLY. The secret material is ENCRYPTED at rest
  * (envelope) and NEVER leaves the daemon: no REST read and no MCP tool ever returns it (for an `oauth2`
@@ -1191,6 +1235,12 @@ export interface ConnectionMetadata {
   createdAt: string;
   /** `oauth2` rows only — the provider template this connection was registered under. */
   provider?: OAuthProviderSlug;
+  /**
+   * `oauth2` rows only — the granted scopes, parsed from the stored space-joined column. NON-secret
+   * (they ride in the consent URL and are stored plaintext), so surfacing them here is safe and lets the
+   * UI show which products a connection covers. Empty array when the row stored no scopes.
+   */
+  scopes?: string[];
   /** `oauth2` rows only — true once at least one token exchange (initial consent or refresh) has succeeded. */
   connected?: boolean;
   /** `oauth2` rows only — ISO expiry of the current access token, or null before the first exchange. */
