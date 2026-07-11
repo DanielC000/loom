@@ -60,6 +60,7 @@ import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisio
 import { getDejaCaptureCount } from "../deja/store.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME } from "../setup/seed.js";
+import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
 import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from "../skills/companion-store.js";
 import { listCompanionMemories, readCompanionMemory, removeCompanionMemory, authorCompanionMemory } from "../skills/companion-memory-store.js";
@@ -2454,6 +2455,34 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       })),
     );
     return { project, agents, liveSessions };
+  });
+
+  // --- Workflow templates (Guided Onboarding & Templates, onboarding C3): the HUMAN-only REST mirror of
+  // the agent-facing template_list/template_apply MCP tools (mcp/setup.ts, onboarding C2). Same trust
+  // posture as the other setup REST writers (project rename/archive, agent endpoint flag, etc.) — loopback,
+  // human-only, NO MCP router (orchestration/platform/setup/audit) exposes these paths. This is the backend
+  // the web setup wizard (C5) consumes directly, in parallel with the agent-facing tool pair from C2. ---
+  app.get("/api/setup/templates", async () =>
+    WORKFLOW_TEMPLATES.map((t) => ({
+      name: t.name,
+      description: t.description,
+      agents: t.agents.map((a) => ({ name: a.name, profileName: a.profileName })),
+    })));
+
+  app.post("/api/setup/templates/apply", async (req, reply) => {
+    const b = (req.body ?? {}) as { projectId?: string; templateName?: string };
+    if (!b.projectId || !b.templateName) return reply.code(400).send({ error: "projectId and templateName required" });
+    const project = deps.db.getProject(b.projectId);
+    if (!project) return reply.code(404).send({ error: "project not found" });
+    const template = findWorkflowTemplate(b.templateName);
+    if (!template) return reply.code(400).send({ error: `unknown workflow template: "${b.templateName}"` });
+    try {
+      return reply.code(201).send(applyWorkflowTemplate(deps.db, template, b.projectId));
+    } catch (e) {
+      // applyWorkflowTemplate throws on an unknown profileName or an elevated resolved role
+      // (setupRoleError) — surface as a clean 400, not an uncaught exception.
+      return reply.code(400).send({ error: (e as Error).message });
+    }
   });
 
   // --- Loom-managed skills (the UI-editable skill store; delivered to sessions project-local) ---
