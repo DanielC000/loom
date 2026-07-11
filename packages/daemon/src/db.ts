@@ -44,6 +44,7 @@ import type {
 import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { isOwnerHeldTaskTitle, describeCron } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
+import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
 // Type-only — companion/types.ts has zero runtime imports, so this can never form a runtime cycle with
 // the companion/* modules that import `Db` from here. CompanionReminder.route reuses THIS module's
 // CompanionRoute (never a duplicate route type, unlike Wake/CompanionBinding's shared/types.ts twins).
@@ -575,6 +576,19 @@ CREATE TABLE IF NOT EXISTS companion_pairing_attempts (
   window_start INTEGER NOT NULL,     -- epoch ms — start of the current failed-attempt window
   locked_until INTEGER,              -- epoch ms — locked out until this instant (NULL = not locked)
   PRIMARY KEY (channel, sender_id)
+);
+-- Access-story Phase C (card 6bc02f50): per-ip failed-remote-gateway-auth counters — the SAME
+-- sliding-window lockout primitive as companion_pairing_attempts above (generalized into
+-- security/lockout.ts), keyed on the remote caller's ip instead of (channel, sender_id). Only a WRONG
+-- (non-empty, malformed/unknown/bad-secret) presented token counts as a failure — an entirely absent
+-- token is ordinary unauthenticated first contact, not a credential-guessing signal — so the trust-tier
+-- hook's onRequest gate rejects WITHOUT even verifying the token while locked. Times are epoch-ms
+-- INTEGERs like companion_pairing_attempts.
+CREATE TABLE IF NOT EXISTS gateway_auth_attempts (
+  ip TEXT PRIMARY KEY,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  window_start INTEGER NOT NULL,
+  locked_until INTEGER
 );
 -- Companion RUN config (Companion epic Phase 3) — the "how to RUN this companion" layer keyed by the
 -- bound assistant session_id, so a human can configure a companion WITHOUT editing a .env and restarting.
@@ -2052,8 +2066,7 @@ export class Db {
       const attempt = this.db.prepare(
         "SELECT attempts, window_start, locked_until FROM companion_pairing_attempts WHERE channel = ? AND sender_id = ?",
       ).get(input.channel, input.senderId) as Row | undefined;
-      const lockedUntil = attempt?.locked_until as number | null | undefined;
-      if (lockedUntil != null && nowMs < lockedUntil) return { outcome: "rejected" };
+      if (isLockedOut(rowToLockoutState(attempt), nowMs)) return { outcome: "rejected" };
 
       // (2) Load + validate. Every check folds into one boolean so a failure is INDISTINGUISHABLE.
       const code = this.db.prepare("SELECT * FROM companion_pairing_codes WHERE code_id = ?").get(input.codeId) as Row | undefined;
@@ -2106,24 +2119,16 @@ export class Db {
       return { outcome: "sender-added", sessionId };
     })();
   }
-  /** Bump the failed-attempt counter for (channel, senderId), locking out at `maxAttempts`. A window that
-   *  has elapsed (or a lock that has expired) resets to strike 1. Called ONLY inside redeemPairingCode's txn. */
+  /** Bump the failed-attempt counter for (channel, senderId), locking out at `maxAttempts` — delegates the
+   *  actual sliding-window/lockout math to the shared primitive (security/lockout.ts), which also backs
+   *  the Phase C gateway-auth lockout below. Called ONLY inside redeemPairingCode's txn. */
   private recordPairingFailure(channel: string, senderId: string, nowMs: number, maxAttempts: number, windowMs: number, lockoutMs: number, existing?: Row): void {
-    const lockedUntil = existing?.locked_until as number | null | undefined;
-    const windowStartPrev = existing?.window_start as number | undefined;
-    let attempts: number;
-    let windowStart: number;
-    if (!existing || (lockedUntil != null && nowMs >= lockedUntil) || (windowStartPrev != null && nowMs - windowStartPrev > windowMs)) {
-      attempts = 1; windowStart = nowMs; // fresh window (first strike, expired lock, or elapsed window)
-    } else {
-      attempts = (existing.attempts as number) + 1; windowStart = windowStartPrev ?? nowMs;
-    }
-    const newLockedUntil = attempts >= maxAttempts ? nowMs + lockoutMs : null;
+    const next = computeFailureUpdate(rowToLockoutState(existing), nowMs, { maxAttempts, windowMs, lockoutMs });
     this.db.prepare(
       `INSERT INTO companion_pairing_attempts (channel, sender_id, attempts, window_start, locked_until)
        VALUES (@channel, @senderId, @attempts, @windowStart, @lockedUntil)
        ON CONFLICT(channel, sender_id) DO UPDATE SET attempts = @attempts, window_start = @windowStart, locked_until = @lockedUntil`,
-    ).run({ channel, senderId, attempts, windowStart, lockedUntil: newLockedUntil });
+    ).run({ channel, senderId, attempts: next.attempts, windowStart: next.windowStart, lockedUntil: next.lockedUntil });
   }
   /** Clear the attempt/lockout row for (channel, senderId) — a successful redemption wipes the strikes. */
   private clearPairingAttempts(channel: string, senderId: string): void {
@@ -2759,6 +2764,34 @@ export class Db {
     if (rec.status === "revoked") return { ok: false, reason: "revoked" };
     if (rec.status === "paused") return { ok: false, reason: "paused" };
     return { ok: true, token: toGatewayTokenPublic(rec) };
+  }
+
+  // --- remote-gateway auth-failure lockout (access-story Phase C, card 6bc02f50) ----------------
+  // Per-ip counterpart to the companion_pairing_attempts lockout above — SAME shared primitive
+  // (security/lockout.ts), keyed on the remote caller's ip instead of (channel, sender_id). Consulted by
+  // the trust-tier onRequest hook (gateway/server.ts) via gateway/remote-rate-limit.ts.
+
+  /** The current lockout-state row for an ip; undefined = never failed (or already cleared). */
+  getGatewayAuthAttempts(ip: string): LockoutState | undefined {
+    const r = this.db.prepare(
+      "SELECT attempts, window_start, locked_until FROM gateway_auth_attempts WHERE ip = ?",
+    ).get(ip) as Row | undefined;
+    return rowToLockoutState(r);
+  }
+  /** Bump the failed-gateway-auth counter for an ip, locking out at `policy.maxAttempts` — the SAME
+   *  sliding-window/lockout math as recordPairingFailure, via the shared primitive. */
+  recordGatewayAuthFailure(ip: string, nowMs: number, policy: { maxAttempts: number; windowMs: number; lockoutMs: number }): void {
+    const next = computeFailureUpdate(this.getGatewayAuthAttempts(ip), nowMs, policy);
+    this.db.prepare(
+      `INSERT INTO gateway_auth_attempts (ip, attempts, window_start, locked_until)
+       VALUES (@ip, @attempts, @windowStart, @lockedUntil)
+       ON CONFLICT(ip) DO UPDATE SET attempts = @attempts, window_start = @windowStart, locked_until = @lockedUntil`,
+    ).run({ ip, attempts: next.attempts, windowStart: next.windowStart, lockedUntil: next.lockedUntil });
+  }
+  /** Clear an ip's gateway-auth failure counter — a successful auth wipes the strikes (mirrors
+   *  clearPairingAttempts). */
+  clearGatewayAuthAttempts(ip: string): void {
+    this.db.prepare("DELETE FROM gateway_auth_attempts WHERE ip = ?").run(ip);
   }
 
   // --- agent runs (R2: ephemeral AgentRun records) ----------------------------------------------
@@ -4635,6 +4668,12 @@ function toGatewayTokenRecord(r0: unknown): GatewayTokenRecord {
 function toGatewayTokenPublic(rec: GatewayTokenRecord): GatewayToken {
   const { salt: _s, hash: _h, ...pub } = rec;
   return pub;
+}
+/** Map a companion_pairing_attempts / gateway_auth_attempts row → the shared LockoutState shape
+ *  (security/lockout.ts); undefined row ⇒ undefined state (never-failed, mirrors both call sites). */
+function rowToLockoutState(r: Row | undefined): LockoutState | undefined {
+  if (!r) return undefined;
+  return { attempts: r.attempts as number, windowStart: r.window_start as number, lockedUntil: (r.locked_until as number | null) ?? null };
 }
 /** Map a runs row → AgentRun, parsing the JSON columns (a corrupt blob degrades to null, never throws). */
 function toRun(r0: unknown): AgentRun {

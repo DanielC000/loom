@@ -7,7 +7,7 @@ import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR } from "./paths.js";
 import { installCrashHandlers } from "./crashlog.js";
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
 import { Db } from "./db.js";
-import { canOpenRemoteListener, isTrustTierHookActive } from "./gateway/trust-tier.js";
+import { canOpenRemoteListener, isTrustTierHookActive, tlsRequirementSatisfied } from "./gateway/trust-tier.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
 import { snapshotAndArchiveRecovered } from "./sessions/boot-backstop.js";
@@ -620,6 +620,16 @@ async function main(): Promise<void> {
     }
   };
 
+  // Access-story Phase C (card 6bc02f50 CR): captured SYNCHRONOUSLY by buildServer's onHttpsResolved
+  // callback (fires before the `await` below even suspends — see that option's doc) — whether TLS material
+  // was ACTUALLY read and applied to the Fastify https option. This is the ONLY signal the boot-time bind
+  // decision below consults for "is TLS really live"; it deliberately does NOT re-derive an independent
+  // `fs.existsSync` check (a prior version of this code did, and a CR caught the resulting two-path
+  // asymmetry: existsSync passing does not imply readFileSync-then-TLS-construction inside buildServer
+  // actually succeeded — a present-but-unreadable key, a cert path that's a directory, or invalid PEM
+  // content would ALL pass existsSync yet leave the real server on plain HTTP, so gating the bind on
+  // existsSync could open a PUBLIC interface as PLAIN HTTP while believing it was HTTPS).
+  let httpsActive = false;
   const app = await buildServer({
     db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus,
     companion: companionController, inApp: inAppChannel, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"),
@@ -628,19 +638,31 @@ async function main(): Promise<void> {
     // gateway_tokens store — fail-closed (any non-"ok" reason, incl. malformed/unknown/bad-secret/
     // paused/revoked, is a plain false; the trust-tier hook never distinguishes why).
     verifyGatewayToken: (token) => db.authenticateGatewayToken(token).ok,
+    onHttpsResolved: (active) => { httpsActive = active; },
   });
-  // Access-story Phase A (card 766f8b50) fail-closed boot check: if a non-loopback bind is requested but
-  // no gateway token exists yet, NEVER bind-and-warn. This phase's `.listen()` below stays hardcoded
-  // loopback-only regardless (the actual bind switch is Phase C) — this only surfaces the refusal now, so
-  // Phase C has a guard (`canOpenRemoteListener`) to consult instead of building one under deadline
-  // pressure. Phase B (this card) fills `gatewayTokenExists`: ANY minted row counts (a paused/revoked
-  // token still means the mechanism is provisioned — the human just needs to mint/rotate one that's live).
+  // Access-story fail-closed boot check (Phase A card 766f8b50, extended by Phase C card 6bc02f50): a
+  // non-loopback bind is only ever actually opened when a gateway token exists AND the TLS mandate is
+  // satisfied by the REAL `httpsActive` signal above (never "bind, then warn"). `gatewayTokenExists` is
+  // Phase B: ANY minted row counts (a paused/revoked token still means the mechanism is provisioned — the
+  // human just needs to mint/rotate one that's live). The invariant this preserves: a non-loopback bind
+  // NEVER opens in the intended-TLS-but-actually-plain-HTTP state — a tailnet bindHost bypasses the TLS
+  // mandate entirely (already-encrypted transport; see tlsRequirementSatisfied), everything else needs
+  // httpsActive:true or the bind stays loopback.
   const remoteAccessConfig = resolveConfig(undefined, db.getPlatformConfig()).remoteAccess;
   const gatewayTokenExists = (): boolean => db.listGatewayTokens().length > 0;
-  if (isTrustTierHookActive(remoteAccessConfig) && !canOpenRemoteListener(remoteAccessConfig, gatewayTokenExists())) {
-    console.warn(`[gateway] remoteAccess.enabled with bindHost=${remoteAccessConfig.bindHost} but no gateway token exists yet — refusing to open a remote listener; staying on loopback (127.0.0.1). (Phase B adds gateway-token minting.)`);
+  const remoteListenerOk = canOpenRemoteListener(remoteAccessConfig, gatewayTokenExists(), httpsActive);
+  if (isTrustTierHookActive(remoteAccessConfig) && !remoteListenerOk) {
+    const reasons: string[] = [];
+    if (!gatewayTokenExists()) reasons.push("no gateway token exists yet");
+    if (!tlsRequirementSatisfied(remoteAccessConfig, httpsActive)) {
+      reasons.push(remoteAccessConfig.tls
+        ? "the configured TLS cert/key did not load (see the earlier [gateway] warning for why)"
+        : "TLS is required for a non-tailnet remote bind but remoteAccess.tls is not configured");
+    }
+    console.warn(`[gateway] remoteAccess.enabled with bindHost=${remoteAccessConfig.bindHost} but ${reasons.join("; ")} — refusing to open a remote listener; staying on loopback (127.0.0.1).`);
   }
-  const boundAddress = await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
+  // local-first default: loopback ONLY, unless the fail-closed boot check above cleared a real remote bind.
+  const boundAddress = await app.listen({ port: PORT, host: remoteListenerOk ? remoteAccessConfig.bindHost : "127.0.0.1" });
   // eslint-disable-next-line no-console
   console.log(`Loom daemon v${loomVersion()} listening on ${boundAddress}`); // boundAddress reflects the OS-assigned port when PORT is 0
 

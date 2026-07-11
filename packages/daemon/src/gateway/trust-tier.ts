@@ -65,6 +65,40 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   // --- WS (tiered here; the actual token-on-upgrade check is Phase B) ---
   { method: "GET", pattern: "/ws/term/:sessionId" },
   { method: "GET", pattern: "/ws/companion/:sessionId" },
+  // --- Phase C (card 6bc02f50) follow-up on 77ade04c: reads a remote read-only UI legitimately needs.
+  //     Promoted DELIBERATELY, one at a time — nothing here writes, executes, or lifecycles anything. ---
+  { method: "GET", pattern: "/api/version" },
+  { method: "GET", pattern: "/api/update-status" },
+  { method: "GET", pattern: "/api/orchestration/status" },
+  { method: "GET", pattern: "/api/orchestration/events" },
+  { method: "GET", pattern: "/api/projects/:id/git/log" },
+  { method: "GET", pattern: "/api/projects/:id/git/branches" },
+  { method: "GET", pattern: "/api/profiles" },
+  { method: "GET", pattern: "/api/profiles/:id" },
+  { method: "GET", pattern: "/api/skills" },
+  { method: "GET", pattern: "/api/skills/:name" },
+  // Archived lists
+  { method: "GET", pattern: "/api/archived-sessions" },
+  { method: "GET", pattern: "/api/projects/:id/archive" },
+  { method: "GET", pattern: "/api/projects/archived" },
+  // Companion reads (writers on the SAME paths — POST/PUT/DELETE — stay Tier-0)
+  { method: "GET", pattern: "/api/companion/:sessionId/grants" },
+  { method: "GET", pattern: "/api/companion/allowed-senders" },
+  { method: "GET", pattern: "/api/companion/bindings" },
+  { method: "GET", pattern: "/api/companion/config" },
+  { method: "GET", pattern: "/api/companion/config/:sessionId" },
+  { method: "GET", pattern: "/api/companion/conversations/:sessionId" },
+  { method: "GET", pattern: "/api/companion/conversations/:sessionId/:seq" },
+  { method: "GET", pattern: "/api/companion/home" },
+  { method: "GET", pattern: "/api/companion/memory/:sessionId" },
+  { method: "GET", pattern: "/api/companion/memory/:sessionId/:name" },
+  { method: "GET", pattern: "/api/companion/messages/:sessionId" },
+  { method: "GET", pattern: "/api/companion/prompt/:sessionId" },
+  { method: "GET", pattern: "/api/companion/reminders/:sessionId" },
+  { method: "GET", pattern: "/api/companion/restricted-tools/:sessionId" },
+  { method: "GET", pattern: "/api/companion/skills/:sessionId" },
+  { method: "GET", pattern: "/api/companion/skills/:sessionId/:name" },
+  { method: "GET", pattern: "/api/companion/voice-prefs/:sessionId" },
 ];
 
 const TIER_1_SET: ReadonlySet<string> = new Set(TIER_1_ROUTES.map((r) => `${r.method} ${r.pattern}`));
@@ -81,8 +115,15 @@ export function routeTier(method: string, routePattern: string): TrustTier {
 }
 
 /** Loopback hostnames a human may reasonably set `remoteAccess.bindHost` to (meaning: not actually remote). */
-function isLoopbackBindHost(host: string): boolean {
+export function isLoopbackBindHost(host: string): boolean {
   return host === "127.0.0.1" || host === "::1" || host === "localhost";
+}
+
+/** A Tailscale (`.ts.net`) tailnet address — already end-to-end encrypted by the tailnet itself, so the
+ *  Phase C TLS mandate (see `tlsRequirementSatisfied`) does not apply to it. v1 is direct-bind + Tailscale
+ *  only (no reverse-proxy), so a suffix match is sufficient — never treated as loopback. */
+export function isTailnetHost(host: string): boolean {
+  return host.toLowerCase().endsWith(".ts.net");
 }
 
 /**
@@ -95,13 +136,26 @@ export function isTrustTierHookActive(remoteAccess: RemoteAccessConfig): boolean
 }
 
 /**
- * Fail-closed boot guard (BUILD item 4): may a later phase actually open a non-loopback listener? Only
- * when `remoteAccess` requests one AND a gateway token already exists — never "bind, then warn". Phase A
- * never calls the result to change the real bind (that's Phase C); it exists now so Phase C's `.listen()`
- * has a guard to consult instead of building one under deadline pressure. `tokenExists` is Phase B's
- * concern — pass a real check once the keyed token table exists; until then any caller should pass a
- * stub that always returns false (no token mechanism ⇒ never able to open a remote listener).
+ * Phase C TLS mandate (BUILD item 2): wss-only-over-untrusted-transport. Satisfied when the bind target
+ * is already an encrypted tailnet link (`isTailnetHost`), OR `remoteAccess.tls` is configured AND its
+ * cert/key files are actually present on disk. `tlsFilesExist` is a caller-supplied check (an
+ * `fs.existsSync` at each call site — gateway/server.ts for the https construction, index.ts for the
+ * `.listen()` host decision) so this stays a pure, fs-free, unit-testable function.
  */
-export function canOpenRemoteListener(remoteAccess: RemoteAccessConfig, tokenExists: boolean): boolean {
-  return remoteAccess.enabled && !isLoopbackBindHost(remoteAccess.bindHost) && tokenExists;
+export function tlsRequirementSatisfied(remoteAccess: RemoteAccessConfig, tlsFilesExist: boolean): boolean {
+  if (isTailnetHost(remoteAccess.bindHost)) return true;
+  return !!remoteAccess.tls && tlsFilesExist;
+}
+
+/**
+ * Fail-closed boot guard (BUILD item 4, extended by Phase C item 2): may a later phase actually open a
+ * non-loopback listener? Only when `remoteAccess` requests one AND a gateway token already exists AND the
+ * TLS mandate is satisfied — never "bind, then warn". `tokenExists` is Phase B's concern; `tlsFilesExist`
+ * is Phase C's (see `tlsRequirementSatisfied`) — pass real checks once each mechanism exists; a stub that
+ * always returns false is the conservative default until then (no token / no TLS ⇒ never able to open a
+ * remote listener).
+ */
+export function canOpenRemoteListener(remoteAccess: RemoteAccessConfig, tokenExists: boolean, tlsFilesExist: boolean): boolean {
+  return remoteAccess.enabled && !isLoopbackBindHost(remoteAccess.bindHost) && tokenExists
+    && tlsRequirementSatisfied(remoteAccess, tlsFilesExist);
 }

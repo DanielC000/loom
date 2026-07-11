@@ -164,6 +164,19 @@ const EXPECTED_TIER_1 = new Set([
   "POST /api/questions/:id/answer", "POST /api/sessions/:id/input", "POST /api/sessions/:id/end",
   "POST /api/sessions/:id/stop", "POST /api/sessions/:id/resume", "POST /api/sessions/:id/rate-limit/clear",
   "GET /ws/term/:sessionId", "GET /ws/companion/:sessionId",
+  // Access-story Phase C (card 6bc02f50) follow-up on 77ade04c: reads a remote read-only UI needs.
+  "GET /api/version", "GET /api/update-status", "GET /api/orchestration/status", "GET /api/orchestration/events",
+  "GET /api/projects/:id/git/log", "GET /api/projects/:id/git/branches",
+  "GET /api/profiles", "GET /api/profiles/:id", "GET /api/skills", "GET /api/skills/:name",
+  "GET /api/archived-sessions", "GET /api/projects/:id/archive", "GET /api/projects/archived",
+  "GET /api/companion/:sessionId/grants", "GET /api/companion/allowed-senders", "GET /api/companion/bindings",
+  "GET /api/companion/config", "GET /api/companion/config/:sessionId",
+  "GET /api/companion/conversations/:sessionId", "GET /api/companion/conversations/:sessionId/:seq",
+  "GET /api/companion/home", "GET /api/companion/memory/:sessionId", "GET /api/companion/memory/:sessionId/:name",
+  "GET /api/companion/messages/:sessionId", "GET /api/companion/prompt/:sessionId",
+  "GET /api/companion/reminders/:sessionId", "GET /api/companion/restricted-tools/:sessionId",
+  "GET /api/companion/skills/:sessionId", "GET /api/companion/skills/:sessionId/:name",
+  "GET /api/companion/voice-prefs/:sessionId",
 ]);
 
 check(`(1) TOTAL real registered routes classify correctly (${ALL_ROUTES.length} checked, ${EXPECTED_TIER_1.size} expected Tier-1)`,

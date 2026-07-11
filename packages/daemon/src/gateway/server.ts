@@ -63,7 +63,8 @@ import { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME } from "../setup/seed.js";
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
 import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from "../skills/companion-store.js";
 import { listCompanionMemories, readCompanionMemory, removeCompanionMemory, authorCompanionMemory } from "../skills/companion-memory-store.js";
-import { routeTier, isTrustTierHookActive } from "./trust-tier.js";
+import { routeTier, isTrustTierHookActive, tlsRequirementSatisfied } from "./trust-tier.js";
+import { createRemoteRateLimiter } from "./remote-rate-limit.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -139,6 +140,19 @@ export interface GatewayDeps {
    * is LIVE (remoteAccess.enabled + a non-loopback bindHost) — inert otherwise.
    */
   verifyGatewayToken?: (token: string | undefined) => boolean;
+  /**
+   * Access-story Phase C (card 6bc02f50 CR): called SYNCHRONOUSLY, once, during buildServer's
+   * construction — BEFORE the returned promise resolves — with whether TLS material was ACTUALLY read
+   * and successfully applied to the Fastify `https` option. This is the ONE source of truth for "is this
+   * server really HTTPS", and index.ts's boot-time bind-host decision consults it directly instead of
+   * independently re-deriving file-existence — the two-path asymmetry a CR caught: `fs.existsSync`
+   * passing (a present-but-UNREADABLE key, a cert-path-that's-a-directory, a delete-after-stat race, or
+   * even a present-but-INVALID-PEM file) does NOT imply the `readFileSync`+TLS-construction below actually
+   * succeeded, so a caller gating the real bind on existsSync could bind a PUBLIC interface as PLAIN HTTP
+   * while believing it's HTTPS. Optional: call sites (nearly every test) that don't care about the real
+   * bind decision simply omit it.
+   */
+  onHttpsResolved?: (active: boolean) => void;
 }
 
 /** The daemon's own non-UI route prefixes. An unmatched GET under any of these must NEVER fall back to
@@ -173,7 +187,49 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // deployment ever needs trustProxy:true, every `LOOPBACK.has(req.ip)` site in this file must be re-audited
   // (the trust-tier hook below instead reads `req.socket.remoteAddress` directly, so it stays correct
   // regardless of this setting — see gateway/trust-tier.ts).
-  const app = Fastify({ logger: false });
+  // Access-story Phase C (card 6bc02f50): resolve `remoteAccess` ONCE, HERE, before Fastify() is even
+  // constructed — the https option (below) can only be set at construction time, so this can't wait until
+  // the trust-tier-hook block further down (where Phase A originally resolved it; that resolution is now
+  // just a reference to THIS one). SHIPS INERT: `isTrustTierHookActive` is false by default (enabled:false
+  // ⇒ loopback), so `httpsOptions` stays undefined and `Fastify({logger:false})` is byte-identical to today.
+  //
+  // `httpsActive` (CR follow-up on card 6bc02f50) is the ONE real signal for "did this server actually end
+  // up HTTPS" — reported to `deps.onHttpsResolved` below so a caller (index.ts) never has to independently
+  // re-derive it (a re-derivation using a cheaper check like `fs.existsSync` can diverge from what actually
+  // happened here: a present-but-unreadable key, a cert path that's a directory, or a present-but-invalid
+  // PEM file all pass `existsSync` yet fail HERE). Two failure points are both caught, independently, so
+  // EITHER one degrades to plain HTTP with httpsActive:false, never a silent throw out of buildServer:
+  //   (a) reading the files (ENOENT/EACCES/EISDIR/a delete-after-check race);
+  //   (b) Node's TLS layer rejecting the read bytes as invalid cert/key material (garbage or empty files) —
+  //       this only surfaces once `https.createServer` actually parses them, i.e. at Fastify construction.
+  const remoteAccessConfig = resolveConfig(undefined, deps.db.getPlatformConfig()).remoteAccess;
+  let httpsOptions: { cert: Buffer; key: Buffer } | undefined;
+  if (isTrustTierHookActive(remoteAccessConfig) && remoteAccessConfig.tls) {
+    try {
+      httpsOptions = {
+        cert: fs.readFileSync(remoteAccessConfig.tls.certPath),
+        key: fs.readFileSync(remoteAccessConfig.tls.keyPath),
+      };
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[gateway] failed to read remoteAccess.tls cert/key (${(err as Error).message}) — opening WITHOUT HTTPS; the remote bind will refuse and fall back to loopback (see onHttpsResolved).`);
+    }
+  }
+  let app: FastifyInstance;
+  let httpsActive = false;
+  if (httpsOptions) {
+    try {
+      app = Fastify({ logger: false, https: httpsOptions });
+      httpsActive = true;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[gateway] remoteAccess.tls cert/key were read but Node rejected them as invalid TLS material (${(err as Error).message}) — opening WITHOUT HTTPS; the remote bind will refuse and fall back to loopback (see onHttpsResolved).`);
+      app = Fastify({ logger: false });
+    }
+  } else {
+    app = Fastify({ logger: false });
+  }
+  deps.onHttpsResolved?.(httpsActive);
 
   // --- CSRF / DNS-rebind backstop (one onRequest hook, registered FIRST so it is inherited by EVERY plugin
   //     + route — the websocket and static plugins below included — i.e. UNIFORM coverage with no per-route
@@ -200,6 +256,22 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   //     subset of "loopback hostname" and stays allowed. ADDITIVE: the /internal/* loopback (req.ip) gate
   //     below is untouched — defence in depth.
   const isLoopbackHostname = (h: string | null): boolean => h === "127.0.0.1" || h === "localhost";
+  // Phase C CSRF-Host reconciliation (card 6bc02f50, Phase-A CR Major 77ade04c): a real remote client's
+  // Origin/Host is the CONFIGURED `remoteAccess.bindHost` (v1: direct-bind + Tailscale, so this is
+  // typically a tailnet hostname or a specific bind IP/hostname the human chose) — an EXACT,
+  // case-insensitive match, never a wildcard/suffix, so an attacker's own domain still fails it. Only
+  // live when a remote bind is actually configured (`isTrustTierHookActive`); disabled/loopback-default
+  // ⇒ this degrades to isLoopbackHostname exactly, byte-identical to Phase A/pre-Phase-C behavior.
+  // WHATWG URL.hostname keeps an IPv6 literal BRACKETED (e.g. "[2001:db8::1]"), but a human-configured
+  // `bindHost` is stored bare (e.g. "2001:db8::1" — the same shape the platform-config validator's
+  // net.isIP check operates on). Strip brackets from BOTH sides before comparing, or an IPv6-literal
+  // bindHost never matches its own parsed Host/Origin header (CR follow-up on card 6bc02f50).
+  const stripBrackets = (h: string): string => (h.startsWith("[") && h.endsWith("]")) ? h.slice(1, -1) : h;
+  const isAllowedHostname = (h: string | null): boolean => {
+    if (isLoopbackHostname(h)) return true;
+    if (h === null || !isTrustTierHookActive(remoteAccessConfig)) return false;
+    return stripBrackets(h).toLowerCase() === stripBrackets(remoteAccessConfig.bindHost).toLowerCase();
+  };
   const hostnameOf = (raw: string, withScheme = false): string | null => {
     try { return new URL(withScheme ? raw : `http://${raw}`).hostname; } catch { return null; }
   };
@@ -214,34 +286,45 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // redirect. The Host check below still applies (it's still bound loopback-only), and the callback's
     // own `state` correlation is the real defense (see connections/oauth.ts).
     const isOAuthCallback = req.method === "GET" && (req.url.split("?")[0] ?? req.url) === "/oauth/callback";
-    // PRESENT Origin must be loopback. An ABSENT Origin is the fail-safe ALLOW path for non-browser
-    // clients (CLI / Run-API-key / server-to-server). A present-but-malformed Origin — including the
-    // literal "null" origin (a sandboxed-iframe CSRF sends `Origin: null`), which fails to parse → not
-    // loopback → 403 — is REJECTED (the safer behavior).
-    if (!isOAuthCallback && typeof origin === "string" && origin.length > 0 && !isLoopbackHostname(hostnameOf(origin, true))) {
+    // PRESENT Origin must be loopback (or, when a remote bind is configured, the bindHost — see
+    // isAllowedHostname above). An ABSENT Origin is the fail-safe ALLOW path for non-browser clients
+    // (CLI / Run-API-key / server-to-server). A present-but-malformed Origin — including the literal
+    // "null" origin (a sandboxed-iframe CSRF sends `Origin: null`), which fails to parse → not allowed →
+    // 403 — is REJECTED (the safer behavior).
+    if (!isOAuthCallback && typeof origin === "string" && origin.length > 0 && !isAllowedHostname(hostnameOf(origin, true))) {
       return reply.code(403).send({ error: "cross-origin request refused" });
     }
-    // Host must be present and loopback (DNS-rebind defence). Real HTTP clients always send Host; a
-    // missing/non-loopback Host → reject.
+    // Host must be present and allowed (DNS-rebind defence). Real HTTP clients always send Host; a
+    // missing/disallowed Host → reject.
     const host = req.headers.host;
-    if (!isLoopbackHostname(typeof host === "string" && host.length > 0 ? hostnameOf(host) : null)) {
+    if (!isAllowedHostname(typeof host === "string" && host.length > 0 ? hostnameOf(host) : null)) {
       return reply.code(403).send({ error: "host header not allowed" });
     }
   });
 
   // --- Trust-tier wall (access-story Phase A, card 766f8b50; see gateway/trust-tier.ts). Registered
   // right after the CSRF hook above (same inheritance reasoning — Fastify only inherits a parent hook
-  // into children registered AFTER it) so coverage is uniform once live. SHIPS INERT: resolved ONCE at
-  // boot (daemon-global, like gitWriteTimeouts below — a config change needs a daemon restart), and the
-  // hook is only ever REGISTERED when a non-loopback bind is actually configured — off by default, so
-  // today's daemon never even allocates it (byte-identical, not just a no-op check).
-  const remoteAccessConfig = resolveConfig(undefined, deps.db.getPlatformConfig()).remoteAccess;
+  // into children registered AFTER it) so coverage is uniform once live. SHIPS INERT: `remoteAccessConfig`
+  // was already resolved ONCE at the top of this function (Phase C needed it before Fastify() itself, for
+  // the https option), daemon-global like gitWriteTimeouts below — a config change needs a daemon
+  // restart — and the hook is only ever REGISTERED when a non-loopback bind is actually configured — off
+  // by default, so today's daemon never even allocates it (byte-identical, not just a no-op check).
   if (isTrustTierHookActive(remoteAccessConfig)) {
     const verifyGatewayToken = deps.verifyGatewayToken ?? (() => false);
+    // Phase C rate limiter (card 6bc02f50): ONE instance for this hook's lifetime — sliding-window
+    // request caps (in-memory) + the db-backed per-ip auth-failure lockout (gateway/remote-rate-limit.ts).
+    // `remoteAccessConfig.rateLimit` always has a value once `enabled` (see PLATFORM_DEFAULTS in
+    // shared/config.ts), but a defensive fallback keeps this hook from ever throwing on a malformed
+    // override that slipped past validation.
+    const rateLimitPolicy = remoteAccessConfig.rateLimit ?? {
+      perIpPerMin: 120, perTokenPerMin: 120, authFailLockout: { maxAttempts: 5, windowMs: 600000, lockoutMs: 900000 },
+    };
+    const rateLimiter = createRemoteRateLimiter(deps.db, rateLimitPolicy);
     app.addHook("onRequest", async (req, reply) => {
       // Read the TCP peer directly rather than `req.ip` — see the trustProxy comment at the Fastify()
       // construction site above. This keeps the wall correct even if trustProxy is ever flipped on.
-      if (LOOPBACK.has(req.socket?.remoteAddress ?? "")) return; // arrived via the loopback interface — pass through unchanged
+      const ip = req.socket?.remoteAddress ?? "";
+      if (LOOPBACK.has(ip)) return; // arrived via the loopback interface — pass through unchanged, EXEMPT from the rate limiter too
       // `req.routeOptions.url` is the matched route's registered PATTERN (find-my-way resolves it before
       // onRequest hooks run). It is undefined only when no route matched at all (a 404) — treat that
       // EXPLICITLY as Tier 0 rather than falling back to `req.url` (the attacker-controlled resolved path),
@@ -263,7 +346,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         const q = req.query as { token?: unknown };
         token = fromProtocol || (typeof q?.token === "string" ? q.token : undefined);
       }
-      if (!verifyGatewayToken(token)) return reply.code(401).send({ error: "unauthorized" });
+      const now = Date.now();
+      // Auth-failure lockout gate — reject BEFORE re-verifying while this ip is locked out (mirrors the
+      // companion pairing coordinator's own lockout-gate-before-load ordering).
+      if (rateLimiter.isIpLockedOut(ip, now)) return reply.code(429).send({ error: "too many failed attempts — try again later" });
+      // Sliding-window request cap — per-ip AND (when presented) per-token.
+      if (!rateLimiter.allowRequest(ip, token, now)) return reply.code(429).send({ error: "rate limit exceeded" });
+      if (!verifyGatewayToken(token)) {
+        // Only a non-empty PRESENTED token that fails to verify counts as a credential-guessing signal —
+        // an entirely absent token is ordinary unauthenticated first contact (a remote UI's first probe
+        // before it has a token to send) and must not itself march an ip toward lockout.
+        if (token) rateLimiter.recordAuthFailure(ip, now);
+        return reply.code(401).send({ error: "unauthorized" });
+      }
+      rateLimiter.clearAuthFailures(ip);
     });
   }
 

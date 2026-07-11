@@ -473,18 +473,36 @@ export const COMPANION_VOICE_ENABLED_DEFAULT = false;
  * switch a future phase reads before ever attempting a non-loopback `.listen()`; `bindHost` is the
  * interface that later bind targets (still ignored while a boot-time token guard refuses it — see
  * gateway/trust-tier.ts `canOpenRemoteListener`). `tls`/`rateLimit` are Phase C concerns (TLS material +
- * a remote-request limiter) carried here now so the config shape doesn't need to change again. The
- * gateway TOKEN itself does NOT live here — Phase B stores it in a keyed table, never in config.
+ * a remote-request limiter), actually consumed starting Phase C (card 6bc02f50). The gateway TOKEN
+ * itself does NOT live here — Phase B stores it in a keyed table, never in config.
  */
 export interface RemoteAccessConfig {
   /** Master switch — a non-loopback bind is only ever attempted when true. Default false. */
   enabled: boolean;
   /** Interface a later phase binds when `enabled`. Default "127.0.0.1" (loopback — no-op today). */
   bindHost: string;
-  /** Optional TLS material for the remote listener (Phase C). Absent = no TLS. */
+  /**
+   * TLS material for the remote listener (Phase C). MANDATORY whenever `bindHost` is non-loopback AND
+   * not a `.ts.net` tailnet address (a tailnet link is already encrypted; anything else is wss-only over
+   * untrusted transport) — absent/unreadable in that case boot-refuses the remote bind and falls back to
+   * loopback (see gateway/trust-tier.ts `canOpenRemoteListener`/`tlsRequirementSatisfied`).
+   */
   tls?: { certPath: string; keyPath: string };
-  /** Optional remote-request rate limiting (Phase C). Absent = no extra limiting beyond existing guards. */
-  rateLimit?: { max: number; windowMs: number };
+  /**
+   * Remote-request rate limiting (Phase C) — on by default whenever a remote bind is enabled (see the
+   * default in PLATFORM_DEFAULTS.remoteAccess.rateLimit below); tunable, never fully absent once
+   * `enabled`. Scoped to the REMOTE interface only — the loopback fast path is exempt (see
+   * gateway/remote-rate-limit.ts).
+   */
+  rateLimit?: {
+    /** Sliding-window request cap per remote caller ip, per minute. */
+    perIpPerMin: number;
+    /** Sliding-window request cap per presented gateway token, per minute. */
+    perTokenPerMin: number;
+    /** Auth-failure backoff/lockout, keyed on the caller's ip — reuses the SAME sliding-window-lockout
+     *  primitive (security/lockout.ts) as the companion DM-pairing coordinator's rate-limit. */
+    authFailLockout: { maxAttempts: number; windowMs: number; lockoutMs: number };
+  };
 }
 
 /** The fully-resolved, effective config for a project. */
@@ -634,8 +652,13 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     // Default OFF (COMPANION_VOICE_ENABLED_DEFAULT) — companion voice provisioning is explicit opt-in.
     companionVoiceEnabled: COMPANION_VOICE_ENABLED_DEFAULT,
   },
-  // Access-story Phase A: OFF + loopback by default — ships inert (see RemoteAccessConfig).
-  remoteAccess: { enabled: false, bindHost: "127.0.0.1" },
+  // Access-story Phase A: OFF + loopback by default — ships inert (see RemoteAccessConfig). The
+  // rateLimit default is carried here too (Phase C) so it applies the moment a human flips `enabled`
+  // without also having to specify tunables — harmless while disabled.
+  remoteAccess: {
+    enabled: false, bindHost: "127.0.0.1",
+    rateLimit: { perIpPerMin: 120, perTokenPerMin: 120, authFailLockout: { maxAttempts: 5, windowMs: 600000, lockoutMs: 900000 } },
+  },
   docLint: true, // Pillar D vault-lint hook on by default
   dejaCapture: false, // opt-in Deja capture hook (card b3bd4841) — off by default
   codescape: { enabled: false }, // opt-in Codescape MCP wiring (card C2) — off by default

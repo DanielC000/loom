@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
+import { isIP as netIsIP } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -364,16 +365,40 @@ const connectionsOverride = z.object({
   rateLimitMax: z.number().int().min(1).max(10000).optional(),
   rateLimitWindowMs: z.number().int().min(1000).max(3600000).optional(),
 }).strict();
-// Access-story Phase A (card 766f8b50): the remote-bind block. HUMAN-only by construction — like every
-// other `platform` sub-group, there is no agent-facing platform-config surface at all (see the function
-// doc below), so `remoteAccess` reaches an agent no differently than gateCommand reaches one via the
-// project schema: it simply isn't reachable. `.strict()` rejects unknown keys; the token itself is never
-// part of this shape (Phase B stores it in a keyed table, not config).
+// Access-story Phase A (card 766f8b50), tightened in Phase C (card 6bc02f50, CR 77ade04c): the
+// remote-bind block. HUMAN-only by construction — like every other `platform` sub-group, there is no
+// agent-facing platform-config surface at all (see the function doc below), so `remoteAccess` reaches an
+// agent no differently than gateCommand reaches one via the project schema: it simply isn't reachable.
+// `.strict()` rejects unknown keys; the token itself is never part of this shape (Phase B stores it in a
+// keyed table, not config).
+//
+// `bindHost` shape validation (77ade04c): must be a valid IPv4/IPv6 literal (net.isIP) OR an RFC
+// 1123-shaped hostname (dot-separated 1-63-char alnum/hyphen labels, no leading/trailing hyphen per
+// label) — this is what a tailnet name (`foo.tailnet-name.ts.net`) and a plain LAN hostname both look
+// like. Rejects garbage (spaces, a URL, a CIDR) BEFORE it ever reaches gateway/trust-tier.ts's Host
+// comparison or a `.listen()` call.
+const HOSTNAME_RE = /^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$/;
+const isValidBindHostShape = (h: string): boolean => {
+  if (h.length > 253) return false;
+  if (netIsIP(h) !== 0) return true;
+  return HOSTNAME_RE.test(h);
+};
 const remoteAccessOverride = z.object({
   enabled: z.boolean().optional(),
-  bindHost: z.string().min(1).optional(),
+  bindHost: z.string().min(1).max(253).refine(isValidBindHostShape, { message: "bindHost must be a valid IPv4/IPv6 address or hostname" }).optional(),
   tls: z.object({ certPath: z.string().min(1), keyPath: z.string().min(1) }).strict().optional(),
-  rateLimit: z.object({ max: z.number().int().min(1), windowMs: z.number().int().min(1000) }).strict().optional(),
+  // rateLimit upper bounds (77ade04c): a human-settable cap large enough to be harmless, small enough
+  // that a fat-fingered "0" or a stray extra zero can't silently defeat the limiter (e.g. a billion
+  // requests/min) or leave a lockout that never expires (a 24h ceiling on lockoutMs).
+  rateLimit: z.object({
+    perIpPerMin: z.number().int().min(1).max(100000),
+    perTokenPerMin: z.number().int().min(1).max(100000),
+    authFailLockout: z.object({
+      maxAttempts: z.number().int().min(1).max(1000),
+      windowMs: z.number().int().min(1000).max(3600000), // 1s..1h
+      lockoutMs: z.number().int().min(1000).max(86400000), // 1s..24h
+    }).strict(),
+  }).strict().optional(),
 }).strict();
 const platformConfigOverrideSchema = z.object({
   rateLimit: rateLimitOverride.optional(),
