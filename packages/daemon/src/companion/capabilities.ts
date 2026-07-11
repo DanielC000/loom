@@ -20,6 +20,7 @@ import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { AMBIGUOUS_ID_ERROR } from "../mcp/transcript-read.js";
+import { spawnableRoleError } from "../mcp/spawnable-role.js";
 import { createProjectTask, getProjectTask, listProjectTasks, updateProjectTask, type TaskSummary } from "../mcp/tasks.js";
 import { readTranscript, readArchivedTranscript, pageTranscript } from "../sessions/transcript.js";
 import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } from "../vault/browser.js";
@@ -33,7 +34,7 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  *  own cards land, without a REST change per lever. */
 export const COMPANION_CAPABILITY_SLUGS = [
   "session-status", "decisions-relay", "attention-push", "session-steer",
-  "board-reach", "vault-read", "media-out", "transcript-read",
+  "board-reach", "vault-read", "media-out", "transcript-read", "session-spawn",
 ] as const;
 export type CapabilitySlug = (typeof COMPANION_CAPABILITY_SLUGS)[number];
 
@@ -166,6 +167,13 @@ export interface GrantSessions {
   redirectSession(sessionId: string, text: string, senderSessionId: string): { delivered: boolean; position?: number };
   stopSession(sessionId: string, mode: "graceful" | "hard"): { stopped: true; sessionId: string };
   resumeSession(sessionId: string): { id: string };
+  /** `session-spawn` lever's own seam (Tier X, manager|plain ONLY — the epic's self-elevation surface).
+   *  Backed by the SAME `SessionService.spawnSessionAsPlatform` the Platform Lead's own `session_spawn`
+   *  uses (mcp/platform.ts) — the role refusal (manager|plain ONLY) is enforced in the LEVER itself
+   *  (via the shared `spawnableRoleError` helper) BEFORE this is ever called; this method is the backing
+   *  op only. `senderSessionId` is threaded through for traceability, mirroring `messageSession`/
+   *  `redirectSession`'s own trailing param — the backing op does not itself consume it. */
+  spawnSession(projectId: string, agentId: string, role: string, senderSessionId: string): Session;
 }
 
 /** Per-lever registration context — `sessionId`/`scope`/`attest`/`pty`/`outbound`/`sessions` are
@@ -175,9 +183,9 @@ export interface GrantSessions {
  *  a8ddd6d2) lets a lever scope Primitive C to the active turn's route and push a post-commit nudge into
  *  an ASKING MANAGER's session (never the owner). `outbound` (same card, CR hardening) is the ONLY way a
  *  lever may put text in front of the OWNER directly. `sessions` (card 305a54fb) is the ONLY way a lever
- *  may drive another session's lifecycle (message/steer/stop/resume) — every lever that doesn't need one
- *  of these (every read-only lever, and `decision_resolve`/`board_create`/`board_update`/`send_media` for
- *  `sessions`) simply never touches it. */
+ *  may drive another session's lifecycle (message/steer/stop/resume/spawn) — every lever that doesn't
+ *  need one of these (every read-only lever, and `decision_resolve`/`board_create`/`board_update`/
+ *  `send_media` for `sessions`) simply never touches it. */
 export interface GrantContext {
   sessionId: string;
   scope: ResolvedGrantScope;
@@ -1627,13 +1635,180 @@ const TRANSCRIPT_READ: CompanionCapability = {
   },
 };
 
+/** This lever's own capability slug, reused as Primitive C's namespace — namespaced apart from every
+ *  other lever's own slug so `session_spawn`'s pending proposal can never collide with another lever's
+ *  pending entry on the SAME (session, route). */
+const SESSION_SPAWN_SLUG = "session-spawn";
+
+/** A validated, NOT-YET-CONFIRMED `session_spawn` proposal, keyed by (sessionId, route) — mirrors
+ *  `pendingBoardWrites`/`pendingBoardKey` (board-reach) and `pendingDecisionResolves`/`pendingResolveKey`
+ *  (decisions-relay) exactly; see their doc for why this shape (module-scoped, in-memory, lost harmlessly
+ *  on a daemon restart). */
+const pendingSpawns = new Map<string, { project: string; agentId: string; role: string }>();
+
+/** Mirrors `pendingBoardKey`/`pendingResolveKey` exactly, namespaced by `SESSION_SPAWN_SLUG` instead. */
+function pendingSpawnKey(sessionId: string, route: CompanionRoute | null): string {
+  return `${sessionId}::${route ? `${route.channel}:${route.chatId}` : ""}::${SESSION_SPAWN_SLUG}`;
+}
+
+/**
+ * `session-spawn` (Framework §4, Companion→Platform-Lead epic ccdb1e0c lever 7b) — lets the companion
+ * spawn a NEW session into a granted project on the owner's behalf. THE epic's self-elevation surface,
+ * so this is the single most heavily-guarded lever in the catalog: Tier X (Framework §6.2 — ALWAYS
+ * steps up, even inside an otherwise-warm trust window) AND manager|plain ONLY, ACT-only (mirrors
+ * `media-out`/`session-steer`'s own `hasActGrant` gate — there is no lower-risk read half to split
+ * "spawn a session" from; session VISIBILITY stays `session-status`'s own separately-granted lever).
+ *
+ * Guards, checked IN ORDER on every call (propose OR confirm):
+ *   (a) **THE #1 GUARD, before scope is even consulted**: `role` must be "manager" or "plain" — the
+ *       EXACT same check + error text as the Platform Lead's own `session_spawn` (mcp/platform.ts),
+ *       via the ONE shared `spawnableRoleError` helper (mcp/spawnable-role.ts) so the two can never
+ *       drift apart. Never "platform"/"auditor"/"setup"/"worker"/anything else — no self-elevation, no
+ *       reaching into a manager's own worker-orchestration job.
+ *   (b) **Scope (resolve-then-scope)**: `project` ∈ `ctx.scope.projectIds` AND `ctx.scope.mayAct
+ *       (project)` — a read-mode grant can never spawn.
+ *   (c) **Primitive A**: `ctx.attest.getActiveTurnOwnerText` non-null — a proactive/heartbeat turn can
+ *       never spawn.
+ *   (d) **Reply-to route required**: `ctx.pty.getActiveTurnOrigin` non-null, fail closed — exactly like
+ *       `decision_resolve`/`board_create`, needed for the Tier-X confirm round-trip below.
+ *   (e) **Tier X propose/confirm**: `mayProceedWithoutConfirm(ctx.trustWindow, "X", …)` — for Tier X
+ *       this ALWAYS returns false (see its own doc), so there is no low-friction direct-commit path at
+ *       all, unlike `board_create`/`board_update`'s Tier A. The FIRST call PROPOSES (mints a token via
+ *       `attest.proposeConfirmation`, delivers the prompt DIRECTLY to the owner via
+ *       `ctx.outbound.deliverToOwner` — never returned to the companion, fail closed on delivery
+ *       failure — and remembers the validated `{project, agentId, role}` in `pendingSpawns`); a SECOND
+ *       identical call on the owner's own confirming turn commits via `ctx.attest.confirmPending`,
+ *       re-checks the pending payload matches, and only then calls `ctx.sessions.spawnSession`.
+ *       `onStepUpCommitted(…, "X", …)` is called after commit — for Tier X this never arms the trust
+ *       window (confirming one self-elevation-adjacent action must never lower friction for the next
+ *       one). Token-mismatch (retryable, left standing) and expired/never-existed (evicted before the
+ *       fresh propose) are handled exactly like `board_create`.
+ *
+ * No free-text content here (`project`/`agentId`/`role` are all closed-vocabulary/id lookups, not
+ * owner-authored prose), so Primitive B does not apply — mirrors `board_update`'s own posture.
+ */
+const SESSION_SPAWN: CompanionCapability = {
+  slug: "session-spawn",
+  supportsMode: ["act"],
+  register(server, ctx) {
+    // ACT-only lever — mirrors media-out/session-steer's own hasActGrant gate.
+    const hasActGrant = [...ctx.scope.projectIds].some((pid) => ctx.scope.mayAct(pid));
+    if (!hasActGrant) return;
+
+    server.registerTool(
+      "session_spawn",
+      {
+        description:
+          "Spawn a NEW session into one of your act-granted projects, on behalf of the owner. `role` " +
+          "MUST be \"manager\" or \"plain\" ONLY — a platform/auditor/setup/operator/worker session can " +
+          "NEVER be spawned here (no self-elevation; any other role value is rejected outright). THE " +
+          "single highest-risk tool you have: this ALWAYS requires a fresh owner confirmation, even " +
+          "inside an otherwise-warm trust window — it does NOT spawn on the first call: Loom sends a " +
+          "confirmation request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/" +
+          "token — just tell the owner you've requested their confirmation) and returns " +
+          "{status:'proposed'}. Only once the owner replies to THAT message do you call session_spawn " +
+          "AGAIN with the SAME arguments to actually spawn it ({status:'spawned'}) — Loom detects the " +
+          "owner's confirming reply itself. A mismatched confirm reply returns " +
+          "{status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. Requires an " +
+          "act-mode grant on `project` and an owner-authored turn on a channel Loom can reply to — a " +
+          "proactive/heartbeat turn is always rejected.",
+        inputSchema: { project: z.string(), agentId: z.string(), role: z.string() },
+      },
+      async ({ project, agentId, role }) => {
+        // Guard (a) — THE #1 GUARD, checked BEFORE scope: only manager|plain may ever be spawned via
+        // this lever. See spawnableRoleError's own doc for why this must never drift from platform.ts's.
+        const roleError = spawnableRoleError(role);
+        if (roleError) return ok({ error: roleError });
+
+        // Guard (b) — belt-and-suspenders per-project scope (Framework §2, mandatory).
+        if (!ctx.scope.projectIds.has(project)) {
+          return ok({ error: `project "${project}" is not in your granted scope` });
+        }
+        if (!ctx.scope.mayAct(project)) {
+          return ok({ error: "you only have a read-mode grant on this project — session_spawn needs act-mode" });
+        }
+
+        // Guard (c) — Primitive A: every call (propose OR confirm) must be on an owner-authored turn.
+        const ownerText = ctx.attest.getActiveTurnOwnerText(ctx.sessionId);
+        if (ownerText === null) {
+          return ok({ error: "no owner text this turn — session_spawn can only act on an owner-authored turn" });
+        }
+
+        // Guard (d) — fail closed with no verified reply-to channel (mirrors decision_resolve/board_create).
+        const route = ctx.pty.getActiveTurnOrigin(ctx.sessionId);
+        if (route === null) {
+          return ok({ error: "no reply-to route for this turn — Loom has no verified channel to confirm this with the owner" });
+        }
+
+        // Guard (e) — Tier X (Framework §6.2, Card 0): spawning a session ALWAYS steps up, even inside an
+        // otherwise-warm trust window. `friction` is resolved for shape-consistency with every other
+        // lever, but is inert here — mayProceedWithoutConfirm short-circuits false unconditionally for
+        // "X" regardless of friction mode (see its own doc).
+        const friction = resolveFrictionMode(ctx.scope.configFor(project) as { friction?: unknown });
+        const frictionScope: FrictionScope = {
+          sessionId: ctx.sessionId, route, senderId: ctx.pty.getActiveTurnSenderId(ctx.sessionId), capability: SESSION_SPAWN_SLUG,
+        };
+        const key = pendingSpawnKey(ctx.sessionId, route);
+
+        if (mayProceedWithoutConfirm(ctx.trustWindow, "X", friction, frictionScope)) {
+          // Never reached — Tier X always returns false — kept so this lever runs through the SAME
+          // shared friction chokepoint every other sensitive ACT lever does, rather than special-casing
+          // Tier X away from it.
+          return ok({ error: "internal: tier-X action reported a low-friction path" });
+        }
+
+        // Primitive C — try to COMMIT a pending proposal for this exact (route, capability) first.
+        const confirmOutcome = ctx.attest.confirmPending(ctx.sessionId, route, SESSION_SPAWN_SLUG);
+        if (confirmOutcome.committed) {
+          const pending = pendingSpawns.get(key);
+          pendingSpawns.delete(key); // single-use, whether or not it still matches below.
+          if (!pending || pending.project !== project || pending.agentId !== agentId || pending.role !== role) {
+            return ok({ error: "the confirmed action no longer matches what was proposed — call session_spawn again to re-propose" });
+          }
+          try {
+            const spawned = ctx.sessions.spawnSession(project, agentId, role, ctx.sessionId);
+            onStepUpCommitted(ctx.trustWindow, "X", friction, frictionScope);
+            return ok({ status: "spawned", session: { id: spawned.id, projectId: spawned.projectId, role: spawned.role ?? null } });
+          } catch (e) {
+            return ok({ error: (e as Error).message });
+          }
+        }
+        if (confirmOutcome.reason === "token-mismatch") {
+          // Left standing (not evicted) — a typo'd confirm reply is retry-able within the TTL.
+          return ok({ status: "confirm-mismatch", error: "that doesn't contain the exact confirm token — ask the owner to reply again with it verbatim" });
+        }
+        // An EXPIRED (or never-existed) proposal's payload is dead weight — evict before the fresh
+        // propose below unconditionally overwrites this key, so a reader never sees a stale entry.
+        pendingSpawns.delete(key);
+
+        // No (or expired) pending confirmation for this route — this is a fresh PROPOSE.
+        const proposal = ctx.attest.proposeConfirmation({
+          sessionId: ctx.sessionId,
+          route,
+          capability: SESSION_SPAWN_SLUG,
+          summary: `Spawn a new "${role}" session in project ${project} (agent ${agentId})?`,
+        });
+        // CR hardening (inherited from decision_resolve/board_create) — deliver DIRECTLY to the owner;
+        // never hand promptText/the token back to the companion. Fail closed on a delivery failure.
+        const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
+        if (!delivered) {
+          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
+        }
+        pendingSpawns.set(key, { project, agentId, role });
+        return ok({ status: "proposed" });
+      },
+    );
+  },
+};
+
 /** The full lever registry (Framework §2). `session-status`, `decisions-relay`'s READ half,
  *  `board-reach`'s READ half, `vault-read` (read-only, no act half), `media-out` (act-only, no read
  *  half), `session-steer` (act-only, no read half — session VISIBILITY is `session-status`'s own
- *  separately-granted lever), and `transcript-read` (read-only, no act half, Tier R) are built — any
- *  remaining sensitive ACT levers append here behind their own injection-guard primitives. */
+ *  separately-granted lever), `transcript-read` (read-only, no act half, Tier R), and `session-spawn`
+ *  (act-only, no read half, Tier X, manager|plain ONLY — the epic's self-elevation surface) are built —
+ *  any remaining sensitive ACT levers append here behind their own injection-guard primitives. */
 export const COMPANION_CAPABILITIES: readonly CompanionCapability[] =
-  [SESSION_STATUS, DECISIONS_RELAY, BOARD_REACH, VAULT_READ, MEDIA_OUT, SESSION_STEER, TRANSCRIPT_READ];
+  [SESSION_STATUS, DECISIONS_RELAY, BOARD_REACH, VAULT_READ, MEDIA_OUT, SESSION_STEER, TRANSCRIPT_READ, SESSION_SPAWN];
 
 /**
  * The single chokepoint (Framework §2): called ONCE per `buildServer`, right after the existing companion
@@ -1652,7 +1827,7 @@ export const COMPANION_CAPABILITIES: readonly CompanionCapability[] =
  * `attest` (Companion injection-guard primitives, card 8e511951), `pty`, `outbound` (both card a8ddd6d2),
  * and `sessions` (card 305a54fb) are injected from the router exactly like a lever's other server-derived
  * reads — additive: every lever that doesn't read them (every lever except `decision_resolve`/
- * `board_create`/`board_update`/`send_media`/`session-steer` today) sees nothing different.
+ * `board_create`/`board_update`/`send_media`/`session-steer`/`session-spawn` today) sees nothing different.
  */
 export function registerCompanionCapabilities(server: McpServer, sessionId: string, role: SessionRole, db: Db, attest: OwnerAttestation, pty: GrantPty, outbound: GrantOutbound, sessions: GrantSessions, trustWindow: CompanionTrustWindow): void {
   if (role !== "assistant") return;

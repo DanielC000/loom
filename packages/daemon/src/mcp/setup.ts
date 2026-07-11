@@ -18,6 +18,7 @@ import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData } from "./skillTools.js";
 import { getByIdPrefix } from "../id-prefix.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
+import { spawnableRoleError } from "./spawnable-role.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -592,25 +593,25 @@ export class SetupMcpRouter {
     );
 
     // === lifecycle (session_spawn — manager|plain ONLY). Reuses the platform router's hard invariant
-    // VERBATIM (sessions.spawnSessionAsPlatform): a setup session can never mint a privileged session. ===
+    // VERBATIM (sessions.spawnSessionAsPlatform): a setup session can never mint a privileged session. The
+    // role refusal itself is the SAME manager|plain-only check as platform.ts's own session_spawn and the
+    // companion session-spawn lever, via the ONE shared spawnableRoleError helper (mcp/spawnable-role.ts)
+    // — so all three agent-facing spawn surfaces can never drift apart on error text or the allowed set. ===
     server.registerTool(
       "session_spawn",
       {
         description:
-          "Spawn a session into a project by explicit projectId + agentId. role MUST be \"manager\" or \"plain\" ONLY: \"manager\" gets the orchestration surface; \"plain\" is a vanilla role-null session (even on a profile agent). NEVER spawns a \"platform\", \"auditor\", \"worker\", or \"setup\" session (no self-elevation; a worker needs a manager parent + task). Any other role value is rejected.",
+          "Spawn a session into a project by explicit projectId + agentId. role MUST be \"manager\" or \"plain\" ONLY: \"manager\" gets the orchestration surface; \"plain\" is a vanilla role-null session (even on a profile agent). NEVER spawns a \"platform\", \"auditor\", \"setup\", or \"operator\" session (no self-elevation) and NEVER a \"worker\" (a worker needs a manager parent + task — a manager's orchestration job). Any other role value is rejected.",
         inputSchema: { projectId: z.string(), agentId: z.string(), role: z.string() },
       },
       async ({ projectId, agentId, role }) => {
-        // HARD INVARIANT: only manager|plain may be minted here. Reject platform/auditor/setup
+        // HARD INVARIANT: only manager|plain may be minted here. Reject platform/auditor/setup/operator
         // (self-elevation) and worker (manager-owned) — and anything else — explicitly, as data.
-        if (role !== "manager" && role !== "plain") {
-          return ok({
-            error: `session_spawn refuses role "${role}" — only "manager" or "plain" may be spawned here. ` +
-              "A platform/auditor/setup session is human-REST/boot-only (no self-elevation) and a worker requires a manager parent + task.",
-          });
-        }
+        const roleError = spawnableRoleError(role);
+        if (roleError) return ok({ error: roleError });
         try {
-          return ok(sessions.spawnSessionAsPlatform(projectId, agentId, role));
+          // Narrowed by spawnableRoleError above (only "manager"/"plain" reach here).
+          return ok(sessions.spawnSessionAsPlatform(projectId, agentId, role as "manager" | "plain"));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

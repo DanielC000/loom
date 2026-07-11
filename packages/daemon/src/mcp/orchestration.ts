@@ -538,6 +538,14 @@ export class OrchestrationMcpRouter {
       redirectSession: (sid, text, senderSessionId) => sessions.redirectSessionAsCompanion(sid, text, senderSessionId),
       stopSession: (sid, mode) => sessions.stopSession(sid, mode),
       resumeSession: (sid) => sessions.resume(sid),
+      // `session-spawn` lever's own seam (Tier X, manager|plain ONLY) — the SAME SessionService spawn
+      // the Platform Lead's own `session_spawn` uses (mcp/platform.ts). The role refusal is enforced in
+      // the LEVER itself (before this is ever called); `senderSessionId` is threaded through for
+      // traceability only, mirroring messageSession/redirectSession's own trailing param — the backing
+      // op does not itself consume it. `role` is validated to "manager"|"plain" by the lever's own
+      // spawnableRoleError guard before this is reachable, so the narrowing cast here is safe.
+      spawnSession: (projectId, agentId, role, _senderSessionId) =>
+        sessions.spawnSessionAsPlatform(projectId, agentId, role as "manager" | "plain"),
     }, this.trustWindow);
 
     // Companion (epic Phase 1): the long-lived `assistant` role gets a MINIMAL surface — the read-only

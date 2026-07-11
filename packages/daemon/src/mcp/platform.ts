@@ -28,6 +28,7 @@ import { prioritySchema } from "./server.js";
 import { getByIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { readTranscript, readArchivedTranscript, pageTranscript } from "../sessions/transcript.js";
 import { AMBIGUOUS_ID_ERROR } from "./transcript-read.js";
+import { spawnableRoleError } from "./spawnable-role.js";
 
 // Same envelope as the task / orchestration MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -952,14 +953,13 @@ export class PlatformMcpRouter {
       async ({ projectId, agentId, role }) => {
         // HARD INVARIANT (single most important of this phase): only manager|plain may be minted here.
         // Reject platform (self-elevation) and worker (manager-owned) — and anything else — explicitly.
-        if (role !== "manager" && role !== "plain") {
-          return ok({
-            error: `session_spawn refuses role "${role}" — only "manager" or "plain" may be spawned here. ` +
-              "A platform/auditor/setup/operator session is human-REST-only (no self-elevation) and a worker requires a manager parent + task (a manager's orchestration job).",
-          });
-        }
+        // Shared with the companion `session-spawn` lever (companion/capabilities.ts) via ONE helper so
+        // the two can never drift apart — see spawnableRoleError's own doc.
+        const roleError = spawnableRoleError(role);
+        if (roleError) return ok({ error: roleError });
         try {
-          return ok(sessions.spawnSessionAsPlatform(projectId, agentId, role));
+          // Narrowed by spawnableRoleError above (only "manager"/"plain" reach here).
+          return ok(sessions.spawnSessionAsPlatform(projectId, agentId, role as "manager" | "plain"));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
