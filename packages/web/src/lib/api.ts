@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PermissionAnswer, ProjectLink } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -631,6 +631,23 @@ export const api = {
   // Preview a cron for the builder: the human summary + the REAL next-3 fires, computed server-side with
   // the SAME matcher the Scheduler fires on (so the preview can never drift from what actually runs).
   previewSchedule: (cron: string) => post<{ valid: boolean; summary: string; next: string[] }>("/api/schedules/preview", { cron }),
+
+  // --- Event Triggers (Loom Event Triggers subsystem, card f5d07121): when an INTERNAL orchestration
+  // event of kind `eventKind` fires (optionally scoped to `projectId` — null = every project), WAKE an
+  // existing session (mode "wake" → targetSessionId) or SPAWN a fresh agent session (mode "spawn" →
+  // agentId). The internal-event counterpart to Schedules' cron: the dispatcher is ALWAYS ON (zero rows =
+  // a no-op tick), so a created trigger fires on its next matching event — no enable gate to surface.
+  // HUMAN-managed (this page + REST) — there is NO agent-writable MCP surface. create → 201; update
+  // patches any field (the effective mode↔target pairing is re-validated server-side). Both create and
+  // update 400/404 with a readable `{ error }` (unknown kind, missing project/session/agent, or a
+  // wake-without-session / spawn-without-agent mismatch) surfaced verbatim via *Err so the modal shows the
+  // reason inline. Toggling `enabled` re-seeds the watermark server-side (no history replay on re-enable). ---
+  eventTriggers: () => get<EventTrigger[]>("/api/event-triggers"),
+  createEventTrigger: (b: { eventKind: EventTriggerEventKind; projectId: string | null; mode: EventTrigger["mode"]; targetSessionId?: string | null; agentId?: string | null; enabled?: boolean }) =>
+    postErr<EventTrigger>("/api/event-triggers", b),
+  updateEventTrigger: (id: string, patch: { eventKind?: EventTriggerEventKind; projectId?: string | null; mode?: EventTrigger["mode"]; targetSessionId?: string | null; agentId?: string | null; enabled?: boolean }) =>
+    postErr<EventTrigger>(`/api/event-triggers/${encodeURIComponent(id)}`, patch),
+  deleteEventTrigger: (id: string) => del<{ ok: boolean }>(`/api/event-triggers/${encodeURIComponent(id)}`),
 
   // --- Preset Prompts (the GLOBAL "terminal action-buttons" store — one shared list, same on every
   // terminal card). HUMAN/UI data managed inline in the terminal popover; there is intentionally NO MCP

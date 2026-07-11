@@ -16,6 +16,7 @@ import Skills from "./pages/Skills";
 import Profiles from "./pages/Profiles";
 import Companion from "./pages/Companion";
 import Schedules from "./pages/Schedules";
+import EventTriggers from "./pages/EventTriggers";
 import Usage from "./pages/Usage";
 import Platform from "./pages/Platform";
 import Settings from "./pages/Settings";
@@ -101,6 +102,10 @@ export const NAV_PAGES: NavPage[] = [
   // it stays right here under More ▾ · Config.
   { label: "Companion", to: "/companion", element: <Companion />, group: "config" },
   { label: "Schedules", to: "/schedules", element: <Schedules />, group: "config", scoped: true },
+  // Event Triggers — the internal-event counterpart to cron Schedules. Daemon-GLOBAL (a trigger's project
+  // scope is an explicit field, and its wake/spawn target may live in any project), so deliberately NOT
+  // `scoped` — it does not respond to the active-project picker.
+  { label: "Event Triggers", to: "/event-triggers", element: <EventTriggers />, group: "config" },
   // The standalone Orchestration page (its manager→worker→diff drill-down) was REMOVED (card bde7957f):
   // its two unique views — the per-manager orchestration_events timeline + the worker branch-diff — now
   // live as role-scoped tabs in the Overview fleet-card expansion (FleetAccordion → SessionCockpit), so
