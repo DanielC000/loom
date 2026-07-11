@@ -4176,6 +4176,12 @@ export class SessionService {
    *       is REAL. Detected directly off the manager's OWN pending queue — the exact
    *       `[loom:worker-report] worker <id> …` text workerReport() enqueues (prefixed with THIS worker's
    *       id, so it can only match its own report).
+   *     • WAKE GUARD (card dfa87343) — a worker that self-parked via `wake_me` (its task stays in the
+   *       `active` lane, no fresh `worker_report`) looks identical to a genuine strand. `listWakesForSession`
+   *       only ever returns wakes that are PENDING — a fired or cancelled wake is deleted (claim-first
+   *       tick, `wake_cancel`) — so any row present means a not-yet-fired wake will resume this worker on
+   *       its own; it never failed to report, it's deliberately waiting. Narrow by construction: a worker
+   *       with no pending wake falls straight through to the stranded check below.
    * - `broken-spawn` — `busy` fell to false WITHOUT the worker ever running a turn (the fresh-spawn
    *   kickoff race — host.ts's scheduleKickoffGuarantee / the short pre-first-turn healIfStuck window).
    *   `engineSessionId` is captured ONLY on the engine's own SessionStart hook, so `null` here is
@@ -4203,6 +4209,8 @@ export class SessionService {
     if (this.pty.getPendingEntries(workerSessionId).length > 0) return { kind: "not-evaluable" }; // direction queued, about to drain
 
     if (w.rateLimitedUntil && Date.parse(w.rateLimitedUntil) > Date.now()) return { kind: "not-stranded" };
+
+    if (this.db.listWakesForSession(workerSessionId).length > 0) return { kind: "not-stranded" }; // wake-parked, see WAKE GUARD above
 
     const task = this.db.getTask(w.taskId);
     const activeKey = this.columnKeyForProjectRole(w.projectId, "active");
