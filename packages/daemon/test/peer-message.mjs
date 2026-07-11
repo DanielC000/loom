@@ -15,6 +15,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (4) nonexistent target project rejected.
 //   (5) NOT-LIVE (no live manager at all) target boards a durable card on the target's OWN board instead
 //       of being dropped.
+//   (4b) a LINKED but ARCHIVED target is rejected outright — NOT dead-lettered as a board card on a
+//       board nobody watches (the archived-target gap this test guards against).
 //   (6) delivery is framed + kind:"agent" (one-per-turn), via the same enqueueDurableMessage channel as
 //       worker_message/session_message — no privilege travels, just a data message.
 //   (7) a `cross_project_message` audit event is recorded for both the live-delivery and boarded cases.
@@ -66,6 +68,7 @@ db.insertProject({ id: "pA", name: "Project A", repoPath: repo, vaultPath: repo,
 db.insertProject({ id: "pB", name: "Project B", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
 db.insertProject({ id: "pC", name: "Project C (unlinked)", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
 db.insertProject({ id: "pD", name: "Project D (worker-only)", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+db.insertProject({ id: "pE", name: "Project E (archived)", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: now, reserved: false });
 db.insertAgent({ id: "agentA", projectId: "pA", name: "A", startupPrompt: "A", position: 0, profileId: null });
 db.insertAgent({ id: "agentB", projectId: "pB", name: "B", startupPrompt: "B", position: 0, profileId: null });
 db.insertAgent({ id: "agentD", projectId: "pD", name: "D", startupPrompt: "D", position: 0, profileId: null });
@@ -127,6 +130,8 @@ try {
   // pD has no link to pA either, but even setting that aside: link pA<->pD and prove a live WORKER in pD
   // (no live manager there) is never delivered to — the tool must fall through to boarding.
   db.createProjectLink("pA", "pD");
+  // pE is linked too, but soft-archived — the archived-target guard under test.
+  db.createProjectLink("pA", "pE");
   const enqBeforeD = host.enqueued.length;
   const tasksDBefore = db.listTasks("pD").length;
   const toWorkerOnly = await mCall("peer_message", { targetProjectId: "pD", text: "is anyone home" });
@@ -145,6 +150,12 @@ try {
   // ===================== (4) nonexistent target project rejected =====================
   const ghost = await mCall("peer_message", { targetProjectId: "ghost-project", text: "hello?" });
   check("(4) a nonexistent target project is rejected", !!ghost.error && /not found/.test(ghost.error));
+
+  // ============== (4b) a LINKED but ARCHIVED target is rejected, not dead-lettered as a board card ======
+  const tasksEBefore = db.listTasks("pE").length;
+  const toArchived = await mCall("peer_message", { targetProjectId: "pE", text: "are you still there?" });
+  check("(4b) a linked-but-archived target project is rejected", !!toArchived.error && /archived/.test(toArchived.error));
+  check("(4b) NO board card was created on the archived target's board", db.listTasks("pE").length === tasksEBefore);
 
   // ===================== (5)+(6) linked + LIVE manager — delivers framed, kind:"agent" =====================
   const enqBeforeB = host.enqueued.length;
@@ -203,6 +214,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — peer_message is manager-gated, delivers ONLY to a linked peer project's LIVE manager (never a worker/other role there — falls through to a durable board card instead), rejects an unlinked/self/nonexistent target, frames + delivers kind:\"agent\" one-per-turn via the shared enqueueDurableMessage channel, records a cross_project_message audit event both live and boarded, rate-limits a flood from one origin manager, and the project_links WRITE has no MCP path on any surface — claude-free, network-free."
+  ? "\n✅ ALL PASS — peer_message is manager-gated, delivers ONLY to a linked peer project's LIVE manager (never a worker/other role there — falls through to a durable board card instead), rejects an unlinked/self/nonexistent/archived target (an archived target never dead-letters a board card), frames + delivers kind:\"agent\" one-per-turn via the shared enqueueDurableMessage channel, records a cross_project_message audit event both live and boarded, rate-limits a flood from one origin manager, and the project_links WRITE has no MCP path on any surface — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

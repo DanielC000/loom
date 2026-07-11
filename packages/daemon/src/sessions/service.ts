@@ -3419,6 +3419,9 @@ export class SessionService {
    * explicitly linked to its own. Trust invariants:
    *   - LINK gate: `db.areProjectsLinked` — an unlinked (or nonexistent) target project is REJECTED.
    *   - self/same-project target REJECTED (use your own project's board instead).
+   *   - a soft-archived target (`project.archivedAt` set) is REJECTED — `getProject` returns archived
+   *     rows too, so without this check a linked-but-archived target would fall through to the board
+   *     fallback below and dead-letter a card onto a board nobody watches.
    *   - manager↔manager ONLY: resolves the target project's LIVE session with role==="manager" — a live
    *     worker/platform/auditor session in that project is never matched (mirrors session_spawn's
    *     manager|plain-only invariant), so the message can never land on the wrong kind of session.
@@ -3443,7 +3446,9 @@ export class SessionService {
     const originProjectId = caller.projectId;
     if (!originProjectId) throw new Error("no project for this session");
     if (targetProjectId === originProjectId) throw new Error("peer_message: cannot target your own project — use your own board instead");
-    if (!this.db.getProject(targetProjectId)) throw new Error("peer_message: target project not found");
+    const targetProject = this.db.getProject(targetProjectId);
+    if (!targetProject) throw new Error("peer_message: target project not found");
+    if (targetProject.archivedAt) throw new Error("peer_message: target project is archived");
     if (!this.db.areProjectsLinked(originProjectId, targetProjectId)) {
       throw new Error("peer_message: target project is not linked to yours — ask the owner to link the projects first");
     }
