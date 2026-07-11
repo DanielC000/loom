@@ -168,7 +168,7 @@ try {
   // ── (D) DOCTRINE: the shipped /worker skill carries the never-commit-to-main rule ────────────────────
   const skillPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets", "skills", "worker", "SKILL.md");
   const skill = fs.readFileSync(skillPath, "utf8");
-  check("(D) /worker SKILL.md says 'never commit to main'", /never commit to\s+`?main/i.test(skill));
+  check("(D) /worker SKILL.md says 'never commit to mainline'", /never commit to (the project's )?mainline/i.test(skill));
   check("(D) /worker SKILL.md says 'commit ONLY to your assigned branch loom/<id>'",
     /commit ONLY to your assigned branch\s+`?loom\/<id>/i.test(skill));
 } finally {

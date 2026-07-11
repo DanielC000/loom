@@ -30,3 +30,9 @@ tmp-*verify.db*
 # Ad-hoc browser-verification screenshots written to the repo root (cwd) —
 # root-only so tracked assets under docs/, packages/**, site/** are untouched
 /*.png
+
+# Dev-only project-local skills for THIS repo's own self-hosting Claude Code sessions — a mix of the
+# canonical packages/daemon/assets/skills/** (refreshed here by scripts/sync-claude-skills.mjs on every
+# daemon build; never hand-edit those) and any personal, never-bundled skill dirs a dev/owner keeps here
+# too (e.g. ideate). Never commit this dir.
+/.claude/skills/
