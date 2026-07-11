@@ -1,14 +1,14 @@
 /**
  * Loom's bundled registry-capability catalog rows — the capabilities analog of profiles/seed.ts's
- * BUNDLED_PROFILES. v1 ships exactly one: GitHub, the FIRST real credential-tied capability (agent-tooling
- * P4 follow-on, board card 3b0c4aef) — proving the `requiresConnection`/`{slug, connectionId}` connection-
- * bind path end-to-end (P4 v1 hermetically tested that plumbing with a FAKE capability only; this is the
- * first REAL one). Seeded as an ordinary `capability_defs` ROW — not a fourth hardcoded builtin slug like
+ * BUNDLED_PROFILES. Ships two: GitHub (agent-tooling P4 follow-on, board card 3b0c4aef) — the FIRST real
+ * credential-tied capability, proving the `requiresConnection`/`{slug, connectionId}` connection-bind path
+ * end-to-end — and "image-gen" (board card b93cfd10, provider decided a4058e7a), the SECOND. Both are
+ * seeded as ordinary `capability_defs` ROWS — not a fourth/fifth hardcoded builtin slug like
  * browser-testing/document-conversion/deja-corpus, which bypass the credential-tie injection entirely (see
- * `buildMcpServers` in `pty/host.ts`) — so binding it exercises the SAME generic node-package/python-venv/
- * bundled/command/github-binary dispatch + spawn-time secret-env-injection an owner-added row gets. Nothing
- * in `pty/host.ts` needed to change: `getCapabilityCatalog`/`resolveConnectionSecret` already read every
- * `capability_defs` row generically.
+ * `buildMcpServers` in `pty/host.ts`) — so binding either exercises the SAME generic node-package/
+ * python-venv/bundled/command/github-binary dispatch + spawn-time secret-env-injection an owner-added row
+ * gets. Nothing in `pty/host.ts` needed to change: `getCapabilityCatalog`/`resolveConnectionSecret` already
+ * read every `capability_defs` row generically.
  *
  * kind "github-binary" (migrated off the archived `@modelcontextprotocol/server-github` npx package):
  * GitHub's maintained `github/github-mcp-server` is provisioned as a Loom-managed, checksum-verified Go
@@ -21,10 +21,39 @@
  * subprocess's OWN env only (never a CLI arg, never the claude process — see `resolveCapabilityServer`).
  * `migrateGithubCapabilityToBinary` (below) rewrites an EXISTING install's old `bundled`/npx row to this
  * shape at boot — see its own doc for the narrow-match/idempotency contract.
+ *
+ * "image-gen" (kind "bundled", NOT github-binary — that kind is github-specific and seed-only): a plain
+ * `npx`-resolved MCP, `mcp-imagenate` (npm, MIT, github.com/mimo-3/mcp-imagenate) — chosen over several
+ * other Gemini-image MCPs surveyed because (a) it writes generated images to DISK unconditionally
+ * (`fs.promises.writeFile`, returning file paths — never base64/URL-only in its response), the hard
+ * requirement for this capability to be reviewable/feedable to a separate session at all, (b) its output
+ * path is sandboxed against symlink/traversal escape when `NANO_BANANA_OUTPUT_DIR` is set (real
+ * `fs.realpathSync` containment checks, not a string-prefix check alone), (c) it's actively maintained (MIT,
+ * ~15 GitHub stars, ~1k npm downloads/mo, last published within the month) unlike several
+ * higher-profile-looking alternatives whose GitHub source had gone 404 or sat unstarred/templated. It's
+ * technically MULTI-provider (also supports OpenAI/BFL FLUX models) — but its model registry only exposes
+ * whichever providers have a configured key (`initRegistry` in the package's own `providers/registry.js`),
+ * so injecting ONLY `GEMINI_API_KEY` (never `OPENAI_API_KEY`/`GPT_IMAGE_API_KEY`/`BFL_API_KEY`) makes it a
+ * pure Gemini/Imagen ("nano-banana") image generator in practice — the OWNER-DECIDED provider (a4058e7a),
+ * with no code path to any other provider ever reachable. Its own output-dir confinement is an ENV VAR
+ * (`NANO_BANANA_OUTPUT_DIR`), not a CLI flag like Playwright's `--output-dir` — see `outputDirEnvVar` on
+ * `registry.ts`'s "bundled" provision kind (a small additive extension added alongside this row) for the
+ * generic env-var-based scratch-dir injection that requires.
  */
 import type { Db } from "../db.js";
 import type { CapabilityDefRow } from "./registry.js";
 import { GITHUB_MCP_SERVER_VERSION } from "./github-binary.js";
+
+/**
+ * The exact `mcp-imagenate` (npm) release the "image-gen" seed row is pinned to — the version this file's
+ * own doc comment above verified (disk-write behavior, NANO_BANANA_OUTPUT_DIR realpathSync sandboxing,
+ * provider-gated-by-configured-key model registry). PINNED, not bare `npx -y mcp-imagenate`: an unpinned
+ * npx re-resolves to whatever is CURRENTLY "latest" at every spawn, so a future compromised release of the
+ * package would silently run with the user's live Gemini key on the very next spawn — and the trust
+ * assessment above is specific to THIS version's actual code, not to "whatever mcp-imagenate becomes."
+ * Bumping this constant is a deliberate, reviewed act (mirrors GITHUB_MCP_SERVER_VERSION's own pin).
+ */
+const MCP_IMAGENATE_VERSION = "0.2.1";
 
 /** The shipped definition for every bundled capability. */
 export function bundledCapabilities(): Omit<CapabilityDefRow, "id" | "createdAt">[] {
@@ -44,6 +73,24 @@ export function bundledCapabilities(): Omit<CapabilityDefRow, "id" | "createdAt"
       wantsScratchDir: false,
       requiresConnection: true,
       secretEnvVar: "GITHUB_PERSONAL_ACCESS_TOKEN",
+    },
+    {
+      slug: "image-gen",
+      name: "Image Generation (Gemini/Imagen)",
+      description:
+        "Inject a per-session Google Gemini/Imagen image-generation MCP so a bound rig (e.g. Web Designer) can generate an image from a text prompt and have it written to disk in the session's own scratch dir — a PNG on disk is then real multimodal input via Claude Code's built-in Read, no extra plumbing needed. Needs a bound connection holding a Gemini API key (Google AI Studio). SPEND-GUARD GAP: Loom's connection rate/spend guard (ConnectionsGuardConfig) covers only the P2 authenticated_request HTTP path, NOT this MCP subprocess path — the MCP calls Google's API directly, outside Loom's own request path entirely. Spend control here rests on opt-in + off-by-default + low-frequency use, plus an OWNER-SET spend cap on the bound key in Google AI Studio/Cloud Console — Loom cannot rate-limit or cap spend on this path itself.",
+      transport: "stdio",
+      kind: "bundled",
+      provisionJson: JSON.stringify({
+        kind: "bundled",
+        command: "npx",
+        args: ["-y", `mcp-imagenate@${MCP_IMAGENATE_VERSION}`],
+        outputDirEnvVar: "NANO_BANANA_OUTPUT_DIR",
+      }),
+      toolAllowlistJson: JSON.stringify(["mcp__image-gen"]),
+      wantsScratchDir: true,
+      requiresConnection: true,
+      secretEnvVar: "GEMINI_API_KEY",
     },
   ];
 }

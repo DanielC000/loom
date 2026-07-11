@@ -72,8 +72,12 @@ export interface CapabilitiesDbStore {
 export type CapabilityProvision =
   | { kind: "node-package"; package: string; binRelativeToPackageJson: string }
   | { kind: "python-venv"; packages: string[]; binary: string; probeImport?: string }
-  | { kind: "bundled"; command: string; args?: string[] }
-  | { kind: "command"; command: string; args?: string[] }
+  // `outputDirEnvVar`: the ONLY wantsScratchDir mechanism a bundled/command MCP has besides the
+  // node-package branch's hardcoded `--output-dir` CLI arg (below) — some CLIs (e.g. the image-gen seed)
+  // take their output directory via an env var of their OWN choosing instead of a flag. Optional + additive:
+  // omitted ⇒ byte-identical to before this field existed (no scratch dir is ever injected for that row).
+  | { kind: "bundled"; command: string; args?: string[]; outputDirEnvVar?: string }
+  | { kind: "command"; command: string; args?: string[]; outputDirEnvVar?: string }
   | { kind: "github-binary"; version: string };
 
 const NAME_MAX = 200;
@@ -136,7 +140,11 @@ export function validateCapabilityDefInput(input: {
     if (args !== undefined && (!Array.isArray(args) || !args.every((x) => typeof x === "string"))) {
       return { ok: false, error: "bundled provision's 'args' must be a string array when present" };
     }
-    provision = { kind: "bundled", command: p.command, args: args as string[] | undefined };
+    const outputDirEnvVar = p.outputDirEnvVar;
+    if (outputDirEnvVar !== undefined && !isNonBlankStr(outputDirEnvVar, NAME_MAX)) {
+      return { ok: false, error: "bundled provision's 'outputDirEnvVar' must be a non-empty string when present" };
+    }
+    provision = { kind: "bundled", command: p.command, args: args as string[] | undefined, outputDirEnvVar: outputDirEnvVar as string | undefined };
   } else {
     // command: an owner-typed arbitrary executable — OWNER-APPROVED as owner-typed-therefore-trusted
     // (same trust model as gateCommand). Resolved to an ABSOLUTE path here, at catalog-SAVE time, so an
@@ -156,7 +164,11 @@ export function validateCapabilityDefInput(input: {
     if (!path.isAbsolute(resolved) || !fs.existsSync(resolved)) {
       return { ok: false, error: `command '${p.command}' could not be resolved to an executable (not absolute/not found on PATH, or does not exist)` };
     }
-    provision = { kind: "command", command: resolved, args: args as string[] | undefined };
+    const outputDirEnvVar = p.outputDirEnvVar;
+    if (outputDirEnvVar !== undefined && !isNonBlankStr(outputDirEnvVar, NAME_MAX)) {
+      return { ok: false, error: "command provision's 'outputDirEnvVar' must be a non-empty string when present" };
+    }
+    provision = { kind: "command", command: resolved, args: args as string[] | undefined, outputDirEnvVar: outputDirEnvVar as string | undefined };
   }
   const toolAllowlist = input.toolAllowlist;
   if (!Array.isArray(toolAllowlist) || !toolAllowlist.every((x) => typeof x === "string")) {
@@ -165,6 +177,13 @@ export function validateCapabilityDefInput(input: {
   const requiresConnection = !!input.requiresConnection;
   if (requiresConnection && !isNonBlankStr(input.secretEnvVar, NAME_MAX)) {
     return { ok: false, error: "secretEnvVar is required (the env var name the credential is injected under) when requiresConnection is true" };
+  }
+  // outputDirEnvVar and secretEnvVar are two DIFFERENT values injected into the SAME mounted server's `env`
+  // object (resolveCapabilityServer) — an equal name would have one silently clobber the other at spawn
+  // time (whichever assignment runs last wins), so reject the self-harm at save time instead.
+  const provisionOutputDirEnvVar = (provision as { outputDirEnvVar?: string }).outputDirEnvVar;
+  if (requiresConnection && provisionOutputDirEnvVar && provisionOutputDirEnvVar === input.secretEnvVar) {
+    return { ok: false, error: "outputDirEnvVar must not equal secretEnvVar (they would collide in the mounted server's env block)" };
   }
   return {
     ok: true,
@@ -431,8 +450,17 @@ export function resolveCapabilityServer(row: CapabilityDefRow, ctx: ResolveCapab
     if (bin) server = { command: bin, args: ["stdio"] };
   }
   if (!server) return null;
-  const env = row.requiresConnection && ctx.connectionSecret
-    ? { [row.secretEnvVar ?? "LOOM_CAPABILITY_SECRET"]: ctx.connectionSecret }
-    : undefined;
-  return { type: "stdio", ...server, ...(env ? { env } : {}) };
+  const env: Record<string, string> = {};
+  if (row.requiresConnection && ctx.connectionSecret) {
+    env[row.secretEnvVar ?? "LOOM_CAPABILITY_SECRET"] = ctx.connectionSecret;
+  }
+  // The bundled/command env-var-based scratch-dir mechanism (see CapabilityProvision's `outputDirEnvVar`
+  // doc): a CLI that takes its output directory via its OWN env var rather than a flag (unlike the
+  // node-package branch's hardcoded `--output-dir` arg above). Additive: only fires when a row's provision
+  // explicitly sets it, so every existing bundled/command row (none of which set it today) is unaffected.
+  if ((provision.kind === "bundled" || provision.kind === "command") && provision.outputDirEnvVar && row.wantsScratchDir && ctx.scratchDir) {
+    env[provision.outputDirEnvVar] = ctx.scratchDir;
+  }
+  const hasEnv = Object.keys(env).length > 0;
+  return { type: "stdio", ...server, ...(hasEnv ? { env } : {}) };
 }

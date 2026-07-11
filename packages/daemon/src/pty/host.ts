@@ -1379,11 +1379,15 @@ export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedToo
 }
 
 /**
- * Collect every capability secret value riding an assembled mcpServers map's `env` blocks (agent-tooling
- * P4 credential tie — see resolveCapabilityServer). `env` is ONLY ever set by that one path today, so
- * "any server carries an env value" IS "a capability secret is present" — but this reads structurally
- * (any string value under any server's `env`), not by name, so it stays correct even if a future capability
- * kind injects a non-secret env var. Pure, exported for the hermetic test.
+ * Collect every capability-injected env value riding an assembled mcpServers map's `env` blocks
+ * (agent-tooling P4 credential tie — see resolveCapabilityServer). This reads STRUCTURALLY (any string
+ * value under any server's `env`), not by name — so it is deliberately NOT "secrets only": a
+ * `wantsScratchDir` row's non-secret scratch-dir path (injected via `outputDirEnvVar`, see registry.ts)
+ * rides the exact same `env` block and is swept in here too. That's intentional and harmless in both
+ * directions this list is used for: `redactSecrets` stripping a value that was never sensitive is a no-op
+ * risk-wise, and `mcpConfigHasSecret` treating a scratch-dir-only row as "has a secret" only means that
+ * config gets the (strictly safer) file-diversion treatment it would get anyway, never less protection
+ * than a config with a real secret. Pure, exported for the hermetic test.
  */
 export function collectMcpEnvSecrets(mcpServers: Record<string, unknown>): string[] {
   const out: string[] = [];
@@ -1394,7 +1398,11 @@ export function collectMcpEnvSecrets(mcpServers: Record<string, unknown>): strin
   return out;
 }
 
-/** True iff the assembled mcpServers map carries at least one capability secret (see collectMcpEnvSecrets). */
+/**
+ * True iff the assembled mcpServers map carries at least one capability-injected env value (secret OR
+ * non-secret, e.g. a `wantsScratchDir` row's output-dir path — see {@link collectMcpEnvSecrets}'s doc for
+ * why that over-inclusion is deliberate and harmless).
+ */
 export function mcpConfigHasSecret(mcpServers: Record<string, unknown>): boolean {
   return collectMcpEnvSecrets(mcpServers).length > 0;
 }

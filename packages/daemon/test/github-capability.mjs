@@ -70,7 +70,10 @@ const STUB_TOKEN = "ghp_STUB-do-not-leak-abcdefghijklmnop";
 const db = new Db();
 check("(seed) pristine db has no capability_defs rows yet", db.listCapabilityDefs().length === 0);
 const seeded = seedDefaultCapabilities(db);
-check("(seed) seeds exactly one row: 'github'", JSON.stringify(seeded) === JSON.stringify(["github"]));
+// Two bundled rows ship now (github + the image-gen follow-on, board card b93cfd10) — this test's own job
+// is only the "github" row's shape, so it scopes its seeded-list assertion to "github is among them" rather
+// than "github is the only one" (image-gen-capability.mjs owns the image-gen row's own assertions).
+check("(seed) seeds 'github' (among the bundled set)", seeded.includes("github"));
 const ghRow = db.getCapabilityDefBySlug("github");
 check("(seed) the row exists in the db", !!ghRow);
 check("(seed) name/description mention GitHub", ghRow.name === "GitHub" && ghRow.description.toLowerCase().includes("github"));
@@ -90,10 +93,10 @@ check("(seed) description names the bound PAT's own scopes as the containment bo
 // seed-if-absent: calling again on the SAME db is a no-op (idempotent), never a duplicate/throw.
 const secondSeedCall = seedDefaultCapabilities(db);
 check("(seed) a second call seeds nothing (idempotent, seed-if-absent by slug)", secondSeedCall.length === 0);
-check("(seed) still exactly one capability_defs row", db.listCapabilityDefs().length === 1);
+check("(seed) exactly the bundled row count persists (github + image-gen, no dupes)", db.listCapabilityDefs().length === bundledCapabilities().length);
 
 // bundledCapabilities() itself is a pure function callers can inspect without a db.
-check("(seed) bundledCapabilities() returns the same single 'github' definition", bundledCapabilities().length === 1 && bundledCapabilities()[0].slug === "github");
+check("(seed) bundledCapabilities() includes the 'github' definition", bundledCapabilities().some((c) => c.slug === "github"));
 
 // ===================== (b) resolveCapabilityServer resolves the REAL seeded row generically =====================
 // github is a PLAIN capability_defs row — it must go through the exact same generic dispatch an owner-added

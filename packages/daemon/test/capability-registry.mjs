@@ -264,6 +264,43 @@ const goodInput = validateCapabilityDefInput({
 });
 check("(validate) a well-formed input validates ok", goodInput.ok === true);
 
+// ===================== outputDirEnvVar (agent-tooling P4 follow-on, image-gen capability b93cfd10) =====================
+// The wantsScratchDir mechanism for bundled/command kinds (node-package's is the hardcoded `--output-dir`
+// CLI arg — this is the OTHER one, an env-var name of the owner's/seed's choosing). Owner-REST input, not
+// just the seed path, must validate it: reject a blank/non-string/over-long name, accept + round-trip a
+// well-formed one — for BOTH kinds that support it.
+const LONG_ENV_VAR = "A".repeat(201);
+for (const kind of ["bundled", "command"]) {
+  const baseProvision = kind === "bundled" ? { command: "npx", args: ["-y", "x"] } : { command: process.execPath, args: [] };
+  check(`(validate) ${kind} rejects a blank outputDirEnvVar`,
+    validateCapabilityDefInput({ slug: `odv-blank-${kind}`, name: "x", description: "", transport: "stdio", kind, provision: { ...baseProvision, outputDirEnvVar: "   " }, toolAllowlist: [] }).ok === false);
+  check(`(validate) ${kind} rejects a non-string outputDirEnvVar`,
+    validateCapabilityDefInput({ slug: `odv-nonstr-${kind}`, name: "x", description: "", transport: "stdio", kind, provision: { ...baseProvision, outputDirEnvVar: 42 }, toolAllowlist: [] }).ok === false);
+  check(`(validate) ${kind} rejects an outputDirEnvVar over 200 characters`,
+    validateCapabilityDefInput({ slug: `odv-long-${kind}`, name: "x", description: "", transport: "stdio", kind, provision: { ...baseProvision, outputDirEnvVar: LONG_ENV_VAR }, toolAllowlist: [] }).ok === false);
+  const okResult = validateCapabilityDefInput({ slug: `odv-ok-${kind}`, name: "x", description: "", transport: "stdio", kind, provision: { ...baseProvision, outputDirEnvVar: "MY_OUTPUT_DIR" }, toolAllowlist: [] });
+  check(`(validate) ${kind} accepts + round-trips a well-formed outputDirEnvVar onto the stored provision`,
+    okResult.ok === true && okResult.value.provision.outputDirEnvVar === "MY_OUTPUT_DIR");
+  // omitted entirely ⇒ still validates ok, undefined on the stored provision (fully optional, additive).
+  const omittedResult = validateCapabilityDefInput({ slug: `odv-omit-${kind}`, name: "x", description: "", transport: "stdio", kind, provision: baseProvision, toolAllowlist: [] });
+  check(`(validate) ${kind} with outputDirEnvVar omitted still validates ok, with it undefined on the stored provision`,
+    omittedResult.ok === true && omittedResult.value.provision.outputDirEnvVar === undefined);
+}
+// Small guard (CR nit): outputDirEnvVar === secretEnvVar would collide in the mounted server's env block
+// (one silently clobbers the other) — reject that self-harm at save time.
+check("(validate) outputDirEnvVar equal to secretEnvVar is rejected (they'd collide in the mounted env)",
+  validateCapabilityDefInput({
+    slug: "odv-collide", name: "x", description: "", transport: "stdio", kind: "bundled",
+    provision: { command: "npx", args: ["-y", "x"], outputDirEnvVar: "SAME_VAR" },
+    toolAllowlist: [], requiresConnection: true, secretEnvVar: "SAME_VAR",
+  }).ok === false);
+check("(validate) outputDirEnvVar different from secretEnvVar still validates ok",
+  validateCapabilityDefInput({
+    slug: "odv-nocollide", name: "x", description: "", transport: "stdio", kind: "bundled",
+    provision: { command: "npx", args: ["-y", "x"], outputDirEnvVar: "OUT_DIR" },
+    toolAllowlist: [], requiresConnection: true, secretEnvVar: "A_TOKEN",
+  }).ok === true);
+
 // ===================== (f) DB round-trip =====================
 const db = new Db();
 const created = createCapabilityDef(db, {
