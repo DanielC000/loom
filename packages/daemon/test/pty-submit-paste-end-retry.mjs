@@ -19,9 +19,13 @@
 //   (a) a withheld confirmation's retry re-asserts START+END before each retried Enter;
 //   (b) the FIRST attempt (immediately after submit()'s own END write) does NOT redundantly re-assert —
 //       only retries (attempt > 1) do, so the common happy-path write shape is unchanged;
-//   (c) give-up recovery writes NO clear/interrupt bytes at all (LEAVE-AS-IS per card ee082fbb's Lead
-//       ruling — deferred pending a real-claude spike on clear-efficacy) — so a genuine human draft
-//       (or the stranded turn text itself) is never touched, regardless of composerLen.
+//   (c) give-up recovery still writes NO Ctrl-U / kill-line byte — the earlier LEAVE-AS-IS ruling (card
+//       ee082fbb) was overturned once a real-claude spike found exact-count Backspace reliably empties
+//       the composer (Ctrl-U doesn't — it silently strands earlier lines of an un-collapsed multi-line
+//       paste). Give-up now DOES clear the stranded injection when composerLen===0 — the dedicated
+//       coverage for that (both the clear and the composerLen>0 human-draft hold) lives in the sibling
+//       test/pty-giveup-clear.mjs; this file just re-confirms its own paste-reassert fix still applies
+//       all the way through to give-up, and that the clear mechanism is still Backspace, never Ctrl-U.
 //
 // RUN (no daemon needed): node test/pty-submit-paste-end-retry.mjs
 //   Requires the daemon built first (reads ../dist/pty/host.js): from packages/daemon, run `pnpm build`.
@@ -137,7 +141,8 @@ try {
     const SID = "sess-pasteend-giveup";
     const { countOf } = spawnReady(SID);
     const t0 = Date.now();
-    const r = host.enqueueStdin(SID, "NEVER_CONFIRMED_EITHER");
+    const TEXT = "NEVER_CONFIRMED_EITHER";
+    const r = host.enqueueStdin(SID, TEXT);
     check("(c) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
     // Never confirm anything — exhaust every attempt (each retry still re-asserting START+END).
@@ -146,11 +151,13 @@ try {
     check("(c) retries still re-asserted the pair (this fix applies through give-up, not just early retries)",
       countOf(REASSERT) === MAX_ATTEMPTS - 1);
     check("(c) GIVE-UP: busy recovered to false (session not wedged)", busyLog[SID].at(-1) === false);
-    // LEAVE-AS-IS (card ee082fbb Lead ruling): give-up must NOT write a Ctrl-U (\x15) or any other
-    // clear/interrupt byte — clearing is deferred pending a real-claude spike on clear-efficacy, so
-    // whatever is in the composer (a human draft OR the stranded turn text) is left untouched, not
-    // blindly wiped. This must hold regardless of composerLen (0 or >0) since no clear path exists at all.
-    check("(c) give-up wrote NO Ctrl-U / kill-line byte (no blind composer clear)", countOf("\x15") === 0);
+    // card ee082fbb: give-up now clears the stranded injection (composerLen stayed 0 the whole scenario —
+    // never touched via writeStdin) via an exact-count Backspace burst — see test/pty-giveup-clear.mjs for
+    // the dedicated coverage of both this and the composerLen>0 human-draft hold. Re-confirmed here: the
+    // mechanism is STILL never Ctrl-U (\x15) — the real-claude spike found Ctrl-U silently strands earlier
+    // lines of an un-collapsed multi-line paste, which is why Backspace was adopted instead.
+    check("(c) give-up wrote NO Ctrl-U / kill-line byte (Backspace, not Ctrl-U, is the clear mechanism)", countOf("\x15") === 0);
+    check("(c) give-up DID clear the stranded injection (composerLen was 0 throughout)", countOf("\x7f") === TEXT.length);
   }
 } finally {
   for (const sid of ["sess-pasteend-retry", "sess-pasteend-giveup"]) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
@@ -158,6 +165,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — sendEnterAndVerify's retries re-assert a zero-length START+END pair before each retried Enter (never on the first attempt), recovering a turn stranded by a dropped closing paste marker instead of losing it after 4 failed attempts; give-up still writes no blind composer clear."
+  ? "\n✅ ALL PASS — sendEnterAndVerify's retries re-assert a zero-length START+END pair before each retried Enter (never on the first attempt), recovering a turn stranded by a dropped closing paste marker instead of losing it after 4 failed attempts; give-up clears the stranded injection via exact-count Backspace, never Ctrl-U."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

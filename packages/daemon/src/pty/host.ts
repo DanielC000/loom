@@ -108,6 +108,8 @@ const DOWN_ARROW = "\x1b[B";
 const UP_ARROW = "\x1b[A";
 const ENTER = "\r";
 const ESC_KEY = "\x1b";
+/** Backspace/DEL — used to surgically un-type a give-up'd injection char-by-char (see sendEnterAndVerify). */
+const BACKSPACE = "\x7f";
 /** Strip CSI sequences so the boot-output scan matches the MCP prompt's words across TUI styling. */
 const ANSI_CSI = new RegExp(ESC_KEY + "\\[[0-9;?]*[ -/]*[@-~]", "g");
 const collapseBoot = (s: string): string => s.replace(ANSI_CSI, "").replace(/\s+/g, "");
@@ -3047,17 +3049,40 @@ export class PtyHost {
    *  - Confirmed / stale generation / the session died by the time the wait elapses → stop, nothing more.
    *  - Not confirmed and attempts remain → log it (this IS the live validation the merge gate wants:
    *    it proves whether a real drop/swallow happened) and re-send `\r` for the next attempt.
-   *  - Not confirmed and out of attempts → give up: log an error and recover busy (setBusy(false)) so
-   *    the session is never left busy=true with an unsent composer forever. The composer may still hold
-   *    the un-submitted paste in this rare give-up case (there is no way to un-paste it without reading
-   *    back the TUI's screen state) — the NEXT turn would then concatenate onto that stray text rather
-   *    than a clean composer. This is a deliberate trade-off (recovered-busy now vs. the old permanent
-   *    wedge) — NOT auto-cleared here: a blind Ctrl-U could just as easily destroy a genuine, unrelated
-   *    HUMAN draft the composer-dirty guard (`deferForHumanDraft`) would otherwise have protected (see
-   *    card e1829591 — never destroy a user's uncommitted draft), and give-up doesn't re-check
-   *    `composerLen` at the moment it fires. Left as a documented residual risk (card ee082fbb — LEAVE
-   *    AS IS pending a real-claude spike on whether a blind clear can even reliably empty a multi-line
-   *    composer; an unverified partial clear could be worse than the current stray-text concatenation).
+   *  - Not confirmed and out of attempts → give up: log an error, recover busy (setBusy(false)) so the
+   *    session is never left busy=true with an unsent composer forever, AND clear the stranded injection
+   *    (card ee082fbb) — but ONLY when `composerLen === 0`. `composerLen` tracks ONLY human raw-terminal
+   *    keystrokes (never our own `pty.write`), so `===0` proves the composer holds NOTHING but this
+   *    give-up'd injection — a human never got a chance to start a draft during the failed retries (if one
+   *    did, `composerLen > 0` and we leave the box alone; `deferForHumanDraft`'s existing hold still
+   *    protects it — see card e1829591, never destroy a user's uncommitted draft). This is exactly the
+   *    HUMAN-DRAFT SAFETY half of the fix; the CLEAR-EFFICACY half (does a clear byte actually empty a
+   *    real multi-line composer, or does it truncate/strand a partial remnant?) needed real-engine
+   *    validation, not just hermetic bytes-written assertions:
+   *
+   *    REAL-CLAUDE FINDINGS (claude 2.1.207, card ee082fbb probe — test/_probe-composer-clear{,-2}.mjs):
+   *      - The TUI COLLAPSES a multi-line/long bracketed paste into a single "[Pasted text #N +K lines]"
+   *        placeholder token — the raw lines are NOT individually editable once pasted.
+   *      - A single Esc does NOT clear it — it only ARMS a "Esc again to clear" confirm; a second Esc (or
+   *        any other key right after) leaves the composer in an inconsistent, still-dirty state. REJECTED.
+   *      - Ctrl-U (kill-line) cleared the COLLAPSED placeholder in one shot (it reads as one "line" to
+   *        readline-style kill semantics) — but on a SHORT multi-line paste that stayed under the
+   *        placeholder-collapse threshold (rendered as literal editable lines, not a placeholder), Ctrl-U
+   *        only killed the CURRENT line and SILENTLY STRANDED the earlier line(s) — confirmed via the
+   *        engine's own transcript, which recorded the stranded first line concatenated with the next
+   *        turn. Exactly the "partial clear worse than concatenation" risk this card was deferred over.
+   *        REJECTED as a general-purpose clear.
+   *      - Exact-count Backspace (`\x7f` × the injected text's length) reliably emptied the composer in
+   *        EVERY case tested: the collapsed placeholder (backspace #1 deletes the whole atomic token, the
+   *        rest floor at 0 and no-op — safe even though the count overshoots the placeholder's own visual
+   *        length; a VERSION-PINNED assumption about claude 2.1.207's composer/backspace handling — worth
+   *        re-verifying against the probes if a future claude version changes that behavior), a short
+   *        un-collapsed multi-line paste (backspace walks back through the embedded newlines exactly like
+   *        nextComposerLen's own counting model), and a single-line paste. ADOPTED.
+   *    The exact length to un-type is `live.lastPrompt` — already the literal text `submit()` pinned for
+   *    THIS turn (line ~3007) — so no new state is needed; give-up walks it back char-by-char via the
+   *    same `writeChunked` large-write path submit() itself uses (a giant Backspace burst is just as
+   *    subject to ConPTY's write-size limits as a giant paste).
    *
    * VALIDATED against a real claude engine (v2.1.206, card 9549e322 review item ②): forcing
    * SUBMIT_VERIFY_TIMEOUT_MS well below a normal UserPromptSubmit round-trip (so the retry ALWAYS fires a
@@ -3105,7 +3130,39 @@ export class PtyHost {
       } else {
         // eslint-disable-next-line no-console
         console.error(`[submit] ${sessionId} gave up after ${attempt} Enter attempts — turn never confirmed started; recovering busy so the session doesn't wedge`);
-        this.setBusy(sessionId, false);
+        // card ee082fbb: clear the stranded injection — ONLY when the composer holds nothing but it (no
+        // human draft started during the failed retries; see the class doc above for the composerLen===0
+        // safety reasoning and the real-claude findings behind exact-backspace as the clear mechanism).
+        //
+        // `attempt > 1` (always true at give-up in production — SUBMIT_MAX_ATTEMPTS defaults to 4) is a
+        // CHEAP proxy for "the paste bracket is closed": THIS attempt's own `if (attempt > 1)` re-assert
+        // above already wrote a fresh START+END pair immediately before ITS Enter (card 97558183's
+        // documented behavior — idle → true no-op, still-open → closes it with a small stray tail), so by
+        // the time this verify-timeout elapses a paste-close was already attempted for this exact attempt.
+        // Skip the clear (fall back to the pre-fix stray-text behavior) when that never happened — a
+        // degenerate SUBMIT_MAX_ATTEMPTS=1 (env-only, never true in production) reaches give-up at
+        // attempt===1 with NO re-assert ever sent, so paste-open is unverified there; sending raw `\x7f`
+        // bytes into a genuinely-still-open paste would fold them in AS PASTE CONTENT (composer becomes
+        // `lastPrompt + backspaces` — strictly worse than the documented pre-fix concatenation). Residual
+        // risk even when attempt>1: that SAME re-assert write could itself also drop (a second, independent
+        // ConPTY drop stacked on the original Enter drop) — not mitigated further here; a paste-markers-
+        // then-Backspace sequence was outside the real-claude probe's validated scope (only START+END+Enter
+        // was probed), so we don't stack another unverified re-assert on top of the burst.
+        if (l.composerLen === 0 && l.lastPrompt && attempt > 1) {
+          // eslint-disable-next-line no-console
+          console.log(`[submit] ${sessionId} clearing the stranded give-up injection (${l.lastPrompt.length} chars, composer otherwise empty)`);
+          // Thread setBusy(false) through the burst's OWN completion, not fired alongside it: writeChunked
+          // is only synchronous for text ≤ PTY_WRITE_CHUNK_BYTES — a large lastPrompt (a worker report /
+          // manager direction routinely exceeds it) becomes N chunks across event-loop ticks, and busy
+          // gates enqueueStdin's immediate-submit path (~this.enqueueStdin's `!live.busy` check). Clearing
+          // busy before the burst finishes would reopen that gate mid-burst: an inbound message landing in
+          // the window would submit a NEW turn whose own BRACKET_PASTE_START+chunks interleave with our
+          // still-draining backspaces on the pty's FIFO — a silent, corrupted/truncated turn. submit() itself
+          // follows this same discipline (its own post-write Enter is gated behind writeChunked's `done`).
+          this.writeChunked(sessionId, BACKSPACE.repeat(l.lastPrompt.length), () => this.setBusy(sessionId, false));
+        } else {
+          this.setBusy(sessionId, false);
+        }
       }
     }, SUBMIT_VERIFY_TIMEOUT_MS);
   }
