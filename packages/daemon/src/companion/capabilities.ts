@@ -18,7 +18,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CompanionRoute, Question, Session, SessionRole, Task, TaskPriority } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
-import { createProjectTask, listProjectTasks, updateProjectTask, type TaskSummary } from "../mcp/tasks.js";
+import { createProjectTask, getProjectTask, listProjectTasks, updateProjectTask, type TaskSummary } from "../mcp/tasks.js";
 import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } from "../vault/browser.js";
 import type { OwnerAttestation } from "./attestation.js";
 import { CompanionTrustWindow } from "./trust-window.js";
@@ -641,7 +641,16 @@ const BOARD_PRIORITY_SCHEMA = z.enum(["p0", "p1", "p2", "p3"]);
 
 /**
  * `board-reach` (Framework §4) — `board_list` is the READ half: a read-only tool reporting board cards
- * across the granted projects. Mirrors SESSION_STATUS/DECISIONS_RELAY exactly.
+ * (titles/summaries, no body) across the granted projects. Mirrors SESSION_STATUS/DECISIONS_RELAY
+ * exactly. `board_get` (card 5a5d21aa) extends the same READ half — a per-project, single-card
+ * lookup returning the FULL card (title + body + fields) by id, so a granted companion can read what a
+ * card actually says, not just that it exists. Registered UNCONDITIONALLY alongside `board_list` (Tier
+ * R, before the `hasActGrant` gate below) — a read-only grant sees it too, and it never touches the
+ * trust window or Primitive A/B/C at all: it's a pure read, reusing `getProjectTask` (mcp/tasks.ts), the
+ * same reader `tasks_get`/the Lead's `project_task_get` use. Scope is the one guard: `project` must be
+ * one of this grant's granted projects (belt-and-suspenders, mirrors `board_list`'s own `project`
+ * selector check) — a `taskId` that doesn't resolve on that project resolves to not-found via
+ * `getProjectTask` itself.
  *
  * `board_create`/`board_update` are the ACT half (card 7975c034) — registered ONLY when at least one of
  * this grant's projects is act-mode (`hasActGrant`, exactly like `decision_resolve`'s own gate), so a
@@ -703,6 +712,35 @@ const BOARD_REACH: CompanionCapability = {
           }));
         });
         return ok({ cards });
+      },
+    );
+
+    server.registerTool(
+      "board_get",
+      {
+        description:
+          "Read-only view of ONE full board card (by the exact `id` from board_list), in one of your " +
+          "granted project(s) — title, body, and fields (column, priority, position, held, timestamps). " +
+          "`project` must be one of your granted projects; passing one you were NOT granted, or a " +
+          "`taskId` that doesn't resolve on that project, is rejected with an {error}.",
+        inputSchema: { project: z.string(), taskId: z.string() },
+      },
+      async ({ project, taskId }) => {
+        // Belt-and-suspenders re-check (Framework §2): `project` must be one of THIS grant's scoped
+        // projects — it can only ever NAME a project already granted, never widen scope.
+        if (!ctx.scope.projectIds.has(project)) {
+          return ok({ error: `project "${project}" is not in your granted scope` });
+        }
+        const found = getProjectTask(db, project, taskId);
+        if ("error" in found) return ok({ error: found.error });
+        const projectName = db.getProject(project)?.name ?? null;
+        return ok({
+          card: {
+            id: found.id, title: found.title, body: found.body, columnKey: found.columnKey,
+            priority: found.priority, position: found.position, held: found.held ?? false,
+            createdAt: found.createdAt, updatedAt: found.updatedAt, projectId: project, projectName,
+          },
+        });
       },
     );
 
