@@ -111,6 +111,7 @@ export class OperatorMcpRouter {
       async ({ branch }) => {
         const p = ownProject();
         if (!p) return ok({ error: "no project for this session" });
+        if (!p.repoPath) return ok({ error: "no repo path for this project" });
         return ok(await gitWriterFor(p.repoPath).checkout(branch));
       },
     );
@@ -124,6 +125,7 @@ export class OperatorMcpRouter {
       async ({ name }) => {
         const p = ownProject();
         if (!p) return ok({ error: "no project for this session" });
+        if (!p.repoPath) return ok({ error: "no repo path for this project" });
         return ok(await gitWriterFor(p.repoPath).createBranch(name));
       },
     );
@@ -137,6 +139,7 @@ export class OperatorMcpRouter {
       async ({ message }) => {
         const p = ownProject();
         if (!p) return ok({ error: "no project for this session" });
+        if (!p.repoPath) return ok({ error: "no repo path for this project" });
         return ok(await gitWriterFor(p.repoPath).commit(message));
       },
     );
@@ -150,6 +153,7 @@ export class OperatorMcpRouter {
       async () => {
         const p = ownProject();
         if (!p) return ok({ error: "no project for this session" });
+        if (!p.repoPath) return ok({ error: "no repo path for this project" });
         return ok(await gitWriterFor(p.repoPath).push());
       },
     );
@@ -165,6 +169,7 @@ export class OperatorMcpRouter {
       async ({ path: relPath, content }) => {
         const p = ownProject();
         if (!p) return ok({ error: "no project for this session" });
+        if (!p.vaultPath) return ok({ error: "no vault path for this project" });
         return ok(await writeVaultFile(p.vaultPath, relPath, content));
       },
     );

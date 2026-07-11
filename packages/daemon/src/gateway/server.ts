@@ -62,7 +62,7 @@ import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge,
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
 import { getDejaCaptureCount } from "../deja/store.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
-import { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME } from "../setup/seed.js";
+import { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME, seedOperatorAgent } from "../setup/seed.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
 import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from "../skills/companion-store.js";
@@ -3138,7 +3138,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.patch("/api/platform/config", async (req, reply) => {
     const v = validatePlatformConfigOverride((req.body as { config?: unknown })?.config ?? req.body);
     if (!v.ok) return reply.code(400).send({ error: `invalid platform config: ${v.error}` });
+    const wasOperatorEnabled = isOperatorEnabled(deps.db);
     deps.db.setPlatformConfig(v.value);
+    // Bucket 2b follow-up: a false→true flip should surface the bundled "Elevated Operator" convenience
+    // agent immediately, not just on the next boot seed (seedOperatorAgent is itself flag-gated + idempotent
+    // seed-if-absent-by-name, so this is a safe no-op on every other transition). Best-effort — a seed
+    // failure must never fail the config write the human actually asked for.
+    if (!wasOperatorEnabled && isOperatorEnabled(deps.db)) {
+      try {
+        const seeded = seedOperatorAgent(deps.db);
+        if (seeded) console.log(`[platform-config] seeded elevated operator agent: ${seeded}`);
+      } catch (e) {
+        console.warn(`[platform-config] seedOperatorAgent failed after operatorEnabled flip: ${(e as Error).message}`);
+      }
+    }
     return { ok: true, override: v.value };
   });
 

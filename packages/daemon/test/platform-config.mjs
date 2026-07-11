@@ -287,10 +287,54 @@ const dbFile = path.join(TMP, "loom.db");
   }
 }
 
+// ============================ (11) operatorEnabled false→true PATCH seeds the Elevated Operator agent ============================
+// Bucket 2b hardening follow-up: seedOperatorAgent used to run ONLY in the boot seed sequence, so flipping
+// platform.operatorEnabled on via the Settings PATCH left the bundled "Elevated Operator" convenience agent
+// missing from the reserved "Platform" home until the next daemon restart. The PATCH handler now kicks the
+// idempotent seed itself on a genuine false→true transition (best-effort — a seed failure must not fail the
+// config write).
+{
+  const { seedSetupHome, OPERATOR_AGENT_NAME } = await import("../dist/setup/seed.js");
+  const opDbFile = path.join(TMP, "operator-seed.db");
+  const db = new Db(opDbFile);
+  try {
+    db.setPlatformConfig({}); // operatorEnabled defaults false
+    const seeded = seedSetupHome(db); // seed-if-absent the reserved "Platform" home so seedOperatorAgent has somewhere to attach
+    check("(11) reserved Platform home seeded", seeded.length > 0);
+    const home = db.getReservedProjectByName("Platform");
+    check("(11) reserved Platform home resolvable", !!home);
+
+    const stub = {};
+    const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+    try {
+      check("(11) no operator agent before the flag is ever enabled",
+        !db.listAgents(home.id).some((a) => a.name === OPERATOR_AGENT_NAME));
+
+      // false → true PATCH must seed the agent immediately — no daemon restart needed.
+      const flipOn = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { operatorEnabled: true } });
+      check("(11) PATCH operatorEnabled:true → 200", flipOn.statusCode === 200);
+      check("(11) Elevated Operator agent present right after the false→true PATCH",
+        db.listAgents(home.id).some((a) => a.name === OPERATOR_AGENT_NAME));
+      const countAfterFirst = db.listAgents(home.id).filter((a) => a.name === OPERATOR_AGENT_NAME).length;
+      check("(11) exactly one operator agent after the first flip", countAfterFirst === 1);
+
+      // A second true→true PATCH is not a fresh false→true transition — must NOT double-seed.
+      const flipStillOn = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { operatorEnabled: true } });
+      check("(11) second true→true PATCH → 200", flipStillOn.statusCode === 200);
+      const countAfterSecond = db.listAgents(home.id).filter((a) => a.name === OPERATOR_AGENT_NAME).length;
+      check("(11) no double-seed on a true→true PATCH", countAfterSecond === 1);
+    } finally {
+      try { await app.close(); } catch { /* ignore */ }
+    }
+  } finally {
+    db.close();
+  }
+}
+
 // cleanup the temp LOOM_HOME (best-effort; retry for the WAL handle on Windows)
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; and GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform."
+  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; and a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
