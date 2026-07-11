@@ -13,7 +13,7 @@ import { ensureTrusted } from "./claude-config.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
-import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev } from "../paths.js";
+import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
@@ -899,10 +899,15 @@ export function buildMcpServers(o: {
         // the same always-current main graph.
         const scope = o.worktreeId ? `${o.projectId}/${o.worktreeId}` : `${o.projectId}`;
         mcpServers["codescape"] = { type: "http", url: `http://127.0.0.1:${port}/mcp/${scope}` };
-      } else {
+      } else if (isCodescapeSupervisorEnabled()) {
+        // The supervisor IS enabled (LOOM_DEV + LOOM_CODESCAPE_ENABLED=1) but has no live port — it gave
+        // up after exhausting its restart backoff (or hasn't finished starting yet). A real problem, worth
+        // a warning. Distinct from the benign "LOOM_CODESCAPE_ENABLED unset" case below, which every spawn
+        // on a codescape-enabled project would otherwise hit and spam on every single boot/spawn.
         // eslint-disable-next-line no-console
         console.warn(`[pty] ${o.sessionId} codescape enabled but the supervisor port is unavailable — spawning WITHOUT the Codescape MCP.`);
       }
+      // else: LOOM_CODESCAPE_ENABLED unset — the benign "supervisor disabled" case; no per-spawn warning.
     }
     // !isLoomDev(): silent skip, mirroring deja-corpus — the "missing" reason is the gate itself.
   }
@@ -924,6 +929,24 @@ export const CODESCAPE_TOOL_ALLOW: readonly string[] = [
   "mcp__codescape__render_tree",
   "mcp__codescape__boundary_map",
   "mcp__codescape__scenario_space",
+];
+
+/**
+ * Card C2 hardening (post-hoc CR blocker): the 5 control/write Codescape tools — NEVER allowlisted (see
+ * {@link CODESCAPE_TOOL_ALLOW}), but the mounted `codescape` MCP entry still ADVERTISES all 12 to the
+ * model regardless. Under `--permission-mode acceptEdits`, a tool that's mounted but not allowlisted is
+ * NOT auto-approved — it PROMPTS. A Loom-driven role (worker/setup/auditor/workspace-auditor, stdin owned
+ * by its manager, `AskUserQuestion` disallowed) can never answer that prompt, so a stray call wedges the
+ * turn until the busy-stuck watchdog fires. These names are unioned into `--disallowedTools` (see
+ * {@link disallowedToolsForSpawn}) whenever the codescape MCP is actually mounted, so the write surface is
+ * structurally unreachable rather than merely un-allowlisted.
+ */
+export const CODESCAPE_WRITE_TOOLS: readonly string[] = [
+  "mcp__codescape__focus_flow",
+  "mcp__codescape__highlight",
+  "mcp__codescape__open_view",
+  "mcp__codescape__annotate",
+  "mcp__codescape__show_diff",
 ];
 
 /**
@@ -1374,16 +1397,20 @@ export const RESTRICTED_NATIVE_TOOLS: readonly string[] = Object.freeze([
 /**
  * The FULL `--disallowedTools` list for a spawn: the role's disallow list ({@link disallowedToolsForRole}
  * — the human-prompt tools, the task-tracking tools, or both) UNIONed (de-duped, role tools first) with
- * {@link RESTRICTED_NATIVE_TOOLS} iff `restrictedTools` is on. When OFF this returns EXACTLY
- * `disallowedToolsForRole(role)` — so the flag-off argv is BYTE-IDENTICAL to today (no restricted tokens
- * appended). Pure + exported so the spawn-args test asserts the union + the byte-identical-off invariant
- * with no real claude. (Companion blast-radius card.)
+ * {@link RESTRICTED_NATIVE_TOOLS} iff `restrictedTools` is on, AND with {@link CODESCAPE_WRITE_TOOLS} iff
+ * `codescapeMounted` is true (the mounted Codescape MCP still advertises its 5 write tools even though
+ * they're never allowlisted — see CODESCAPE_WRITE_TOOLS's doc for why that alone isn't enough). When BOTH
+ * are off/falsy this returns EXACTLY `disallowedToolsForRole(role)` — so the flag-off argv is BYTE-IDENTICAL
+ * to today (no restricted/codescape tokens appended). Pure + exported so the spawn-args test asserts the
+ * union + the byte-identical-off invariant with no real claude. (Companion blast-radius card; Codescape C2
+ * hardening.)
  */
-export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedTools?: boolean): string[] {
+export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedTools?: boolean, codescapeMounted?: boolean): string[] {
   const base = disallowedToolsForRole(role);
-  if (!restrictedTools) return base; // OFF: exactly the role's disallow list (byte-identical to today)
+  if (!restrictedTools && !codescapeMounted) return base; // OFF: exactly the role's disallow list (byte-identical to today)
   const merged = [...base];
-  for (const t of RESTRICTED_NATIVE_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
+  if (restrictedTools) for (const t of RESTRICTED_NATIVE_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
+  if (codescapeMounted) for (const t of CODESCAPE_WRITE_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
   return merged;
 }
 
@@ -2291,10 +2318,13 @@ export class PtyHost {
     // Role-scoped disallow of the interactive human-prompt tools (AskUserQuestion / Exit|EnterPlanMode):
     // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human — UNIONed with
     // the curated dangerous native tools when this session's Profile set restrictedTools (Companion
-    // blast-radius control). Computed from the session role + pinned flag at the single spawn chokepoint, so
-    // EVERY path (fresh/resume/fork/recycle/boot) inherits it; when restrictedTools is off this is exactly
-    // disallowedToolsForRole(role) ⇒ byte-identical argv. See disallowedToolsForSpawn.
-    const disallowedTools = disallowedToolsForSpawn(opts.role, opts.restrictedTools);
+    // blast-radius control), AND with the 5 Codescape write tools when the mcpServers map actually carries
+    // a "codescape" entry (a mounted-but-unallowlisted MCP tool still PROMPTS under acceptEdits, which a
+    // Loom-driven role can never answer — see CODESCAPE_WRITE_TOOLS). Computed from the session role +
+    // pinned flags at the single spawn chokepoint, so EVERY path (fresh/resume/fork/recycle/boot) inherits
+    // it; with restrictedTools off and codescape unmounted this is exactly disallowedToolsForRole(role) ⇒
+    // byte-identical argv. See disallowedToolsForSpawn.
+    const disallowedTools = disallowedToolsForSpawn(opts.role, opts.restrictedTools, !!mcpServers.codescape);
     // Agent-tooling P4 credential-tie hardening: a capability secret must NEVER ride the claude process's
     // own argv. Diverting to a 0600 per-session FILE is CONDITIONAL on the map actually carrying one —
     // every secret-free spawn (every session today) keeps the byte-identical inline --mcp-config <json>

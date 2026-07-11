@@ -2829,12 +2829,14 @@ export class SessionService {
       // guaranteeing its own ISOLATED worktree/branch that can never collide with a task's worktree or
       // with another taskless spawn's (this is also how a read-only reviewer avoids ever sharing the
       // author's worktree — see the guard note above).
-      const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit });
+      const { worktreePath, branch, mainSha } = await createWorktree(project.repoPath, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit });
       // Codescape C3: register this worktree with the fleet-daemon supervisor — fire-and-forget, NEVER
       // blocks the spawn (isCodescapeEnabled folds in isLoomDev(), so a non-dev/disabled daemon fires
       // nothing). Skipped for a taskless spawn: codescapeWorktreeId(taskId) is null (no stable id for
-      // C3's later drop-on-gc to target — same carve-out C2's MCP wiring already uses).
-      this.fireCodescapeRegister(project.id, config, codescapeWorktreeId(taskId), worktreePath, branch);
+      // C3's later drop-on-gc to target — same carve-out C2's MCP wiring already uses). baseRef is the
+      // FORK POINT (createWorktree's mainSha) — NOT `branch` (the worktree's OWN branch), which would make
+      // any base-vs-worktree divergence always compute as `branch..branch` = empty (CR fix).
+      this.fireCodescapeRegister(project.id, config, codescapeWorktreeId(taskId), worktreePath, mainSha);
 
       const now = new Date().toISOString();
       const worker: Session = {

@@ -8,6 +8,10 @@ import { WORKTREES_DIR } from "../paths.js";
 export interface WorktreeInfo {
   worktreePath: string;
   branch: string;
+  /** The repo's HEAD sha at the moment of this call — the worktree branch's FORK POINT off main, not the
+   *  worktree's own branch. Codescape's baseRef needs this (a worktree's own branch as its own base is
+   *  always a 0-diff no-op); see the CR fix at sessions/service.ts's fireCodescapeRegister call site. */
+  mainSha: string;
 }
 
 /**
@@ -487,11 +491,14 @@ export async function createWorktree(
   const key = taskKey(taskId);
   const branch = `loom/${key}`;
   const worktreePath = path.join(WORKTREES_DIR, projectId, key);
+  // The repo's CURRENT HEAD — the fork point this worktree's branch is (or was) cut off, captured up
+  // front so it's correct for every path below (fresh cut, reuse, and reattach all fork off THIS sha).
+  const mainSha = (await simpleGit(repoPath).raw(["rev-parse", "HEAD"])).trim();
   if (fs.existsSync(worktreePath)) {
     // Retained worktree → reuse (already provisioned). Re-cut an empty/stale branch onto current main
     // first; a recovery branch (unmerged work) is left exactly as-is.
     await recutStaleReusedBranch(repoPath, worktreePath, branch);
-    return { worktreePath, branch };
+    return { worktreePath, branch, mainSha };
   }
 
   const git = simpleGit(repoPath);
@@ -510,7 +517,7 @@ export async function createWorktree(
   // Populate node_modules so the worker is build-ready without paying a full `pnpm install` first.
   // Best-effort + bounded; on failure the worker just installs on its own (see provisionWorktreeDeps).
   await provisionWorktreeDeps(worktreePath, deps);
-  return { worktreePath, branch };
+  return { worktreePath, branch, mainSha };
 }
 
 /**

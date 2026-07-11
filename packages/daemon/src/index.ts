@@ -24,7 +24,7 @@ import { createFasterWhisperTranscriber, prewarmStt } from "./companion/stt.js";
 import { createKokoroSynthesizer, prewarmTts } from "./companion/tts.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
-import { CodescapeSupervisor } from "./codescape/supervisor.js";
+import { CodescapeSupervisor, codescapeBootRepoPaths } from "./codescape/supervisor.js";
 import { UsageSampler } from "./sessions/usage-sampler.js";
 import { TaskMcpRouter } from "./mcp/server.js";
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
@@ -799,10 +799,13 @@ async function main(): Promise<void> {
   // Codescape fleet-daemon (C1): fire-and-forget, like the reconcile kick above — ingest-then-serve can
   // take a while (a real repo's initial graph build), and nothing here should delay listen() or later
   // boot steps. `.start()` itself logs its own "off"/"starting" state and NEVER throws past this .catch.
-  // v1 bootstrap: no repoPaths yet (C2 lands the per-project `codescape.enabled` flag this will read) —
-  // so today this only ever starts a bare `serve` with zero projects ingested, under LOOM_DEV +
-  // LOOM_CODESCAPE_ENABLED=1.
-  void codescapeSupervisor.start().catch((err) => {
+  // v1 bootstrap: feed every codescape-enabled project's repoPath so `start()` ingests each one BEFORE
+  // `serve` boots — serve loads its project index from `.codescape/projects/index.json` at BOOT ONLY (the
+  // CWD CONTRACT doc in codescape/supervisor.ts), so a project enabled here is the only way it's ever seen.
+  // v1 has NO runtime registration: a project whose `codescape.enabled` flips ON after this boot is not
+  // picked up until the NEXT daemon restart (see the log at the config-PATCH site in gateway/server.ts) —
+  // a real gap, not silently papered over, and intentionally NOT solved here (that's a deferred v2 feature).
+  void codescapeSupervisor.start(codescapeBootRepoPaths(db.listProjects())).catch((err) => {
     console.warn(`[boot] codescape supervisor failed to start (continuing boot): ${(err as Error).message}`);
   });
 

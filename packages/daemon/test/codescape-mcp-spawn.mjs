@@ -47,7 +47,7 @@ delete process.env.LOOM_DEV;
 delete process.env.LOOM_CODESCAPE_ENABLED;
 
 const { Db } = await import("../dist/db.js");
-const { PtyHost, buildMcpServers, CODESCAPE_TOOL_ALLOW } = await import("../dist/pty/host.js");
+const { PtyHost, buildMcpServers, buildSpawnArgs, disallowedToolsForSpawn, CODESCAPE_TOOL_ALLOW, CODESCAPE_WRITE_TOOLS } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { isLoomDev, isCodescapeSupervisorEnabled, isCodescapeEnabled } = await import("../dist/paths.js");
@@ -91,6 +91,41 @@ check("(allowlist) CODESCAPE_TOOL_ALLOW has exactly the 7 read tools",
   CODESCAPE_TOOL_ALLOW.length === 7 && expectedRead.every((t) => CODESCAPE_TOOL_ALLOW.includes(t)));
 check("(allowlist) CODESCAPE_TOOL_ALLOW contains NONE of the 5 control/write tools",
   forbiddenWrite.every((t) => !CODESCAPE_TOOL_ALLOW.includes(t)));
+
+// ===================== CR fix: the 5 write tools are actually UNREACHABLE, not just un-allowlisted =====================
+// The allowlist checks above only prove the write tools are absent from --allowedTools; under
+// `acceptEdits` a mounted-but-unallowlisted MCP tool still PROMPTS (it isn't auto-denied), which would
+// wedge a Loom-driven worker session. disallowedToolsForSpawn must union CODESCAPE_WRITE_TOOLS into
+// `--disallowedTools` whenever the codescape MCP is actually mounted — proving the write tools are
+// structurally unreachable, not merely unallowlisted.
+check("(CODESCAPE_WRITE_TOOLS) carries exactly the 5 control/write tool names",
+  CODESCAPE_WRITE_TOOLS.length === 5 && forbiddenWrite.every((t) => CODESCAPE_WRITE_TOOLS.includes(t)));
+
+check("(disallow) codescapeMounted=false ⇒ disallowedToolsForSpawn has NONE of the write tools",
+  forbiddenWrite.every((t) => !disallowedToolsForSpawn("worker", false, false).includes(t)));
+check("(disallow) codescapeMounted=true ⇒ disallowedToolsForSpawn has ALL 5 write tools",
+  forbiddenWrite.every((t) => disallowedToolsForSpawn("worker", false, true).includes(t)));
+check("(disallow) codescapeMounted=true still keeps the role's own disallow list (union, not replace)",
+  ["AskUserQuestion", "ExitPlanMode", "EnterPlanMode"].every((t) => disallowedToolsForSpawn("worker", false, true).includes(t)));
+check("(disallow) codescapeMounted + restrictedTools both off ⇒ byte-identical to disallowedToolsForSpawn(role) alone",
+  JSON.stringify(disallowedToolsForSpawn("worker", false, false)) === JSON.stringify(disallowedToolsForSpawn("worker")));
+
+// End-to-end through buildSpawnArgs: the write tools actually land in `--disallowedTools` argv when
+// codescape is mounted, and are absent when it isn't — proving the flag is emitted, not just the array.
+{
+  const mcpNoCodescape = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } };
+  const mcpWithCodescape = { ...mcpNoCodescape, codescape: { type: "http", url: "http://127.0.0.1:5555/mcp/pA" } };
+  const argsWithout = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: mcpNoCodescape, startupPrompt: "GO", disallowedTools: disallowedToolsForSpawn("worker", false, !!mcpNoCodescape.codescape) });
+  const argsWith = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: mcpWithCodescape, startupPrompt: "GO", disallowedTools: disallowedToolsForSpawn("worker", false, !!mcpWithCodescape.codescape) });
+  check("(e2e-disallow) codescape NOT mounted: none of the 5 write tools appear in argv",
+    forbiddenWrite.every((t) => !argsWithout.includes(t)));
+  check("(e2e-disallow) codescape MOUNTED: all 5 write tools appear in --disallowedTools argv",
+    forbiddenWrite.every((t) => argsWith.includes(t)));
+  const d = argsWith.indexOf("--disallowedTools");
+  const strict = argsWith.indexOf("--strict-mcp-config");
+  check("(e2e-disallow) --disallowedTools still precedes --strict-mcp-config (flag-ordering invariant preserved)",
+    d !== -1 && strict !== -1 && d < strict);
+}
 
 // ===================== buildMcpServers: NEGATIVE CASE x3 — byte-identical to a no-flag spawn =====================
 const noFlag = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker" });

@@ -3098,7 +3098,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // platform MCP's project_configure so UI/REST and the agent share one validator + store.
   app.patch("/api/projects/:id/config", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    const existing = deps.db.getProject(id);
+    if (!existing) return reply.code(404).send({ error: "project not found" });
     const v = validateProjectConfigOverride((req.body as { config?: unknown })?.config ?? req.body);
     if (!v.ok) return reply.code(400).send({ error: `invalid config: ${v.error}` });
     // Route through the SAFE writer (not a blind setProjectConfig): a kanbanColumns change that drops/renames
@@ -3106,6 +3107,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // column. A non-column patch stays byte-identical to the blind path. (tasks/columns.ts.)
     const wrote = setProjectConfigSafe(deps.db, id, v.value);
     if (!wrote.ok) return reply.code(400).send({ error: wrote.error });
+    // Codescape v1 has no runtime registration (see codescape/supervisor.ts's CWD CONTRACT doc): serve
+    // only ever sees the projects boot-ingested it. Flipping codescape.enabled ON here won't ingest this
+    // project until the next daemon restart — log it so the gap isn't silent.
+    if (v.value.codescape?.enabled && !resolveConfig(existing.config).codescape.enabled) {
+      console.log(`[codescape] project ${id} codescape.enabled set — a daemon restart is required to ingest this project (v1)`);
+    }
     return deps.db.getProject(id);
   });
 

@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import net from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
-import { CODESCAPE_HOME_DIR, isCodescapeSupervisorEnabled, resolveCodescapeBin } from "../paths.js";
+import { resolveConfig, type ProjectConfigOverride } from "@loom/shared";
+import { CODESCAPE_HOME_DIR, isCodescapeSupervisorEnabled, isLoomDev, resolveCodescapeBin } from "../paths.js";
 
 /**
  * Codescape fleet-daemon wiring epic (`369dde3c`), card C1 — FOUNDATION. Under `isCodescapeSupervisorEnabled()`
@@ -141,6 +142,26 @@ function pickLoopbackPort(): Promise<number> {
   });
 }
 
+/** The narrow project shape {@link codescapeBootRepoPaths} needs — kept structural so a test can fake it
+ *  with plain objects, no real Db. */
+export interface CodescapeBootProject {
+  repoPath: string;
+  config?: ProjectConfigOverride;
+}
+
+/**
+ * CR fix (blocker 1): which projects' repoPaths the daemon should feed into `start()`'s ingest loop at
+ * boot. Without this, `start()` was always called with `[]` — `codescape serve` boots with an EMPTY
+ * project index (v1 has no runtime registration; see the CWD CONTRACT doc above), so every one of the 7
+ * read tools silently returns empty even on a project with `codescape.enabled` on. A project qualifies
+ * iff its RESOLVED `codescape.enabled` flag is true; the daemon-wide `isCodescapeSupervisorEnabled()` gate
+ * is `start()`'s own concern (it no-ops before ever looking at repoPaths when disabled), so this stays a
+ * pure, project-only filter — hermetically testable with plain objects, no live git/db/supervisor.
+ */
+export function codescapeBootRepoPaths(projects: CodescapeBootProject[]): string[] {
+  return projects.filter((p) => resolveConfig(p.config).codescape.enabled).map((p) => p.repoPath);
+}
+
 export class CodescapeSupervisor {
   private readonly homeDir: string;
   private readonly restartBackoffMs: number[];
@@ -219,7 +240,10 @@ export class CodescapeSupervisor {
   async start(repoPaths: string[] = []): Promise<void> {
     if (this.starting || this.child) return;
     if (!isCodescapeSupervisorEnabled()) {
-      console.log("[boot] codescape off (set LOOM_DEV=1 and LOOM_CODESCAPE_ENABLED=1 to enable fleet-daemon supervision)");
+      // isLoomDev()-gated: a regular (non-dev) end user never sees a reference to this unshipped,
+      // LOOM_DEV-only feature at every boot — only a LOOM_DEV=1 dev build without LOOM_CODESCAPE_ENABLED
+      // (the "off but could be on" case) gets the reminder.
+      if (isLoomDev()) console.log("[boot] codescape off (set LOOM_DEV=1 and LOOM_CODESCAPE_ENABLED=1 to enable fleet-daemon supervision)");
       return;
     }
     this.starting = true;

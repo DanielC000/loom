@@ -41,8 +41,26 @@ delete process.env.LOOM_DEV;
 delete process.env.LOOM_CODESCAPE_ENABLED;
 delete process.env.LOOM_CODESCAPE_BIN;
 
-const { CodescapeSupervisor } = await import("../dist/codescape/supervisor.js");
+const { CodescapeSupervisor, codescapeBootRepoPaths } = await import("../dist/codescape/supervisor.js");
 const { isLoomDev, isCodescapeSupervisorEnabled, resolveCodescapeBin, CODESCAPE_HOME_DIR } = await import("../dist/paths.js");
+
+// ===================== CR fix (blocker 1): codescapeBootRepoPaths — the boot-ingest project filter =====================
+// Pure, hermetic, no live db — plain project-shaped objects. Proves the boot-ingest gap fix: a project
+// whose RESOLVED codescape.enabled is true contributes its repoPath; everything else is filtered out.
+check("(boot-ingest) no projects ⇒ []", JSON.stringify(codescapeBootRepoPaths([])) === "[]");
+check("(boot-ingest) a project with no config override (default codescape.enabled=false) is excluded",
+  JSON.stringify(codescapeBootRepoPaths([{ repoPath: "/repo/a" }])) === "[]");
+check("(boot-ingest) codescape.enabled explicitly false is excluded",
+  JSON.stringify(codescapeBootRepoPaths([{ repoPath: "/repo/a", config: { codescape: { enabled: false } } }])) === "[]");
+check("(boot-ingest) codescape.enabled true contributes its repoPath",
+  JSON.stringify(codescapeBootRepoPaths([{ repoPath: "/repo/a", config: { codescape: { enabled: true } } }])) === JSON.stringify(["/repo/a"]));
+check("(boot-ingest) mixed set: only the enabled projects' repoPaths, in list order",
+  JSON.stringify(codescapeBootRepoPaths([
+    { repoPath: "/repo/a", config: { codescape: { enabled: true } } },
+    { repoPath: "/repo/b", config: { codescape: { enabled: false } } },
+    { repoPath: "/repo/c" },
+    { repoPath: "/repo/d", config: { codescape: { enabled: true } } },
+  ])) === JSON.stringify(["/repo/a", "/repo/d"]));
 
 // ===================== paths.ts resolvers (claude-free, pure) =====================
 check("(resolver) CODESCAPE_HOME_DIR derives from LOOM_HOME", CODESCAPE_HOME_DIR === path.join(tmpHome, "codescape"));
@@ -235,6 +253,6 @@ delete process.env.LOOM_DEV;
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape supervisor (C1): LOOM_DEV unset never spawns anything (getPort/getPid null, zero side effects); enabled ingest-then-serve run from the SAME shared cwd (CWD CONTRACT) on a real loopback port; killing the child triggers a bounded restart (same port, new pid); stop() disarms restart-on-death; the control-plane client (register/reingest/drop/overlay) hits the right method+URL+body, is bounded, and NEVER throws — claude-free, network-free."
+  ? "\n✅ ALL PASS — Codescape supervisor (C1): codescapeBootRepoPaths filters projects to only those with codescape.enabled resolved true; LOOM_DEV unset never spawns anything (getPort/getPid null, zero side effects); enabled ingest-then-serve run from the SAME shared cwd (CWD CONTRACT) on a real loopback port; killing the child triggers a bounded restart (same port, new pid); stop() disarms restart-on-death; the control-plane client (register/reingest/drop/overlay) hits the right method+URL+body, is bounded, and NEVER throws — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

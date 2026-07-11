@@ -123,6 +123,9 @@ function makeHost(db) {
     // --- (1) register fires on a TASKED spawn, AFTER createWorktree resolves ---
     const taskId = `clh-task-${sfx}`;
     db.insertTask({ id: taskId, projectId: P.projId, title: "CLH task", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
+    // The repo's HEAD at the moment of the spawn — the TRUE fork point the worker's branch was cut off.
+    // Captured BEFORE spawnWorker so it's unambiguously "main's tip", independent of anything the spawn does.
+    const repoHeadBeforeSpawn = execSync("git rev-parse HEAD", { cwd: P.repo }).toString().trim();
     const worker = await sessions.spawnWorker(mgr.id, { taskId, agentId: P.workerAgentId, kickoffPrompt: "GO" });
     const expectedWorktreeId = codescapeWorktreeId(taskId);
 
@@ -131,7 +134,11 @@ function makeHost(db) {
     check("(1) register: projectId matches", reg?.projectId === P.projId);
     check("(1) register: worktreeId === codescapeWorktreeId(taskId) === taskKey(taskId)", reg?.worktreeId === expectedWorktreeId && reg?.worktreeId === taskKey(taskId));
     check("(1) register: path === the real worktree path", reg?.path === worker.worktreePath);
-    check("(1) register: baseRef is a non-empty string (the branch name)", typeof reg?.baseRef === "string" && reg.baseRef.length > 0 && reg.baseRef === worker.branch);
+    // CR fix: baseRef must be the FORK POINT (main's HEAD sha at cut time), NOT the worktree's OWN branch —
+    // passing `branch` as `baseRef` makes any base-vs-worktree divergence always compute as `branch..branch`
+    // (empty), since createWorktree returns that same branch as the worktree's checked-out ref.
+    check("(1) register: baseRef is a non-empty string (main's fork-point sha)", typeof reg?.baseRef === "string" && reg.baseRef.length > 0 && reg.baseRef === repoHeadBeforeSpawn);
+    check("(1) register: baseRef is NOT the worktree's own branch (the bug this fixes)", reg?.baseRef !== worker.branch);
 
     // --- (1b) register is SKIPPED for a taskless spawn (no stable worktreeId) ---
     const registerCountBeforeTaskless = fake.calls.register.length;
