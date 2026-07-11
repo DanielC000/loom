@@ -76,6 +76,14 @@ export default function Settings() {
         <SectionLabel>Capabilities</SectionLabel>
         <CapabilitiesPanel />
       </div>
+
+      {/* Owner-declared project links (board card 2349d90c) — the sole gate for the manager↔manager
+          peer_message cross-project channel. Daemon-global, cross-project (not scoped to the active
+          project above), HUMAN-only — like Connections/Capabilities, there is no agent MCP path. */}
+      <div>
+        <SectionLabel>Project Links</SectionLabel>
+        <ProjectLinksPanel />
+      </div>
     </div>
   );
 }
@@ -935,6 +943,96 @@ function usePollAgents() {
       return lists.flat();
     },
   });
+}
+
+// Owner-declared symmetric project links (board card 2349d90c) — the sole gate for the manager↔manager
+// `peer_message` cross-project channel. Daemon-global (like Connections/Capabilities), HUMAN-only REST —
+// there is intentionally no agent MCP path that can create or remove a link. A minimal list + two-project
+// picker; project names are resolved from the already-loaded active-project list (api.projects()).
+function ProjectLinksPanel() {
+  const qc = useQueryClient();
+  const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: () => api.projects() });
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ["projectLinks"],
+    queryFn: () => api.projectLinks(),
+  });
+
+  const nameFor = (id: string) => projects?.find((p) => p.id === id)?.name ?? id;
+
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["projectLinks"] });
+  const [projectA, setProjectA] = useState("");
+  const [projectB, setProjectB] = useState("");
+  const create = useMutation({
+    mutationFn: () => api.createProjectLink({ projectA, projectB }),
+    onSuccess: () => { setProjectA(""); setProjectB(""); invalidate(); },
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api.deleteProjectLink(id),
+    onSuccess: () => invalidate(),
+    onError: (e) => window.alert((e as Error).message),
+  });
+
+  const rows = data ?? [];
+  const options = projects ?? [];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <Panel>
+        <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+          Link two projects to let their managers message each other directly (the <code>peer_message</code> tool) —
+          e.g. to answer contract questions without hand-relaying them through the Platform Lead. A manager can
+          reach ONLY a project linked here; there is no agent-facing way to create a link.
+        </p>
+      </Panel>
+
+      <Panel>
+        <SectionLabel style={{ margin: "0 0 8px" }}>Links ({rows.length})</SectionLabel>
+
+        {isLoading && <Hint>loading project links…</Hint>}
+        {isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/project-links"}</span>}
+
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Project A</span>
+            <Select value={projectA} onChange={(e) => setProjectA(e.target.value)}>
+              <option value="">select…</option>
+              {options.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </Select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Project B</span>
+            <Select value={projectB} onChange={(e) => setProjectB(e.target.value)}>
+              <option value="">select…</option>
+              {options.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </Select>
+          </label>
+          <Button variant="primary" disabled={!projectA || !projectB || create.isPending} onClick={() => create.mutate()}>
+            Link
+          </Button>
+        </div>
+        {create.error && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, display: "block", marginBottom: 8 }}>{(create.error as Error).message}</span>}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {rows.length === 0 && !isLoading && (
+            <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>No project links yet.</span>
+          )}
+          {rows.map((l) => (
+            <div key={l.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{nameFor(l.projectAId)}</span>
+              <span style={{ color: color.textDim }}>↔</span>
+              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{nameFor(l.projectBId)}</span>
+              <span style={{ flex: 1 }} />
+              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{new Date(l.createdAt).toLocaleString()}</span>
+              <Button variant="danger" disabled={remove.isPending}
+                onClick={() => { if (window.confirm(`Unlink "${nameFor(l.projectAId)}" and "${nameFor(l.projectBId)}"? Their managers will no longer be able to peer_message each other.`)) remove.mutate(l.id); }}>
+                Unlink
+              </Button>
+            </div>
+          ))}
+        </div>
+      </Panel>
+    </div>
+  );
 }
 
 function PollJobsPanel() {

@@ -39,6 +39,7 @@ import type {
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
   ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
+  ProjectLink,
 } from "@loom/shared";
 import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { isOwnerHeldTaskTitle, describeCron } from "@loom/shared";
@@ -763,6 +764,22 @@ CREATE TABLE IF NOT EXISTS capability_defs (
   secret_env_var TEXT,                       -- env var name the P1 secret is injected under; NULL if N/A
   created_at TEXT NOT NULL
 );
+-- Owner-declared SYMMETRIC project link (board card 2349d90c) — the sole gate for the manager<->manager
+-- peer_message cross-project channel: a manager may message a peer project's manager ONLY if the owner
+-- has linked the two projects here. GLOBAL / daemon-wide, HUMAN-managed only over the loopback REST
+-- surface — NO MCP path (same trust posture as connections/capability_defs above): an agent must never be
+-- able to link projects itself and so widen its own cross-project reach. project_a_id/project_b_id are
+-- always stored canonically ordered (lexicographically smaller id first, see Db.createProjectLink) so a
+-- pair is represented exactly once regardless of which side the owner declared it from; the unique index
+-- below enforces that at the storage layer too. Brand-new table => CREATE TABLE IF NOT EXISTS is itself the
+-- additive migration (no ALTER needed), exactly like connections/capability_defs.
+CREATE TABLE IF NOT EXISTS project_links (
+  id TEXT PRIMARY KEY,
+  project_a_id TEXT NOT NULL REFERENCES projects(id),
+  project_b_id TEXT NOT NULL REFERENCES projects(id),
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_project_links_pair ON project_links(project_a_id, project_b_id);
 -- Manager→human DECISION INBOX (card 8701bdbb, daemon core / child A), generalized (card 695ebab0) into
 -- a durable, TYPED Requests object via the 'type' discriminator: 'decision' (the original shape, and the
 -- default — backward-compat for every pre-695ebab0 caller), 'input' (freeform-text, no options),
@@ -2399,6 +2416,42 @@ export class Db {
   /** Delete an owner-added capability def by id (idempotent — a missing id matches nothing). */
   deleteCapabilityDef(id: string): void {
     this.db.prepare("DELETE FROM capability_defs WHERE id = ?").run(id);
+  }
+
+  // --- project_links (owner-declared symmetric project link, cross-project peer_message gate) ---
+  // GLOBAL / daemon-wide, HUMAN-managed only over the loopback REST surface — NO MCP path (same trust
+  // posture as connections/capability_defs above): an agent must never be able to link projects itself. ---
+  /** Every declared project link, ordered by created_at for a stable admin list. */
+  listProjectLinks(): ProjectLink[] {
+    return (this.db.prepare("SELECT * FROM project_links ORDER BY created_at, rowid").all() as Row[]).map(toProjectLink);
+  }
+  /** Read one link by id, or undefined when absent. */
+  getProjectLink(id: string): ProjectLink | undefined {
+    const r = this.db.prepare("SELECT * FROM project_links WHERE id = ?").get(id) as Row | undefined;
+    return r ? toProjectLink(r) : undefined;
+  }
+  /** True iff the two projects are linked (either direction) — the server-side gate `peer_message` checks. */
+  areProjectsLinked(projectAId: string, projectBId: string): boolean {
+    const { a, b } = canonicalProjectLinkPair(projectAId, projectBId);
+    const r = this.db.prepare("SELECT 1 FROM project_links WHERE project_a_id = ? AND project_b_id = ?").get(a, b);
+    return !!r;
+  }
+  /**
+   * Create a new symmetric link, canonically ordering the pair (lexicographically smaller id first) so it
+   * is represented exactly once regardless of declaration order. Caller (the REST route) validates
+   * self-link / duplicate / project-existence first; the unique index is the storage-layer backstop.
+   */
+  createProjectLink(projectAId: string, projectBId: string): ProjectLink {
+    const { a, b } = canonicalProjectLinkPair(projectAId, projectBId);
+    const row: ProjectLink = { id: randomUUID(), projectAId: a, projectBId: b, createdAt: new Date().toISOString() };
+    this.db.prepare(
+      `INSERT INTO project_links (id, project_a_id, project_b_id, created_at) VALUES (@id, @projectAId, @projectBId, @createdAt)`,
+    ).run(row);
+    return row;
+  }
+  /** Delete a link by id (idempotent — a missing id matches nothing). */
+  deleteProjectLink(id: string): void {
+    this.db.prepare("DELETE FROM project_links WHERE id = ?").run(id);
   }
 
   // --- agents ---
@@ -4625,6 +4678,17 @@ function toConnectionRow(r0: unknown): ConnectionRow {
     scopes: (r.scopes as string | null) ?? null,
     tokenExpiresAt: (r.token_expires_at as string | null) ?? null,
     oauthNeedsReauth: (r.oauth_needs_reauth as number | null) === 1,
+  };
+}
+/** Canonical (lexicographically smaller-id-first) ordering for a symmetric project_links pair. */
+function canonicalProjectLinkPair(projectAId: string, projectBId: string): { a: string; b: string } {
+  return projectAId <= projectBId ? { a: projectAId, b: projectBId } : { a: projectBId, b: projectAId };
+}
+function toProjectLink(r0: unknown): ProjectLink {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, projectAId: r.project_a_id as string, projectBId: r.project_b_id as string,
+    createdAt: (r.created_at as string) ?? "",
   };
 }
 function toCapabilityDefRow(r0: unknown): CapabilityDefRow {

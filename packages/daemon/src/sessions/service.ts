@@ -42,6 +42,7 @@ import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type Pendi
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
+import { checkPeerMessageRateLimit } from "./peer-message-guard.js";
 import { planColumnLayout, setProjectConfigSafe, type DesiredColumn } from "../tasks/columns.js";
 import { resolveIdPrefix, looksLikeId, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 
@@ -3339,6 +3340,101 @@ export class SessionService {
   }
 
   /**
+   * Manager↔manager cross-project channel (orchestration `peer_message`, board card 2349d90c) — a manager
+   * addressing a message to a LINKED peer project's LIVE manager. This is the manager's SECOND (and only
+   * other) structured cross-project write, alongside `platformEscalate`; unlike that hardcoded-target
+   * escalation, the target here is caller-chosen but gated server-side on `project_links` (owner-declared,
+   * human-only — no MCP path can create a link), so a manager can reach ONLY a project the owner has
+   * explicitly linked to its own. Trust invariants:
+   *   - LINK gate: `db.areProjectsLinked` — an unlinked (or nonexistent) target project is REJECTED.
+   *   - self/same-project target REJECTED (use your own project's board instead).
+   *   - manager↔manager ONLY: resolves the target project's LIVE session with role==="manager" — a live
+   *     worker/platform/auditor session in that project is never matched (mirrors session_spawn's
+   *     manager|plain-only invariant), so the message can never land on the wrong kind of session.
+   *   - NO privilege travels: delivered via the SAME `enqueueDurableMessage` channel worker_message/
+   *     session_message use — a framed, `kind:"agent"` DATA message (one-per-turn) that grants the
+   *     recipient nothing beyond an inbound turn it acts on WITHIN ITS OWN project.
+   *   - rate-limited per ORIGIN manager session (`checkPeerMessageRateLimit`) so a compromised/confused
+   *     manager can't turn this into a cross-project spam/probe vector.
+   * When the target project has NO live manager, mirrors `deliverSessionMessage`'s offline path: rather
+   * than dropping the message or erroring, it boards a durable card on the target project's OWN board (the
+   * message is never lost — the peer's manager picks it up as a normal task on its next boot/attach).
+   * Audited both directions via a single `cross_project_message` event (this method's caller is the ONLY
+   * place that appends it, so origin/target are always recorded together).
+   */
+  messagePeerManager(
+    managerSessionId: string,
+    targetProjectId: string,
+    text: string,
+  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; targetSessionId?: string } {
+    this.requireManager(managerSessionId, "peer_message");
+    const caller = this.db.getSession(managerSessionId)!;
+    const originProjectId = caller.projectId;
+    if (!originProjectId) throw new Error("no project for this session");
+    if (targetProjectId === originProjectId) throw new Error("peer_message: cannot target your own project — use your own board instead");
+    if (!this.db.getProject(targetProjectId)) throw new Error("peer_message: target project not found");
+    if (!this.db.areProjectsLinked(originProjectId, targetProjectId)) {
+      throw new Error("peer_message: target project is not linked to yours — ask the owner to link the projects first");
+    }
+    if (!checkPeerMessageRateLimit(managerSessionId)) {
+      throw new Error("peer_message: rate limit exceeded — slow down and try again shortly");
+    }
+
+    const originProject = this.db.getProject(originProjectId);
+    const originName = originProject?.name ?? originProjectId;
+    const framed = `[loom:from-manager · ${originName}]\n${text}`;
+
+    // manager↔manager ONLY: match role==="manager" explicitly — a live worker/platform/auditor session in
+    // the target project must never be matched, even if it's the only live session there.
+    const targetManager = this.db.listAllSessions().find(
+      (s) => s.projectId === targetProjectId && s.role === "manager" && s.processState === "live",
+    );
+
+    const now = new Date().toISOString();
+    let result: { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; targetSessionId?: string };
+    if (targetManager) {
+      const r = this.enqueueDurableMessage(targetManager.id, framed, { sender: managerSessionId, taskId: targetManager.taskId ?? null });
+      result = { deliveryStatus: this.deliveryStatusFor(r), position: r.position, targetSessionId: targetManager.id };
+    } else {
+      // No live manager in the target project: board a durable card on ITS OWN board (mirrors
+      // deliverSessionMessage's "no live successor" fallback) — the message survives until its manager
+      // next attaches, instead of being silently dropped or the call erroring for a legitimate offline peer.
+      const body = [
+        "**Message from a linked project's manager** (boarded because no manager session was live).",
+        "",
+        `- **From project:** ${originName} (\`${originProjectId}\`)`,
+        `- **From (manager session):** \`${managerSessionId}\``,
+        "",
+        "## Message",
+        "",
+        text,
+      ].join("\n");
+      const task: Task = {
+        id: randomUUID(),
+        projectId: targetProjectId,
+        title: `[Peer message] from ${originName}`,
+        body,
+        columnKey: this.columnKeyForProjectRole(targetProjectId, "defaultLanding") ?? "backlog",
+        position: Date.now(),
+        priority: DEFAULT_TASK_PRIORITY,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.db.insertTask(task);
+      result = { deliveryStatus: "boarded", taskId: task.id };
+    }
+
+    this.db.appendEvent({
+      id: randomUUID(), ts: now,
+      managerSessionId, workerSessionId: result.targetSessionId ?? "", taskId: result.taskId ?? null,
+      kind: "cross_project_message",
+      detail: { originProjectId, targetProjectId, targetSessionId: result.targetSessionId ?? null, text, deliveryStatus: result.deliveryStatus },
+    });
+
+    return result;
+  }
+
+  /**
    * Manager→Platform escalation READ (orchestration `escalation_status`) — closes the gap where a manager
    * has no way to tell whether a `platform_escalate` it filed was ever picked up, so it re-escalates work
    * the Lead already claimed. READ-ONLY, origin-project-scoped: the candidate set is derived SERVER-SIDE
@@ -4682,9 +4778,11 @@ export class SessionService {
    * tools (project_update/_archive, agent_update/_assign_profile, schedule_create/_update) take a target
    * id as a param; without this guard a prompt-injected/confused manager could reconfigure or archive ANY
    * project — including the reserved Loom Platform home — breaking the documented invariant that
-   * platform_escalate is the manager's ONE cross-project write. Each method derives the target's project
-   * via this helper and REJECTS a target outside the caller's own project. Throws (→ the router's error
-   * envelope) on a session with no project, so a write can never escape its scope.
+   * platform_escalate (the hardcoded Platform-board escalation) and peer_message (the project_links-gated
+   * manager↔manager channel, board card 2349d90c) are the manager's ONLY two structured cross-project
+   * writes. Each method derives the target's project via this helper and REJECTS a target outside the
+   * caller's own project. Throws (→ the router's error envelope) on a session with no project, so a write
+   * can never escape its scope.
    */
   private requireOwnProject(managerSessionId: string, targetProjectId: string | undefined, surface: string): void {
     const own = this.db.getSession(managerSessionId)?.projectId;

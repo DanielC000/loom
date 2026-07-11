@@ -1506,10 +1506,11 @@ export class OrchestrationMcpRouter {
     // The ONE upward channel: a project manager reports a discovered Loom bug / friction UP to the
     // Platform Lead. DURABLE by design — it files a structured TASK onto the reserved "Loom Platform"
     // project's board (the Lead's inbox), which survives the common case where no Lead session is live.
-    // This is the ONLY cross-project write a manager gets, and ONLY this structured escalation: the
-    // target board is HARDCODED to the reserved home server-side (the manager never names a projectId),
-    // so it can never become a general cross-project task-write. Down-tree messaging stays parent-scoped
-    // (worker_message); session_message (the Lead's un-scoped delivery) is the PLATFORM surface, not here.
+    // This is ONE of the manager's two structured cross-project writes (the other is peer_message, below):
+    // the target board here is HARDCODED to the reserved home server-side (the manager never names a
+    // projectId), so it can never become a general cross-project task-write. Down-tree messaging stays
+    // parent-scoped (worker_message); session_message (the Lead's un-scoped delivery) is the PLATFORM
+    // surface, not here.
     server.registerTool(
       "platform_escalate",
       {
@@ -1517,8 +1518,8 @@ export class OrchestrationMcpRouter {
           "Escalate a discovered Loom bug or friction UP to the Platform Lead. Files a DURABLE, structured " +
           "task on the reserved Loom Platform board (the Lead's inbox — it survives whether or not a Lead " +
           "session is live), capturing your origin project + this manager session, the title, the detail/" +
-          "evidence, and a severity. This is the ONLY cross-project write you have, and ONLY this escalation: " +
-          "the target is the Platform board, fixed server-side (you cannot pick a project). Returns the created " +
+          "evidence, and a severity. The target is the Platform board, fixed server-side (you cannot pick a " +
+          "project) — for a LINKED peer project's manager instead, use peer_message. Returns the created " +
           "Platform task id plus a `deliveryStatus` (delivered-live | queued | boarded | dropped): `boarded` " +
           "means no Lead session was live but the board task is durably filed (the normal, safe case) — only " +
           "`dropped` warrants concern. Use it for platform-level problems (a Loom bug, a confusing tool/skill, " +
@@ -1532,6 +1533,41 @@ export class OrchestrationMcpRouter {
       async ({ title, detail, severity }) => {
         try {
           return ok(sessions.platformEscalate(managerSessionId, { title, detail, severity }));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    // --- Manager↔manager cross-project channel (board card 2349d90c) --------------------------------
+    // The manager's OTHER structured cross-project write, alongside platform_escalate above. Unlike that
+    // hardcoded-target escalation, `targetProjectId` here is caller-chosen but gated server-side on
+    // `project_links` — an owner-declared, HUMAN-only table with NO MCP path (an agent can never create a
+    // link itself, only use one the owner already made). Delivers ONLY to the target project's LIVE
+    // manager session (never a worker/platform/auditor); when none is live, the message is durably boarded
+    // on the target project's own board instead of dropped. Reuses the same framed, kind:"agent",
+    // one-per-turn delivery channel as worker_message/session_message — a data message only, no privilege
+    // travels with it. Rate-limited per calling manager session.
+    server.registerTool(
+      "peer_message",
+      {
+        description:
+          "Message a LINKED peer project's manager — the sanctioned manager↔manager cross-project channel " +
+          "(replaces hand-relaying contract Q&A through the Platform Lead). `targetProjectId` MUST be a " +
+          "project the owner has explicitly LINKED to yours (ask the owner to link them first if not — " +
+          "there is no way to link projects yourself). Rejected if: the target is your own project, the " +
+          "target project doesn't exist, the two projects aren't linked, or you're sending too fast (a " +
+          "per-session rate limit). Delivers to the target project's LIVE manager session ONLY — never a " +
+          "worker or any other role there. If no manager session is live in the target project right now, " +
+          "the message is durably BOARDED as a task on that project's OWN board instead of being dropped — " +
+          "its manager will see it next time it attaches. Returns `deliveryStatus` (delivered-live | queued " +
+          "| boarded) plus `taskId` when boarded. This is DATA delivery only — the recipient acts on it " +
+          "within its OWN project and gains no reach into yours except replying through this same primitive.",
+        inputSchema: { targetProjectId: z.string(), text: z.string() },
+      },
+      async ({ targetProjectId, text }) => {
+        try {
+          return ok(sessions.messagePeerManager(managerSessionId, targetProjectId, text));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

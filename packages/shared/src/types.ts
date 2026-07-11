@@ -642,8 +642,16 @@ export type OrchestrationEventKind =
   | "session_message"
   // Manager→Platform UPWARD escalation (orchestration `platform_escalate`): a discovered Loom bug/friction
   // filed as a durable TASK on the reserved Platform board (the Lead's inbox). `detail` carries the origin
-  // project, severity, and the created Platform task id. The ONLY cross-project write a manager may make.
+  // project, severity, and the created Platform task id. The ONLY cross-project write a manager may make
+  // to the reserved Platform home — see `cross_project_message` below for the LINKED-peer-project channel.
   | "platform_escalate"
+  // Manager↔manager cross-project message (orchestration `peer_message`, board card 2349d90c) — a manager
+  // messaging a LINKED peer project's LIVE MANAGER (never a worker/platform/auditor session). `detail`
+  // carries { originProjectId, targetProjectId, targetSessionId, deliveryStatus }; managerSessionId is the
+  // SENDING manager, workerSessionId (reused as the generic "other session" column) is the target manager
+  // session when one was live, else empty. Gated server-side on `project_links` (owner-declared, human-only
+  // — no MCP path can create a link) — a manager can reach ONLY a project the owner has explicitly linked.
+  | "cross_project_message"
   // Platform Auditor finding (loom-audit `audit_file_finding`, P5): a transcript-review finding filed as a
   // durable TASK on the reserved Platform board. `detail` carries the severity, title, and Platform task id.
   // The ONLY write the read-and-file-only Auditor can make (it has no git/vault/config/spawn capability).
@@ -1247,6 +1255,23 @@ export interface ConnectionMetadata {
   tokenExpiresAt?: string | null;
   /** `oauth2` rows only — true when the refresh token is absent/revoked and consent must be redone. */
   needsReauth?: boolean;
+}
+
+/**
+ * An owner-declared SYMMETRIC link between two projects (board card 2349d90c) — the sole gate for the
+ * manager↔manager `peer_message` cross-project channel: a manager may message a peer project's manager
+ * ONLY if the owner has linked the two projects here. HUMAN-managed only over the loopback REST surface
+ * (`GET/POST /api/project-links`, `DELETE /api/project-links/:id`) — INTENTIONALLY NO MCP path, same
+ * trust posture as the connections/capability_defs stores: an agent must never be able to link projects
+ * itself and so widen its own cross-project reach. `projectAId`/`projectBId` are stored canonically
+ * ordered (lexicographically smaller id first) so a pair is represented exactly once regardless of which
+ * side declared it; direction carries no meaning (the link is symmetric).
+ */
+export interface ProjectLink {
+  id: string;
+  projectAId: string;
+  projectBId: string;
+  createdAt: string;
 }
 
 /**

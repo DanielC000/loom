@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PermissionAnswer } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PermissionAnswer, ProjectLink } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -810,6 +810,13 @@ export const api = {
     provision: unknown; toolAllowlist: string[]; wantsScratchDir?: boolean; requiresConnection?: boolean; secretEnvVar?: string;
   }) => postErr<CapabilitySummary>("/api/capabilities", b),
   deleteCapability: (id: string) => delErr<{ ok: boolean }>(`/api/capabilities/${encodeURIComponent(id)}`),
+
+  // --- Owner-declared project links (board card 2349d90c): a symmetric link between two projects — the
+  // sole gate for the manager↔manager `peer_message` cross-project channel. HUMAN-only loopback REST —
+  // INTENTIONALLY NO agent MCP path (same trust posture as connections/capabilities above). ---
+  projectLinks: () => get<ProjectLink[]>("/api/project-links"),
+  createProjectLink: (b: { projectA: string; projectB: string }) => postErr<ProjectLink>("/api/project-links", b),
+  deleteProjectLink: (id: string) => delErr<{ ok: boolean }>(`/api/project-links/${encodeURIComponent(id)}`),
 };
 
 // Stop + (once fully exited) resume a companion's own session — the only way a spawn-time property like

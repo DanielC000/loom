@@ -47,6 +47,7 @@ import { GitReader } from "../git/reader.js";
 import { GitWriter } from "../git/writer.js";
 import { workerDiff } from "../git/worktrees.js";
 import { checkRepoRebind } from "../projects/rebind.js";
+import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
 import { listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff } from "../skills/store.js";
@@ -1712,6 +1713,30 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.delete("/api/capabilities/:id", async (req) => {
     deleteCapabilityDef(deps.db, (req.params as { id: string }).id);
+    return { ok: true };
+  });
+
+  // --- Owner-declared project links (board card 2349d90c): a symmetric link between two projects — the
+  // sole gate for the manager↔manager `peer_message` cross-project channel. HUMAN-ONLY loopback REST,
+  // INTENTIONALLY NO MCP path (of ANY router): an agent must never be able to link projects itself and so
+  // widen its own cross-project reach (same trust posture as connections/capabilities above). Validation
+  // (self-link / duplicate / nonexistent project) is OWNED by `projects/links.ts` — this handler only
+  // narrows the body's TYPE, then maps the store's thrown validation error to a 400. ---
+  app.get("/api/project-links", async () => listProjectLinks(deps.db));
+  app.post("/api/project-links", async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    if (typeof b.projectA !== "string" || typeof b.projectB !== "string") {
+      return reply.code(400).send({ error: "projectA and projectB must be strings" });
+    }
+    try {
+      const created = createProjectLink(deps.db, { projectAId: b.projectA, projectBId: b.projectB });
+      return reply.code(201).send(created);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+  app.delete("/api/project-links/:id", async (req) => {
+    deleteProjectLink(deps.db, (req.params as { id: string }).id);
     return { ok: true };
   });
 
