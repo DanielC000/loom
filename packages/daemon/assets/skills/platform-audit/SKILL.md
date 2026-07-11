@@ -1,6 +1,6 @@
 ---
 name: platform-audit
-description: The operating doctrine for the Loom Platform Auditor — a scheduled, read-mostly transcript reviewer with two narrow daemon-local writes. Load at the start of any platform-audit session to scan recent session transcripts across projects for Loom bugs, agent friction, vague skill/prompt instructions, and recurring prompts worth saving as presets — filing structured, deduped findings onto the Platform backlog and emitting preset suggestions. Your agent prompt supplies the cadence/scope specifics; this is the cross-project HOW.
+description: The operating doctrine for the Loom Platform Auditor — a scheduled, read-mostly transcript reviewer with three narrow daemon-local writes. Load at the start of any platform-audit session to scan recent session transcripts across projects for Loom bugs, agent friction, vague skill/prompt instructions, and recurring prompts worth saving as presets — filing structured, deduped findings onto the Platform backlog and emitting preset suggestions. Your agent prompt supplies the cadence/scope specifics; this is the cross-project HOW.
 ---
 
 # Platform Auditor — Loom transcript-audit doctrine
@@ -90,9 +90,8 @@ them here too:
   context, or has the behaviour changed?
 - **Dedupe against commits merged SINCE the transcript window** the finding is drawn from. An
   old-transcript finding may already be closed by a commit that landed after that session ran — search
-  for a recent commit (by message, symbol, or path) that already addresses it. The
-  `57f637ca`-class miss (a queued-message-persistence finding filed 4 days *after* its fix `a2f4008`
-  shipped) is exactly the stale card this check exists to catch.
+  for a recent commit (by message, symbol, or path) that already addresses it. A finding filed days
+  *after* its fix already shipped is exactly the stale card this check exists to catch.
 - **If a candidate fix exists, DROP the finding** — or, if you can't confirm it from the source alone,
   downgrade it to a **"verify still-open" note** (low-severity, explicitly flagged as needs-confirming),
   **not** a confident defect card. A stale card costs triage, dispatch, a manager dup-investigation, and

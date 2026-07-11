@@ -12,7 +12,9 @@ project id anywhere; it's derived server-side.
 ## Steps
 
 1. **Board** — `tasks_list` (the `loom-tasks` MCP) to see tasks and their columns. Note what's
-   in-progress, in review, and waiting.
+   in-progress, in review, and waiting, and surface which cards are **`held`** (an owner brake) vs
+   **`deferred`** (not yet sequenced) so "what's next" respects them. Also drain the **Requests inbox**
+   (`question_pull`) and check `escalation_status` for decisions the human answered while you were away.
 2. **Code** — `git log --oneline -20` and `git status` for recent and in-flight work.
 3. **Conventions** — read `CLAUDE.md` at the repo root if present.
 4. **Your role's anchor** (whichever applies):
