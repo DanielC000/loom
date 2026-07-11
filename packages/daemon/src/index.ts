@@ -620,14 +620,23 @@ async function main(): Promise<void> {
     }
   };
 
-  const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus, companion: companionController, inApp: inAppChannel, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"), updateStatus: () => updateCheck.current(), beginSelfUpdate });
+  const app = await buildServer({
+    db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus,
+    companion: companionController, inApp: inAppChannel, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"),
+    updateStatus: () => updateCheck.current(), beginSelfUpdate,
+    // Access-story Phase B (card 56ffe50a): verify a presented gateway token against the real
+    // gateway_tokens store — fail-closed (any non-"ok" reason, incl. malformed/unknown/bad-secret/
+    // paused/revoked, is a plain false; the trust-tier hook never distinguishes why).
+    verifyGatewayToken: (token) => db.authenticateGatewayToken(token).ok,
+  });
   // Access-story Phase A (card 766f8b50) fail-closed boot check: if a non-loopback bind is requested but
-  // no gateway token exists yet (Phase B mints/stores the real token — there is no mechanism for one to
-  // exist today), NEVER bind-and-warn. This phase's `.listen()` below stays hardcoded loopback-only
-  // regardless (the actual bind switch is Phase C) — this only surfaces the refusal now, so Phase C has a
-  // guard (`canOpenRemoteListener`) to consult instead of building one under deadline pressure.
+  // no gateway token exists yet, NEVER bind-and-warn. This phase's `.listen()` below stays hardcoded
+  // loopback-only regardless (the actual bind switch is Phase C) — this only surfaces the refusal now, so
+  // Phase C has a guard (`canOpenRemoteListener`) to consult instead of building one under deadline
+  // pressure. Phase B (this card) fills `gatewayTokenExists`: ANY minted row counts (a paused/revoked
+  // token still means the mechanism is provisioned — the human just needs to mint/rotate one that's live).
   const remoteAccessConfig = resolveConfig(undefined, db.getPlatformConfig()).remoteAccess;
-  const gatewayTokenExists = (): boolean => false; // Phase B stub — no token table exists yet
+  const gatewayTokenExists = (): boolean => db.listGatewayTokens().length > 0;
   if (isTrustTierHookActive(remoteAccessConfig) && !canOpenRemoteListener(remoteAccessConfig, gatewayTokenExists())) {
     console.warn(`[gateway] remoteAccess.enabled with bindHost=${remoteAccessConfig.bindHost} but no gateway token exists yet — refusing to open a remote listener; staying on loopback (127.0.0.1). (Phase B adds gateway-token minting.)`);
   }

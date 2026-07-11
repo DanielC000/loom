@@ -78,6 +78,23 @@ export function parsePairingCode(token: unknown): { id: string; secret: string }
   return parsePrefixedToken(token, PAIRING_PREFIX);
 }
 
+/** Access-story gateway tokens (Phase B, card 56ffe50a) reuse the SAME salted-hash core, with a
+ *  DISTINCT `lgw_` ("loom gateway") prefix — the prefix IS the scope check: a Run key (`lrk_`) can
+ *  never parse (and thus never verify) as a gateway token, and a gateway token can never parse as a
+ *  Run key, so the two credential kinds can't authorize each other's surface even by accident. */
+const GATEWAY_PREFIX = "lgw_";
+
+/** Mint a fresh gateway token — same shape as `mintApiKey`, only with the `lgw_` prefix. */
+export function mintGatewayToken(id: string = randomUUID()): MintedKey {
+  const k = mintApiKey(id);
+  return { ...k, plaintext: `${GATEWAY_PREFIX}${k.plaintext.slice(TOKEN_PREFIX.length)}` };
+}
+
+/** Parse a presented token into its public id + secret parts; null if not `lgw_`-shaped. */
+export function parseGatewayToken(token: unknown): { id: string; secret: string } | null {
+  return parsePrefixedToken(token, GATEWAY_PREFIX);
+}
+
 /** Constant-time verify of a presented secret against a stored salt+hash (timing-safe; length-guarded). */
 export function verifySecret(secret: string, salt: string, hash: string): boolean {
   const a = Buffer.from(hashSecret(secret, salt), "hex");

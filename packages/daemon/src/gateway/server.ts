@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer } from "@loom/shared";
 import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev, PORT } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -129,11 +129,14 @@ export interface GatewayDeps {
    *  same trust boundary as requestShutdown / the vault+git writers). Optional for the same reason as above. */
   beginSelfUpdate?: () => void;
   /**
-   * Access-story Phase A (card 766f8b50) — Phase B stub: verifies a Bearer gateway token presented on a
-   * REMOTE (non-loopback) Tier-1 request. Absent ⇒ always-false (no token mechanism exists yet, so every
-   * Tier-1 remote request 401s until Phase B mints/verifies real tokens). Test-injectable so a daemon test
-   * can simulate a "stubbed-valid" token without a real implementation. Only ever consulted when the
-   * trust-tier hook is LIVE (remoteAccess.enabled + a non-loopback bindHost) — inert otherwise.
+   * Access-story Phase B (card 56ffe50a) — verifies a gateway token (Bearer header, or the
+   * Sec-WebSocket-Protocol / `?token=` fallback the trust-tier hook extracts for the two WS routes)
+   * presented on a REMOTE (non-loopback) Tier-1 request. Wired by index.ts to
+   * `db.authenticateGatewayToken(token).ok` — real fail-closed, constant-time verify against the
+   * `gateway_tokens` store. Absent ⇒ always-false (every Tier-1 remote request 401s), which is also
+   * what a partial-stub test gets for free. Test-injectable so a daemon test can simulate a
+   * "stubbed-valid" token without standing up a real one. Only ever consulted when the trust-tier hook
+   * is LIVE (remoteAccess.enabled + a non-loopback bindHost) — inert otherwise.
    */
   verifyGatewayToken?: (token: string | undefined) => boolean;
 }
@@ -162,6 +165,14 @@ export function sanitizeCompanionName(raw: string): string {
 }
 
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
+  // trustProxy is DELIBERATELY left at its default (false) — LOAD-BEARING for every `req.ip` loopback
+  // gate in this file (the /internal/* checks below, and the trust-tier onRequest hook's own peer check).
+  // With trustProxy enabled, Fastify derives `req.ip` from an X-Forwarded-For header, which is
+  // attacker-controlled on any request that actually reaches this process — a remote caller could set
+  // `X-Forwarded-For: 127.0.0.1` and spoof past every one of those loopback checks. If a real reverse-proxy
+  // deployment ever needs trustProxy:true, every `LOOPBACK.has(req.ip)` site in this file must be re-audited
+  // (the trust-tier hook below instead reads `req.socket.remoteAddress` directly, so it stays correct
+  // regardless of this setting — see gateway/trust-tier.ts).
   const app = Fastify({ logger: false });
 
   // --- CSRF / DNS-rebind backstop (one onRequest hook, registered FIRST so it is inherited by EVERY plugin
@@ -228,13 +239,30 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   if (isTrustTierHookActive(remoteAccessConfig)) {
     const verifyGatewayToken = deps.verifyGatewayToken ?? (() => false);
     app.addHook("onRequest", async (req, reply) => {
-      if (LOOPBACK.has(req.ip)) return; // arrived via the loopback interface — pass through unchanged
-      const tier = routeTier(req.method, req.routeOptions.url ?? req.url);
+      // Read the TCP peer directly rather than `req.ip` — see the trustProxy comment at the Fastify()
+      // construction site above. This keeps the wall correct even if trustProxy is ever flipped on.
+      if (LOOPBACK.has(req.socket?.remoteAddress ?? "")) return; // arrived via the loopback interface — pass through unchanged
+      // `req.routeOptions.url` is the matched route's registered PATTERN (find-my-way resolves it before
+      // onRequest hooks run). It is undefined only when no route matched at all (a 404) — treat that
+      // EXPLICITLY as Tier 0 rather than falling back to `req.url` (the attacker-controlled resolved path),
+      // so an unmatched path's own text can never influence tier classification.
+      const routePattern = req.routeOptions.url;
+      const tier = routePattern === undefined ? 0 : routeTier(req.method, routePattern);
       if (tier === 0) return reply.code(403).send({ error: "forbidden" });
-      // Tier 1: require a valid gateway token on a remote request. Real minting/verification is Phase B —
-      // `verifyGatewayToken` is the injected stub it fills; absent, every Tier-1 remote request 401s.
+      // Tier 1: require a valid gateway token on a remote request (Phase B: gateway_tokens, verified via
+      // deps.verifyGatewayToken — see index.ts). A browser cannot set an Authorization header on a
+      // WebSocket upgrade, so the two WS routes ALSO accept the token via the Sec-WebSocket-Protocol
+      // subprotocol (preferred — `ws`'s default handleProtocols echoes the offered protocol back, so the
+      // browser's handshake completes normally) or a documented `?token=` query-param fallback. Every
+      // other Tier-1 route stays Authorization-Bearer-only.
       const auth = req.headers.authorization;
-      const token = typeof auth === "string" ? /^Bearer\s+(.+)$/i.exec(auth)?.[1] : undefined;
+      let token = typeof auth === "string" ? /^Bearer\s+(.+)$/i.exec(auth)?.[1] : undefined;
+      if (!token && (routePattern === "/ws/term/:sessionId" || routePattern === "/ws/companion/:sessionId")) {
+        const proto = req.headers["sec-websocket-protocol"];
+        const fromProtocol = typeof proto === "string" ? proto.split(",")[0]?.trim() : undefined;
+        const q = req.query as { token?: unknown };
+        token = fromProtocol || (typeof q?.token === "string" ? q.token : undefined);
+      }
       if (!verifyGatewayToken(token)) return reply.code(401).send({ error: "unauthorized" });
     });
   }
@@ -2971,6 +2999,51 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const inflight = deps.db.listInFlightRunsForKey(keyId);
     for (const r of inflight) deps.sessions.cancelRun(r.id);
     return { cancelled: inflight.length };
+  });
+
+  // --- Access-story Phase B (card 56ffe50a): the gateway token — HUMAN-only, loopback REST, same trust-
+  // boundary posture as the api_keys admin above (mirrors its create/rotate/edit/delete shape). NOT in
+  // trust-tier.ts's TIER_1_ROUTES allowlist, so once a remote bind is live these stay Tier-0 (loopback-
+  // only) BY CONSTRUCTION — a remote caller (even one holding a valid gateway token) can never mint,
+  // rotate, or revoke a gateway token over the wire; only the human at the loopback UI can. No MCP path —
+  // no agent can reach this either. The plaintext is returned ONCE (create + rotate), same "hashed at
+  // rest, plaintext once" contract as api_keys. ---
+  const GATEWAY_TOKEN_STATUSES = new Set(["active", "paused", "revoked"]);
+  app.get("/api/gateway-tokens", async () => deps.db.listGatewayTokens()); // PUBLIC metadata only (no secret/hash)
+  app.post("/api/gateway-tokens", async (req, reply) => {
+    const b = (req.body ?? {}) as { name?: unknown };
+    if (b.name !== undefined && typeof b.name !== "string") return reply.code(400).send({ error: "name must be a string" });
+    const { token, plaintext } = deps.db.createGatewayToken(typeof b.name === "string" ? b.name : "");
+    // The ONE time the plaintext is returned — the client must store it now (never recoverable after).
+    return reply.code(201).send({ token, plaintext });
+  });
+  // Edit a token's metadata: name / status (pause + revoke live here).
+  app.post("/api/gateway-tokens/:tokenId", async (req, reply) => {
+    const tokenId = (req.params as { tokenId: string }).tokenId;
+    if (!deps.db.getGatewayToken(tokenId)) return reply.code(404).send({ error: "gateway token not found" });
+    const b = (req.body ?? {}) as { name?: unknown; status?: unknown };
+    const patch: { name?: string; status?: GatewayTokenStatus } = {};
+    if (typeof b.name === "string") patch.name = b.name;
+    if (b.status !== undefined) {
+      if (!GATEWAY_TOKEN_STATUSES.has(b.status as string)) return reply.code(400).send({ error: "status must be active|paused|revoked" });
+      patch.status = b.status as GatewayTokenStatus;
+    }
+    deps.db.updateGatewayToken(tokenId, patch);
+    return deps.db.getGatewayToken(tokenId);
+  });
+  // Rotate a token's secret — invalidates the old plaintext, returns the new plaintext ONCE.
+  app.post("/api/gateway-tokens/:tokenId/rotate", async (req, reply) => {
+    const tokenId = (req.params as { tokenId: string }).tokenId;
+    const rotated = deps.db.rotateGatewayToken(tokenId);
+    if (!rotated) return reply.code(404).send({ error: "gateway token not found" });
+    return reply.send(rotated); // { token, plaintext }
+  });
+  // Hard-delete a token (permanent). A soft revoke is POST /api/gateway-tokens/:id {status:'revoked'}.
+  app.delete("/api/gateway-tokens/:tokenId", async (req, reply) => {
+    const tokenId = (req.params as { tokenId: string }).tokenId;
+    if (!deps.db.getGatewayToken(tokenId)) return reply.code(404).send({ error: "gateway token not found" });
+    deps.db.deleteGatewayToken(tokenId);
+    return { ok: true };
   });
 
   // --- Agent Runs R3: the PUBLIC key-authed run API (the FIRST authed surface). Still LOOPBACK (the whole

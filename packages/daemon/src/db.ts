@@ -35,7 +35,7 @@ import type {
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, PresetPrompt, PresetPromptSuggestion,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
   CompanionCapabilityGrant,
-  ApiKey, ApiKeyStatus, ApiKeyCaps, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
+  ApiKey, ApiKeyStatus, ApiKeyCaps, GatewayToken, GatewayTokenStatus, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
   ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
@@ -43,7 +43,7 @@ import type {
 } from "@loom/shared";
 import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { isOwnerHeldTaskTitle, describeCron } from "@loom/shared";
-import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken } from "./keys/hash.js";
+import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 // Type-only — companion/types.ts has zero runtime imports, so this can never form a runtime cycle with
 // the companion/* modules that import `Db` from here. CompanionReminder.route reuses THIS module's
 // CompanionRoute (never a duplicate route type, unlike Wake/CompanionBinding's shared/types.ts twins).
@@ -192,6 +192,23 @@ CREATE TABLE IF NOT EXISTS api_keys (
   max_concurrent_runs INTEGER,                          -- per-key caps (NULL = uncapped); R3/R4 enforce
   daily_token_cap INTEGER,
   daily_spend_cap REAL,
+  status TEXT NOT NULL DEFAULT 'active',                -- 'active' | 'paused' | 'revoked'
+  created_at TEXT NOT NULL,
+  rotated_at TEXT
+);
+-- Access-story Phase B (card 56ffe50a): the gateway token — the daemon-GLOBAL credential (v1 is a
+-- single token, but the store allows more than one row) that authorizes a Tier-1 request over a
+-- non-loopback remote bind (see gateway/trust-tier.ts). Modeled on api_keys (salted-hash at rest,
+-- plaintext returned ONCE) but deliberately a SEPARATE table, not a reused api_keys row: a gateway
+-- token has no project (api_keys.project_id is NOT NULL — a nullable-project hack would blur two
+-- distinct credential kinds under one table) and no endpoint-agent allowlist / usage caps. Brand-new
+-- table ⇒ CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER needed); an existing
+-- DB simply gains an empty table on next boot. HUMAN-managed only (loopback REST) — no MCP tool.
+CREATE TABLE IF NOT EXISTS gateway_tokens (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  salt TEXT NOT NULL,                                   -- per-token random salt (hex)
+  hash TEXT NOT NULL,                                   -- salted SHA-256 of the secret (hex) — never plaintext
   status TEXT NOT NULL DEFAULT 'active',                -- 'active' | 'paused' | 'revoked'
   created_at TEXT NOT NULL,
   rotated_at TEXT
@@ -1159,6 +1176,22 @@ export interface ApiKeyRecord extends ApiKey {
 /** Result of authenticating a presented API-key token (Agent Runs R1; nothing CALLS auth yet — R3 does). */
 export type ApiKeyAuth =
   | { ok: true; key: ApiKey }
+  | { ok: false; reason: "malformed" | "unknown" | "bad-secret" | "paused" | "revoked" };
+
+/**
+ * Access-story Phase B (card 56ffe50a) — the db-INTERNAL gateway-token record: the public
+ * {@link GatewayToken} metadata PLUS the salt+hash that never leave the daemon. Mirrors
+ * `ApiKeyRecord`'s split (public accessors strip salt/hash; the internal record is for
+ * authenticate only).
+ */
+export interface GatewayTokenRecord extends GatewayToken {
+  salt: string;
+  hash: string;
+}
+
+/** Result of authenticating a presented gateway token (access-story Phase B). Mirrors `ApiKeyAuth`. */
+export type GatewayTokenAuth =
+  | { ok: true; token: GatewayToken }
   | { ok: false; reason: "malformed" | "unknown" | "bad-secret" | "paused" | "revoked" };
 
 /** Asleep-at-the-Wheel idle-watchdog nudge policy (foundation). */
@@ -2649,6 +2682,83 @@ export class Db {
     if (rec.status === "revoked") return { ok: false, reason: "revoked" };
     if (rec.status === "paused") return { ok: false, reason: "paused" };
     return { ok: true, key: toApiKeyPublic(rec) };
+  }
+
+  // --- gateway tokens (access-story Phase B, card 56ffe50a: daemon-global, hashed-at-rest) -------
+  // Same "hashed at rest, plaintext once" contract as api_keys above, but NOT project-scoped and with
+  // no endpoint allowlist / caps — see the gateway_tokens table comment. No MCP path — loopback human
+  // REST only (same trust boundary as the api_keys writers).
+
+  /** Mint a gateway token: persist the salt+hash + metadata, RETURN the one-time plaintext. */
+  createGatewayToken(name: string): { token: GatewayToken; plaintext: string } {
+    const minted = mintGatewayToken();
+    const createdAt = new Date().toISOString();
+    const rec: GatewayTokenRecord = { id: minted.id, name, status: "active", createdAt, rotatedAt: null, salt: minted.salt, hash: minted.hash };
+    this.db.prepare(
+      `INSERT INTO gateway_tokens (id,name,salt,hash,status,created_at,rotated_at) VALUES (@id,@name,@salt,@hash,@status,@createdAt,@rotatedAt)`,
+    ).run(rec);
+    return { token: toGatewayTokenPublic(rec), plaintext: minted.plaintext };
+  }
+
+  /** Every gateway token as PUBLIC metadata (NO secret/hash), newest first. */
+  listGatewayTokens(): GatewayToken[] {
+    return (this.db.prepare("SELECT * FROM gateway_tokens ORDER BY created_at DESC").all() as Row[])
+      .map(toGatewayTokenRecord).map(toGatewayTokenPublic);
+  }
+  /** One gateway token as PUBLIC metadata (NO secret/hash); undefined if absent. */
+  getGatewayToken(id: string): GatewayToken | undefined {
+    const rec = this.getGatewayTokenRecord(id);
+    return rec ? toGatewayTokenPublic(rec) : undefined;
+  }
+  /** INTERNAL: the full record incl. salt+hash (for authenticate). Never serialize this to a client. */
+  getGatewayTokenRecord(id: string): GatewayTokenRecord | undefined {
+    const r = this.db.prepare("SELECT * FROM gateway_tokens WHERE id = ?").get(id) as Row | undefined;
+    return r ? toGatewayTokenRecord(r) : undefined;
+  }
+
+  /** Partial edit of a token's metadata — name / status (pause + revoke live here). The secret is
+   *  NEVER touched here (rotateGatewayToken is the only secret-changing path). */
+  updateGatewayToken(id: string, patch: { name?: string; status?: GatewayTokenStatus }): void {
+    const cols: Record<string, unknown> = { name: patch.name, status: patch.status };
+    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
+    if (names.length === 0) return;
+    const set = names.map((c) => `${c} = ?`).join(", ");
+    this.db.prepare(`UPDATE gateway_tokens SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
+
+  /** Rotate a token's SECRET: mint a fresh secret for the SAME row id, overwrite salt+hash, stamp
+   *  rotated_at. The old plaintext stops verifying immediately; the new plaintext is returned ONCE. */
+  rotateGatewayToken(id: string): { token: GatewayToken; plaintext: string } | null {
+    const existing = this.getGatewayTokenRecord(id);
+    if (!existing) return null;
+    const minted = mintGatewayToken(id); // same id ⇒ row identity preserved, only the secret changes
+    const rotatedAt = new Date().toISOString();
+    this.db.prepare("UPDATE gateway_tokens SET salt = ?, hash = ?, rotated_at = ? WHERE id = ?")
+      .run(minted.salt, minted.hash, rotatedAt, id);
+    return { token: toGatewayTokenPublic({ ...existing, salt: minted.salt, hash: minted.hash, rotatedAt }), plaintext: minted.plaintext };
+  }
+
+  /** Permanently delete a gateway token row (hard revoke). A soft revoke is
+   *  `updateGatewayToken(id, {status:'revoked'})`. */
+  deleteGatewayToken(id: string): void {
+    this.db.prepare("DELETE FROM gateway_tokens WHERE id = ?").run(id);
+  }
+
+  /**
+   * Authenticate a presented token against the gateway_tokens store, FAILING CLOSED. Parse (the
+   * `lgw_` prefix — a Run key or anything else fails to parse here, scoping this to gateway tokens
+   * only) → O(1) lookup by embedded id → CONSTANT-TIME secret verify → status gate. Verify the secret
+   * BEFORE consulting status so a wrong secret never reveals whether a token is paused/revoked.
+   */
+  authenticateGatewayToken(token: unknown): GatewayTokenAuth {
+    const parsed = parseGatewayToken(token);
+    if (!parsed) return { ok: false, reason: "malformed" };
+    const rec = this.getGatewayTokenRecord(parsed.id);
+    if (!rec) return { ok: false, reason: "unknown" };
+    if (!verifySecret(parsed.secret, rec.salt, rec.hash)) return { ok: false, reason: "bad-secret" };
+    if (rec.status === "revoked") return { ok: false, reason: "revoked" };
+    if (rec.status === "paused") return { ok: false, reason: "paused" };
+    return { ok: true, token: toGatewayTokenPublic(rec) };
   }
 
   // --- agent runs (R2: ephemeral AgentRun records) ----------------------------------------------
@@ -4481,6 +4591,21 @@ function toApiKeyRecord(r0: unknown): ApiKeyRecord {
 }
 /** Strip the secret material — the PUBLIC `ApiKey` surfaced over REST never carries salt/hash. */
 function toApiKeyPublic(rec: ApiKeyRecord): ApiKey {
+  const { salt: _s, hash: _h, ...pub } = rec;
+  return pub;
+}
+/** Map a gateway_tokens row to the db-internal record (incl. salt+hash). */
+function toGatewayTokenRecord(r0: unknown): GatewayTokenRecord {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, name: (r.name as string) ?? "",
+    salt: r.salt as string, hash: r.hash as string,
+    status: (r.status as GatewayTokenStatus) ?? "active",
+    createdAt: r.created_at as string, rotatedAt: (r.rotated_at as string) ?? null,
+  };
+}
+/** Strip the secret material — the PUBLIC `GatewayToken` surfaced over REST never carries salt/hash. */
+function toGatewayTokenPublic(rec: GatewayTokenRecord): GatewayToken {
   const { salt: _s, hash: _h, ...pub } = rec;
   return pub;
 }

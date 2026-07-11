@@ -300,6 +300,32 @@ export interface ApiKey {
   rotatedAt: string | null;
 }
 
+// --- Access-story gateway token (Phase B, card 56ffe50a) ------------------------------------------
+export type GatewayTokenStatus = "active" | "paused" | "revoked";
+export type GatewayTokenId = string;
+
+/**
+ * The daemon-global gateway token (access-story Phase B) — the credential that authorizes a Tier-1
+ * request over a non-loopback remote bind (see gateway/trust-tier.ts). A single token is the v1
+ * shape, but the store supports more than one row. Deliberately a DISTINCT kind from `ApiKey` (a
+ * project-scoped Run key): a gateway token is not project-scoped, carries no endpoint-agent
+ * allowlist or usage caps, and is minted with a DISTINCT `lgw_` prefix so the two credential kinds
+ * can never be confused at the parse level — a Run key cannot parse as a gateway token and vice
+ * versa (keys/hash.ts `parseGatewayToken`/`parseApiKey`). The SECRET is never part of this shape —
+ * only a salted hash lives at rest; the plaintext is returned exactly ONCE at mint/rotate, the same
+ * "hashed at rest, plaintext once" contract as `ApiKey`. Human-managed only — no agent MCP tool can
+ * mint/rotate/revoke one.
+ */
+export interface GatewayToken {
+  id: GatewayTokenId;
+  /** Human label (e.g. "My laptop"). */
+  name: string;
+  status: GatewayTokenStatus;
+  createdAt: string;
+  /** When the secret was last rotated (null = never rotated since creation). */
+  rotatedAt: string | null;
+}
+
 // --- Session FSM (explicit; replaces the predecessor's loose status enum) ---
 // 'none' has no TS producer (every insert path stamps "starting"), but it stays: it's the SQL column
 // default (`process_state TEXT NOT NULL DEFAULT 'none'` in db.ts) — the structural placeholder for any

@@ -10,9 +10,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   2. remoteAccess DISABLED (default): the hook is never even registered — a "remote-looking" request
 //      (simulated remoteAddress) to a writer route behaves exactly as today (200, byte-identical).
 //   3. remoteAccess ENABLED + a non-loopback bindHost:
-//      a. a LOOPBACK request (req.ip in the loopback set) → unchanged (passes through to the handler).
-//      b. a REMOTE request to a Tier-0 route (a writer, /internal/*, an /mcp-* mount) → 403.
+//      a. a LOOPBACK request (the TCP peer in the loopback set) → unchanged (passes through to the handler).
+//      b. a REMOTE request to a Tier-0 route (a writer, /internal/*, an /mcp-* mount) → 403; an UNMATCHED
+//         route (undefined req.routeOptions.url) is ALSO Tier 0 (card 77ade04c nit: never fall back to the
+//         attacker-controlled req.url); a spoofed X-Forwarded-For:127.0.0.1 does NOT count as loopback
+//         (card 77ade04c nit: the peer check reads req.socket.remoteAddress directly, immune to trustProxy).
 //      c. a REMOTE request to a Tier-1 route → 401 without a token, and passes with a (stubbed-valid) one.
+//      d. the two WS routes ALSO accept the token via Sec-WebSocket-Protocol (preferred) or a `?token=`
+//         query fallback (Phase B, card 56ffe50a) — proven via a REAL handshake through @fastify/
+//         websocket's injectWS (drives the SAME onRequest hook chain a genuine socket upgrade does).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -77,6 +83,8 @@ const ALL_ROUTES = [
   ["GET", "/api/connections"], ["POST", "/api/connections"], ["DELETE", "/api/connections/:id"],
   ["POST", "/api/connections/:id/oauth/consent"], ["POST", "/api/connections/oauth"],
   ["GET", "/api/deja/capture-status"],
+  ["DELETE", "/api/gateway-tokens/:tokenId"], ["GET", "/api/gateway-tokens"], ["POST", "/api/gateway-tokens"],
+  ["POST", "/api/gateway-tokens/:tokenId"], ["POST", "/api/gateway-tokens/:tokenId/rotate"],
   ["DELETE", "/api/keys/:keyId"], ["POST", "/api/keys/:keyId"],
   ["POST", "/api/keys/:keyId/kill"], ["POST", "/api/keys/:keyId/rotate"],
   ["GET", "/api/orchestration/events"], ["POST", "/api/orchestration/kill"],
@@ -212,6 +220,21 @@ try {
   check("(3b) remote POST /mcp/:sessionId → 403", remoteMcp.statusCode === 403);
   const remoteWriterSameSurfaceOtherMethod = await appOn.inject({ method: "PUT", url: "/api/projects/proj1/vault/file", remoteAddress: "203.0.113.5" });
   check("(3b) remote PUT vault/file (writer sibling of a Tier-1 GET) → 403", remoteWriterSameSurfaceOtherMethod.statusCode === 403);
+  // Belt-and-suspenders (CR follow-up on card 56ffe50a): the gateway-token ADMIN surface itself is NOT in
+  // TIER_1_ROUTES, so it stays Tier-0 (loopback-only) by construction — even a VALID gateway token must
+  // NOT authorize minting/rotating/revoking gateway tokens over a remote bind. Pinned here with the SAME
+  // valid GOOD_TOKEN the (3c) Tier-1 checks below prove works elsewhere, so a future accidental addition
+  // of these routes to TIER_1_ROUTES fails this test loudly.
+  const remoteAdminEditWithValidToken = await appOn.inject({
+    method: "POST", url: "/api/gateway-tokens/some-id", remoteAddress: "203.0.113.5",
+    headers: { authorization: `Bearer ${GOOD_TOKEN}` },
+  });
+  check("(3b) remote POST /api/gateway-tokens/:id (admin) with a VALID gateway token → still 403 (Tier-0 default-deny)", remoteAdminEditWithValidToken.statusCode === 403);
+  const remoteAdminDeleteWithValidToken = await appOn.inject({
+    method: "DELETE", url: "/api/gateway-tokens/some-id", remoteAddress: "203.0.113.5",
+    headers: { authorization: `Bearer ${GOOD_TOKEN}` },
+  });
+  check("(3b) remote DELETE /api/gateway-tokens/:id (admin) with a VALID gateway token → still 403 (Tier-0 default-deny)", remoteAdminDeleteWithValidToken.statusCode === 403);
 
   // (3c) remote request to a Tier-1 route → 401 without a token, 401 with a WRONG token, 200 with the valid one.
   const remoteReadNoToken = await appOn.inject({ method: "GET", url: "/api/projects", remoteAddress: "203.0.113.5" });
@@ -223,6 +246,55 @@ try {
   // A Tier-1 POST (answer/steer) behaves the same: blocked before the handler ever runs.
   const remoteInputNoToken = await appOn.inject({ method: "POST", url: "/api/sessions/nonexistent/input", remoteAddress: "203.0.113.5" });
   check("(3c) remote POST /api/sessions/:id/input (Tier-1) with NO token → 401", remoteInputNoToken.statusCode === 401);
+
+  // (card 77ade04c nit) an UNMATCHED route (no registered handler at all) never falls back to
+  // classifying on the raw resolved URL text — it's Tier 0 by construction, 403, no crash.
+  const unmatched = await appOn.inject({ method: "GET", url: "/this/route/does/not/exist", remoteAddress: "203.0.113.5" });
+  check("(3b) remote GET on an UNMATCHED route (undefined routeOptions.url) → Tier 0 (403), never throws", unmatched.statusCode === 403);
+
+  // (card 77ade04c nit) the loopback peer check reads req.socket.remoteAddress directly — a REMOTE peer
+  // can't spoof its way past the wall by sending an X-Forwarded-For claiming 127.0.0.1.
+  const spoofedXff = await appOn.inject({ method: "POST", url: "/api/orchestration/kill", remoteAddress: "203.0.113.5", headers: { "x-forwarded-for": "127.0.0.1" } });
+  check("(3b) a remote peer spoofing X-Forwarded-For: 127.0.0.1 is NOT treated as loopback (403)", spoofedXff.statusCode === 403 && killCallsOn === 1 /* not re-invoked */);
+
+  // --- (3d) WS upgrade auth: Sec-WebSocket-Protocol (preferred) + ?token= (fallback) ------------------
+  // injectWS drives the request through the SAME fastify.routing() + onRequest hook chain a genuine
+  // socket upgrade uses, so a REJECTED handshake (our hook 401s before the route ever hijacks the
+  // socket) makes the client-side promise REJECT (no "101 Switching Protocols" ever comes back), and an
+  // ACCEPTED one resolves to a real open `ws` client. Targets /ws/companion (its handler tolerates a
+  // missing `deps.inApp`, unlike /ws/term's unconditional `deps.pty.subscribe`), with /ws/term covered
+  // for the reject path (auth happens before either handler body ever runs).
+  // The daemon's own CSRF/DNS-rebind onRequest hook (registered ahead of the trust-tier hook, so it runs
+  // first) requires a loopback-shaped Host header on every request — a real browser always sends one, and
+  // injectWS's hand-built request needs it supplied explicitly too, or every case here 403s from THAT
+  // hook before ever reaching the trust-tier / token logic under test.
+  const remoteSocket = { remoteAddress: "203.0.113.5" };
+  const wsReject = async (wsPath, headers) => {
+    try { const ws = await appOn.injectWS(wsPath, { headers: { host: "127.0.0.1", ...headers }, socket: remoteSocket }); ws.close(); return false; }
+    catch { return true; }
+  };
+  check("(3d) remote WS upgrade to /ws/companion with NO token → rejected before the 101 response",
+    await wsReject("/ws/companion/sess1", {}));
+  check("(3d) remote WS upgrade to /ws/term with NO token → rejected before the 101 response",
+    await wsReject("/ws/term/sess1", {}));
+  check("(3d) remote WS upgrade to /ws/companion with a BAD Sec-WebSocket-Protocol token → rejected",
+    await wsReject("/ws/companion/sess1", { "sec-websocket-protocol": "wrong-token" }));
+  check("(3d) remote WS upgrade to /ws/companion with a BAD ?token= query → rejected",
+    await wsReject("/ws/companion/sess1?token=wrong-token", {}));
+
+  // NOTE: the accepted-subprotocol-echo behavior (RFC 6455 §4.1 — required or a real browser client fails
+  // the connection) is handled entirely by `ws`'s WebSocketServer.handleUpgrade (verified by reading its
+  // source: absent a custom handleProtocols, it echoes back the first client-offered protocol
+  // automatically) — not by anything this daemon implements, and injectWS's client-side shim doesn't
+  // parse the raw handshake response to surface it back as `ws.protocol` for a test to assert on. What
+  // THIS daemon owns, and what matters here, is that the handshake actually completes for a valid token.
+  const wsOkProtocol = await appOn.injectWS("/ws/companion/sess1", { headers: { host: "127.0.0.1", "sec-websocket-protocol": GOOD_TOKEN }, socket: remoteSocket });
+  check("(3d) remote WS upgrade to /ws/companion with a VALID Sec-WebSocket-Protocol token → accepted (real handshake completes)", !!wsOkProtocol);
+  wsOkProtocol.close();
+
+  const wsOkQuery = await appOn.injectWS(`/ws/companion/sess1?token=${GOOD_TOKEN}`, { headers: { host: "127.0.0.1" }, socket: remoteSocket });
+  check("(3d) remote WS upgrade to /ws/companion with a VALID ?token= query fallback → accepted", !!wsOkQuery);
+  wsOkQuery.close();
 } finally {
   await appOn.close();
   dbOn.close();
