@@ -130,3 +130,41 @@ test("the detail modal widens on a large viewport and never overflows a narrow o
   // 92vw of 390 ≈ 359, so the padded panel is clearly narrower than the full window.
   expect(narrow!.width).toBeLessThan(370);
 });
+
+// Responsive height cap (owner fast-track sibling to the width change above: the modal was wide enough
+// but too SHORT — content-height (~620px) — on a large window; it now uses `minHeight: min(820px, 85vh)`
+// + `maxHeight: 88vh`, so the panel grows tall on a big viewport (the flex:1 description absorbs the room)
+// and still fits — panel-scrolling, never overflowing — on a short/phone one).
+test("the detail modal grows taller on a tall viewport and always fits a short one", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`board-modal-height-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+
+  const title = uniq("height-card");
+  const task = await loomDaemon.createTask(project.id, { title, columnKey: "todo" });
+
+  const panel = () => page.getByRole("dialog").locator("> div");
+
+  // TALL viewport: 85vh of 1000 = 850, so the 820px floor is what sizes it — the panel reaches its
+  // min-height (measured 820, well past the ~620px content-height it used to be) and never exceeds the
+  // 88vh cap (= 880).
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.goto(`${loomDaemon.baseURL}/board?task=${encodeURIComponent(task.id)}`);
+  await expect(page.getByRole("dialog")).toBeVisible();
+  const tall = await panel().boundingBox();
+  expect(tall).not.toBeNull();
+  // Clearly taller than the old content-height (~620px): the 820px floor, and capped under 88vh.
+  expect(tall!.height).toBeGreaterThanOrEqual(780);
+  expect(tall!.height).toBeLessThanOrEqual(0.88 * 1000 + 1);
+  // Fully inside the window, top and bottom.
+  expect(tall!.y).toBeGreaterThan(0);
+  expect(tall!.y + tall!.height).toBeLessThanOrEqual(1000);
+
+  // SHORT (phone) viewport: the floor collapses to 82vh and the 88vh cap keeps the panel inside the
+  // window — it must never overflow the bottom (top ≥ 0, bottom edge clear of the viewport height).
+  await page.setViewportSize({ width: 390, height: 600 });
+  const short = await panel().boundingBox();
+  expect(short).not.toBeNull();
+  expect(short!.height).toBeLessThanOrEqual(0.88 * 600 + 1);
+  expect(short!.y).toBeGreaterThanOrEqual(0);
+  expect(short!.y + short!.height).toBeLessThanOrEqual(600);
+});
