@@ -89,6 +89,22 @@ export interface PythonProvisioning {
 // line instead of silent emptiness. LOOM_DEV-only (403 otherwise, mirroring the rest of Deja).
 export interface DejaCaptureStatus { count: number; }
 
+// Guided-onboarding workflow templates (onboarding C3 REST — GET /api/setup/templates). The human-only
+// mirror of the agent-facing template_list tool: each bundled preset's name + one-line purpose + its
+// agent→profile roster. NOTE the response deliberately carries ONLY name/description/agents — NOT the
+// starter board-card seed (title/body/count) — so the wizard renders the starter card generically and
+// reads the authoritative created counts from the apply response below. Each agent is bound to an
+// existing bundled Profile by name; the wizard resolves that name against GET /api/profiles for the
+// role sigil + browser/no-commit badges.
+export interface SetupTemplate {
+  name: string;
+  description: string;
+  agents: { name: string; profileName: string }[];
+}
+// The POST /api/setup/templates/apply result: the agents + starter board cards actually created in the
+// target project (the authoritative counts the Done screen shows). Mirrors applyWorkflowTemplate's return.
+export interface TemplateApplyResult { agents: Agent[]; tasks: Task[]; }
+
 async function get<T>(url: string): Promise<T> {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
@@ -249,6 +265,15 @@ export const api = {
     agents: Agent[];
     liveSessions: { id: string; agentId: string; role: SessionRole | null; processState: string; busy: boolean; createdAt: string; lastActivity: string }[];
   }>("/api/setup/home"),
+  // --- Guided onboarding & templates (onboarding C3/C5). HUMAN-only loopback REST mirror of the
+  // agent-facing template_list/template_apply MCP tools — the setup wizard consumes these directly.
+  // `setupTemplates` lists the bundled workflow presets (name + purpose + agent→profile roster);
+  // `applyTemplate` stands up a template's agents + starter card into an ALREADY-EXISTING project and
+  // returns the created agents/tasks. applyTemplate surfaces the server's `{ error }` body verbatim (an
+  // unknown template / elevated-role guard 400s) via postErr, so the wizard shows the reason inline. ---
+  setupTemplates: () => get<SetupTemplate[]>("/api/setup/templates"),
+  applyTemplate: (projectId: string, templateName: string) =>
+    postErr<TemplateApplyResult>("/api/setup/templates/apply", { projectId, templateName }),
   createProject: (b: { name: string; repoPath: string; vaultPath: string }) =>
     post<Project>("/api/projects", b),
   // --- HUMAN-only project/agent management (rename / archive / restore / PERMANENT delete + agent

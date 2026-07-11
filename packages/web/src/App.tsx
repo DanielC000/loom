@@ -8,6 +8,7 @@ import { NAV_PAGES, useVisibleNavPages, type NavGroup } from "./nav";
 import { NavTab, Badge, Button } from "./components/ui";
 import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
+import { SetupWizard } from "./components/SetupWizard";
 import { RequestModalProvider, useOpenRequest } from "./components/requests";
 import { api } from "./lib/api";
 import { useAttention, useNewAttention, attentionOpenTarget, type AttentionItem } from "./lib/attention";
@@ -365,8 +366,15 @@ function FirstRunWelcome() {
   const navigate = useNavigate();
   const projectsQ = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const [dismissed, setDismissed] = useState<boolean>(() => localStorage.getItem(WELCOME_DISMISSED_KEY) === "1");
+  // Entry B — the first-run welcome opens the guided-setup WIZARD directly (the fast path to a
+  // ready-to-run workspace), a peer of "Open Platform" (hand the operator agent the reins instead).
+  const [wizardOpen, setWizardOpen] = useState(false);
   const dismiss = () => { localStorage.setItem(WELCOME_DISMISSED_KEY, "1"); setDismissed(true); };
-  const ref = useDismissable<HTMLDivElement>(!dismissed, dismiss);
+  const ref = useDismissable<HTMLDivElement>(!dismissed && !wizardOpen, dismiss);
+
+  // While the wizard is open it fully takes over the viewport (its own overlay), so render ONLY it — this
+  // also keeps a single Escape handler in play (the welcome's dismiss-on-Escape stays disarmed above).
+  if (wizardOpen) return <SetupWizard open onClose={() => setWizardOpen(false)} />;
 
   // Only once projects have actually loaded + resolved EMPTY (no flash on a populated install). The
   // context's `projects` is already archived-filtered + reserved-excluded — read it via the same cache.
@@ -378,16 +386,17 @@ function FirstRunWelcome() {
     <div style={{ position: "fixed", inset: 0, zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center",
       background: "rgba(0,0,0,0.55)", backdropFilter: "blur(2px)" }}>
       <div ref={ref} role="dialog" aria-modal="true" aria-label="Welcome to Loom"
-        style={{ width: 460, maxWidth: "92vw", background: color.panel, border: `1px solid ${color.borderStrong}`,
+        style={{ width: 480, maxWidth: "92vw", background: color.panel, border: `1px solid ${color.borderStrong}`,
           borderRadius: radius.base, padding: "26px 26px 22px", boxShadow: "0 12px 48px rgba(0,0,0,0.6)",
           borderTop: `3px solid ${color.phosphor}` }}>
         <div style={{ fontFamily: font.head, fontSize: 20, color: color.text, letterSpacing: "0.01em" }}>Welcome to Loom</div>
         <p style={{ color: color.textDim, fontFamily: font.mono, fontSize: 13, lineHeight: 1.6, margin: "12px 0 22px" }}>
-          Let’s get you set up. Your Platform assistant — a friendly workspace operator — is already running and ready to
-          create your first project, agents and profiles, and act on your behalf. Open it to tell it what you want to build.
+          Loom weaves real Claude Code sessions, your docs, and tasks into one workspace. Let’s stand up your first
+          project — pick a workflow template, point Loom at a repo, and get a ready-to-run team in a few quick steps.
         </p>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <Button variant="primary" onClick={goSetup} style={{ padding: "6px 14px", fontSize: 13 }}>Open Platform →</Button>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <Button variant="primary" onClick={() => setWizardOpen(true)} style={{ padding: "6px 14px", fontSize: 13 }}>Start guided setup →</Button>
+          <Button onClick={goSetup} style={{ padding: "6px 14px", fontSize: 13 }} title="Hand the reins to the Platform operator instead">Open Platform</Button>
           <Button variant="ghost" onClick={dismiss} style={{ padding: "6px 12px", fontSize: 13, color: color.textMuted }}>Maybe later</Button>
         </div>
       </div>

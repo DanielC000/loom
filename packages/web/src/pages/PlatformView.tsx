@@ -8,6 +8,8 @@ import { AgentPromptEditor } from "../components/AgentPromptEditor";
 import { RunHistory } from "../components/RunHistory";
 import { CollapsibleHistory } from "../components/CollapsibleHistory";
 import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../components/ui";
+import { SetupWizard } from "../components/SetupWizard";
+import { LogoMark } from "../components/Logo";
 import { looksLikeCron } from "./Schedules";
 import { color, font } from "../theme";
 import { roleDisplay } from "../lib/roleDisplay";
@@ -47,6 +49,9 @@ export function PlatformView({ edition }: { edition: PlatformEdition }) {
   // Profiles resolve each agent's role (operator/auditor) — the human spawn role + chip.
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 4000 });
+  // Entry A — the guided-onboarding wizard, launched from the band below. Human-only; stands up a new
+  // project + a templated team over the existing setup REST (nothing here spawns an agent).
+  const [wizardOpen, setWizardOpen] = useState(false);
 
   if (home.isLoading) return <p style={{ color: color.textMuted }}>Loading the Platform home…</p>;
   if (home.isError || !home.data) {
@@ -86,6 +91,26 @@ export function PlatformView({ edition }: { edition: PlatformEdition }) {
           {edition.copy.header.paragraph}
         </p>
       </div>
+
+      {/* --- Guided setup launcher (onboarding Entry A): stand up a NEW project + a templated team in a few
+             guided steps. A peer to handing the operator agent the reins above — this is the do-it-yourself
+             fast path. Opens the SetupWizard overlay; it spawns no agent. --- */}
+      <Panel style={{
+        display: "flex", alignItems: "center", gap: 16, padding: "16px 18px",
+        background: `radial-gradient(560px 180px at 12% -40%, ${color.phosphorDim}, transparent 70%), ${color.panel}`,
+      }}>
+        <span style={{ color: color.phosphor, display: "inline-flex", flexShrink: 0 }}><LogoMark size={26} /></span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontFamily: font.head, fontSize: 14, color: color.text }}>New workspace from a template</div>
+          <div style={{ fontFamily: font.mono, fontSize: 11.5, color: color.textMuted, marginTop: 3, lineHeight: 1.5 }}>
+            Pick a workflow template, point Loom at a repo, and get a ready-to-run team plus a starter board card — in four quick steps.
+          </div>
+        </div>
+        <Button variant="primary" onClick={() => setWizardOpen(true)} style={{ padding: "6px 14px", fontSize: 13, flexShrink: 0 }}>
+          Start guided setup →
+        </Button>
+      </Panel>
+      <SetupWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
 
       {/* --- 1. Agent go-live controls (operator + auditor) --- */}
       <section>
