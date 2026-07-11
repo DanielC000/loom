@@ -465,6 +465,8 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // Message-delivery behavior toggle (owner-directed 2026-07-03): a top-level boolean, not part of the
   // ms-keyed GLOBAL_FIELDS grid, so it gets its own tri-state seeded straight from the loaded override.
   const [coalesceAgentMsgs, setCoalesceAgentMsgs] = useState(triStr(override.coalesceAgentMessages));
+  // Bucket 2b "Elevated Operator" gate — same daemon-global tri-state pattern, own toggle (default OFF).
+  const [operatorEnabled, setOperatorEnabled] = useState(triStr(override.operatorEnabled));
 
   // Build the override from the form — every non-blank field converted to canonical ms (× the unit).
   // A blank field is omitted (inherits). A non-numeric entry sends NaN (→ null) so the strict-zod PATCH
@@ -478,6 +480,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
       grp[f.key] = Number(s) * UNIT_MS[f.unit];
     }
     if (coalesceAgentMsgs !== "inherit") o.coalesceAgentMessages = coalesceAgentMsgs === "true";
+    if (operatorEnabled !== "inherit") o.operatorEnabled = operatorEnabled === "true";
     return o;
   }
 
@@ -552,6 +555,25 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             into one turn (the pre-2026-07 behavior). Loom&apos;s own routine nudges (idle/context/rate-limit
             watchdogs, etc.) still coalesce regardless of this setting; action-required nudges (a merge
             rejection, an already-merged notice) stay on their own turn either way.
+          </Hint>
+        </label>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Elevated Operator</SectionLabel>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 560 }}>
+          <span style={fieldLabel}>Elevated Operator (off by default)</span>
+          <TriSelect value={operatorEnabled} set={setOperatorEnabled} def={defaults.operatorEnabled} />
+          <Hint>{effHint(resolved.operatorEnabled)}</Hint>
+          <Hint>
+            Turning this on lets you spawn an <em>operator</em> session that can act on its own
+            project&apos;s working tree on your behalf: (a) switch/create local branches and commit
+            changes, (b) write files into that project&apos;s vault, and (c) push its current branch to
+            its own remote (never a force-push). It is confined to the one project it&apos;s started in
+            and is spawned only by you. It can never: run host/deploy commands, send data to a webhook,
+            edit Loom&apos;s bundled skills, reach or act on other projects, create schedules, or spawn/
+            elevate other sessions. Leave this off unless you want an agent committing and pushing code
+            for you.
           </Hint>
         </label>
       </Panel>

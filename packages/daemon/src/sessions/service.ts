@@ -209,10 +209,11 @@ function suggestAgentRef(agents: Agent[], ref: string): string | undefined {
  * my_context + the companion-gated chat_reply), so a "+New" on an assistant-profile agent may spawn it
  * directly, like a manager/worker rig.
  * The elevated/locked roles — "platform" (loom-platform surface), "auditor" (loom-audit),
- * "workspace-auditor" (loom-user-audit), "setup" (loom-setup) and "run" (internal-only Agent
- * Runs) — must come EXCLUSIVELY from their explicit human spawn paths (startPlatformLead/startAuditor/
- * startSetup/startWorkspaceAuditor) or internal starters, which pass an explicit caller
- * role. A profile role outside this set is dropped to a plain (role-null) spawn in resolveAgentSpawn,
+ * "workspace-auditor" (loom-user-audit), "setup" (loom-setup), "operator" (loom-operator, Bucket 2b) and
+ * "run" (internal-only Agent Runs) — must come EXCLUSIVELY from their explicit human spawn paths
+ * (startPlatformLead/startAuditor/startSetup/startWorkspaceAuditor/startOperator) or internal starters,
+ * which pass an explicit caller role. A profile role outside this set is dropped to a plain (role-null)
+ * spawn in resolveAgentSpawn,
  * so a "normal-looking" agent carrying an elevated profile + a role-omitted REST spawn can never
  * silently elevate. (Note: validateProfile already forbids "auditor"/"workspace-auditor"/"run" on a
  * profile; this is the spawn-side backstop and also covers the still-mintable "platform"/"setup".)
@@ -1089,6 +1090,91 @@ export class SessionService {
     // Explicit 'setup' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the curated loom-setup surface.
     const { role, startupPrompt, permission, browserTesting, documentConversion, dejaCorpus, capabilities, restrictedTools, noCommit, model, skills, connections } = this.resolveAgentSpawn(agent, config, "setup");
+
+    const now = new Date().toISOString();
+    const session: Session = {
+      id: randomUUID(),
+      projectId: project.id,
+      agentId,
+      engineSessionId: null,
+      title: null,
+      cwd: project.repoPath,
+      processState: "starting",
+      resumability: "unknown",
+      busy: false,
+      createdAt: now,
+      lastActivity: now,
+      lastError: null,
+      role,
+      browserTesting,
+      documentConversion,
+      dejaCorpus,
+      capabilities, // profile-pinned registry-capability grants, pinned on the row ([] ⇒ today's behavior)
+      restrictedTools,
+      noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
+      skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
+      connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
+    };
+    this.db.insertSession(session);
+    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
+    this.db.setProcessState(session.id, "live");
+    this.pty.spawn({
+      sessionId: session.id,
+      cwd: session.cwd,
+      permission,
+      geometry: config.pty,
+      sessionEnv: config.sessionEnv,
+      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      dejaCapture: config.dejaCapture, // opt-in Deja capture hook (card b3bd4841)
+      codescapeEnabled: config.codescape.enabled, codescapePort: this.codescape?.getPort() ?? null, projectId: project.id, // card C2
+      startupPrompt,
+      role,
+      browserTesting,
+      documentConversion,
+      dejaCorpus,
+      capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
+      restrictedTools,
+      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+    });
+    return { ...session, processState: "live" };
+  }
+
+  /**
+   * Start a NEW ELEVATED OPERATOR session in an agent (Bucket 2b "Bounded Elevated Operator"). Shaped like
+   * startSetup but passes callerRole "operator" so the session is LOCKED to the curated, own-workspace-
+   * confined loom-operator MCP surface. Because an EXPLICIT caller role ALWAYS wins in resolveAgentSpawn,
+   * the session role is "operator" regardless of the agent's profile role — the gate is keyed off the
+   * SESSION role (+ the LIVE platform.operatorEnabled flag, re-checked by the router itself on every
+   * request), never the profile role.
+   *
+   * CREATE-ONLY, NOT a singleton (mirrors startWorkspaceAuditor's shape, deliberately NOT startSetup's
+   * live-reuse guard): an operator is a bounded, human-invoked tool session, not a standing assistant — the
+   * human may want several independent operator sessions live in the same agent (e.g. one per task), so
+   * this never collapses a fresh spawn into an already-live row.
+   *
+   * FLAG-GATED at the CALLER (gateway REST — see isOperatorEnabled), not here: this method itself does NOT
+   * re-check platform.operatorEnabled, mirroring startWorkspaceAuditor/startSetup (neither re-checks their
+   * own gating condition internally either — the REST route is the single enforcement point for "may this
+   * spawn happen at all"; the router's resolveRole is the SEPARATE, LIVE-read enforcement point for "may
+   * this session's surface be reached right now").
+   *
+   * HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"operator"}, flag-gated 403 when off) —
+   * no agent/MCP path mints one (session_spawn on every agent-facing surface refuses role "operator";
+   * setupRoleError excludes it from the mintable profile-role allowlist). The Elevated Operator agent lives
+   * wherever the human creates it (own-workspace-confined — NOT restricted to a reserved home, unlike
+   * setup/workspace-auditor, since an operator is meant to act on an ORDINARY project's own tree).
+   */
+  startOperator(agentId: string): Session {
+    const agent = this.db.getAgent(agentId);
+    if (!agent) throw new Error("agent not found");
+    const project = this.db.getProject(agent.projectId);
+    if (!project) throw new Error("project not found");
+
+    const config = resolveConfig(project.config);
+    // Explicit 'operator' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
+    // allowDelta. The locked role — NOT the profile role — drives the curated loom-operator surface.
+    const { role, startupPrompt, permission, browserTesting, documentConversion, dejaCorpus, capabilities, restrictedTools, noCommit, model, skills, connections } = this.resolveAgentSpawn(agent, config, "operator");
 
     const now = new Date().toISOString();
     const session: Session = {

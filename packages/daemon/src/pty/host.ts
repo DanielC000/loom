@@ -767,6 +767,7 @@ export function buildMcpServers(o: {
   const wantsAudit = o.role === "auditor";
   const wantsUserAudit = o.role === "workspace-auditor";
   const wantsSetup = o.role === "setup";
+  const wantsOperator = o.role === "operator";
   const mcpServers: Record<string, unknown> = {
     "loom-tasks": { type: "http", url: `http://127.0.0.1:${o.port}/mcp/${o.sessionId}` },
   };
@@ -789,6 +790,14 @@ export function buildMcpServers(o: {
   // loom-tasks) — NEVER loom-platform/orchestration/audit. A tool not registered there can't be reached.
   if (wantsSetup) {
     mcpServers["loom-setup"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-setup/${o.sessionId}` };
+  }
+  // Bucket 2b Elevated Operator: an "operator" session gets ONLY the curated loom-operator surface (on
+  // top of loom-tasks) — NEVER loom-platform/orchestration/audit/setup. A tool not registered there can't
+  // be reached. The router ITSELF re-checks platform.operatorEnabled LIVE (isOperatorEnabled) on every
+  // request, so this mount alone is not the enforcement point — a flag flip to OFF 404s the surface even
+  // though the mount entry (an inert URL) still exists in this session's already-spawned argv.
+  if (wantsOperator) {
+    mcpServers["loom-operator"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-operator/${o.sessionId}` };
   }
   // Agent-tooling P4: ONE generalized loop over every resolved registry-capability grant (the bridged
   // legacy booleans + the new capabilities array). byte-identical-when-none: an empty resolved list is a
@@ -2229,6 +2238,7 @@ export class PtyHost {
     const wantsUserAudit = opts.role === "workspace-auditor";
     const wantsSetup = opts.role === "setup";
     const wantsRun = opts.role === "run";
+    const wantsOperator = opts.role === "operator";
     // A browser-testing session ALSO needs its Playwright MCP tools allowlisted — acceptEdits doesn't
     // auto-approve MCP tools (the §9 lesson), so without this the worker would hang on a permission
     // prompt the first time it calls a browser tool. Orthogonal to role (a browser session is a worker),
@@ -2240,6 +2250,7 @@ export class PtyHost {
       : wantsUserAudit ? ["mcp__loom-user-audit"]
       : wantsSetup ? ["mcp__loom-setup"]
       : wantsRun ? ["mcp__loom-run"]
+      : wantsOperator ? ["mcp__loom-operator"]
       : [];
     // A document-conversion session ALSO needs its markitdown MCP tool allowlisted (acceptEdits doesn't
     // auto-approve MCP tools — the §9 lesson), so it layers ON TOP of the role surface like browserTesting.

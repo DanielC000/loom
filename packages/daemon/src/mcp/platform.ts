@@ -408,6 +408,10 @@ const platformConfigOverrideSchema = z.object({
   connections: connectionsOverride.optional(),
   coalesceAgentMessages: z.boolean().optional(),
   companionVoiceEnabled: z.boolean().optional(),
+  // Bucket 2b Elevated Operator gate. HUMAN-only, like every other `platform` sub-group — there is no
+  // agent-facing platform-config surface at all (see the function doc below), so this reaches an agent
+  // no differently than gateCommand reaches one via the project schema: it simply isn't reachable.
+  operatorEnabled: z.boolean().optional(),
   remoteAccess: remoteAccessOverride.optional(),
 }).strict();
 
@@ -951,7 +955,7 @@ export class PlatformMcpRouter {
         if (role !== "manager" && role !== "plain") {
           return ok({
             error: `session_spawn refuses role "${role}" — only "manager" or "plain" may be spawned here. ` +
-              "A platform session is human-REST-only (no self-elevation) and a worker requires a manager parent + task (a manager's orchestration job).",
+              "A platform/auditor/setup/operator session is human-REST-only (no self-elevation) and a worker requires a manager parent + task (a manager's orchestration job).",
           });
         }
         try {

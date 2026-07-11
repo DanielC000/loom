@@ -3,6 +3,7 @@ import type { Agent, Project, Task } from "@loom/shared";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { LOOM_HOME } from "../paths.js";
 import type { Db } from "../db.js";
+import { isOperatorEnabled } from "../mcp/operator.js";
 
 /**
  * Setup Assistant — the reserved, UNGATED "Platform" home + its single Setup Assistant agent.
@@ -297,6 +298,57 @@ export function seedSetupAuditorAgent(db: Db): string | null {
   };
   db.insertAgent(agent);
   return SETUP_AUDITOR_AGENT_NAME;
+}
+
+/** The bundled profile the Elevated Operator agent runs under (seeded ungated by seedDefaultProfiles). */
+const OPERATOR_PROFILE_NAME = "Elevated Operator";
+
+/**
+ * The seeded Elevated Operator agent's DISPLAY name — DISTINCT from the other reserved-home agent names
+ * (SETUP_AGENT_NAME "Platform" / SETUP_AUDITOR_AGENT_NAME "Workspace Auditor") so they never collide.
+ */
+export const OPERATOR_AGENT_NAME = "Elevated Operator";
+
+/** The default startup prompt shipped for the Elevated Operator agent (user-editable after seed). */
+const OPERATOR_PROMPT = `You are the **Elevated Operator** — a bounded, own-workspace-confined operator a human spawns deliberately to act on THEIR CURRENT PROJECT's working tree: switch/create local branches, commit changes, write notes into that project's vault, and push its current branch to its own remote. You are confined to the one project you're started in; you can never reach another project, run host/deploy commands, send data to a webhook, edit Loom's bundled skills, create schedules, or spawn/elevate other sessions.
+
+Act only on the explicit task the human gives you this session. Confirm before an irreversible or ambiguous step. When you're done, say plainly what you changed (branch/commit/push/vault write) so the human can verify.`;
+
+/**
+ * Bucket 2b "Bounded Elevated Operator" — seed the bundled Elevated Operator agent into the SAME reserved
+ * "Platform" setup home as the operator/auditor/companion agents, SEED-IF-ABSENT BY AGENT-NAME, mirroring
+ * seedSetupAuditorAgent/seedCompanionAgent — EXCEPT this one is FLAG-GATED: it seeds ONLY while
+ * platform.operatorEnabled is on (isOperatorEnabled, read LIVE — same helper the router/REST gate use), so
+ * a fresh install with the flag off never grows the agent row at all. Once seeded it PERSISTS across a
+ * later flag-off (the row itself is inert — the surface it drives 404s the moment the flag flips off; this
+ * mirrors every other seed-if-absent agent, which is never retroactively deleted by a config change).
+ *
+ * Run at boot AFTER seedSetupHome, scoped to the reserved home (resolved by NAME — gotcha #1 from the
+ * sibling seeders), never a name-agnostic reserved lookup. Bound to the bundled "Elevated Operator" profile
+ * (looked up by name; profileId null backstop if absent so the seed never throws). Deliberately NO
+ * first-run auto-launch anywhere — an operator is opt-in + elevated and must NEVER auto-spawn; seeding the
+ * AGENT is not spawning a SESSION (that stays human-REST-only via startOperator). Returns the seeded name,
+ * or null when it no-ops (home missing, flag off, or already present).
+ */
+export function seedOperatorAgent(db: Db): string | null {
+  if (!isOperatorEnabled(db)) return null; // flag off — never seed the agent row at all
+  const home = db.getReservedProjectByName(SETUP_PROJECT_NAME);
+  if (!home) return null; // no setup home yet — seedSetupHome (run first) creates it; nothing to attach to
+  const agents = db.listAgents(home.id);
+  if (agents.some((a) => a.name === OPERATOR_AGENT_NAME)) return null; // already present — idempotent
+
+  const profile = db.listProfiles().find((p) => p.name === OPERATOR_PROFILE_NAME);
+  const agent: Agent = {
+    id: randomUUID(),
+    projectId: home.id,
+    name: OPERATOR_AGENT_NAME,
+    startupPrompt: OPERATOR_PROMPT,
+    position: agents.length,
+    profileId: profile?.id ?? null, // plain backstop if the bundled profile is unexpectedly absent
+    endpoint: false, ioSchema: null, // not an API endpoint
+  };
+  db.insertAgent(agent);
+  return OPERATOR_AGENT_NAME;
 }
 
 /** The bundled profile the Companion agent runs under (seeded ungated by seedDefaultProfiles). */

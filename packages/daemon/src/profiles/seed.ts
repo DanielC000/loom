@@ -155,6 +155,22 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
     icon: "🧭",
   },
   {
+    // CORE product, UNGATED (role "operator" is NOT a platform-exclusive role, so isPlatformProfile()
+    // returns false and this seeds for every loomctl user regardless of LOOM_DEV — deliberately NOT added
+    // to isPlatformProfile, which would wrongly make it dev-only; see the clone-core.ts trap comment).
+    // Seeding this rig is INERT by itself: the surface it drives (loom-operator) is 404 until a human
+    // turns on platform.operatorEnabled (Settings) AND explicitly spawns a session on this profile's
+    // agent — there is no auto-launch, no schedule kind, and no agent/MCP path that can mint one.
+    name: "Elevated Operator",
+    role: "operator",
+    description:
+      "Elevated Operator rig (off by default): a bounded, own-workspace-confined operator that can switch/create local branches, commit, write vault notes, and push its own project's branch on your behalf — never another project's. Requires enabling 'Elevated Operator' in Settings; spawned only by you.",
+    allowDelta: [],
+    skills: null,
+    model: null,
+    icon: "🛠️",
+  },
+  {
     // CORE product, UNGATED — the end-user Platform tier's SUGGEST-ONLY reviewer, the de-privileged
     // user-workspace twin of Platform-audit. Role "workspace-auditor" is NOT a platform-exclusive role, so
     // isPlatformProfile() returns false and this seeds for every loomctl user (like Setup Assistant). The

@@ -19,7 +19,11 @@ const profileSchema = z
     // "assistant" (the long-lived Loom Companion) is a valid, low-privilege profile role — profile-spawnable
     // like manager/worker (its whole surface is my_context + the companion-gated chat_reply). The ungated
     // Setup operator still can't mint one (setupRoleError's allowlist omits it) — human REST / dev only.
-    role: z.enum(["manager", "worker", "platform", "setup", "assistant"]).nullable().optional(),
+    // "operator" (Bucket 2b "Elevated Operator") IS a valid, human-mintable profile role too — but the
+    // SESSION role it ends up carrying is ALWAYS locked by the explicit caller role at startOperator
+    // (resolveAgentSpawn), never by this profile field alone, and the ungated Setup operator still can't
+    // mint/assign one (setupRoleError's allowlist omits it, exactly like "platform").
+    role: z.enum(["manager", "worker", "platform", "setup", "assistant", "operator"]).nullable().optional(),
     description: z.string().optional(),
     allowDelta: z.array(z.string()).optional(),
     skills: z.array(z.string()).nullable().optional(),

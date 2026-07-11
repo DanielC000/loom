@@ -39,7 +39,16 @@ export function clonedProfileRoleError(db: Db, sourceProfileId: string | null): 
   const profile = db.getProfile(sourceProfileId);
   // A dangling profileId (its profile was since deleted) resolves to the plain backstop elsewhere —
   // nothing elevated to guard against.
-  if (!profile || !isPlatformProfile(profile)) return null;
+  if (!profile) return null;
+  // Bucket 2b: "operator" gets its OWN explicit check, deliberately NOT folded into isPlatformProfile —
+  // isPlatformProfile ALSO drives LOOM_DEV seed-gating (profiles/seed.ts), so adding "operator" there
+  // would wrongly make the ungated Elevated Operator rig dev-only. An operator is own-workspace-confined
+  // (unlike platform/auditor, which are cross-project by design), so cloning one into ANOTHER project
+  // would defeat that confinement just as surely — it must be refused here too.
+  if (profile.role === "operator") {
+    return `cannot clone agent: its profile role is "operator" — cloning the own-workspace-confined Elevated Operator rig into another project is never allowed`;
+  }
+  if (!isPlatformProfile(profile)) return null;
   return `cannot clone agent: its profile role is "${profile.role}" — cloning an elevated platform/auditor rig into another project is never allowed (mirrors the least-privilege guard on assigning one directly)`;
 }
 

@@ -26,6 +26,8 @@ import type { PlatformMcpRouter } from "../mcp/platform.js";
 import type { AuditMcpRouter } from "../mcp/audit.js";
 import type { WorkspaceAuditMcpRouter } from "../mcp/user-audit.js";
 import type { SetupMcpRouter } from "../mcp/setup.js";
+import type { OperatorMcpRouter } from "../mcp/operator.js";
+import { isOperatorEnabled } from "../mcp/operator.js";
 import type { RunMcpRouter } from "../mcp/run.js";
 import type { CompanionControl } from "../companion/controller.js";
 import type { InAppChannel } from "../companion/in-app.js";
@@ -104,6 +106,7 @@ export interface GatewayDeps {
   auditMcp: AuditMcpRouter;
   userAuditMcp: WorkspaceAuditMcpRouter;
   setupMcp: SetupMcpRouter;
+  operatorMcp: OperatorMcpRouter;
   runMcp: RunMcpRouter;
   control: OrchestrationControl;
   usageStatus: UsageStatusPoller;
@@ -458,6 +461,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { sessionId } = req.params as { sessionId: string };
     reply.hijack();
     await deps.setupMcp.handle(req.raw, reply.raw, sessionId, req.body);
+  });
+
+  // --- Operator MCP (Bucket 2b "Bounded Elevated Operator"; role-gated to 'operator' AND
+  // platform.operatorEnabled, both checked LIVE by the router's own resolveRole). A distinct route +
+  // router so an 'operator' session reaches ONLY its own-workspace-confined git/vault writers: it 404s on
+  // every other /mcp* route, and no agent/MCP path can mint an 'operator' session (human REST only,
+  // startOperator), so a non-operator session can never reach here. ---
+  app.all("/mcp-operator/:sessionId", async (req, reply) => {
+    const { sessionId } = req.params as { sessionId: string };
+    reply.hijack();
+    await deps.operatorMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
 
   // --- Agent-Run MCP (role-gated to 'run'; the ephemeral run's ONLY tool is submit_result — R2). A
@@ -3578,6 +3592,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // surface. HUMAN-REST only (like startPlatformLead/startAuditor) — the session role is locked to
     // "setup" via callerRole regardless of the agent's profile role; a live setup session is reused.
     if (role === "setup") return deps.sessions.startSetup(id);
+    // Bucket 2b "Elevated Operator": spawn the CREATE-ONLY, own-workspace-confined Operator on the
+    // curated loom-operator MCP surface. HUMAN-REST only (like setup/workspace-auditor) — the session
+    // role is locked to "operator" via callerRole regardless of the agent's profile role. FLAG-GATED:
+    // 403s (does not spawn) unless platform.operatorEnabled is on (read LIVE — the same isOperatorEnabled
+    // helper the router's own resolveRole uses), so a disabled install can never mint the surface even
+    // via a direct REST call.
+    if (role === "operator") {
+      if (!isOperatorEnabled(deps.db)) {
+        reply.code(403);
+        return { error: "the Elevated Operator is disabled — enable it in Settings first (platform.operatorEnabled)" };
+      }
+      return deps.sessions.startOperator(id);
+    }
     // P3 force-plain override (web "Spawn → force plain"): a VANILLA session even in an agent with a
     // manager/platform profile — bypasses the profile entirely (role null, agent's own prompt, no allow
     // delta). Absent/undefined role = auto (the profile's role applies — P2 default).

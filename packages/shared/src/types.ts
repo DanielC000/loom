@@ -379,8 +379,19 @@ export type Resumability = "unknown" | "resumable" | "dead";
  *   loom-orchestration surface (my_context + the companion-gated chat_reply), NEVER the manager
  *   spawn/stop/list surface or any writer (least-privilege; the restricted tool profile is a later card).
  *   Profile-spawnable + resume-durable like the other non-worktree persistent roles. See `[[Companion Design]]`.
+ * - operator: the Bucket 2b "Elevated Operator" — a per-install, OPT-IN, HUMAN-SPAWNED-ONLY, OWN-WORKSPACE-
+ *   CONFINED role sitting between the fail-closed `setup` operator and the LOOM_DEV Platform Lead. Gated
+ *   LIVE (not boot-memoized) on the human-only `platform.operatorEnabled` config flag — flipping it off
+ *   404s the surface immediately. When on, it gets the `loom-operator` MCP surface: the SAME own-workspace
+ *   writers the Lead's P3 block carries (git_checkout/create_branch/commit/push + vault_write, reusing
+ *   GitWriter/writeVaultFile VERBATIM) plus bounded own-project reads — but with NO `projectId` argument
+ *   on any writer: the target project is resolved SERVER-SIDE from the caller's OWN session, the load-
+ *   bearing divergence from the Lead's explicit-projectId cross-project tools. No config-set, no
+ *   session_spawn/session_message, no schedule_*, no bundled skill_write, no cross-project reach at all.
+ *   Never mintable via a profile role on the `setup` surface (setupRoleError) or via session_spawn on any
+ *   agent-facing surface — human-REST (`startOperator`) only. See `[[Bucket 2b — Bounded Elevated Operator (Build Spec)]]`.
  */
-export const SESSION_ROLES = ["manager", "worker", "platform", "auditor", "setup", "workspace-auditor", "run", "assistant"] as const;
+export const SESSION_ROLES = ["manager", "worker", "platform", "auditor", "setup", "workspace-auditor", "run", "assistant", "operator"] as const;
 export type SessionRole = (typeof SESSION_ROLES)[number];
 
 // --- Agent Runs (R2): the AgentRun primitive ------------------------------------------------------

@@ -460,11 +460,24 @@ export interface PlatformConfig {
    * per-project layer) + HUMAN-only, mirroring the rest of `PlatformConfig`.
    */
   companionVoiceEnabled: boolean;
+  /**
+   * Bucket 2b "Elevated Operator" gate (owner-approved spec): master switch for the `operator` session
+   * role's `loom-operator` MCP surface (own-workspace git writers + vault_write). Default OFF. Read LIVE
+   * at every gate (mirrors `paths.ts` `isLoomDev` — NOT boot-memoized like `coalesceAgentMessages`/
+   * `companionVoiceEnabled` above), so flipping it off revokes the surface on the very next request
+   * instead of waiting for a restart. DAEMON-GLOBAL (no per-project layer) + HUMAN-only, mirroring the
+   * rest of `PlatformConfig`.
+   */
+  operatorEnabled: boolean;
 }
 
 /** Default for `PlatformConfig.companionVoiceEnabled` — a single named constant so flipping the shipped
  *  default is a one-line change. OFF: companion voice provisioning is explicit human opt-in. */
 export const COMPANION_VOICE_ENABLED_DEFAULT = false;
+
+/** Default for `PlatformConfig.operatorEnabled` — a single named constant, mirroring
+ *  `COMPANION_VOICE_ENABLED_DEFAULT`. OFF: the Elevated Operator surface is explicit human opt-in. */
+export const OPERATOR_ENABLED_DEFAULT = false;
 
 /**
  * Access-story Phase A (card 766f8b50) — daemon-global remote-bind config. NOT per-project — like
@@ -596,6 +609,8 @@ export interface PlatformConfigOverride {
   coalesceAgentMessages?: boolean;
   /** See PlatformConfig.companionVoiceEnabled. */
   companionVoiceEnabled?: boolean;
+  /** See PlatformConfig.operatorEnabled. */
+  operatorEnabled?: boolean;
   /** See RemoteAccessConfig. Deep-partial: `tls`/`rateLimit` replace whole when present. */
   remoteAccess?: Partial<RemoteAccessConfig>;
 }
@@ -651,6 +666,8 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     coalesceAgentMessages: false,
     // Default OFF (COMPANION_VOICE_ENABLED_DEFAULT) — companion voice provisioning is explicit opt-in.
     companionVoiceEnabled: COMPANION_VOICE_ENABLED_DEFAULT,
+    // Default OFF (OPERATOR_ENABLED_DEFAULT) — the Bucket 2b Elevated Operator surface is explicit opt-in.
+    operatorEnabled: OPERATOR_ENABLED_DEFAULT,
   },
   // Access-story Phase A: OFF + loopback by default — ships inert (see RemoteAccessConfig). The
   // rateLimit default is carried here too (Phase C) so it applies the moment a human flips `enabled`
@@ -907,6 +924,7 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
     },
     coalesceAgentMessages: po?.coalesceAgentMessages ?? d.coalesceAgentMessages,
     companionVoiceEnabled: po?.companionVoiceEnabled ?? d.companionVoiceEnabled,
+    operatorEnabled: po?.operatorEnabled ?? d.operatorEnabled,
   };
 }
 

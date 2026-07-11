@@ -126,6 +126,23 @@ export const ROLE_DISPLAY: Record<RoleKey, RoleDisplay> = {
     ],
     confer: "user",
   },
+  operator: {
+    key: "operator",
+    role: "operator",
+    label: "Elevated Operator",
+    short: "Operator",
+    sigil: "▲",
+    tone: sessionRoleTone.operator,
+    tier: "elevated",
+    tierLabel: "elevated",
+    description: "Bounded, own-project git & vault writes — spawned only by you.",
+    powers: [
+      { text: "Own-project git checkout/commit/push", has: true },
+      { text: "Own-project vault writes", has: true },
+      { text: "No cross-project reach — off by default", has: false },
+    ],
+    confer: "user",
+  },
   platform: {
     key: "platform",
     role: "platform",

@@ -16,7 +16,7 @@ import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
 import { seedDefaultCapabilities, migrateGithubCapabilityToBinary } from "./capabilities/seed.js";
 import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
-import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent } from "./setup/seed.js";
+import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent, seedOperatorAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles, migrateHumanHoldToHeld } from "./tasks/columns.js";
 import { prewarmMarkitdownForProfilesAtBoot, resolvePrewarmInterpreterPath, shouldPrewarmCompanionVoice } from "./python/prewarm.js";
@@ -32,6 +32,7 @@ import { PlatformMcpRouter } from "./mcp/platform.js";
 import { AuditMcpRouter } from "./mcp/audit.js";
 import { WorkspaceAuditMcpRouter } from "./mcp/user-audit.js";
 import { SetupMcpRouter } from "./mcp/setup.js";
+import { OperatorMcpRouter } from "./mcp/operator.js";
 import { RunMcpRouter } from "./mcp/run.js";
 import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
@@ -147,6 +148,13 @@ async function main(): Promise<void> {
   // spawns NO session and writes NO companion_config; the rig stays invisible until a human provisions it.
   const seededCompanion = seedCompanionAgent(db);
   if (seededCompanion) console.log(`[boot] seeded companion agent: ${seededCompanion}`);
+  // Bucket 2b "Bounded Elevated Operator": seed the bundled Elevated Operator agent into the SAME
+  // reserved "Platform" setup home — FLAG-GATED (isOperatorEnabled, read LIVE), so a fresh install with
+  // platform.operatorEnabled off never grows this agent row. seed-if-absent BY AGENT-NAME within the
+  // reserved home, mirroring the auditor/companion seeders above. NO first-run auto-launch — seeding the
+  // agent is not spawning a session (that stays human-REST-only via startOperator).
+  const seededOperatorAgent = seedOperatorAgent(db);
+  if (seededOperatorAgent) console.log(`[boot] seeded elevated operator agent: ${seededOperatorAgent}`);
   // Platform Manager P1: seed the reserved "Loom Platform" home + its Platform Lead / Platform Auditor
   // agents, seed-if-absent (idempotent; runs AFTER seedDefaultProfiles so the bundled platform profiles
   // exist to assign). Hidden from the project picker (db.listProjects), still Mission-Control visible.
@@ -362,7 +370,7 @@ async function main(): Promise<void> {
       // this session's billed usage isn't lost (the periodic tick may have missed the last segment). The
       // sampler skips run / no-transcript sessions itself. Best-effort: never disturb the exit path.
       try { if (exited) void usageSampler.onSessionExit(exited).catch(() => { /* async best-effort */ }); } catch { /* never disturb the exit path */ }
-      mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); userAuditMcp.dispose(sessionId); setupMcp.dispose(sessionId); runMcp.dispose(sessionId);
+      mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); userAuditMcp.dispose(sessionId); setupMcp.dispose(sessionId); operatorMcp.dispose(sessionId); runMcp.dispose(sessionId);
     },
   }, {
     busyStaleMs: timeouts.busyStaleMs, coalesceAgentMessages: resolved.platform.coalesceAgentMessages, // BOOT-BOUND: from resolved platform config
@@ -591,6 +599,12 @@ async function main(): Promise<void> {
   // registry (structural/profile/read ops) AND SessionService (session_spawn). Deliberately gets NO
   // git-write timeouts: it has no git/vault/config-elevation/schedule/message tool, by design.
   const setupMcp = new SetupMcpRouter(db, sessions);
+  // Operator MCP (Bucket 2b "Bounded Elevated Operator") — the per-install, opt-in, own-workspace-
+  // confined surface (own-project git writers + vault_write, NO projectId argument — the target is
+  // always resolved server-side from the caller's own session). Threads the SAME boot-bound git-write
+  // timeouts as the Lead's P3 tools (platformMcp above), so an operator git op is bounded identically to
+  // both the human REST path and the Lead's elevated tools.
+  const operatorMcp = new OperatorMcpRouter(db, sessions, { gitLocalMs: timeouts.gitLocalMs, gitPushMs: timeouts.gitPushMs });
   // Run MCP (Agent Runs R2) — the ephemeral run's restricted submit_result surface. Needs the registry
   // (resolve session→run) AND SessionService (validate + record + teardown). Gets NO git/vault timeouts.
   const runMcp = new RunMcpRouter(db, sessions);
@@ -658,7 +672,7 @@ async function main(): Promise<void> {
   const schedulerEnabled =
     process.env.LOOM_SCHEDULER_ENABLED === "1" || resolved.orchestration.schedulerEnabled;
   const app = await buildServer({
-    db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus,
+    db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, operatorMcp, runMcp, control, usageStatus,
     schedulerEnabled,
     companion: companionController, inApp: inAppChannel, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"),
     updateStatus: () => updateCheck.current(), beginSelfUpdate,
