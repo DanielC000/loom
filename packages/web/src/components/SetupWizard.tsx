@@ -12,17 +12,17 @@ import { roleDisplay, roleColor } from "../lib/roleDisplay";
 // ── Guided onboarding WIZARD (onboarding C5, visual direction B · Guided Flow) ────────────────────────
 //
 // A full-bleed, 4-screen guided flow — Template → Project → Review → Done — that stands up a ready-to-run
-// workspace from a bundled workflow template, wired end-to-end to the EXISTING setup REST (nothing here
-// mints a backend endpoint):
+// workspace from a bundled workflow template, wired end-to-end to the setup REST:
 //   1. Template gallery  → GET /api/setup/templates (+ GET /api/profiles to resolve each agent's role /
 //      browser / no-commit rig for its roster chip). "Start empty" skips the template apply entirely.
-//   2. Project step      → api.createProject (the ONLY REST project-create; requires name + repoPath +
-//      vaultPath, exactly like the Projects "New project" form). A "Bind existing / Create new" segmented
-//      toggle frames the same call two ways — there is no host dir-creation / git-init over REST (that is
-//      the setup-MCP project_init, deliberately out of scope for this web card), so BOTH modes register a
-//      project at the paths the user provides.
-//   3. Review & confirm  → nothing is applied until the primary "Apply template" — createProject THEN, for
-//      a real template, applyTemplate. Shows the full roster + the browser-rig one-time-install advisory.
+//   2. Project step      → a "Bind existing / Create new" segmented toggle picks between two DISTINCT
+//      backend calls: "Bind existing" → api.createProject (registers a project at a repoPath/vaultPath
+//      already on disk, exactly like the Projects "New project" form); "Create new" → api.projectInit
+//      (the host-write REST mirror of the setup-MCP project_init tool — Loom creates + `git init`s a
+//      BRAND-NEW directory under its sanctioned workspace base; only a name is needed, no path).
+//   3. Review & confirm  → nothing is applied until the primary "Apply template" — the mode-appropriate
+//      project call THEN, for a real template, applyTemplate. Shows the full roster + the exact starter
+//      card(s) (from the templates response's boardSeed) + the browser-rig one-time-install advisory.
 //   4. Done              → the AUTHORITATIVE created counts from the apply response. The wizard itself
 //      spawns NO agent — "Go to the board" / "Spawn the Orchestrator" are navigation, not spawns.
 //
@@ -82,7 +82,11 @@ function WizardBody({ onClose }: { onClose: () => void }) {
   // Escape closes the wizard from any step (except mid-apply, where it would strand the flow).
   const apply = useMutation({
     mutationFn: async (): Promise<{ projectId: string; projectName: string; result: TemplateApplyResult | null }> => {
-      const project = await api.createProject({ name: name.trim(), repoPath: repoPath.trim(), vaultPath: vaultPath.trim() });
+      // "Create new" inits a real directory (host-write, confined to the sanctioned base); "Bind
+      // existing" registers a project at the path the user already has on disk.
+      const project = mode === "new"
+        ? await api.projectInit({ name: name.trim() })
+        : await api.createProject({ name: name.trim(), repoPath: repoPath.trim(), vaultPath: vaultPath.trim() });
       // "Start empty" registers the project only — no template to apply.
       const result = choice && choice !== "empty" ? await api.applyTemplate(project.id, choice) : null;
       return { projectId: project.id, projectName: project.name, result };
@@ -113,7 +117,9 @@ function WizardBody({ onClose }: { onClose: () => void }) {
   };
 
   const canContinueFrom1 = choice !== null;
-  const canContinueFrom2 = !!name.trim() && !!repoPath.trim() && !!vaultPath.trim();
+  const canContinueFrom2 = mode === "new"
+    ? !!name.trim()
+    : !!name.trim() && !!repoPath.trim() && !!vaultPath.trim();
 
   const goToBoard = () => { setProjectId(created!.projectId); onClose(); navigate("/board"); };
   const goSpawnOrchestrator = () => { setProjectId(created!.projectId); onClose(); navigate("/overview"); };
@@ -163,7 +169,7 @@ function WizardBody({ onClose }: { onClose: () => void }) {
         )}
         {step === 3 && (
           <StepReview
-            name={name.trim()} repoPath={repoPath.trim()} vaultPath={vaultPath.trim()}
+            mode={mode} name={name.trim()} repoPath={repoPath.trim()} vaultPath={vaultPath.trim()}
             template={chosenTemplate} isEmpty={choice === "empty"} profileByName={profileByName}
             error={apply.isError ? (apply.error as Error).message : null}
           />
@@ -363,7 +369,7 @@ function TemplateCard({
         display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: font.mono, fontSize: 11.5, color: color.textDim,
       }}>
         <span>stands up <b style={{ color: color.phosphor }}>{n} agent{n === 1 ? "" : "s"}</b></span>
-        <span>+ 1 starter card</span>
+        <span>+ {template.boardSeed.count} starter card{template.boardSeed.count === 1 ? "" : "s"}</span>
       </div>
     </button>
   );
@@ -380,31 +386,42 @@ function StepProject({
 }) {
   return (
     <div>
-      <Heading title="Point Loom at a project" lede="Bind an existing local repository, or set up a fresh one in your workspace. Loom weaves its board, sessions and vault around this path." />
+      <Heading title="Point Loom at a project" lede={mode === "bind"
+        ? "Bind an existing local repository. Loom weaves its board, sessions and vault around this path."
+        : "Loom creates and git-initializes a brand-new project directory for you — just give it a name."} />
       <div style={{ maxWidth: 620, margin: "0 auto", background: color.panel, border: `1px solid ${color.border}`, borderRadius: radius.base, padding: "24px 26px" }}>
         {/* Segmented Bind / Create toggle. */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 22 }} role="tablist" aria-label="Project source">
           <SegButton on={mode === "bind"} onClick={() => onMode("bind")}
             title="Bind existing repo" sub="use a repository already on disk" />
           <SegButton on={mode === "new"} onClick={() => onMode("new")}
-            title="Create new project" sub="register a fresh project by path" />
+            title="Create new project" sub="Loom creates the folder for you" />
         </div>
 
-        <Field label="Repository path" hint={mode === "bind" ? "The absolute path to a git repo already on disk." : "Where the project lives — set up the folder and git repo here, then bind it."}>
-          <Input value={repoPath} onChange={(e) => onRepoPath(e.target.value)} spellCheck={false}
-            placeholder={mode === "bind" ? "/Users/you/code/aurora-api" : "/Users/you/code/new-project"}
-            aria-label="Repository path" style={{ width: "100%", boxSizing: "border-box" }} />
-        </Field>
+        {mode === "bind" ? (
+          <>
+            <Field label="Repository path" hint="The absolute path to a git repo already on disk.">
+              <Input value={repoPath} onChange={(e) => onRepoPath(e.target.value)} spellCheck={false}
+                placeholder="/Users/you/code/aurora-api"
+                aria-label="Repository path" style={{ width: "100%", boxSizing: "border-box" }} />
+            </Field>
 
-        <Field label="Project name" hint="Auto-filled from the folder — change it if you like.">
-          <Input value={name} onChange={(e) => onName(e.target.value)} spellCheck={false}
-            placeholder="aurora-api" aria-label="Project name" style={{ width: "100%", boxSizing: "border-box" }} />
-        </Field>
+            <Field label="Project name" hint="Auto-filled from the folder — change it if you like.">
+              <Input value={name} onChange={(e) => onName(e.target.value)} spellCheck={false}
+                placeholder="aurora-api" aria-label="Project name" style={{ width: "100%", boxSizing: "border-box" }} />
+            </Field>
 
-        <Field label="Vault path" hint="An Obsidian vault folder for this project's design docs.">
-          <Input value={vaultPath} onChange={(e) => onVaultPath(e.target.value)} spellCheck={false}
-            placeholder="/Users/you/vault/aurora-api" aria-label="Vault path" style={{ width: "100%", boxSizing: "border-box" }} />
-        </Field>
+            <Field label="Vault path" hint="An Obsidian vault folder for this project's design docs.">
+              <Input value={vaultPath} onChange={(e) => onVaultPath(e.target.value)} spellCheck={false}
+                placeholder="/Users/you/vault/aurora-api" aria-label="Vault path" style={{ width: "100%", boxSizing: "border-box" }} />
+            </Field>
+          </>
+        ) : (
+          <Field label="Project name" hint="Loom derives a folder name from this and creates a git-initialized directory under its own workspace folder — no path to type.">
+            <Input value={name} onChange={(e) => onName(e.target.value)} spellCheck={false}
+              placeholder="aurora-api" aria-label="Project name" style={{ width: "100%", boxSizing: "border-box" }} />
+          </Field>
+        )}
       </div>
     </div>
   );
@@ -440,9 +457,9 @@ function Field({ label, hint, children }: { label: string; hint: string; childre
 
 // ── Screen 3 — Review & confirm ─────────────────────────────────────────────────────────────────────────
 function StepReview({
-  name, repoPath, vaultPath, template, isEmpty, profileByName, error,
+  mode, name, repoPath, vaultPath, template, isEmpty, profileByName, error,
 }: {
-  name: string; repoPath: string; vaultPath: string; template: SetupTemplate | null; isEmpty: boolean;
+  mode: ProjectMode; name: string; repoPath: string; vaultPath: string; template: SetupTemplate | null; isEmpty: boolean;
   profileByName: Map<string, Profile>; error: string | null;
 }) {
   const needsBrowserInstall = !!template?.agents.some((a) => profileByName.get(a.profileName)?.browserTesting);
@@ -455,8 +472,16 @@ function StepReview({
       <div style={{ maxWidth: 640, margin: "0 auto", background: color.panel, border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden" }}>
         <ReceiptSection title="Project">
           <ReceiptLine k="name" v={name} />
-          <ReceiptLine k="repo" v={repoPath} mono />
-          <ReceiptLine k="vault" v={vaultPath} mono />
+          {mode === "bind" ? (
+            <>
+              <ReceiptLine k="repo" v={repoPath} mono />
+              <ReceiptLine k="vault" v={vaultPath} mono />
+            </>
+          ) : (
+            <p style={{ fontFamily: font.mono, fontSize: 12.5, color: color.textDim, margin: "2px 0 0", lineHeight: 1.5 }}>
+              Loom will create and git-initialize a new directory for this project under its own workspace folder.
+            </p>
+          )}
         </ReceiptSection>
 
         <ReceiptSection title={isEmpty ? "Template · none" : `Template · ${template?.name ?? ""}`}
@@ -472,11 +497,13 @@ function StepReview({
           )}
         </ReceiptSection>
 
-        {!isEmpty && (
-          <ReceiptSection title="Starter board card">
-            <p style={{ fontFamily: font.mono, fontSize: 12.5, color: color.textDim, margin: "2px 0 0", lineHeight: 1.5 }}>
-              A “Get oriented” card is added to the board so the team has a first task to pick up.
-            </p>
+        {!isEmpty && template && template.boardSeed.count > 0 && (
+          <ReceiptSection title={`Starter board card${template.boardSeed.count === 1 ? "" : "s"}`}>
+            {template.boardSeed.titles.map((title, i) => (
+              <p key={title + i} style={{ fontFamily: font.mono, fontSize: 12.5, color: color.textDim, margin: i === 0 ? "2px 0 0" : "4px 0 0", lineHeight: 1.5 }}>
+                “{title}”
+              </p>
+            ))}
           </ReceiptSection>
         )}
 

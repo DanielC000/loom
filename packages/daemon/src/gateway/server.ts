@@ -43,8 +43,9 @@ import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
 import { clearClaudeRateLimit } from "../orchestration/usage-awareness.js";
-import { GitReader } from "../git/reader.js";
+import { GitReader, checkCommitIdentity } from "../git/reader.js";
 import { GitWriter } from "../git/writer.js";
+import { bootstrapProjectDir } from "../setup/bootstrap.js";
 import { workerDiff } from "../git/worktrees.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
@@ -2574,7 +2575,38 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       name: t.name,
       description: t.description,
       agents: t.agents.map((a) => ({ name: a.name, profileName: a.profileName })),
+      // Board-seed summary (card count + title(s)) so the wizard's pre-apply Review screen can show
+      // exactly what will be seeded, instead of only learning it from the apply response (Done screen).
+      boardSeed: { count: t.boardSeed.length, titles: t.boardSeed.map((c) => c.title) },
     })));
+
+  // Guided Onboarding wizard "Create new" (follow-up to C5, card 07981d27): the HUMAN-only REST mirror of
+  // the agent-facing project_init MCP tool (mcp/setup.ts) — creates a BRAND-NEW project directory confined
+  // to the SANCTIONED workspace base. REUSES bootstrapProjectDir (setup/bootstrap.ts) — the SAME
+  // confinement + traversal/escape rejection project_init uses — rather than a second implementation.
+  // The caller never supplies a host path: the dir is derived from `name` (or an explicit `dirName`),
+  // confined under WORKSPACE_ROOT. kind "git" (default) `git init`s a code repo; kind "vault" leaves a
+  // plain notes folder. Same trust posture as the other setup REST writers — loopback, human-only, NO MCP
+  // router (orchestration/platform/setup/audit) exposes this path.
+  app.post("/api/setup/project-init", async (req, reply) => {
+    const b = (req.body ?? {}) as { name?: string; kind?: "git" | "vault"; dirName?: string; config?: ProjectConfigOverride };
+    if (!b.name || !b.name.trim()) return reply.code(400).send({ error: "name required" });
+    const isGit = (b.kind ?? "git") === "git";
+    const boot = await bootstrapProjectDir({ name: b.name, dirName: b.dirName, git: isGit });
+    if (!boot.ok) return reply.code(400).send({ error: boot.error });
+    const project: Project = {
+      id: randomUUID(), name: b.name, repoPath: boot.dir, vaultPath: boot.dir,
+      config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
+      reserved: false, // a wizard-created project is never a reserved/system one (boot-seed only)
+    };
+    deps.db.insertProject(project);
+    // Same bind-time commit-identity advisory as project_init: never blocks the create (already persisted).
+    if (isGit) {
+      const identity = await checkCommitIdentity(boot.dir);
+      if (identity.warning) return reply.code(201).send({ ...project, identityWarning: identity.warning });
+    }
+    return reply.code(201).send(project);
+  });
 
   app.post("/api/setup/templates/apply", async (req, reply) => {
     const b = (req.body ?? {}) as { projectId?: string; templateName?: string };

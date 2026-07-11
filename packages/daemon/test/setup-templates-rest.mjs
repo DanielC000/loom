@@ -4,7 +4,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // NETWORK-FREE, modeled on platform-home-rest.mjs (Db + buildServer via app.inject). Mirrors the C2
 // agent-facing MCP tools (template_list/template_apply, mcp/setup.ts) but on the loopback REST surface
 // only. Proves:
-//   (1) GET /api/setup/templates → 200 with the two bundled presets (name/description/agents roster);
+//   (1) GET /api/setup/templates → 200 with the two bundled presets (name/description/agents roster +
+//       a boardSeed summary — card count + title(s) — so the wizard's Review screen can show exactly
+//       what will be seeded before apply, card 07981d27);
 //   (2) POST /api/setup/templates/apply on a REAL project stands up the roster's agents + the starter
 //       board card via ordinary db reads (listAgents/listTasks) — no new writer surface;
 //   (3) an unknown templateName is rejected (400), nothing written;
@@ -55,6 +57,11 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
     check("(1) each preset carries a description", typeof solo.description === "string" && solo.description.length > 0);
     check("(1) each preset carries a roster (name + profileName)",
       Array.isArray(solo.agents) && solo.agents.every((a) => typeof a.name === "string" && typeof a.profileName === "string"));
+    check("(1) each preset carries a boardSeed summary (count + titles)",
+      typeof solo.boardSeed?.count === "number" && Array.isArray(solo.boardSeed?.titles));
+    check("(1) boardSeed.count matches the number of titles", solo.boardSeed.count === solo.boardSeed.titles.length);
+    check("(1) Solo builder seeds the 'Get oriented' starter card",
+      solo.boardSeed.count === 1 && solo.boardSeed.titles[0] === "Get oriented in this project");
   } finally {
     try { await app.close(); } catch { /* ignore */ }
     db.close();

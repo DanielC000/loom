@@ -91,15 +91,17 @@ export interface DejaCaptureStatus { count: number; }
 
 // Guided-onboarding workflow templates (onboarding C3 REST — GET /api/setup/templates). The human-only
 // mirror of the agent-facing template_list tool: each bundled preset's name + one-line purpose + its
-// agent→profile roster. NOTE the response deliberately carries ONLY name/description/agents — NOT the
-// starter board-card seed (title/body/count) — so the wizard renders the starter card generically and
-// reads the authoritative created counts from the apply response below. Each agent is bound to an
-// existing bundled Profile by name; the wizard resolves that name against GET /api/profiles for the
-// role sigil + browser/no-commit badges.
+// agent→profile roster, plus a `boardSeed` summary (card count + title(s)) so the wizard's pre-apply
+// Review screen can show exactly what will be seeded — the AUTHORITATIVE created counts still come from
+// the apply response below (a template could seed a card whose title changes between list and apply, in
+// theory; boardSeed here is a preview, not a guarantee). Each agent is bound to an existing bundled
+// Profile by name; the wizard resolves that name against GET /api/profiles for the role sigil +
+// browser/no-commit badges.
 export interface SetupTemplate {
   name: string;
   description: string;
   agents: { name: string; profileName: string }[];
+  boardSeed: { count: number; titles: string[] };
 }
 // The POST /api/setup/templates/apply result: the agents + starter board cards actually created in the
 // target project (the authoritative counts the Done screen shows). Mirrors applyWorkflowTemplate's return.
@@ -276,6 +278,12 @@ export const api = {
     postErr<TemplateApplyResult>("/api/setup/templates/apply", { projectId, templateName }),
   createProject: (b: { name: string; repoPath: string; vaultPath: string }) =>
     post<Project>("/api/projects", b),
+  // The wizard's "Create new" mode: init a BRAND-NEW project dir under Loom's sanctioned workspace base
+  // (confined + traversal-rejected server-side — see setup/bootstrap.ts) instead of registering a
+  // user-typed path. kind "git" (default) `git init`s it; kind "vault" leaves a plain notes folder.
+  // postErr surfaces the confinement/traversal-rejection `{ error }` body verbatim.
+  projectInit: (b: { name: string; kind?: "git" | "vault" }) =>
+    postErr<Project & { identityWarning?: string }>("/api/setup/project-init", b),
   // --- HUMAN-only project/agent management (rename / archive / restore / PERMANENT delete + agent
   // delete). DESTRUCTIVE, loopback-only — there is NO agent MCP path to any of these (same posture as
   // session archive/delete + gateCommand). All surface the server's `{ error }` body verbatim (via
