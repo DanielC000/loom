@@ -2,12 +2,13 @@ import { useState, useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
-import type { Task, TaskPriority, KanbanColumn, SessionListItem } from "@loom/shared";
+import type { Task, TaskPriority, KanbanColumn, SessionListItem, QuestionInboxItem } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { Button, Input, SectionLabel, StatusPill, Chip } from "../components/ui";
+import { Button, Input, SectionLabel, StatusPill, Chip, Badge } from "../components/ui";
 import { useOpenRequest, RequestTypeTag } from "../components/requests";
-import { relativeAge, requestOutcome, requestNeedsChip, REQUEST_TYPE_TONE } from "../lib/questions";
+import { DecisionStateChip } from "../components/decisions";
+import { relativeAge, requestHint, REQUEST_TYPE_TONE } from "../lib/questions";
 import { color, font, radius, tone, roleTone, type Tone } from "../theme";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
 import { useVoiceLang } from "../lib/useVoiceLang";
@@ -84,6 +85,8 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   }, [taskParam, board.data, setSearchParams]);
 
   const openTask = board.data?.tasks.find((t) => t.id === openTaskId) ?? null;
+  // The open card's resolved lane, for the modal header's state/lane chip (dossier header).
+  const openColumn = openTask ? board.data?.columns.find((c) => c.key === openTask.columnKey) ?? null : null;
 
   // ── Client-side view filter (no server round-trip) ───────────────────────────
   // Search matches id+title+body (case-insensitive substring — a full card id or any prefix finds the
@@ -141,7 +144,7 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
         </>
       )}
       {openTask && (
-        <TaskDrawer key={openTask.id} task={openTask} onClose={() => setOpenTaskId(null)}
+        <TaskDrawer key={openTask.id} task={openTask} column={openColumn} onClose={() => setOpenTaskId(null)}
           onSave={(patch) => edit.mutate({ id: openTask.id, patch })} saving={edit.isPending}
           onDelete={() => del.mutate(openTask.id)} deleting={del.isPending}
           deleteError={del.error ? (del.error as Error).message : null} />
@@ -422,8 +425,8 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
 // Linked-requests section opens the request dialog ABOVE this one. Save patches the shared task store,
 // then the board refetches. EVERY entry point (a Board card click, the `?task=` deep-link, a Request's
 // reverse linked-task chip → /board?task=) funnels through Board's openTaskId state into this one modal.
-function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteError }:
-  { task: Task; onClose: () => void; onSave: (patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean }) => void; saving: boolean;
+function TaskDrawer({ task, column, onClose, onSave, saving, onDelete, deleting, deleteError }:
+  { task: Task; column: KanbanColumn | null; onClose: () => void; onSave: (patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean }) => void; saving: boolean;
     onDelete: () => void; deleting: boolean; deleteError: string | null }) {
   const [title, setTitle] = useState(task.title);
   const [body, setBody] = useState(task.body ?? "");
@@ -489,6 +492,30 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
     speech.start();
   };
   const labelStyle = { fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim } as const;
+
+  // ── Connected requests (Dossier right rail, card 8c1f27f0) ──────────────────────────────────────
+  // Every Request (pending/answered/consumed) connected to this card. Matches commit 9e5a733's
+  // `db.listQuestionsForTask` project+task scoping guard client-side: filter the global inbox
+  // (`openQuestions(true)` folds in consumed history) by BOTH `projectId` AND `taskId`, so a foreign-
+  // project question that happens to carry this task's id can never leak in (there is no task-scoped REST
+  // endpoint — 9e5a733 built the read as MCP tools only; this is the equivalent human/REST read).
+  const questions = useQuery({ queryKey: ["openQuestions", "history"], queryFn: () => api.openQuestions(true), refetchInterval: 5000 });
+  const linked = (questions.data ?? []).filter((q) => q.taskId === task.id && q.projectId === task.projectId);
+  const hasRequests = linked.length > 0;
+  // Per-user COLLAPSED preference, persisted so it survives reopen. Tri-state: `null` = no explicit
+  // choice yet → default to expanded when the card HAS connected requests, collapsed when it has none.
+  // Once the user toggles, their explicit boolean sticks (localStorage), regardless of the request count.
+  const RAIL_KEY = "loom.taskRail.collapsed";
+  const [collapsedPref, setCollapsedPref] = useState<boolean | null>(() => {
+    try { const v = localStorage.getItem(RAIL_KEY); return v === null ? null : v === "1"; } catch { return null; }
+  });
+  const railCollapsed = collapsedPref ?? !hasRequests;
+  const toggleRail = () => {
+    const next = !railCollapsed;
+    setCollapsedPref(next);
+    try { localStorage.setItem(RAIL_KEY, next ? "1" : "0"); } catch { /* storage may be unavailable */ }
+  };
+
   return (
     <div onClick={requestClose} role="dialog" aria-modal
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 50, display: "flex",
@@ -503,8 +530,13 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
           minHeight: "min(820px, 85vh)", maxHeight: "88vh", overflowY: "auto",
           background: color.panel, border: `1px solid ${color.borderStrong}`,
           borderRadius: radius.base, padding: 16, display: "flex", flexDirection: "column", gap: 10, boxSizing: "border-box" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <SectionLabel style={{ margin: 0, flex: 1 }}>Task · {task.id.slice(0, 8)}</SectionLabel>
+        {/* Dossier header: TASK · id · priority · lane · close. The priority chip reflects the LIVE
+            edited priority (updates as you pick below); the lane chip is tinted by the column's role. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <SectionLabel style={{ margin: 0 }}>Task · {task.id.slice(0, 8)}</SectionLabel>
+          <PriorityChip priority={priority} />
+          {column && <Badge tone={columnTone(column) ?? "muted"}>{column.label}</Badge>}
+          <span style={{ flex: 1 }} />
           <Button onClick={requestClose} title="Close (Esc)">✕</Button>
         </div>
         {/* Unsaved-edit guard: a close request while dirty arms this confirm instead of discarding. */}
@@ -516,6 +548,13 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
             <Button onClick={() => setConfirmingClose(false)}>Cancel</Button>
           </div>
         )}
+        {/* Dossier body: LEFT = task editing, RIGHT = connected-requests rail. When the rail is collapsed
+            the left column expands to full width (single-column); flexWrap lets the two stack on a narrow
+            panel. flex:1 so the body fills the panel down to its min-height. */}
+        <div style={{ display: "flex", gap: 14, flex: 1, minHeight: 0, alignItems: "stretch",
+          flexWrap: railCollapsed ? "nowrap" : "wrap" }}>
+          <div data-testid="task-edit-column" style={{ flex: railCollapsed ? "1 1 auto" : "2 1 360px", minWidth: 0, display: "flex",
+            flexDirection: "column", gap: 10, minHeight: 0 }}>
         <span style={labelStyle}>Title</span>
         <Input value={title} onChange={(e) => setTitle(e.target.value)} />
         <span style={labelStyle}>Priority</span>
@@ -612,46 +651,164 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
         </div>
         {/* The server's live-session guard (or any failure) surfaces here rather than silently closing. */}
         {deleteError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{deleteError}</span>}
-        {/* Requests soft-linked to this card (card 695ebab0). Read-only surfacing — "view ↗" opens the
-            Request detail modal. A deleted task never orphans a request (taskId is a non-FK soft link),
-            so this is derived by filtering the global inbox by taskId; a dangling id just never matches. */}
-        <LinkedRequests taskId={task.id} />
+          </div>
+          {/* RIGHT rail — the card's connected requests (card 8c1f27f0). Collapsed → a slim, clickable
+              strip so the left editing column takes the full width; expanded → the full dossier rail. */}
+          {railCollapsed
+            ? <CollapsedRequestsStrip count={linked.length} onExpand={toggleRail} />
+            : <ConnectedRequestsRail linked={linked} onCollapse={toggleRail} />}
+        </div>
       </div>
     </div>
   );
 }
 
-// The "Linked requests" section inside the task drawer: every Request (any state) whose soft `taskId`
-// points at this card. Derived client-side from the global inbox (`openQuestions(true)` folds in consumed
-// history), so no new daemon route is needed. Each row opens the shared Request detail modal.
-function LinkedRequests({ taskId }: { taskId: string }) {
-  const questions = useQuery({ queryKey: ["openQuestions", "history"], queryFn: () => api.openQuestions(true), refetchInterval: 5000 });
-  const openRequest = useOpenRequest();
+// ── Connected-requests rail (Dossier RIGHT column, card 8c1f27f0) ─────────────────────────────────
+// The expanded rail: header (title + count + collapse control), a by-state summary line, then one
+// signal row per connected request — the same visual language as the Requests inbox (components/
+// requests.tsx): a 3px left edge signed by the type's color, a bordered type tag + lifecycle state
+// chip, the title, and the asking-agent/time meta. Each row inline-expands to its recorded answer.
+function ConnectedRequestsRail({ linked, onCollapse }: { linked: QuestionInboxItem[]; onCollapse: () => void }) {
   const now = Date.now();
-  const linked = (questions.data ?? []).filter((q) => q.taskId === taskId);
-  if (linked.length === 0) return null;
+  const pending = linked.filter((q) => q.state === "pending").length;
+  const answered = linked.filter((q) => q.state === "answered").length;
+  const consumed = linked.filter((q) => q.state === "consumed").length;
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
-      <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>
-        Linked requests ({linked.length})
-      </span>
-      {linked.map((q) => {
-        const meta = q.state === "pending" ? requestNeedsChip(q.type) : requestOutcome(q);
-        return (
-          <div key={q.id} style={{ display: "flex", alignItems: "center", gap: 8,
-            border: `1px solid ${color.border}`, borderLeft: `3px solid ${tone[REQUEST_TYPE_TONE[q.type]]}`, borderRadius: 4, padding: "5px 8px" }}>
-            <RequestTypeTag type={q.type} />
-            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-              <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
-              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                agent {q.sessionId.slice(0, 8)} · {meta} · {relativeAge(q.state === "pending" ? q.createdAt : q.answeredAt, now)}
-              </span>
-            </div>
-            <Button variant="ghost" onClick={() => openRequest(q.id)} style={{ padding: "0 6px", flexShrink: 0 }}>view ↗</Button>
+    <div data-testid="task-requests-rail"
+      style={{ flex: "1 1 280px", minWidth: 240, maxWidth: "100%", display: "flex", flexDirection: "column",
+        minHeight: 0, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.base }}>
+      {/* Header (pinned) — title + count + collapse control. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 10px 8px", borderBottom: `1px solid ${color.border}` }}>
+        <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>
+          Connected requests
+        </span>
+        <span style={{ fontFamily: font.mono, fontSize: 11, fontWeight: 700, color: linked.length > 0 ? color.cyan : color.textMuted }}>{linked.length}</span>
+        <span style={{ flex: 1 }} />
+        <button type="button" onClick={onCollapse} aria-expanded aria-label="Collapse connected requests"
+          title="Collapse the requests rail" data-testid="task-requests-collapse" className="loom-toggle"
+          style={{ background: "transparent", border: "none", cursor: "pointer", color: color.textDim,
+            fontSize: 15, lineHeight: 1, padding: "2px 4px", borderRadius: 3 }}>›</button>
+      </div>
+      {linked.length === 0 ? (
+        // Empty state — reads as intentional, not broken. (A card with no requests defaults to collapsed,
+        // but the user can still expand the empty rail.)
+        <div style={{ padding: "14px 10px", color: color.textMuted, fontFamily: font.mono, fontSize: 11, lineHeight: 1.5 }}>
+          No requests connected to this card yet. A manager links owner Requests to a card so the answer travels with the work.
+        </div>
+      ) : (
+        <>
+          {/* By-state summary line. */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", flexWrap: "wrap",
+            fontFamily: font.mono, fontSize: 11, color: color.textMuted, borderBottom: `1px solid ${color.border}` }}>
+            <span style={{ color: pending > 0 ? color.cyan : color.textMuted }}>{pending} pending</span>
+            <span aria-hidden>·</span>
+            <span>{answered} answered</span>
+            <span aria-hidden>·</span>
+            <span>{consumed} consumed</span>
           </div>
-        );
-      })}
+          {/* Signal rows — the lone scroll region so the header + summary stay pinned. */}
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, padding: 10 }}>
+            {linked.map((q) => <ConnectedRequestRow key={q.id} q={q} now={now} />)}
+          </div>
+        </>
+      )}
     </div>
+  );
+}
+
+// One connected-request signal row. The header (type tag · state chip · title · agent/time meta) toggles
+// an inline answer readout; "Open request ↗" opens the shared Request detail modal for the full view.
+function ConnectedRequestRow({ q, now }: { q: QuestionInboxItem; now: number }) {
+  const openRequest = useOpenRequest();
+  const [open, setOpen] = useState(false);
+  const edge = tone[REQUEST_TYPE_TONE[q.type]];
+  return (
+    <div style={{ border: `1px solid ${color.border}`, borderLeft: `3px solid ${edge}`, borderRadius: 4, background: color.panel }}>
+      <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
+        title={open ? "Hide the answer" : "Show the answer"} className="loom-toggle"
+        style={{ width: "100%", textAlign: "left", cursor: "pointer", background: "transparent", border: "none",
+          padding: "6px 8px", display: "flex", flexDirection: "column", gap: 4, borderRadius: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+          <RequestTypeTag type={q.type} />
+          <DecisionStateChip q={q} now={now} />
+          <span aria-hidden style={{ marginLeft: "auto", color: color.textMuted, fontSize: 11, flexShrink: 0,
+            transition: "transform 120ms ease", transform: open ? "rotate(90deg)" : "none" }}>▸</span>
+        </div>
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          agent {q.sessionId.slice(0, 8)} · {relativeAge(q.state === "pending" ? q.createdAt : q.answeredAt, now)}
+        </span>
+      </button>
+      {open && (
+        <div style={{ borderTop: `1px solid ${color.border}`, padding: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+          <ConnectedRequestAnswer q={q} />
+          <Button variant="ghost" onClick={() => openRequest(q.id)} style={{ padding: "0 6px", alignSelf: "flex-start" }}>Open request ↗</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The inline-expanded answer for a connected request. Mirrors requests.tsx › AnsweredReadout: a credential
+// NEVER shows a value — only the ack + the target env var (the read tool never returns a secret). A pending
+// request has no answer yet, so it shows the ask body + a type-colored "needs …" hint instead.
+function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
+  if (q.state === "pending") {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {q.body && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{q.body}</span>}
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[REQUEST_TYPE_TONE[q.type]] }}>{requestHint(q)} · awaiting your answer</span>
+      </div>
+    );
+  }
+  if (q.type === "credential") {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>provided · encrypted, never shown</span>
+        {q.credentialEnvVar && (
+          <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+            target env var: <span style={{ color: color.amber }}>{q.credentialEnvVar}</span>
+          </span>
+        )}
+      </div>
+    );
+  }
+  if (q.type === "permission") {
+    const authorized = q.chosenOption === "authorize";
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: authorized ? color.phosphor : color.red }}>{authorized ? "authorized" : "denied"}</span>
+        {q.note && <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, whiteSpace: "pre-wrap" }}>{q.note}</span>}
+      </div>
+    );
+  }
+  // decision / input — chosen option + note (the note IS the answer for a note-only ask).
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      {q.chosenOption && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text }}>chose <span style={{ color: color.cyan }}>{q.chosenOption}</span></span>}
+      {q.note && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, whiteSpace: "pre-wrap" }}>{q.note}</span>}
+      {!q.chosenOption && !q.note && <span style={{ color: color.textMuted, fontSize: 12, fontFamily: font.mono }}>—</span>}
+    </div>
+  );
+}
+
+// The COLLAPSED connected-requests rail: a slim, full-height vertical strip pinned to the modal's right
+// edge. Clicking it re-expands the rail; while collapsed the left editing column takes the full width.
+// Keeps the requests DISCOVERABLE (a count badge) without spending horizontal room.
+function CollapsedRequestsStrip({ count, onExpand }: { count: number; onExpand: () => void }) {
+  return (
+    <button type="button" onClick={onExpand} aria-expanded={false} aria-label={`Expand connected requests (${count})`}
+      title="Expand connected requests" data-testid="task-requests-collapsed"
+      style={{ flex: "0 0 auto", alignSelf: "stretch", width: 36, display: "flex", flexDirection: "column",
+        alignItems: "center", gap: 10, padding: "10px 0", cursor: "pointer",
+        background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.base }}>
+      <span aria-hidden style={{ color: color.textDim, fontSize: 14, lineHeight: 1 }}>‹</span>
+      <span aria-hidden style={{ fontFamily: font.head, fontSize: 9, fontWeight: 700, letterSpacing: "0.14em",
+        textTransform: "uppercase", color: color.textMuted, writingMode: "vertical-rl" }}>
+        Requests
+      </span>
+      <span style={{ fontFamily: font.mono, fontSize: 11, fontWeight: 700, color: count > 0 ? color.cyan : color.textMuted }}>{count}</span>
+    </button>
   );
 }
 
