@@ -499,8 +499,14 @@ function TaskDrawer({ task, column, onClose, onSave, saving, onDelete, deleting,
   // (`openQuestions(true)` folds in consumed history) by BOTH `projectId` AND `taskId`, so a foreign-
   // project question that happens to carry this task's id can never leak in (there is no task-scoped REST
   // endpoint — 9e5a733 built the read as MCP tools only; this is the equivalent human/REST read).
+  // Since 76b4bdb, `question_ask` stores the RESOLVED FULL task id, so a fresh row always matches the
+  // exact `q.taskId === task.id` check below — but a row filed BEFORE that fix landed can still carry a
+  // raw 8-char id-PREFIX (`question_ask({taskId: "28f425c2"})`), which never equals the card's full id.
+  // The `startsWith` fallback is belt-and-suspenders for those legacy rows (card c089a959).
   const questions = useQuery({ queryKey: ["openQuestions", "history"], queryFn: () => api.openQuestions(true), refetchInterval: 5000 });
-  const linked = (questions.data ?? []).filter((q) => q.taskId === task.id && q.projectId === task.projectId);
+  const linked = (questions.data ?? []).filter(
+    (q) => q.projectId === task.projectId && (q.taskId === task.id || (!!q.taskId && task.id.startsWith(`${q.taskId}-`))),
+  );
   const hasRequests = linked.length > 0;
   // Per-user COLLAPSED preference, persisted so it survives reopen. Tri-state: `null` = no explicit
   // choice yet → default to expanded when the card HAS connected requests, collapsed when it has none.

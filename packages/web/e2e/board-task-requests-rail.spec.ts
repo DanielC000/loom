@@ -121,6 +121,32 @@ test("the collapse control flips two-column → full-width single-column and bac
   expect(Math.abs(backWidth - twoColWidth)).toBeLessThan(4);
 });
 
+// Card c089a959: a Request filed BEFORE commit 76b4bdb (which taught `question_ask` to resolve+store the
+// CANONICAL FULL task id) can have a raw 8-char id-PREFIX sitting in its `task_id` column — seeded here by
+// bypassing question_ask entirely (seedQuestion writes straight through db.insertQuestion, exactly like a
+// legacy pre-fix row would have landed). The rail's `startsWith` fallback must still surface it.
+test("a legacy prefix-stored taskId (pre-76b4bdb row) still shows on the card's rail", async ({ page, loomDaemon }) => {
+  const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "LegacyPrefixMgr" });
+  const task = await loomDaemon.createTask(mgr.projectId, { title: uniq("legacy-prefix-card"), columnKey: "todo" });
+  const legacyTitle = uniq("legacy-prefix-ask");
+  await loomDaemon.seedQuestion({
+    sessionId: mgr.sessionId, projectId: mgr.projectId, taskId: task.id.slice(0, 8), title: legacyTitle,
+    type: "decision", options: ["Ship now", "Wait"], state: "answered",
+    chosenOption: "Ship now", note: "legacy prefix-linked row", answeredAt: ISO,
+  });
+  await pinActiveProject(page, mgr.projectId);
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(`${loomDaemon.baseURL}/board?task=${encodeURIComponent(task.id)}`);
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  const rail = dialog.getByTestId("task-requests-rail");
+  await expect(rail).toBeVisible();
+  await expect(rail.getByText("Connected requests", { exact: true })).toBeVisible();
+  await expect(rail.getByText(legacyTitle, { exact: true })).toBeVisible();
+});
+
 test("a request row expands to its answer; a credential row shows the ack + env var, never a secret", async ({ page, loomDaemon }) => {
   const seed = await seedCardWithRequests(loomDaemon);
   await pinActiveProject(page, seed.projectId);
