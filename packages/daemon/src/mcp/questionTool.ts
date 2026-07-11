@@ -111,13 +111,15 @@ export function questionPullItem(q: Question): Record<string, unknown> {
 }
 
 /**
- * The per-type ANSWER shape shared by `taskRequestGetItem` — same branching/fields as `questionPullItem`,
- * but safe to call on a row in ANY state (not just a freshly-answered one `question_pull` just drained):
- * a still-`pending` row's answer fields all read `null` instead of a misleading false-ish derivation (e.g.
- * a pending permission would otherwise wrongly read `approved:false`, indistinguishable from "denied").
- * Same credential never-echo guarantee as `questionPullItem` — see `credentialAck`.
+ * The per-type ANSWER shape shared by `taskRequestGetItem` and `auditRequestItem` (card 59489267) — same
+ * branching/fields as `questionPullItem`, but safe to call on a row in ANY state (not just a freshly-
+ * answered one `question_pull` just drained): a still-`pending` row's answer fields all read `null`
+ * instead of a misleading false-ish derivation (e.g. a pending permission would otherwise wrongly read
+ * `approved:false`, indistinguishable from "denied"). Same credential never-echo guarantee as
+ * `questionPullItem` — see `credentialAck`. Exported so both non-consuming read surfaces (task-scoped and
+ * cross-project audit) share this ONE branching implementation instead of drifting apart.
  */
-function questionAnswerByType(q: Question): Record<string, unknown> {
+export function questionAnswerByType(q: Question): Record<string, unknown> {
   if (q.type === "credential") {
     return { ack: q.state === "pending" ? null : credentialAck(q) };
   }
@@ -142,6 +144,26 @@ export function taskRequestGetItem(q: Question): Record<string, unknown> {
     options: q.options, recommendation: q.recommendation,
     state: q.state, taskId: q.taskId,
     createdAt: q.createdAt, answeredAt: q.answeredAt,
+    ...questionAnswerByType(q),
+  };
+}
+
+/**
+ * Shape ONE request (any state, any project) — enriched with its asking session's `agentId` (joined
+ * server-side by `db.listQuestionsForAudit`; not a column on the `Question` row itself) — into the
+ * Platform Auditor's cross-project `requests_list` payload (card 59489267). Title-altitude + answer-by-
+ * type, NOT the full body/options/recommendation (that's `task_request_get`'s job): the audit LIST spans
+ * every project's Requests at once, so it stays bounded the way `task_requests_list`'s rows do, plus the
+ * identity fields (`projectId`/`sessionId`/`agentId`/`taskId`) a cross-project triage needs that a single-
+ * project caller already knows from context. NON-CONSUMING; shares `questionAnswerByType` with
+ * `taskRequestGetItem` so the credential never-echo guarantee (never `secret_blob`, only `ack`) can never
+ * drift between the two read surfaces.
+ */
+export function auditRequestItem(q: Question & { agentId: string | null }): Record<string, unknown> {
+  return {
+    id: q.id, projectId: q.projectId, sessionId: q.sessionId, agentId: q.agentId, taskId: q.taskId,
+    type: q.type, title: q.title, state: q.state,
+    createdAt: q.createdAt, answeredAt: q.answeredAt, consumedAt: q.consumedAt,
     ...questionAnswerByType(q),
   };
 }

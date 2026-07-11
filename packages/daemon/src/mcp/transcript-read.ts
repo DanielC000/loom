@@ -30,7 +30,11 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * instructions to obey. NO write/host/outward capability lives here; each router adds its own narrow,
  * dedupe-guarded daemon-local writes on top.
  */
-export function registerTranscriptReadTools(server: McpServer, db: Db): void {
+export function registerTranscriptReadTools(
+  server: McpServer,
+  db: Db,
+  opts: { agentPromptToolName?: string } = {},
+): void {
   // --- cross-project reads (the audit input) ---
   server.registerTool(
     "list_sessions",
@@ -46,8 +50,9 @@ export function registerTranscriptReadTools(server: McpServer, db: Db): void {
         "when auditing worker behavior. Optional projectId narrows to one project. DEFAULT returns a lightweight " +
         "SUMMARY per session (id, projectId, projectName, agentId, agentName, role, processState, busy, archivedAt, " +
         "createdAt, lastActivity, model, ctxInputTokens, ctxTurns) — enough to feed (projectId, id, archived: " +
-        "archivedAt!=null) into transcript_read, and `agentId` into agent_prompt_read, while keeping the list " +
-        "bounded; heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. " +
+        "archivedAt!=null) into transcript_read" +
+        (opts.agentPromptToolName ? `, and \`agentId\` into ${opts.agentPromptToolName}` : "") +
+        ", while keeping the list bounded; heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. " +
         "`ctxTurns` here is a session CONTEXT METER (how much of the model window is used), NOT the transcript " +
         "length — do NOT use it to decide how many turns to page; transcript_read reports the real length via " +
         "totalTurns/nextOffset. Pass full:true for whole session records. The default summary " +

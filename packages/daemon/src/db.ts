@@ -4262,6 +4262,33 @@ export class Db {
       .all(taskId, projectId) as Row[]).map(toQuestion);
   }
   /**
+   * Every request (any state), ACROSS ALL PROJECTS, newest-first — the backing read for the Platform
+   * Auditor's cross-project `requests_list` (card 59489267), the audit-scope sibling of
+   * `listQuestionsForTask` (one-task-scoped). Deliberately NON-CONSUMING (never touches `state`/
+   * `consumed_at`), same as `listQuestionsForTask`. Filters are optional/AND'd; omit all for the whole
+   * platform. `agentId` is NOT a column on `questions` itself (only the asking session carries it), so this
+   * LEFT JOINs `sessions` to surface it — a hard-deleted asking session reads `agentId: null` rather than
+   * dropping the row. Returns every matching row unpaginated (mirrors list_sessions: the MCP layer applies
+   * the default cap / explicit limit+offset, not this read).
+   */
+  listQuestionsForAudit(filters: {
+    projectId?: string; state?: QuestionState; type?: QuestionType; since?: string;
+  } = {}): (Question & { agentId: string | null })[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (filters.projectId) { clauses.push("q.project_id = ?"); params.push(filters.projectId); }
+    if (filters.state) { clauses.push("q.state = ?"); params.push(filters.state); }
+    if (filters.type) { clauses.push("q.type = ?"); params.push(filters.type); }
+    if (filters.since) { clauses.push("q.created_at >= ?"); params.push(filters.since); }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.db.prepare(
+      `SELECT q.*, s.agent_id AS joined_agent_id FROM questions q
+       LEFT JOIN sessions s ON s.id = q.session_id
+       ${where} ORDER BY q.created_at DESC`,
+    ).all(...params) as Row[];
+    return rows.map((r) => ({ ...toQuestion(r), agentId: (r.joined_agent_id as string | null) ?? null }));
+  }
+  /**
    * The web decision-inbox's GLOBAL "waiting on me" read (card 8701bdbb, child B): every question across
    * ALL projects/sessions, enriched with the asking agent/project display names + whether the asking
    * session is still live (for the jump/nudge affordances). By default only the human-actionable states

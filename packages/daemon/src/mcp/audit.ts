@@ -2,13 +2,22 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import { QUESTION_STATES, QUESTION_TYPES } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { registerTranscriptReadTools } from "./transcript-read.js";
 import { registerRepoReadTools } from "./repo-read.js";
+import { auditRequestItem } from "./questionTool.js";
 
 // Same envelope as the task / orchestration / platform MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
+
+/**
+ * Backstop cap on a DEFAULT `requests_list` read so an unfiltered whole-platform Requests history can't
+ * overflow the tool-result cap with no explicit limit — same rationale + sizing precedent as
+ * `DEFAULT_SESSION_SUMMARY_CAP` (mcp/sessionView.ts). An explicit limit/offset pages past it.
+ */
+const DEFAULT_REQUESTS_LIST_CAP = 50;
 
 /**
  * Audit MCP server (Platform Manager P5) — the Platform Auditor's RESTRICTED, READ-AND-FILE-ONLY surface.
@@ -65,6 +74,48 @@ export class AuditMcpRouter {
     // Auditor never gains source-read tools (it audits the user's workspace, not Loom's dev — the dev↔user
     // split). PURE READS, confined to the repo root, no host-process spawn — see repo-read.ts's header. ---
     registerRepoReadTools(server);
+
+    // --- cross-project READ: the Requests inbox itself (card 59489267) — so the Auditor can intake
+    // requests-friction directly instead of hoping one happens to surface in a transcript. NON-CONSUMING
+    // (never touches state/consumed_at, unlike question_pull) — the cross-project sibling of
+    // task_requests_list/task_request_get (card 988bb585), sharing the SAME per-type answer shaping
+    // (questionTool.ts's questionAnswerByType) so the credential never-echo guarantee can't drift between
+    // the two read surfaces. ---
+    server.registerTool(
+      "requests_list",
+      {
+        description:
+          "List Requests (decision/input/permission/credential asks) ACROSS ALL PROJECTS — the human's " +
+          "whole Requests inbox, so you can intake requests-friction directly instead of hoping one happens " +
+          "to surface in a transcript. NON-CONSUMING — reading NEVER drains or flips state, unlike " +
+          "question_pull's agent-scoped drain-and-consume (a distinct primitive; mirrors task_requests_list/ " +
+          "task_request_get's non-consuming guarantee). Returns, per row: {id, projectId, sessionId, agentId, " +
+          "taskId, type, title, state, createdAt, answeredAt, consumedAt} plus an answer summary by type — " +
+          "chosenOption/note for decision|input, approved/note for permission, ack ONLY for credential " +
+          "(NEVER the secret — mirrors question_pull's never-echo shape; a pending row's answer fields read " +
+          "null rather than a misleading false-ish value). Filters (all optional, AND'd): projectId (one " +
+          "project), state (pending|answered|consumed), type, sinceMinutes (only requests created within the " +
+          "last N minutes). Newest-first (createdAt DESC); no filters returns the whole platform. Bounded to " +
+          `${DEFAULT_REQUESTS_LIST_CAP} rows by default — pass an explicit limit/offset to page past it.`,
+        inputSchema: {
+          projectId: z.string().optional(),
+          state: z.enum(QUESTION_STATES).optional(),
+          type: z.enum(QUESTION_TYPES).optional(),
+          sinceMinutes: z.number().int().positive().optional(),
+          limit: z.number().int().positive().optional(),
+          offset: z.number().int().nonnegative().optional(),
+        },
+      },
+      async ({ projectId, state, type, sinceMinutes, limit, offset }) => {
+        const since = sinceMinutes !== undefined
+          ? new Date(Date.now() - sinceMinutes * 60_000).toISOString()
+          : undefined;
+        const all = db.listQuestionsForAudit({ projectId, state, type, since });
+        const off = offset ?? 0;
+        const page = all.slice(off, off + (limit ?? DEFAULT_REQUESTS_LIST_CAP));
+        return ok(page.map(auditRequestItem));
+      },
+    );
 
     // --- the ONE write: file a structured finding onto the reserved Platform board (hardcoded target) ---
     server.registerTool(
