@@ -130,7 +130,11 @@ try {
   check("(B) the ack references the requested envVar hint", rowCredAnswered.ack.includes("STRIPE_API_KEY"));
   check("(B) the response STILL has no secretBlob/secret_blob/secret field after answering", !("secretBlob" in rowCredAnswered) && !("secret_blob" in rowCredAnswered) && !("secret" in rowCredAnswered));
   check("(B) JSON.stringify of the whole response list never contains the plaintext", !JSON.stringify(afterCredAnswer).includes(plaintext));
-  check("(B) the underlying db row DOES carry the encrypted secret_blob (proves the tool is what filters it, not that it's simply absent)", typeof db.getQuestion(qCred) === "object");
+  // Raw SELECT bypassing toQuestion (which never maps secret_blob) — `db.db` reaches the real
+  // better-sqlite3 handle underneath the Db wrapper (TS `private db` erases to a plain field at runtime).
+  const rawCredRow = db.db.prepare("SELECT secret_blob FROM questions WHERE id = ?").get(qCred);
+  check("(B) the underlying db row DOES carry a non-empty encrypted secret_blob (proves the tool is what filters it, not that it's simply absent)", typeof rawCredRow?.secret_blob === "string" && rawCredRow.secret_blob.length > 0);
+  check("(B) the raw stored secret_blob is genuinely ciphertext, not the plaintext secret", rawCredRow.secret_blob !== plaintext && !rawCredRow.secret_blob.includes(plaintext));
 
   // ============ (C) NON-CONSUMING — state unchanged by the read ============
   const beforeStateA = db.getQuestion(qA).state;
