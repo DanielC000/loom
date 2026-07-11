@@ -447,7 +447,10 @@ export const api = {
   // Human-initiated merge of a worker's branch — runs the daemon's fail-closed build gate then
   // merges (manager derived from the worker's parentSessionId server-side).
   mergeWorker: (sessionId: string) => post<{ merged: boolean; reason?: string }>(`/api/sessions/${sessionId}/merge`),
-  orchestrationStatus: () => get<{ pausedScopes: string[] }>("/api/orchestration/status"),
+  // `schedulerEnabled` is the boot-time cron-Scheduler gate (LOOM_SCHEDULER_ENABLED=1 OR resolved
+  // orchestration.schedulerEnabled). Read-only; the Schedules page uses it to warn, honestly, when
+  // created schedules will NOT fire because the scheduler is off (the default).
+  orchestrationStatus: () => get<{ pausedScopes: string[]; schedulerEnabled: boolean }>("/api/orchestration/status"),
 
   // --- Manager→human DECISION INBOX (card 8701bdbb, child B). READ side: `openQuestions` is the GLOBAL
   // "waiting on me" queue (pending+answered across ALL projects, enriched with the asking agent/project

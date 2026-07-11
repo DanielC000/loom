@@ -1,10 +1,10 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type CSSProperties } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Schedule, CronBuilderState, CronFrequency } from "@loom/shared";
 import { cronFromBuilder, describeCron, parseCronToBuilder, defaultBuilderState } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { Panel, Button, Input, Select, SectionLabel, Badge, Chip } from "../components/ui";
+import { Panel, Button, Input, Select, SectionLabel, Badge, Chip, StatusPill } from "../components/ui";
 import { color, font, radius } from "../theme";
 
 // A 5-field cron is the daemon's contract (Schedule.cron). Cheap client-side gate for the raw-cron
@@ -19,6 +19,13 @@ export function looksLikeCron(s: string): boolean {
 function fmt(iso: string | null): string {
   return iso ? new Date(iso).toLocaleString() : "—";
 }
+
+// Inline code chip for env-var / config names in the scheduler-off notice — a hairline-bordered mono
+// token so the copy reads as "set THIS", not free prose.
+const codeStyle: CSSProperties = {
+  fontFamily: font.mono, fontSize: 11, color: color.text, background: color.panel2,
+  border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "1px 5px", whiteSpace: "nowrap",
+};
 
 // Flat list of every agent across all projects, with a "Project / Agent" label — for TABLE label
 // resolution only (the table stays god-eye: it shows schedules targeting any project). The builder's
@@ -49,6 +56,11 @@ export default function Schedules() {
   const [modal, setModal] = useState<ModalState>(null);
 
   const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
+  // The boot-time cron-Scheduler gate. The daemon only starts the ticker when this is true, so a
+  // schedule created while it's off is saved but never fires — surface that honestly (below). Gate the
+  // warning on an explicit `=== false` so it doesn't flash while the status is still loading.
+  const orch = useQuery({ queryKey: ["orchestrationStatus"], queryFn: api.orchestrationStatus });
+  const schedulerOff = orch.data?.schedulerEnabled === false;
   const agents = useAllAgents();
   const agentLabel = (id: string) => agents.data?.find((a) => a.id === id)?.label ?? id;
   // The builder's agent dropdown is scoped to the ACTIVE project's agents (re-scopes on project switch).
@@ -78,6 +90,13 @@ export default function Schedules() {
     <Panel style={{ alignSelf: "start" }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
         <SectionLabel style={{ margin: 0 }}>Schedules</SectionLabel>
+        {orch.data && (
+          <StatusPill
+            tone={orch.data.schedulerEnabled ? "phosphor" : "amber"}
+            label={orch.data.schedulerEnabled ? "scheduler active" : "scheduler off"}
+            glow={orch.data.schedulerEnabled}
+          />
+        )}
         <p style={{ color: color.textMuted, fontSize: 11, margin: 0, fontFamily: font.mono, lineHeight: 1.5, flex: 1, minWidth: 240 }}>
           Cron triggers. On each due boundary the daemon boots a manager session in the target agent —
           the agent's startup prompt is the kickoff, optionally followed by this schedule's own task
@@ -85,6 +104,24 @@ export default function Schedules() {
         </p>
         <Button variant="primary" onClick={() => setModal({ mode: "create" })}>+ New schedule</Button>
       </div>
+
+      {/* State-driven honesty: when the daemon's Scheduler is off (the default), a created schedule is
+          saved but never fires — say so plainly, with the two ways to turn it on. */}
+      {schedulerOff && (
+        <div role="status" style={{
+          marginTop: 12, display: "flex", alignItems: "flex-start", gap: 10, flexWrap: "wrap",
+          padding: "10px 12px", border: `1px solid ${color.amber}`, borderRadius: radius.base,
+          background: "rgba(232,168,68,0.06)",
+        }}>
+          <Badge tone="amber">scheduler off</Badge>
+          <p style={{ margin: 0, flex: 1, minWidth: 260, color: color.textDim, fontFamily: font.mono, fontSize: 12, lineHeight: 1.6 }}>
+            The cron scheduler is disabled, so schedules you create here are saved but{" "}
+            <strong style={{ color: color.amber, fontWeight: 700 }}>will not fire</strong>. To enable it, set{" "}
+            <code style={codeStyle}>LOOM_SCHEDULER_ENABLED=1</code> in the daemon's environment (or turn on{" "}
+            <code style={codeStyle}>orchestration.schedulerEnabled</code> in config), then restart the daemon.
+          </p>
+        </div>
+      )}
 
       <div style={{ marginTop: 12, overflowX: "auto" }}>
         {rows.length === 0 ? (

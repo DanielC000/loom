@@ -106,6 +106,13 @@ export interface GatewayDeps {
   runMcp: RunMcpRouter;
   control: OrchestrationControl;
   usageStatus: UsageStatusPoller;
+  /** Whether the cron Scheduler ticker is actually running (the boot-time gate:
+   *  LOOM_SCHEDULER_ENABLED=1 OR resolved orchestration.schedulerEnabled). Surfaced READ-ONLY on
+   *  GET /api/orchestration/status so the Schedules UI can tell the user, honestly, whether created
+   *  schedules will fire. Decided ONCE at boot — a runtime config change does not start the ticker
+   *  until restart, so this reflects the ticker's real state, not the live config. Optional: absent ⇒
+   *  reported as `false` (a partial-stub test builds a server without it — matches the default-off gate). */
+  schedulerEnabled?: boolean;
   /** The Companion hot-lifecycle CONTROLLER (a stable facade over the live ChatGateway + heartbeat), or
    *  null when the companion subsystem isn't wired. Threaded so the human-only /api/companion routes drive
    *  the RUNNING companion with NO restart: bindings POST/DELETE keep the gateway's routing map in sync
@@ -475,7 +482,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true, pausedScopes: deps.control.pausedScopes() };
   });
   app.post("/api/orchestration/kill", async () => ({ stopped: deps.sessions.killAllWorkers() }));
-  app.get("/api/orchestration/status", async () => ({ pausedScopes: deps.control.pausedScopes() }));
+  app.get("/api/orchestration/status", async () => ({ pausedScopes: deps.control.pausedScopes(), schedulerEnabled: deps.schedulerEnabled ?? false }));
   // --- Daemon version (Releases v1, Part 3) — the user-facing `loom` package version, read at RUNTIME
   // from the umbrella package.json (loomVersion() walks up to the `name:"loom"` package.json; NO hardcoded
   // second copy that can drift). READ-ONLY on this existing REST surface — no trust-boundary change; the

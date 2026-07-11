@@ -117,6 +117,31 @@ test.describe("schedules UI (Direction B)", () => {
     expect(res.status).toBe(400);
   });
 
+  test("scheduler-off: an honest notice warns that created schedules will not fire", async ({ page, loomDaemon }) => {
+    // The e2e daemon boots with LOOM_SCHEDULER_ENABLED=0 and a fresh config (orchestration.schedulerEnabled
+    // defaults to false), so the cron ticker is OFF — the live, honest state this notice exists for. Prove
+    // the page reflects the REAL resolved gate (from GET /api/orchestration/status), not an unconditional
+    // "the backend runs" claim.
+    const stamp = Date.now();
+    const project = await loomDaemon.createProject(`sched-off-${stamp}`);
+    await pinActiveProject(page, project.id);
+
+    await page.goto(`${loomDaemon.baseURL}/schedules`);
+
+    // The header status pill reflects the resolved OFF state (distinct from the notice's own badge below).
+    await expect(page.getByText(/scheduler off/i).first()).toBeVisible();
+
+    // The inline notice names the consequence AND both ways to turn the scheduler on.
+    const notice = page.getByRole("status").filter({ hasText: /will not fire/i });
+    await expect(notice).toBeVisible();
+    await expect(notice).toContainText("LOOM_SCHEDULER_ENABLED=1");
+    await expect(notice).toContainText("orchestration.schedulerEnabled");
+
+    // REST backstop: the status the UI reads from actually reports the gate as false.
+    const status = await fetch(`${loomDaemon.baseURL}/api/orchestration/status`).then((r) => r.json()) as { schedulerEnabled: boolean };
+    expect(status.schedulerEnabled).toBe(false);
+  });
+
   test("the table's On/Off toggle enables/disables a schedule", async ({ page, loomDaemon }) => {
     const stamp = Date.now();
     const project = await loomDaemon.createProject(`sched-toggle-${stamp}`);

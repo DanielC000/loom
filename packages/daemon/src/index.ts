@@ -640,8 +640,15 @@ async function main(): Promise<void> {
   // content would ALL pass existsSync yet leave the real server on plain HTTP, so gating the bind on
   // existsSync could open a PUBLIC interface as PLAIN HTTP while believing it was HTTPS).
   let httpsActive = false;
+  // Pillar B cron Scheduler gate: OPT-IN, decided ONCE at boot (LOOM_SCHEDULER_ENABLED=1 env override OR
+  // the resolved platform config). Consumed both here (surfaced on /api/orchestration/status so the
+  // Schedules UI is honest about whether schedules will fire) and below, where the ticker starts — the
+  // SAME const, so the reported state can never drift from the ticker's real state.
+  const schedulerEnabled =
+    process.env.LOOM_SCHEDULER_ENABLED === "1" || resolved.orchestration.schedulerEnabled;
   const app = await buildServer({
     db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus,
+    schedulerEnabled,
     companion: companionController, inApp: inAppChannel, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"),
     updateStatus: () => updateCheck.current(), beginSelfUpdate,
     // Access-story Phase B (card 56ffe50a): verify a presented gateway token against the real
@@ -750,8 +757,8 @@ async function main(): Promise<void> {
   // due schedule's tick. OPT-IN (autonomy earned gate-by-gate): only start when enabled via the
   // platform config OR the LOOM_SCHEDULER_ENABLED=1 env override. LOOM_SCHEDULER_INTERVAL_MS tunes
   // the tick cadence (default 60s) — tests use a short interval to avoid a 60s wait.
-  const schedulerEnabled =
-    process.env.LOOM_SCHEDULER_ENABLED === "1" || resolved.orchestration.schedulerEnabled;
+  // schedulerEnabled is computed once up-front (before buildServer) and shared: the gateway reports it
+  // on GET /api/orchestration/status so the UI is honest about whether schedules will fire.
   // BOOT-BOUND cadence from the resolved platform config (LOOM_SCHEDULER_INTERVAL_MS env read +
   // floor-clamped inside resolveConfig; default 60s).
   const intervalMs = watchers.schedulerMs;
