@@ -336,6 +336,55 @@ test("Capabilities: granting a lever persists across reload + prompts a restart-
   await expect(fleetCardReloaded.getByText("on · 1 project", { exact: true })).toHaveCount(0);
 });
 
+test("Capabilities: a lever grants across MULTIPLE projects — the per-lever count and the by-project overview both reflect a second project, and it persists", async ({ page, loomDaemon }) => {
+  // Card 324e47ed (epic ccdb1e0c, lever 3): grants are edited PER PROJECT, so the panel must let the owner
+  // grant one capability on more than the companion's own bound project — and the cross-project overview must
+  // consolidate that N-project picture (which the capability-first lever cards scatter). Same no-spawn seeded-
+  // companion path as the single-project round-trip above; we grant fleet-status on the companion's OWN
+  // project and then on a SECOND, freshly-created project.
+  const name = `Ada-${randomUUID().slice(0, 8)}`;
+  const companion = await loomDaemon.seedCompanion({ name });
+  const second = await loomDaemon.createProject(`second-${randomUUID().slice(0, 8)}`);
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+  const focus = async () => {
+    const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
+    if (await pickerBtn.count()) {
+      await pickerBtn.click();
+      await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
+    }
+    await page.getByRole("tab", { name: "Manage" }).click();
+  };
+  await focus();
+
+  const fleetCard = page.getByTestId("companion-lever-session-status");
+  const grantSelect = fleetCard.getByRole("combobox", { name: "Grant Fleet status on a project" });
+
+  // Grant on the companion's own project, then on the SECOND project.
+  await grantSelect.selectOption(companion.projectId);
+  await page.getByTestId("companion-grant-add-session-status").click();
+  await expect(fleetCard.getByText("on · 1 project", { exact: true })).toBeVisible();
+  await grantSelect.selectOption(second.id);
+  await page.getByTestId("companion-grant-add-session-status").click();
+
+  // The per-lever count reflects BOTH projects (observable state change), and the cross-project overview
+  // lists each project as its own row.
+  await expect(fleetCard.getByText("on · 2 projects", { exact: true })).toBeVisible();
+  const overview = page.getByTestId("companion-grants-by-project");
+  await expect(overview).toBeVisible();
+  await expect(overview.getByTestId(`companion-grants-project-${companion.projectId}`)).toBeVisible();
+  await expect(overview.getByTestId(`companion-grants-project-${second.id}`)).toBeVisible();
+  await expect(overview.getByTestId(`companion-grants-project-${second.id}`).getByText(second.name, { exact: false })).toBeVisible();
+
+  // Persistence across a FULL reload — a fresh GET, not the post-mutation optimistic cache.
+  await page.reload();
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+  await focus();
+  await expect(page.getByTestId("companion-lever-session-status").getByText("on · 2 projects", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("companion-grants-by-project").getByTestId(`companion-grants-project-${second.id}`)).toBeVisible();
+});
+
 test("Capabilities: decisions-relay act mode reveals the decision-class picker; toggling a class round-trips", async ({ page, loomDaemon }) => {
   // decisions-relay is act-CAPABLE: a read grant lists decisions, an act grant can resolve one — but only for
   // the decision CLASSES the owner explicitly allowlists (an empty set resolves nothing). The panel must (a)

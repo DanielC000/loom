@@ -1414,6 +1414,8 @@ function CapabilityGrantsSection({ sessionId }: { sessionId: string }) {
           )}
           {respawn.error && <span style={errStyle}>{(respawn.error as Error).message}</span>}
 
+          <GrantsByProject rows={rows} projects={projectList} />
+
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {COMPANION_LEVERS.map((meta) => (
               <LeverCard
@@ -1429,6 +1431,83 @@ function CapabilityGrantsSection({ sessionId }: { sessionId: string }) {
         </>
       )}
     </section>
+  );
+}
+
+// A read-only CROSS-PROJECT summary of everything this companion is granted — the multi-project lens the
+// per-lever cards below lack (they're capability-first, so one project's grants are scattered across N
+// cards). Derived straight from the grant ROWS (never the fixed lever table), so it stays legible as the
+// capability catalog GROWS: a grant whose slug this Loom build has no rich editor for yet still shows here —
+// by its raw slug, flagged muted — rather than becoming an invisible, un-revokable row. Purely
+// informational: editing stays in the lever cards; nothing here mutates. A NULL projectId groups under "this
+// companion's project" (its own bound project — the narrow default).
+function GrantsByProject({ rows, projects }: { rows: CompanionCapabilityGrant[]; projects: Project[] }) {
+  const grouped = useMemo(() => {
+    const leverName = new Map(COMPANION_LEVERS.map((l) => [l.slug as string, l.name]));
+    const leverOrder = new Map(COMPANION_LEVERS.map((l, i) => [l.slug as string, i]));
+    const groups = new Map<string, { projectId: string | null; name: string; caps: { slug: string; mode: GrantMode; known: boolean }[] }>();
+    for (const g of rows) {
+      const key = g.projectId ?? " own"; // null (own project) grouped distinctly from any real id
+      const name = g.projectId === null
+        ? "This companion's project"
+        : (projects.find((p) => p.id === g.projectId)?.name ?? g.projectId.slice(0, 8));
+      const group = groups.get(key) ?? { projectId: g.projectId, name, caps: [] };
+      group.caps.push({ slug: g.capability, mode: g.mode, known: leverName.has(g.capability) });
+      groups.set(key, group);
+    }
+    const ordered = [...groups.values()].sort((a, b) => {
+      if ((a.projectId === null) !== (b.projectId === null)) return a.projectId === null ? -1 : 1; // own first
+      return a.name.localeCompare(b.name);
+    });
+    for (const grp of ordered) {
+      grp.caps.sort((a, b) => {
+        const oa = leverOrder.get(a.slug) ?? Number.MAX_SAFE_INTEGER; // known levers in catalog order, unknown last
+        const ob = leverOrder.get(b.slug) ?? Number.MAX_SAFE_INTEGER;
+        return oa !== ob ? oa - ob : a.slug.localeCompare(b.slug);
+      });
+    }
+    return { ordered, leverName };
+  }, [rows, projects]);
+
+  if (rows.length === 0) return null;
+  const { ordered, leverName } = grouped;
+
+  return (
+    <div
+      data-testid="companion-grants-by-project"
+      style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 12px", border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2 }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 11, color: color.textDim }}>Grants by project</strong>
+        <span style={{ flex: 1 }} />
+        <StatusPill tone="phosphor" label={`${ordered.length} project${ordered.length === 1 ? "" : "s"}`} />
+      </div>
+      <p style={{ ...hint, margin: 0 }}>
+        Everything this companion holds, grouped by project — the cross-project view of the levers below. Edit
+        any of it in that lever's card.
+      </p>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {ordered.map((grp) => (
+          <div
+            key={grp.projectId ?? "__own__"}
+            data-testid={`companion-grants-project-${grp.projectId ?? "own"}`}
+            style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}
+          >
+            <Chip label="project" value={grp.name} tone="cyan" />
+            <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap", minWidth: 0 }}>
+              {grp.caps.map((c) => (
+                <Chip
+                  key={c.slug}
+                  label={c.known ? leverName.get(c.slug) : c.slug}
+                  value={c.mode}
+                  tone={!c.known ? "muted" : c.mode === "act" ? "amber" : "phosphor"}
+                />
+              ))}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
