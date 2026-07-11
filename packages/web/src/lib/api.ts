@@ -42,8 +42,11 @@ export interface DesiredColumn { key: string; label: string; role?: ColumnRole; 
 export interface TranscriptTurn { role: "user" | "assistant" | "tool_result"; text: string; }
 // One queued (not-yet-delivered) message. `id` is server-minted and stable, so the UI can
 // delete/edit/reorder a specific entry even as the FIFO head drains between polls. `source` is who
-// enqueued it: 'human' (the composer — adjustable) vs 'system' (worker reports / nudges — read-only).
-export interface QueuedMessage { id: string; text: string; source: "human" | "system"; }
+// enqueued it ('human' composer vs 'system' programmatic) and `kind` classifies a system entry: 'warning'
+// = a Loom operational nudge (idle/context watchdog, restart/memory-recall), 'agent' = a message authored
+// by an agent/human TO this session (worker report, manager direction). Actionable = the human's own
+// ('human') PLUS Loom's own ('warning'); an agent-authored entry (system + 'agent') is read-only.
+export interface QueuedMessage { id: string; text: string; source: "human" | "system"; kind: "warning" | "agent"; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
 
 // Skill update adoption (end-user customization — card 295a50f9). `update-diff` is the raw base→shipped

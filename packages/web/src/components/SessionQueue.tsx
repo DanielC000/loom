@@ -16,16 +16,28 @@ import { color, font, radius } from "../theme";
 // internally-scrollable drawer listing every queued message with its full affordances; collapse returns
 // to the one-liner. Renders nothing when empty, so it stays completely out of the way.
 //
-// Two kinds share the one FIFO and render together in the drawer:
-//   • 'human' entries (composer turns) are adjustable: reorder (↑/↓), edit in place (✎), remove (✕);
-//   • 'system' entries (worker reports / nudges) render READ-ONLY — the human never rewrites or reorders
-//     an agent's message out from under it (the daemon mutators refuse it too).
+// Three row species share the one FIFO and render together in the drawer:
+//   • 'human' entries (composer turns) are fully adjustable: reorder (↑/↓), edit in place (✎), remove (✕);
+//   • Loom nudges ('warning' kind — idle/context watchdog, restart/memory-recall injections like
+//     [loom:worker-idle]) are Loom's OWN text: the human may reorder (↑/↓) and remove (✕) them, but not
+//     rewrite them (editing a Loom nudge is meaningless);
+//   • agent-authored entries ('system' source + 'agent' kind — worker reports / manager direction) render
+//     READ-ONLY — the human never rewrites or reorders an agent's message out from under it (the daemon
+//     mutators refuse it too).
 // They still drain on their own (next turn boundary / reconcile tick). Every mutation is id-addressed: the
 // FIFO head can drain between the 3s poll and a click, so an id op targets exactly one entry and is a
 // harmless no-op once it has drained.
 //
-// Reorder moves a human entry only among the OTHER human entries (system entries hold their slot), so ↑/↓
-// sends the human ids' desired order and the daemon permutes them within the human slots.
+// Reorder moves a MUTABLE entry (human + Loom-nudge) only among the OTHER mutable entries (agent-authored
+// entries hold their slot), so ↑/↓ sends the mutable ids' desired order and the daemon permutes them
+// within those slots.
+
+// Which entries the human may act on: their OWN composer turns PLUS Loom's OWN 'warning' nudges. An
+// agent-authored entry (system source + 'agent' kind) stays read-only. Mirrors the daemon's isHumanMutable.
+const isMutable = (m: QueuedMessage) => m.source === "human" || m.kind === "warning";
+// Edit (rewrite in place) is reserved for the human's own composed turns — a Loom nudge is deletable /
+// reorderable but not editable.
+const isEditable = (m: QueuedMessage) => m.source === "human";
 
 // Bounded drawer height (px) — the approved mockup's cap. Beyond it, the drawer scrolls internally so the
 // footprint stays bounded no matter how deep the backlog is.
@@ -49,14 +61,14 @@ export function SessionQueue({ sessionId }: { sessionId: string }) {
 
   if (pending.length === 0) return null;
 
-  // Reorder operates on the HUMAN entries only — system entries keep their slot (the daemon pins them).
-  // Move the human entry `id` by `dir` (±1) within that human-only ordering and send the new order.
-  const humanIds = pending.filter((m) => m.source === "human").map((m) => m.id);
+  // Reorder operates on the MUTABLE entries only (human turns + Loom nudges) — agent-authored entries keep
+  // their slot (the daemon pins them). Move the entry `id` by `dir` (±1) within that ordering and send it.
+  const movableIds = pending.filter(isMutable).map((m) => m.id);
   const move = (id: string, dir: -1 | 1) => {
-    const k = humanIds.indexOf(id);
+    const k = movableIds.indexOf(id);
     const j = k + dir;
-    if (k < 0 || j < 0 || j >= humanIds.length) return;
-    const order = [...humanIds];
+    if (k < 0 || j < 0 || j >= movableIds.length) return;
+    const order = [...movableIds];
     [order[k], order[j]] = [order[j]!, order[k]!];
     reorder.mutate(order);
   };
@@ -109,13 +121,13 @@ export function SessionQueue({ sessionId }: { sessionId: string }) {
           }}
         >
           {pending.map((m) => {
-            const hIdx = m.source === "human" ? humanIds.indexOf(m.id) : -1;
+            const mIdx = isMutable(m) ? movableIds.indexOf(m.id) : -1;
             return (
               <QueueRow
                 key={m.id}
                 m={m}
-                canUp={hIdx > 0}
-                canDown={hIdx >= 0 && hIdx < humanIds.length - 1}
+                canUp={mIdx > 0}
+                canDown={mIdx >= 0 && mIdx < movableIds.length - 1}
                 editing={editingId === m.id}
                 busy={mutating}
                 onEditStart={() => setEditingId(m.id)}
@@ -151,10 +163,11 @@ function QueueRow({
   const rowStyle = { display: "flex", gap: 6, alignItems: editing ? "flex-start" : "center", padding: "2px 4px", borderRadius: radius.sm } as const;
   const preview = m.text.replace(/\s+/g, " ").trim();
 
-  // System entries (worker reports / nudges) are READ-ONLY: a calm cyan-dot row, no controls, no edit.
-  if (m.source !== "human") {
+  // Agent-authored entries (worker reports / manager direction) are READ-ONLY: a calm cyan-dot row, no
+  // controls, no edit. The human never rewrites or reorders another agent's message out from under it.
+  if (!isMutable(m)) {
     return (
-      <div style={rowStyle} title={`${m.text}\n\n(worker / system message — read-only)`}>
+      <div style={rowStyle} title={`${m.text}\n\n(worker / agent message — read-only)`}>
         <Dot tone="cyan" />
         <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
           {preview}
@@ -164,26 +177,32 @@ function QueueRow({
     );
   }
 
-  if (editing) {
+  const editable = isEditable(m);
+
+  if (editing && editable) {
     // Mounted fresh per edit, so the draft always seeds from the CURRENT text.
     return <div style={rowStyle}><QueueEditor initial={m.text} busy={busy} onSave={onEditSave} onCancel={onEditCancel} /></div>;
   }
 
+  // Mutable rows: the human's own composer turns (amber dot, editable) and Loom's own operational nudges
+  // ('warning' kind — a muted dot + a "loom" tag, removable/reorderable but not editable).
   return (
     <div style={rowStyle}>
       <div style={{ display: "inline-flex", gap: 2 }}>
         <IconBtn title="Move up" disabled={!canUp || busy} onClick={onUp}>↑</IconBtn>
         <IconBtn title="Move down" disabled={!canDown || busy} onClick={onDown}>↓</IconBtn>
       </div>
-      <Dot tone="amber" />
+      <Dot tone={editable ? "amber" : "muted"} />
       <span
-        onClick={onEditStart}
-        title={m.text}
-        style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: 11, color: color.textDim, cursor: "text" }}
+        onClick={editable ? onEditStart : undefined}
+        title={editable ? m.text : `${m.text}\n\n(Loom nudge — remove or reorder, not editable)`}
+        style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: 11, color: color.textDim, cursor: editable ? "text" : "default" }}
       >
         {preview}
       </span>
-      <IconBtn title="Edit this queued message" disabled={busy} onClick={onEditStart}>✎</IconBtn>
+      {editable
+        ? <IconBtn title="Edit this queued message" disabled={busy} onClick={onEditStart}>✎</IconBtn>
+        : <span style={{ fontFamily: font.head, fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textMuted }}>loom</span>}
       <IconBtn title="Remove from queue" variant="danger" disabled={busy} onClick={onDelete}>✕</IconBtn>
     </div>
   );

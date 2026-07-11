@@ -2595,14 +2595,17 @@ export class PtyHost {
   }
 
   /**
-   * A copy of a session's queued entries (id + text) in FIFO order — for the human-facing UI, which
-   * needs the stable id to delete/edit/reorder a SPECIFIC entry (see QueuedMessage). Returns [] for an
-   * unknown session. Entries are shallow-copied so a caller can't mutate the live FIFO through them.
+   * A copy of a session's queued entries (id + text + source + kind) in FIFO order — for the human-facing
+   * UI, which needs the stable id to delete/edit/reorder a SPECIFIC entry (see QueuedMessage), and `source`
+   * + `kind` to tell which entries it may mutate (see {@link isHumanMutable}): the human's own composed
+   * turns and Loom's own `kind:"warning"` nudges are actionable; an agent-authored `kind:"agent"` entry
+   * renders read-only. Returns [] for an unknown session. Entries are shallow-copied so a caller can't
+   * mutate the live FIFO through them.
    */
-  getPendingEntries(sessionId: string): Array<Pick<QueuedMessage, "id" | "text" | "source">> {
-    // Strip the internal `onDeliver` callback — the UI only needs {id,text,source}, and a function must
-    // never escape the host (it isn't serializable and is meaningless outside this process).
-    return (this.live.get(sessionId)?.pending ?? []).map(({ id, text, source }) => ({ id, text, source }));
+  getPendingEntries(sessionId: string): Array<Pick<QueuedMessage, "id" | "text" | "source" | "kind">> {
+    // Strip the internal `onDeliver` callback — the UI only needs {id,text,source,kind}, and a function
+    // must never escape the host (it isn't serializable and is meaningless outside this process).
+    return (this.live.get(sessionId)?.pending ?? []).map(({ id, text, source, kind }) => ({ id, text, source, kind }));
   }
 
   /**
@@ -2744,9 +2747,13 @@ export class PtyHost {
    * no-op returning false — the whole reason ids exist (an index would silently hit the wrong, shifted
    * entry). The auto-drain (drainPending/reconcile) safety net is unaffected.
    *
-   * SOURCE GATE: a mutator may only touch a 'human' entry. An op aimed at a 'system' entry (a worker
-   * report / nudge) is REFUSED — it returns false WITH `refused:true` (the REST layer maps that to a
-   * 403) and leaves the entry untouched, so an agent's queued report can never be deleted, rewritten,
+   * MUTABILITY GATE (see {@link isHumanMutable}): a mutator may only touch a HUMAN-MUTABLE entry —
+   * the human's OWN composed turns (`source:"human"`) AND Loom's OWN operational injections
+   * (`kind:"warning"` — idle/context/busy-stuck watchdog nudges, restart/boot continuation notes,
+   * rate-limit/memory-recall). An op aimed at an agent-AUTHORED entry (`source:"system"` +
+   * `kind:"agent"` — a worker→manager report, manager→worker direction, a Lead session_message, a
+   * companion inbound) is REFUSED — it returns false WITH `refused:true` (the REST layer maps that to a
+   * 403) and leaves the entry untouched, so an agent's queued message can never be deleted, rewritten,
    * or reordered out from under it. (A missing id stays a plain false with no `refused` — it's not a
    * boundary violation, just a lost race with the drain.)
    */
@@ -2755,7 +2762,7 @@ export class PtyHost {
     if (!live?.alive) return { deleted: false };
     const i = live.pending.findIndex((m) => m.id === id);
     if (i < 0) return { deleted: false }; // already drained / unknown id — safe no-op
-    if (live.pending[i]!.source !== "human") return { deleted: false, refused: true }; // system entry — read-only
+    if (!this.isHumanMutable(live.pending[i]!)) return { deleted: false, refused: true }; // agent-authored — read-only
     live.pending.splice(i, 1);
     return { deleted: true };
   }
@@ -2765,44 +2772,61 @@ export class PtyHost {
     if (!live?.alive) return { edited: false };
     const m = live.pending.find((m) => m.id === id);
     if (!m) return { edited: false }; // already drained / unknown id — safe no-op
-    if (m.source !== "human") return { edited: false, refused: true }; // system entry — read-only
+    if (!this.isHumanMutable(m)) return { edited: false, refused: true }; // agent-authored — read-only
     m.text = text; // identity (id) and FIFO position preserved; only the body changes
     return { edited: true };
   }
 
   /**
-   * Reorder the held FIFO. Only HUMAN entries may move: `orderedIds` is the human entries' desired
-   * order, and the permutation is applied IN PLACE within the slots human entries currently occupy —
-   * every 'system' entry keeps its absolute FIFO position, so a human reorder can never reposition (or
-   * jump ahead of) a worker report. Reconciled against the CURRENT queue: ids not present are skipped
-   * (drained/unknown), and any human entry NOT named (e.g. one enqueued after the client's snapshot) is
-   * preserved and appended after the named ones in its existing relative order — so a reorder can never
-   * silently drop a message. REFUSED (reordered:false, refused:true) if any named id targets a 'system'
-   * entry — the UI never sends one, so this is a guard against a hand-rolled request. Returns
-   * reordered:false (no refused) only for a dead/unknown session.
+   * Which held entries the HUMAN may mutate (delete / edit / reorder). Two classes qualify (owner-directed
+   * 2026-07-11 — the human owns the daemon, so both their own and Loom's own queued text are theirs to clear):
+   *   • `source:"human"` — the human's OWN composed turns (any kind);
+   *   • `kind:"warning"` — Loom's OWN operational injections (idle/context/busy-stuck watchdog nudges like
+   *     `[loom:worker-idle]`, restart/boot continuation notes, rate-limit/usage nudges, memory-recall) —
+   *     Loom-authored, NOT a message from another agent, so removing/repositioning one harms nobody.
+   * The ONE protected class is `source:"system"` + `kind:"agent"` — a message AUTHORED by an agent or a
+   * human TO this recipient (worker→manager report, manager→worker direction/redirect, Lead session_message,
+   * companion inbound) — which must never be deleted, rewritten, or reordered out from under the running
+   * orchestration. (`source:"human"` entries are always `kind:"agent"` in practice, hence the OR, not AND.)
+   */
+  private isHumanMutable(m: QueuedMessage): boolean {
+    return m.source === "human" || m.kind === "warning";
+  }
+
+  /**
+   * Reorder the held FIFO. Only HUMAN-MUTABLE entries (see {@link isHumanMutable}) may move: `orderedIds`
+   * is their desired order, and the permutation is applied IN PLACE within the slots those entries
+   * currently occupy — every agent-AUTHORED (`source:"system"` + `kind:"agent"`) entry keeps its absolute
+   * FIFO position, so a human reorder can never reposition (or jump ahead of) a worker report / manager
+   * direction. Reconciled against the CURRENT queue: ids not present are skipped (drained/unknown), and any
+   * mutable entry NOT named (e.g. one enqueued after the client's snapshot) is preserved and appended after
+   * the named ones in its existing relative order — so a reorder can never silently drop a message. REFUSED
+   * (reordered:false, refused:true) if any named id targets an agent-authored entry — the UI never sends
+   * one, so this is a guard against a hand-rolled request. Returns reordered:false (no refused) only for a
+   * dead/unknown session.
    */
   reorderQueued(sessionId: string, orderedIds: string[]): { reordered: boolean; refused?: boolean } {
     const live = this.live.get(sessionId);
     if (!live?.alive) return { reordered: false };
     const byId = new Map(live.pending.map((m) => [m.id, m] as const));
-    // Boundary guard: a named id that resolves to a system entry is a trust-boundary violation — refuse
-    // the whole op rather than silently dropping that id (which would let a caller probe the queue).
+    // Boundary guard: a named id that resolves to an agent-authored entry is a trust-boundary violation —
+    // refuse the whole op rather than silently dropping that id (which would let a caller probe the queue).
     for (const id of orderedIds) {
       const m = byId.get(id);
-      if (m && m.source !== "human") return { reordered: false, refused: true };
+      if (m && !this.isHumanMutable(m)) return { reordered: false, refused: true };
     }
-    // Desired order of the HUMAN entries: named-first (present, human, deduped), then any un-named human
-    // entries in their existing relative order.
+    // Desired order of the MUTABLE entries: named-first (present, mutable, deduped), then any un-named
+    // mutable entries in their existing relative order.
     const seen = new Set<string>();
-    const humanSeq: QueuedMessage[] = [];
+    const mutableSeq: QueuedMessage[] = [];
     for (const id of orderedIds) {
       const m = byId.get(id);
-      if (m && m.source === "human" && !seen.has(id)) { humanSeq.push(m); seen.add(id); }
+      if (m && this.isHumanMutable(m) && !seen.has(id)) { mutableSeq.push(m); seen.add(id); }
     }
-    for (const m of live.pending) if (m.source === "human" && !seen.has(m.id)) { humanSeq.push(m); seen.add(m.id); }
-    // Rebuild in place: system entries hold their slot; each human slot takes the next from humanSeq.
+    for (const m of live.pending) if (this.isHumanMutable(m) && !seen.has(m.id)) { mutableSeq.push(m); seen.add(m.id); }
+    // Rebuild in place: agent-authored entries hold their slot; each mutable slot takes the next from mutableSeq.
     let hi = 0;
-    const next = live.pending.map((m) => (m.source === "human" ? humanSeq[hi++]! : m));
+    const next = live.pending.map((m) => (this.isHumanMutable(m) ? mutableSeq[hi++]! : m));
     live.pending.splice(0, live.pending.length, ...next);
     return { reordered: true };
   }

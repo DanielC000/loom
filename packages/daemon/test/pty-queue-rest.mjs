@@ -3,14 +3,16 @@
 // (buildServer) against a temp Db + the REAL PtyHost driving a FAKE pty (createPty seam), and drives
 // the queue routes via app.inject():
 //   • POST   /api/sessions/:id/input            — the HUMAN composer; tags its entry source:'human'
-//   • GET    /api/sessions/:id/queue            — returns {id,text,source}[] (the UI view)
+//   • GET    /api/sessions/:id/queue            — returns {id,text,source,kind}[] (the UI view)
 //   • PATCH  /api/sessions/:id/queue/:entryId   — edit a HELD entry's text
 //   • DELETE /api/sessions/:id/queue/:entryId   — remove a HELD entry
-//   • PATCH  /api/sessions/:id/queue            — reorder the human entries
-// The trust boundary is the point of the test: a programmatic enqueue (worker report / nudge) is
-// 'system' and the mutators REFUSE it → the route maps refused→403, so an agent's queued message can
-// never be rewritten or reordered from the human surface. Plus the validation edges: 404 unknown
-// session, 400 bad body, and a stale/unknown id is a graceful 200 no-op.
+//   • PATCH  /api/sessions/:id/queue            — reorder the human + warning entries
+// The trust boundary is the point of the test: an agent-AUTHORED enqueue (a worker report / manager
+// direction — source:'system' + kind:'agent') is REFUSED by the mutators → the route maps refused→403,
+// so an agent's queued message can never be rewritten or reordered from the human surface. A Loom
+// kind:'warning' operational nudge (idle/context watchdog), by contrast, IS human-mutable (owner-directed
+// 2026-07-11) and its delete/edit/reorder return 200. Plus the validation edges: 404 unknown session,
+// 400 bad body, and a stale/unknown id is a graceful 200 no-op.
 //
 // RUN (self-isolating; sets its OWN temp LOOM_HOME before importing dist):
 //   1) build the daemon, 2) node test/pty-queue-rest.mjs
@@ -64,13 +66,13 @@ try {
   const p1 = await app.inject({ method: "POST", url: `/api/sessions/${SID}/input`, payload: { text: "H1" } });
   check("POST /input: 200, queued (delivered:false, has position)", p1.statusCode === 200 && p1.json().delivered === false && typeof p1.json().position === "number");
   await app.inject({ method: "POST", url: `/api/sessions/${SID}/input`, payload: { text: "H2" } });
-  // A PROGRAMMATIC enqueue (worker report) — defaults to 'system', the read-only kind.
-  host.enqueueStdin(SID, "WORKER REPORT");
+  // An agent-AUTHORED enqueue (a worker report) — source:'system' + kind:'agent', the read-only class.
+  host.enqueueStdin(SID, "WORKER REPORT", "system", undefined, undefined, "agent");
 
   let q = await getQueue();
-  check("GET /queue: returns 3 entries with {id,text,source}", q.length === 3 && q.every((e) => e.id && typeof e.text === "string" && (e.source === "human" || e.source === "system")));
+  check("GET /queue: returns 3 entries with {id,text,source,kind}", q.length === 3 && q.every((e) => e.id && typeof e.text === "string" && (e.source === "human" || e.source === "system") && (e.kind === "warning" || e.kind === "agent")));
   check("GET /queue: composer entries tagged source:'human'", q[0].text === "H1" && q[0].source === "human" && q[1].source === "human");
-  check("GET /queue: programmatic entry tagged source:'system'", idOf(q, "WORKER REPORT") && q.find((e) => e.text === "WORKER REPORT").source === "system");
+  check("GET /queue: agent-authored entry tagged source:'system' + kind:'agent'", idOf(q, "WORKER REPORT") && q.find((e) => e.text === "WORKER REPORT").source === "system" && q.find((e) => e.text === "WORKER REPORT").kind === "agent");
 
   const h1 = idOf(q, "H1"), h2 = idOf(q, "H2"), sys = idOf(q, "WORKER REPORT");
 
@@ -87,15 +89,36 @@ try {
   check("PATCH reorder: applied → [H2, H1-edited, WORKER REPORT] (system pinned last)",
     q.map((e) => e.text).join("|") === "H2|H1-edited|WORKER REPORT");
 
-  // ════════ TRUST BOUNDARY: every mutator REFUSES a 'system' entry → 403 ════════
+  // ════════ TRUST BOUNDARY: every mutator REFUSES an agent-authored entry → 403 ════════
   const eSys = await app.inject({ method: "PATCH", url: `/api/sessions/${SID}/queue/${sys}`, payload: { text: "HACK" } });
-  check("PATCH system edit: 403 refused", eSys.statusCode === 403 && eSys.json().refused === true);
+  check("PATCH agent-authored edit: 403 refused", eSys.statusCode === 403 && eSys.json().refused === true);
   const dSys = await app.inject({ method: "DELETE", url: `/api/sessions/${SID}/queue/${sys}` });
-  check("DELETE system: 403 refused", dSys.statusCode === 403 && dSys.json().refused === true);
+  check("DELETE agent-authored: 403 refused", dSys.statusCode === 403 && dSys.json().refused === true);
   const rSys = await app.inject({ method: "PATCH", url: `/api/sessions/${SID}/queue`, payload: { orderedIds: [sys, h2] } });
-  check("PATCH reorder naming a system id: 403 refused", rSys.statusCode === 403 && rSys.json().refused === true);
+  check("PATCH reorder naming an agent-authored id: 403 refused", rSys.statusCode === 403 && rSys.json().refused === true);
   q = await getQueue();
-  check("after refused ops: queue + system text untouched", q.map((e) => e.text).join("|") === "H2|H1-edited|WORKER REPORT");
+  check("after refused ops: queue + agent-authored text untouched", q.map((e) => e.text).join("|") === "H2|H1-edited|WORKER REPORT");
+
+  // ════════ WARNING IS HUMAN-MUTABLE: a Loom kind:'warning' nudge edits/reorders/deletes via REST (200) ════════
+  host.enqueueStdin(SID, "LOOM NUDGE", "system", undefined, undefined, "warning"); // → [H2, H1-edited, WORKER REPORT, LOOM NUDGE]
+  q = await getQueue();
+  const nudge = idOf(q, "LOOM NUDGE");
+  check("GET /queue: Loom nudge tagged source:'system' + kind:'warning'", q.find((e) => e.text === "LOOM NUDGE")?.source === "system" && q.find((e) => e.text === "LOOM NUDGE")?.kind === "warning");
+  const eNudge = await app.inject({ method: "PATCH", url: `/api/sessions/${SID}/queue/${nudge}`, payload: { text: "LOOM NUDGE 2" } });
+  check("PATCH warning edit: 200 {edited:true} (Loom nudge is human-mutable)", eNudge.statusCode === 200 && eNudge.json().edited === true);
+  // Reorder NAMING the warning is ALLOWED (200, not the old 403) — the point of contrast with the agent
+  // entry above. Passing the movable ids in their current order is a net-stable permutation, so the
+  // agent-authored WORKER REPORT stays pinned at index 2 and the downstream human-delete order holds.
+  q = await getQueue();
+  const nudge2 = idOf(q, "LOOM NUDGE 2");
+  const rNudge = await app.inject({ method: "PATCH", url: `/api/sessions/${SID}/queue`, payload: { orderedIds: [h2, h1, nudge2] } });
+  check("PATCH reorder naming a warning id: 200 {reordered:true} (not refused)", rNudge.statusCode === 200 && rNudge.json().reordered === true);
+  q = await getQueue();
+  check("reorder across human+warning: agent-authored WORKER REPORT still pinned at index 2", q[2].text === "WORKER REPORT");
+  const dNudge = await app.inject({ method: "DELETE", url: `/api/sessions/${SID}/queue/${nudge2}` });
+  check("DELETE warning: 200 {deleted:true} (Loom nudge removed)", dNudge.statusCode === 200 && dNudge.json().deleted === true);
+  q = await getQueue();
+  check("after warning delete: LOOM NUDGE gone, agent-authored WORKER REPORT survives", !q.some((e) => e.text.startsWith("LOOM NUDGE")) && q.some((e) => e.text === "WORKER REPORT"));
 
   // ════════ DELETE a HUMAN entry ════════
   const d1 = await app.inject({ method: "DELETE", url: `/api/sessions/${SID}/queue/${h2}` });

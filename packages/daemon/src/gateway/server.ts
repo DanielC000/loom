@@ -1974,6 +1974,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // sub-panel render (it draws nothing when empty). DB-backed (insertWake), so it round-trips
         // through listWakesForSession / GET /api/sessions/:id/wakes with no live pty.
         wakes?: { sessionId: string; wakeAt?: string; note?: string }[];
+        // Enqueue a message straight onto a LIVE session's pty FIFO with a chosen source+kind — the ONLY
+        // way an e2e spec can seed a Loom `kind:"warning"` operational nudge (e.g. [loom:worker-idle]) into
+        // a session's queue, since the human REST path (POST /input) only ever produces source:"human" +
+        // kind:"agent" entries. Delegates to the SAME PtyHost.enqueueStdin the real nudge watchers use, so
+        // delivered-vs-held tracks the session's busy state exactly as in prod (arm busy with a prior
+        // delivery, then a warning enqueued while busy is HELD in the FIFO). Needs a live pty entry
+        // (e.g. a seedCanned session). Used by the warning-delete queue e2e (SessionQueue mutability).
+        enqueue?: { sessionId: string; text: string; source?: "human" | "system"; kind?: "warning" | "agent" }[];
         // CLEANUP: archive (leave the live rail) seeded live sessions once a spec is done with them — the
         // e2e worker daemon is SHARED across spec files, so a lingering `live` row would pollute a later
         // spec's GLOBAL "no live sessions" empty-state (e.g. the Usage page's Live-occupancy plane). Sets
@@ -2200,6 +2208,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         deps.db.insertWake(wake);
         wakeIds.push(id);
       }
+      // Direct pty-FIFO enqueue with a chosen source+kind — seeds a Loom kind:"warning" nudge (or any
+      // combination) into a live session's queue via the SAME PtyHost.enqueueStdin the real watchers use.
+      // Processes in array order, so a caller can arm busy with a leading (delivered) entry and then have a
+      // trailing warning HELD in the FIFO. Reports delivered/position so the spec can assert it was held.
+      const enqueued: { sessionId: string; delivered: boolean; position?: number }[] = [];
+      for (const e of b.enqueue ?? []) {
+        if (typeof e.sessionId !== "string" || typeof e.text !== "string") {
+          return reply.code(400).send({ error: "enqueue[].sessionId and text are required strings" });
+        }
+        const r = deps.pty.enqueueStdin(e.sessionId, e.text, e.source ?? "system", undefined, undefined, e.kind ?? "warning");
+        enqueued.push({ sessionId: e.sessionId, delivered: r.delivered, position: r.position });
+      }
       // Cleanup: archive the named sessions (idempotent; a missing row is a no-op). Also drop any
       // `seedCanned` pty entry (card a53e6bc9) — the e2e worker daemon is SHARED across spec files, so a
       // lingering canned entry would otherwise outlive its spec; a session with none is a harmless no-op.
@@ -2250,7 +2270,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         ok: true, usageSampleIds, runIds,
         companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds,
         companionMessageIds,
-        liveSessionIds, wakeIds, archivedSessionIds, orchestrationEventIds, questionIds,
+        liveSessionIds, wakeIds, enqueued, archivedSessionIds, orchestrationEventIds, questionIds,
       });
     });
   }
@@ -3248,12 +3268,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // agent can never reorder or rewrite another session's pending turns. All three are id-addressed and
   // delegate to the synchronous PtyHost mutators (no pty write), so they're safe at any time and a
   // stale/already-drained id is a graceful no-op (false), never a 500. 404 only for an unknown session;
-  // 403 (`refused`) when the op targets a 'system' entry (a worker report / nudge) — those are read-only.
+  // 403 (`refused`) when the op targets an agent-AUTHORED entry (source:"system" + kind:"agent" — a
+  // worker report / manager direction) — those stay read-only. The human's own composed turns AND Loom's
+  // own kind:"warning" operational nudges (e.g. [loom:worker-idle]) are actionable (see isHumanMutable).
   app.delete("/api/sessions/:id/queue/:entryId", async (req, reply) => {
     const { id, entryId } = req.params as { id: string; entryId: string };
     if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
     const r = deps.pty.deleteQueued(id, entryId);
-    if (r.refused) return reply.code(403).send({ error: "entry is not human-owned", ...r });
+    if (r.refused) return reply.code(403).send({ error: "entry is agent-authored (read-only)", ...r });
     return reply.send(r);
   });
   app.patch("/api/sessions/:id/queue/:entryId", async (req, reply) => {
@@ -3262,7 +3284,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (typeof text !== "string" || !text.trim()) return reply.code(400).send({ error: "text required" });
     if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
     const r = deps.pty.editQueued(id, entryId, text);
-    if (r.refused) return reply.code(403).send({ error: "entry is not human-owned", ...r });
+    if (r.refused) return reply.code(403).send({ error: "entry is agent-authored (read-only)", ...r });
     return reply.send(r);
   });
   app.patch("/api/sessions/:id/queue", async (req, reply) => {
@@ -3272,7 +3294,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return reply.code(400).send({ error: "orderedIds (string[]) required" });
     if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
     const r = deps.pty.reorderQueued(id, orderedIds as string[]);
-    if (r.refused) return reply.code(403).send({ error: "entry is not human-owned", ...r });
+    if (r.refused) return reply.code(403).send({ error: "entry is agent-authored (read-only)", ...r });
     return reply.send(r);
   });
   // Cancel one of a session's pending wakes (scoped: the wake must belong to that session).

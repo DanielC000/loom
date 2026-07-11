@@ -232,6 +232,18 @@ export interface LoomDaemon {
     ptyBytes?: string;
   }) => Promise<SeededLiveSession>;
   /**
+   * Enqueue a message straight onto a LIVE session's pty FIFO with a chosen source+kind via POST
+   * /internal/test/seed — the ONLY way an e2e spec can seed a Loom `kind:"warning"` operational nudge
+   * (e.g. [loom:worker-idle]) into a session's queue, since the human REST path (POST /input) only ever
+   * produces source:"human" + kind:"agent" entries. Delegates to the same PtyHost.enqueueStdin the real
+   * nudge watchers use, so delivered-vs-held tracks busy state exactly as in prod. Requires a live pty
+   * entry — seed a `seedLiveSession({ ptyGeometry, ptyBytes })` canned session first, then arm busy with a
+   * leading (delivered) entry so a trailing warning is HELD. Returns the enqueue outcome per entry.
+   */
+  enqueueMessage: (opts: {
+    sessionId: string; text: string; source?: "human" | "system"; kind?: "warning" | "agent";
+  }) => Promise<{ delivered: boolean; position?: number }>;
+  /**
    * Seed a raw orchestration_events audit row via POST /internal/test/seed (card 12204d22) — the ONLY way
    * an e2e spec can drive an attention item that's derived from a manager's event stream (e.g. a
    * `merge_request`, which the project Overview's Attention section renders as a rich Review-queue card).
@@ -519,6 +531,13 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       };
     };
 
+    const enqueueMessage: LoomDaemon["enqueueMessage"] = async (opts) => {
+      const res = await apiPost<{ enqueued: { delivered: boolean; position?: number }[] }>(baseURL, "/internal/test/seed", {
+        enqueue: [{ sessionId: opts.sessionId, text: opts.text, source: opts.source, kind: opts.kind }],
+      });
+      return res.enqueued[0];
+    };
+
     const seedOrchestrationEvent: LoomDaemon["seedOrchestrationEvent"] = async (evt) => {
       const res = await apiPost<{ orchestrationEventIds: string[] }>(baseURL, "/internal/test/seed", {
         orchestrationEvents: [evt],
@@ -587,7 +606,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, seedOrchestrationEvent, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
+    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, enqueueMessage, seedOrchestrationEvent, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.
