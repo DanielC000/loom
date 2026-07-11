@@ -11,6 +11,15 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
     },
+    "@loom/daemon#build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"],
+      // @loom/daemon's build script runs scripts/sync-claude-skills.mjs (outside this package's own
+      // file tree), so it needs its own inputs entry keying the cache on that script too — otherwise a
+      // script-only change is invisible to turbo and a bare `pnpm build` can replay a stale cache hit
+      // without re-running the sync. $TURBO_DEFAULT$ preserves the normal git-tracked-files inputs.
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/sync-claude-skills.mjs"]
+    },
     "typecheck": {
       "dependsOn": ["^build"]
     },
