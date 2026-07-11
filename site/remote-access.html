@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Remote access · Loom</title>
+    <meta
+      name="description"
+      content="Reach your Loom daemon from another device. The recommended path keeps the daemon loopback-only behind Tailscale Serve or SSH; a co-equal alternative is a direct authenticated bind with a gateway token and mandatory TLS off the tailnet."
+    />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0a0b0c" />
+
+    <meta property="og:title" content="Remote access · Loom" />
+    <meta
+      property="og:description"
+      content="Reach your Loom daemon from another device: Tailscale Serve / SSH (recommended, zero new listening surface) or a direct authenticated bind with a gateway token and TLS."
+    />
+    <meta property="og:type" content="article" />
+
+    <!-- Brand type is embedded offline as base64 woff2 in styles.css. No CDN, no network requests. -->
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <!-- ── Header ─────────────────────────────────────────────────────────── -->
+    <header class="site-header">
+      <div class="wrap header-inner">
+        <a class="brand" href="index.html#top" aria-label="Loom home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" width="22" height="22">
+              <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                <path d="M8 4 V13.2 M8 18.8 V20" />
+                <path d="M16 4 V5.2 M16 10.8 V20" />
+                <path d="M4 8 H5.2 M10.8 8 H20" />
+                <path d="M4 16 H13.2 M18.8 16 H20" />
+              </g>
+            </svg>
+          </span>
+          <span class="brand-word">loom</span>
+        </a>
+        <nav class="header-nav" aria-label="Primary">
+          <a href="index.html#features">Features</a>
+          <a href="index.html#how">How it works</a>
+          <a href="index.html#quickstart">Quickstart</a>
+          <a class="btn btn-primary btn-sm" href="https://github.com/DanielC000/loom">
+            <span class="btn-gh-mark" aria-hidden="true">
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            </span>
+            GitHub
+          </a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- ── Intro ────────────────────────────────────────────────────────── -->
+      <section class="section doc-intro loom-grid">
+        <div class="wrap">
+          <p class="doc-crumb reveal"><a href="index.html#top">loom</a> <span aria-hidden="true">/</span> Docs <span aria-hidden="true">/</span> Remote access</p>
+          <p class="section-label reveal">Remote access</p>
+          <h1 class="section-title doc-h1 reveal">Reach your fleet from another device — without opening it up.</h1>
+          <p class="prose reveal">
+            By default the Loom daemon binds <strong>loopback only</strong>
+            (<code>127.0.0.1:4317</code>): nothing outside your machine can reach
+            it. That's the right default, but sometimes you want to open the
+            cockpit from a laptop, a phone, or another box. There are two supported
+            ways to do that, and they trade off differently.
+          </p>
+          <div class="opt-grid reveal">
+            <div class="opt">
+              <span class="pill pill-phosphor">Recommended</span>
+              <h3 class="opt-h">Tailscale Serve / SSH</h3>
+              <p class="opt-b">
+                The daemon stays loopback-only. Tailscale (or an SSH tunnel)
+                authenticates and encrypts the transport, so Loom opens
+                <strong>no new listening surface</strong> of its own — nothing to
+                mint, nothing to expose.
+              </p>
+            </div>
+            <div class="opt">
+              <span class="pill pill-muted">Alternative</span>
+              <h3 class="opt-h">Direct authenticated bind</h3>
+              <p class="opt-b">
+                Loom itself binds a non-loopback interface, gated by a
+                <strong>gateway token</strong> and — off a tailnet —
+                <strong>mandatory TLS</strong>. Reach for this when you can't run
+                Tailscale or SSH on both ends.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Recommended: Tailscale Serve / SSH ───────────────────────────── -->
+      <section class="section" id="tailscale">
+        <div class="wrap doc-col">
+          <p class="section-label reveal">Recommended</p>
+          <h2 class="section-title reveal">Tailscale Serve, or an SSH tunnel.</h2>
+          <div class="doc-flow reveal">
+            <p class="prose">
+              This is the path we recommend for almost everyone. You leave
+              Loom's <code>remoteAccess</code> config untouched (still disabled,
+              still loopback), and put the authentication in front of it. Because
+              the proxy connects to the daemon over <code>127.0.0.1</code>, the
+              request arrives on the loopback interface Loom already trusts — you
+              add reach without adding an exposed port.
+            </p>
+
+            <h3 class="doc-sub">Tailscale Serve</h3>
+            <p class="prose">
+              If your machines are on a <a href="https://tailscale.com/">Tailscale</a>
+              tailnet, <code>tailscale serve</code> publishes an HTTPS endpoint on
+              your node — with a certificate Tailscale provisions for you — and
+              proxies it to the daemon on loopback. Only devices on your tailnet
+              can reach it.
+            </p>
+          </div>
+
+          <div class="term reveal">
+            <div class="term-bar">
+              <span class="instrument-dot"></span>
+              <span class="term-title">tailscale · serve</span>
+            </div>
+            <div class="term-body">
+              <p class="term-comment"># proxy an HTTPS tailnet endpoint to the loopback daemon</p>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="tailscale serve --bg 4317"><span class="term-prompt">$</span> tailscale serve --bg 4317</code>
+                <button class="copy" type="button" aria-label="Copy: tailscale serve --bg 4317">Copy</button>
+              </div>
+              <p class="term-comment term-comment-sp"># then open the cockpit from any device on your tailnet</p>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="https://your-machine.your-tailnet.ts.net/"><span class="term-prompt">›</span> https://your-machine.your-tailnet.ts.net/</code>
+                <button class="copy" type="button" aria-label="Copy the tailnet URL">Copy</button>
+              </div>
+              <p class="term-comment term-comment-sp"># stop serving when you're done</p>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="tailscale serve --bg 4317 off"><span class="term-prompt">$</span> tailscale serve --bg 4317 off</code>
+                <button class="copy" type="button" aria-label="Copy: tailscale serve --bg 4317 off">Copy</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="doc-flow reveal">
+            <h3 class="doc-sub">SSH tunnel</h3>
+            <p class="prose">
+              No tailnet? Any SSH connection to the daemon's host works just as
+              well. Forward a local port over SSH and browse it as if it were
+              local — SSH authenticates and encrypts the whole hop, and the daemon
+              still only ever sees a loopback connection.
+            </p>
+          </div>
+
+          <div class="term reveal">
+            <div class="term-bar">
+              <span class="instrument-dot"></span>
+              <span class="term-title">ssh · port-forward</span>
+            </div>
+            <div class="term-body">
+              <p class="term-comment"># from your laptop: forward local 4317 → the daemon host's loopback</p>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="ssh -N -L 4317:127.0.0.1:4317 you@daemon-host"><span class="term-prompt">$</span> ssh -N -L 4317:127.0.0.1:4317 you@daemon-host</code>
+                <button class="copy" type="button" aria-label="Copy the ssh port-forward command">Copy</button>
+              </div>
+              <p class="term-comment term-comment-sp"># then open the cockpit locally</p>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="http://127.0.0.1:4317/"><span class="term-prompt">›</span> http://127.0.0.1:4317/</code>
+                <button class="copy" type="button" aria-label="Copy: http://127.0.0.1:4317/">Copy</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="callout reveal">
+            <p class="callout-title"><span class="dot dot-phosphor"></span> Why this is the default recommendation</p>
+            <p>
+              With Serve or SSH, the daemon's listening surface never changes — it
+              stays bound to <code>127.0.0.1</code>. There's no gateway token to
+              mint, no TLS material to manage inside Loom, and no interface exposed
+              for anyone to probe. The transport's own identity layer (your
+              tailnet, or your SSH keys) does the authenticating.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Alternative: direct authenticated bind ───────────────────────── -->
+      <section class="section" id="direct-bind">
+        <div class="wrap doc-col">
+          <p class="section-label reveal">Alternative</p>
+          <h2 class="section-title reveal">Direct authenticated bind.</h2>
+          <div class="doc-flow reveal">
+            <p class="prose">
+              When Tailscale and SSH aren't options — say you want the daemon to
+              answer directly on a LAN interface, or on a host that's already
+              reachable — Loom can bind a non-loopback interface itself. This
+              opens a real listening socket, so Loom gates it hard: a
+              <strong>gateway token</strong> is required on every remote request,
+              and off a tailnet, <strong>valid TLS is mandatory</strong> or the
+              daemon refuses to open the interface at all.
+            </p>
+            <p class="prose">
+              It's a co-equal, fully supported path — just one that puts the
+              authentication and the certificate in your hands instead of the
+              transport's. Prefer it over Serve/SSH only when you specifically
+              need Loom to be the thing listening.
+            </p>
+          </div>
+
+          <ol class="doc-steps reveal">
+            <li>
+              <h3>Mint a gateway token</h3>
+              <p>
+                The gateway token is the daemon-global credential that authorizes a
+                remote request. Mint one over the loopback API. The
+                <code>plaintext</code> secret is returned <strong>once</strong> —
+                store it now; it's hashed at rest and never recoverable again.
+              </p>
+              <div class="term">
+                <div class="term-bar">
+                  <span class="instrument-dot"></span>
+                  <span class="term-title">POST /api/gateway-tokens</span>
+                </div>
+                <div class="term-body">
+                  <div class="term-line">
+                    <code class="term-cmd" data-copy="curl -X POST http://127.0.0.1:4317/api/gateway-tokens -H 'content-type: application/json' -d '{&quot;name&quot;:&quot;my-laptop&quot;}'"><span class="term-prompt">$</span> curl -X POST http://127.0.0.1:4317/api/gateway-tokens \
+    -H 'content-type: application/json' -d '{"name":"my-laptop"}'</code>
+                    <button class="copy" type="button" aria-label="Copy the mint-token curl command">Copy</button>
+                  </div>
+                  <p class="term-comment term-comment-sp"># → { "token": { "id": "…", "name": "my-laptop", … }, "plaintext": "&lt;the secret — shown once&gt;" }</p>
+                </div>
+              </div>
+            </li>
+
+            <li>
+              <h3>Point Loom at your TLS cert and key</h3>
+              <p>
+                Off a tailnet, a non-loopback bind must be HTTPS. Provide a
+                certificate and private key — from your own CA, an internal PKI, or
+                a tool like <a href="https://github.com/FiloSottile/mkcert">mkcert</a>
+                for a LAN. You'll pass their paths as
+                <code>remoteAccess.tls.certPath</code> and <code>keyPath</code> in
+                the next step.
+              </p>
+            </li>
+
+            <li>
+              <h3>Enable the remote bind</h3>
+              <p>
+                Set the daemon-global <code>remoteAccess</code> config over the
+                loopback API: turn it on, choose the interface to bind, and supply
+                the TLS paths. <code>remoteAccess</code> is daemon-global (not
+                per-project), so this is a one-time setting.
+              </p>
+              <div class="term">
+                <div class="term-bar">
+                  <span class="instrument-dot"></span>
+                  <span class="term-title">PATCH /api/platform/config</span>
+                </div>
+                <div class="term-body">
+                  <div class="term-line">
+                    <code class="term-cmd" data-copy="curl -X PATCH http://127.0.0.1:4317/api/platform/config -H 'content-type: application/json' -d '{&quot;config&quot;:{&quot;remoteAccess&quot;:{&quot;enabled&quot;:true,&quot;bindHost&quot;:&quot;0.0.0.0&quot;,&quot;tls&quot;:{&quot;certPath&quot;:&quot;/etc/loom/cert.pem&quot;,&quot;keyPath&quot;:&quot;/etc/loom/key.pem&quot;}}}}'"><span class="term-prompt">$</span> curl -X PATCH http://127.0.0.1:4317/api/platform/config \
+    -H 'content-type: application/json' \
+    -d '{"config":{"remoteAccess":{
+          "enabled": true,
+          "bindHost": "0.0.0.0",
+          "tls": { "certPath": "/etc/loom/cert.pem", "keyPath": "/etc/loom/key.pem" }
+        }}}'</code>
+                    <button class="copy" type="button" aria-label="Copy the configure-remoteAccess curl command">Copy</button>
+                  </div>
+                  <p class="term-comment term-comment-sp"># bindHost can be a specific address (e.g. 192.168.1.10) or 0.0.0.0 for all interfaces</p>
+                </div>
+              </div>
+            </li>
+
+            <li>
+              <h3>Restart the daemon</h3>
+              <p>
+                <code>remoteAccess</code> is read once at boot, so the change takes
+                effect on the next restart. On boot Loom runs a
+                <strong>fail-closed</strong> check: it only opens the remote
+                interface when it's enabled, the <code>bindHost</code> is
+                non-loopback, a gateway token exists, <em>and</em> the TLS mandate
+                is satisfied. If any of those is missing it logs why and stays on
+                loopback — it never opens a public interface as plain HTTP.
+              </p>
+              <div class="term">
+                <div class="term-bar">
+                  <span class="instrument-dot"></span>
+                  <span class="term-title">loom · restart</span>
+                </div>
+                <div class="term-body">
+                  <div class="term-line">
+                    <code class="term-cmd" data-copy="loom restart"><span class="term-prompt">$</span> loom restart</code>
+                    <button class="copy" type="button" aria-label="Copy: loom restart">Copy</button>
+                  </div>
+                </div>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ── Using the token ──────────────────────────────────────────────── -->
+      <section class="section" id="using-the-token">
+        <div class="wrap doc-col">
+          <p class="section-label reveal">Using the token</p>
+          <h2 class="section-title reveal">Present the token from your client.</h2>
+          <div class="doc-flow reveal">
+            <p class="prose">
+              Once the remote interface is live, every remote request carries the
+              gateway token. Standard REST calls send it as a bearer token; the
+              live terminal WebSockets — which can't set an
+              <code>Authorization</code> header on the upgrade — accept it as a
+              WebSocket subprotocol or a <code>?token=</code> query parameter.
+            </p>
+          </div>
+
+          <div class="term reveal">
+            <div class="term-bar">
+              <span class="instrument-dot"></span>
+              <span class="term-title">authenticated remote request</span>
+            </div>
+            <div class="term-body">
+              <p class="term-comment"># REST: Authorization: Bearer &lt;plaintext&gt;</p>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="curl https://your-host:4317/api/projects -H 'Authorization: Bearer <plaintext>'"><span class="term-prompt">$</span> curl https://your-host:4317/api/projects \
+    -H 'Authorization: Bearer &lt;plaintext&gt;'</code>
+                <button class="copy" type="button" aria-label="Copy the authenticated curl command">Copy</button>
+              </div>
+              <p class="term-comment term-comment-sp"># WebSocket terminals: token via the Sec-WebSocket-Protocol subprotocol, or ?token=&lt;plaintext&gt;</p>
+            </div>
+          </div>
+
+          <div class="callout reveal">
+            <p class="callout-title"><span class="dot dot-cyan"></span> What a remote token can reach</p>
+            <p>
+              A remote request is deliberately limited to a read-and-steer surface:
+              the read-only views, the answer/steer actions on an already-running
+              session (answer a question, send input, stop, resume, end), and the
+              two read-only terminal WebSockets. Everything else — vault and git
+              writers, the internal control endpoints, the MCP mounts, and even the
+              gateway-token admin itself — stays <strong>loopback-only by
+              construction</strong>. A valid remote token can never mint, rotate,
+              or revoke tokens over the wire; only the human at the local machine
+              can. Remote requests are also rate-limited per IP and per token, with
+              an automatic lockout after repeated auth failures; loopback traffic is
+              exempt.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── TLS off the tailnet ──────────────────────────────────────────── -->
+      <section class="section" id="tls">
+        <div class="wrap doc-col">
+          <p class="section-label reveal">TLS off the tailnet</p>
+          <h2 class="section-title reveal">TLS is mandatory for a non-tailnet bind.</h2>
+          <div class="doc-flow reveal">
+            <p class="prose">
+              A direct bind to any non-loopback, non-tailnet interface carries
+              traffic — including the gateway token — over an untrusted network, so
+              Loom requires it to be encrypted. If <code>remoteAccess.tls</code> is
+              missing, or the cert/key can't actually be read and loaded as valid
+              TLS material, the boot-time check fails closed: the daemon
+              <strong>refuses to open the remote interface and falls back to
+              loopback</strong>, logging exactly why. It will never bind a public
+              interface believing it's HTTPS when it's really plain HTTP.
+            </p>
+            <p class="prose">
+              A Tailscale <code>.ts.net</code> address is the one exception: the
+              tailnet already encrypts the link end to end, so a bind whose
+              <code>bindHost</code> is a <code>.ts.net</code> name skips the TLS
+              requirement. (Note this is the <em>direct-bind-to-a-tailnet-address</em>
+              case — distinct from the recommended Tailscale Serve path above, which
+              needs no bind at all.)
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Manage tokens ────────────────────────────────────────────────── -->
+      <section class="section" id="manage">
+        <div class="wrap doc-col">
+          <p class="section-label reveal">Managing tokens</p>
+          <h2 class="section-title reveal">Rotate, pause, revoke.</h2>
+          <div class="doc-flow reveal">
+            <p class="prose">
+              All token management is loopback-only and human-only. List shows
+              metadata only — never the secret.
+            </p>
+          </div>
+
+          <div class="term reveal">
+            <div class="term-bar">
+              <span class="instrument-dot"></span>
+              <span class="term-title">gateway-token admin (loopback only)</span>
+            </div>
+            <div class="term-body">
+              <p class="term-comment"># list tokens (metadata only — no secret)</p>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="curl http://127.0.0.1:4317/api/gateway-tokens"><span class="term-prompt">$</span> curl http://127.0.0.1:4317/api/gateway-tokens</code>
+                <button class="copy" type="button" aria-label="Copy: list gateway tokens">Copy</button>
+              </div>
+              <p class="term-comment term-comment-sp"># rotate a token's secret — old plaintext dies, new one returned once</p>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="curl -X POST http://127.0.0.1:4317/api/gateway-tokens/<id>/rotate"><span class="term-prompt">$</span> curl -X POST http://127.0.0.1:4317/api/gateway-tokens/&lt;id&gt;/rotate</code>
+                <button class="copy" type="button" aria-label="Copy: rotate a gateway token">Copy</button>
+              </div>
+              <p class="term-comment term-comment-sp"># pause or revoke (soft, reversible → active|paused|revoked)</p>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="curl -X POST http://127.0.0.1:4317/api/gateway-tokens/<id> -H 'content-type: application/json' -d '{&quot;status&quot;:&quot;revoked&quot;}'"><span class="term-prompt">$</span> curl -X POST http://127.0.0.1:4317/api/gateway-tokens/&lt;id&gt; \
+    -H 'content-type: application/json' -d '{"status":"revoked"}'</code>
+                <button class="copy" type="button" aria-label="Copy: revoke a gateway token">Copy</button>
+              </div>
+              <p class="term-comment term-comment-sp"># delete permanently</p>
+              <div class="term-line">
+                <code class="term-cmd" data-copy="curl -X DELETE http://127.0.0.1:4317/api/gateway-tokens/<id>"><span class="term-prompt">$</span> curl -X DELETE http://127.0.0.1:4317/api/gateway-tokens/&lt;id&gt;</code>
+                <button class="copy" type="button" aria-label="Copy: delete a gateway token">Copy</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── CTA strip ────────────────────────────────────────────────────── -->
+      <section class="section section-cta">
+        <div class="wrap cta-inner reveal">
+          <div>
+            <h2 class="section-title" id="cta-h">Back to the overview.</h2>
+            <p class="prose prose-tight">
+              Remote access is optional — Loom runs perfectly as a local-only
+              instrument. When you do open it up, keep it on the transport you
+              trust.
+            </p>
+          </div>
+          <a class="btn btn-primary btn-lg" href="index.html#top">
+            Back to home
+            <span class="btn-arrow" aria-hidden="true">→</span>
+          </a>
+        </div>
+      </section>
+    </main>
+
+    <!-- ── Footer ───────────────────────────────────────────────────────── -->
+    <footer class="site-footer">
+      <div class="wrap footer-inner">
+        <a class="brand" href="index.html#top" aria-label="Loom home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" width="18" height="18">
+              <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                <path d="M8 4 V13.2 M8 18.8 V20" />
+                <path d="M16 4 V5.2 M16 10.8 V20" />
+                <path d="M4 8 H5.2 M10.8 8 H20" />
+                <path d="M4 16 H13.2 M18.8 16 H20" />
+              </g>
+            </svg>
+          </span>
+          <span class="brand-word">loom</span>
+        </a>
+        <p class="footer-note">
+          Loom runs on your own machine, bound to loopback by default. Remote
+          access is opt-in and gated: Tailscale Serve / SSH, or a direct
+          authenticated bind with a gateway token and TLS.
+        </p>
+        <a class="footer-link" href="https://github.com/DanielC000/loom"
+          >github.com/DanielC000/loom</a
+        >
+      </div>
+    </footer>
+
+    <!-- Progressive enhancement only: reveal-on-scroll + copy buttons.
+         Self-contained inline JS, no network. The page is fully usable with JS
+         disabled (everything is visible; commands are plain selectable text). -->
+    <script>
+      (function () {
+        var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+        if (!reduce && "IntersectionObserver" in window) {
+          document.documentElement.classList.add("js-reveal");
+          var io = new IntersectionObserver(
+            function (entries) {
+              entries.forEach(function (e) {
+                if (e.isIntersecting) {
+                  e.target.classList.add("in");
+                  io.unobserve(e.target);
+                }
+              });
+            },
+            { rootMargin: "0px 0px -8% 0px", threshold: 0.08 }
+          );
+          document.querySelectorAll(".reveal").forEach(function (el) { io.observe(el); });
+        }
+
+        document.querySelectorAll(".term-line").forEach(function (line) {
+          var btn = line.querySelector(".copy");
+          var cmd = line.querySelector(".term-cmd");
+          if (!btn || !cmd) return;
+          btn.addEventListener("click", function () {
+            var text = cmd.getAttribute("data-copy") || cmd.textContent.replace(/^[$›]\s*/, "");
+            var done = function () {
+              btn.classList.add("is-copied");
+              btn.textContent = "Copied";
+              setTimeout(function () {
+                btn.classList.remove("is-copied");
+                btn.textContent = "Copy";
+              }, 1400);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(text).then(done, function () {});
+            } else {
+              var ta = document.createElement("textarea");
+              ta.value = text;
+              ta.setAttribute("readonly", "");
+              ta.style.position = "absolute";
+              ta.style.left = "-9999px";
+              document.body.appendChild(ta);
+              ta.select();
+              try { document.execCommand("copy"); done(); } catch (err) {}
+              document.body.removeChild(ta);
+            }
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>
