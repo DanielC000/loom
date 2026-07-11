@@ -32,7 +32,7 @@ function assertNotProdDbInTest(file: string): void {
 import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, PresetPrompt, PresetPromptSuggestion,
+  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, PresetPrompt, PresetPromptSuggestion,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
   CompanionCapabilityGrant,
   ApiKey, ApiKeyStatus, ApiKeyCaps, GatewayToken, GatewayTokenStatus, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
@@ -454,6 +454,39 @@ CREATE TABLE IF NOT EXISTS poll_jobs (
   last_error TEXT,
   created_at TEXT NOT NULL
 );
+-- Local event triggers (Loom Event Triggers subsystem, card f5d07121 — T1, the data-layer FOUNDATION;
+-- the always-on dispatcher + human-only REST are deferred follow-on cards). The internal-state
+-- counterpart to poll_jobs above: instead of fetching an EXTERNAL endpoint, a trigger reacts to an
+-- orchestration-lifecycle event ALREADY on the durable orchestration_events bus (see its seq column
+-- doc above) via a per-trigger watermark cursor (last_seq), mirroring AttentionPushWatcher's own
+-- per-subscriber watermark (companion/attention-push.ts — a bus POSITION) rather than poll_jobs'
+-- item-id snapshot (there's no "item" here). On a match the (deferred) dispatcher wakes
+-- target_session_id (mode 'wake') or spawns a fresh session in agent_id (mode 'spawn'). Brand-new table
+-- => CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER), exactly like poll_jobs/
+-- connections/api_keys/runs above. PURE DATA in this card — nothing reads last_seq/last_fired_at forward
+-- yet. Human-configured only (REST) — no MCP path (mirrors poll_jobs/connections/schedules).
+CREATE TABLE IF NOT EXISTS event_triggers (
+  id TEXT PRIMARY KEY,
+  -- One of EVENT_TRIGGER_EVENT_KINDS (@loom/shared) -- a real OrchestrationEventKind already emitted on
+  -- the bus today; validated at the REST create/update surface (deferred follow-on), not here.
+  event_kind TEXT NOT NULL,
+  -- Scope: NULL = every project; else only events whose owning session resolves to this project.
+  project_id TEXT REFERENCES projects(id),
+  -- 'wake' (nudge an existing target_session_id) or 'spawn' (fresh session in agent_id).
+  mode TEXT NOT NULL,
+  target_session_id TEXT REFERENCES sessions(id),
+  agent_id TEXT REFERENCES agents(id),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  -- Watermark cursor into orchestration_events.seq (Db.listEventsSince) -- every event with seq <= this
+  -- has already been considered by this trigger. 0 = never scanned.
+  last_seq INTEGER NOT NULL DEFAULT 0,
+  -- Dedupe/rate-guard: when this trigger last actually fired (a delivered wake/spawn), NULL if never.
+  -- The dispatcher enforces its own anti-hammer floor off this, mirroring poll_jobs'
+  -- consecutive_failures-driven backoff / MIN_POLL_INTERVAL_MS anti-hammer floor.
+  last_fired_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_event_triggers_enabled ON event_triggers(enabled);
 -- Daemon-GLOBAL platform tuning override (rate-limit numbers / watcher cadences / op timeouts), held
 -- as a single JSON blob in a SINGLETON row (id pinned to 1 by the CHECK). NOT per-project — the daemon
 -- shares one of these (like backup/schedulerEnabled). Persisted in SQLite so a backup captures it. The
@@ -4156,6 +4189,61 @@ export class Db {
     ).run(patch.nextPollAt, patch.error, id);
   }
 
+  // --- event triggers (Loom Event Triggers subsystem, card f5d07121 T1 — data layer only) ---
+  insertEventTrigger(t: EventTrigger): void {
+    this.db.prepare(
+      `INSERT INTO event_triggers
+        (id,event_kind,project_id,mode,target_session_id,agent_id,enabled,last_seq,last_fired_at,created_at)
+       VALUES
+        (@id,@eventKind,@projectId,@mode,@targetSessionId,@agentId,@enabled,@lastSeq,@lastFiredAt,@createdAt)`,
+    ).run({
+      ...t, enabled: t.enabled ? 1 : 0, projectId: t.projectId ?? null,
+      targetSessionId: t.targetSessionId ?? null, agentId: t.agentId ?? null,
+      lastFiredAt: t.lastFiredAt ?? null,
+    });
+  }
+  listEventTriggers(): EventTrigger[] {
+    return (this.db.prepare("SELECT * FROM event_triggers ORDER BY created_at, rowid").all() as Row[]).map(toEventTrigger);
+  }
+  getEventTrigger(id: string): EventTrigger | undefined {
+    const r = this.db.prepare("SELECT * FROM event_triggers WHERE id = ?").get(id) as Row | undefined;
+    return r ? toEventTrigger(r) : undefined;
+  }
+  /** Partial edit (REST): any provided field is written; omitted fields are left as-is. */
+  updateEventTrigger(id: string, patch: {
+    eventKind?: EventTriggerEventKind; projectId?: string | null; mode?: "wake" | "spawn";
+    targetSessionId?: string | null; agentId?: string | null; enabled?: boolean;
+  }): void {
+    const cols: Record<string, unknown> = {
+      event_kind: patch.eventKind, project_id: patch.projectId, mode: patch.mode,
+      target_session_id: patch.targetSessionId, agent_id: patch.agentId,
+      enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
+    };
+    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
+    if (names.length === 0) return;
+    const set = names.map((c) => `${c} = ?`).join(", ");
+    this.db.prepare(`UPDATE event_triggers SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+  }
+  deleteEventTrigger(id: string): void {
+    this.db.prepare("DELETE FROM event_triggers WHERE id = ?").run(id);
+  }
+  /** Every ENABLED trigger — the (deferred) dispatcher's per-tick candidate set. There's no time-based
+   *  "due" here (a trigger reacts to bus events, not a clock); the name mirrors listDuePollJobs for the
+   *  analogous reader. */
+  listDueEventTriggers(): EventTrigger[] {
+    return (this.db.prepare("SELECT * FROM event_triggers WHERE enabled = 1 ORDER BY created_at, rowid").all() as Row[]).map(toEventTrigger);
+  }
+  /** Advance a trigger's bus watermark. Pass `firedAt` only when this advance corresponds to an ACTUAL
+   *  wake/spawn delivery — it stamps the dedupe/rate-guard column; a pure "scanned past, nothing
+   *  matched" advance leaves last_fired_at untouched (mirrors markPolled vs a bare watermark move). */
+  advanceEventTriggerSeq(id: string, lastSeq: number, firedAt?: string): void {
+    if (firedAt !== undefined) {
+      this.db.prepare("UPDATE event_triggers SET last_seq = ?, last_fired_at = ? WHERE id = ?").run(lastSeq, firedAt, id);
+    } else {
+      this.db.prepare("UPDATE event_triggers SET last_seq = ? WHERE id = ?").run(lastSeq, id);
+    }
+  }
+
   // --- questions (manager→human Requests object, card 8701bdbb generalized by card 695ebab0) ---
   insertQuestion(q: Question): void {
     this.db.prepare(
@@ -4962,6 +5050,16 @@ function toPollJob(r0: unknown): PollJob {
     agentId: (r.agent_id as string) ?? null, enabled: (r.enabled as number) === 1,
     consecutiveFailures: r.consecutive_failures as number, lastError: (r.last_error as string) ?? null,
     createdAt: r.created_at as string,
+  };
+}
+function toEventTrigger(r0: unknown): EventTrigger {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, eventKind: r.event_kind as EventTrigger["eventKind"],
+    projectId: (r.project_id as string) ?? null, mode: r.mode as EventTrigger["mode"],
+    targetSessionId: (r.target_session_id as string) ?? null, agentId: (r.agent_id as string) ?? null,
+    enabled: (r.enabled as number) === 1, lastSeq: r.last_seq as number,
+    lastFiredAt: (r.last_fired_at as string) ?? null, createdAt: r.created_at as string,
   };
 }
 // NOTE: intentionally does NOT map `secret_blob` — the envelope-encrypted credential ciphertext must

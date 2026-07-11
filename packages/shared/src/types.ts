@@ -1422,6 +1422,58 @@ export interface PollJob {
   createdAt: string;
 }
 
+/**
+ * Event Triggers (Loom Event Triggers subsystem, card f5d07121 — T1, the data-layer FOUNDATION; the
+ * always-on dispatcher and the human-only REST are deferred follow-on cards). The internal-state
+ * counterpart to `PollJob` above: `PollJob` reacts to an EXTERNAL endpoint via a fetch cadence, an
+ * `EventTrigger` reacts to an INTERNAL orchestration-lifecycle event already on the durable
+ * `orchestration_events` bus.
+ *
+ * The eligible-kind allowlist below (`EVENT_TRIGGER_EVENT_KINDS`) is the union of attention-push.ts's
+ * `classify()` signal sources (companion/attention-push.ts — the closest existing "which lifecycle
+ * events matter" vocabulary) plus the scheduler/poll/wake success-fired events, which attention-push
+ * doesn't subscribe to but are equally real bus signals. It is the single source of truth the dispatcher
+ * and the REST validator (both deferred) will reuse — deliberately excludes card/task-lifecycle kinds
+ * (task mutations emit no events today) and companion-internal mechanics (heartbeat/reminder/alert-push
+ * — those are the companion's own watchers' output, not general orchestration lifecycle).
+ */
+export const EVENT_TRIGGER_EVENT_KINDS = [
+  "merge_rejected", "merge_request",
+  "worker_stuck", "worker_report", "worker_exited_without_report", "session_recovery_abandoned",
+  "question_asked",
+  "idle_escalated", "idle_report",
+  "context_escalated",
+  "platform_escalate",
+  "session_rate_limited",
+  "schedule_fired", "poll_fired", "wake_fired",
+] as const satisfies readonly OrchestrationEventKind[];
+export type EventTriggerEventKind = (typeof EVENT_TRIGGER_EVENT_KINDS)[number];
+
+/**
+ * A local event trigger: when an event whose `kind` is `eventKind` appears on the `orchestration_events`
+ * bus (optionally scoped to `projectId` — null means every project), wake `targetSessionId` (mode
+ * "wake") or spawn a fresh session in `agentId` (mode "spawn"). `lastSeq` is the watermark cursor into
+ * `Db.listEventsSince` — mirrors `AttentionPushWatcher`'s own per-subscriber watermark (a bus POSITION),
+ * not `PollJob.cursorJson`'s item-id snapshot (there's no "item" here). `lastFiredAt` is the dedupe/
+ * rate-guard column: null until this trigger has actually fired once; the (deferred) dispatcher stamps
+ * it on every real wake/spawn delivery and can enforce its own anti-hammer floor off it, mirroring
+ * `PollJob`'s `consecutiveFailures`-driven backoff / `MIN_POLL_INTERVAL_MS` anti-hammer floor. Pure data
+ * in this card — nothing reads `lastSeq`/`lastFiredAt` forward yet; that's the dispatcher card.
+ * Human-configured only (REST, mirrors `poll_jobs`/`schedules`) — never an agent MCP tool.
+ */
+export interface EventTrigger {
+  id: string;
+  eventKind: EventTriggerEventKind;
+  projectId: string | null;
+  mode: "wake" | "spawn";
+  targetSessionId: string | null;
+  agentId: string | null;
+  enabled: boolean;
+  lastSeq: number;
+  lastFiredAt: string | null;
+  createdAt: string;
+}
+
 export const QUESTION_STATES = ["pending", "answered", "consumed"] as const;
 export type QuestionState = (typeof QUESTION_STATES)[number];
 
