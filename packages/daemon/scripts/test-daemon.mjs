@@ -12,10 +12,18 @@
 // _guard.mjs, _trust-writer.mjs — not standalone tests) and the small NOT_HERMETIC denylist below,
 // for tests that need a human-started isolated daemon and/or a real `claude` login. Run those
 // manually per the header comment in each file.
+//
+// Runs in a BOUNDED, port-safe worker pool (each test file is already hermetically isolated — own
+// temp LOOM_HOME, own port — so this is embarrassingly-parallel). Pool size defaults to
+// os.availableParallelism() capped at MAX_CONCURRENCY (concurrent temp-SQLite DBs thrash IO past a
+// point); override with LOOM_TEST_CONCURRENCY=<n> for tuning/debugging (e.g. =1 to force serial).
+// Each of the fixed pool "lanes" owns one port for its whole run (4400+laneIndex), so concurrent
+// workers never collide — unlike a file-index-derived port, which only avoided collisions when tests
+// ran strictly one-at-a-time.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -36,32 +44,88 @@ const HERMETIC = fs.readdirSync(TEST_DIR)
   .filter((name) => !NOT_HERMETIC.has(name))
   .sort();
 
-let pass = 0;
-const failed = [];
+const MAX_CONCURRENCY = 8;
+const POOL_SIZE = Math.max(
+  1,
+  Math.min(
+    Number(process.env.LOOM_TEST_CONCURRENCY) || os.availableParallelism(),
+    MAX_CONCURRENCY,
+  ),
+);
+
+const TEST_TIMEOUT_MS = 120_000;
 const tmpRoots = [];
 
-HERMETIC.forEach((name, i) => {
-  const file = path.join(TEST_DIR, `${name}.mjs`);
-  if (!fs.existsSync(file)) { console.log(`SKIP  ${name} (missing)`); return; }
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), `loom-td-${name}-`));
-  tmpRoots.push(home);
-  const port = 4400 + (i % 800); // non-4317, low-collision; tests run sequentially so reuse is fine
-  const r = spawnSync(process.execPath, [file], {
-    env: { ...process.env, LOOM_HOME: home, LOOM_PORT: String(port), LOOM_TEST: "1" },
-    encoding: "utf8",
-    timeout: 120_000,
+// Runs one test file on a fixed pool "lane" (its port for the whole run, so concurrent lanes never
+// collide). Resolves to a result record; never rejects — a spawn error is captured as a failure.
+function runOne(name, lane) {
+  return new Promise((resolve) => {
+    const file = path.join(TEST_DIR, `${name}.mjs`);
+    if (!fs.existsSync(file)) { resolve({ name, ok: true, skipped: true }); return; }
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), `loom-td-${name}-`));
+    tmpRoots.push(home);
+    const port = 4400 + lane; // fixed per-lane port — safe under concurrency (POOL_SIZE lanes, POOL_SIZE ports)
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const child = spawn(process.execPath, [file], {
+      env: { ...process.env, LOOM_HOME: home, LOOM_PORT: String(port), LOOM_TEST: "1" },
+    });
+    child.stdout.on("data", (d) => { stdout += d; });
+    child.stderr.on("data", (d) => { stderr += d; });
+
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, TEST_TIMEOUT_MS);
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ name, ok: false, status: null, stdout, stderr: `${stderr}\n${err.message}` });
+    });
+    child.on("close", (status) => {
+      clearTimeout(timer);
+      const ok = !timedOut && status === 0;
+      resolve({
+        name,
+        ok,
+        status: timedOut ? "timeout" : status,
+        tail: ok ? undefined : (stdout.split("\n").filter(Boolean).slice(-1)[0] || stderr.split("\n").filter(Boolean).slice(-1)[0]),
+      });
+    });
   });
-  const ok = r.status === 0;
-  if (ok) pass++; else failed.push({ name, status: r.status, tail: (r.stdout || "").split("\n").filter(Boolean).slice(-1)[0] || (r.stderr || "").split("\n").filter(Boolean).slice(-1)[0] });
-  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : `  (exit ${r.status})`}`);
-});
+}
+
+// A fixed number of lanes each pull the next unclaimed test off a shared cursor — bounded concurrency,
+// stable per-lane port, and every file still runs to completion regardless of earlier failures.
+function makeCursor(length) {
+  let next = 0;
+  return () => (next < length ? next++ : null);
+}
+
+async function runLane(lane, names, nextIndex, results) {
+  for (let idx = nextIndex(); idx !== null; idx = nextIndex()) {
+    const name = names[idx];
+    const result = await runOne(name, lane);
+    results[idx] = result;
+    console.log(`${result.ok ? "PASS" : "FAIL"}  ${result.name}${result.ok ? "" : `  (exit ${result.status})`}`);
+  }
+}
+
+const results = new Array(HERMETIC.length);
+const nextIndex = makeCursor(HERMETIC.length);
+await Promise.all(
+  Array.from({ length: Math.min(POOL_SIZE, HERMETIC.length) }, (_, lane) => runLane(lane, HERMETIC, nextIndex, results)),
+);
 
 // Best-effort cleanup of the per-test temp homes (WAL handles may briefly hold a few on Windows).
 for (const root of tmpRoots) {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry */ } }
 }
 
-console.log(`\n${pass}/${HERMETIC.length} hermetic daemon tests passed.`);
+const pass = results.filter((r) => r.ok).length;
+const failed = results.filter((r) => !r.ok);
+
+console.log(`\n${pass}/${HERMETIC.length} hermetic daemon tests passed. (pool size ${POOL_SIZE})`);
 if (failed.length) {
   console.log("FAILURES:");
   for (const f of failed) console.log(`  - ${f.name} (exit ${f.status}): ${f.tail ?? ""}`);
