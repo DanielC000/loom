@@ -292,21 +292,30 @@ const SESSION_STATUS: CompanionCapability = {
       "sessions_status",
       {
         description:
-          "Read-only view of live sessions in your granted project(s): which are live, their busy/process " +
+          "Read-only view of sessions in your granted project(s): which are live, their busy/process " +
           "state, and their current task (if any). Optionally pass `project` (a project id) to narrow to " +
           "ONE of your granted projects — passing a project you were NOT granted is rejected with an " +
-          "{error}; omitting it returns every granted project's live sessions.",
-        inputSchema: { project: z.string().optional() },
+          "{error}; omitting it returns every granted project's sessions. `state` (default \"live\") " +
+          "filters by PROCESS lifecycle: \"live\" = only currently-live sessions (the default — matches " +
+          "today's behavior exactly); \"exited\" = only stopped/exited sessions (so you can find one to " +
+          "resume); \"all\" = both.",
+        inputSchema: { project: z.string().optional(), state: z.enum(["live", "exited", "all"]).optional() },
       },
-      async ({ project }) => {
+      async ({ project, state }) => {
         // Belt-and-suspenders re-check (Framework §2): a `project` selector must be one of THIS grant's
         // scoped projects — it can only ever NAME a project already granted, never widen scope.
         if (project !== undefined && !ctx.scope.projectIds.has(project)) {
           return ok({ error: `project "${project}" is not in your granted scope` });
         }
         const targetProjects = project !== undefined ? new Set([project]) : ctx.scope.projectIds;
+        // `state` mirrors the Lead's own list_all_sessions state filter (mcp/platform.ts) in SHAPE
+        // (live/exited/all) and in its exited/all semantics. Its "live" bucket deliberately stays the
+        // NARROW, pre-existing predicate (processState === "live" exactly, not "non-exited") so the
+        // default (state omitted) is byte-identical to this tool's behavior before this card.
+        const wantState = state ?? "live";
         const sessions = db.listAllSessions()
-          .filter((s) => s.processState === "live" && !!s.projectId && targetProjects.has(s.projectId))
+          .filter((s) => !!s.projectId && targetProjects.has(s.projectId))
+          .filter((s) => wantState === "all" ? true : s.processState === wantState)
           .map((s) => ({
             sessionId: s.id, projectId: s.projectId, projectName: s.projectName,
             role: s.role ?? null, busy: s.busy, processState: s.processState,
