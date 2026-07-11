@@ -1111,6 +1111,31 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    server.registerTool(
+      "deploy",
+      {
+        description:
+          "Deploy/push YOUR OWN project — least-privilege, no promotion to a cross-project Lead needed. " +
+          "Runs the project's HUMAN-configured `orchestration.deployCommand` (a build script, `git push`, " +
+          "or a deploy webhook curl — whatever the owner set up) in the project's own repo, bounded by a " +
+          "per-project timeout. There is NO projectId/host/branch/repo param — the project is always YOUR " +
+          "OWN, derived server-side from this session; you can never deploy anything else. Refuses with " +
+          "{deployed:false,reason} if the project has no deployCommand configured (ask the owner to set " +
+          "one — it's a human-only, opt-in-once setting) or if you've hit the per-manager deploy rate " +
+          "limit. `reason` is a short note for the audit trail only — it is never part of the command run. " +
+          "On success returns {deployed:true}; on a failed run returns {deployed:false,reason,exitCode," +
+          "outputTail} with a bounded stdout+stderr tail to diagnose from.",
+        inputSchema: { reason: z.string() },
+      },
+      async ({ reason }) => {
+        try {
+          return ok(await sessions.deployOwnProject(managerSessionId, reason));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     // GAP 2: a deploy/served-state read so post-daemon_restart verification doesn't need curl. Minimal by
     // design — just what's trivially available server-side: the umbrella package version, the served web
     // bundle's asset filename (Vite hashes it, e.g. "index-Ab12Cd34.js", so a changed hash after a restart

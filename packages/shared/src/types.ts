@@ -819,7 +819,16 @@ export type OrchestrationEventKind =
   // tick (the tail-poll watermark does NOT advance — the next non-deferred tick re-scans from the same
   // point). `detail.reason` is "rate-limited" or "pending". Emitted at most once per defer streak (bounded
   // log growth, mirroring the sibling watchers).
-  | "companion_alert_deferred";
+  | "companion_alert_deferred"
+  // Scoped per-project DEPLOY (orchestration `deploy`, design [[Scoped Per-Project Deploy — Design]]
+  // 13235b62): a manager ran its OWN project's HUMAN-configured `orchestration.deployCommand` (the
+  // owner's opt-in-once trust decision — no per-deploy confirm). Filed under the CALLING MANAGER
+  // (managerSessionId = its own id); `detail` carries { reason, ok, exitCode, signal, timedOut,
+  // outputTail } — the manager-supplied reason plus the run outcome (a bounded stdout+stderr tail, same
+  // shape as the build/DoD gate's own diagnostic capture). The audit trail for this trust-boundary
+  // surface; never fired for a refused (unconfigured / rate-limited) attempt, which returns an error
+  // with no host exec and thus nothing to audit.
+  | "deploy";
 
 export interface OrchestrationEvent {
   id: string;

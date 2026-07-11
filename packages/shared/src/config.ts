@@ -186,6 +186,23 @@ export interface OrchestrationConfig {
    */
   gateCommandTimeoutMs: number;
   /**
+   * Scoped per-project DEPLOY command (design [[Scoped Per-Project Deploy — Design]], 13235b62): a
+   * manager's OWN-project outward-exec primitive — mirrors `gateCommand` exactly. Run in the project's
+   * `repoPath` cwd via the `deploy` manager tool; can be `git push` (triggers external CI), a deploy
+   * script, or a webhook curl — the command itself IS the deploy. Empty string (default) = no deploy
+   * configured, so the tool refuses ("ships inert"). HUMAN-only to set (host-RCE-capable exactly like
+   * `gateCommand` — see the agent-facing validator note on `agentOrchestrationOverride` in
+   * mcp/platform.ts); its presence on a project's config IS the owner's opt-in-once trust decision — no
+   * separate per-deploy confirm.
+   */
+  deployCommand: string;
+  /**
+   * Per-project, HUMAN-only timeout (ms) for a `deployCommand` run — pairs with `deployCommand`, same
+   * bounds/semantics as `gateCommandTimeoutMs`. Default 120000. No env layer (per-project + global
+   * only). Omitted from the agent-facing validator (human-only, like its paired `deployCommand`).
+   */
+  deployCommandTimeoutMs: number;
+  /**
    * Safety rail (§17a): hard cap on concurrently-LIVE workers per manager, gating worker_spawn.
    * At the cap the manager's next spawn is refused; in-flight workers keep running. Default 3.
    */
@@ -600,7 +617,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3 },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -948,6 +965,10 @@ export function resolveConfig(
       gateCommand: override.orchestration?.gateCommand ?? d.orchestration.gateCommand,
       // Per-project timeout pairing gateCommand (no env layer). `??` so an explicit value survives.
       gateCommandTimeoutMs: override.orchestration?.gateCommandTimeoutMs ?? d.orchestration.gateCommandTimeoutMs,
+      // Scoped per-project deploy (mirrors gateCommand's resolution exactly).
+      deployCommand: override.orchestration?.deployCommand ?? d.orchestration.deployCommand,
+      // Per-project timeout pairing deployCommand (no env layer). `??` so an explicit value survives.
+      deployCommandTimeoutMs: override.orchestration?.deployCommandTimeoutMs ?? d.orchestration.deployCommandTimeoutMs,
       // Optional + absent by default (d has none): the override value or undefined (no external delivery).
       alertWebhook: override.orchestration?.alertWebhook ?? d.orchestration.alertWebhook,
       // Per-project timeout pairing alertWebhook (no env layer). `??` so an explicit value survives.

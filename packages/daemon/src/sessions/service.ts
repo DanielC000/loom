@@ -38,6 +38,7 @@ import { RESUME_NUDGE_TAIL } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_RETRY_ENABLED, GATE_RETRY_SETTLE_MS, type GateSequentialResult } from "../orchestration/gate-runner.js";
+import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
@@ -1475,6 +1476,76 @@ export class SessionService {
     return supervisorChanged
       ? { restarting: true, supervisorChanged: true, supervisorWarning: SUPERVISOR_CHANGED_WARNING }
       : { restarting: true };
+  }
+
+  /**
+   * Scoped per-project DEPLOY (the `deploy` orchestration tool; design [[Scoped Per-Project Deploy —
+   * Design]], 13235b62): a manager can deploy/push its OWN project without being promoted to a
+   * cross-project Lead. Mirrors `gateCommand`'s trust posture exactly:
+   *
+   *   - OWN-PROJECT ONLY, STRUCTURALLY: the caller passes no projectId/host/branch/repo — the project is
+   *     derived server-side from the caller's OWN session (`db.getSession(managerSessionId).projectId`),
+   *     so a manager can never deploy another project or an arbitrary host.
+   *   - HUMAN-ONLY TO ENABLE: `deployCommand` is settable only via the human REST config path (the
+   *     agent-facing validator REJECTS it — see `agentOrchestrationOverride` in mcp/platform.ts). Its
+   *     presence on the resolved project config IS the owner's opt-in-once trust decision; there is no
+   *     further per-deploy confirm gate here.
+   *   - SHIPS INERT: no `deployCommand` configured → refuses, no host exec.
+   *   - FIXED COMMAND, NO AGENT-SUPPLIED ARGS: `reason` is free text for the audit trail only; it is
+   *     NEVER interpolated into the shell command that runs.
+   *   - BOUNDED + NON-INTERACTIVE: runs via the SAME `runGateSequential` executor the merge gate uses
+   *     (spawn, shell:true, capped at `deployCommandTimeoutMs`), in the project's own `repoPath` — never
+   *     a worker worktree.
+   *   - RATE-LIMITED: a per-manager-session sliding-window cap (`checkDeployRateLimit`) so a looping/
+   *     compromised agent can't hammer the deploy command.
+   *
+   * ⚠️ TRUST BOUNDARY — HOST RCE BY DESIGN, same as confirmWorkerMerge's `gateCommand` run above:
+   * `deployCommand` is an arbitrary HOST shell command run with `shell:true`. That is intentional (a real
+   * deploy needs it — `git push`, a deploy script, a webhook curl) and is why it is HUMAN-set only.
+   *
+   * Every attempt that actually reaches host exec (i.e. wasn't refused for being unconfigured/rate-
+   * limited) emits a durable `deploy` audit event under the calling manager, carrying the outcome.
+   */
+  async deployOwnProject(
+    managerSessionId: string, reason: string,
+  ): Promise<{ deployed: boolean; reason?: string; exitCode?: number | null; outputTail?: string }> {
+    this.requireManager(managerSessionId, "deploy");
+    const session = this.db.getSession(managerSessionId);
+    const project = session ? this.db.getProject(session.projectId) : undefined;
+    if (!project) throw new Error("project not found for this session");
+
+    // RESOLVE-LIVE: read the deploy command AND its per-project timeout fresh here, so a human PATCH to
+    // either takes effect with no daemon restart (mirrors confirmWorkerMerge's gate resolution).
+    const orchestration = resolveConfig(project.config).orchestration;
+    const deployCommand = orchestration.deployCommand;
+    if (!deployCommand) {
+      return { deployed: false, reason: "no deployCommand configured for this project — ask the owner to set orchestration.deployCommand" };
+    }
+
+    if (!checkDeployRateLimit(managerSessionId, Date.now())) {
+      return {
+        deployed: false,
+        reason: `deploy rate limit exceeded (max ${DEPLOY_RATE_LIMIT_MAX} per ${Math.round(DEPLOY_RATE_LIMIT_WINDOW_MS / 60_000)}min) — wait for the window to clear`,
+      };
+    }
+
+    const runGateSeq = this.runGate ?? runGateSequential;
+    const result = await runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "deploy",
+      detail: {
+        reason, ok: result.passed,
+        ...(result.passed ? {} : {
+          exitCode: result.failedStatus ?? null,
+          signal: result.failedSignal ?? null,
+          timedOut: result.failedTimedOut ?? false,
+        }),
+        ...(result.outputTail ? { outputTail: result.outputTail } : {}),
+      },
+    });
+    return result.passed
+      ? { deployed: true }
+      : { deployed: false, reason: "deploy command failed", exitCode: result.failedStatus ?? null, outputTail: result.outputTail };
   }
 
   /**

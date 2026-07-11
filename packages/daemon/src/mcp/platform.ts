@@ -92,6 +92,14 @@ const orchestrationOverride = z.object({
   // Per-project, HUMAN-only timeout (ms) capping a gateCommand run. Pairs with gateCommand and is
   // omitted from the agent path with it (see agentOrchestrationOverride). Bounded 1000–1800000.
   gateCommandTimeoutMs: z.number().int().min(1000).max(1800000).optional(),
+  // Scoped per-project DEPLOY command (design [[Scoped Per-Project Deploy — Design]] 13235b62) — a
+  // manager's own-project outward-exec primitive, mirroring gateCommand exactly (host-RCE by design;
+  // see the trust-boundary note on `confirmWorkerMerge`'s gate run and `deployOwnProject`). HUMAN-only:
+  // omitted from the agent path with gateCommand/alertWebhook (see agentOrchestrationOverride below).
+  deployCommand: z.string().optional(),
+  // Per-project, HUMAN-only timeout (ms) capping a deployCommand run. Pairs with deployCommand; same
+  // bounds as gateCommandTimeoutMs.
+  deployCommandTimeoutMs: z.number().int().min(1000).max(1800000).optional(),
   // HUMAN-only (data-exfiltration vector — see agentOrchestrationOverride). Accepted on this human
   // path; dropped from the agent path so an agent can't redirect orchestration data off-box.
   alertWebhook: alertWebhookSchema.optional(),
@@ -166,21 +174,28 @@ const projectConfigOverrideSchema = z.object({
 }).strict();
 
 /**
- * Agent-facing variant of the config schema. Two `orchestration` keys are TRUSTED/human-set ONLY and
+ * Agent-facing variant of the config schema. Three `orchestration` keys are TRUSTED/human-set ONLY and
  * MUST NOT be writable through the agent-facing loom-platform MCP path:
  *   - `gateCommand` — a STRING the daemon later runs via `spawnSync(..., { shell: true })` on the host
  *     (see `confirmWorkerMerge` in sessions/service.ts), i.e. host-RCE-capable by design.
+ *   - `deployCommand` — the scoped per-project deploy's own outward-exec STRING, run in the project's
+ *     repoPath by `deployOwnProject` (sessions/service.ts). Same host-RCE shape as `gateCommand`, so it
+ *     gets the identical human-only treatment: setting it IS the owner's opt-in-once trust decision.
  *   - `alertWebhook` — an outbound URL the daemon POSTs orchestration data to, i.e. a DATA-EXFILTRATION
  *     vector: an agent that could set it would redirect the event stream to an attacker endpoint.
- * Their paired per-project timeouts (`gateCommandTimeoutMs`/`alertWebhookTimeoutMs`) are HUMAN-only too
- * (lead decision) and dropped alongside them. We omit ALL FOUR from the orchestration shape; `.strict()`
- * then makes any of them a REJECTED unknown key, so an agent attempting to set one gets an error and the
- * stored config is left unchanged. DRY: this reuses the same base shapes — only `orchestration` is
- * narrowed. The REST PATCH path keeps the full `projectConfigOverrideSchema` (the human/trusted path),
- * so all four stay human-settable there.
+ * Their paired per-project timeouts (`gateCommandTimeoutMs`/`deployCommandTimeoutMs`/
+ * `alertWebhookTimeoutMs`) are HUMAN-only too (lead decision) and dropped alongside them. We omit ALL
+ * SIX from the orchestration shape; `.strict()` then makes any of them a REJECTED unknown key, so an
+ * agent attempting to set one gets an error and the stored config is left unchanged. DRY: this reuses
+ * the same base shapes — only `orchestration` is narrowed. The REST PATCH path keeps the full
+ * `projectConfigOverrideSchema` (the human/trusted path), so all six stay human-settable there.
  */
 const agentOrchestrationOverride = orchestrationOverride
-  .omit({ gateCommand: true, gateCommandTimeoutMs: true, alertWebhook: true, alertWebhookTimeoutMs: true })
+  .omit({
+    gateCommand: true, gateCommandTimeoutMs: true,
+    deployCommand: true, deployCommandTimeoutMs: true,
+    alertWebhook: true, alertWebhookTimeoutMs: true,
+  })
   .strict();
 // Agent-facing obsidian shape: `autoStart` only. `path` is omitted (host-launch capable, human-only), so
 // `.strict()` REJECTS an agent's `obsidian.path` — the agent can flip the convenience on but can't point
