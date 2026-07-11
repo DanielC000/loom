@@ -628,11 +628,110 @@ try {
     await client.close();
     db.close();
   }
+
+  // ============ card e7591ed2: a relocated card's connected decision-inbox Requests are re-homed to the
+  // destination project, ATOMICALLY with the card move — listQuestionsForTask filters on BOTH project_id
+  // AND task_id, so a stale project_id would otherwise silently detach a connected question from the
+  // card's new home. Also covers a LEGACY 8-char id-prefix linked question (pre-a3f1319f rows). ============
+  {
+    const db = tmpDb();
+    const projSrc = "proj-requests-src";
+    const projDest = "proj-requests-dest";
+    seedProject(db, projSrc, "Requests source");
+    seedProject(db, projDest, "Requests dest");
+    const companionSess = "companion-requests";
+    seedSession(db, companionSess, projSrc, "assistant");
+    const taskId = randomUUID();
+    seedTask(db, taskId, projSrc, { title: "Card with connected requests" });
+
+    // A full-id-linked question and a LEGACY 8-char-prefix-linked question, both connected to this card.
+    const qFull = "q-requests-full";
+    db.insertQuestion({
+      id: qFull, sessionId: companionSess, projectId: projSrc, title: "Which approach?", body: "pick one",
+      options: ["A", "B"], recommendation: "A", taskId, state: "answered", chosenOption: "A", note: null,
+      createdAt: now, answeredAt: now, consumedAt: null,
+    });
+    const qLegacy = "q-requests-legacy";
+    db.insertQuestion({
+      id: qLegacy, sessionId: companionSess, projectId: projSrc, title: "OK to proceed?", body: "one-way door",
+      options: null, recommendation: null, taskId: taskId.slice(0, 8), state: "pending", chosenOption: null, note: null,
+      createdAt: now, answeredAt: null, consumedAt: null,
+    });
+    // A question connected to a DIFFERENT task on the same project — must NOT be touched by this relocate.
+    const otherTaskId = randomUUID();
+    seedTask(db, otherTaskId, projSrc, { title: "Unrelated card" });
+    const qOther = "q-requests-other";
+    db.insertQuestion({
+      id: qOther, sessionId: companionSess, projectId: projSrc, title: "Unrelated ask", body: "n/a",
+      options: null, recommendation: null, taskId: otherTaskId, state: "pending", chosenOption: null, note: null,
+      createdAt: now, answeredAt: null, consumedAt: null,
+    });
+
+    check("requests setup: both connected questions visible under the SOURCE project before relocate",
+      db.listQuestionsForTask(projSrc, taskId).map((q) => q.id).sort().join(",") === [qFull, qLegacy].sort().join(","));
+
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: projSrc, mode: "act" });
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: projDest, mode: "act" });
+    const pty = makeFakePty("the owner said: move that card to the other project");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const proposed = await call(client, "board_relocate", { taskId, toProject: projDest });
+    check("requests: propose succeeds", proposed.status === "proposed");
+    const token = extractToken(companion.delivered[0].text);
+    pty.setOwnerText(`CONFIRM ${token}`);
+    const relocated = await call(client, "board_relocate", { taskId, toProject: projDest });
+    check("requests: confirm relocates the card", relocated.status === "relocated" && relocated.task.projectId === projDest);
+
+    const dest = db.listQuestionsForTask(projDest, taskId).map((q) => q.id).sort();
+    check("requests: BOTH connected questions (full-id + legacy prefix) now resolve under the DESTINATION project",
+      dest.join(",") === [qFull, qLegacy].sort().join(","));
+    check("requests: neither connected question resolves under the SOURCE project any more",
+      db.listQuestionsForTask(projSrc, taskId).length === 0);
+    check("requests: each connected question's own project_id row was actually updated to the destination",
+      db.getQuestion(qFull).projectId === projDest && db.getQuestion(qLegacy).projectId === projDest);
+    check("requests: the UNRELATED question on a different task kept its original project_id (not swept up)",
+      db.getQuestion(qOther).projectId === projSrc);
+    check("requests: the unrelated task's own connected-requests lookup is unaffected",
+      db.listQuestionsForTask(projSrc, otherTaskId).map((q) => q.id).join(",") === qOther);
+
+    await client.close();
+    db.close();
+  }
+
+  // ============ atomicity: a single db.relocateTask call moves the task AND its connected questions'
+  // project_id together — never observably split (this is the db-layer contract board_relocate relies on,
+  // exercised directly here without the companion propose/confirm ceremony) ============
+  {
+    const db = tmpDb();
+    const projSrc = "proj-atomic-src";
+    const projDest = "proj-atomic-dest";
+    seedProject(db, projSrc, "Atomic source");
+    seedProject(db, projDest, "Atomic dest");
+    const sessId = "s-atomic";
+    seedSession(db, sessId, projSrc, "manager");
+    const taskId = randomUUID();
+    seedTask(db, taskId, projSrc, { title: "Atomic card", columnKey: "backlog", position: 7 });
+    const qId = "q-atomic";
+    db.insertQuestion({
+      id: qId, sessionId: sessId, projectId: projSrc, title: "Q", body: "b",
+      options: null, recommendation: null, taskId, state: "pending", chosenOption: null, note: null,
+      createdAt: now, answeredAt: null, consumedAt: null,
+    });
+
+    db.relocateTask(taskId, { projectId: projDest, columnKey: "backlog", position: 99 });
+
+    check("atomicity: task's project_id reflects the destination", db.getTask(taskId).projectId === projDest);
+    check("atomicity: the connected question's project_id reflects the SAME destination in the SAME call",
+      db.getQuestion(qId).projectId === projDest);
+    db.close();
+  }
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — board_relocate is registered only under an act-mode grant (additive alongside board_create/board_update/board_get/board_list); it requires act-mode on BOTH the card's current project and the destination (source-read-only, dest-ungranted, dest-read-only, and a same-project no-op are all rejected); it is ALWAYS Tier X (no low-friction direct-commit path, unlike board_create/board_update — that dead branch fails SAFE if it were ever reached) — it never applies on the first (propose) call, delivers the confirm prompt to the OWNER directly, and applies EXACTLY ONCE via the new relocateProjectTask backing op once the owner's own next turn carries the confirm token; a payload mismatch (a different toProject) or a card that drifted to a different project between propose and confirm is rejected and never force-moves the card; a wrong/typo'd confirm token is retryable (leaves the pending standing) distinct from a payload mismatch; the backing op reassigns projectId, keeps the card's columnKey when it exists on the destination board or falls back to the destination's landing column otherwise (never orphaning it onto a non-existent key), and assigns a fresh position; a card with a live worker session bound to it refuses to relocate; a real confirm token minted for board_create's proposal can never commit board_relocate's write (or vice versa), even though they share one capability-slug/pending-map namespace by design; and a proactive (no-owner-text) turn, a missing reply-to route, and a failed outbound delivery are all rejected."
+  ? "\n✅ ALL PASS — board_relocate is registered only under an act-mode grant (additive alongside board_create/board_update/board_get/board_list); it requires act-mode on BOTH the card's current project and the destination (source-read-only, dest-ungranted, dest-read-only, and a same-project no-op are all rejected); it is ALWAYS Tier X (no low-friction direct-commit path, unlike board_create/board_update — that dead branch fails SAFE if it were ever reached) — it never applies on the first (propose) call, delivers the confirm prompt to the OWNER directly, and applies EXACTLY ONCE via the new relocateProjectTask backing op once the owner's own next turn carries the confirm token; a payload mismatch (a different toProject) or a card that drifted to a different project between propose and confirm is rejected and never force-moves the card; a wrong/typo'd confirm token is retryable (leaves the pending standing) distinct from a payload mismatch; the backing op reassigns projectId, keeps the card's columnKey when it exists on the destination board or falls back to the destination's landing column otherwise (never orphaning it onto a non-existent key), and assigns a fresh position; a card with a live worker session bound to it refuses to relocate; a real confirm token minted for board_create's proposal can never commit board_relocate's write (or vice versa), even though they share one capability-slug/pending-map namespace by design; a proactive (no-owner-text) turn, a missing reply-to route, and a failed outbound delivery are all rejected; and (card e7591ed2) a relocated card's connected decision-inbox Requests — full-id-linked AND legacy 8-char-prefix-linked alike — are re-homed to the destination project's project_id ATOMICALLY with the card move (an unrelated question on a different task is never swept up), verified both via the full companion propose/confirm flow and directly against the db.relocateTask transaction."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

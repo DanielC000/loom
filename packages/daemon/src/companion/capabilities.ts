@@ -738,10 +738,10 @@ function authoredContentAllowed(cfg: { authoredContent?: unknown }): boolean {
  * different move than the one the owner actually confirmed. Refuses to relocate a card with a LIVE worker
  * session bound to it (`db.countLiveSessionsForTask`, mirroring the task-delete guard, gateway/server.ts) —
  * relocating out from under a running worker would strand it in the source project while the card moves.
- * No Primitive-B check applies — `taskId`/`toProject` are id references, not authored content. KNOWN v1
- * LIMITATION (tracked separately, card e7591ed2): a relocated card's connected decision-inbox Requests are
- * NOT re-homed — they keep their original `project_id`, so they no longer show up as "connected" from the
- * destination project's view of the card.
+ * No Primitive-B check applies — `taskId`/`toProject` are id references, not authored content. A relocated
+ * card's connected decision-inbox Requests are re-homed right alongside it (card e7591ed2) — `db.relocateTask`
+ * moves the task's `project_id` and every connected `questions` row's `project_id` in ONE transaction, so
+ * they stay reachable as "connected" from the destination project's view of the card.
  */
 const BOARD_REACH: CompanionCapability = {
   slug: "board-reach",
@@ -1137,9 +1137,8 @@ const BOARD_REACH: CompanionCapability = {
           "{status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. Requires an " +
           "owner-authored turn on a channel Loom can reply to — a proactive/heartbeat turn is always " +
           "rejected. Refuses to relocate a card that has a LIVE worker session bound to it — stop or " +
-          "finish that session first. There is no delete tool — card removal stays human-only. KNOWN v1 " +
-          "LIMITATION: a relocated card's connected decision-inbox Requests are NOT re-homed to the " +
-          "destination project — they keep their original project.",
+          "finish that session first. There is no delete tool — card removal stays human-only. A " +
+          "relocated card's connected decision-inbox Requests move WITH it to the destination project.",
         inputSchema: { taskId: z.string(), toProject: z.string() },
       },
       async ({ taskId, toProject }) => {
