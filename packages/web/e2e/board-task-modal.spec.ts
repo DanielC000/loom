@@ -98,3 +98,35 @@ test("the ?task= deep-link opens the detail modal and clears the param; ✕ clos
   await expect(dialog).toHaveCount(0);
   await expect(page).toHaveURL(/\/board$/);
 });
+
+// Responsive width cap (owner fast-track: the modal was too narrow — a fixed 520px — on a large window;
+// it now uses `min(820px, 92vw)`, so it grows wide on a big viewport and still pads inside a phone one).
+test("the detail modal widens on a large viewport and never overflows a narrow one", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`board-modal-width-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+
+  const title = uniq("width-card");
+  const task = await loomDaemon.createTask(project.id, { title, columnKey: "todo" });
+
+  const panel = () => page.getByRole("dialog").locator("> div");
+
+  // LARGE viewport: the panel reaches its 820px cap (well past the old 520px), not merely a slice of the
+  // window (92vw of 1600 = 1472, so the 820px min() branch is what caps it).
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto(`${loomDaemon.baseURL}/board?task=${encodeURIComponent(task.id)}`);
+  await expect(page.getByRole("dialog")).toBeVisible();
+  const wide = await panel().boundingBox();
+  expect(wide).not.toBeNull();
+  expect(Math.round(wide!.width)).toBe(820);
+
+  // NARROW (phone) viewport: the panel falls back to 92vw and stays fully inside the window with padding
+  // on both sides — it must never overflow (width ≤ viewport, and both edges clear of 0/viewport width).
+  await page.setViewportSize({ width: 390, height: 844 });
+  const narrow = await panel().boundingBox();
+  expect(narrow).not.toBeNull();
+  expect(narrow!.width).toBeLessThanOrEqual(390);
+  expect(narrow!.x).toBeGreaterThan(0);
+  expect(narrow!.x + narrow!.width).toBeLessThan(390);
+  // 92vw of 390 ≈ 359, so the padded panel is clearly narrower than the full window.
+  expect(narrow!.width).toBeLessThan(370);
+});

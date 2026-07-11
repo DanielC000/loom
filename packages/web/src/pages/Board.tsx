@@ -494,7 +494,7 @@ function TaskDrawer({ task, onClose, onSave, saving, onDelete, deleting, deleteE
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 50, display: "flex",
         alignItems: "flex-start", justifyContent: "center", padding: "6vh 16px", overflowY: "auto" }}>
       <div onClick={(e) => e.stopPropagation()}
-        style={{ width: 520, maxWidth: "100%", background: color.panel, border: `1px solid ${color.borderStrong}`,
+        style={{ width: "min(820px, 92vw)", maxWidth: "100%", background: color.panel, border: `1px solid ${color.borderStrong}`,
           borderRadius: radius.base, padding: 16, display: "flex", flexDirection: "column", gap: 10, boxSizing: "border-box" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <SectionLabel style={{ margin: 0, flex: 1 }}>Task · {task.id.slice(0, 8)}</SectionLabel>
